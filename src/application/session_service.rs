@@ -15,14 +15,15 @@ use ahash::RandomState;
 use futures_util::future::BoxFuture;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    CommandRequest, NoticeLevel, ServerNotice, SuggestOutcome, SuggestRequest, Suggestion,
-    SuggestionKind, SuggestionStatus, TextEdit,
+    Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection, ChoiceStatus,
+    ChoiceTarget, ChoiceValue, CommandRequest, DomainPaceChoice, NoticeLevel, ServerNotice,
+    SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
 };
 use nervix_consensus::{Administrator, CommandExecutionTransactionTarget, Observer, Proposer};
 use nervix_execution::sync::DashMap;
 use nervix_interconnect::Transport;
 use nervix_models::{
-    BuiltinFunctionScope, CommandExecutionReference, DomainName, Model, ModelName,
+    BuiltinFunctionScope, CommandExecutionReference, DomainName, Model, ModelName, PlacementPolicy,
     RequestedResourceVersion, ResourceId, ResourceName, ResourceUploadKey, ResourceVersionStatus,
     SemanticReference, TransactionPosition,
 };
@@ -756,6 +757,236 @@ struct CompletionPageBasis {
     query_digest: String,
 }
 
+/// The revision and typed query a page cursor is bound to.
+struct ChoicePageBasis {
+    revision: u64,
+    query_digest: String,
+}
+
+impl ChoicePageBasis {
+    fn new(request: &ChoiceLookupRequest, revision: u64) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&[match request.target() {
+            ChoiceTarget::DomainPace => 0,
+            ChoiceTarget::PlacementPolicy => 1,
+        }]);
+        hash_choice_text(&mut hasher, request.search());
+        for dependency in request.dependencies() {
+            hash_choice_value(&mut hasher, &dependency.value);
+        }
+        Self {
+            revision,
+            query_digest: hasher.finalize().to_hex().to_string(),
+        }
+    }
+
+    fn page(&self, request: &ChoiceLookupRequest, candidates: Vec<Choice>) -> ChoiceOutcome {
+        let mut candidate_hasher = blake3::Hasher::new();
+        for candidate in &candidates {
+            hash_choice_value(&mut candidate_hasher, &candidate.value);
+            hash_choice_text(&mut candidate_hasher, &candidate.presentation.label);
+            hash_optional_choice_text(
+                &mut candidate_hasher,
+                candidate.presentation.detail.as_deref(),
+            );
+            hash_optional_choice_text(
+                &mut candidate_hasher,
+                candidate.presentation.group.as_deref(),
+            );
+        }
+        let candidate_digest = candidate_hasher.finalize().to_hex().to_string();
+        let offset = match request.page_cursor() {
+            Some(cursor) => {
+                let mut parts = cursor.split(':');
+                let revision = parts.next().and_then(|value| value.parse::<u64>().ok());
+                let offset = parts.next().and_then(|value| value.parse::<usize>().ok());
+                let query = parts.next();
+                let candidates = parts.next();
+                if parts.next().is_some()
+                    || revision != Some(self.revision)
+                    || query != Some(self.query_digest.as_str())
+                    || candidates != Some(candidate_digest.as_str())
+                {
+                    return stale_choice_outcome();
+                }
+                let Some(offset) = offset else {
+                    return stale_choice_outcome();
+                };
+                offset
+            }
+            None => 0,
+        };
+        if offset > candidates.len() {
+            return stale_choice_outcome();
+        }
+        let available = candidates.len() - offset;
+        let take = request.page_size().min(available);
+        let end = offset
+            .checked_add(take)
+            .assured("a choice page cannot extend beyond its bounded candidates");
+        let page_cursor = if end < candidates.len() {
+            Some(format!(
+                "{}:{end}:{}:{candidate_digest}",
+                self.revision, self.query_digest
+            ))
+        } else {
+            None
+        };
+        ChoiceOutcome {
+            status: ChoiceStatus::Ready,
+            choices: candidates[offset..end].to_vec(),
+            page_cursor,
+        }
+    }
+}
+
+fn hash_choice_text(hasher: &mut blake3::Hasher, value: &str) {
+    let length =
+        u64::try_from(value.len()).assured("choice text fits the bounded session transfer limit");
+    hasher.update(&length.to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn hash_optional_choice_text(hasher: &mut blake3::Hasher, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hash_choice_text(hasher, value);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
+fn hash_choice_value(hasher: &mut blake3::Hasher, value: &ChoiceValue) {
+    match value {
+        ChoiceValue::DomainPace(value) => {
+            hasher.update(&[
+                0,
+                match value {
+                    DomainPaceChoice::Unpaced => 0,
+                    DomainPaceChoice::Paced => 1,
+                },
+            ]);
+        }
+        ChoiceValue::PlacementPolicy(value) => {
+            hasher.update(&[
+                1,
+                match value {
+                    PlacementPolicy::RequireColocation => 0,
+                    PlacementPolicy::PreferColocation => 1,
+                    PlacementPolicy::Neutral => 2,
+                    PlacementPolicy::SuggestSeparation => 3,
+                },
+            ]);
+        }
+        ChoiceValue::Domain(domain) => {
+            hasher.update(&[2]);
+            hash_choice_text(hasher, domain.as_str());
+        }
+        ChoiceValue::Resource(resource) => {
+            hasher.update(&[3]);
+            hash_choice_text(hasher, resource.as_str());
+        }
+        ChoiceValue::Model(node) => {
+            hasher.update(&[4]);
+            hash_choice_text(hasher, node.kind.as_str());
+            hash_choice_text(hasher, node.identifier.as_str());
+        }
+    }
+}
+
+fn stale_choice_outcome() -> ChoiceOutcome {
+    ChoiceOutcome {
+        status: ChoiceStatus::StaleContext,
+        choices: Vec::new(),
+        page_cursor: None,
+    }
+}
+
+fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatus> {
+    let mut choices = match request.target() {
+        ChoiceTarget::DomainPace if request.dependencies().is_empty() => vec![
+            Choice {
+                value: ChoiceValue::DomainPace(DomainPaceChoice::Unpaced),
+                presentation: ChoicePresentation {
+                    label: "UNPACED".to_string(),
+                    detail: Some("Advance only when the domain receives progress".to_string()),
+                    group: Some("Domain clock".to_string()),
+                },
+            },
+            Choice {
+                value: ChoiceValue::DomainPace(DomainPaceChoice::Paced),
+                presentation: ChoicePresentation {
+                    label: "PACED".to_string(),
+                    detail: Some("Advance from wall time using a period and skew".to_string()),
+                    group: Some("Domain clock".to_string()),
+                },
+            },
+        ],
+        ChoiceTarget::PlacementPolicy
+            if matches!(
+                request.dependencies(),
+                [ChoiceSelection {
+                    value: ChoiceValue::DomainPace(_),
+                }]
+            ) =>
+        {
+            vec![
+                (
+                    PlacementPolicy::RequireColocation,
+                    "REQUIRE COLOCATION",
+                    "Place all domain work together",
+                ),
+                (
+                    PlacementPolicy::PreferColocation,
+                    "PREFER COLOCATION",
+                    "Prefer placing domain work together",
+                ),
+                (
+                    PlacementPolicy::Neutral,
+                    "NEUTRAL",
+                    "Apply no placement preference",
+                ),
+                (
+                    PlacementPolicy::SuggestSeparation,
+                    "SUGGEST SEPARATION",
+                    "Prefer spreading domain work across nodes",
+                ),
+            ]
+            .into_iter()
+            .map(|(value, label, detail)| Choice {
+                value: ChoiceValue::PlacementPolicy(value),
+                presentation: ChoicePresentation {
+                    label: label.to_string(),
+                    detail: Some(detail.to_string()),
+                    group: Some("Placement".to_string()),
+                },
+            })
+            .collect()
+        }
+        ChoiceTarget::DomainPace | ChoiceTarget::PlacementPolicy => {
+            return Err(ChoiceStatus::MissingContext);
+        }
+    };
+    let search = request.search().to_ascii_lowercase();
+    choices.retain(|choice| {
+        search.is_empty()
+            || choice
+                .presentation
+                .label
+                .to_ascii_lowercase()
+                .contains(&search)
+            || choice
+                .presentation
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.to_ascii_lowercase().contains(&search))
+    });
+    Ok(choices)
+}
+
 impl CompletionPageBasis {
     fn new(request: &SuggestRequest, revision: u64) -> Self {
         let mut hasher = blake3::Hasher::new();
@@ -932,6 +1163,29 @@ impl SessionServiceImpl {
     /// Report a control-plane failure this node recovered from to the sessions attached to it.
     pub(in crate::application) fn broadcast_error(&self, message: impl Into<String>) {
         self.inner.events.report_error(message);
+    }
+
+    /// Resolves one structured control against a single observed application revision.
+    pub(in crate::application) async fn process_choice(
+        &self,
+        request: ChoiceLookupRequest,
+    ) -> ChoiceOutcome {
+        let revision = self.inner.consensus.current_revision().await;
+        let basis = ChoicePageBasis::new(&request, revision);
+        let choices = match choices_for(&request) {
+            Ok(choices) => choices,
+            Err(status) => {
+                return ChoiceOutcome {
+                    status,
+                    choices: Vec::new(),
+                    page_cursor: None,
+                };
+            }
+        };
+        if self.inner.consensus.current_revision().await != revision {
+            return stale_choice_outcome();
+        }
+        basis.page(&request, choices)
     }
 
     /// The completions at the request's cursor, read against the session as `session` last left
@@ -1481,6 +1735,82 @@ mod tests {
             changed.page(&next_request, candidates).status,
             SuggestionStatus::StaleContext
         );
+    }
+
+    #[test]
+    fn choice_pages_bind_typed_dependencies_search_candidates_and_revision() {
+        let request = |pace, search: &str, cursor| {
+            ChoiceLookupRequest::new(
+                ChoiceTarget::PlacementPolicy,
+                vec![ChoiceSelection {
+                    value: ChoiceValue::DomainPace(pace),
+                }],
+                search.to_string(),
+            )
+            .with_page(3, cursor)
+            .assured("three choices fit the bounded page size")
+        };
+        let first_request = request(DomainPaceChoice::Paced, "", None);
+        let basis = ChoicePageBasis::new(&first_request, 42);
+        let candidates =
+            choices_for(&first_request).assured("a placement lookup carries its pace dependency");
+        let first = basis.page(&first_request, candidates.clone());
+        assert_eq!(first.status, ChoiceStatus::Ready);
+        assert_eq!(first.choices.len(), 3);
+        let cursor = first.page_cursor.assured("the fourth choice remains");
+
+        let next_request = request(DomainPaceChoice::Paced, "", Some(cursor.clone()));
+        let second = basis.page(&next_request, candidates);
+        assert_eq!(second.status, ChoiceStatus::Ready);
+        assert_eq!(
+            second.choices[0].value,
+            ChoiceValue::PlacementPolicy(PlacementPolicy::SuggestSeparation)
+        );
+        assert!(second.page_cursor.is_none());
+
+        let changed_dependency = request(DomainPaceChoice::Unpaced, "", Some(cursor.clone()));
+        assert_eq!(
+            ChoicePageBasis::new(&changed_dependency, 42)
+                .page(
+                    &changed_dependency,
+                    choices_for(&changed_dependency)
+                        .assured("the changed request still has a typed pace dependency"),
+                )
+                .status,
+            ChoiceStatus::StaleContext
+        );
+        assert_eq!(
+            ChoicePageBasis::new(&next_request, 43)
+                .page(
+                    &next_request,
+                    choices_for(&next_request)
+                        .assured("the continued request has a typed pace dependency"),
+                )
+                .status,
+            ChoiceStatus::StaleContext
+        );
+
+        let searched = request(DomainPaceChoice::Paced, "spreading", None);
+        let searched =
+            choices_for(&searched).assured("the searched request has a typed pace dependency");
+        assert_eq!(searched.len(), 1);
+        assert_eq!(searched[0].presentation.label, "SUGGEST SEPARATION");
+    }
+
+    #[test]
+    fn choice_lookup_reports_missing_typed_dependencies() {
+        let placement =
+            ChoiceLookupRequest::new(ChoiceTarget::PlacementPolicy, Vec::new(), String::new());
+        assert_eq!(choices_for(&placement), Err(ChoiceStatus::MissingContext));
+
+        let pace = ChoiceLookupRequest::new(
+            ChoiceTarget::DomainPace,
+            vec![ChoiceSelection {
+                value: ChoiceValue::PlacementPolicy(PlacementPolicy::Neutral),
+            }],
+            String::new(),
+        );
+        assert_eq!(choices_for(&pace), Err(ChoiceStatus::MissingContext));
     }
 
     #[test]

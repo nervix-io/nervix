@@ -1,4 +1,72 @@
 Feature: Iceberg emission
+  Scenario Outline: Iceberg catalog and object storage resolve through the node DNS fixture
+    Given MQTT is running
+    And Iceberg dependencies are running
+    And cluster peers are addressed by "DNS names"
+    And a <cluster_size> node nervix cluster is started
+    And Iceberg table "dns_notifications_{{test_id}}" exists at "s3://nervix-iceberg/tables/dns_notifications_{{test_id}}" with columns
+      """
+      user_id I64
+      """
+    And the Iceberg endpoints are published under fixture DNS
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT mqtt_ingress TYPE MQTT CONFIG {
+        'addr' = '{{mqtt_addr}}',
+        'client_id' = 'nervix-cucumber-iceberg-dns-{{test_id}}'
+      };
+      CREATE INGESTOR mqtt_notifications
+      FROM MQTT mqtt_ingress TOPIC iceberg_dns_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      ON QUIESCE DROP DECODE USING notification_codec
+      TO notifications
+      INHERIT ALL
+      UNBRANCHED
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE CLIENT s3_main TYPE S3 CONFIG {
+        'endpoint' = '{{rustfs_dns_addr}}',
+        'region' = 'us-east-1',
+        'access_key_id' = 'rustfsadmin',
+        'secret_access_key' = 'rustfsadmin',
+        'path_style_access' = true
+      };
+      CREATE CLIENT iceberg_catalog TYPE ICEBERG_REST CONFIG {
+        'uri' = '{{iceberg_rest_dns_addr}}',
+        'warehouse' = 's3://nervix-iceberg/warehouse'
+      };
+      CREATE EMITTER iceberg_notifications FROM notifications TO ICEBERG ON S3 s3_main TABLE dns_notifications_{{test_id}}
+      VALUES { 'user_id' = input.user_id }
+      LOCATION 's3://nervix-iceberg/tables/dns_notifications_{{test_id}}'
+      CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
+      """
+    And MQTT message is published to topic "iceberg_dns_in_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    Then the Iceberg table "dns_notifications_{{test_id}}" eventually contains a row
+      """
+      {"user_id":42}
+      """
+    And the DNS fixture eventually receives Iceberg catalog and object-store questions
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Iceberg emitter accepts GCS object storage configuration
     Given GCS is running
     And Iceberg dependencies are running
@@ -776,12 +844,14 @@ Feature: Iceberg emission
     Given MQTT is running
     And Iceberg dependencies are running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
     And Iceberg table "ack_notifications_{{test_id}}" exists at "s3://nervix-iceberg/tables/ack_notifications_{{test_id}}" with columns
       """
       user_id I64
       action STRING
       """
+    And the Iceberg endpoints are published under fixture DNS
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -811,7 +881,7 @@ Feature: Iceberg emission
         CREATE CLIENT s3_main
         TYPE S3
         CONFIG {
-          'endpoint' = '{{rustfs_addr}}',
+          'endpoint' = '{{rustfs_dns_addr}}',
           'region' = 'us-east-1',
           'access_key_id' = 'rustfsadmin',
           'secret_access_key' = 'rustfsadmin',
@@ -820,7 +890,7 @@ Feature: Iceberg emission
         CREATE CLIENT iceberg_catalog
         TYPE ICEBERG_REST
         CONFIG {
-          'uri' = '{{iceberg_rest_addr}}',
+          'uri' = '{{iceberg_rest_dns_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
         CREATE INGESTOR mqtt_notifications
@@ -859,6 +929,7 @@ Feature: Iceberg emission
       """
       {"user_id":43,"action":"FAULTED"}
       """
+    And the DNS fixture eventually receives Iceberg catalog and object-store questions
 
     Examples:
       | cluster_size | replica_count |

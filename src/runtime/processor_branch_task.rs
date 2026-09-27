@@ -133,26 +133,18 @@ impl RelayInteractionCommand for ProcessorNodeCommand {
     }
 }
 
-/// The domain-scoped execution context a processor task runs inside: the runtime it calls back
-/// into, the domain that owns it, and the active graph it evaluates against. Carrying the three as
-/// one value keeps a task's spawn and run halves provably agreed on which domain's graph they serve.
+/// The domain-scoped execution context a processor task runs inside.
 #[derive(Clone)]
 pub(in crate::runtime) struct ProcessorRuntimeContext {
     pub(super) runtime_handle: Runtime,
     pub(super) domain: DomainName,
-    pub(super) graph: SharedActiveGraph,
 }
 
 impl ProcessorRuntimeContext {
-    pub(in crate::runtime) fn new(
-        runtime_handle: Runtime,
-        domain: DomainName,
-        graph: SharedActiveGraph,
-    ) -> Self {
+    pub(in crate::runtime) fn new(runtime_handle: Runtime, domain: DomainName) -> Self {
         Self {
             runtime_handle,
             domain,
-            graph,
         }
     }
 }
@@ -208,7 +200,6 @@ pub(super) async fn run_processor_node_runtime(
     let ProcessorRuntimeContext {
         runtime_handle,
         domain,
-        graph,
     } = context;
     let processor = template.source.clone();
     let domain_clock = match runtime_handle.bind_domain_clock(&domain) {
@@ -234,7 +225,6 @@ pub(super) async fn run_processor_node_runtime(
         last_persisted_lru_lsm = match restore_processor_branch_lru_snapshot(
             &runtime_handle,
             &domain,
-            &graph,
             &template,
             &mut instances,
         )
@@ -288,7 +278,7 @@ pub(super) async fn run_processor_node_runtime(
             tokio::task::consume_budget().await;
             let key = handoff.key.clone();
             match spawn_processor_branch_task(
-                ProcessorRuntimeContext::new(runtime_handle.clone(), domain.clone(), graph.clone()),
+                ProcessorRuntimeContext::new(runtime_handle.clone(), domain.clone()),
                 &template,
                 key.clone(),
                 handoff.pending_materialized,
@@ -464,7 +454,6 @@ pub(super) async fn run_processor_node_runtime(
                     ProcessorNodeDispatchContext {
                         runtime_handle: &runtime_handle,
                         domain: &domain,
-                        graph: &graph,
                         template: &template,
                         domain_clock: &domain_clock,
                     },
@@ -493,12 +482,8 @@ pub(super) async fn run_processor_node_runtime(
                     preparation,
                     response,
                 } => {
-                    let reset_context = ProcessorWasmStateResetContext::new(
-                        &runtime_handle,
-                        &domain,
-                        &graph,
-                        &template,
-                    );
+                    let reset_context =
+                        ProcessorWasmStateResetContext::new(&runtime_handle, &domain, &template);
                     let request = preparation.request.clone();
                     let scope = preparation.scope;
                     let reason = preparation.reason;
@@ -518,7 +503,6 @@ pub(super) async fn run_processor_node_runtime(
                     let result = abort_processor_wasm_state_reset(
                         &runtime_handle,
                         &domain,
-                        &graph,
                         &template,
                         &mut instances,
                         &request,
@@ -538,19 +522,14 @@ pub(super) async fn run_processor_node_runtime(
                     let result = match reset.phase() {
                         nervix_models::WasmStateResetPhase::Publishing => {
                             reset_fence = Some(reset.clone());
-                            ProcessorWasmStateResetContext::new(
-                                &runtime_handle,
-                                &domain,
-                                &graph,
-                                &template,
-                            )
-                            .commit(
-                                &mut instances,
-                                &mut last_persisted_lru_lsm,
-                                &reset,
-                                &mut prepared_reset,
-                            )
-                            .await
+                            ProcessorWasmStateResetContext::new(&runtime_handle, &domain, &template)
+                                .commit(
+                                    &mut instances,
+                                    &mut last_persisted_lru_lsm,
+                                    &reset,
+                                    &mut prepared_reset,
+                                )
+                                .await
                         }
                         nervix_models::WasmStateResetPhase::Ready => {
                             complete_processor_wasm_state_reset(
@@ -624,7 +603,6 @@ pub(super) async fn run_processor_node_runtime(
 struct ProcessorWasmStateResetContext<'a> {
     runtime: &'a Runtime,
     domain: &'a DomainName,
-    graph: &'a SharedActiveGraph,
     template: &'a BranchInstanceTemplate,
 }
 
@@ -632,13 +610,11 @@ impl<'a> ProcessorWasmStateResetContext<'a> {
     fn new(
         runtime: &'a Runtime,
         domain: &'a DomainName,
-        graph: &'a SharedActiveGraph,
         template: &'a BranchInstanceTemplate,
     ) -> Self {
         Self {
             runtime,
             domain,
-            graph,
             template,
         }
     }
@@ -694,7 +670,6 @@ fn processor_reset_target_keys(
 async fn restore_processor_wasm_state_reset_branches(
     runtime: &Runtime,
     domain: &DomainName,
-    graph: &SharedActiveGraph,
     template: &BranchInstanceTemplate,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
     branches: &mut Vec<PreparedWasmStateResetBranch>,
@@ -708,7 +683,7 @@ async fn restore_processor_wasm_state_reset_branches(
         let restored_at = handoff.restored_at;
         let key = branch.key.clone();
         let task = spawn_processor_branch_task(
-            ProcessorRuntimeContext::new(runtime.clone(), domain.clone(), graph.clone()),
+            ProcessorRuntimeContext::new(runtime.clone(), domain.clone()),
             template,
             key.clone(),
             handoff.pending_materialized,
@@ -734,7 +709,6 @@ impl ProcessorWasmStateResetContext<'_> {
     ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
         let runtime = self.runtime;
         let domain = self.domain;
-        let graph = self.graph;
         let template = self.template;
         let WasmStateResetPreparation {
             request,
@@ -781,7 +755,6 @@ impl ProcessorWasmStateResetContext<'_> {
                         let restore = restore_processor_wasm_state_reset_branches(
                             runtime,
                             domain,
-                            graph,
                             template,
                             instances,
                             &mut branches,
@@ -817,7 +790,6 @@ impl ProcessorWasmStateResetContext<'_> {
                     restore_processor_wasm_state_reset_branches(
                         runtime,
                         domain,
-                        graph,
                         template,
                         instances,
                         &mut branches,
@@ -840,7 +812,6 @@ impl ProcessorWasmStateResetContext<'_> {
 async fn abort_processor_wasm_state_reset(
     runtime: &Runtime,
     domain: &DomainName,
-    graph: &SharedActiveGraph,
     template: &BranchInstanceTemplate,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
     request: &CommandExecutionReference,
@@ -861,7 +832,6 @@ async fn abort_processor_wasm_state_reset(
     restore_processor_wasm_state_reset_branches(
         runtime,
         domain,
-        graph,
         template,
         instances,
         &mut current.branches,
@@ -879,7 +849,6 @@ impl ProcessorWasmStateResetContext<'_> {
     ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
         let runtime = self.runtime;
         let domain = self.domain;
-        let graph = self.graph;
         let template = self.template;
         let processor = ModelName::from(&template.source);
         if prepared.is_none() {
@@ -923,7 +892,7 @@ impl ProcessorWasmStateResetContext<'_> {
             }
             let key = branch.key.clone();
             let task = spawn_processor_branch_task(
-                ProcessorRuntimeContext::new(runtime.clone(), domain.clone(), graph.clone()),
+                ProcessorRuntimeContext::new(runtime.clone(), domain.clone()),
                 template,
                 key.clone(),
                 VecDeque::new(),
@@ -1018,7 +987,6 @@ fn complete_processor_wasm_state_reset(
 pub(super) struct ProcessorNodeDispatchContext<'a> {
     pub(super) runtime_handle: &'a Runtime,
     pub(super) domain: &'a DomainName,
-    pub(super) graph: &'a SharedActiveGraph,
     pub(super) template: &'a BranchInstanceTemplate,
     pub(super) domain_clock: &'a DomainClock,
 }
@@ -1033,7 +1001,6 @@ pub(super) async fn dispatch_processor_node_input(
     let ProcessorNodeDispatchContext {
         runtime_handle,
         domain,
-        graph,
         template,
         domain_clock,
     } = context;
@@ -1068,7 +1035,7 @@ pub(super) async fn dispatch_processor_node_input(
     } else {
         let incarnation = instances.next_incarnation();
         let state = match spawn_processor_branch_task(
-            ProcessorRuntimeContext::new(runtime_handle.clone(), domain.clone(), graph.clone()),
+            ProcessorRuntimeContext::new(runtime_handle.clone(), domain.clone()),
             template,
             key.clone(),
             VecDeque::new(),
@@ -1175,6 +1142,21 @@ pub(super) async fn spawn_processor_branch_task(
     lifetime: ProcessorBranchLifetime,
     incarnation: u64,
 ) -> error_stack::Result<ProcessorBranchTask, ProcessorBranchTaskError> {
+    let published_template = if matches!(lifetime, ProcessorBranchLifetime::Appeared) {
+        context
+            .runtime_handle
+            .domain_routing_cache(&context.domain)
+            .and_then(|mut routing| {
+                routing
+                    .load()
+                    .processor_plans
+                    .get(&NodeRef::new(template.source_kind, &template.source))
+                    .map(|plan| plan.template.clone())
+            })
+    } else {
+        None
+    };
+    let template = published_template.unwrap_or_else(|| StdArc::new(template.clone()));
     let branch_key = key.clone();
     let mut branch = template
         .instantiate(&context.runtime_handle, &context.domain, key, incarnation)
@@ -1302,7 +1284,6 @@ async fn run_processor_branch_task(
     let ProcessorRuntimeContext {
         runtime_handle,
         domain,
-        graph,
     } = context;
     let mut force_flush = runtime_handle.force_flush_participant(&domain, quiesce_counters.clone());
     let mut quiesce_gauges = BranchQuiesceGauges::new(quiesce_counters.clone());
@@ -1350,7 +1331,7 @@ async fn run_processor_branch_task(
                     .next_deadline()
                     .is_some_and(|deadline| deadline <= now))
         {
-            branch.tick(&graph, &execution_snapshot).await;
+            branch.tick(&execution_snapshot).await;
             quiesce_gauges.observe(&branch, &processor);
             continue;
         }
@@ -1443,7 +1424,7 @@ async fn run_processor_branch_task(
                 match received {
                     Some(ProcessorBranchInput { relay, batch, work }) => {
                         branch
-                            .execute_processor_input(&graph, &processor, &relay, batch)
+                            .execute_processor_input(&processor, &relay, batch)
                             .await;
                         quiesce_gauges.observe(&branch, &processor);
                         drop(work);
@@ -1461,7 +1442,7 @@ async fn run_processor_branch_task(
                 }
             }, if has_pending_materialized && !ownership_frozen => {
                 branch
-                    .retry_processor_pending_materialized(&graph, &processor)
+                    .retry_processor_pending_materialized(&processor)
                     .await;
                 quiesce_gauges.observe(&branch, &processor);
             }
@@ -1487,10 +1468,10 @@ async fn run_processor_branch_task(
                 // messages whose materialized dependency arrived after they were parked.
                 if branch.processor_has_pending_materialized(&processor) {
                     branch
-                        .retry_processor_pending_materialized(&graph, &processor)
+                        .retry_processor_pending_materialized(&processor)
                         .await;
                 }
-                branch.force_flush(&graph, &flush_snapshot).await;
+                branch.force_flush(&flush_snapshot).await;
                 quiesce_gauges.observe(&branch, &processor);
                 completion.complete();
             }
@@ -1528,7 +1509,7 @@ async fn run_processor_branch_task(
     }
     while let Ok(ProcessorBranchInput { relay, batch, work }) = input.try_recv() {
         branch
-            .execute_processor_input(&graph, &processor, &relay, batch)
+            .execute_processor_input(&processor, &relay, batch)
             .await;
         quiesce_gauges.observe(&branch, &processor);
         drop(work);
@@ -1551,16 +1532,14 @@ async fn run_processor_branch_task(
                 ));
                 // Without a clock the processor produces no output. Running its collected input
                 // still reports each batch through the processor's error policy.
-                branch
-                    .flush_processor_collected_inputs(&graph, &processor)
-                    .await;
+                branch.flush_processor_collected_inputs(&processor).await;
                 None
             }
         },
         Some(ProcessorBranchStopMode::Evict) => None,
     };
     if let Some(snapshot) = &finalization_snapshot {
-        branch.force_flush(&graph, snapshot).await;
+        branch.force_flush(snapshot).await;
     }
     if let Some(ProcessorBranchStopMode::Evict) = &stop_mode {
         branch.evict().await;
@@ -1810,7 +1789,6 @@ pub(super) async fn shutdown_all_processor_branch_instances(
 pub(super) async fn restore_processor_branch_lru_snapshot(
     runtime: &Runtime,
     domain: &DomainName,
-    graph: &SharedActiveGraph,
     template: &BranchInstanceTemplate,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
 ) -> error_stack::Result<u64, ProcessorBranchTaskError> {
@@ -1830,7 +1808,7 @@ pub(super) async fn restore_processor_branch_lru_snapshot(
         let last_ingestion = restored_entry.last_ingestion;
         let incarnation = restored_entry.incarnation;
         let entry = spawn_processor_branch_task(
-            ProcessorRuntimeContext::new(runtime.clone(), domain.clone(), graph.clone()),
+            ProcessorRuntimeContext::new(runtime.clone(), domain.clone()),
             template,
             key.clone(),
             VecDeque::new(),
@@ -1847,13 +1825,9 @@ pub(super) async fn restore_processor_branch_lru_snapshot(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc as StdArc,
-        atomic::{AtomicBool, Ordering},
-    };
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use ahash::HashMap;
-    use nervix_execution::sync::ArcSwapOption;
     use nervix_models::{
         CommandExecutionReference, CreateSchema, ErrorPolicies, MessageErrorPolicy, ModelKind,
         ModelName, NodeRef, ParseAsType, RelayName, SchemaField,
@@ -1873,6 +1847,7 @@ mod tests {
 
     fn reset_target_template(source_kind: ModelKind, branched: bool) -> BranchInstanceTemplate {
         BranchInstanceTemplate {
+            revision: ProcessorPlanRevision::new(),
             source_kind,
             source: named("counting_guest"),
             root_relay: named("counted_input_events"),
@@ -2025,7 +2000,6 @@ mod tests {
             ModelKind::Deduplicator,
             named::<ModelName>("dedup_users"),
         );
-        let graph: SharedActiveGraph = StdArc::new(ArcSwapOption::from(None));
         let schema = Arc::new(compile_schema(&CreateSchema {
             name: named("notification"),
             fields: vec![SchemaField {
@@ -2036,6 +2010,7 @@ mod tests {
             }],
         }));
         let template = BranchInstanceTemplate {
+            revision: ProcessorPlanRevision::new(),
             source_kind: ModelKind::Deduplicator,
             source: named("dedup_users"),
             root_relay: named("orders"),
@@ -2061,7 +2036,9 @@ mod tests {
                     input_collect_policies: HashMap::default(),
                     error_policies: ErrorPolicies::handled_by_log(),
                     from_where: HashMap::default(),
+                    compiled_from_where: HashMap::default(),
                     filter_where: None,
+                    compiled_filter_where: HashMap::default(),
                     materialized_state: Vec::new(),
                     operation: RelayProcessorOperationTemplate::Deduplicator {
                         output_routes: RelayProcessorOutputsTemplate {
@@ -2073,10 +2050,12 @@ mod tests {
                                 },
                                 flush_policy: Some(RuntimeFlushPolicy::Immediate),
                                 message_error_policy: MessageErrorPolicy::Log,
+                                compiled_program: None,
                             }],
                         },
                         deduplicate_on: vec![expression("input.user_id")],
                         max_time: Duration::from_secs(600),
+                        compiled_key_program: None,
                     },
                 },
             )]
@@ -2110,7 +2089,6 @@ mod tests {
             ProcessorNodeDispatchContext {
                 runtime_handle: &runtime,
                 domain: &domain,
-                graph: &graph,
                 template: &template,
                 domain_clock: &domain_clock,
             },
@@ -2128,7 +2106,6 @@ mod tests {
             ProcessorNodeDispatchContext {
                 runtime_handle: &runtime,
                 domain: &domain,
-                graph: &graph,
                 template: &template,
                 domain_clock: &domain_clock,
             },
@@ -2149,7 +2126,6 @@ mod tests {
             ProcessorNodeDispatchContext {
                 runtime_handle: &runtime,
                 domain: &domain,
-                graph: &graph,
                 template: &template,
                 domain_clock: &domain_clock,
             },
@@ -2201,7 +2177,6 @@ mod tests {
             ProcessorNodeDispatchContext {
                 runtime_handle: &runtime,
                 domain: &domain,
-                graph: &StdArc::new(ArcSwapOption::from(None)),
                 template: &template,
                 domain_clock: &runtime
                     .bind_domain_clock(&domain)
@@ -2275,7 +2250,6 @@ mod tests {
             ProcessorNodeDispatchContext {
                 runtime_handle: &runtime,
                 domain: &domain,
-                graph: &StdArc::new(ArcSwapOption::from(None)),
                 template: &template,
                 domain_clock: &domain_clock,
             },
@@ -2356,6 +2330,7 @@ mod tests {
                 max_batch_size: 1024 * 1024,
             }),
             message_error_policy: MessageErrorPolicy::Log,
+            compiled_program: None,
         });
         let domain_clock = runtime
             .bind_domain_clock(&domain)
@@ -2402,11 +2377,7 @@ mod tests {
         timeout(
             Duration::from_secs(2),
             run_processor_branch_task(
-                ProcessorRuntimeContext::new(
-                    runtime.clone(),
-                    domain.clone(),
-                    StdArc::new(ArcSwapOption::from(None)),
-                ),
+                ProcessorRuntimeContext::new(runtime.clone(), domain.clone()),
                 ProcessorBranchRunIdentity {
                     processor: processor.clone(),
                     incarnation: 1,
@@ -2485,11 +2456,7 @@ mod tests {
             .await
             .expect("handoff command should queue before the processor starts");
         let task = tokio::spawn(run_processor_node_runtime(
-            ProcessorRuntimeContext::new(
-                runtime.clone(),
-                domain.clone(),
-                StdArc::new(ArcSwapOption::from(None)),
-            ),
+            ProcessorRuntimeContext::new(runtime.clone(), domain.clone()),
             template,
             vec![(orders, orders_input), (returns, returns_input)],
             shutdown_rx,

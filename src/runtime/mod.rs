@@ -7,15 +7,14 @@
 //!   reordering, windows, correlation, generators, in-flight acknowledgement tracking, node-owned
 //!   state persistence and replication, and the entities that bind listening ports.
 //! - **Depends on.** The engines — the VM, the UDF and WASM hosts, codecs, the connector crates,
-//!   the interconnect, the state and resource stores — the vocabulary, and the registry's
-//!   `ActiveGraph` as its input.
+//!   the interconnect, the state and resource stores — vocabulary and typed execution plans.
 //! - **Must not know.** NSPL text, transactions, the gRPC surface or consensus. It is told what to
 //!   run and runs it.
 //!
-//! This module breaks its own contract twice. It reads Models directly rather than consuming a
-//! planned execution; a planner between the control state and the runtime closes that boundary, and
-//! `just ratchet` counts what is left. It also holds the connectors themselves rather than hosting
-//! them; moving each integration into its connector crate closes that one.
+//! Nonprocessor lifecycle paths still read Models directly instead of consuming plans, and `just
+//! ratchet` counts those remaining violations. Processor tasks consume published typed plans. This
+//! module also holds the connectors themselves rather than hosting them; moving each integration
+//! into its connector crate closes that violation.
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -53,6 +52,7 @@ use fjall::Database;
 use futures_util::{future::BoxFuture, stream::FuturesUnordered};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
+use nervix_dns::DnsResolver;
 use nervix_execution::{
     ChargedBytes, Executor,
     sync::{AbortOnDropHandle, ArcSwap, ArcSwapOption, Cache, DashMap},
@@ -154,7 +154,12 @@ use crate::{
         MessageMetricsHandle, NodeBatchMetricsSpec, NodeInputMetricsHandle, RelayMetricRecorders,
         RelayMetricsHandle, RuntimeMetrics, RuntimeMetricsSnapshot,
     },
-    registry::{ActiveGraph, RuntimeChange, RuntimeChanges, ScheduleDelta},
+    registry::{
+        ActiveGraph, BranchInstanceAckBoundary, BranchedIngestorSpec, BranchedNodeSpecs,
+        BranchedProcessorNodeSpec, BranchedProcessorOperationSpec, BranchedProcessorOutputSpec,
+        BranchedProcessorOutputsSpec, BranchedProcessorSpec, RuntimeChange, RuntimeChanges,
+        ScheduleDelta, branched_node_specs_from_scheduled_nodes,
+    },
     resource::ResourceStore,
     runtime_ack::{
         AckCompletion, AckOutcome, AckProgress, AckRequiredWaitGuard, AckRootTracker, AckSet,
@@ -229,6 +234,7 @@ mod planning;
 mod pooled_sink_clients;
 mod processor_branch_task;
 mod processor_output;
+mod processor_plan_binding;
 mod processor_template;
 mod processors;
 mod published_generation;
@@ -280,7 +286,7 @@ use branch_runtime::{
     BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL, BranchRuntime, BranchRuntimeMetrics,
     IngestorRouteRuntime, MaterializedBatchWaitContext, MaterializedDomainHandles,
     PendingMaterializedBatch, branch_lru_placement, flush_branch_junction,
-    internal_processor_error_policies, output_error_policies, persist_branch_instance_lru_snapshot,
+    internal_processor_error_policies, persist_branch_instance_lru_snapshot,
     publish_branch_instance_lru_snapshot,
 };
 use correlator::{
@@ -413,12 +419,9 @@ use nervix_models::{
     ReingestorName, ResolvedCodecWireFormat, WireSchemaLookup, WireSchemaName,
 };
 pub(in crate::runtime) use node::{RuntimeInner, SharedActiveGraph};
-#[cfg(test)]
-use planning::PlannedModel;
 use planning::{
-    branched_node_specs_from_active_graph, branched_node_specs_from_scheduled_nodes,
-    materialize_ingestor_route_template, materialize_processor_instance_template,
-    processor_template_for_graph_node,
+    ProcessorPlanBindingContext, bind_published_processor_plans,
+    materialize_ingestor_route_template,
 };
 use processor_branch_task::{
     PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, ProcessorBranchHandoff, ProcessorNodeCommand,
@@ -430,23 +433,21 @@ pub(in crate::runtime) use processor_branch_task::{
 };
 use processor_output::{
     PendingProcessorOutputBatch, PendingProcessorOutputMessageError, ProcessorMaterializedState,
-    ProcessorOutputBatchScope, ProcessorOutputDispatchContext, ProcessorOutputFilterSource,
-    dispatch_processor_output, dispatch_processor_outputs, flush_all_processor_outputs,
-    flush_due_processor_outputs, pending_output_batches_by_key, processor_output_input_sensitivity,
+    ProcessorOutputBatchScope, ProcessorOutputDispatchContext, dispatch_processor_output,
+    dispatch_processor_outputs, flush_all_processor_outputs, flush_due_processor_outputs,
+    pending_output_batches_by_key,
 };
 use processor_template::{
     MaterializedDependencyResolution, ProcessorInputFilterKind, ProcessorTemplateError,
     wasm_guest_call_schemas, wasm_instance_next_deadline,
 };
 use processors::{
-    BranchInstanceAckBoundary, BranchInstanceTemplate, BranchedIngestorSpec, BranchedNodeSpecs,
-    BranchedProcessorNodeSpec, BranchedProcessorOperationSpec, BranchedProcessorOutputSpec,
-    BranchedProcessorOutputsSpec, BranchedProcessorSpec, CompiledCorrelatorOutputProgram,
-    CompiledCorrelatorWhereProgram, CompiledInferencerInputProgram, CompiledReordererProgram,
-    CompiledWindowAggregateProgram, CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan,
-    InferencerFlushContext, InferencerOutputBuffer, IngestorRouteTemplate, JunctionFlushContext,
-    PlannedGeneralError, PlannedGeneralResult, PlannedMessageError, ProcessorCompileError,
-    ProcessorLiveStateError, ProcessorMaterializedError, RelayProcessorNode,
+    BranchInstanceTemplate, CompiledCorrelatorOutputProgram, CompiledCorrelatorWhereProgram,
+    CompiledInferencerInputProgram, CompiledReordererProgram, CompiledWindowAggregateProgram,
+    CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext,
+    InferencerOutputBuffer, IngestorRouteTemplate, JunctionFlushContext, PlannedGeneralError,
+    PlannedGeneralResult, PlannedMessageError, ProcessorCompileError, ProcessorLiveStateError,
+    ProcessorMaterializedError, ProcessorPlanRevision, PublishedProcessorPlan, RelayProcessorNode,
     RelayProcessorOperationNode, RelayProcessorOperationTemplate, RelayProcessorOutputNode,
     RelayProcessorOutputTemplate, RelayProcessorOutputsNode, RelayProcessorOutputsTemplate,
     RelayProcessorRelayTemplate, RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer,
@@ -521,9 +522,9 @@ use vm_compile::{
     CompiledMessageErrorSites, GeneratorSetProgramSchemas, OutputNamespaceInput,
     RuntimeCompileTarget, RuntimeFilterScope, RuntimeVmSchema, RuntimeVmSchemaPair,
     compile_emitter_filter_map_part, compile_expression_filter_program,
-    compile_generator_set_program, compile_ingestor_filter_map_program,
-    compile_message_error_set_program, compile_output_branch_program,
-    compile_processor_output_filter_map_program, compile_processor_output_program,
+    compile_finalized_output_filter_program, compile_generator_set_program,
+    compile_ingestor_filter_map_program, compile_message_error_set_program,
+    compile_output_branch_program, compile_processor_output_filter_map_program,
     compile_reorderer_program, compile_scoped_filter_program,
     compile_wasm_output_filter_map_program, compiled_message_error_sites,
     evaluate_constant_expression_vm, referenced_materialized_stream_bindings,
@@ -572,6 +573,9 @@ use window_state::{
     LinearHistogramDelayedRemovalSnapshot, ReplicatedWindowProcessorState,
     WindowAccumulatorSnapshot, WindowEntrySnapshot, WindowProcessorStateSnapshot,
 };
+
+#[cfg(test)]
+use crate::registry::{PlannedModel, branched_node_specs_from_models};
 
 mod vm_compile;
 mod vm_input;

@@ -1,0 +1,191 @@
+x-nervix-environment: &nervix-environment
+  NERVIX_ADDR: 0.0.0.0:47391
+  NERVIX_WEB_CONSOLE_LISTEN_ADDR: 0.0.0.0:47420
+  NERVIX_OBSERVABILITY_LISTEN_ADDR: 0.0.0.0:9090
+  NERVIX_CLUSTER_ID: ${CHAOS_CLUSTER_ID:?CHAOS_CLUSTER_ID is required}
+  NERVIX_INTERCONNECT_LISTEN_ADDR: 0.0.0.0:47395
+  NERVIX_INTERCONNECT_TLS_CA: /etc/nervix/interconnect/ca.pem
+  NERVIX_INTERCONNECT_TLS_CERT: /etc/nervix/interconnect/node.pem
+  NERVIX_INTERCONNECT_TLS_KEY: /etc/nervix/interconnect/node-key.pem
+  NERVIX_REPLICA_COUNT: "0"
+  RUST_LOG: nervix=info
+
+x-nervix-service: &nervix-service
+  image: ${NERVIX_IMAGE:?NERVIX_IMAGE is required}
+  init: true
+  restart: "no"
+  stop_grace_period: 60s
+  logging:
+    driver: local
+    options:
+      max-file: "2"
+      max-size: 2m
+  networks:
+    - chaos
+
+x-run-labels: &run-labels
+  io.nervix.chaos.run: ${CHAOS_RUN_ID:?CHAOS_RUN_ID is required}
+
+services:
+  broker:
+    image: ${CHAOS_KAFKA_IMAGE:-apache/kafka:3.9.1}
+    hostname: broker
+    restart: "no"
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: broker
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    logging:
+      driver: local
+      options:
+        max-file: "2"
+        max-size: 2m
+    networks:
+      - chaos
+
+  nervix-1:
+    <<: *nervix-service
+    hostname: nervix-1
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: node
+      io.nervix.chaos.target: "true"
+    environment:
+      <<: *nervix-environment
+      NERVIX_NODE_ID: node-1
+      NERVIX_GRPC_ADVERTISE_ADDR: nervix-1:47391
+      NERVIX_WEB_CONSOLE_ADVERTISE_ADDR: nervix-1:47420
+      NERVIX_INTERCONNECT_ADVERTISE_ADDR: nervix-1:47395
+      NERVIX_ALLOW_BOOTSTRAP: "true"
+      NERVIX_INIT_DEFAULT_USER_PASSWORD: ${CHAOS_PASSWORD:?CHAOS_PASSWORD is required}
+    volumes:
+      - node-1-data:/var/lib/nervix
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/ca.pem:/etc/nervix/interconnect/ca.pem:ro
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/node-1.pem:/etc/nervix/interconnect/node.pem:ro
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/node-1-key.pem:/etc/nervix/interconnect/node-key.pem:ro
+
+  nervix-2:
+    <<: *nervix-service
+    hostname: nervix-2
+    profiles:
+      - three-node
+    depends_on:
+      - nervix-1
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: node
+      io.nervix.chaos.target: "true"
+    environment:
+      <<: *nervix-environment
+      NERVIX_NODE_ID: node-2
+      NERVIX_GRPC_ADVERTISE_ADDR: nervix-2:47391
+      NERVIX_WEB_CONSOLE_ADVERTISE_ADDR: nervix-2:47420
+      NERVIX_INTERCONNECT_ADVERTISE_ADDR: nervix-2:47395
+      NERVIX_CLUSTER_BOOTSTRAP_HOST: nervix-1:47395
+    volumes:
+      - node-2-data:/var/lib/nervix
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/ca.pem:/etc/nervix/interconnect/ca.pem:ro
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/node-2.pem:/etc/nervix/interconnect/node.pem:ro
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/node-2-key.pem:/etc/nervix/interconnect/node-key.pem:ro
+
+  nervix-3:
+    <<: *nervix-service
+    hostname: nervix-3
+    profiles:
+      - three-node
+    depends_on:
+      - nervix-1
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: node
+      io.nervix.chaos.target: "true"
+    environment:
+      <<: *nervix-environment
+      NERVIX_NODE_ID: node-3
+      NERVIX_GRPC_ADVERTISE_ADDR: nervix-3:47391
+      NERVIX_WEB_CONSOLE_ADVERTISE_ADDR: nervix-3:47420
+      NERVIX_INTERCONNECT_ADVERTISE_ADDR: nervix-3:47395
+      NERVIX_CLUSTER_BOOTSTRAP_HOST: nervix-1:47395
+    volumes:
+      - node-3-data:/var/lib/nervix
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/ca.pem:/etc/nervix/interconnect/ca.pem:ro
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/node-3.pem:/etc/nervix/interconnect/node.pem:ro
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/node-3-key.pem:/etc/nervix/interconnect/node-key.pem:ro
+
+  admin:
+    image: ${NERVIX_IMAGE:?NERVIX_IMAGE is required}
+    profiles:
+      - tools
+    entrypoint: []
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: admin
+    environment:
+      NERVIX_PASSWORD: ${CHAOS_PASSWORD:?CHAOS_PASSWORD is required}
+    tmpfs:
+      - /var/lib/nervix
+    networks:
+      - chaos
+
+  broker-admin:
+    image: ${CHAOS_KAFKA_IMAGE:-apache/kafka:3.9.1}
+    profiles:
+      - tools
+    entrypoint: []
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: broker-admin
+    networks:
+      - chaos
+
+  kcat:
+    image: ${CHAOS_KCAT_IMAGE:-edenhill/kcat:1.7.1}
+    profiles:
+      - tools
+    entrypoint:
+      - kcat
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: traffic
+    networks:
+      - chaos
+
+  probe:
+    image: ${CHAOS_PROBE_IMAGE:-alpine:3.22}
+    profiles:
+      - tools
+    entrypoint: []
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: observer
+    networks:
+      - chaos
+
+networks:
+  chaos:
+    labels:
+      <<: *run-labels
+
+volumes:
+  node-1-data:
+    labels:
+      <<: *run-labels
+  node-2-data:
+    labels:
+      <<: *run-labels
+  node-3-data:
+    labels:
+      <<: *run-labels

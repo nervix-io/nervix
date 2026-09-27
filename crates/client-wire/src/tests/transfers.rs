@@ -81,6 +81,39 @@ fn a_large_reply_is_split_into_parts_and_reassembled() {
 }
 
 #[test]
+fn default_limits_transfer_command_text_larger_than_one_frame() {
+    let limits = SessionLimits::DEFAULT;
+    let mut outcome = command_outcome(CommandDisposition::Completed {
+        already_existed: false,
+    });
+    outcome.message = "x".repeat(
+        limits
+            .frame_bytes()
+            .checked_add(1)
+            .assured("the default frame limit leaves room in usize"),
+    );
+    let reply = Reply {
+        request_id: request(12),
+        body: ReplyBody::Command(Box::new(outcome)),
+    };
+    let ReplyDelivery::Transfer(parts) = reply.encode(&limits).assured("the reply fits") else {
+        panic!("command text above one frame must use a transfer");
+    };
+    let mut assembly = TransferAssembly::new(request(12), &limits);
+    for part in parts {
+        assert!(part.len() <= limits.frame_bytes());
+        let frame = part.verify(&limits).assured("the transfer part verifies");
+        let ServerMessage::TransferPart(part) =
+            ServerMessage::decode(&frame).assured("the transfer part decodes")
+        else {
+            panic!("a transfer part must decode as a transfer part");
+        };
+        assembly.append(&part).assured("parts arrive in order");
+    }
+    assert_eq!(assembly.finish().assured("the transfer is complete"), reply);
+}
+
+#[test]
 fn an_inspection_report_is_transferred_intact() {
     let limits = small_limits(2048);
     let reply = Reply {

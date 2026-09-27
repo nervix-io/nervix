@@ -12,14 +12,15 @@ use std::{fmt::Write as _, fs, path::PathBuf};
 
 use bytes::Bytes;
 use meticulous::ResultExt as _;
-use nervix_models::{ParseAsType, SchemaField};
+use nervix_models::{ModelKind, ModelName, NodeRef, ParseAsType, PlacementPolicy, SchemaField};
 
 use super::{
     fixtures::{limits, name, request},
     samples::{client_messages, command_outcome, leader, row_schema, rows_frame, subscription},
 };
 use crate::{
-    CellView, CellsView, ClientFrame, ClientMessage, ClientRequest, CommandDisposition,
+    CellView, CellsView, Choice, ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceValue,
+    ClientFrame, ClientMessage, ClientRequest, CommandDisposition, DomainPaceChoice,
     LeaderRedirect, Reply, ReplyBody, ReplyDelivery, RequestRejected, RequestRejection,
     ServerEvent, ServerFrame, ServerMessage, SubscribeDisposition, SubscribeOutcome,
     SubscriptionEndReason, SubscriptionEnded, SubscriptionOpened, SubscriptionType, SuggestOutcome,
@@ -76,11 +77,67 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
     .assured("the corpus event fits the default limits");
     vec![
         ("client_cancel.nxcm", client(13)),
+        ("client_choice.nxcm", client(14)),
         ("client_command.nxcm", client(0)),
         ("client_command_bare.nxcm", client(2)),
         ("client_commit.nxcm", client(1)),
         ("client_subscribe.nxcm", client(11)),
         ("client_suggest.nxcm", client(3)),
+        (
+            "server_choice.nxsm",
+            reply(
+                9,
+                ReplyBody::Choice(ChoiceOutcome {
+                    status: ChoiceStatus::Ready,
+                    choices: vec![
+                        Choice {
+                            value: ChoiceValue::DomainPace(DomainPaceChoice::Paced),
+                            presentation: ChoicePresentation {
+                                label: "PACED".to_string(),
+                                detail: Some("Wall clock".to_string()),
+                                group: Some("Domain clock".to_string()),
+                            },
+                        },
+                        Choice {
+                            value: ChoiceValue::PlacementPolicy(PlacementPolicy::PreferColocation),
+                            presentation: ChoicePresentation {
+                                label: "PREFER COLOCATION".to_string(),
+                                detail: None,
+                                group: Some("Placement".to_string()),
+                            },
+                        },
+                        Choice {
+                            value: ChoiceValue::Domain(name("tenant")),
+                            presentation: ChoicePresentation {
+                                label: "tenant".to_string(),
+                                detail: None,
+                                group: None,
+                            },
+                        },
+                        Choice {
+                            value: ChoiceValue::Resource(name("bundle")),
+                            presentation: ChoicePresentation {
+                                label: "bundle".to_string(),
+                                detail: None,
+                                group: None,
+                            },
+                        },
+                        Choice {
+                            value: ChoiceValue::Model(NodeRef::new(
+                                ModelKind::Relay,
+                                name::<ModelName>("orders"),
+                            )),
+                            presentation: ChoicePresentation {
+                                label: "orders".to_string(),
+                                detail: Some("RELAY".to_string()),
+                                group: Some("Models".to_string()),
+                            },
+                        },
+                    ],
+                    page_cursor: Some("choice-page-two".to_string()),
+                }),
+            ),
+        ),
         (
             "server_command_failed.nxsm",
             command(1, CommandDisposition::Failed),
@@ -253,6 +310,18 @@ fn disposition(disposition: &CommandDisposition) -> &'static str {
     }
 }
 
+fn choice_value(value: &ChoiceValue) -> String {
+    match value {
+        ChoiceValue::DomainPace(value) => format!("pace:{value:?}"),
+        ChoiceValue::PlacementPolicy(value) => format!("placement:{value:?}"),
+        ChoiceValue::Domain(domain) => format!("domain:{}", domain.as_str()),
+        ChoiceValue::Resource(resource) => format!("resource:{}", resource.as_str()),
+        ChoiceValue::Model(node) => {
+            format!("model:{}/{}", node.kind.as_str(), node.identifier.as_str())
+        }
+    }
+}
+
 fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
     match message {
         ServerMessage::Reply(reply) => {
@@ -322,6 +391,32 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                             suggestion.edit.start,
                             suggestion.edit.end,
                             text(&suggestion.edit.replacement)
+                        ));
+                    }
+                }
+                ReplyBody::Choice(outcome) => {
+                    lines.push(format!(
+                        "REPLY {id} CHOICE status={:?} cursor={}",
+                        outcome.status,
+                        outcome.page_cursor.as_deref().unwrap_or("none")
+                    ));
+                    for choice in &outcome.choices {
+                        lines.push(format!(
+                            "CHOICE value={} label={} detail={} group={}",
+                            choice_value(&choice.value),
+                            text(&choice.presentation.label),
+                            choice
+                                .presentation
+                                .detail
+                                .as_deref()
+                                .map(text)
+                                .unwrap_or_else(|| "none".to_string()),
+                            choice
+                                .presentation
+                                .group
+                                .as_deref()
+                                .map(text)
+                                .unwrap_or_else(|| "none".to_string())
                         ));
                     }
                 }
@@ -428,6 +523,22 @@ fn render_client(message: &ClientMessage, lines: &mut Vec<String>) {
             suggest.page_size(),
             suggest.continuation().unwrap_or("none")
         )),
+        ClientRequest::Choice(choice) => {
+            let dependencies = choice
+                .dependencies()
+                .iter()
+                .map(|selection| choice_value(&selection.value))
+                .collect::<Vec<_>>()
+                .join(",");
+            lines.push(format!(
+                "REQUEST {id} CHOICE target={:?} dependencies=[{dependencies}] search={} \
+                 page_size={} cursor={}",
+                choice.target(),
+                text(choice.search()),
+                choice.page_size(),
+                choice.page_cursor().unwrap_or("none")
+            ));
+        }
         ClientRequest::Cancel(cancel) => {
             lines.push(format!(
                 "REQUEST {id} CANCEL target={}",

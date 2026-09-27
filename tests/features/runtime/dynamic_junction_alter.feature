@@ -172,3 +172,72 @@ Feature: Dynamically applying junction ALTER operations
       | cluster_size |
       | 1            |
       | 3            |
+
+  @dynamic_branched_junction_revision
+  Scenario Outline: A dynamic junction revision reaches existing and newly appearing branches
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA input_event ( tenant STRING, seq I64 );
+      CREATE SCHEMA output_event ( tenant STRING, seq I64, label STRING );
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_event_source SCHEMA tenant_branch TTL 5m;
+      CREATE WIRE JSON SCHEMA input_event_wire MODE STRICT ( tenant string, seq integer );
+      CREATE CODEC input_event_codec FROM WIRE JSON SCHEMA input_event_wire TO SCHEMA input_event;
+      CREATE RELAY incoming SCHEMA input_event BRANCHED BY by_event_source;
+      CREATE RELAY outgoing SCHEMA output_event BRANCHED BY by_event_source;
+      CREATE VHOST edge http-{{test_id}}-dynamic-branch-revision.example.com;
+      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR event_source
+        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING input_event_codec
+        TO incoming INHERIT ALL BRANCHED BY by_event_source SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE JUNCTION route_events FROM incoming BRANCHED BY by_event_source
+        TO outgoing SET tenant = input.tenant, seq = input.seq, label = 'before'
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION outgoing_subscription TO outgoing;
+      START;
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}-dynamic-branch-revision.example.com" path "/events"
+      """
+      {"tenant":"existing","seq":1}
+      """
+    Then the relay subscription receives a payload
+      """
+      "label":"before","seq":1,"tenant":"existing"
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      ALTER JUNCTION route_events
+        REPLACE ROUTE TO outgoing
+        SET tenant = input.tenant, seq = input.seq, label = 'after'
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DYNAMIC
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}-dynamic-branch-revision.example.com" path "/events"
+      """
+      {"tenant":"existing","seq":2}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}-dynamic-branch-revision.example.com" path "/events"
+      """
+      {"tenant":"new","seq":3}
+      """
+    Then within "5s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"existing"} | "label":"after","seq":2,"tenant":"existing"
+      key={"tenant":"new"} | "label":"after","seq":3,"tenant":"new"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

@@ -94,6 +94,7 @@ pub struct OtelSink {
 /// What one OTEL emitter exports with, from its typed sink plan.
 pub struct OtelSinkConfig {
     pub config: Vec<ClientConfigEntry>,
+    pub dns: nervix_dns::DnsResolver,
     pub signal: OtelSignal,
     /// The signal keys this emitter maps, in the order of its mapped columns.
     pub values: Vec<String>,
@@ -456,6 +457,7 @@ impl OtelSink {
     pub fn new(config: OtelSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
         let OtelSinkConfig {
             config,
+            dns,
             signal,
             values,
             attributes,
@@ -464,7 +466,7 @@ impl OtelSink {
             mapped_schema,
         } = config;
         let client = OtelClient {
-            transport: Self::transport_from_config(&config)?,
+            transport: Self::transport_from_config(&config, &dns)?,
         };
         Self::validate_mapped_types(&signal, &values, &attributes, &mapped_schema)
             .map_err(|error| invalid_configuration(format!("{error:?}")))?;
@@ -508,7 +510,10 @@ impl OtelSink {
         })
     }
 
-    fn transport_from_config(config: &[ClientConfigEntry]) -> SinkStartResult<OtelTransport> {
+    fn transport_from_config(
+        config: &[ClientConfigEntry],
+        dns: &nervix_dns::DnsResolver,
+    ) -> SinkStartResult<OtelTransport> {
         let settings = OtelClientSettings::parse(config)?;
         match settings.protocol {
             OtelProtocol::Grpc => {
@@ -566,7 +571,7 @@ impl OtelSink {
                 })
             }
             OtelProtocol::HttpProtobuf => {
-                let client = HttpClientConfig::new(config, "OTEL")
+                let client = HttpClientConfig::new(config, "OTEL", dns)
                     .build()
                     .map_err(invalid_configuration)?;
                 let headers = Self::http_headers(&settings.headers)?;
@@ -2081,12 +2086,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn grpc_transport_initialization_does_not_require_a_reachable_endpoint() {
-        let transport = OtelSink::transport_from_config(&config(&[
-            ("endpoint", "http://127.0.0.1:0"),
-            ("protocol", "grpc"),
-            ("timeout_ms", "1"),
-        ]))
+    async fn grpc_transport_initialization_does_not_require_a_reachable_endpoint()
+    -> Result<(), Report<nervix_dns::DnsConfigurationError>> {
+        let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration::system()).await?;
+        let transport = OtelSink::transport_from_config(
+            &config(&[
+                ("endpoint", "http://127.0.0.1:0"),
+                ("protocol", "grpc"),
+                ("timeout_ms", "1"),
+            ]),
+            &dns,
+        )
         .unwrap_or_else(|error| {
             panic!("an unavailable endpoint must initialize for publish-time retry: {error:?}")
         });
@@ -2103,6 +2113,7 @@ mod tests {
             &SinkPublishError::Publish { sink: OTEL },
             "an unreachable receiver is a failure the host retries"
         );
+        Ok(())
     }
 
     #[test]

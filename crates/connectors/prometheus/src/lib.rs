@@ -21,6 +21,7 @@ use nervix_connector::{
     RetainedIngestHeaders, SourceConnector, SourceError, SourcePoll, SourcePollMessage,
     SourceResult, client_config_value, physical_time::actual_utc_now,
 };
+use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, Timestamp};
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
@@ -32,6 +33,7 @@ const PROMETHEUS: &str = "prometheus";
 pub struct PrometheusSourcePlan {
     pub config: Vec<ClientConfigEntry>,
     pub query: String,
+    pub dns: DnsResolver,
 }
 
 pub struct PrometheusSource {
@@ -88,9 +90,11 @@ impl SourceConnector for PrometheusSource {
     type Plan = PrometheusSourcePlan;
 
     async fn open(plan: &Self::Plan, _instance_index: u64) -> SourceResult<Self> {
-        let client = Self::client_from_config(&plan.config).change_context(SourceError::Open {
-            connector: PROMETHEUS,
-        })?;
+        let client = Self::client_from_config(&plan.config, &plan.dns).change_context(
+            SourceError::Open {
+                connector: PROMETHEUS,
+            },
+        )?;
         let addr = Self::addr_from_config(&plan.config).change_context(SourceError::Open {
             connector: PROMETHEUS,
         })?;
@@ -136,8 +140,9 @@ impl PacedSourceConnector for PrometheusSource {
 impl PrometheusSource {
     fn client_from_config(
         config: &[ClientConfigEntry],
+        dns: &DnsResolver,
     ) -> Result<HttpClient, Report<HttpClientConfigError>> {
-        HttpClientConfig::new(config, "Prometheus").build()
+        HttpClientConfig::new(config, "Prometheus", dns).build()
     }
 
     fn addr_from_config(config: &[ClientConfigEntry]) -> ClientConfigResult<String> {
@@ -263,8 +268,10 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn prometheus_source_reads_address_and_validates_client_configuration() {
+    #[tokio::test]
+    async fn prometheus_source_reads_address_and_validates_client_configuration()
+    -> Result<(), Report<nervix_dns::DnsConfigurationError>> {
+        let dns = DnsResolver::load(nervix_dns::DnsConfiguration::system()).await?;
         let address = vec![ClientConfigEntry {
             key: "addr".to_string(),
             value: "http://prometheus:9090".to_string(),
@@ -284,9 +291,10 @@ mod tests {
             key: "timeout_ms".to_string(),
             value: "oops".to_string(),
         }];
-        let error =
-            PrometheusSource::client_from_config(&timeout).expect_err("invalid Prometheus timeout");
+        let error = PrometheusSource::client_from_config(&timeout, &dns)
+            .expect_err("invalid Prometheus timeout");
         assert!(error.to_string().contains("Prometheus timeout_ms"));
+        Ok(())
     }
 
     #[test]

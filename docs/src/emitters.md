@@ -714,6 +714,8 @@ Use a JSON wire codec or a JAQ-native codec with JSON output. Sentry emitters re
 USING`, do not accept `write_header`, and still require explicit leakage for sensitive event
 fields. The optional Sentry client keys `timeout_ms`, `tls_ca_file`, `tls_cert_file`, and
 `tls_key_file` have their usual meanings.
+Sentry resolves the DSN endpoint through the node's configured DNS resolver; its HTTP request
+timeout includes that lookup, connection setup, TLS, and the response.
 
 ### OTEL
 
@@ -739,6 +741,9 @@ absent compression key sends an uncompressed request. `timeout_ms` is an optiona
 bound. For `http/protobuf`, Nervix appends `/v1/logs`, `/v1/traces`, or `/v1/metrics` to the endpoint
 path. Mount TLS files and use `tls_ca_file`, `tls_cert_file`, and `tls_key_file` in the same client;
 the certificate and key must be supplied together.
+OTLP/HTTP-protobuf resolves through the node's configured DNS resolver. OTLP/gRPC continues to
+use its gRPC transport resolver. The configured request timeout covers HTTP DNS and connection
+setup as well as the response.
 
 One log record is mapped as follows:
 
@@ -1069,6 +1074,11 @@ CREATE EMITTER iceberg_notifications
 ```
 
 Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE USING`. The `ON S3`, `ON GCS`, or `ON AZURE_BLOB` backend clause selects the object-store implementation. The referenced blob client supplies the object-store connection for table files. The `CATALOG <client>` clause references a separate `TYPE ICEBERG_REST` client that supplies the REST catalog URI and warehouse. The referenced REST catalog namespace and table must already exist; Nervix loads that table and appends data, but does not create catalog namespaces or tables implicitly. The emitter owns the Iceberg table name, mapped output columns, table location, catalog client reference, and flush policy.
+
+The catalog and object-store HTTP clients resolve endpoint names through the node's configured
+DNS resolver. The catalog keeps its configured URL and authentication, while OpenDAL uses the
+resolver for object operations and credential HTTP calls. DNS failures enter the existing sink
+initialization or commit retry path; they do not advance the commit or ACK boundary.
 
 GCS uses the same emitter shape with a `TYPE GCS` client and `gs://` locations:
 

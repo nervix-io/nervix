@@ -11,7 +11,6 @@ use std::sync::Arc as StdArc;
 
 use ahash::HashMap;
 use arrow_array::Array;
-use nervix_execution::sync::ArcSwapOption;
 use nervix_interconnect::{EntityGatePurpose, RelayPayload, RelayPayloadKind};
 use nervix_models::{
     AckMode, ClusterNodeName, CreateRelay, CreateSchema, DomainName, DomainSchedule, ModelKind,
@@ -837,7 +836,6 @@ async fn owner_ingress_touches_expiring_stream_state() {
             start_version: 0,
             domain_clock: test_domain_clock(&domain),
             shutdown,
-            graph: StdArc::new(ArcSwapOption::empty()),
             routing: runtime.stage_domain_routing(
                 &domain,
                 DomainRoutingSnapshot {
@@ -988,6 +986,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
     let runtime = Runtime::with_persistence_and_temp_dir(
         nervix_execution::Executor::default(),
         None,
+        None,
         Duration::from_secs(60),
         fault_injection,
         PathBuf::from(DEFAULT_TEMP_DIR),
@@ -1069,7 +1068,6 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),
                 shutdown,
-                graph: StdArc::new(ArcSwapOption::empty()),
                 routing: DomainRouting::new(DomainRoutingSnapshot::default()),
                 branched_ingestors: HashMap::default(),
                 branched_entrypoints: HashMap::default(),

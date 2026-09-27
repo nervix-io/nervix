@@ -246,6 +246,21 @@ impl ClusterDns {
         self.authority.set(&qualified_name(node_id), answer);
     }
 
+    /// Publish a separately provisioned service under a name in this scenario's zone.
+    pub(crate) fn publish_service(&self, name: &str, address: IpAddr) {
+        self.authority.set(
+            name,
+            DnsAnswer::Addresses {
+                addresses: vec![address],
+                ttl: FIXTURE_TTL,
+            },
+        );
+    }
+
+    pub(crate) fn questions_for_name(&self, name: &str) -> u64 {
+        self.authority.questions_for(name)
+    }
+
     /// Questions the authority received for the names of `node_ids`.
     pub(crate) fn questions_for(&self, node_ids: &[String]) -> u64 {
         let mut questions = 0_u64;

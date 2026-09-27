@@ -21,38 +21,12 @@ pub(super) enum ProcessorOutputError {
     TakeBranchRows,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(super) enum ProcessorOutputFilterSource<'a> {
-    InputRelays,
-    OutputRelay,
-    Inferencer(InferencerFilterMapTensors<'a>),
-}
-
-impl ProcessorOutputFilterSource<'_> {
-    pub(super) fn relays(&self, input_relays: &[RelayName]) -> Vec<RelayName> {
-        match self {
-            Self::InputRelays | Self::OutputRelay | Self::Inferencer(_) => input_relays.to_vec(),
-        }
-    }
-
-    pub(super) fn inferencer_tensors(&self) -> Option<InferencerFilterMapTensors<'_>> {
-        if let Self::Inferencer(tensors) = self {
-            Some(*tensors)
-        } else {
-            None
-        }
-    }
-}
-
 pub(super) struct ProcessorOutputDispatchContext<'a> {
-    pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) node_kind: ModelKind,
     pub(super) source_kind: ModelKind,
     pub(super) processor: &'a ModelName,
     pub(super) error_policies: &'a ErrorPolicies,
-    pub(super) input_relays: &'a [RelayName],
-    pub(super) filter_source: ProcessorOutputFilterSource<'a>,
     pub(super) materialized_state: ProcessorMaterializedState<'a>,
     pub(super) execution_now: Timestamp,
 }
@@ -190,22 +164,6 @@ pub(super) struct PendingProcessorOutputMessageError {
     pub(super) error: StructuredMessageError,
     pub(super) partial_output: Option<RuntimeRecordBatch>,
     pub(super) materialized_state: HashMap<String, RuntimeValue>,
-}
-
-pub(super) fn processor_output_input_sensitivity(
-    branch: &BranchRuntime,
-    relays: &[RelayName],
-) -> VmSchemaSensitivity {
-    let Some(relay) = relays.first() else {
-        return VmSchemaSensitivity::default();
-    };
-    let Ok(routing) = branch.domain_routing() else {
-        return VmSchemaSensitivity::default();
-    };
-    let Ok(schema) = relay_schema_for_routing(routing, &branch.domain, relay) else {
-        return VmSchemaSensitivity::default();
-    };
-    schema.vm_sensitivity()
 }
 
 /// Work that every output route of one dispatched batch shares.
@@ -430,7 +388,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
         |output_index: usize| selected_output.is_none_or(|selected| selected == output_index);
 
     let mut output_schemas = vec![None; output_relays.len()];
-    for (output_index, output) in outputs.routes.iter_mut().enumerate() {
+    for (output_index, _) in outputs.routes.iter_mut().enumerate() {
         if !selects_output(output_index) {
             continue;
         }
@@ -456,22 +414,6 @@ pub(super) async fn dispatch_selected_processor_outputs(
                 return None;
             }
         };
-        if let Err(error) =
-            compile_processor_output_program(&mut context, output, &batch, &output_schema)
-        {
-            context
-                .branch
-                .runtime
-                .handle_internal_processor_error_for_acks(
-                    &context.branch.domain,
-                    context.node_kind,
-                    context.processor,
-                    context.error_policies,
-                    error.acks.iter(),
-                    error.reason,
-                );
-            return None;
-        }
         output_schemas[output_index] = Some(output_schema);
     }
 
@@ -744,13 +686,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
         };
         if context
             .branch
-            .dispatch_output(
-                context.graph,
-                output,
-                context.source_kind,
-                context.processor,
-                &forwarded,
-            )
+            .dispatch_output(output, context.source_kind, context.processor, &forwarded)
             .await
             .is_ok()
         {
@@ -908,13 +844,7 @@ async fn flush_processor_outputs(
         };
         if context
             .branch
-            .dispatch_output(
-                context.graph,
-                output,
-                context.source_kind,
-                context.processor,
-                &forwarded,
-            )
+            .dispatch_output(output, context.source_kind, context.processor, &forwarded)
             .await
             .is_ok()
         {

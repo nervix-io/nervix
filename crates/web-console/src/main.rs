@@ -19,16 +19,17 @@ use leptos::{ev, mount::mount_to_body, prelude::*};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_client_wire::{
-    AttachDisposition, AttachOutcome, AttachTransactionRequest, CancellationStage, ClientMessage,
-    ClientRequest, ClusterObserved, CommandDisposition, CommandOutcome, CommandRequest, Diagnostic,
-    DomainEntity, DomainInfo, DomainSelection, DomainSnapshotObserved, InspectTransactionRequest,
-    InspectionOutcome, LeaderRedirect, Leadership, NoticeLevel, ReplyBody, RequestCancelled,
-    RequestId, RowBatchView, RowSchema, SelectDomainRequest, ServerEvent, ServerFrame,
-    ServerMessage, ServerNotice, SessionEndReason, SessionLimits, StatementDisposition,
-    StatementOutcome, SubscribeDisposition, SubscribeOutcome, SubscribeRequest, SubscriptionHandle,
-    SubscriptionOpened, SubscriptionRows, SubscriptionType, SuggestRequest,
-    Suggestion as WireSuggestion, SuggestionKind, SuggestionStatus, TextEdit, TransferAssembly,
-    TransferPart, UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame,
+    AttachDisposition, AttachOutcome, AttachTransactionRequest, CancellationStage,
+    ChoiceLookupRequest, ClientMessage, ClientRequest, ClusterObserved, CommandDisposition,
+    CommandOutcome, CommandRequest, Diagnostic, DomainEntity, DomainInfo, DomainSelection,
+    DomainSnapshotObserved, InspectTransactionRequest, InspectionOutcome, LeaderRedirect,
+    Leadership, NoticeLevel, ReplyBody, RequestCancelled, RequestId, RowBatchView, RowSchema,
+    SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage, ServerNotice, SessionEndReason,
+    SessionLimits, StatementDisposition, StatementOutcome, SubscribeDisposition, SubscribeOutcome,
+    SubscribeRequest, SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionType,
+    SuggestRequest, Suggestion as WireSuggestion, SuggestionKind, SuggestionStatus, TextEdit,
+    TransferAssembly, TransferPart, UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest,
+    VerifiedFrame,
     websocket::{ClientWebSocketCodec, WebSocketData},
 };
 use nervix_dataflow_graph::{
@@ -55,8 +56,13 @@ use url::Url;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
+mod create_dialog;
 mod transaction_inspector;
 
+use create_dialog::{
+    ChoiceControl, ChoiceRequestContext, CreateCommandContext, CreateDialog, CreateKind,
+    CreateMenu, CreateSignals, CreateSubmission,
+};
 use transaction_inspector::{InspectorSignals, TransactionInspector};
 
 const RUNTIME_VERSION_LABEL: &str = concat!("nervix runtime v", env!("CARGO_PKG_VERSION"));
@@ -106,6 +112,10 @@ struct WebConsoleSignals {
     domains_loaded: RwSignal<bool>,
     auth_token: RwSignal<Option<String>>,
     auth_error: RwSignal<Option<String>>,
+    session_generation: RwSignal<u64>,
+    create: CreateSignals,
+    selected_resource: RwSignal<Option<String>>,
+    upload_status: RwSignal<String>,
 }
 
 impl WebConsoleSignals {
@@ -127,6 +137,9 @@ impl WebConsoleSignals {
         self.suggestion_query.set(None);
         self.suggestion_continuation.set(None);
         self.terminal_lines.set(TermLineHistory::default());
+        self.create.connection_lost();
+        self.selected_resource.set(None);
+        self.upload_status.set(String::new());
     }
 
     /// Closing a pending start waits for its reply before deleting that subscription. An opened
@@ -199,6 +212,11 @@ enum ConsoleRequest {
     SelectDomain(SelectDomainRequest),
     /// Asks for completions of the REPL input.
     Suggest(SuggestRequest),
+    /// Resolves a structured form control into typed choices.
+    Choice {
+        request: ChoiceLookupRequest,
+        context: ChoiceRequestContext,
+    },
     /// Binds the session's transaction to the connection.
     AttachTransaction(AttachTransactionRequest),
     /// Reads an impact report without binding the inspected transaction.
@@ -210,6 +228,8 @@ enum ConsoleRequest {
 enum CommandPurpose {
     /// The REPL prints it.
     Repl,
+    /// A popup form reads the terminal outcome and its own submission state.
+    Create(CreateCommandContext),
     /// The resource dialog reads the versions of `resource` from its typed `DESCRIBE RESOURCE`
     /// description.
     ResourceDescription { resource: String },
@@ -227,6 +247,7 @@ impl ConsoleRequest {
             | Self::SubscriptionStop { .. }
             | Self::SelectDomain(_)
             | Self::Suggest(_)
+            | Self::Choice { .. }
             | Self::AttachTransaction(_) => false,
         }
     }
@@ -235,8 +256,8 @@ impl ConsoleRequest {
     /// until the session can serve it and outlives a connection that ended before answering it.
     ///
     /// Every connection selects the active domain and attaches the session's transaction again
-    /// itself, and a completion request only matters while the operator is typing, so those are
-    /// sent at once and forgotten with the connection.
+    /// itself. Completion and structured-choice requests only matter for the current input or
+    /// draft, so those are sent at once and forgotten with the connection.
     fn is_ordered(&self) -> bool {
         match self {
             Self::Command { .. }
@@ -244,7 +265,10 @@ impl ConsoleRequest {
             | Self::SubscriptionStart { .. }
             | Self::SubscriptionStop { .. } => true,
             Self::InspectTransaction(_) => true,
-            Self::SelectDomain(_) | Self::Suggest(_) | Self::AttachTransaction(_) => false,
+            Self::SelectDomain(_)
+            | Self::Suggest(_)
+            | Self::Choice { .. }
+            | Self::AttachTransaction(_) => false,
         }
     }
 
@@ -257,6 +281,7 @@ impl ConsoleRequest {
             Self::SubscriptionStop { request, .. } => ClientRequest::Unsubscribe(request.clone()),
             Self::SelectDomain(request) => ClientRequest::SelectDomain(request.clone()),
             Self::Suggest(request) => ClientRequest::Suggest(request.clone()),
+            Self::Choice { request, .. } => ClientRequest::Choice(request.clone()),
             Self::AttachTransaction(request) => ClientRequest::AttachTransaction(request.clone()),
             Self::InspectTransaction(request) => ClientRequest::InspectTransaction(request.clone()),
         }
@@ -321,6 +346,9 @@ struct SessionRequests {
     /// The latest completion request. An earlier one is no longer awaited, so its stale
     /// suggestions are never shown.
     latest_suggestion: Option<RequestId>,
+    /// The latest request for each structured control. Older replies cannot overwrite a newer
+    /// draft or search.
+    latest_choices: BTreeMap<ChoiceControl, RequestId>,
     /// Whether the server confirmed that the node serving the connection leads the cluster.
     leader_confirmed: bool,
     /// The request attaching the session's transaction to the connection, while it is in flight.
@@ -336,6 +364,7 @@ impl SessionRequests {
             in_flight: BTreeMap::new(),
             transfers: BTreeMap::new(),
             latest_suggestion: None,
+            latest_choices: BTreeMap::new(),
             leader_confirmed: false,
             attaching: None,
         }
@@ -389,6 +418,12 @@ impl SessionRequests {
             ConsoleRequest::Suggest(_) => {
                 if let Some(previous) = self.latest_suggestion.replace(request_id) {
                     self.in_flight.remove(&previous);
+                }
+            }
+            ConsoleRequest::Choice { context, .. } => {
+                if let Some(previous) = self.latest_choices.insert(context.control, request_id) {
+                    self.in_flight.remove(&previous);
+                    self.transfers.remove(&previous);
                 }
             }
             ConsoleRequest::AttachTransaction(_) => {
@@ -457,6 +492,8 @@ impl SessionRequests {
         if self.latest_suggestion == Some(request_id) {
             self.latest_suggestion = None;
         }
+        self.latest_choices
+            .retain(|_, latest| *latest != request_id);
         Some(request)
     }
 
@@ -522,6 +559,7 @@ impl SessionRequests {
         self.transfers.clear();
         self.next_request_id = NonZeroU64::MIN;
         self.latest_suggestion = None;
+        self.latest_choices.clear();
         self.leader_confirmed = false;
         self.attaching = None;
     }
@@ -685,6 +723,15 @@ fn main() {
     mount_to_body(App);
 }
 
+#[cfg(test)]
+fn initialize_test_executor() {
+    static EXECUTOR: std::sync::Once = std::sync::Once::new();
+    EXECUTOR.call_once(|| {
+        any_spawner::Executor::init_futures_executor()
+            .assured("the test process initializes the Leptos executor once");
+    });
+}
+
 #[component]
 fn App() -> impl IntoView {
     let active_domain = RwSignal::new(None::<DomainName>);
@@ -707,6 +754,10 @@ fn App() -> impl IntoView {
     let domains_loaded = RwSignal::new(false);
     let auth_token = RwSignal::new(web_console_auth_token_from_location());
     let auth_error = RwSignal::new(None::<String>);
+    let session_generation = RwSignal::new(0_u64);
+    let create = CreateSignals::new();
+    let selected_resource = RwSignal::new(None::<String>);
+    let upload_status = RwSignal::new(String::new());
     let signals = WebConsoleSignals {
         terminal_lines,
         suggestions,
@@ -725,6 +776,10 @@ fn App() -> impl IntoView {
         domains_loaded,
         auth_token,
         auth_error,
+        session_generation,
+        create,
+        selected_resource,
+        upload_status,
     };
     let web_console_session = use_websocket_session(signals);
 
@@ -954,6 +1009,18 @@ fn App() -> impl IntoView {
         suggestions.set(Vec::new());
         input.set(String::new());
     };
+    let create_request_tx = web_console_session.request_tx;
+    let submit_create = move |submission: CreateSubmission, attempt: u64, draft_revision: u64| {
+        submit_create_request(
+            create,
+            terminal_lines,
+            transaction_status,
+            create_request_tx,
+            submission,
+            attempt,
+            draft_revision,
+        );
+    };
     let subscription_session = web_console_session.clone();
     let start_subscription = move |relay: String, filter: String, sample_rate_index: usize| {
         let Some(domain) = active_domain.get_untracked() else {
@@ -1065,9 +1132,10 @@ fn App() -> impl IntoView {
                     run_command=run_command
                     transaction_status=transaction_status
                     inspector=inspector
+                    create=create
                 />
                 <div class="console-body">
-                    <Sidebar active_domain=active_domain domains=domains domains_loaded=domains_loaded active_graph=active_graph active_entities=active_entities cluster_counters=cluster_counters resource_details=resource_details web_console_session=web_console_session.clone() run_command=run_command />
+                    <Sidebar active_domain=active_domain domains=domains domains_loaded=domains_loaded active_graph=active_graph active_entities=active_entities cluster_counters=cluster_counters resource_details=resource_details selected_resource=selected_resource upload_status=upload_status create=create web_console_session=web_console_session.clone() run_command=run_command />
                     <section class="main-pane">
                         <TransactionInspector
                             inspector=inspector
@@ -1100,8 +1168,79 @@ fn App() -> impl IntoView {
                         />
                     </section>
                 </div>
+                <CreateDialog
+                    signals=create
+                    active_domain=active_domain
+                    connection_state=web_console_session.state
+                    session_generation=session_generation
+                    request_tx=web_console_session.request_tx
+                    submit=submit_create
+                />
             </main>
         </Show>
+    }
+}
+
+fn submit_create_request(
+    create: CreateSignals,
+    terminal_lines: RwSignal<TermLineHistory>,
+    transaction_status: RwSignal<Option<TransactionStatus>>,
+    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    submission: CreateSubmission,
+    attempt: u64,
+    draft_revision: u64,
+) {
+    let CreateSubmission {
+        kind,
+        query,
+        presentation,
+        domain,
+        resource,
+        created_domain,
+    } = submission;
+    let prompt_transaction =
+        transaction_status.with_untracked(|status| ActiveTransaction::of(status.as_ref()));
+    terminal_lines.update(|lines| {
+        lines.push(TermLine::prompt(presentation.clone(), prompt_transaction));
+    });
+    let transaction = transaction_status.get_untracked();
+    let expected_transaction_position = match &transaction {
+        Some(status) if status.lifecycle().is_active() => Some(status.accepted_operations()),
+        Some(_) | None => None,
+    };
+    let context = CreateCommandContext {
+        attempt,
+        draft_revision,
+        kind,
+        presentation,
+        domain: domain.clone(),
+        resource,
+        created_domain,
+    };
+    let queued = ConsoleRequest::Command {
+        request: CommandRequest {
+            query,
+            domain,
+            execution_reference: command_execution_reference(),
+            expected_transaction_position,
+            expected_preview: None,
+        },
+        purpose: CommandPurpose::Create(context),
+    };
+    let Some(request_tx) = request_tx.get_untracked() else {
+        create.failed(
+            attempt,
+            draft_revision,
+            "WebSocket session is not available".to_string(),
+        );
+        return;
+    };
+    if request_tx.unbounded_send(queued).is_err() {
+        create.failed(
+            attempt,
+            draft_revision,
+            "WebSocket command channel is closed".to_string(),
+        );
     }
 }
 
@@ -1242,10 +1381,16 @@ async fn run_websocket_session(
                 wait_for_websocket_open(&socket).await;
                 if auth_token.get_untracked().as_deref() != Some(current_auth_token.as_str()) {
                     requests.end_connection();
+                    signals.create.connection_lost();
                     interrupt_subscription_tabs(signals);
                     continue;
                 }
                 let ended = if let WebSocketState::Open = socket.state() {
+                    signals.session_generation.update(|generation| {
+                        *generation = generation
+                            .checked_add(1)
+                            .assured("a console cannot open 2^64 websocket connections");
+                    });
                     Some(
                         serve_connection(
                             signals,
@@ -1273,6 +1418,7 @@ async fn run_websocket_session(
                 if let Some(ended) = ended {
                     if auth_token.get_untracked().as_deref() != Some(current_auth_token.as_str()) {
                         requests.end_connection();
+                        signals.create.connection_lost();
                         interrupt_subscription_tabs(signals);
                         continue;
                     }
@@ -1280,6 +1426,7 @@ async fn run_websocket_session(
                     reconnect_delay = WEBSOCKET_INITIAL_RECONNECT_DELAY;
                     auth_error.set(None);
                     requests.end_connection();
+                    signals.create.connection_lost();
                     if !matches!(&ended, ConnectionEnd::ConsoleClosed) {
                         interrupt_subscription_tabs(signals);
                     }
@@ -1917,6 +2064,14 @@ fn apply_reply(
             }
             SessionStep::Continue
         }
+        (ConsoleRequest::Choice { context, .. }, ReplyBody::Choice(outcome)) => {
+            signals.create.apply_choice(
+                context,
+                signals.session_generation.get_untracked(),
+                outcome,
+            );
+            SessionStep::Continue
+        }
         (ConsoleRequest::AttachTransaction(_), ReplyBody::Attach(outcome)) => {
             apply_attach_outcome(signals, requests, outcome)
         }
@@ -1975,6 +2130,11 @@ fn apply_command_outcome(
     mut outcome: CommandOutcome,
 ) -> SessionStep {
     if let Some(redirect) = command_redirect(&outcome.disposition) {
+        if let CommandPurpose::Create(context) = &purpose {
+            signals
+                .create
+                .queued_reconnect(context.attempt, context.draft_revision);
+        }
         let step = redirect_step(signals, redirect);
         requests.hold_again(IssuedRequest {
             order,
@@ -1983,12 +2143,18 @@ fn apply_command_outcome(
         return step;
     }
     if matches!(outcome.disposition, CommandDisposition::OutcomeUnknown(_)) {
+        if let CommandPurpose::Create(context) = &purpose {
+            signals
+                .create
+                .queued_reconnect(context.attempt, context.draft_revision);
+        }
         requests.hold_again(IssuedRequest {
             order,
             request: ConsoleRequest::Command { request, purpose },
         });
         return SessionStep::Reconnect;
     }
+    let queued_transaction_position = queued_transaction_position(&outcome);
     if let Some(status) = outcome.transaction.take() {
         adopt_transaction(signals, status);
     }
@@ -2002,6 +2168,15 @@ fn apply_command_outcome(
     }
     match purpose {
         CommandPurpose::Repl => show_command_outcome(signals, order, &request.query, outcome),
+        CommandPurpose::Create(context) => {
+            show_create_outcome(
+                signals,
+                requests,
+                context,
+                outcome,
+                queued_transaction_position,
+            );
+        }
         CommandPurpose::ResourceDescription { resource } => {
             let detail = ResourceDetailView::from_description(outcome);
             signals.resource_details.update(|details| {
@@ -2010,6 +2185,82 @@ fn apply_command_outcome(
         }
     }
     SessionStep::Continue
+}
+
+fn show_create_outcome(
+    signals: WebConsoleSignals,
+    requests: &mut SessionRequests,
+    context: CreateCommandContext,
+    outcome: CommandOutcome,
+    queued_transaction_position: Option<usize>,
+) {
+    let completed = matches!(outcome.disposition, CommandDisposition::Completed { .. });
+    let failure = if outcome.message.is_empty() {
+        "Create failed".to_string()
+    } else {
+        outcome.message.clone()
+    };
+    let lines = command_outcome_lines(outcome, &context.presentation);
+    signals
+        .terminal_lines
+        .update(|terminal| terminal.extend(lines));
+
+    if let Some(position) = queued_transaction_position {
+        signals
+            .create
+            .queued_transaction(context.attempt, context.draft_revision, position);
+        return;
+    }
+    if !completed {
+        signals
+            .create
+            .failed(context.attempt, context.draft_revision, failure);
+        return;
+    }
+    if !signals
+        .create
+        .completed(context.attempt, context.draft_revision)
+    {
+        return;
+    }
+    if context.kind == CreateKind::Domain
+        && let Some(domain) = context.created_domain
+    {
+        signals.active_domain.set(Some(domain));
+    }
+    if context.kind == CreateKind::Resource
+        && let (Some(resource), Some(domain)) = (context.resource, context.domain)
+    {
+        signals.selected_resource.set(Some(resource.clone()));
+        signals.upload_status.set(String::new());
+        let issued = requests.issue(ConsoleRequest::Command {
+            request: CommandRequest {
+                query: format!("DESCRIBE RESOURCE {resource};"),
+                domain: Some(domain),
+                execution_reference: command_execution_reference(),
+                expected_transaction_position: None,
+                expected_preview: None,
+            },
+            purpose: CommandPurpose::ResourceDescription { resource },
+        });
+        requests.hold_again(issued);
+    }
+}
+
+/// The accepted position of a popup command that remains queued in an attached transaction.
+///
+/// Standalone model commands also use a short durable transaction internally. Their completed
+/// outcomes retain an admission as retry evidence but carry no active transaction, so that
+/// admission describes completed work rather than a queued operation.
+fn queued_transaction_position(outcome: &CommandOutcome) -> Option<usize> {
+    outcome
+        .transaction
+        .as_ref()
+        .filter(|status| status.lifecycle().is_active())?;
+    outcome
+        .transaction_admission
+        .as_ref()
+        .map(|admission| admission.operation.get())
 }
 
 /// Prints the outcome of a REPL command, and makes the domain a completed `CREATE DOMAIN` created
@@ -2224,6 +2475,17 @@ fn fail_request(
                 .update(|lines| lines.push(TermLine::error(reason)));
         }
         ConsoleRequest::Command {
+            purpose: CommandPurpose::Create(context),
+            ..
+        } => {
+            signals
+                .create
+                .failed(context.attempt, context.draft_revision, reason.clone());
+            signals
+                .terminal_lines
+                .update(|lines| lines.push(TermLine::error(reason)));
+        }
+        ConsoleRequest::Command {
             purpose: CommandPurpose::ResourceDescription { resource },
             ..
         } => {
@@ -2245,6 +2507,11 @@ fn fail_request(
                 .update(|lines| lines.push(TermLine::error(reason)));
         }
         ConsoleRequest::Suggest(_) => signals.suggestions.set(Vec::new()),
+        ConsoleRequest::Choice { context, .. } => {
+            signals
+                .create
+                .fail_choice(context, signals.session_generation.get_untracked(), reason)
+        }
         ConsoleRequest::InspectTransaction(_) => signals.inspector.error.set(Some(reason)),
         ConsoleRequest::AttachTransaction(_) => {
             // Without its transaction attached, the session cannot serve what was held for it.
@@ -2803,6 +3070,7 @@ fn Header(
     run_command: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
     transaction_status: RwSignal<Option<TransactionStatus>>,
     inspector: InspectorSignals,
+    create: CreateSignals,
 ) -> impl IntoView {
     let theme_open = RwSignal::new(false);
     let selected_domain = move || {
@@ -2823,6 +3091,7 @@ fn Header(
             <span class="crumb-separator">"/"</span>
             <span class="crumb">"console"</span>
             <div class="topbar-status">
+                <CreateMenu signals=create active_domain=active_domain />
                 <Show when=move || transaction_status.get().is_some_and(|status| status.lifecycle().is_active()) fallback=|| ()>
                     <button class="transaction-indicator" type="button" on:click=move |_| inspector.open_attached()>
                         "Transaction · Inspect"
@@ -2948,6 +3217,9 @@ fn Sidebar(
     active_entities: impl Fn() -> Vec<EntityView> + Copy + Send + Sync + 'static,
     cluster_counters: RwSignal<ClusterCounters>,
     resource_details: RwSignal<BTreeMap<String, ResourceDetailView>>,
+    selected_resource: RwSignal<Option<String>>,
+    upload_status: RwSignal<String>,
+    create: CreateSignals,
     web_console_session: WebConsoleSession,
     run_command: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
@@ -2959,8 +3231,6 @@ fn Sidebar(
     let clients_open = RwSignal::new(true);
     let vhosts_open = RwSignal::new(true);
     let endpoints_open = RwSignal::new(true);
-    let selected_resource = RwSignal::new(None::<String>);
-    let upload_status = RwSignal::new(String::new());
     let entities_for = move |kind: EntityKind| {
         active_entities()
             .into_iter()
@@ -3086,6 +3356,19 @@ fn Sidebar(
                 </div>
             </div>
             <nav class="nav-list" aria-label="Console entities">
+                <button
+                    id="sidebar-create-resource"
+                    class="sidebar-create-button"
+                    type="button"
+                    on:click=move |_| create.open(
+                        CreateKind::Resource,
+                        active_domain.get_untracked(),
+                        "sidebar-create-resource",
+                    )
+                >
+                    <span aria-hidden="true">"＋"</span>
+                    <span>"Create resource in this domain"</span>
+                </button>
                 <NavHeader title="Schemas" count=move || entities_for(EntityKind::Model(ModelKind::Schema)).len().to_string() kind="schemas" open=schemas_open />
                 <Show when=move || schemas_open.get() fallback=|| ()>
                     <For
@@ -6672,8 +6955,9 @@ mod tests {
         ClusterNodeName, DomainClockPeriod, DomainClockSkew, ImpactPlanningBasis,
         ImpactReportCompleteness, ModelName, NodeRef, ResourceName, Timestamp,
         TransactionImpactReport, TransactionInspection, TransactionInspectionRejection,
-        TransactionInspectionTarget, TransactionLifecycle, TransactionPosition,
-        TransactionPreviewIdentity, TransactionStatus,
+        TransactionInspectionTarget, TransactionLifecycle, TransactionOperationAdmission,
+        TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity,
+        TransactionStatus,
     };
 
     use super::*;
@@ -6861,6 +7145,10 @@ mod tests {
             domains_loaded: RwSignal::new(true),
             auth_token: RwSignal::new(None),
             auth_error: RwSignal::new(None),
+            session_generation: RwSignal::new(0),
+            create: CreateSignals::new(),
+            selected_resource: RwSignal::new(None),
+            upload_status: RwSignal::new(String::new()),
         }
     }
 
@@ -7971,6 +8259,47 @@ mod tests {
     }
 
     #[test]
+    fn only_the_latest_request_for_each_typed_choice_control_is_awaited() {
+        let mut requests = SessionRequests::new();
+        let earlier = requests.issue(choice_request(ChoiceControl::DomainPace, 1));
+        let earlier = requests
+            .accept(earlier)
+            .assured("a choice request is sent without waiting for leadership");
+        assert!(matches!(earlier.request, ClientRequest::Choice(_)));
+
+        let placement = requests.issue(choice_request(ChoiceControl::PlacementPolicy, 1));
+        let placement = requests
+            .accept(placement)
+            .assured("an independent choice control is sent at once");
+        let later = requests.issue(choice_request(ChoiceControl::DomainPace, 1));
+        let later = requests
+            .accept(later)
+            .assured("a newer request for the same control is sent at once");
+
+        assert!(matches!(
+            requests.route(reply(earlier.request_id, ready_choice_reply())),
+            Routed::Untracked
+        ));
+        assert!(matches!(
+            requests.route(reply(placement.request_id, ready_choice_reply())),
+            Routed::Reply(_)
+        ));
+
+        let Routed::Reply(answered) = requests.route(reply(later.request_id, ready_choice_reply()))
+        else {
+            panic!("the latest choice request remains tracked");
+        };
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            signals.create.open(CreateKind::Domain, None, "trigger");
+            assert!(matches!(
+                apply_reply(signals, &mut requests, *answered),
+                SessionStep::Continue
+            ));
+        });
+    }
+
+    #[test]
     fn successful_commands_without_output_add_no_terminal_line() {
         let lines = command_outcome_lines(completed_outcome(""), "CREATE DOMAIN quiet");
 
@@ -8943,6 +9272,30 @@ mod tests {
         ConsoleRequest::Suggest(request)
     }
 
+    fn choice_request(control: ChoiceControl, draft_revision: u64) -> ConsoleRequest {
+        let target = match control {
+            ChoiceControl::DomainPace => nervix_client_wire::ChoiceTarget::DomainPace,
+            ChoiceControl::PlacementPolicy => nervix_client_wire::ChoiceTarget::PlacementPolicy,
+        };
+        ConsoleRequest::Choice {
+            request: ChoiceLookupRequest::new(target, Vec::new(), String::new()),
+            context: ChoiceRequestContext {
+                control,
+                draft_revision,
+                session_generation: 0,
+                append: false,
+            },
+        }
+    }
+
+    fn ready_choice_reply() -> ReplyBody {
+        ReplyBody::Choice(nervix_client_wire::ChoiceOutcome {
+            status: nervix_client_wire::ChoiceStatus::Ready,
+            choices: Vec::new(),
+            page_cursor: None,
+        })
+    }
+
     fn completed_outcome(message: &str) -> CommandOutcome {
         CommandOutcome {
             execution_reference: command_execution_reference(),
@@ -8959,6 +9312,332 @@ mod tests {
             wasm_state: None,
             resource: None,
         }
+    }
+
+    #[test]
+    fn create_admission_is_queued_only_while_its_transaction_remains_active() {
+        let mut outcome = completed_outcome("created resource");
+        outcome.transaction_admission = Some(TransactionOperationAdmission {
+            operation: TransactionOperationNumber::from_index(0)
+                .assured("the first transaction operation is addressable"),
+            preview: TransactionPreviewIdentity {
+                transaction_id: "standalone-or-attached".to_string(),
+                position: TransactionPosition::new(1),
+                planning_basis: ImpactPlanningBasis::new([7; 32]),
+            },
+        });
+
+        assert_eq!(queued_transaction_position(&outcome), None);
+
+        outcome.transaction = Some(
+            TransactionStatus::new(
+                "attached".to_string(),
+                domain_name("demo"),
+                TransactionLifecycle::Open,
+                TransactionPosition::new(1),
+                0,
+            )
+            .assured("the open transaction has not applied its accepted operation"),
+        );
+        assert_eq!(queued_transaction_position(&outcome), Some(1));
+
+        outcome.transaction = Some(
+            TransactionStatus::new(
+                "finished".to_string(),
+                domain_name("demo"),
+                TransactionLifecycle::Committed,
+                TransactionPosition::new(1),
+                1,
+            )
+            .assured("the committed transaction applied its accepted operation"),
+        );
+        assert_eq!(queued_transaction_position(&outcome), None);
+    }
+
+    #[test]
+    fn popup_submission_uses_the_shared_command_queue_and_masks_its_prompt() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            signals.create.open(CreateKind::User, None, "trigger");
+            let (attempt, revision) = signals.create.begin_submission(true);
+            let transaction = TransactionStatus::new(
+                "attached".to_string(),
+                domain_name("demo"),
+                TransactionLifecycle::Open,
+                TransactionPosition::new(2),
+                0,
+            )
+            .assured("the test transaction has two accepted, unapplied operations");
+            signals.transaction_status.set(Some(transaction));
+            let (sender, mut receiver) = unbounded();
+            submit_create_request(
+                signals.create,
+                signals.terminal_lines,
+                signals.transaction_status,
+                RwSignal::new(Some(sender)),
+                CreateSubmission {
+                    kind: CreateKind::User,
+                    query: "CREATE USER operator WITH PASSWORD 'actual-secret';".to_string(),
+                    presentation: "CREATE USER operator WITH PASSWORD '********';".to_string(),
+                    domain: None,
+                    resource: None,
+                    created_domain: None,
+                },
+                attempt,
+                revision,
+            );
+            let ConsoleRequest::Command { request, purpose } = receiver
+                .try_recv()
+                .assured("the shared command queue receives the popup command")
+            else {
+                panic!("popup submission sends a command request");
+            };
+            assert!(request.query.contains("actual-secret"));
+            assert_eq!(
+                request.expected_transaction_position,
+                Some(TransactionPosition::new(2))
+            );
+            assert!(matches!(purpose, CommandPurpose::Create(_)));
+            let prompt = &signals.terminal_lines.get_untracked().into_lines()[0]
+                .line
+                .text;
+            assert!(prompt.contains("********"));
+            assert!(!prompt.contains("actual-secret"));
+
+            signals.create.open(CreateKind::User, None, "trigger");
+            let (attempt, revision) = signals.create.begin_submission(false);
+            signals.transaction_status.set(None);
+            submit_create_request(
+                signals.create,
+                signals.terminal_lines,
+                signals.transaction_status,
+                RwSignal::new(None),
+                CreateSubmission {
+                    kind: CreateKind::User,
+                    query: "CREATE USER unavailable WITH PASSWORD 'secret';".to_string(),
+                    presentation: "CREATE USER unavailable WITH PASSWORD '********';".to_string(),
+                    domain: None,
+                    resource: None,
+                    created_domain: None,
+                },
+                attempt,
+                revision,
+            );
+
+            let (closed_sender, closed_receiver) = unbounded();
+            drop(closed_receiver);
+            signals.create.open(CreateKind::User, None, "trigger");
+            let (attempt, revision) = signals.create.begin_submission(true);
+            submit_create_request(
+                signals.create,
+                signals.terminal_lines,
+                signals.transaction_status,
+                RwSignal::new(Some(closed_sender)),
+                CreateSubmission {
+                    kind: CreateKind::User,
+                    query: "CREATE USER closed WITH PASSWORD 'secret';".to_string(),
+                    presentation: "CREATE USER closed WITH PASSWORD '********';".to_string(),
+                    domain: None,
+                    resource: None,
+                    created_domain: None,
+                },
+                attempt,
+                revision,
+            );
+        });
+    }
+
+    #[test]
+    fn create_outcomes_update_domain_resource_and_retry_state_once() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let mut requests = SessionRequests::new();
+
+            signals.create.open(CreateKind::Domain, None, "trigger");
+            let (attempt, revision) = signals.create.begin_submission(true);
+            let created_domain = domain_name("created");
+            show_create_outcome(
+                signals,
+                &mut requests,
+                CreateCommandContext {
+                    attempt,
+                    draft_revision: revision,
+                    kind: CreateKind::Domain,
+                    presentation: "CREATE UNPACED DOMAIN created PLACEMENT NEUTRAL;".to_string(),
+                    domain: None,
+                    resource: None,
+                    created_domain: Some(created_domain.clone()),
+                },
+                completed_outcome("created domain"),
+                None,
+            );
+            assert_eq!(signals.active_domain.get_untracked(), Some(created_domain));
+
+            let scope = domain_name("created");
+            signals
+                .create
+                .open(CreateKind::Resource, Some(scope.clone()), "trigger");
+            let (attempt, revision) = signals.create.begin_submission(true);
+            show_create_outcome(
+                signals,
+                &mut requests,
+                CreateCommandContext {
+                    attempt,
+                    draft_revision: revision,
+                    kind: CreateKind::Resource,
+                    presentation: "CREATE RESOURCE bundle;".to_string(),
+                    domain: Some(scope.clone()),
+                    resource: Some("bundle".to_string()),
+                    created_domain: None,
+                },
+                completed_outcome("created resource"),
+                None,
+            );
+            assert_eq!(
+                signals.selected_resource.get_untracked().as_deref(),
+                Some("bundle")
+            );
+            assert!(requests.held.values().any(|request| matches!(
+                request,
+                ConsoleRequest::Command { request, purpose: CommandPurpose::ResourceDescription { resource } }
+                    if request.query == "DESCRIBE RESOURCE bundle;"
+                        && request.domain.as_ref() == Some(&scope)
+                        && resource == "bundle"
+            )));
+
+            signals.create.open(CreateKind::User, None, "trigger");
+            let (attempt, revision) = signals.create.begin_submission(true);
+            let mut failed = completed_outcome("");
+            failed.disposition = CommandDisposition::Failed;
+            show_create_outcome(
+                signals,
+                &mut requests,
+                CreateCommandContext {
+                    attempt,
+                    draft_revision: revision,
+                    kind: CreateKind::User,
+                    presentation: "CREATE USER duplicate WITH PASSWORD '********';".to_string(),
+                    domain: None,
+                    resource: None,
+                    created_domain: None,
+                },
+                failed,
+                None,
+            );
+
+            signals.create.open(CreateKind::User, None, "trigger");
+            let (attempt, revision) = signals.create.begin_submission(true);
+            let context = CreateCommandContext {
+                attempt,
+                draft_revision: revision,
+                kind: CreateKind::User,
+                presentation: "CREATE USER queued WITH PASSWORD '********';".to_string(),
+                domain: None,
+                resource: None,
+                created_domain: None,
+            };
+            show_create_outcome(
+                signals,
+                &mut requests,
+                context.clone(),
+                completed_outcome("queued user"),
+                Some(3),
+            );
+            show_create_outcome(
+                signals,
+                &mut requests,
+                CreateCommandContext {
+                    attempt: 0,
+                    ..context.clone()
+                },
+                completed_outcome("stale completion"),
+                None,
+            );
+
+            let issued = requests.issue(ConsoleRequest::Command {
+                request: CommandRequest {
+                    query: "CREATE USER queued WITH PASSWORD 'secret';".to_string(),
+                    domain: None,
+                    execution_reference: command_execution_reference(),
+                    expected_transaction_position: None,
+                    expected_preview: None,
+                },
+                purpose: CommandPurpose::Create(context),
+            });
+            let IssuedRequest { order, request } = issued;
+            let ConsoleRequest::Command { request, purpose } = request else {
+                panic!("the test issued a create command");
+            };
+            let mut unknown = completed_outcome("leadership moved during admission");
+            unknown.disposition = CommandDisposition::OutcomeUnknown(
+                nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
+            );
+            assert!(matches!(
+                apply_command_outcome(
+                    signals,
+                    &mut requests,
+                    order,
+                    request,
+                    purpose,
+                    unknown,
+                ),
+                SessionStep::Reconnect
+            ));
+        });
+    }
+
+    #[test]
+    fn failed_create_and_choice_requests_update_their_own_surface() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let mut requests = SessionRequests::new();
+            signals.create.open(CreateKind::User, None, "trigger");
+            let (attempt, revision) = signals.create.begin_submission(true);
+            fail_request(
+                signals,
+                &mut requests,
+                ConsoleRequest::Command {
+                    request: CommandRequest {
+                        query: "CREATE USER operator WITH PASSWORD 'secret';".to_string(),
+                        domain: None,
+                        execution_reference: command_execution_reference(),
+                        expected_transaction_position: None,
+                        expected_preview: None,
+                    },
+                    purpose: CommandPurpose::Create(CreateCommandContext {
+                        attempt,
+                        draft_revision: revision,
+                        kind: CreateKind::User,
+                        presentation: "CREATE USER operator WITH PASSWORD '********';".to_string(),
+                        domain: None,
+                        resource: None,
+                        created_domain: None,
+                    }),
+                },
+                "request rejected".to_string(),
+            );
+            assert!(
+                signals
+                    .terminal_lines
+                    .get_untracked()
+                    .into_lines()
+                    .iter()
+                    .any(|entry| entry.line.text.contains("request rejected"))
+            );
+
+            signals.create.open(CreateKind::Domain, None, "trigger");
+            fail_request(
+                signals,
+                &mut requests,
+                choice_request(
+                    ChoiceControl::DomainPace,
+                    revision
+                        .checked_add(1)
+                        .assured("opening the domain form advances the draft revision once"),
+                ),
+                "choice transport ended".to_string(),
+            );
+        });
     }
 
     fn diagnostic(message: &str, start: u32, end: u32) -> Diagnostic {

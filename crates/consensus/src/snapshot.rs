@@ -171,7 +171,14 @@ impl SectionWriter {
             .pending_bytes
             .checked_add(record_bytes)
             .ok_or_else(|| io::Error::other(crate::durable_batch::StorageFailure::Capacity))?;
-        if !self.pending.records.is_empty() && would_hold > self.limit {
+        let record_count = self
+            .pending
+            .records
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
+        let encoded_bound = section_encoded_bytes_bound(would_hold, record_count)?;
+        if !self.pending.records.is_empty() && encoded_bound > self.limit {
             return Ok(false);
         }
         self.pending_bytes = would_hold;
@@ -188,6 +195,75 @@ impl SectionWriter {
             return Ok(None);
         }
         crate::durable_batch::DurableBatch::encode(&self.pending, self.limit).map(Some)
+    }
+}
+
+/// Bound one section's archive including its out-of-line byte payloads, archived record array,
+/// root, and the alignment padding before the array and root.
+fn section_encoded_bytes_bound(payload_bytes: u64, record_count: usize) -> io::Result<u64> {
+    let count = u64::try_from(record_count).map_err(io::Error::other)?;
+    let record_header =
+        u64::try_from(std::mem::size_of::<ArchivedStoredRecord>()).map_err(io::Error::other)?;
+    let root =
+        u64::try_from(std::mem::size_of::<ArchivedSnapshotSection>()).map_err(io::Error::other)?;
+    let record_alignment = std::mem::align_of::<ArchivedStoredRecord>()
+        .checked_sub(1)
+        .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
+    let root_alignment = std::mem::align_of::<ArchivedSnapshotSection>()
+        .checked_sub(1)
+        .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
+    let alignment = u64::try_from(
+        record_alignment
+            .checked_add(root_alignment)
+            .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?,
+    )
+    .map_err(io::Error::other)?;
+    let record_headers = count
+        .checked_mul(record_header)
+        .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
+    let with_headers = payload_bytes
+        .checked_add(record_headers)
+        .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
+    let with_root = with_headers
+        .checked_add(root)
+        .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?;
+    with_root
+        .checked_add(alignment)
+        .ok_or_else(|| io::Error::other(StorageFailure::Capacity))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn section_writer_accounts_for_every_archived_record_envelope()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const LIMIT: u64 = 512;
+        let mut writer = SectionWriter::new(LIMIT);
+        let mut accepted = 0_usize;
+        for index in 0_u16..1024 {
+            let key = index.to_be_bytes();
+            if !writer.try_push(&key, b"v")? {
+                break;
+            }
+            accepted = accepted
+                .checked_add(1)
+                .ok_or("the test accepted more records than usize can count")?;
+        }
+        assert!(
+            accepted > 1,
+            "the fixture must put several records in one section"
+        );
+        assert!(
+            accepted < 170,
+            "archive envelopes, rather than raw key and value bytes, must close the section"
+        );
+        let encoded = writer.finish()?.ok_or("the section must not be empty")?;
+        assert!(u64::try_from(encoded.len())? <= LIMIT);
+        let section: SnapshotSection = crate::storage_decode(&encoded)?;
+        assert_eq!(section.records.len(), accepted);
+        Ok(())
     }
 }
 

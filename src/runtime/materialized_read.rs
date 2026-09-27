@@ -1006,10 +1006,7 @@ fn materialized_record_report(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use ahash::HashMap;
-    use nervix_execution::sync::ArcSwapOption;
     use nervix_interconnect::{RemoteOperationFailure, RemoteOperationSubject};
     use nervix_models::{Assignment, AssignmentTarget, DomainSchedule, Expression, ParseAsType};
     use tokio::{
@@ -1141,7 +1138,6 @@ mod tests {
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),
                 shutdown,
-                graph: StdArc::new(ArcSwapOption::empty()),
                 routing: runtime.stage_domain_routing(
                     &domain,
                     DomainRoutingSnapshot {
