@@ -62,34 +62,22 @@ fn SchemaFieldEditor(signals: CreateSignals, index: usize) -> impl IntoView {
                         disabled=move || signals.progress.get().is_pending() || index == 0
                         on:click=move |_| {
                             if index > 0 {
-                                signals.structured.update(|drafts| {
-                                    if index < drafts.schema.fields.len() {
-                                        drafts.schema.fields.swap(index, index - 1);
-                                    }
-                                });
+                                signals.structured.update(|drafts| drafts.schema.move_field_up(index));
                                 signals.edit();
                             }
                         }>"↑"</button>
                     <button type="button" aria-label=format!("Move field {} down", index + 1)
                         disabled=move || signals.progress.get().is_pending()
                         on:click=move |_| {
-                            if let Some(next) = index.checked_add(1) {
-                                signals.structured.update(|drafts| {
-                                    if next < drafts.schema.fields.len() {
-                                        drafts.schema.fields.swap(index, next);
-                                    }
-                                });
+                            if index.checked_add(1).is_some() {
+                                signals.structured.update(|drafts| drafts.schema.move_field_down(index));
                                 signals.edit();
                             }
                         }>"↓"</button>
                     <button type="button" aria-label=format!("Remove field {}", index + 1)
                         disabled=move || signals.progress.get().is_pending()
                         on:click=move |_| {
-                            signals.structured.update(|drafts| {
-                                if index < drafts.schema.fields.len() {
-                                    drafts.schema.fields.remove(index);
-                                }
-                            });
+                            signals.structured.update(|drafts| drafts.schema.remove_field(index));
                             signals.edit();
                         }>"Remove"</button>
                 </div>
@@ -107,11 +95,7 @@ fn SchemaFieldEditor(signals: CreateSignals, index: usize) -> impl IntoView {
                     disabled=move || signals.progress.get().is_pending()
                     on:input=move |event| {
                         let name = event_target_value(&event);
-                        signals.structured.update(|drafts| {
-                            if let Some(field) = drafts.schema.fields.get_mut(index) {
-                                field.name = name;
-                            }
-                        });
+                        signals.structured.update(|drafts| drafts.schema.set_field_name(index, name));
                         signals.edit();
                     } />
             </label>
@@ -132,11 +116,7 @@ fn SchemaFieldEditor(signals: CreateSignals, index: usize) -> impl IntoView {
                                     }
                                     disabled=move || signals.progress.get().is_pending()
                                     on:click=move |_| {
-                                        signals.structured.update(|drafts| {
-                                            if let Some(field) = drafts.schema.fields.get_mut(index) {
-                                                field.ty.scalar = Some(ty.clone());
-                                            }
-                                        });
+                                        signals.structured.update(|drafts| drafts.schema.set_field_scalar(index, ty.clone()));
                                         signals.edit();
                                     }>{label.clone()}</button>
                             }
@@ -182,13 +162,7 @@ fn SchemaFieldEditor(signals: CreateSignals, index: usize) -> impl IntoView {
                                         disabled=move || signals.progress.get().is_pending()
                                         on:input=move |event| {
                                             let value = event_target_value(&event);
-                                            signals.structured.update(|drafts| {
-                                                if let Some(field) = drafts.schema.fields.get_mut(index)
-                                                    && let Some(CollectionLayer::Array { length }) = field.ty.layers.get_mut(layer)
-                                                {
-                                                    *length = value;
-                                                }
-                                            });
+                                            signals.structured.update(|drafts| drafts.schema.set_array_length(index, layer, value));
                                             signals.edit();
                                         } />
                                 </label>
@@ -196,13 +170,7 @@ fn SchemaFieldEditor(signals: CreateSignals, index: usize) -> impl IntoView {
                             <button type="button" aria-label=format!("Remove collection layer {}", layer + 1)
                                 disabled=move || signals.progress.get().is_pending()
                                 on:click=move |_| {
-                                    signals.structured.update(|drafts| {
-                                        if let Some(field) = drafts.schema.fields.get_mut(index)
-                                            && layer < field.ty.layers.len()
-                                        {
-                                            field.ty.layers.remove(layer);
-                                        }
-                                    });
+                                    signals.structured.update(|drafts| drafts.schema.remove_field_layer(index, layer));
                                     signals.edit();
                                 }>"Remove"</button>
                         </div>
@@ -211,20 +179,12 @@ fn SchemaFieldEditor(signals: CreateSignals, index: usize) -> impl IntoView {
                 <div class="create-type-layer-add">
                     <button class="create-add-vector" type="button" disabled=move || signals.progress.get().is_pending()
                         on:click=move |_| {
-                            signals.structured.update(|drafts| {
-                                if let Some(field) = drafts.schema.fields.get_mut(index) {
-                                    field.ty.layers.push(CollectionLayer::Vector);
-                                }
-                            });
+                            signals.structured.update(|drafts| drafts.schema.push_field_layer(index, CollectionLayer::Vector));
                             signals.edit();
                         }>"Wrap in vector"</button>
                     <button class="create-add-array" type="button" disabled=move || signals.progress.get().is_pending()
                         on:click=move |_| {
-                            signals.structured.update(|drafts| {
-                                if let Some(field) = drafts.schema.fields.get_mut(index) {
-                                    field.ty.layers.push(CollectionLayer::Array { length: String::new() });
-                                }
-                            });
+                            signals.structured.update(|drafts| drafts.schema.push_field_layer(index, CollectionLayer::Array { length: String::new() }));
                             signals.edit();
                         }>"Wrap in fixed array"</button>
                 </div>
@@ -235,11 +195,7 @@ fn SchemaFieldEditor(signals: CreateSignals, index: usize) -> impl IntoView {
                     disabled=move || signals.progress.get().is_pending()
                     on:change=move |event| {
                         let checked = event_target_checked(&event);
-                        signals.structured.update(|drafts| {
-                            if let Some(field) = drafts.schema.fields.get_mut(index) {
-                                field.optional = checked;
-                            }
-                        });
+                        signals.structured.update(|drafts| drafts.schema.set_field_optional(index, checked));
                         signals.edit();
                     } />
                 <span>"Optional"</span>
@@ -250,11 +206,7 @@ fn SchemaFieldEditor(signals: CreateSignals, index: usize) -> impl IntoView {
                     disabled=move || signals.progress.get().is_pending()
                     on:change=move |event| {
                         let checked = event_target_checked(&event);
-                        signals.structured.update(|drafts| {
-                            if let Some(field) = drafts.schema.fields.get_mut(index) {
-                                field.sensitive = checked;
-                            }
-                        });
+                        signals.structured.update(|drafts| drafts.schema.set_field_sensitive(index, checked));
                         signals.edit();
                     } />
                 <span>"Sensitive"</span>
@@ -339,37 +291,22 @@ fn WireFieldEditor(signals: CreateSignals, format: WireFormat, index: usize) -> 
                         disabled=move || signals.progress.get().is_pending() || index == 0
                         on:click=move |_| {
                             if index > 0 {
-                                signals.structured.update(|drafts| {
-                                    let fields = &mut drafts.wire_mut(format).fields;
-                                    if index < fields.len() {
-                                        fields.swap(index, index - 1);
-                                    }
-                                });
+                                signals.structured.update(|drafts| drafts.wire_mut(format).move_field_up(index));
                                 signals.edit();
                             }
                         }>"↑"</button>
                     <button type="button" aria-label=format!("Move field {} down", index + 1)
                         disabled=move || signals.progress.get().is_pending()
                         on:click=move |_| {
-                            if let Some(next) = index.checked_add(1) {
-                                signals.structured.update(|drafts| {
-                                    let fields = &mut drafts.wire_mut(format).fields;
-                                    if next < fields.len() {
-                                        fields.swap(index, next);
-                                    }
-                                });
+                            if index.checked_add(1).is_some() {
+                                signals.structured.update(|drafts| drafts.wire_mut(format).move_field_down(index));
                                 signals.edit();
                             }
                         }>"↓"</button>
                     <button type="button" aria-label=format!("Remove field {}", index + 1)
                         disabled=move || signals.progress.get().is_pending()
                         on:click=move |_| {
-                            signals.structured.update(|drafts| {
-                                let fields = &mut drafts.wire_mut(format).fields;
-                                if index < fields.len() {
-                                    fields.remove(index);
-                                }
-                            });
+                            signals.structured.update(|drafts| drafts.wire_mut(format).remove_field(index));
                             signals.edit();
                         }>"Remove"</button>
                 </div>
@@ -387,11 +324,7 @@ fn WireFieldEditor(signals: CreateSignals, format: WireFormat, index: usize) -> 
                     disabled=move || signals.progress.get().is_pending()
                     on:input=move |event| {
                         let name = event_target_value(&event);
-                        signals.structured.update(|drafts| {
-                            if let Some(field) = drafts.wire_mut(format).fields.get_mut(index) {
-                                field.name = name;
-                            }
-                        });
+                        signals.structured.update(|drafts| drafts.wire_mut(format).set_field_name(index, name));
                         signals.edit();
                     } />
             </label>
@@ -406,11 +339,7 @@ fn WireFieldEditor(signals: CreateSignals, format: WireFormat, index: usize) -> 
                                     class:active=move || signals.structured.get().wire(format).fields.get(index).is_some_and(|field| field.ty == Some(ty))
                                     disabled=move || signals.progress.get().is_pending()
                                     on:click=move |_| {
-                                        signals.structured.update(|drafts| {
-                                            if let Some(field) = drafts.wire_mut(format).fields.get_mut(index) {
-                                                field.ty = Some(ty);
-                                            }
-                                        });
+                                        signals.structured.update(|drafts| drafts.wire_mut(format).set_field_type(index, ty));
                                         signals.edit();
                                     }>{label.clone()}</button>
                             }
@@ -423,11 +352,7 @@ fn WireFieldEditor(signals: CreateSignals, format: WireFormat, index: usize) -> 
                     disabled=move || signals.progress.get().is_pending()
                     on:change=move |event| {
                         let checked = event_target_checked(&event);
-                        signals.structured.update(|drafts| {
-                            if let Some(field) = drafts.wire_mut(format).fields.get_mut(index) {
-                                field.optional = checked;
-                            }
-                        });
+                        signals.structured.update(|drafts| drafts.wire_mut(format).set_field_optional(index, checked));
                         signals.edit();
                     } />
                 <span>"Optional"</span>

@@ -99,6 +99,62 @@ impl SchemaTypeDraft {
 }
 
 impl SchemaDraft {
+    pub(super) fn move_field_up(&mut self, index: usize) {
+        move_item_up(&mut self.fields, index);
+    }
+
+    pub(super) fn move_field_down(&mut self, index: usize) {
+        move_item_down(&mut self.fields, index);
+    }
+
+    pub(super) fn remove_field(&mut self, index: usize) {
+        remove_item(&mut self.fields, index);
+    }
+
+    pub(super) fn set_field_name(&mut self, index: usize, name: String) {
+        if let Some(field) = self.fields.get_mut(index) {
+            field.name = name;
+        }
+    }
+
+    pub(super) fn set_field_scalar(&mut self, index: usize, ty: ParseAsType) {
+        if let Some(field) = self.fields.get_mut(index) {
+            field.ty.scalar = Some(ty);
+        }
+    }
+
+    pub(super) fn push_field_layer(&mut self, index: usize, layer: CollectionLayer) {
+        if let Some(field) = self.fields.get_mut(index) {
+            field.ty.layers.push(layer);
+        }
+    }
+
+    pub(super) fn set_array_length(&mut self, index: usize, layer: usize, value: String) {
+        if let Some(field) = self.fields.get_mut(index)
+            && let Some(CollectionLayer::Array { length }) = field.ty.layers.get_mut(layer)
+        {
+            *length = value;
+        }
+    }
+
+    pub(super) fn remove_field_layer(&mut self, index: usize, layer: usize) {
+        if let Some(field) = self.fields.get_mut(index) {
+            remove_item(&mut field.ty.layers, layer);
+        }
+    }
+
+    pub(super) fn set_field_optional(&mut self, index: usize, optional: bool) {
+        if let Some(field) = self.fields.get_mut(index) {
+            field.optional = optional;
+        }
+    }
+
+    pub(super) fn set_field_sensitive(&mut self, index: usize, sensitive: bool) {
+        if let Some(field) = self.fields.get_mut(index) {
+            field.sensitive = sensitive;
+        }
+    }
+
     pub(super) fn build(&self) -> error_stack::Result<CreateSchema, SchemaDraftError> {
         let name = SchemaName::parse(self.name.trim())
             .map_err(|_| Report::new(SchemaDraftError::SchemaName))?;
@@ -174,6 +230,36 @@ impl StructuredDrafts {
 }
 
 impl WireSchemaDraft {
+    pub(super) fn move_field_up(&mut self, index: usize) {
+        move_item_up(&mut self.fields, index);
+    }
+
+    pub(super) fn move_field_down(&mut self, index: usize) {
+        move_item_down(&mut self.fields, index);
+    }
+
+    pub(super) fn remove_field(&mut self, index: usize) {
+        remove_item(&mut self.fields, index);
+    }
+
+    pub(super) fn set_field_name(&mut self, index: usize, name: String) {
+        if let Some(field) = self.fields.get_mut(index) {
+            field.name = name;
+        }
+    }
+
+    pub(super) fn set_field_type(&mut self, index: usize, ty: WireFieldType) {
+        if let Some(field) = self.fields.get_mut(index) {
+            field.ty = Some(ty);
+        }
+    }
+
+    pub(super) fn set_field_optional(&mut self, index: usize, optional: bool) {
+        if let Some(field) = self.fields.get_mut(index) {
+            field.optional = optional;
+        }
+    }
+
     pub(super) fn build(&self, format: WireFormat) -> error_stack::Result<Model, SchemaDraftError> {
         let name = WireSchemaName::parse(self.name.trim())
             .map_err(|_| Report::new(SchemaDraftError::WireSchemaName))?;
@@ -243,6 +329,26 @@ impl WireSchemaDraft {
                 }))
             }
         }
+    }
+}
+
+fn move_item_up<T>(items: &mut [T], index: usize) {
+    if index > 0 && index < items.len() {
+        items.swap(index, index - 1);
+    }
+}
+
+fn move_item_down<T>(items: &mut [T], index: usize) {
+    if let Some(next) = index.checked_add(1)
+        && next < items.len()
+    {
+        items.swap(index, next);
+    }
+}
+
+fn remove_item<T>(items: &mut Vec<T>, index: usize) {
+    if index < items.len() {
+        items.remove(index);
     }
 }
 
@@ -602,5 +708,114 @@ mod tests {
         branch.schema = Some(SchemaName::parse("tenant_key").assured("valid schema name"));
         branch.schema_valid = true;
         assert_eq!(draft_error(branch.build()), SchemaDraftError::TtlRequired);
+    }
+
+    #[test]
+    fn ordered_schema_edits_keep_nested_types_and_ignore_stale_field_callbacks() {
+        let mut draft = SchemaDraft {
+            name: "ordered".to_string(),
+            fields: vec![SchemaFieldDraft::default(); 3],
+            ..SchemaDraft::default()
+        };
+        for (index, name) in ["first", "second", "third"].into_iter().enumerate() {
+            draft.set_field_name(index, name.to_string());
+            draft.set_field_scalar(index, ParseAsType::U32);
+        }
+        draft.move_field_up(2);
+        draft.move_field_down(0);
+        draft.remove_field(2);
+        draft.push_field_layer(0, CollectionLayer::Vector);
+        draft.remove_field_layer(0, 0);
+        draft.push_field_layer(0, CollectionLayer::Vector);
+        draft.push_field_layer(
+            0,
+            CollectionLayer::Array {
+                length: String::new(),
+            },
+        );
+        draft.set_array_length(0, 1, "3".to_string());
+        draft.set_field_optional(1, true);
+        draft.set_field_sensitive(1, true);
+
+        let snapshot = draft.clone();
+        draft.move_field_up(0);
+        draft.move_field_down(usize::MAX);
+        draft.remove_field(usize::MAX);
+        draft.set_field_name(usize::MAX, "stale".to_string());
+        draft.set_field_scalar(usize::MAX, ParseAsType::String);
+        draft.push_field_layer(usize::MAX, CollectionLayer::Vector);
+        draft.set_array_length(0, 0, "99".to_string());
+        draft.remove_field_layer(0, usize::MAX);
+        draft.set_field_optional(usize::MAX, false);
+        draft.set_field_sensitive(usize::MAX, false);
+        assert_eq!(draft, snapshot);
+
+        let model = draft
+            .build()
+            .assured("the edited fields have names and scalar types");
+        assert_eq!(
+            model
+                .fields
+                .iter()
+                .map(|field| field.name.as_ref())
+                .collect::<Vec<_>>(),
+            ["third", "first"]
+        );
+        assert_eq!(
+            model.fields[0].ty,
+            ParseAsType::Array {
+                element: Box::new(ParseAsType::Vec {
+                    element: Box::new(ParseAsType::U32),
+                }),
+                len: NonZeroU32::new(3).assured("three is positive"),
+            }
+        );
+        assert!(model.fields[1].optional);
+        assert!(model.fields[1].sensitive);
+        assert_canonical_round_trip(Model::Schema(model), false);
+    }
+
+    #[test]
+    fn ordered_wire_edits_keep_field_identity_and_ignore_stale_field_callbacks() {
+        let mut draft = WireSchemaDraft {
+            name: "ordered_wire".to_string(),
+            mode: Some(WireSchemaStrictness::Strict),
+            fields: vec![WireFieldDraft::default(); 3],
+            ..WireSchemaDraft::default()
+        };
+        for (index, name) in ["first", "second", "third"].into_iter().enumerate() {
+            draft.set_field_name(index, name.to_string());
+            draft.set_field_type(index, WireFieldType::Json(JsonType::String));
+        }
+        draft.move_field_down(0);
+        draft.move_field_up(2);
+        draft.remove_field(1);
+        draft.set_field_optional(0, true);
+
+        let snapshot = draft.clone();
+        draft.move_field_up(0);
+        draft.move_field_down(usize::MAX);
+        draft.remove_field(usize::MAX);
+        draft.set_field_name(usize::MAX, "stale".to_string());
+        draft.set_field_type(usize::MAX, WireFieldType::Json(JsonType::String));
+        draft.set_field_optional(usize::MAX, false);
+        assert_eq!(draft, snapshot);
+
+        let model = draft
+            .build(WireFormat::Json)
+            .assured("the edited wire fields have types");
+        let Model::WireJsonSchema(schema) = &model else {
+            panic!("the selected JSON format keeps its model identity");
+        };
+        assert_eq!(
+            schema
+                .fields
+                .iter()
+                .map(|field| field.name.as_ref())
+                .collect::<Vec<_>>(),
+            ["second", "first"]
+        );
+        assert!(schema.fields[0].optional);
+        assert_canonical_round_trip(model, false);
     }
 }
