@@ -98,6 +98,138 @@ button {
   color-scheme: light;
 }
 
+.transaction-indicator {
+  border: 1px solid var(--cyan);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--cyan) 14%, var(--surface));
+  color: var(--text);
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.transaction-inspector {
+  position: fixed;
+  z-index: 80;
+  top: 64px;
+  right: 0;
+  bottom: 0;
+  width: min(1180px, calc(100vw - var(--sidebar-width)));
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border-hi);
+  background: var(--surface);
+  box-shadow: -16px 0 40px rgba(0, 0, 0, 0.28);
+  color: var(--text);
+}
+
+.inspector-toolbar,
+.inspector-lookup,
+.inspector-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.inspector-toolbar strong { margin-right: auto; color: var(--cyan); }
+.transaction-inspector button { cursor: pointer; }
+.inspector-toolbar button,
+.inspector-lookup button,
+.inspector-controls button,
+.scope-select,
+.step-select,
+.operation-select {
+  border: 1px solid var(--border-hi);
+  border-radius: 5px;
+  background: var(--surface-hi);
+  color: var(--text);
+  padding: 6px 9px;
+}
+.inspector-controls button.active { border-color: var(--cyan); color: var(--cyan); }
+.inspector-lookup input,
+.inspector-controls input {
+  min-width: 120px;
+  border: 1px solid var(--border-hi);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 6px;
+}
+.inspector-error { margin: 8px 12px; color: #fca5a5; }
+.inspector-loading { padding: 20px; }
+.inspector-body { display: flex; flex: 1; min-height: 0; }
+.inspector-outline {
+  width: 280px;
+  flex: 0 0 280px;
+  overflow: auto;
+  padding: 12px;
+  border-right: 1px solid var(--border);
+}
+.inspector-summary,
+.inspector-scope {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-b);
+}
+.inspector-outline button { display: block; width: 100%; margin: 6px 0; text-align: left; }
+.inspector-relation-list { margin-top: 12px; font-size: 12px; }
+.inspector-relation-list summary { cursor: pointer; color: var(--cyan); }
+.inspector-relation-select { overflow-wrap: anywhere; }
+.operation-select { margin-left: 10px !important; width: calc(100% - 10px) !important; }
+.inspector-visual { display: flex; flex: 1; min-width: 0; flex-direction: column; }
+.inspector-stage {
+  position: relative;
+  flex: 1;
+  min-height: 200px;
+  overflow: hidden;
+  cursor: grab;
+  background: var(--bg);
+}
+.inspector-canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: top left;
+}
+.inspector-relations { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.inspector-branch { fill: rgba(6, 182, 212, 0.05); stroke: var(--cyan); stroke-dasharray: 6 5; }
+.inspector-branch-label { position: absolute; color: var(--cyan); font-size: 13px; font-weight: 600; pointer-events: none; }
+.inspector-domain-outline { position: absolute; box-sizing: border-box; border: 3px dashed var(--orange); pointer-events: none; }
+.inspector-domain-label { position: absolute; color: var(--orange); font-size: 13px; font-weight: 600; white-space: nowrap; }
+.inspector-edge { fill: none; stroke: var(--purple); stroke-width: 2.5; cursor: pointer; }
+.inspector-edge.added { stroke: var(--cyan); }
+.inspector-edge.dropped { stroke: var(--orange); stroke-dasharray: 6 4; }
+.inspector-edge.transient { stroke: var(--text-c); stroke-dasharray: 2 5; }
+.inspector-edge[data-relation*="Dependency"] { stroke-dasharray: 4 4; }
+.inspector-edge.absent,
+.inspector-item.absent { opacity: 0.12; pointer-events: none; }
+.inspector-item {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  overflow: hidden;
+  border: 1px solid var(--cyan);
+  border-radius: 7px;
+  padding: 7px;
+  background: var(--surface-hi);
+  color: var(--text);
+  text-align: left;
+}
+.inspector-item[data-kind="RESOURCE"] { border-style: double; border-width: 3px; }
+.inspector-item.added { border-color: var(--cyan); }
+.inspector-item.dropped { border-color: var(--orange); }
+.inspector-item.transient { border-color: var(--text-c); border-style: dashed; }
+.inspector-kind { font-size: 10px; color: var(--cyan); }
+.inspector-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.inspector-marks { font-size: 10px; color: var(--orange); }
+.inspector-detail { min-height: 56px; padding: 10px 12px; border-top: 1px solid var(--border); font-size: 12px; overflow-wrap: anywhere; }
+
 .auth-shell {
   min-height: 100vh;
   display: grid;

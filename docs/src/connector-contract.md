@@ -127,6 +127,14 @@ the host's retry backoff. `finish` lets a transport empty a client-side queue wi
 stop deadline; Kafka uses it. A sink may keep its client after a publish failure when reopening it
 would discard staged work or a persistent session.
 
+The task loop keeps the connector state, buffer, retry schedule, backoff, and reconnect decision in
+one mutable owner. Force flushes, cadence or retry wakes, and input-triggered publishes all apply one
+outcome transition: success clears retry state and records sent metrics, a retryable failure defers
+the owned work and decides whether to reconnect, and a terminal failure routes every still-owned
+source batch through the emitter's message error policy. Stop requests retain their separate
+deadline-bounded final flush and transport finish, and a stopped interaction performs its final
+drain before the loop exits.
+
 For a record sink using the emitter `BATCH` clause, the host selects rows from successive
 Arc-backed Arrow carriers released by one flush. It retains each carrier's source relay, exact
 branch key, execution time and original batch and row position. The host prepares members in

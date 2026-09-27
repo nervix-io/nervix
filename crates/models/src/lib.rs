@@ -130,10 +130,10 @@ pub use resource::{
 };
 pub use resource_binding::ResourceRebinding;
 pub use schema::{
-    AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation,
-    AvroType, CborType, CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema,
-    CreateSchema, CreateWireSchema, JsonType, ParseAsType, SchemaField, WireSchemaField,
-    WireSchemaStrictness,
+    AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaError,
+    AlterWireSchemaOperation, AvroType, CborType, CreateAvroWireSchema, CreateCborWireSchema,
+    CreateJsonWireSchema, CreateSchema, CreateWireSchema, JsonType, ParseAsType, SchemaField,
+    WireSchemaField, WireSchemaStrictness,
 };
 pub use schema_fingerprint::SchemaFingerprint;
 pub use statement::{

@@ -14,6 +14,7 @@ are in [Message Errors](./processors.md#message-errors) and [Error Routes](./qui
 
 | Boundary | Failure meaning it owns | What its caller can decide |
 | --- | --- | --- |
+| Vocabulary Models and the execution-graph description | Alterations the stored Model refuses; invalid placement members, inferencer tensor schemas, and upload identities; values canonical NSPL cannot spell; and execution-graph encoding or decoding | Refuse the command and keep the stored Model unchanged, or report which statement or graph could not be rendered or decoded. |
 | Arrow record and batch layer | Schema, field, column, row, and batch construction or decoding failures | Reject a malformed batch or a field operation without inventing a replacement value. |
 | Expression VM frontend and runtime bridge | Invalid expression scopes, types, sensitivity, compiled program inputs, and evaluation failures | Refuse a model during validation, or classify an affected row or batch during execution. [VM Functions](./vm-functions.md) owns execution detail. |
 | Stateful processors | Branch-local deduplication, ordering, window, correlation, inference, and WASM execution or state failures | Apply the processor's message or node policy, or fail a checkpoint and its held acknowledgements. |
@@ -32,6 +33,23 @@ report. It does not format a cause into a string and then classify that text as 
 Values a caller acts on belong in typed fields; display formatting happens when the result is
 reported. `anyhow` remains at integration and tooling boundaries whose caller has no domain choice
 to make, such as a foreign callback that only accepts a general error.
+
+The vocabulary is the innermost owner, and its Model operations report the same way. An alteration
+is applied to a copy of the stored Model, which replaces the original only when every operation
+succeeds, so a refusal leaves the stored Model unchanged. Each refusal names what it refused in
+typed fields: the field, input relay, route target, or materialized dependency, or the stored and
+requested names when an alteration targets another Model. An input, route, or dependency operation
+that junctions, deduplicators, reorderers, and reingestors share is reported in the altered
+processor's own error where it is detected, so the report begins at the failure rather than at a
+conversion. Canonical NSPL rendering refuses only a value the language has no spelling for: a NaN or
+infinite `F64` literal, which the error carries, or a codec declaration its wire format cannot
+express, such as encoding rules on `SYSLOG` or a JAQ-transformed format without a program, which the
+error names by codec. The execution-graph description keeps the JSON encoder's or decoder's error
+beneath its own when the public wire form cannot be written or read. Registry planning keeps an
+alteration's report beneath its invalid-model refusal of the named Model, and the refusal quotes the
+rejection's message, so a failed `ALTER` shows the same reason the vocabulary gave. The formatter
+reports the source line of a statement it could not render; `SHOW CREATE` answers such a Model with
+a fixed diagnostic.
 
 ```mermaid
 sequenceDiagram
@@ -152,7 +170,12 @@ sequenceDiagram
 
 At the public edge, the session maps a typed validation or execution result to a command
 disposition, message, and diagnostics; a transaction's admitted and retained outcomes stay
-distinct from a new execution. Parse diagnostics retain precise expected and found tokens and
+distinct from a new execution. `DESCRIBE TRANSACTION` and `SHOW TRANSACTIONS` read beside an
+attached transaction only as separate requests; combining either read with another statement
+returns a session planning diagnostic before anything enters the queue. An incomplete impact
+report carries its planning diagnostics and cannot supply a commit preview. A stale preview is a
+recoverable command disposition that applies no effects and tells the client to refresh its
+inspection before retrying `COMMIT`. Parse diagnostics retain precise expected and found tokens and
 source byte spans for a client to underline. Validation diagnostics attach a source span when the
 relevant identifier is present in the submitted text; failures without a source location have an
 unlocated diagnostic. HTTP endpoints choose their response status at the boundary according to

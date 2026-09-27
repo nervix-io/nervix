@@ -26,6 +26,7 @@ nervix-nspl = { workspace = true, features = ["client"] }
 nervix-recovery = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["js", "v7"] }
+
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 web-sys = { workspace = true, features = [
@@ -44,3 +45,7 @@ web-sys = { workspace = true, features = [
   "Response",
   "Window",
 ] }
+
+[dev-dependencies]
+any_spawner = { workspace = true, features = ["futures-executor"] }
+leptos = { workspace = true, features = ["ssr"] }

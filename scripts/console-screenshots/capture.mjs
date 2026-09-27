@@ -320,6 +320,20 @@ async function captureConsole(page, output) {
   await waitForText(page, ".resource-version-list", "version 1");
   await waitForText(page, ".resource-version-list", "2 files");
   await capture(page, output, "console-resource-dialog.png", ".resource-dialog");
+  await page.click(".resource-dialog .dialog-close");
+
+  // A transaction's typed impact report, opened from the active-transaction indicator.
+  await page.fill(".prompt-row input", "BEGIN;");
+  await page.press(".prompt-row input", "Enter");
+  await page.waitForSelector(".transaction-indicator");
+  await page.fill(".prompt-row input", "DROP JUNCTION route_orders;");
+  await page.press(".prompt-row input", "Enter");
+  await waitForText(page, ".terminal", "DROP JUNCTION route_orders");
+  await page.click(".transaction-indicator");
+  await waitForText(page, ".transaction-inspector", "route_orders");
+  await page.waitForSelector(".transaction-inspector .inspector-edge.dropped");
+  await page.click(".transaction-inspector .inspector-fit");
+  await capture(page, output, "console-transaction-inspector.png", ".transaction-inspector");
 }
 
 async function main() {
