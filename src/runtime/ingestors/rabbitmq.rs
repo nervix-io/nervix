@@ -4,8 +4,8 @@
 //!
 //! - **Owns.** Composing the RabbitMQ connector plan with the declared acknowledgement policy and
 //!   host-owned intake.
-//! - **Depends on.** The connector source contract, the RabbitMQ connector, and pre-resolved
-//!   runtime execution handles.
+//! - **Depends on.** The connector source contract, the RabbitMQ connector, the node resolver,
+//!   and pre-resolved runtime execution handles.
 //! - **Must not know.** The AMQP driver, channel lifecycle, NSPL parsing, registry validation, or
 //!   placement computation.
 
@@ -31,9 +31,15 @@ impl RabbitMqIngestorStartPlan {
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .map_err(|error| ingestor.start_failure(error.to_string()))?;
+        let Some(dns) = runtime.dns() else {
+            return Err(
+                ingestor.start_failure("the node DNS resolver is not installed".to_string())
+            );
+        };
         BrokerSourceStart {
             connector: RabbitMqSourcePlan::new(
                 resolved.entries,
+                dns.clone(),
                 queue,
                 ingestor.name.as_str().to_string(),
             ),

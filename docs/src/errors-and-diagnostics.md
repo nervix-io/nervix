@@ -47,6 +47,15 @@ is `FeatureUnsupported`. Building the storage HTTP client or an OpenDAL operatio
 `Unexpected`, with the underlying error retained as its source. Those failures enter the existing
 sink failure and retry path; they do not release a staged record's acknowledgement before commit.
 
+A RabbitMQ connection that fails is a `RabbitMqConnectError`, owned by the connector's connection
+module: an invalid address or CA file, a lookup failure that keeps the resolver's
+`DnsLookupFailure` as a typed field, no address that accepted a connection, a failed or overdue
+TLS handshake, or a failed AMQP handshake, each naming the broker host. The source keeps it beneath
+its connect and resume contexts, so `DESCRIBE INGESTOR` shows the deepest cause, such as the
+resolver's own lookup error. The sink changes it into a configuration failure for an invalid
+address or CA file and an initialization failure otherwise, leading with the connection error's
+message, which `DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
+
 The vocabulary is the innermost owner, and its Model operations report the same way. An alteration
 is applied to a copy of the stored Model, which replaces the original only when every operation
 succeeds, so a refusal leaves the stored Model unchanged. Each refusal names what it refused in

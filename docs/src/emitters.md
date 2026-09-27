@@ -576,6 +576,15 @@ TO RABBITMQ <client> QUEUE <queue>
 `ACK` enables publisher confirms and waits for the confirm of each message. A broker nack is an
 infrastructure failure and is retried with backpressure. `NO_ACK` acknowledges channel acceptance.
 
+The emitter resolves the host of the client's `addr` through the node's configured DNS resolver
+when it opens and whenever it reopens after a failed publish, so a changed DNS answer takes effect
+on the next connection, and tries the addresses it receives in order. A literal IPv4 address, or
+an IPv6 address in brackets, is connected to as written. Resolution, the TCP connection and, for
+`amqps`, the TLS handshake have 30 seconds together; the broker certificate must name the host
+`addr` names. A connection that fails, including a name that does not resolve, leaves the emitter
+unavailable with the failure as its transient error; it confirms nothing, so its input stays
+unacknowledged, and it reopens on its `RETRY POLICY` backoff.
+
 ### Redis Pub/Sub
 
 ```nspl,ignore

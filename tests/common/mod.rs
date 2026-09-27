@@ -15,3 +15,4 @@ pub(crate) mod scenario_phase;
 pub(crate) mod server_process;
 pub(crate) mod status_request;
 pub(crate) mod suite_watchdog;
+pub(crate) mod tcp_forwarder;
