@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-    printf 'usage: %s EXPECTED_NDJSON OBSERVED_NDJSON RESULT_JSON\n' "$(basename "$0")" >&2
+    printf 'usage: %s EXPECTED_NDJSON OBSERVED_NDJSON RESULT_JSON [--allow-replay-duplicates]\n' "$(basename "$0")" >&2
 }
 
 write_error() {
@@ -12,7 +12,7 @@ write_error() {
         '{verdict: "error", category: $category, message: $message}' >"${result_path}"
 }
 
-if [[ "$#" -ne 3 ]]; then
+if [[ "$#" -ne 3 && "$#" -ne 4 ]]; then
     usage
     exit 2
 fi
@@ -20,6 +20,11 @@ fi
 expected_path="$1"
 observed_path="$2"
 result_path="$3"
+allow_replay_duplicates=false
+if [[ "$#" -eq 4 ]]; then
+    [[ "$4" == --allow-replay-duplicates ]] || { usage; exit 2; }
+    allow_replay_duplicates=true
+fi
 
 mkdir -p "$(dirname "${result_path}")"
 
@@ -57,6 +62,7 @@ if [[ "$(jq 'length' <<<"${expected_duplicates}")" -ne 0 ]]; then
 fi
 
 jq -n \
+    --argjson allow_replay_duplicates "${allow_replay_duplicates}" \
     --slurpfile expected "${expected_path}" \
     --slurpfile observed "${observed_path}" '
     def ids($rows): [$rows[].event_id] | unique;
@@ -76,13 +82,14 @@ jq -n \
         | select(.event_id == $wanted.event_id and . != $wanted)
         | {event_id: .event_id, expected: $wanted, observed: .}]) as $incorrect
     | {
-        verdict: (if (($duplicates | length) == 0
+        verdict: (if ((($duplicates | length) == 0 or $allow_replay_duplicates)
                       and ($missing | length) == 0
                       and ($unexpected | length) == 0
                       and ($incorrect | length) == 0)
                   then "pass" else "fail" end),
         expected_records: ($expected | length),
         observed_records: ($observed | length),
+        replay_duplicates_allowed: $allow_replay_duplicates,
         duplicate_records: ($duplicates | map(.count - 1) | add // 0),
         duplicates: $duplicates,
         missing_ids: $missing,

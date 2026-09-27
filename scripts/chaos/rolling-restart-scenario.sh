@@ -2,7 +2,7 @@
 # Sourced by run-baseline.sh after the shared external cluster and graph are ready.
 
 rolling_fail() {
-    printf 'rolling-restart failure: %s\n' "$*" >&2
+    printf '%s failure: %s\n' "${scenario}" "$*" >&2
     return 1
 }
 
@@ -37,7 +37,12 @@ check_support_containers() {
         local container_id
         container_id="$(owned_service_container "${service}")" || return 1
         if ! container_running "${container_id}"; then
-            rolling_fail "${service} stopped during rolling traffic"
+            failure_category=setup
+            if [[ "${service}" == load ]]; then
+                rolling_fail 'load fixture ended before fault verification; increase --records'
+                return 1
+            fi
+            rolling_fail "${service} stopped during fault traffic"
             return 1
         fi
     done
