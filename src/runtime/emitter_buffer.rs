@@ -61,13 +61,13 @@ impl Default for EmitterBufferedMessages {
 pub(super) struct EmitterPublishBatch {
     /// A relay has one fixed named branch declaration, so this name and `batch.key` together
     /// identify the exact source branch even when another relay has an equal concrete key.
-    pub(super) source_relay: RelayName,
-    pub(super) batch: RelayRecordBatch,
-    pub(super) execution_now: Timestamp,
+    source_relay: RelayName,
+    batch: RelayRecordBatch,
+    execution_now: Timestamp,
     headers: Option<Vec<EmitterHeaders>>,
     /// The ordering group of every row, absent when the emitter declares none.
     ordering_groups: Option<OrderingGroups>,
-    pub(super) delivered: Vec<bool>,
+    delivered: Vec<bool>,
 }
 
 /// The bound every byte estimate in this module relies on: each term counts bytes of a batch,
@@ -203,6 +203,26 @@ impl EmitterPublishBatch {
         }
     }
 
+    pub(super) fn source_relay(&self) -> &RelayName {
+        &self.source_relay
+    }
+
+    pub(super) fn relay_batch(&self) -> &RelayRecordBatch {
+        &self.batch
+    }
+
+    pub(super) fn into_relay_batch(self) -> RelayRecordBatch {
+        self.batch
+    }
+
+    pub(super) fn execution_now(&self) -> Timestamp {
+        self.execution_now
+    }
+
+    pub(super) fn delivered_rows(&self) -> &[bool] {
+        &self.delivered
+    }
+
     pub(super) fn message_count(&self) -> u64 {
         self.batch.message_count()
     }
@@ -336,8 +356,8 @@ impl PublishReport {
 /// deadline exactly as they were.
 #[derive(Default)]
 pub(super) struct EmitterBatchBuffer {
-    pub(super) flush_policy: Option<RuntimeFlushPolicy>,
-    pub(super) pending: Vec<EmitterPublishBatch>,
+    flush_policy: Option<RuntimeFlushPolicy>,
+    pending: Vec<EmitterPublishBatch>,
     pending_messages: u64,
     pending_bytes: u64,
     cadence: BranchBufferTimer,
@@ -407,6 +427,20 @@ impl EmitterBatchBuffer {
 
     pub(super) fn is_empty(&self) -> bool {
         self.pending.is_empty()
+    }
+
+    pub(super) fn pending_mut(&mut self) -> &mut [EmitterPublishBatch] {
+        self.pending.as_mut_slice()
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending(&self) -> &[EmitterPublishBatch] {
+        self.pending.as_slice()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_flush_policy(&mut self, flush_policy: RuntimeFlushPolicy) {
+        self.flush_policy = Some(flush_policy);
     }
 
     pub(super) fn deadline(&self) -> Option<BranchBufferDeadline> {

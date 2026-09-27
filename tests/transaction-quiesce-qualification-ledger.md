@@ -2,7 +2,7 @@
 
 This is the acceptance record for [Tx Quiesce 11: Qualify inspection, recovery, and large reports
 across the full stack](https://app.clickup.com/t/90141361959/86bc16euj). The audit starts from
-`origin/main` at `3dfad585` and follows the one typed impact report from planning through replicated
+`origin/main` at `3fb52ed0` and follows the one typed impact report from planning through replicated
 storage, execution outcomes, the Rust client, CLI rendering, and the browser inspector.
 
 Run the public qualification matrix with:

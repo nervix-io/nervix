@@ -9,6 +9,7 @@
 
 use std::fmt;
 
+use error_stack::{Context, Report};
 use nervix_models::{BranchSelection, DomainName, FieldName, ModelKind, ModelName, RelayName};
 use thiserror::Error;
 
@@ -323,4 +324,208 @@ pub(crate) enum RegistryError {
         identifier: String,
         placements: String,
     },
+}
+
+impl RegistryError {
+    /// Refuses model `identifier` because the vocabulary rejected an operation on it, such as an
+    /// alteration the stored model cannot take.
+    ///
+    /// The rejection's report stays beneath the refusal, and its message is the refusal's reason,
+    /// which is the text a failed command shows.
+    pub(in crate::registry) fn invalid_model<C: Context>(
+        domain: &DomainName,
+        identifier: &str,
+        rejection: Report<C>,
+    ) -> Report<Self> {
+        let reason = rejection.to_string();
+        rejection.change_context(Self::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.to_string(),
+            reason,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use nervix_models::{
+        AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation, AlterPlacement,
+        AlterPlacementError, AlterPlacementOperation, AlterProcessorError, AlterProcessorOperation,
+        AlterRelay, AlterRelayError, AlterRelayOperation, AlterWireSchema, AlterWireSchemaError,
+        AlterWireSchemaOperation, AvroType, CreatePlacement, CreateWireSchema, JsonType, Model,
+        PlacementPolicy, WireSchemaField,
+    };
+
+    use super::*;
+    use crate::registry::{
+        Registry, RegistryMutation,
+        test_fixtures::{
+            avro_wire_schema_with_type, full_graph_batch, named, placement, temp_db_path,
+        },
+    };
+
+    /// Asserts that `error` refuses model `identifier` with the vocabulary's own message.
+    fn assert_invalid_model(error: &Report<RegistryError>, identifier: &str, reason: &str) {
+        assert_eq!(
+            error.current_context(),
+            &RegistryError::InvalidModel {
+                domain: "default".to_string(),
+                identifier: identifier.to_string(),
+                reason: reason.to_string(),
+            }
+        );
+    }
+
+    /// Drops a field no fixture wire schema declares.
+    fn drop_missing_field<T>() -> Vec<AlterWireSchemaOperation<T>> {
+        vec![AlterWireSchemaOperation::DropField {
+            field: named("missing"),
+        }]
+    }
+
+    #[test]
+    fn a_refused_model_keeps_the_vocabulary_rejection_beneath_the_refusal() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let domain = DomainName::parse("default").expect("valid domain");
+        let mut models = full_graph_batch();
+        models.push(Model::WireCborSchema(CreateWireSchema {
+            name: named("event_cbor"),
+            strictness: Default::default(),
+            fields: vec![WireSchemaField {
+                name: named("value"),
+                ty: JsonType::String,
+                optional: false,
+            }],
+        }));
+        models.push(avro_wire_schema_with_type("event_avro", AvroType::String));
+        models.push(placement(
+            "pin_ing",
+            &["ing"],
+            &["emit"],
+            PlacementPolicy::PreferColocation,
+            None,
+        ));
+        registry
+            .apply_batch(&domain, models)
+            .expect("the fixture graph should validate");
+        let refuse = |mutation: RegistryMutation| {
+            registry
+                .plan_mutations(&domain, &[mutation])
+                .expect_err("the stored model refuses the alteration")
+        };
+
+        let wire_alterations = [
+            (
+                "event_wire",
+                RegistryMutation::AlterWireJsonSchema(AlterWireSchema {
+                    schema: named("event_wire"),
+                    operations: drop_missing_field(),
+                }),
+            ),
+            (
+                "event_cbor",
+                RegistryMutation::AlterWireCborSchema(AlterWireSchema {
+                    schema: named("event_cbor"),
+                    operations: drop_missing_field(),
+                }),
+            ),
+            (
+                "event_avro",
+                RegistryMutation::AlterWireAvroSchema(AlterWireSchema {
+                    schema: named("event_avro"),
+                    operations: drop_missing_field(),
+                }),
+            ),
+        ];
+        for (identifier, mutation) in wire_alterations {
+            let error = refuse(mutation);
+            assert_invalid_model(&error, identifier, "field `missing` does not exist");
+            assert_eq!(
+                error.downcast_ref::<AlterWireSchemaError>(),
+                Some(&AlterWireSchemaError::FieldNotFound {
+                    field: named("missing"),
+                })
+            );
+        }
+
+        let error = refuse(RegistryMutation::AlterRelay(AlterRelay {
+            relay: named("notifications"),
+            operations: vec![AlterRelayOperation::DropMaterializedState],
+        }));
+        assert_invalid_model(
+            &error,
+            "notifications",
+            "relay materialized state is not configured",
+        );
+        assert_eq!(
+            error.downcast_ref::<AlterRelayError>(),
+            Some(&AlterRelayError::MaterializedStateNotConfigured)
+        );
+
+        let error = refuse(RegistryMutation::AlterDeduplicator(AlterDeduplicator {
+            deduplicator: named("p99_proc"),
+            operations: vec![AlterDeduplicatorOperation::Processor(Box::new(
+                AlterProcessorOperation::DropRoute {
+                    relay: named("missing"),
+                },
+            ))],
+        }));
+        assert_invalid_model(
+            &error,
+            "p99_proc",
+            "route target `missing` is not configured",
+        );
+        assert_eq!(
+            error.downcast_ref::<AlterDeduplicatorError>(),
+            Some(&AlterDeduplicatorError::Processor(
+                AlterProcessorError::RouteTargetNotFound {
+                    relay: named("missing"),
+                }
+            ))
+        );
+
+        let error = refuse(RegistryMutation::AlterPlacement(AlterPlacement {
+            placement: named("pin_ing"),
+            operations: vec![AlterPlacementOperation::SetMembers {
+                from: vec![named("ing")],
+                to: Vec::new(),
+            }],
+        }));
+        assert_invalid_model(
+            &error,
+            "pin_ing",
+            "a placement must declare at least one TO member",
+        );
+        assert_eq!(
+            error.downcast_ref::<AlterPlacementError>(),
+            Some(&AlterPlacementError::EmptyTo)
+        );
+
+        let error = registry
+            .apply_batch(
+                &domain,
+                vec![Model::Placement(CreatePlacement {
+                    name: named("pin_nothing"),
+                    from: Vec::new(),
+                    to: vec![named("emit")],
+                    policy: PlacementPolicy::Neutral,
+                    rank: None,
+                })],
+            )
+            .expect_err("a placement without FROM members is invalid");
+        assert_invalid_model(
+            &error,
+            "pin_nothing",
+            "a placement must declare at least one FROM member",
+        );
+        assert_eq!(
+            error.downcast_ref::<AlterPlacementError>(),
+            Some(&AlterPlacementError::EmptyFrom)
+        );
+
+        let _ = fs::remove_dir_all(path);
+    }
 }
