@@ -114,6 +114,16 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     AcknowledgementRowOutOfBounds { row: usize, row_count: usize },
     #[error("emitter rejected row {row} is outside batch with {row_count} rows")]
     RejectionRowOutOfBounds { row: usize, row_count: usize },
+    #[error("emitter prepared row {row} is outside batch with {row_count} rows")]
+    PreparedRowOutOfBounds { row: usize, row_count: usize },
+    #[error("emitter row {row} is already carried by a prepared payload or resolved")]
+    RowAlreadyPrepared { row: usize },
+    #[error("emitter sink answered for record {record} of a write with {records} records")]
+    UnknownSinkRecord { record: usize, records: usize },
+    #[error("emitter sink answered twice for record {record}")]
+    SinkRecordAnsweredTwice { record: usize },
+    #[error("emitter sink left {unanswered} of {records} records unanswered")]
+    UnansweredSinkRecords { unanswered: usize, records: usize },
     #[error("fault injector failed emitter publish")]
     FaultInjected,
     #[error("emitter shutdown while stalled")]
@@ -139,7 +149,10 @@ pub(in crate::runtime) enum EmitterRuntimeError {
 impl EmitterRuntimeError {
     pub(super) fn is_retryable_publish_failure(&self) -> bool {
         match self {
-            Self::SinkNotInitialized | Self::PublishBatch | Self::PublishStalled => true,
+            Self::SinkNotInitialized
+            | Self::PublishBatch
+            | Self::PublishStalled
+            | Self::UnansweredSinkRecords { .. } => true,
             Self::FlushPolicyNotInitialized
             | Self::HeaderCountMismatch { .. }
             | Self::OrderingGroupCountMismatch { .. }
@@ -148,6 +161,10 @@ impl EmitterRuntimeError {
             | Self::DeliveryRowOutOfBounds { .. }
             | Self::AcknowledgementRowOutOfBounds { .. }
             | Self::RejectionRowOutOfBounds { .. }
+            | Self::PreparedRowOutOfBounds { .. }
+            | Self::RowAlreadyPrepared { .. }
+            | Self::UnknownSinkRecord { .. }
+            | Self::SinkRecordAnsweredTwice { .. }
             | Self::InvalidSinkConfig
             | Self::InvalidOtelResource { .. }
             | Self::InitializeSink
@@ -1431,7 +1448,7 @@ impl EmitterBatchContext<'_> {
         operation: MessageErrorOperation,
     ) {
         let execution_now = batch.execution_now();
-        let delivered = batch.delivered_rows().to_vec();
+        let resolved = batch.resolved_rows();
         let messages = match batch.into_relay_batch().try_into_messages() {
             Ok(messages) => messages,
             Err(error) => {
@@ -1444,7 +1461,7 @@ impl EmitterBatchContext<'_> {
             }
         };
         for (row, message) in messages.into_iter().enumerate() {
-            if delivered.get(row).copied().unwrap_or(false) {
+            if resolved.get(row).copied().unwrap_or(false) {
                 continue;
             }
             self.runtime
@@ -1807,6 +1824,10 @@ mod tests {
             EmitterRuntimeError::SinkNotInitialized,
             EmitterRuntimeError::PublishBatch,
             EmitterRuntimeError::PublishStalled,
+            EmitterRuntimeError::UnansweredSinkRecords {
+                unanswered: 1,
+                records: 2,
+            },
         ] {
             assert!(retryable.is_retryable_publish_failure());
             assert!(emitter_publish_error_is_retryable(&Report::new(retryable)));
@@ -1817,6 +1838,16 @@ mod tests {
             EmitterRuntimeError::FlushPolicyNotInitialized,
             EmitterRuntimeError::FaultInjected,
             EmitterRuntimeError::EncodeBatch,
+            EmitterRuntimeError::PreparedRowOutOfBounds {
+                row: 1,
+                row_count: 1,
+            },
+            EmitterRuntimeError::RowAlreadyPrepared { row: 0 },
+            EmitterRuntimeError::UnknownSinkRecord {
+                record: 2,
+                records: 2,
+            },
+            EmitterRuntimeError::SinkRecordAnsweredTwice { record: 0 },
         ] {
             assert!(!terminal.is_retryable_publish_failure());
             assert!(!emitter_publish_error_is_retryable(&Report::new(terminal)));

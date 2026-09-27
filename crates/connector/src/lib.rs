@@ -55,7 +55,7 @@ pub use sink::{
     AckConfirmation, BrokerPublishingMode, MappedSinkRows, PerRecordOutcome, PerRecordOutcomeParts,
     RecordSink, RejectedSinkRecord, RowSink, SinkAcknowledgementServices, SinkAcknowledgements,
     SinkCommitReport, SinkDeadline, SinkEventReporter, SinkGeneralErrorHandler, SinkHost,
-    SinkHostServices, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord,
+    SinkHostServices, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId,
     SinkRecordPosition, SinkRetryDelay, SinkStagingDirectory, SinkStartError, SinkStartResult,
     SinkTransientErrorStatus,
 };

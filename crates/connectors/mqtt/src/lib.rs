@@ -24,8 +24,8 @@ use futures_util::FutureExt;
 use meticulous::OptionExt as _;
 use nervix_connector::{
     AckConfirmation, ParsedRetryPolicy, PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkHost,
-    SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordPosition,
-    SinkStartError, SinkStartResult, client_config_value, client_tls_paths, next_retry_delay,
+    SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId, SinkStartError,
+    SinkStartResult, client_config_value, client_tls_paths, next_retry_delay,
     optional_client_config_value, read_tls_file,
 };
 use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
@@ -93,7 +93,7 @@ pub struct MqttSink {
 type MqttConfirmation = Pin<Box<dyn Future<Output = Result<(), PublishNoticeError>> + Send>>;
 
 struct PendingMqttConfirmation {
-    position: SinkRecordPosition,
+    record: SinkRecordId,
     occurred_at: Timestamp,
     deadline: Instant,
     confirmation: MqttConfirmation,
@@ -282,7 +282,7 @@ impl MqttSink {
     async fn confirm_oldest(
         pending: &mut VecDeque<PendingMqttConfirmation>,
         timeout: Duration,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) -> SinkPublishResult<()> {
         let Some(oldest) = pending.front_mut() else {
             return Err(Self::publish_error(
@@ -306,18 +306,18 @@ impl MqttSink {
             Self::harvest_ready_after_oldest_failure(pending, outcome);
             return Err(Self::confirm_timeout_error(timeout));
         };
-        let position = oldest.position;
+        let record_id = oldest.record;
         let occurred_at = oldest.occurred_at;
         match result {
             Ok(()) => {
                 pending.pop_front();
-                outcome.deliver(position);
+                outcome.deliver(record_id);
                 Ok(())
             }
             Err(error) if Self::is_record_notice_rejection(&error) => {
                 pending.pop_front();
                 outcome.reject(RejectedSinkRecord::external(
-                    position,
+                    record_id,
                     occurred_at,
                     format!("mqtt rejected record: {error}"),
                 ));
@@ -339,7 +339,7 @@ impl MqttSink {
     /// caller is returning, and classifying it per record would report one outage many times.
     fn harvest_ready_after_oldest_failure(
         pending: &mut VecDeque<PendingMqttConfirmation>,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) {
         let mut index = 1;
         while index < pending.len() {
@@ -355,10 +355,10 @@ impl MqttSink {
                  removes from",
             );
             match result {
-                Ok(()) => outcome.deliver(confirmation.position),
+                Ok(()) => outcome.deliver(confirmation.record),
                 Err(error) if Self::is_record_notice_rejection(&error) => {
                     outcome.reject(RejectedSinkRecord::external(
-                        confirmation.position,
+                        confirmation.record,
                         confirmation.occurred_at,
                         format!("mqtt rejected record: {error}"),
                     ));
@@ -439,12 +439,12 @@ impl SinkLifecycle for MqttSink {
 
 #[async_trait]
 impl RecordSink for MqttSink {
-    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         let mut pending: VecDeque<PendingMqttConfirmation> = VecDeque::new();
         for record in records {
             tokio::task::consume_budget().await;
-            let position = record.position;
+            let record_id = record.id;
             let occurred_at = record.occurred_at;
             if let MqttPublishingMode::Qos0 = self.mode {
                 match self.client.try_publish(
@@ -452,10 +452,10 @@ impl RecordSink for MqttSink {
                     record.payload,
                     PublishOptions::at_most_once(),
                 ) {
-                    Ok(()) => outcome.deliver(position),
+                    Ok(()) => outcome.deliver(record_id),
                     Err(error) if Self::is_record_client_rejection(&error) => {
                         outcome.reject(RejectedSinkRecord::external(
-                            position,
+                            record_id,
                             occurred_at,
                             format!("mqtt rejected record: {error}"),
                         ));
@@ -476,7 +476,7 @@ impl RecordSink for MqttSink {
                 Ok(notice) => notice,
                 Err(error) if Self::is_record_client_rejection(&error) => {
                     outcome.reject(RejectedSinkRecord::external(
-                        position,
+                        record_id,
                         occurred_at,
                         format!("mqtt rejected record: {error}"),
                     ));
@@ -500,7 +500,7 @@ impl RecordSink for MqttSink {
                 return outcome;
             };
             pending.push_back(PendingMqttConfirmation {
-                position,
+                record: record_id,
                 occurred_at,
                 deadline,
                 confirmation: Box::pin(notice.wait_completion_async()),
@@ -530,20 +530,13 @@ impl RecordSink for MqttSink {
 mod tests {
     use super::*;
 
-    fn position(row_index: usize) -> SinkRecordPosition {
-        SinkRecordPosition {
-            batch_index: 0,
-            row_index,
-        }
-    }
-
     fn pending(
-        row_index: usize,
+        index: usize,
         confirmation: MqttConfirmation,
         deadline: Instant,
     ) -> PendingMqttConfirmation {
         PendingMqttConfirmation {
-            position: position(row_index),
+            record: SinkRecordId::new(index),
             occurred_at: Timestamp::from_unix_nanos(0),
             deadline,
             confirmation,
@@ -577,9 +570,9 @@ mod tests {
         let outcome = outcome.into_parts();
 
         assert_eq!(window.len(), 1, "only the unresolved oldest must remain");
-        assert_eq!(outcome.delivered, vec![position(1)]);
+        assert_eq!(outcome.delivered, vec![SinkRecordId::new(1)]);
         assert_eq!(outcome.rejected.len(), 1);
-        assert_eq!(outcome.rejected[0].position.row_index, 2);
+        assert_eq!(outcome.rejected[0].id, SinkRecordId::new(2));
         assert!(outcome.infrastructure_error.is_none());
     }
 

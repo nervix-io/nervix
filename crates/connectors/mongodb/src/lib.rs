@@ -243,7 +243,7 @@ impl MongoDbSink {
         chunk: &[usize],
         occurred_at: Timestamp,
         error: DriverError,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordPosition>,
     ) {
         let ErrorKind::InsertMany(insert_error) = error.kind.as_ref() else {
             outcome.fail(safe_infrastructure_error("insert_many request"));
@@ -269,7 +269,7 @@ impl MongoDbSink {
         chunk: &[usize],
         occurred_at: Timestamp,
         write_errors: &[(usize, i32)],
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordPosition>,
     ) {
         let errors = write_errors.iter().copied().collect::<HashMap<_, _>>();
         let mut has_infrastructure_error = errors.len() != write_errors.len()
@@ -305,7 +305,7 @@ impl MongoDbSink {
         chunk: &[usize],
         occurred_at: Timestamp,
         error: DriverError,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordPosition>,
     ) {
         let ErrorKind::BulkWrite(bulk_error) = error.kind.as_ref() else {
             outcome.fail(safe_infrastructure_error("bulk write request"));
@@ -363,7 +363,7 @@ impl SinkLifecycle for MongoDbSink {}
 
 #[async_trait]
 impl RowSink for MongoDbSink {
-    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome {
+    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
         let mut outcome = PerRecordOutcome::with_capacity(rows.selected_rows.len());
         let columns = match MappedBsonColumns::new(rows.batch, rows.target_columns) {
             Ok(columns) => columns,
@@ -543,7 +543,11 @@ impl UnencodableMappedValue {
     /// The rejection names the field and what MongoDB has no representation for, never the value
     /// itself, so a rejected payload reaches neither an error route nor a log. It is definitive,
     /// so the record follows `ON MESSAGE ERROR` instead of entering the host's retry loop.
-    fn rejected(&self, position: SinkRecordPosition, occurred_at: Timestamp) -> RejectedSinkRecord {
+    fn rejected(
+        &self,
+        position: SinkRecordPosition,
+        occurred_at: Timestamp,
+    ) -> RejectedSinkRecord<SinkRecordPosition> {
         let field = match self {
             Self::UnsupportedColumn { field, .. } | Self::UnsignedIntegerRange { field } => field,
         };
@@ -801,7 +805,7 @@ mod tests {
         );
         assert_eq!(outcome.rejected.len(), 1);
         assert_eq!(
-            outcome.rejected[0].position,
+            outcome.rejected[0].id,
             SinkRecordPosition {
                 batch_index: 7,
                 row_index: 11,
@@ -920,7 +924,7 @@ mod tests {
         );
 
         assert_eq!(
-            record.position,
+            record.id,
             SinkRecordPosition {
                 batch_index: 2,
                 row_index: 5,

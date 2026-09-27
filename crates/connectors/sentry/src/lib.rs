@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use error_stack::Report;
 use nervix_connector::{
     HttpClientConfig, PerRecordOutcome, RecordSink, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkRecord, SinkRetryDelay, SinkStartError, SinkStartResult, client_config_value,
+    SinkRecord, SinkRecordId, SinkRetryDelay, SinkStartError, SinkStartResult, client_config_value,
     physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
@@ -234,7 +234,7 @@ impl SinkLifecycle for SentrySink {}
 
 #[async_trait]
 impl RecordSink for SentrySink {
-    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         for record in records {
             tokio::task::consume_budget().await;
@@ -263,7 +263,7 @@ impl RecordSink for SentrySink {
             };
             let status = response.status();
             if status.is_success() {
-                outcome.deliver(record.position);
+                outcome.deliver(record.id);
                 continue;
             }
             if Self::is_record_status(status) {

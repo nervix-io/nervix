@@ -2,21 +2,18 @@
 //!
 //! Layer: data plane.
 //! - **Owns.** Encoding every row a batch still holds with the emitter's codec — one record per row,
-//!   or, when the emitter declares `BATCH`, one record per packed batch payload — pairing each
+//!   or, when the emitter declares `BATCH`, one batch payload per packed candidate — pairing each
 //!   record with its key, headers and ordering group, rejecting the rows that cannot be encoded or
-//!   do not fit, handing the records to the record sink in one write, and applying the sink's
-//!   outcome for a batch record to every member it carries.
-//! - **Depends on.** The emitter's compiled codec, its buffered batches, the batch packing, and the
-//!   connector contract's record sink and record value type.
+//!   do not fit, and handing one write to the record sink: the batch payloads earlier attempts
+//!   retained, unchanged, followed by the ones packed now.
+//! - **Depends on.** The emitter's compiled codec, its buffered batches, the batch packing, the
+//!   record identities and retained payloads a write is answered through, and the connector
+//!   contract's record sink and record value type.
 //! - **Must not know.** Which external system receives the records, or when the emitter publishes
 //!   them.
 
-use std::collections::BTreeMap;
-
 use async_trait::async_trait;
-use nervix_connector::{
-    PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkLifecycle, SinkRecord, SinkRecordPosition,
-};
+use nervix_connector::{RecordSink, SinkLifecycle, SinkRecord, SinkRecordPosition};
 use nervix_models::EmitterBatchPolicy;
 
 use super::{
@@ -85,27 +82,55 @@ impl EmitterSink for EncodedRecordSink {
     }
 
     /// Encodes every row the batches still hold and publishes them in one write.
+    ///
+    /// With `BATCH`, the write carries every batch payload the emitter retains: the ones earlier
+    /// attempts prepared and the sink left unanswered, written again exactly as they were first
+    /// written, and the ones packed now from rows no payload carries yet.
     async fn publish_batches(
+        &mut self,
+        context: &EmitterSinkContext,
+        publication: EmitterPublication<'_>,
+    ) -> EmitterRuntimeResult<()> {
+        let EmitterPublication { batches, prepared } = publication;
+        let Some(policy) = self.batch else {
+            return self.publish_rows(context, batches).await;
+        };
+        let packed = pack_batch_records(self.codec.clone(), policy, context, batches).await?;
+        for payload in packed {
+            prepared.retain(payload, batches)?;
+        }
+        if prepared.is_empty() {
+            return Ok(());
+        }
+        let PreparedWrite { records, payloads } = prepared.next_write();
+        let record_count = records.len();
+        let outcome = self.sink.publish(records).await;
+        let outcome = context.received_outcome(record_count, outcome);
+        prepared
+            .answers(batches, payloads, outcome)?
+            .apply(context, batches, DeliveredAcknowledgements::Host)
+            .await
+    }
+}
+
+impl EncodedRecordSink {
+    /// Encodes one record for every row the batches still hold and publishes them in one write.
+    async fn publish_rows(
         &mut self,
         context: &EmitterSinkContext,
         batches: &mut [EmitterPublishBatch],
     ) -> EmitterRuntimeResult<()> {
-        if let Some(policy) = self.batch {
-            let packed = pack_batch_records(self.codec.clone(), policy, context, batches).await?;
-            let outcome = self.sink.publish(packed.records).await;
-            let outcome = packed.membership.apply_to_members(outcome);
-            return finish_record_sink_publish(
-                context,
-                batches,
-                outcome,
-                DeliveredAcknowledgements::Host,
-            )
-            .await;
-        }
         let encoded = encode_broker_records(self.codec.clone(), context, batches).await?;
-        let records = sink_records(context, batches, encoded).await?;
+        let RowWrite { records, rows } = sink_records(context, batches, encoded).await?;
+        if records.is_empty() {
+            return Ok(());
+        }
+        let record_count = records.len();
         let outcome = self.sink.publish(records).await;
-        finish_record_sink_publish(context, batches, outcome, DeliveredAcknowledgements::Host).await
+        let outcome = context.received_outcome(record_count, outcome);
+        rows.answers(outcome)?
+            .apply(context, batches, DeliveredAcknowledgements::Host)
+            .await
     }
 }
 
@@ -166,10 +191,7 @@ async fn encode_broker_records(
     let mut rejected = Vec::new();
     for (batch_index, batch) in batches.iter().enumerate() {
         tokio::task::consume_budget().await;
-        let row_count = batch.relay_batch().batch.batch().num_rows();
-        let pending_rows = (0..row_count)
-            .filter(|row_index| !batch.is_delivered(*row_index))
-            .collect::<Vec<_>>();
+        let pending_rows = batch.pending_record_rows();
         let batch_acks = batch.merged_acks();
         let payloads = await_emitter_confirmation(
             &batch_acks,
@@ -228,6 +250,12 @@ async fn encode_broker_records(
     Ok(encoded)
 }
 
+/// The records one write hands a sink when each record carries one row, and the row each carries.
+struct RowWrite {
+    records: Vec<SinkRecord>,
+    rows: RowRecords,
+}
+
 /// The records a sink publishes, once every record whose ordering group could not be evaluated
 /// has been rejected here.
 ///
@@ -237,8 +265,9 @@ async fn sink_records(
     context: &EmitterSinkContext,
     batches: &mut [EmitterPublishBatch],
     encoded: Vec<EncodedBrokerRecord>,
-) -> EmitterRuntimeResult<Vec<SinkRecord>> {
+) -> EmitterRuntimeResult<RowWrite> {
     let mut records = Vec::with_capacity(encoded.len());
+    let mut rows = RowRecords::with_capacity(encoded.len());
     let mut rejected = Vec::new();
     for record in encoded {
         tokio::task::consume_budget().await;
@@ -255,7 +284,7 @@ async fn sink_records(
             }
         };
         let sink_record = SinkRecord::new(
-            position,
+            rows.record(position),
             record.key,
             record.payload,
             record.headers,
@@ -267,91 +296,36 @@ async fn sink_records(
         });
     }
     finish_rejected_records(context, batches, rejected, MessageErrorOperation::Publish).await?;
-    Ok(records)
+    Ok(RowWrite { records, rows })
 }
 
-/// The records a batching emitter publishes, one per batch payload, and the rows each carries.
-struct PackedBatchRecords {
-    records: Vec<SinkRecord>,
-    membership: BatchMembership,
-}
-
-/// The rows every batch record carries, keyed by the position the record is published under.
-///
-/// A batch record is published under its first member's position, so a sink that answers for the
-/// record answers for exactly one entry here.
-#[derive(Debug, Default)]
-struct BatchMembership {
-    members: BTreeMap<SinkRecordPosition, Vec<BatchMemberOutcome>>,
-}
-
-/// One source row's original position and execution time, preserved across a payload assembled
-/// from several Arrow carriers so an external rejection remains attributed to that row.
-#[derive(Debug, Clone, Copy)]
-struct BatchMemberOutcome {
-    position: SinkRecordPosition,
-    occurred_at: Timestamp,
-}
-
-impl BatchMembership {
-    /// Applies the sink's outcome for each batch record to every member it carries.
-    ///
-    /// One confirmation delivers every member, and one rejection rejects every member with the
-    /// same error, so its reference shows that they failed together.
-    fn apply_to_members(&self, outcome: PerRecordOutcome) -> PerRecordOutcome {
-        let outcome = outcome.into_parts();
-        let mut applied = PerRecordOutcome::with_capacity(outcome.delivered.len());
-        for position in outcome.delivered {
-            if let Some(members) = self.members.get(&position) {
-                for member in members {
-                    applied.deliver(member.position);
-                }
-            } else {
-                applied.deliver(position);
-            }
-        }
-        for rejected in outcome.rejected {
-            if let Some(members) = self.members.get(&rejected.position) {
-                for member in members {
-                    let mut error = rejected.error.clone();
-                    error.occurred_at = member.occurred_at;
-                    applied.reject(RejectedSinkRecord {
-                        position: member.position,
-                        error,
-                    });
-                }
-            } else {
-                applied.reject(rejected);
-            }
-        }
-        if let Some(error) = outcome.infrastructure_error {
-            applied.fail(error);
-        }
-        applied
-    }
-}
-
-/// Packs pending rows across successive Arrow carriers and pairs each payload with the key,
-/// headers and ordering group its members share.
+/// Packs the rows no payload carries yet across successive Arrow carriers, and pairs each payload
+/// with the key, headers and ordering group its members share.
 ///
 /// Rows whose ordering group could not be evaluated are rejected before packing, as they are when
 /// the emitter publishes one record per row. Rows that cannot be members, rows that alone exceed
-/// `MAX SIZE`, and the rows of a candidate whose container failed are rejected here as well.
+/// `MAX SIZE`, and the rows of a candidate whose container failed are rejected here as well, so
+/// every row packing sees ends either rejected or a member of one returned payload.
 async fn pack_batch_records(
     codec: Arc<CompiledCodec>,
     policy: EmitterBatchPolicy,
     context: &EmitterSinkContext,
     batches: &mut [EmitterPublishBatch],
-) -> EmitterRuntimeResult<PackedBatchRecords> {
-    let mut records = Vec::new();
-    let mut membership = BatchMembership::default();
+) -> EmitterRuntimeResult<Vec<PreparedPayload>> {
+    let mut payloads = Vec::new();
     let mut unpublishable = Vec::new();
     let mut rejected = Vec::new();
     let mut carriers = Vec::with_capacity(batches.len());
     for (batch_index, batch) in batches.iter().enumerate() {
         tokio::task::consume_budget().await;
         let mut rows = Vec::new();
-        for row_index in batch.pending_record_rows() {
+        for row in batch.rows_to_pack() {
+            // A payload packed now never spans the rows a retained payload carries, so the two
+            // cannot interleave their members.
+            let RowToPack::Pending(row_index) = row else {
+                rows.push(PackingRow::Seal);
+                continue;
+            };
             let position = SinkRecordPosition {
                 batch_index,
                 row_index,
@@ -401,36 +375,18 @@ async fn pack_batch_records(
                 envelope,
                 payload,
             }) => {
-                let position = *rows
+                let first = *rows
                     .first()
                     .assured("a packed payload always carries at least one member");
                 let batch = batches
-                    .get(position.batch_index)
+                    .get(first.batch_index)
                     .assured("packing positions refer to the source batches it received");
-                let record = SinkRecord::new(
-                    position,
-                    envelope.key,
+                payloads.push(PreparedPayload {
+                    members: rows,
+                    envelope,
+                    occurred_at: batch.execution_now(),
                     payload,
-                    envelope.headers,
-                    batch.execution_now(),
-                );
-                records.push(match envelope.message_group {
-                    Some(message_group) => record.with_message_group(message_group),
-                    None => record,
                 });
-                let members = rows
-                    .into_iter()
-                    .map(|position| {
-                        let batch = batches
-                            .get(position.batch_index)
-                            .assured("packing positions refer to the source batches it received");
-                        BatchMemberOutcome {
-                            position,
-                            occurred_at: batch.execution_now(),
-                        }
-                    })
-                    .collect();
-                membership.members.insert(position, members);
             }
             PackedOutcome::MemberFailed { position, error } => {
                 rejected.push(RejectedEmitterRecord {
@@ -491,10 +447,7 @@ async fn pack_batch_records(
     )
     .await?;
     finish_rejected_records(context, batches, rejected, MessageErrorOperation::Encode).await?;
-    Ok(PackedBatchRecords {
-        records,
-        membership,
-    })
+    Ok(payloads)
 }
 
 /// The one error every member of a candidate whose container failed is rejected with.
@@ -597,97 +550,221 @@ async fn pack_pending_rows(
 
 #[cfg(test)]
 mod tests {
-    use nervix_connector::SinkPublishError;
+    use std::collections::VecDeque;
+
+    use nervix_connector::{PerRecordOutcome, SinkPublishError, SinkRecordId};
+    use nervix_models::{
+        BatchMessageLimit, CodecWireFormat, CreateCodec, CreateWireSchema, JsonType,
+        ResolvedCodecWireFormat, WireSchemaField,
+    };
+    use parking_lot::Mutex;
 
     use super::*;
+    use crate::{
+        runtime::test_fixtures::{input_batch_with, input_schema, named, sink_context},
+        runtime_schema::compile_codec,
+    };
 
-    fn position(batch_index: usize, row_index: usize) -> SinkRecordPosition {
-        SinkRecordPosition {
-            batch_index,
-            row_index,
+    /// How the scripted sink answers one write.
+    enum Answer {
+        /// The sink fails before it answers for any record, as a stalled broker does.
+        Stall,
+        /// The sink confirms every record of the write.
+        ConfirmAll,
+    }
+
+    /// A record sink that keeps every payload it was handed and answers each write from a script.
+    struct ScriptedSink {
+        writes: Arc<Mutex<Vec<Vec<Vec<u8>>>>>,
+        answers: VecDeque<Answer>,
+    }
+
+    impl SinkLifecycle for ScriptedSink {}
+
+    #[async_trait]
+    impl RecordSink for ScriptedSink {
+        async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
+            self.writes.lock().push(
+                records
+                    .iter()
+                    .map(|record| record.payload.clone())
+                    .collect(),
+            );
+            let mut outcome = PerRecordOutcome::with_capacity(records.len());
+            let answer = self
+                .answers
+                .pop_front()
+                .expect("the test scripts an answer for every write it makes");
+            match answer {
+                Answer::Stall => {
+                    outcome.fail(Report::new(SinkPublishError::Publish { sink: "scripted" }));
+                }
+                Answer::ConfirmAll => {
+                    for record in &records {
+                        outcome.deliver(record.id);
+                    }
+                }
+            }
+            outcome
         }
     }
 
-    fn member(batch_index: usize, row_index: usize, occurred_at: i64) -> BatchMemberOutcome {
-        BatchMemberOutcome {
-            position: position(batch_index, row_index),
-            occurred_at: Timestamp::from_unix_nanos(occurred_at),
-        }
+    fn json_codec() -> Arc<CompiledCodec> {
+        let wire = CreateWireSchema {
+            name: named("input_wire"),
+            strictness: Default::default(),
+            fields: vec![WireSchemaField {
+                name: named("value"),
+                ty: JsonType::Integer,
+                optional: false,
+            }],
+        };
+        let model = CreateCodec {
+            name: named("input_codec"),
+            wire_format: CodecWireFormat::Json {
+                wire_schema: wire.name.clone(),
+            },
+            schema: named("emitter_input"),
+            encoding_rules: Vec::new(),
+        };
+        compile_codec(&model, input_schema(), ResolvedCodecWireFormat::Json(&wire))
+            .expect("the test codec and Arrow schema both define one required integer field")
     }
 
-    fn membership() -> BatchMembership {
-        let mut membership = BatchMembership::default();
-        membership.members.insert(
-            position(0, 0),
-            vec![member(0, 0, 1), member(1, 1, 2), member(0, 3, 1)],
-        );
-        membership
-            .members
-            .insert(position(1, 2), vec![member(1, 2, 2), member(1, 4, 2)]);
-        membership
+    fn two_rows(first: i64, second: i64) -> EmitterPublishBatch {
+        let messages = [first, second]
+            .into_iter()
+            .map(|value| RelayMessage {
+                key: None,
+                record: test_runtime_row([("value".to_string(), RuntimeValue::I64(value))]),
+                acks: AckSet::empty(),
+            })
+            .collect();
+        EmitterPublishBatch::from_batch(
+            RelayRecordBatch::from_messages(input_schema(), messages)
+                .expect("the test rows match the emitter input schema"),
+            Timestamp::from_unix_nanos(100),
+        )
     }
 
-    #[test]
-    fn a_confirmed_batch_record_delivers_every_member() {
-        let mut outcome = PerRecordOutcome::with_capacity(1);
-        outcome.deliver(position(1, 2));
-
-        let applied = membership().apply_to_members(outcome).into_parts();
-
-        assert_eq!(applied.delivered, vec![position(1, 2), position(1, 4)]);
-        assert!(applied.rejected.is_empty());
-        assert!(applied.infrastructure_error.is_none());
+    fn one_row(value: i64) -> EmitterPublishBatch {
+        EmitterPublishBatch::from_batch(
+            input_batch_with(value, 0, AckSet::empty()),
+            Timestamp::from_unix_nanos(100),
+        )
     }
 
-    #[test]
-    fn a_rejected_batch_record_rejects_every_member_with_one_reference() {
-        let mut outcome = PerRecordOutcome::with_capacity(0);
-        outcome.reject(RejectedSinkRecord::external(
-            position(0, 0),
-            Timestamp::from_unix_nanos(1),
-            "refused".to_string(),
-        ));
+    #[tokio::test]
+    async fn a_retry_writes_the_retained_payloads_unchanged_before_packing_new_rows() {
+        let context = sink_context();
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let mut sink = EncodedRecordSink {
+            sink: Box::new(ScriptedSink {
+                writes: writes.clone(),
+                answers: VecDeque::from([Answer::Stall, Answer::ConfirmAll]),
+            }),
+            codec: json_codec(),
+            batch: Some(EmitterBatchPolicy {
+                max_messages: BatchMessageLimit::try_from(2_u32)
+                    .expect("two is a positive message limit"),
+                max_size: "1KiB".parse().expect("1KiB is a positive byte limit"),
+            }),
+        };
+        let mut batches = vec![two_rows(1, 2), one_row(3)];
+        let mut prepared = PreparedPayloads::default();
 
-        let applied = membership().apply_to_members(outcome).into_parts();
-
-        let rejected = applied
-            .rejected
-            .iter()
-            .map(|rejected| rejected.position)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            rejected,
-            vec![position(0, 0), position(1, 1), position(0, 3)]
-        );
-        let references = applied
-            .rejected
-            .iter()
-            .map(|rejected| rejected.error.reference)
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(references.len(), 1);
-        assert_eq!(
-            applied
-                .rejected
+        let stalled = sink
+            .publish_batches(
+                &context,
+                EmitterPublication {
+                    batches: &mut batches,
+                    prepared: &mut prepared,
+                },
+            )
+            .await
+            .expect_err("a stalled write leaves its payloads unresolved");
+        assert!(emitter_publish_error_is_retryable(&stalled));
+        assert!(
+            batches
                 .iter()
-                .map(|rejected| rejected.error.occurred_at)
-                .collect::<Vec<_>>(),
+                .all(|batch| batch.pending_record_rows().is_empty())
+        );
+
+        // A batch buffered after the stalled write is packed on its own: the retained payload of
+        // row 3 is written as it was, not regrouped with row 4.
+        batches.push(one_row(4));
+        sink.publish_batches(
+            &context,
+            EmitterPublication {
+                batches: &mut batches,
+                prepared: &mut prepared,
+            },
+        )
+        .await
+        .expect("the retry is confirmed");
+
+        assert_eq!(
+            *writes.lock(),
             vec![
-                Timestamp::from_unix_nanos(1),
-                Timestamp::from_unix_nanos(2),
-                Timestamp::from_unix_nanos(1),
+                vec![
+                    br#"[{"value":1},{"value":2}]"#.to_vec(),
+                    br#"[{"value":3}]"#.to_vec()
+                ],
+                vec![
+                    br#"[{"value":1},{"value":2}]"#.to_vec(),
+                    br#"[{"value":3}]"#.to_vec(),
+                    br#"[{"value":4}]"#.to_vec(),
+                ],
             ]
         );
+        assert!(prepared.is_empty());
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.resolved_rows().iter().all(|resolved| *resolved))
+        );
     }
 
-    #[test]
-    fn an_infrastructure_failure_and_unknown_positions_pass_through() {
-        let mut outcome = PerRecordOutcome::with_capacity(1);
-        outcome.deliver(position(2, 0));
-        outcome.fail(Report::new(SinkPublishError::Publish { sink: "test" }));
+    #[tokio::test]
+    async fn one_record_per_row_is_encoded_again_after_a_stalled_write() {
+        let context = sink_context();
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let mut sink = EncodedRecordSink {
+            sink: Box::new(ScriptedSink {
+                writes: writes.clone(),
+                answers: VecDeque::from([Answer::Stall, Answer::ConfirmAll]),
+            }),
+            codec: json_codec(),
+            batch: None,
+        };
+        let mut batches = vec![two_rows(1, 2)];
+        let mut prepared = PreparedPayloads::default();
 
-        let applied = membership().apply_to_members(outcome).into_parts();
+        let stalled = sink
+            .publish_batches(
+                &context,
+                EmitterPublication {
+                    batches: &mut batches,
+                    prepared: &mut prepared,
+                },
+            )
+            .await
+            .expect_err("a stalled write leaves its rows unresolved");
+        assert!(emitter_publish_error_is_retryable(&stalled));
+        assert_eq!(batches[0].pending_record_rows(), vec![0, 1]);
+        sink.publish_batches(
+            &context,
+            EmitterPublication {
+                batches: &mut batches,
+                prepared: &mut prepared,
+            },
+        )
+        .await
+        .expect("the retry is confirmed");
 
-        assert_eq!(applied.delivered, vec![position(2, 0)]);
-        assert!(applied.infrastructure_error.is_some());
+        let expected = vec![br#"{"value":1}"#.to_vec(), br#"{"value":2}"#.to_vec()];
+        assert_eq!(*writes.lock(), vec![expected.clone(), expected]);
+        assert!(prepared.is_empty());
+        assert_eq!(batches[0].resolved_rows(), vec![true, true]);
     }
 }

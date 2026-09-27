@@ -33,6 +33,13 @@ impl ConfiguredFaultInjection {
         false
     }
 
+    pub(in crate::runtime) fn take_emitter_sink_stall(
+        &self,
+        _emitter: &EmitterName,
+    ) -> Option<usize> {
+        None
+    }
+
     pub(in crate::runtime) fn syslog_ingestor_bind_addr(
         &self,
         _node_id: &ClusterNodeName,

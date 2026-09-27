@@ -24,7 +24,7 @@ use futures_util::FutureExt;
 use meticulous::OptionExt as _;
 use nervix_connector::{
     AckConfirmation, BrokerPublishingMode, PerRecordOutcome, RecordSink, RejectedSinkRecord,
-    SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordPosition,
+    SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId,
     SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
     optional_bool_client_config_value, optional_client_config_value, read_tls_file,
 };
@@ -55,7 +55,7 @@ pub struct PulsarSink {
 }
 
 struct PendingPulsarConfirmation {
-    position: SinkRecordPosition,
+    record: SinkRecordId,
     occurred_at: Timestamp,
     deadline: Instant,
     confirmation: PulsarSendFuture,
@@ -176,20 +176,20 @@ impl PulsarSink {
     async fn publish_unconfirmed(
         &mut self,
         records: Vec<SinkRecord>,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) {
         for record in records {
             tokio::task::consume_budget().await;
-            let position = record.position;
+            let record_id = record.id;
             let occurred_at = record.occurred_at;
             match self.producer.send_non_blocking(Self::message(record)).await {
                 Ok(confirmation) => {
                     drop(confirmation);
-                    outcome.deliver(position);
+                    outcome.deliver(record_id);
                 }
                 Err(source) if Self::is_record_rejection(&source) => {
                     outcome.reject(RejectedSinkRecord::external(
-                        position,
+                        record_id,
                         occurred_at,
                         format!("pulsar rejected record: {source}"),
                     ));
@@ -214,18 +214,18 @@ impl PulsarSink {
             max_in_flight,
             timeout,
         }: AckConfirmation,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) {
         let mut pending: VecDeque<PendingPulsarConfirmation> = VecDeque::new();
         for record in records {
             tokio::task::consume_budget().await;
-            let position = record.position;
+            let record_id = record.id;
             let occurred_at = record.occurred_at;
             let confirmation = match self.producer.send_non_blocking(Self::message(record)).await {
                 Ok(confirmation) => confirmation,
                 Err(source) if Self::is_record_rejection(&source) => {
                     outcome.reject(RejectedSinkRecord::external(
-                        position,
+                        record_id,
                         occurred_at,
                         format!("pulsar rejected record: {source}"),
                     ));
@@ -245,7 +245,7 @@ impl PulsarSink {
                 return;
             };
             pending.push_back(PendingPulsarConfirmation {
-                position,
+                record: record_id,
                 occurred_at,
                 deadline,
                 confirmation,
@@ -278,7 +278,7 @@ impl PulsarSink {
     async fn confirm_oldest(
         pending: &mut VecDeque<PendingPulsarConfirmation>,
         timeout: Duration,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) -> SinkPublishResult<()> {
         let Some(oldest) = pending.front_mut() else {
             return Err(Self::publish_error(
@@ -308,18 +308,18 @@ impl PulsarSink {
                 humantime::format_duration(timeout)
             )));
         };
-        let position = oldest.position;
+        let record_id = oldest.record;
         let occurred_at = oldest.occurred_at;
         match result {
             Ok(_receipt) => {
                 pending.pop_front();
-                outcome.deliver(position);
+                outcome.deliver(record_id);
                 Ok(())
             }
             Err(source) if Self::is_record_rejection(&source) => {
                 pending.pop_front();
                 outcome.reject(RejectedSinkRecord::external(
-                    position,
+                    record_id,
                     occurred_at,
                     format!("pulsar rejected record: {source}"),
                 ));
@@ -341,7 +341,7 @@ impl PulsarSink {
     /// caller is returning, and classifying it per record would report one outage many times.
     fn harvest_ready_after_oldest_failure(
         pending: &mut VecDeque<PendingPulsarConfirmation>,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) {
         let mut index = 1;
         while index < pending.len() {
@@ -357,10 +357,10 @@ impl PulsarSink {
                  removes from",
             );
             match result {
-                Ok(_receipt) => outcome.deliver(confirmation.position),
+                Ok(_receipt) => outcome.deliver(confirmation.record),
                 Err(source) if Self::is_record_rejection(&source) => {
                     outcome.reject(RejectedSinkRecord::external(
-                        confirmation.position,
+                        confirmation.record,
                         confirmation.occurred_at,
                         format!("pulsar rejected record: {source}"),
                     ));
@@ -414,7 +414,7 @@ impl SinkLifecycle for PulsarSink {}
 
 #[async_trait]
 impl RecordSink for PulsarSink {
-    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         match self.mode {
             BrokerPublishingMode::NoAck => {

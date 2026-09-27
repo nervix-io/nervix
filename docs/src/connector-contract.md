@@ -133,12 +133,13 @@ sequenceDiagram
 ## Sink boundary
 
 The host prepares one batch for either of two sink contracts. A **record sink** receives
-codec-encoded keys, payloads, headers, optional ordering groups, timestamps, and host positions.
-A **row sink** receives host-projected Arrow columns, target columns, selected rows, and bounded
-chunks; it encodes its external representation from those columns. The host evaluates `VALUES`
-once per batch and excludes rows with mapping errors before calling a row sink. It retains ACKs
-by position, so no runtime ACK map enters the connector. Each publish is one call per batch,
-never a virtual call per row.
+codec-encoded keys, payloads, headers, optional ordering groups, timestamps, and the identity the
+host assigned each record of the write. A **row sink** receives host-projected Arrow columns,
+target columns, selected rows, and bounded chunks; it encodes its external representation from
+those columns. The host evaluates `VALUES` once per batch and excludes rows with mapping errors
+before calling a row sink. It retains the ACKs of the source rows every record or mapped row
+carries, so no runtime ACK map enters the connector. Each publish is one call per batch, never a
+virtual call per row.
 
 An ordering group exists only where the sink plan declares one; today that is the SQS
 `FIFO GROUP`. The host compiles the declaration, evaluates it once per filtered source batch, and
@@ -150,8 +151,13 @@ reaches the connector, which receives each remaining record's group already eval
 whose plan declares no group carries nothing beside its batches.
 
 Each connector classifies definite delivery and rejection per record, and may report one
-infrastructure failure for the attempt. The host applies those outcomes to the corresponding ACK
-roots and error policy. The emitter task owns its buffer, maximum batch size, flush cadence,
+infrastructure failure for the attempt. A record sink answers for a record under the identity the
+host gave it, and a row sink answers for a mapped row under that row's source position. The host
+checks a record sink's answers against the write before applying any of them: an answer for a
+record the write did not carry, or a second answer for one record, breaks the contract and fails
+the attempt without a retry. A record left unanswered without a reported failure leaves the attempt
+unresolved, and the host retries it, because nothing says that record was not written. The host
+applies the answers to the corresponding ACK roots and error policy. The emitter task owns its buffer, maximum batch size, flush cadence,
 retry schedule, fault injection, stop deadline, and metrics. The connector owns the external
 operation and its completion point. A receiver-requested delay can extend, but cannot shorten,
 the host's retry backoff. `finish` lets a transport empty a client-side queue within the remaining
@@ -172,8 +178,24 @@ branch key, execution time and original batch and row position. The host prepare
 arrival order and seals a payload when the source relay, branch, key, ordered headers, ordering
 group or codec container metadata changes. The codec encodes each candidate under `MAX SIZE`, and
 the host subdivides a candidate that does not fit; Arrow memory accounting still belongs to
-`FLUSH`. The connector sees one encoded record per completed payload and returns its outcome under
-the first member's position. The host maps that outcome back to every member's original position.
+`FLUSH`. The connector sees one encoded record per completed payload and answers for it under the
+record's identity, without learning which rows the payload carries.
+
+The host owns that membership. It keeps every payload it offers the sink, with its exact bytes,
+key, headers, ordering group and member positions, in the emitter buffer beside the batches the
+members came from, and marks the members prepared so that no later attempt packs them again. A
+confirmation delivers every member at the completion point `MODE` selects. A rejection routes every
+member through `ON MESSAGE ERROR` with the sink's one error reference, each member keeping its own
+execution time, branch and acknowledgement. A payload the attempt left unanswered, because the sink
+failed or its outcome is unknown, stays retained unchanged. The next attempt, whether a retry, a
+force flush or a drain, writes it again byte for byte with the same members, ahead of any payload
+packed after it, and never writes a payload the sink already confirmed or rejected. The retry
+schedule keeps the members' acknowledgements alive while they wait, and the buffer counts them as
+work the node still holds until they resolve. The retained payloads live with the buffer rather
+than the connector, so reopening a connector between attempts keeps them; only a failure that ends
+the attempt for good releases them, and their members then follow the error policy with every other
+unresolved row. A row sink names every member itself, so its retry writes only the rows it left
+unresolved; MongoDB's per-document results shrink a retried bulk write this way.
 
 For a sink that stages writes, the lifecycle exposes a domain or physical commit deadline,
 staged-message count, pending ACKs, and a commit operation. The host includes that deadline in

@@ -47,11 +47,15 @@ impl EmitterSink for MappedRowSink {
     }
 
     /// Writes every buffered batch, one projection and one virtual call per batch.
+    ///
+    /// A row sink answers for each mapped row by its position, so a row it left unresolved is
+    /// projected again by the next attempt and nothing is retained between attempts.
     async fn publish_batches(
         &mut self,
         context: &EmitterSinkContext,
-        batches: &mut [EmitterPublishBatch],
+        publication: EmitterPublication<'_>,
     ) -> EmitterRuntimeResult<()> {
+        let EmitterPublication { batches, .. } = publication;
         let acknowledgements = match self.sink.retains_acknowledgements() {
             true => DeliveredAcknowledgements::Sink,
             false => DeliveredAcknowledgements::Host,
@@ -91,8 +95,12 @@ impl EmitterSink for MappedRowSink {
                 }
                 DeliveredAcknowledgements::Host => None,
             };
+            let rows = projected.selected_rows().len();
             let outcome = self.sink.publish(projected.rows(retained)).await;
-            finish_record_sink_publish(context, batches, outcome, acknowledgements).await?;
+            let outcome = context.received_outcome(rows, outcome);
+            RowAnswers::from(outcome)
+                .apply(context, batches, acknowledgements)
+                .await?;
         }
         Ok(())
     }

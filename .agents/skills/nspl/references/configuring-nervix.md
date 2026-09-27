@@ -178,7 +178,9 @@ relay. Do not use them to scan across branches.
   escaping, the container and any transformation expansion; an oversize candidate is halved, and a
   record that alone exceeds it goes to `ON MESSAGE ERROR` as a `validation` error, so leave headroom
   for the largest record rather than sizing it to a typical one. A failing `ON EMITTING BATCH`
-  rejects every member of that batch with one shared error reference.
+  rejects every member of that batch with one shared error reference. A payload whose outcome is
+  unknown is retried with the same bytes and members, so consumers deduplicating a retry see a
+  whole repeated batch, never a regrouped one.
   SQS `.fifo` queue names and `FIFO GROUP` appear together, and `FIFO GROUP FROM BRANCH` is used
   only with branched input.
 - Every MongoDB emitter maps integers that fit the BSON signed 64-bit range. A `U64` value above
