@@ -959,7 +959,10 @@ impl Client {
         captured: Option<Arc<ExchangeRequests>>,
     ) -> Result<ReplyBody, ClientError> {
         let kind = RequestKind::from(&request);
-        let read_only = matches!(kind, RequestKind::ListDomains | RequestKind::Suggest);
+        let read_only = matches!(
+            kind,
+            RequestKind::ListDomains | RequestKind::Suggest | RequestKind::Choice
+        );
         let deadline = Instant::now() + self.inner.connector.retry_timeout();
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
             tokio::task::consume_budget().await;
@@ -1161,6 +1164,24 @@ impl Client {
                     .collect(),
             }),
             other => Err(ClientError::unexpected_reply(RequestKind::Suggest, other)),
+        }
+    }
+
+    /// Resolves one structured form control into typed, revision-fenced choices.
+    pub async fn lookup_choices(
+        &self,
+        request: nervix_client_wire::ChoiceLookupRequest,
+    ) -> error_stack::Result<nervix_client_wire::ChoiceOutcome, ClientError> {
+        match self
+            .request(ClientRequest::Choice(request), None)
+            .await
+            .map_err(error_stack::Report::new)?
+        {
+            ReplyBody::Choice(outcome) => Ok(outcome),
+            other => Err(error_stack::Report::new(ClientError::unexpected_reply(
+                RequestKind::Choice,
+                other,
+            ))),
         }
     }
 

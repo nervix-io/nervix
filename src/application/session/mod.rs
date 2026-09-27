@@ -39,12 +39,13 @@ use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
 use nervix_client_wire::{
     AttachTransactionRequest, CancelOutcome, CancelRequest, CancelState, CancellationStage,
-    ClientFrame, ClientMessage, ClientRequest, CommandRequest, DomainList, DomainSelection,
-    EncodedFrame, InspectTransactionRequest, InspectionOutcome, Reply, ReplyBody, ReplyDelivery,
-    RequestCancelled, RequestId, RequestRejected, RequestRejection, SelectDomainRequest,
-    ServerFrame, SessionEndReason, SessionEnding, SessionLimits, SubscribeDisposition,
-    SubscribeOutcome, SubscribeRequest, SubscriptionType, SuggestRequest, UnsubscribeDisposition,
-    UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame, WireDecodeError, WireEncodeError,
+    ChoiceLookupRequest, ClientFrame, ClientMessage, ClientRequest, CommandRequest, DomainList,
+    DomainSelection, EncodedFrame, InspectTransactionRequest, InspectionOutcome, Reply, ReplyBody,
+    ReplyDelivery, RequestCancelled, RequestId, RequestRejected, RequestRejection,
+    SelectDomainRequest, ServerFrame, SessionEndReason, SessionEnding, SessionLimits,
+    SubscribeDisposition, SubscribeOutcome, SubscribeRequest, SubscriptionType, SuggestRequest,
+    UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame, WireDecodeError,
+    WireEncodeError,
 };
 use nervix_execution::{AdmissionError, CpuClass, ExecutionError, MemoryClass};
 use nervix_models::{
@@ -108,6 +109,7 @@ enum OrderedRequest {
 /// A request that only reads the session, served beside the ordered lane.
 enum ConcurrentRequest {
     Suggest(SuggestRequest),
+    Choice(ChoiceLookupRequest),
     ListDomains,
     SelectDomain(SelectDomainRequest),
     Inspect(InspectTransactionRequest),
@@ -622,6 +624,9 @@ async fn accept_frame(
         ClientRequest::Suggest(suggest) => {
             RoutedRequest::Concurrent(ConcurrentRequest::Suggest(suggest))
         }
+        ClientRequest::Choice(choice) => {
+            RoutedRequest::Concurrent(ConcurrentRequest::Choice(choice))
+        }
         ClientRequest::ListDomains => RoutedRequest::Concurrent(ConcurrentRequest::ListDomains),
         ClientRequest::SelectDomain(select) => {
             RoutedRequest::Concurrent(ConcurrentRequest::SelectDomain(select))
@@ -675,6 +680,9 @@ async fn serve_concurrent(
             let view = shared.view.read().clone();
             let outcome = service.process_suggest(suggest, &view).await;
             ReplyBody::Suggest(outcome)
+        }
+        ConcurrentRequest::Choice(choice) => {
+            ReplyBody::Choice(service.process_choice(choice).await)
         }
         ConcurrentRequest::ListDomains => {
             let domains = service.domain_infos().await;

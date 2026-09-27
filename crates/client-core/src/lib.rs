@@ -34,12 +34,13 @@ pub use events::{
 };
 pub use nervix_client_wire as wire;
 pub use nervix_client_wire::{
-    CommandDisposition, Diagnostic, DomainInfo, ExecutionReferenceConflict, LeaderEndpoints,
-    LeaderRedirect, Leadership, NoticeLevel, OutcomeOrigin, RowConformanceError, RowSchema,
-    SourceSpan, StatementDisposition, StatementOutcome, SubscriptionDeliveryLost,
-    SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRows,
-    SubscriptionRowsSkipped, SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause,
-    UploadFailure,
+    Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection, ChoiceStatus,
+    ChoiceTarget, ChoiceValue, CommandDisposition, Diagnostic, DomainInfo, DomainPaceChoice,
+    ExecutionReferenceConflict, LeaderEndpoints, LeaderRedirect, Leadership, NoticeLevel,
+    OutcomeOrigin, RowConformanceError, RowSchema, SourceSpan, StatementDisposition,
+    StatementOutcome, SubscriptionDeliveryLost, SubscriptionEnded, SubscriptionHandle,
+    SubscriptionOpened, SubscriptionRows, SubscriptionRowsSkipped, SuggestionKind,
+    SuggestionStatus, TextEdit, UnknownOutcomeCause, UploadFailure,
 };
 pub use nervix_models::{
     CommandExecutionReference, DomainName, ImpactPlanningBasis, ResourceUploadIdentity,
