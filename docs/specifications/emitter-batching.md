@@ -444,7 +444,7 @@ not an array — and Nervix never changes a destination schema to make an array 
 | Sink | `MAX SIZE` measures | Framing outside the bound | Native limits |
 | --- | --- | --- | --- |
 | Kafka | The encoded batch payload written as the record value | The record key, headers and the producer's own record framing | Broker `message.max.bytes` and producer `max.request.size`, both 1 MiB by default |
-| Pulsar | The encoded batch payload written as the message payload | Message metadata and properties | Broker `maxMessageSize`, 5 MiB by default |
+| Pulsar | The encoded batch payload written as the message payload | Message metadata and properties | Broker `maxMessageSize`, 5 MiB by default, which the broker announces on every connection; a topic's own `maxMessageSize` policy may be smaller |
 | RabbitMQ | The encoded batch payload written as the message body | Basic properties and headers | `max_message_size`, 16 MiB by default in RabbitMQ 4.x, compared with the body alone |
 | Redis Pub/Sub | The encoded batch payload written as the message | The RESP command framing | `proto-max-bulk-len`, 512 MiB by default |
 | MQTT | The encoded batch payload written as the PUBLISH payload | The fixed and variable headers, including the topic | The broker's `Maximum Packet Size`; the protocol maximum is 268,435,455 bytes |
@@ -465,20 +465,23 @@ against it before writing, counting the framing outside the bound: the Kafka pro
 `message.max.bytes` with the record key, headers and record overhead; the Maximum Packet Size the
 MQTT broker declared in its latest `CONNACK`, and the largest packet MQTT can express, with the
 fixed header, topic, packet identifier and property length; the `max_payload` the NATS server
-announced, with the message headers; and the 256 KiB SQS message with its attributes and FIFO
-group. Pulsar's `maxMessageSize` and RabbitMQ's `max_message_size` are broker settings a client
-cannot read, so a larger message reaches the broker. A Pulsar broker refuses it, and the emitter
-retries it as an infrastructure failure. A RabbitMQ broker closes the channel the message arrived on
-with a refusal that names the limit, and discards every message written on that channel after it.
-The connector takes that refusal as the destination's definitive rejection of the first message of
-the attempt the broker had not answered whose body exceeds the limit, so every member of that batch
+announced, with the message headers; the `maxMessageSize` the Pulsar broker announced when the
+producer's connection opened, with the message metadata and properties, as the Java client counts
+them; and the 256 KiB SQS message with its attributes and FIFO group. A Pulsar topic's own
+`maxMessageSize` policy is applied only by the broker, which answers a larger message with
+`NotAllowedError`; a confirming `MODE ACK` rejects the batch with that answer, while `NO_ACK` has
+already completed at producer acceptance. RabbitMQ's `max_message_size` is a broker setting a client
+cannot read, so a larger message reaches the broker, which closes the channel it arrived on with a
+refusal that names the limit and discards every message written on that channel after it. The
+connector takes that refusal as the destination's definitive rejection of the first message of the
+attempt the broker had not answered whose body exceeds the limit, so every member of that batch
 follows `ON MESSAGE ERROR`, and it writes the discarded messages again on a new channel of the same
-connection. A message written ahead of the refused one that the broker had not confirmed may
-already be in its queue, so the attempt then fails as an infrastructure failure and its unresolved
-payloads are retried. In `NO_ACK` a RabbitMQ write completes with one round trip on its channel,
-which the broker answers only after it has taken every message written before it, so a refused
-message is found before any member is acknowledged. Redis answers a value above
-`proto-max-bulk-len` with a rejection, and ZeroMQ fixes no limit of its own.
+connection. A message written ahead of the refused one that the broker had not confirmed may already
+be in its queue, so the attempt then fails as an infrastructure failure and its unresolved payloads
+are retried. In `NO_ACK` a RabbitMQ write completes with one round trip on its channel, which the
+broker answers only after it has taken every message written before it, so a refused message is
+found before any member is acknowledged. Redis answers a value above `proto-max-bulk-len` with a
+rejection, and ZeroMQ fixes no limit of its own.
 
 Iceberg is the one sink with two byte bounds, and they measure different things on purpose:
 `BATCH ... MAX SIZE` bounds one written data file, while `COMMIT EACH ... MAX SIZE` bounds the

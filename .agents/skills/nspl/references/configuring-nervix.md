@@ -188,10 +188,10 @@ relay. Do not use them to scan across branches.
   unknown is retried with the same bytes and members, so consumers deduplicating a retry see a
   whole repeated batch, never a regrouped one. Keep `MAX SIZE` below the destination's own message
   limit with room for the key, headers or attributes written around the payload: a batch message
-  over a limit the client can see (Kafka, MQTT, NATS, SQS), or whose body RabbitMQ refuses as larger
-  than its `max_message_size`, is rejected with every member as an `external` `publish` error, while
-  a larger message to Pulsar is retried. RabbitMQ counts the body alone, so a `MAX SIZE` no larger
-  than `max_message_size` suffices there; see
+  over a limit the client can see (Kafka, MQTT, NATS, Pulsar, SQS) is rejected with every member as
+  an `external` `publish` error, as is one a Pulsar topic's own `maxMessageSize` refuses under
+  `MODE ACK` and one whose body RabbitMQ refuses as larger than its `max_message_size`. RabbitMQ
+  counts the body alone, so a `MAX SIZE` no larger than `max_message_size` suffices there; see
   [Emitters](../../../docs/src/emitters.md#broker-and-message-emitters).
   SQS `.fifo` queue names and `FIFO GROUP` appear together, and `FIFO GROUP FROM BRANCH` is used
   only with branched input.

@@ -56,12 +56,20 @@ resolver's own lookup error. The sink changes it into a configuration failure fo
 address or CA file and an initialization failure otherwise, leading with the connection error's
 message, which `DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
 
+A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar sink: a message
+larger than the maximum message size the broker announced, which carries the measured size of its
+metadata and payload and the limit as typed fields, or a message the broker answered with
+`NotAllowedError`, which carries the broker's reason. Either becomes a record rejection with code
+`external` and operation `publish`. Every other failure of the client, its connection or the broker
+stays an infrastructure failure of the attempt, which the emitter retries.
+
 A RabbitMQ publish that ends with the broker closing the sink's channel is classified by the
 broker's own reason, which the sink reads from its connection. A refusal of a message body larger
-than `max_message_size` is a record rejection of that message: code `external`, operation
-`publish`, and a message naming the body size and the limit, which reaches every member of a batch
-message. Any other close, a lost connection, and a close whose reason never arrives fail the
-attempt as an infrastructure failure, which the emitter retries on its backoff.
+than `max_message_size` is a `RabbitMqRecordError`, owned by the RabbitMQ sink, which carries the
+body size and the limit as typed fields and becomes a record rejection of that message with code
+`external` and operation `publish`, reaching every member of a batch message. Any other close, a
+lost connection, and a close whose reason never arrives fail the attempt as an infrastructure
+failure, which the emitter retries on its backoff.
 
 The vocabulary is the innermost owner, and its Model operations report the same way. An alteration
 is applied to a copy of the stored Model, which replaces the original only when every operation
@@ -154,6 +162,13 @@ invalid-model failure naming the node and output in its diagnostic. Planning fai
 retain the selected entity or placement so an operator can correct the request. See [Control
 Plane](./control-plane.md) for activation and [Typed States And Validation
 Boundaries](./typed-states.md) for required state.
+
+Visual schema and branch editors report incomplete names, fields, types, modes, references and
+instance limits before submitting a command, while retaining the editable draft. Once a completed
+branch command reaches the registry, the registry remains the owner of branch key validation: a
+schema containing `BYTES`, even under a collection type, returns the branch, domain and field in
+its diagnostic. The console presents that command failure inline and does not replace it with a
+local guess or silently change the selected schema.
 
 Domain activation has typed failures for a relay or codec missing its schema, a codec missing its
 wire definition, a relay missing its branch or carrying an invalid branch TTL, and an endpoint

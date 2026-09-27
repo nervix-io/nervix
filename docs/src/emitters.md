@@ -369,6 +369,7 @@ counting what it writes around the payload:
 | Kafka | The producer's `message.max.bytes` client setting | The record key, headers and record overhead |
 | MQTT | The Maximum Packet Size the broker declared in its latest `CONNACK`, and the largest packet the protocol can express | The fixed header, topic, packet identifier and property length |
 | NATS | The `max_payload` the server announced | The message headers |
+| Pulsar | The `maxMessageSize` the broker announced when the producer's connection opened | The message metadata: the properties, the partition key and the producer's own fields |
 | SQS | 256 KiB | Message attribute names, types and values, and the FIFO message group |
 
 A batch message that does not fit is never written. Every member follows `ON MESSAGE ERROR` with
@@ -376,6 +377,15 @@ code `external`, operation `publish` and one shared reference, and the message n
 the limit, such as `mqtt rejected record: MQTT PUBLISH packet of 1200090 bytes exceeds the broker's
 maximum packet size of 1048576 bytes`. The messages around it are still written. Declare a
 `MAX SIZE` that leaves room for the metadata to keep batches from reaching the limit.
+
+A Pulsar broker announces its `maxMessageSize` on every connection, so a producer that reconnects
+to another broker checks against the new one's. A Pulsar topic can also set a smaller
+`maxMessageSize` policy of its own. Only the broker applies it, measuring the metadata and payload
+with ten bytes of framing, so such a message is written and refused afterwards. In `MODE ACK` the
+refusal rejects every member the same way, with the broker's reason, such as
+`pulsar rejected record: the Pulsar broker does not allow the message: Exceed maximum message
+size`. In `MODE NO_ACK` the message was already delivered when the producer accepted it, so the
+refusal is not observed.
 
 The remaining limits are not visible to the client. RabbitMQ's `max_message_size` is a broker
 setting that AMQP never tells a client, and the broker compares it with the message body alone. A
@@ -391,11 +401,9 @@ failure, and its retry carries every message but the rejected one and those alre
 Headers do not count, so a `MAX SIZE` no larger than `max_message_size` keeps every batch message
 within it.
 
-A Pulsar broker refuses a message above its `maxMessageSize`, which the client cannot read either,
-and Nervix retries it as an infrastructure failure, so declare a `MAX SIZE` below it with room for
-the properties. Redis rejects a value above its `proto-max-bulk-len` itself, and that rejection
-follows `ON MESSAGE ERROR` like the ones above. ZeroMQ fixes no limit; a receiving socket configured
-with a maximum message size drops a larger message after the sending socket has accepted it.
+Redis rejects a value above its `proto-max-bulk-len` itself, and that rejection follows
+`ON MESSAGE ERROR` like the ones above. ZeroMQ fixes no limit; a receiving socket configured with a
+maximum message size drops a larger message after the sending socket has accepted it.
 
 ## Altering emitters
 
@@ -613,6 +621,13 @@ TO PULSAR <client> TOPIC <topic>
 `ACK` waits for each broker receipt. `NO_ACK` acknowledges producer acceptance and does not expose
 later broker errors; its throughput advantage may be smaller than Kafka's because Pulsar already
 pipelines producer work.
+
+A record whose message is larger than the `maxMessageSize` the broker announced for the producer's
+connection, counting its metadata and properties, follows `ON MESSAGE ERROR` in either mode: the
+producer refuses it before writing it, because the broker would close the connection and fail
+every message in flight on it. With `ACK`, a message the broker receives and refuses with
+`NotAllowedError`, such as one above the topic's own `maxMessageSize` policy, follows
+`ON MESSAGE ERROR` too, while any other broker error is retried.
 
 Pulsar emitters use the same client config surface as Pulsar ingestors:
 
