@@ -12,10 +12,10 @@ binary, sends `SIGKILL`, and reopens the same database and ports. Focused unit p
 where a public client cannot observe the dispatcher's waiter identity or the server's internal
 subscription-interest balance.
 
-Expected failures carry `@client_wire_expected_failure` or Rust's `#[ignore]`, name their owning
-delivery task, and are excluded from the ordinary suite. A later task removes the quarantine only
-after the owning behavior passes. Task 15 composes the final public qualification; this ledger does
-not make that claim.
+Expected failures carried `@client_wire_expected_failure` or Rust's `#[ignore]`, named their owning
+delivery task, and were excluded from the ordinary suite until the owning behavior passed. The
+integrated qualification and its validation commands are recorded in
+[Client Wire 15 qualification](client-wire-15-qualification.md).
 
 ## Findings and ownership
 

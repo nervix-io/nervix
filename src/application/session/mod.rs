@@ -6,15 +6,17 @@
 //!   change a session in the order they were written while completion, domain, inspection and
 //!   cancellation requests proceed beside them, deciding each cancellation against its request's
 //!   admission, refusing what a session cannot serve with typed rejections, encoding replies and
-//!   transferring the ones larger than a frame, and the unsolicited events a session receives.
+//!   transferring the ones larger than a frame, the unsolicited events a session receives, and the
+//!   domain clocks it follows.
 //! - **Depends on.** The client wire contract, the command pipeline and the control-plane use
 //!   cases behind it, and the execution classes large replies are encoded under.
 //! - **Must not know.** How a transport frames, authenticates or closes a session.
 //!
-//! A request is served on one of two lanes. Commands, attachments and subscription changes all
-//! change the session, so they run one at a time in the order the client wrote them. Everything
-//! else only reads it, from the view the ordered lane last published, and runs beside them, so a
-//! long command never delays a completion, an inspection, a domain request or a cancellation.
+//! A request is served on one of two lanes. Commands, transaction and domain clock attachments, and
+//! subscription changes all change the session, so they run one at a time in the order the client
+//! wrote them. Everything else only reads it, from the view the ordered lane last published, and
+//! runs beside them, so a long command never delays a completion, an inspection, a domain request
+//! or a cancellation.
 //!
 //! Every request has exactly one terminal reply. Whoever takes the request's in-flight entry owes
 //! it: the lane that served it, or a cancellation. A cancellation decides against admission
@@ -23,6 +25,7 @@
 //! request still in flight, and a request not yet admitted never begins.
 
 pub(in crate::application) mod admission;
+mod clock_attachments;
 mod events;
 pub(in crate::application) mod grpc;
 pub(in crate::application) mod outbound;
@@ -38,8 +41,10 @@ use std::collections::BTreeMap;
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
 use nervix_client_wire::{
-    AttachTransactionRequest, CancelOutcome, CancelRequest, CancelState, CancellationStage,
-    ChoiceLookupRequest, ClientFrame, ClientMessage, ClientRequest, CommandRequest, DomainList,
+    AttachDomainClockRequest, AttachTransactionRequest, CancelOutcome, CancelRequest, CancelState,
+    CancellationStage, ChoiceLookupRequest, ClientFrame, ClientMessage, ClientRequest,
+    CommandRequest, DetachDomainClockRequest, DomainClockAttachDisposition,
+    DomainClockAttachOutcome, DomainClockDetachDisposition, DomainClockDetachOutcome, DomainList,
     DomainSelection, EncodedFrame, InspectTransactionRequest, InspectionOutcome, Reply, ReplyBody,
     ReplyDelivery, RequestCancelled, RequestId, RequestRejected, RequestRejection,
     SelectDomainRequest, ServerFrame, SessionEndReason, SessionEnding, SessionLimits,
@@ -64,6 +69,7 @@ use triomphe::Arc;
 
 use self::{
     admission::{CancelledBeforeAdmission, CancelledStage, RequestAdmission},
+    clock_attachments::ClockAttachments,
     outbound::{LaneClosed, SessionOutbound},
     outcome::{attach_outcome, command_outcome, leader_redirect, wire_diagnostics},
 };
@@ -104,7 +110,15 @@ enum OrderedRequest {
     Attach(AttachTransactionRequest),
     Subscribe(SubscribeRequest),
     Unsubscribe(UnsubscribeRequest),
+    AttachDomainClock(AttachDomainClockRequest),
+    DetachDomainClock(DetachDomainClockRequest),
 }
+
+/// Why a session refuses a session-local request while it holds an active transaction. Such a
+/// request belongs to the session rather than to the transaction, so it is sent on its own once
+/// the transaction has finished.
+const SESSION_LOCAL_IN_TRANSACTION: &str =
+    "session-scoped and client-local statements cannot be queued in a transaction";
 
 /// A request that only reads the session, served beside the ordered lane.
 enum ConcurrentRequest {
@@ -621,6 +635,12 @@ async fn accept_frame(
         ClientRequest::Unsubscribe(unsubscribe) => {
             RoutedRequest::Ordered(OrderedRequest::Unsubscribe(unsubscribe))
         }
+        ClientRequest::AttachDomainClock(attach) => {
+            RoutedRequest::Ordered(OrderedRequest::AttachDomainClock(attach))
+        }
+        ClientRequest::DetachDomainClock(detach) => {
+            RoutedRequest::Ordered(OrderedRequest::DetachDomainClock(detach))
+        }
         ClientRequest::Suggest(suggest) => {
             RoutedRequest::Concurrent(ConcurrentRequest::Suggest(suggest))
         }
@@ -740,28 +760,32 @@ async fn inspect_transaction(
 }
 
 /// Serves the session's ordered requests one at a time, in the order they were written, and hands
-/// back the session's state once the session stops sending and the last request is served.
+/// back the session's state once the session stops sending and the last request is served. The
+/// domain clocks the session follows belong to the lane, and stop with it.
 async fn run_ordered_lane(
     shared: Arc<SessionShared>,
     mut work: mpsc::UnboundedReceiver<OrderedWork>,
     mut subscriptions: SessionSubscriptions,
 ) -> SessionSubscriptions {
+    let mut clock_attachments = ClockAttachments::default();
     while let Some(item) = work.recv().await {
         tokio::task::consume_budget().await;
         // A request cancelled while it waited was already answered by its cancellation.
         if item.admission.is_cancelled() {
             continue;
         }
-        serve_ordered(&shared, item, &mut subscriptions).await;
+        serve_ordered(&shared, item, &mut subscriptions, &mut clock_attachments).await;
         shared.publish_view(&subscriptions);
     }
+    clock_attachments.stop_all().await;
     subscriptions
 }
 
 async fn serve_ordered(
-    shared: &SessionShared,
+    shared: &Arc<SessionShared>,
     item: OrderedWork,
     subscriptions: &mut SessionSubscriptions,
+    clock_attachments: &mut ClockAttachments,
 ) {
     let OrderedWork {
         request_id,
@@ -818,6 +842,42 @@ async fn serve_ordered(
             };
             shared
                 .finish_with(request_id, ReplyBody::Unsubscribe(outcome))
+                .await;
+        }
+        OrderedRequest::AttachDomainClock(attach) => {
+            if admission.admit().is_err() {
+                return;
+            }
+            if subscriptions.transaction_active() {
+                let outcome = DomainClockAttachOutcome {
+                    disposition: DomainClockAttachDisposition::Failed,
+                    message: SESSION_LOCAL_IN_TRANSACTION.to_string(),
+                };
+                shared
+                    .finish_with(request_id, ReplyBody::DomainClockAttach(outcome))
+                    .await;
+                return;
+            }
+            clock_attachments
+                .attach(shared, request_id, attach.domain)
+                .await;
+        }
+        OrderedRequest::DetachDomainClock(detach) => {
+            if admission.admit().is_err() {
+                return;
+            }
+            if subscriptions.transaction_active() {
+                let outcome = DomainClockDetachOutcome {
+                    disposition: DomainClockDetachDisposition::Failed,
+                    message: SESSION_LOCAL_IN_TRANSACTION.to_string(),
+                };
+                shared
+                    .finish_with(request_id, ReplyBody::DomainClockDetach(outcome))
+                    .await;
+                return;
+            }
+            clock_attachments
+                .detach(shared, request_id, detach.domain)
                 .await;
         }
     }
@@ -936,9 +996,7 @@ async fn open_subscription(
 /// The refusal of a subscription change while the session holds an active transaction. A
 /// subscription belongs to the session, not to the transaction, so it is sent separately.
 fn subscription_in_transaction() -> CommandResult {
-    command_error(
-        "session-scoped and client-local statements cannot be queued in a transaction".to_string(),
-    )
+    command_error(SESSION_LOCAL_IN_TRANSACTION.to_string())
 }
 
 /// The subscription of a statement list that holds exactly one `CREATE SUBSCRIPTION`.

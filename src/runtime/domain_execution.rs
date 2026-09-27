@@ -234,8 +234,10 @@ impl Runtime {
         })
     }
 
+    /// Installs `domains` as a committed revision would, each with the same assigned test clock
+    /// authority, for tests of the runtime and of the edges that observe it.
     #[cfg(test)]
-    pub(super) fn sync_domains(&self, domains: &BTreeMap<DomainName, DomainState>) {
+    pub(crate) fn sync_domains(&self, domains: &BTreeMap<DomainName, DomainState>) {
         let authority = DomainClockAuthority::assigned(
             nervix_models::DomainClockAuthorityRevision::INITIAL,
             nervix_models::ClusterNodeIdentity::new(

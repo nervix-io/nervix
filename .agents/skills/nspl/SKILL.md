@@ -81,10 +81,10 @@ Use `BEGIN; ... COMMIT;` when sending multiple queueable configuration statement
 belongs to one already-existing domain: `BEGIN` binds it to the selected domain and every queued
 statement must select that same domain. Transactions and commit progress are replicated and
 resumable, but their content is deliberately limited to that domain's model mutations, domain
-configuration/lifecycle, `CREATE RESOURCE`, and `RESET WASM PROCESSOR ... STATE`. Keep `CREATE DOMAIN`,
-`CREATE USER`, other read-only statements, subscriptions, `USE`, resource uploads, and node
-administration outside the transaction. Use `SHOW TRANSACTIONS;` when transaction state or a
-retained outcome needs
+configuration/lifecycle, `CREATE RESOURCE`, and `RESET WASM PROCESSOR ... STATE`. Keep
+`CREATE DOMAIN`, `CREATE USER`, other read-only statements, subscriptions, `USE`,
+`ATTACH DOMAIN CLOCK`/`DETACH DOMAIN CLOCK`, resource uploads, and node administration outside the
+transaction. Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
 verification. Use `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT | JSON ];` to
 explain what an open, committing, or retained transaction requires and changes before or after
 `COMMIT`. These two reads are allowed while a transaction is open, are sent on their own, and neither

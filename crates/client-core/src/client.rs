@@ -2,19 +2,21 @@
 //! holds.
 //!
 //! - **Owns.** Sending requests on the current exchange, the redirects, retries and reconnects a
-//!   reply calls for, the session's selected domain and transaction binding, and the statements the
-//!   client serves itself.
+//!   reply calls for, the session's selected domain and transaction binding, the statements the
+//!   client serves itself, and attaching the domain clocks it follows again on a new exchange.
 //! - **Depends on.** The exchange dispatcher, the connector, the wire contract, and the language
 //!   layer for splitting and classifying statements.
 //! - **Must not know.** How a frame is routed off an exchange.
 
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc as SharedClientArc, time::Duration};
 
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    AttachDisposition, AttachTransactionRequest, ClientMessage, ClientRequest, CommandRequest,
-    DomainInfo, InspectTransactionRequest, InspectionOutcome, Leadership, ReplyBody,
-    SubscribeRequest, SubscriptionType, UnsubscribeRequest,
+    AttachDisposition, AttachDomainClockRequest, AttachTransactionRequest, ClientMessage,
+    ClientRequest, CommandRequest, DetachDomainClockRequest, DomainClockAttachOutcome,
+    DomainClockDetachOutcome, DomainInfo, InspectTransactionRequest, InspectionOutcome, Leadership,
+    ReplyBody, SubscribeRequest, SubscriptionType, UnsubscribeRequest,
 };
 use nervix_models::{
     CommandExecutionReference, CreateSubscription, DomainName, ResourceUploadIdentity,
@@ -34,6 +36,7 @@ use url::Url;
 use crate::events::{AutocompleteOutcome, AutocompleteSuggestion};
 use crate::{
     connection::{ConnectOptions, GrpcConnector, ServerDirectory, TlsRequirement},
+    domain_clock::{AttachedDomainClock, DomainClockEvent},
     error::{ClientError, EventStreamKind, RequestKind},
     events::{ServerEvent, SubscriptionEvent, SubscriptionRequest},
     exchange::{EventQueueError, Exchange, ExchangeRequests, SESSION_LIMITS, SessionEvents},
@@ -119,11 +122,15 @@ enum StatementRoute {
     Command,
 }
 
-/// A statement the client serves without sending it.
+/// A statement the client serves itself, without sending it as a command.
 #[derive(Debug, Clone)]
 enum LocalStatement {
     UseDomain(DomainName),
     ListDomains,
+    /// Sent as an attach request for the active domain.
+    AttachDomainClock,
+    /// Sent as a detach request for the active domain.
+    DetachDomainClock,
     UploadResource(UploadResource),
 }
 
@@ -160,6 +167,8 @@ impl StatementRoute {
         match parsed.statement {
             ClientStatement::UseDomain(domain) => Self::Local(LocalStatement::UseDomain(domain)),
             ClientStatement::ListDomains => Self::Local(LocalStatement::ListDomains),
+            ClientStatement::AttachDomainClock => Self::Local(LocalStatement::AttachDomainClock),
+            ClientStatement::DetachDomainClock => Self::Local(LocalStatement::DetachDomainClock),
             ClientStatement::UploadResource(upload) => {
                 Self::Local(LocalStatement::UploadResource(upload))
             }
@@ -651,6 +660,32 @@ impl Client {
                     &domains,
                 )))
             }
+            StatementRoute::Local(LocalStatement::AttachDomainClock) => {
+                let Some(domain) = execution.domain.clone() else {
+                    return Err(ClientError::NoActiveDomain);
+                };
+                let request = ClientRequest::AttachDomainClock(AttachDomainClockRequest { domain });
+                match self.request(request, None).await? {
+                    ReplyBody::DomainClockAttach(outcome) => Ok(CommandOutcome::from(outcome)),
+                    other => Err(ClientError::unexpected_reply(
+                        RequestKind::AttachDomainClock,
+                        other,
+                    )),
+                }
+            }
+            StatementRoute::Local(LocalStatement::DetachDomainClock) => {
+                let Some(domain) = execution.domain.clone() else {
+                    return Err(ClientError::NoActiveDomain);
+                };
+                let request = ClientRequest::DetachDomainClock(DetachDomainClockRequest { domain });
+                match self.request(request, None).await? {
+                    ReplyBody::DomainClockDetach(outcome) => Ok(CommandOutcome::from(outcome)),
+                    other => Err(ClientError::unexpected_reply(
+                        RequestKind::DetachDomainClock,
+                        other,
+                    )),
+                }
+            }
             StatementRoute::Local(LocalStatement::UploadResource(upload)) => {
                 let Some(domain) = execution.domain.clone() else {
                     return Err(ClientError::NoActiveDomain);
@@ -1121,6 +1156,140 @@ impl Client {
         }
     }
 
+    /// Attaches the session to the clock of `domain`, which it follows until it detaches, even
+    /// across reconnects.
+    ///
+    /// An attached outcome carries the clock as the serving node has it installed.
+    /// [`Client::domain_clock`] answers from the latest clock from then on, and
+    /// [`Client::next_domain_clock_event`] reports every change the server sends after the reply.
+    pub async fn attach_domain_clock(
+        &self,
+        domain: DomainName,
+    ) -> error_stack::Result<DomainClockAttachOutcome, ClientError> {
+        let request = ClientRequest::AttachDomainClock(AttachDomainClockRequest { domain });
+        match self.clock_request(request).await? {
+            ReplyBody::DomainClockAttach(outcome) => Ok(outcome),
+            other => Err(Report::new(ClientError::unexpected_reply(
+                RequestKind::AttachDomainClock,
+                other,
+            ))),
+        }
+    }
+
+    /// Detaches the session from the clock of `domain`. Nothing about the domain's clock follows
+    /// the reply.
+    pub async fn detach_domain_clock(
+        &self,
+        domain: DomainName,
+    ) -> error_stack::Result<DomainClockDetachOutcome, ClientError> {
+        let request = ClientRequest::DetachDomainClock(DetachDomainClockRequest { domain });
+        match self.clock_request(request).await? {
+            ReplyBody::DomainClockDetach(outcome) => Ok(outcome),
+            other => Err(Report::new(ClientError::unexpected_reply(
+                RequestKind::DetachDomainClock,
+                other,
+            ))),
+        }
+    }
+
+    /// The latest clock of a domain the session follows, with the arithmetic that projects it.
+    /// `None` when the session does not follow the domain's clock.
+    pub fn domain_clock(&self, domain: &DomainName) -> Option<AttachedDomainClock> {
+        self.inner.events.sinks.clocks.latest(domain)
+    }
+
+    /// Waits for the next event about the domain clocks the session follows.
+    ///
+    /// Events are coalesced per domain, so a caller that reads late receives the newest clock of
+    /// each domain rather than every change in between. When the session holding an attachment
+    /// ends, this reopens a session, which attaches every followed clock again. A client that
+    /// follows no clock waits until it attaches to one.
+    pub async fn next_domain_clock_event(
+        &self,
+    ) -> error_stack::Result<DomainClockEvent, ClientError> {
+        let clocks = &self.inner.events.sinks.clocks;
+        loop {
+            tokio::task::consume_budget().await;
+            let mut changed = clocks.watch();
+            if let Some(event) = clocks.take_event() {
+                return Ok(event);
+            }
+            if clocks.awaits_restoration() {
+                let exchange = self.inner.exchange.lock().await.requests();
+                let open = exchange.pending.lock().is_open();
+                if !open {
+                    let recovered = self
+                        .recover_session(RecoveryMode::IfClosed)
+                        .await
+                        .map_err(Report::new)?;
+                    if let SessionRecovery::Unavailable = recovered {
+                        return Err(Report::new(ClientError::SessionClosed));
+                    }
+                    continue;
+                }
+            }
+            changed
+                .changed()
+                .await
+                .assured("the client holds the sender of its own clock notifications");
+        }
+    }
+
+    /// Sends a domain clock request, reopening a lost session and sending the request again
+    /// within the retry deadline.
+    async fn clock_request(
+        &self,
+        request: ClientRequest,
+    ) -> error_stack::Result<ReplyBody, ClientError> {
+        let answered = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
+            for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+                tokio::task::consume_budget().await;
+                match self.request(request.clone(), None).await {
+                    Ok(body) => return Ok(body),
+                    Err(error) if error.retryable_session_failure() => {
+                        match self.recover_session(RecoveryMode::IfClosed).await? {
+                            SessionRecovery::Ready => {}
+                            SessionRecovery::Unavailable => return Err(error),
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            // Only a session that closed again on the last attempt leaves the loop.
+            Err(ClientError::SessionClosed)
+        })
+        .await;
+        match answered {
+            Ok(result) => result.map_err(Report::new),
+            Err(_) => Err(Report::new(ClientError::RetryDeadline)),
+        }
+    }
+
+    /// Attaches every domain clock the client follows on a new exchange before the exchange is
+    /// published, so no other request of the client precedes those attachments on it.
+    ///
+    /// No caller waits for these replies. The exchange reader applies each one to the followed
+    /// clocks as it arrives, which moves the attachment to the new exchange.
+    async fn restore_domain_clocks(&self, exchange: &ExchangeRequests) {
+        for domain in self.inner.events.sinks.clocks.followed_domains() {
+            tokio::task::consume_budget().await;
+            let Some(registered) = exchange.register() else {
+                return;
+            };
+            let message = ClientMessage {
+                request_id: registered.request_id,
+                request: ClientRequest::AttachDomainClock(AttachDomainClockRequest { domain }),
+            };
+            let frame = message.encode(&SESSION_LIMITS).assured(
+                "an attach request names one domain, far below the session limits a client uses",
+            );
+            drop(registered);
+            if exchange.frames.send(frame).await.is_err() {
+                return;
+            }
+        }
+    }
+
     /// Waits for the next complete domain list the server observes. Only the latest list is kept,
     /// so a caller that reads late gets the current list rather than every list in between.
     pub async fn next_domain_list(&self) -> Result<Vec<DomainInfo>, ClientError> {
@@ -1241,6 +1410,7 @@ impl Client {
         )
         .await?;
         self.inner.servers.lock().await.connected(server);
+        self.restore_domain_clocks(&exchange.requests()).await;
         let previous = std::mem::replace(&mut *self.inner.exchange.lock().await, exchange);
         previous.close().await;
         let exchange = self.inner.exchange.lock().await;

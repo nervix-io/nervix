@@ -1979,6 +1979,22 @@ fn apply_event(
             append_subscription_line(signals.subscription_tabs, &ended.subscription, line);
             SessionStep::Continue
         }
+        ServerEvent::DomainClockObserved(observed) => {
+            let line = TermLine::info(format!(
+                "domain clock [{}]: {}",
+                observed.domain, observed.clock
+            ));
+            signals.terminal_lines.update(|lines| lines.push(line));
+            SessionStep::Continue
+        }
+        ServerEvent::DomainClockAttachmentEnded(ended) => {
+            let line = TermLine::error(format!(
+                "domain clock [{}]: the attachment ended because {}",
+                ended.domain, ended.reason
+            ));
+            signals.terminal_lines.update(|lines| lines.push(line));
+            SessionStep::Continue
+        }
         ServerEvent::SessionEnding(ending) => match ending.reason {
             SessionEndReason::ServerShuttingDown => {
                 signals.terminal_lines.update(|lines| {
@@ -6947,17 +6963,20 @@ impl TermLineKind {
 #[cfg(test)]
 mod tests {
     use leptos::prelude::Owner;
-    use nervix_client_wire::{DomainList, DomainsObserved, OutcomeOrigin, Reply, SourceSpan};
+    use nervix_client_wire::{
+        DomainClockAttachmentEndReason, DomainClockAttachmentEnded, DomainClockObserved,
+        DomainList, DomainsObserved, OutcomeOrigin, Reply, SourceSpan,
+    };
     use nervix_dataflow_graph::{
         DataflowBranchStatistics, DataflowEdge, DataflowNode, DataflowProcessorKind,
     };
     use nervix_models::{
-        ClusterNodeName, DomainClockPeriod, DomainClockSkew, ImpactPlanningBasis,
-        ImpactReportCompleteness, ModelName, NodeRef, ResourceName, Timestamp,
-        TransactionImpactReport, TransactionInspection, TransactionInspectionRejection,
-        TransactionInspectionTarget, TransactionLifecycle, TransactionOperationAdmission,
-        TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity,
-        TransactionStatus,
+        ClusterNodeName, DomainClockObservation, DomainClockObservedState, DomainClockPeriod,
+        DomainClockSkew, ImpactPlanningBasis, ImpactReportCompleteness, ModelName, NodeRef,
+        ResourceName, Timestamp, TransactionImpactReport, TransactionInspection,
+        TransactionInspectionRejection, TransactionInspectionTarget, TransactionLifecycle,
+        TransactionOperationAdmission, TransactionOperationNumber, TransactionPosition,
+        TransactionPreviewIdentity, TransactionStatus,
     };
 
     use super::*;
@@ -7658,6 +7677,45 @@ mod tests {
                     .line
                     .text
                     .contains("delete was rejected")
+            );
+        });
+    }
+
+    #[test]
+    fn domain_clock_frames_are_written_to_the_event_log() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let state = RwSignal::new(ConsoleConnectionState::Connected);
+            let mut requests = SessionRequests::new();
+            let domain = DomainName::parse("tenant").assured("the test domain name is valid");
+            let observed = ServerEvent::DomainClockObserved(DomainClockObserved {
+                domain: domain.clone(),
+                clock: DomainClockObservation {
+                    generation: 2,
+                    state: DomainClockObservedState::Stopped,
+                },
+            });
+            let step = apply_event(signals, state, &mut requests, observed);
+            assert!(matches!(step, SessionStep::Continue));
+            let ended = ServerEvent::DomainClockAttachmentEnded(DomainClockAttachmentEnded {
+                domain,
+                reason: DomainClockAttachmentEndReason::DomainRemoved,
+            });
+            let step = apply_event(signals, state, &mut requests, ended);
+            assert!(matches!(step, SessionStep::Continue));
+
+            let lines = signals.terminal_lines.get_untracked().into_lines();
+            let texts = lines
+                .iter()
+                .map(|entry| entry.line.text.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                texts,
+                [
+                    "domain clock [tenant]: generation 2, stopped",
+                    "error: domain clock [tenant]: the attachment ended because the domain no \
+                     longer exists on the serving node",
+                ]
             );
         });
     }

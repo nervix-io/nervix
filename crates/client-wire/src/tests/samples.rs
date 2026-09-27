@@ -8,29 +8,31 @@ use nervix_models::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
     AffectedTopology, AttributedGateBoundary, AttributedImpactNode, BranchKeyFingerprint,
     CanonicalImpactSet, ConcreteBranchCoverage, ConfigurationImpact, ConfigurationTransition,
-    DomainLifecycleAction, DomainLifecycleImpact, ExecutionStepImpactReport, ExecutionStepOutcome,
-    ForceFlushImpact, ImpactAttribution, ImpactDiagnostic, ImpactDiagnosticKind, ImpactEdgeKind,
-    ImpactEffects, ImpactGateBoundary, ImpactNodeCoverage, ImpactPlanningBasis,
-    ImpactReportCompleteness, ImpactTopology, ImpactTopologyEdge, ModelChangeAspect, ModelKind,
-    ModelName, NodeRef, OperationImpactReason, OperationImpactReport, OwnershipMoveImpact,
-    ParseAsType, PauseRequirement, PlannedExecutionStepImpact, QuiesceSubgraph, QuiescenceOutcome,
-    RebuildImpact, RebuildReason, RequestedResourceVersion, ResourceBindingImpact,
-    ResourceCatalogAction, ResourceCatalogImpact, SchemaField, StatePurge, StateResetImpact,
-    Timestamp, TransactionImpactReport, TransactionInspectionTarget, TransactionLifecycle,
-    TransactionOperation, TransactionOperationAdmission, TransactionOperationRange,
-    TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
+    DomainClockObservation, DomainClockObservedState, DomainClockPeriod, DomainClockSkew,
+    DomainClockState, DomainLifecycleAction, DomainLifecycleImpact, DomainTimeRate,
+    ExecutionStepImpactReport, ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution,
+    ImpactDiagnostic, ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactGateBoundary,
+    ImpactNodeCoverage, ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology,
+    ImpactTopologyEdge, ModelChangeAspect, ModelKind, ModelName, NodeRef, OperationImpactReason,
+    OperationImpactReport, OwnershipMoveImpact, PacedDomainClock, ParseAsType, PauseRequirement,
+    PlannedExecutionStepImpact, QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason,
+    RequestedResourceVersion, ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact,
+    SchemaField, StatePurge, StateResetImpact, Timestamp, TransactionImpactReport,
+    TransactionInspectionTarget, TransactionLifecycle, TransactionOperation,
+    TransactionOperationAdmission, TransactionOperationRange, TransactionPosition,
+    TransactionPreviewIdentity, TransactionStatus,
 };
 use url::Url;
 
 use super::fixtures::{name, non_zero, operation, reference, request};
 use crate::{
-    AttachTransactionRequest, CancelRequest, CellWriter, ChoiceLookupRequest, ChoiceSelection,
-    ChoiceTarget, ChoiceValue, ClientMessage, ClientRequest, CommandDisposition, CommandOutcome,
-    CommandRequest, Diagnostic, EncodedFrame, InspectTransactionRequest, LeaderEndpoints,
-    LeaderRedirect, OutcomeOrigin, RowBranch, RowSchema, SelectDomainRequest, ServerFrame,
-    SessionLimits, SourceSpan, StatementDisposition, StatementOutcome, SubscribeRequest,
-    SubscriptionHandle, SubscriptionRowsEncoder, SubscriptionType, SuggestRequest,
-    UnsubscribeRequest, WireEncodeError,
+    AttachDomainClockRequest, AttachTransactionRequest, CancelRequest, CellWriter,
+    ChoiceLookupRequest, ChoiceSelection, ChoiceTarget, ChoiceValue, ClientMessage, ClientRequest,
+    CommandDisposition, CommandOutcome, CommandRequest, DetachDomainClockRequest, Diagnostic,
+    EncodedFrame, InspectTransactionRequest, LeaderEndpoints, LeaderRedirect, OutcomeOrigin,
+    RowBranch, RowSchema, SelectDomainRequest, ServerFrame, SessionLimits, SourceSpan,
+    StatementDisposition, StatementOutcome, SubscribeRequest, SubscriptionHandle,
+    SubscriptionRowsEncoder, SubscriptionType, SuggestRequest, UnsubscribeRequest, WireEncodeError,
 };
 
 pub(crate) fn leader() -> LeaderEndpoints {
@@ -159,6 +161,12 @@ pub(crate) fn client_messages() -> Vec<ClientMessage> {
             .with_page(2, Some("choice-page-two".to_string()))
             .assured("two choices fit a bounded page"),
         ),
+        ClientRequest::AttachDomainClock(AttachDomainClockRequest {
+            domain: name("simulation"),
+        }),
+        ClientRequest::DetachDomainClock(DetachDomainClockRequest {
+            domain: name(&"d".repeat(128)),
+        }),
     ];
     requests
         .into_iter()
@@ -168,6 +176,46 @@ pub(crate) fn client_messages() -> Vec<ClientMessage> {
             request: request_body,
         })
         .collect()
+}
+
+/// A domain clock in every installation state, at the edges of each value: the generation before
+/// the first START and after the last, both signed-nanosecond endpoints, the shortest and longest
+/// period, zero and maximal skew, and the smallest and largest time rate.
+pub(crate) fn domain_clock_observations() -> Vec<DomainClockObservation> {
+    let paced = |period: u64, skew: u64, anchor: i64, origin: i64, rate: f64| {
+        DomainClockObservedState::Paced(PacedDomainClock {
+            period: DomainClockPeriod::from_nanos(non_zero(period)),
+            skew: DomainClockSkew::from_nanos(skew),
+            mapping: DomainClockState::new(
+                Timestamp::from_unix_nanos(anchor),
+                Timestamp::from_unix_nanos(origin),
+                DomainTimeRate::try_from(rate).assured("the sample rate is positive and finite"),
+            ),
+        })
+    };
+    [
+        (0, DomainClockObservedState::Stopped),
+        (1, DomainClockObservedState::Uninstalled),
+        (2, DomainClockObservedState::Unpaced),
+        (
+            3,
+            paced(
+                100_000_000,
+                10_000_000,
+                1_790_535_000_123_456_789,
+                1_893_456_000_000_000_000,
+                2.0,
+            ),
+        ),
+        (u64::MAX, paced(1, 0, i64::MIN, i64::MAX, f64::MIN_POSITIVE)),
+        (
+            u64::MAX,
+            paced(u64::MAX, u64::MAX, i64::MAX, i64::MIN, f64::MAX),
+        ),
+    ]
+    .into_iter()
+    .map(|(generation, state)| DomainClockObservation { generation, state })
+    .collect()
 }
 
 pub(crate) fn command_outcome(disposition: CommandDisposition) -> CommandOutcome {

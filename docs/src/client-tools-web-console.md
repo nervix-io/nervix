@@ -207,6 +207,11 @@ The console sends a statement whether or not a domain is selected, and the serve
 it needs one: `SHOW CLUSTER STATUS` or `CREATE DOMAIN` runs with no domain selected, while a
 statement that acts on a domain fails with `no active domain selected`.
 
+The console session does not follow domain clocks. `ATTACH DOMAIN CLOCK` and `DETACH DOMAIN CLOCK`
+typed into the REPL reach the server as commands, which refuses them as session-local; follow a
+domain clock with the [command line client](client-tools-cli.md#session-and-transaction-statements)
+or the [Rust client library](client-library.md#following-a-domain-clock).
+
 `BEGIN` requires a selected domain that already exists and binds the transaction to it. The
 console follows the transaction's domain, so attaching switches the domain selector to it.
 `DESCRIBE TRANSACTION` prints the open transaction's impact report between queued statements, and

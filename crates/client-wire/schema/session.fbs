@@ -81,7 +81,8 @@ table LeaderRedirect {
   leader: LeaderEndpoints;
 }
 
-/// A request failed definitively. The enclosing outcome's message and diagnostics say why.
+/// A request failed definitively. The enclosing outcome's message, and its diagnostics where it
+/// carries them, say why.
 table RequestFailed {}
 
 /// Whether an outcome was produced now or recovered from the durable record of an earlier
@@ -1099,6 +1100,53 @@ table RowBatch {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Domain clocks
+// ---------------------------------------------------------------------------------------------
+//
+// A session attached to a domain's clock receives the clock as the serving node has it installed:
+// the START generation and the state of that generation's installation. Timestamps are signed
+// nanoseconds since the Unix epoch in UTC.
+
+/// The generation is stopped and runs no domain work.
+table StoppedDomainClock {}
+
+/// The generation is paced and running, and the serving node lacks its committed mapping or an
+/// assigned clock authority, so its clock cannot be read.
+table UninstalledDomainClock {}
+
+/// The generation reads actual UTC.
+table UnpacedDomainClock {}
+
+/// The generation projects UTC through its committed mapping:
+/// logical = logical_origin + floor(max(0, utc - utc_anchor) * time_rate).
+table PacedDomainClock {
+  /// The tick period. Non-zero.
+  period_nanos: ulong;
+  /// The inclusive admission tolerance around each reached tick center.
+  skew_nanos: ulong;
+  /// The logical instant the generation started at.
+  logical_origin_unix_nanos: long;
+  /// The UTC instant the generation was established at.
+  utc_anchor_unix_nanos: long;
+  /// Required. Positive and finite.
+  time_rate: double = null;
+}
+
+union DomainClockObservedState {
+  StoppedDomainClock,
+  UninstalledDomainClock,
+  UnpacedDomainClock,
+  PacedDomainClock
+}
+
+/// A domain clock as the serving node has it installed.
+table DomainClockObservation {
+  /// The number of STARTs the domain has committed; zero before its first.
+  generation: ulong;
+  state: DomainClockObservedState (required);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Client requests
 // ---------------------------------------------------------------------------------------------
 
@@ -1184,6 +1232,16 @@ table CancelRequest {
   target_request_id: ulong;
 }
 
+/// Attaches the session to a domain's clock.
+table AttachDomainClockRequest {
+  domain: string (required);
+}
+
+/// Detaches the session from a domain's clock.
+table DetachDomainClockRequest {
+  domain: string (required);
+}
+
 union ClientRequest {
   CommandRequest,
   SuggestRequest,
@@ -1194,7 +1252,9 @@ union ClientRequest {
   SubscribeRequest,
   UnsubscribeRequest,
   CancelRequest,
-  ChoiceLookupRequest
+  ChoiceLookupRequest,
+  AttachDomainClockRequest,
+  DetachDomainClockRequest
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1570,6 +1630,50 @@ table TransferPart {
   chunk: [ubyte] (required);
 }
 
+/// The session is attached, and the domain's clock is as the serving node has it installed.
+table DomainClockAttached {
+  domain: string (required);
+  clock: DomainClockObservation (required);
+}
+
+/// The session already follows the domain's clock. Nothing changed.
+table DomainClockAlreadyAttached {
+  domain: string (required);
+}
+
+union DomainClockAttachDisposition {
+  DomainClockAttached,
+  DomainClockAlreadyAttached,
+  DomainNotFound,
+  RequestFailed
+}
+
+table DomainClockAttachOutcome {
+  disposition: DomainClockAttachDisposition (required);
+  message: string (required);
+}
+
+/// The session no longer follows the domain's clock. No frame about it follows this reply.
+table DomainClockDetached {
+  domain: string (required);
+}
+
+/// The session does not follow the domain's clock. Nothing changed.
+table DomainClockNotAttached {
+  domain: string (required);
+}
+
+union DomainClockDetachDisposition {
+  DomainClockDetached,
+  DomainClockNotAttached,
+  RequestFailed
+}
+
+table DomainClockDetachOutcome {
+  disposition: DomainClockDetachDisposition (required);
+  message: string (required);
+}
+
 union ReplyBody {
   CommandOutcome,
   AttachOutcome,
@@ -1583,7 +1687,9 @@ union ReplyBody {
   RequestCancelled,
   RequestRejected,
   TransferPart,
-  ChoiceOutcome
+  ChoiceOutcome,
+  DomainClockAttachOutcome,
+  DomainClockDetachOutcome
 }
 
 table Reply {
@@ -1711,6 +1817,25 @@ table SubscriptionEnded {
   message: string (required);
 }
 
+/// The installation of an attached domain clock changed on the serving node.
+table DomainClockObserved {
+  domain: string (required);
+  clock: DomainClockObservation (required);
+}
+
+enum DomainClockAttachmentEndReason : ubyte {
+  /// The domain no longer exists on the serving node.
+  DomainRemoved
+}
+
+/// The server ended the session's attachment to a domain clock. It is the last frame about that
+/// attachment.
+table DomainClockAttachmentEnded {
+  domain: string (required);
+  /// Required.
+  reason: DomainClockAttachmentEndReason = null;
+}
+
 table ServerShuttingDown {}
 
 table ProtocolViolated {
@@ -1739,7 +1864,9 @@ union ServerBody {
   SubscriptionDeliveryLost,
   SubscriptionRowsSkipped,
   SubscriptionEnded,
-  SessionEnding
+  SessionEnding,
+  DomainClockObserved,
+  DomainClockAttachmentEnded
 }
 
 // ---------------------------------------------------------------------------------------------

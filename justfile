@@ -584,7 +584,8 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
         --package nervix-connector-prometheus \
         --package nervix-connector-sentry \
         --package nervix-connector-otel \
-        --package nervix-connector-iceberg
+        --package nervix-connector-iceberg \
+        --package nervix-connector-rabbitmq
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
     run_scenario() {
         cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
@@ -595,6 +596,7 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
     run_scenario tests/features/runtime/sentry_emission.feature 'Sentry.*publishes'
     run_scenario tests/features/runtime/otel_emission.feature 'OTEL.*metric.*HTTP'
     run_scenario tests/features/runtime/iceberg_emission.feature 'DNS.*fixture|Iceberg.*holds.*ACK'
+    run_scenario tests/features/runtime/rabbitmq_dns_resolution.feature 'RabbitMQ|AMQPS'
     just coverage-dns-clients-report {{ quote(output) }}
 
 # Export the profiles collected by `coverage-dns-clients` without rebuilding its test binaries.
@@ -607,7 +609,8 @@ coverage-dns-clients-report output="target/dns-clients.lcov":
         --package nervix-connector-prometheus \
         --package nervix-connector-sentry \
         --package nervix-connector-otel \
-        --package nervix-connector-iceberg
+        --package nervix-connector-iceberg \
+        --package nervix-connector-rabbitmq
 
 # Measure the Shuttle-only test paths, which production-mode workspace coverage cannot compile.
 # The same checks run under ordinary and nondeterminism-detection schedules, with one test thread
@@ -900,11 +903,11 @@ audit:
 ratchet *args:
     python3 scripts/ratchet.py {{ args }}
 
-validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict validate-http-dns-dependencies
+validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict validate-dns-dependencies
 
 # Check each connector as a consumer root. Cargo tree limits feature unification to that root;
 # the full workspace build alone can hide a missing resolver feature in a leaf connector.
-validate-http-dns-dependencies:
+validate-dns-dependencies:
     #!/usr/bin/env bash
     set -euo pipefail
     for package in nervix-connector-http nervix-connector-prometheus nervix-connector-sentry nervix-connector-otel nervix-connector-iceberg; do
@@ -924,8 +927,35 @@ validate-http-dns-dependencies:
             exit 1
         fi
     done
+    # RabbitMQ resolves through the node's Hickory resolver and hands Lapin the transport it
+    # established. Neither the connector on its own nor the server may select the process-wide
+    # Hickory resolver behind Lapin's own feature, and Lapin's TLS stays on AWS-LC.
+    for package in nervix-connector-rabbitmq nervix-server; do
+        graph="$(cargo tree --package "${package}" --edges normal --format '{p} {f}' --prefix none)"
+        if ! rg -q '^nervix-dns v' <<< "${graph}" || \
+            ! rg -q '^hickory-resolver v0\.26\.[0-9]+ .*tokio' <<< "${graph}"; then
+            echo "${package} lacks the node resolver RabbitMQ connects through" >&2
+            exit 1
+        fi
+        if rg -q '^(lapin|amq-protocol|amq-protocol-tcp|async-rs) v[^ ]+ .*hickory-dns' <<< "${graph}"; then
+            echo "${package} selected Lapin's process-wide Hickory resolver" >&2
+            exit 1
+        fi
+        if ! rg -q '^tcp-stream v[^ ]+ .*rustls--aws_lc_rs' <<< "${graph}" || \
+            rg -q '^tcp-stream v[^ ]+ .*rustls--ring' <<< "${graph}"; then
+            echo "${package} does not select AWS-LC for RabbitMQ TLS" >&2
+            exit 1
+        fi
+    done
+    # MongoDB keeps its driver's Hickory SRV and TXT discovery; the driver still resolves the
+    # addresses it connects to through Tokio.
+    graph="$(cargo tree --package nervix-connector-mongodb --edges normal --format '{p} {f}' --prefix none)"
+    if ! rg -q '^mongodb v3\.[0-9]+\.[0-9]+ .*dns-resolver' <<< "${graph}"; then
+        echo "nervix-connector-mongodb lacks MongoDB's Hickory SRV and TXT discovery" >&2
+        exit 1
+    fi
 
-validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict validate-http-dns-dependencies
+validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict validate-dns-dependencies
 
 # Shuttle's runner and synchronization wrappers belong only to modeled builds. Production package
 # graphs use the real synchronization crates directly and contain no Shuttle package.
