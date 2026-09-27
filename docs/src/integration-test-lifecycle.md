@@ -35,6 +35,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Scenario steps and hooks | One runner task: Cucumber polls every running scenario, and the suite watchdog around them, from the task the binary's main thread blocks on | `tests/scenarios.rs` |
 | In-process nodes | One Tokio task per node on the binary's multi-threaded runtime, which has one worker thread per CPU | The cluster fixture, `tests/common/cluster.rs` |
 | Server processes | Child processes executing the `nervix-server` binary | The server-process fixture, `tests/common/server_process.rs` |
+| Real-process cluster | Three server children with separate durable stores, ports and identities under one test certificate authority | `tests/common/server_process_cluster.rs`, using the server-process fixture |
 | CLI sessions | Child processes executing `nervix-cli`; a scenario reader retains at most 256 output lines | The scenario world, `tests/scenarios.rs` |
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
@@ -87,6 +88,10 @@ The boundary between them is kept in four places.
   phases under its configured deadline. Registering termination signals, the forced-exit supervisor,
   and exit statuses belong to the process boundary, which only the server-process fixture crosses.
   See [Shutdown And Recovery](./shutdown.md#stop-requests).
+  A real-process cluster can deliver `SIGKILL` to all three voters before waiting for any child to
+  exit. On restart it launches all existing stores before awaiting readiness, so no one voter is
+  required to answer without the persisted quorum. Each node must then report the same leader and
+  all three voters through its public status endpoint.
 - **Test defaults.** An in-process node's shutdown timeout defaults to four minutes rather than the
   product's `50s`, which leaves the bounded shutdown phases scenarios configure by default room to
   finish, so only a scenario about the deadline reaches it. A server process runs with the product
@@ -112,6 +117,7 @@ second module runs the operation, it is named after the owner.
 | Stopping a scenario's HTTP receivers | `http_receiver.rs`, run by `tests/scenarios.rs` | 6 seconds for every receiver together: 5 for its connections, 1 for its accept loop | Still-running connections, then the accept loop, are aborted and joined and recorded as forced |
 | An HTTP receiver wait: captured requests or a recorded fault | `http_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
 | A server process's readiness, exit, or log line | `server_process.rs` | 120, 120, and 60 seconds | The step fails, quoting the last 80 lines of the process log |
+| Convergence of a restarted real-process cluster | `server_process_cluster.rs` | 120 seconds, with each status request capped at 10 seconds | The step fails with the last status or typed request failure from every member |
 | A one-shot CLI command or a subscription output assertion | `tests/scenarios.rs` | 60 seconds for a command, 30 seconds for an expected subscription line | The step fails with the process result or retained output lines |
 | One draw from the port pool | `port_pool.rs` | 65,536 consecutive draws that land on reserved ports | The draw fails with the pool exhausted |
 | The whole scenario run | `suite_watchdog.rs` | 37 minutes, injectable | Every active scenario is reported, live nodes get a 60-second cleanup window, and the process exits `124` |
@@ -427,7 +433,8 @@ teardown started      release paused health responses, domain-clock progress pau
 teardown diagnostics  every node's status at once within 10 s; the scenario's context
      |
 stopping              abort CLI output readers and kill their child processes;
-     |                drop HTTP load, held uploads, server processes, and observers;
+     |                drop HTTP load, held uploads, server processes and process clusters,
+     |                and observers;
      |                stop HTTP receivers within 6 s; close the browser and the session;
      |                stop the cluster within 60 s;
      |                release proxies, silent peers, permits, and fixture ports
@@ -486,8 +493,8 @@ Harness state goes back only after the tasks that used it have ended, so the nex
 finds a port, a fault, or a proxy taken.
 
 - CLI output readers are aborted and their `kill_on_drop` child processes are dropped before node
-  teardown. Background HTTP load, held uploads, and server processes are also dropped first.
-  Dropping a server process kills it and returns its ports.
+  teardown. Background HTTP load, held uploads, server processes and real-process clusters are
+  also dropped first. Dropping any server child kills it and returns its ports.
 - Broker and syslog observers, HTTP receivers, the browser, and the session are closed before the
   cluster stops.
 - The TCP proxies and silent interconnect peers a scenario placed in front of its nodes are released

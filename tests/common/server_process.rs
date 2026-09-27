@@ -230,6 +230,8 @@ struct ServerProcessConfiguration {
     launch: ServerProcessLaunch,
     options: Vec<ServerProcessOption>,
     ports: ServerProcessPorts,
+    node_id: String,
+    bootstrap_host: Option<String>,
     certificate_authority: PathBuf,
     certificate: PathBuf,
     private_key: PathBuf,
@@ -261,7 +263,7 @@ impl ServerProcessConfiguration {
             .arg("--cluster-id")
             .arg(CLUSTER_ID)
             .arg("--node-id")
-            .arg(NODE_ID)
+            .arg(&self.node_id)
             .arg("--interconnect-listen-addr")
             .arg(loopback(self.ports.interconnect))
             .arg("--interconnect-advertise-addr")
@@ -272,7 +274,6 @@ impl ServerProcessConfiguration {
             .arg(&self.certificate)
             .arg("--interconnect-tls-key")
             .arg(&self.private_key)
-            .arg("--allow-bootstrap")
             .arg("--default-user")
             .arg(TEST_AUTH_USERNAME)
             .arg("--init-default-user-password")
@@ -285,6 +286,11 @@ impl ServerProcessConfiguration {
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(error_log))
             .kill_on_drop(true);
+        if let Some(bootstrap_host) = &self.bootstrap_host {
+            command.arg("--cluster-bootstrap-host").arg(bootstrap_host);
+        } else {
+            command.arg("--allow-bootstrap");
+        }
         for option in &self.options {
             option.apply_to(&mut command);
         }
@@ -322,9 +328,21 @@ impl ServerProcess {
             .prefix("nervix-server-process-")
             .tempdir()?;
         let certificate_authority = InterconnectTestCa::new(&root)?;
+        Self::start_cluster_member(root, &certificate_authority, NODE_ID, None, launch, options)
+    }
+
+    /// Starts one independently persisted member under a shared cluster certificate authority.
+    pub(crate) fn start_cluster_member(
+        root: TempDir,
+        certificate_authority: &InterconnectTestCa,
+        node_id: &str,
+        bootstrap_host: Option<&str>,
+        launch: ServerProcessLaunch,
+        options: &[ServerProcessOption],
+    ) -> io::Result<Self> {
         let (certificate, private_key) = certificate_authority.issue_node_with_identity(
             CLUSTER_ID,
-            NODE_ID,
+            node_id,
             TestCertificateValidity::Current,
             root.path(),
         )?;
@@ -334,6 +352,8 @@ impl ServerProcess {
             launch,
             options: options.to_vec(),
             ports: ServerProcessPorts::allocate()?,
+            node_id: node_id.to_string(),
+            bootstrap_host: bootstrap_host.map(str::to_string),
             certificate_authority: certificate_authority.path.clone(),
             certificate,
             private_key,
@@ -352,6 +372,13 @@ impl ServerProcess {
 
     /// Reopens this process's existing database on the same isolated ports.
     pub(crate) async fn restart(&mut self) -> io::Result<()> {
+        self.restart_without_waiting()?;
+        self.wait_until_ready().await
+    }
+
+    /// Starts the next process before checking readiness. A whole cluster must bring up its
+    /// persisted voters together because one voter alone cannot form the old quorum.
+    pub(crate) fn restart_without_waiting(&mut self) -> io::Result<()> {
         if self.observe_exit()?.is_none() {
             return Err(io::Error::other(
                 "cannot restart nervix-server before its preceding process exits",
@@ -360,7 +387,7 @@ impl ServerProcess {
         self.log_start = std::fs::metadata(self.root.path().join("server.log"))?.len();
         self.child = self.configuration.spawn(self.root.path())?;
         self.exit_status = None;
-        self.wait_until_ready().await
+        Ok(())
     }
 
     /// Waits until the server answers an authenticated command, which also proves that its
@@ -397,7 +424,7 @@ impl ServerProcess {
         }
     }
 
-    fn status_endpoint(&self) -> StatusEndpoint {
+    pub(crate) fn status_endpoint(&self) -> StatusEndpoint {
         StatusEndpoint::new(
             SocketAddr::from((Ipv4Addr::LOCALHOST, self.configuration.ports.grpc)),
             StatusTransport::Plaintext,
@@ -723,6 +750,10 @@ impl ServerProcess {
 
     pub(crate) fn grpc_uri(&self) -> String {
         format!("http://{}", loopback(self.configuration.ports.grpc))
+    }
+
+    pub(crate) fn interconnect_endpoint(&self) -> String {
+        loopback(self.configuration.ports.interconnect)
     }
 
     pub(crate) fn observability_uri(&self, path: &str) -> String {
