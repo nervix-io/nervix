@@ -11,7 +11,7 @@ the resulting Arrow batches inside the graph.
 | Layer | Responsibility |
 | --- | --- |
 | Vocabulary and registry | Define and validate source capabilities, schemas, delivery modes, header availability, branches, and references before activation. The registry names no connector crate. |
-| Decision and composition | Convert a validated Model into a typed source or sink start plan once. The server is the composition root and the only crate that names every integration. It resolves client resource mounts before opening a connector. |
+| Decision and composition | Convert a validated Model into a typed source or sink start plan once. The registry decides every ingestor's source plan together with its codec and lowered routes, validating the source name, kind, client and route identities as one decision. The server is the composition root and the only crate that names every integration. It resolves client resource mounts before opening a connector. |
 | `nervix-connector` | Define source and sink operations, typed boundary values, and opaque host services. It knows neither a driver nor graph execution state. |
 | `nervix-connector-*` | Own one integration's driver, connection and configuration interpretation, transport headers, protocol acknowledgements, and per-record results. A crate implements the source contract, the sink contract, or both. |
 | Host data plane | Own tasks, intake and Arrow decoding, branch routing, ACK trees, quiesce, buffering, retry and flush scheduling, metrics, events, and drain. It executes typed plans; it does not parse NSPL or read a Model during data-plane execution. |
@@ -66,6 +66,13 @@ sequenceDiagram
 ```
 
 ## Source boundary
+
+Each domain revision installs its ingestor plans with its schedule. Building a domain, swapping or
+relocating an ingestor, starting the ingestors a runtime revision leaves missing, and placing Kafka
+domain offsets all read those same plans; none of them reads the ingestor's Model. Starting an
+ingestor binds its codec, node filter, routes and branched entrypoints against the installed domain
+surfaces and parses its declared acknowledgement before any connector instance opens, so a start
+that fails leaves nothing running.
 
 A source plan combines connector-specific settings, validated capabilities, and the host's ACK
 policy. Capabilities state whether header reads are available, which typed metadata scope exists,
@@ -277,7 +284,8 @@ drain boundary. This chapter does not redefine those output formats.
    public statement form. Keep external driver configuration raw only where pass-through is its
    intentional contract.
 2. Validate schema, reference, branch, header, quiesce, delivery, and external contract rules in
-   the registry. Convert the validated Model into one typed start-plan variant before execution.
+   the registry. Convert the validated Model into one typed start-plan variant before execution;
+   a source's variant belongs to the registry's ingestor planner.
 3. Add one crate under `crates/connectors/` with its ownership header, driver dependencies, and
    source or sink contract implementation. Add its composition mapping in the server; do not
    teach the contract or registry about the driver.

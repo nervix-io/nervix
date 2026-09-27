@@ -172,7 +172,7 @@ fn materialize_outputs(
     Ok(RelayProcessorOutputsTemplate { routes })
 }
 
-fn parse_branch_flush_policy(
+pub(in crate::runtime) fn parse_branch_flush_policy(
     kind: ModelKind,
     processor: &ModelName,
     route: &RelayName,
@@ -584,47 +584,60 @@ fn resolve_branch_relay_templates(
     Ok(templates)
 }
 
+/// Binds the branched entrypoint one planned ingestor or reingestor route feeds to the relay
+/// registry and services its records publish through.
+/// The template of the branched entrypoint one planned route of the ingestor or reingestor `kind`
+/// `identifier` feeds.
 pub(in crate::runtime) fn materialize_ingestor_route_template(
-    spec: &BranchedIngestorSpec,
-    model_index: &ModelIndex,
+    kind: ModelKind,
+    identifier: &ModelName,
+    route: &PlannedEntryRoute,
     relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
 ) -> error_stack::Result<IngestorRouteTemplate, PlanningError> {
-    let mut branch_relay_ids = HashSet::default();
-    branch_relay_ids.insert(spec.root_relay.clone());
-    let relays = resolve_branch_relay_templates(
-        spec.kind,
-        &spec.identifier,
-        branch_relay_ids,
-        model_index,
-        relay_registries,
-        relay_services,
-    )?;
+    let Some(registry) = relay_registries.get(&route.relay).cloned() else {
+        return Err(Report::new(PlanningError::MissingRelayRegistry {
+            kind,
+            node: identifier.clone(),
+            route: route.relay.clone(),
+        }));
+    };
+    let Some(services) = relay_services.get(&route.relay).cloned() else {
+        return Err(Report::new(PlanningError::MissingRelayServices {
+            kind,
+            node: identifier.clone(),
+            route: route.relay.clone(),
+        }));
+    };
+    let mut relays = HashMap::default();
+    relays.insert(
+        route.relay.clone(),
+        RelayProcessorRelayTemplate { registry, services },
+    );
+    let flush_policy =
+        parse_branch_flush_policy(kind, identifier, &route.relay, &route.flush_policy)?;
+    let mut branch = BranchInstanceTemplate {
+        revision: ProcessorPlanRevision::new(),
+        source_kind: kind,
+        source: RelayName::from(identifier),
+        root_relay: route.relay.clone(),
+        branch: None,
+        branch_ttl: None,
+        branch_max_instances: None,
+        error_policies: route.error_policies.clone(),
+        relays,
+        processors: HashMap::default(),
+        wasm_state_reset: None,
+    };
+    if let Some(retention) = route.branch.retention() {
+        branch.branch = Some(retention.branch.clone());
+        branch.branch_ttl = Some(retention.ttl);
+        branch.branch_max_instances = retention.max_instances;
+    }
     Ok(IngestorRouteTemplate {
-        branch: BranchInstanceTemplate {
-            revision: ProcessorPlanRevision::new(),
-            source_kind: spec.kind,
-            source: RelayName::from(&spec.identifier),
-            root_relay: spec.root_relay.clone(),
-            branch: spec.branch.clone(),
-            branch_ttl: parse_branch_ttl_setting(
-                spec.branch_ttl.as_deref(),
-                spec.kind,
-                &spec.identifier,
-            )?,
-            branch_max_instances: spec.branch_max_instances.map(addressable_count),
-            error_policies: spec.error_policies.clone(),
-            relays,
-            processors: HashMap::default(),
-            wasm_state_reset: None,
-        },
-        ack_boundary: spec.output_ack_boundary,
-        flush_policy: parse_branch_flush_policy(
-            spec.kind,
-            &spec.identifier,
-            &spec.root_relay,
-            &spec.output_flush_policy,
-        )?,
+        branch,
+        ack_boundary: route.ack_boundary,
+        flush_policy,
     })
 }
 

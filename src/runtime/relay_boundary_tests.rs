@@ -845,7 +845,7 @@ async fn owner_ingress_touches_expiring_stream_state() {
                     ..DomainRoutingSnapshot::default()
                 },
             ),
-            branched_ingestors: HashMap::default(),
+            entrypoints: Arc::default(),
             branched_entrypoints: HashMap::default(),
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),
@@ -1069,7 +1069,7 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
                 domain_clock: test_domain_clock(&domain),
                 shutdown,
                 routing: DomainRouting::new(DomainRoutingSnapshot::default()),
-                branched_ingestors: HashMap::default(),
+                entrypoints: Arc::default(),
                 branched_entrypoints: HashMap::default(),
                 endpoint_routes: HashMap::default(),
                 node_tasks: HashMap::default(),

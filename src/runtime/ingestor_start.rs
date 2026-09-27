@@ -1,9 +1,10 @@
 //! Ingestor runtime materialization.
 //!
 //! Layer: data plane.
-//! - **Owns.** Choosing which scheduled ingestors this node starts, stopping a running ingestor,
-//!   and compiling the dependencies every ingestor start reads.
-//! - **Depends on.** Ingestor plans, installed domain capabilities and the source start path.
+//! - **Owns.** Choosing which planned ingestors this node starts, stopping a running ingestor,
+//!   and binding the dependencies every ingestor start reads.
+//! - **Depends on.** Installed ingestor plans, installed domain capabilities and the source start
+//!   path.
 //! - **Must not know.** NSPL parsing, registry validation, placement selection, or which connector
 //!   a source runs on.
 
@@ -54,9 +55,8 @@ pub(in crate::runtime) enum LookupRuntimeError {
 }
 
 pub(super) enum ScheduledIngestorStart {
-    Plan(Box<IngestorStartPlan>),
+    Plan(Arc<IngestorStartPlan>),
     Complete,
-    Error(RuntimeError),
 }
 
 /// One running ingestor: the tasks its source runs in and the branch runtimes its routes feed.
@@ -86,9 +86,8 @@ impl Runtime {
         loop {
             tokio::task::consume_budget().await;
             match self.next_scheduled_ingestor_start_plan(Some(domain)) {
-                ScheduledIngestorStart::Plan(plan) => self.start_ingestor(*plan).await?,
+                ScheduledIngestorStart::Plan(plan) => self.start_ingestor(&plan).await?,
                 ScheduledIngestorStart::Complete => break,
-                ScheduledIngestorStart::Error(error) => return Err(error),
             }
         }
         Ok(())
@@ -99,14 +98,15 @@ impl Runtime {
         loop {
             tokio::task::consume_budget().await;
             match self.next_scheduled_ingestor_start_plan(None) {
-                ScheduledIngestorStart::Plan(plan) => self.start_ingestor(*plan).await?,
+                ScheduledIngestorStart::Plan(plan) => self.start_ingestor(&plan).await?,
                 ScheduledIngestorStart::Complete => break,
-                ScheduledIngestorStart::Error(error) => return Err(error),
             }
         }
         Ok(())
     }
 
+    /// The plan of the next ingestor this node executes but does not run, from the plans its
+    /// running domains installed with their schedules.
     pub(super) fn next_scheduled_ingestor_start_plan(
         &self,
         requested_domain: Option<&DomainName>,
@@ -134,71 +134,35 @@ impl Runtime {
             let Some(execution) = self.inner.executions.get(&domain) else {
                 continue;
             };
-            let passive_only = execution.passive_only;
-            let schedule = execution.schedule.clone();
-            drop(execution);
-
-            if passive_only {
+            if execution.passive_only {
                 continue;
             }
+            let mut local_plans = Vec::new();
+            for plan in execution.entrypoints.ingestors() {
+                let identity =
+                    NodeRef::new(ModelKind::Ingestor, ModelName::from(&plan.ingestor.name));
+                let node = execution.schedule.nodes.get(&identity).assured(
+                    "every domain execution is installed and updated with the entrypoint plans \
+                     decided from the schedule it keeps",
+                );
+                if Self::scheduled_node_executes_locally(node, local_node_id) {
+                    local_plans.push(plan.clone());
+                }
+            }
+            drop(execution);
 
-            for node in schedule.nodes.values() {
-                if node.kind() != ModelKind::Ingestor
-                    || !Self::scheduled_node_executes_locally(node, local_node_id)
+            for plan in local_plans {
+                if !self
+                    .inner
+                    .ingestors
+                    .contains_key(&plan.ingestor.runtime_key())
                 {
-                    continue;
+                    return ScheduledIngestorStart::Plan(plan);
                 }
-
-                let key = node.identity().in_domain(&domain);
-                if self.inner.ingestors.contains_key(&key) {
-                    continue;
-                }
-
-                let Model::Ingestor(ingestor) = node.config.as_ref() else {
-                    continue;
-                };
-                let Some(source_model) =
-                    Self::source_model_for_scheduled_ingestor(&schedule, ingestor)
-                else {
-                    warn!(
-                        domain = domain.as_str(),
-                        ingestor = ingestor.name.as_str(),
-                        "cannot resume ingestor after memory pressure because its source model is \
-                         missing"
-                    );
-                    continue;
-                };
-
-                let plan = match IngestorStartPlan::decide(&domain, node, &source_model) {
-                    Ok(plan) => plan,
-                    Err(error) => {
-                        return ScheduledIngestorStart::Error(RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "cannot plan ingestor '{}': {error}",
-                                ingestor.name.as_str()
-                            ),
-                        });
-                    }
-                };
-                return ScheduledIngestorStart::Plan(Box::new(plan));
             }
         }
 
         ScheduledIngestorStart::Complete
-    }
-
-    pub(super) fn source_model_for_scheduled_ingestor(
-        schedule: &DomainSchedule,
-        ingestor: &CreateIngestor,
-    ) -> Option<Model> {
-        schedule
-            .nodes
-            .get(&NodeRef::new(
-                ingestor.source.source_kind(),
-                ingestor.source.source_ref(),
-            ))
-            .map(|node| (*node.config).clone())
     }
 
     pub(in crate::runtime) async fn stop_ingestor(
@@ -253,165 +217,45 @@ impl Runtime {
         Ok(())
     }
 
+    /// Binds what every source of `ingestor` dispatches through: its codec, its compiled node filter
+    /// and routes, and the branched entrypoints its routes feed.
     pub(in crate::runtime) async fn ingestor_dependencies(
         &self,
-        domain: &DomainName,
         ingestor: &IngestorSpec,
     ) -> Result<IngestorDependencies, RuntimeError> {
-        let Some(execution) = self.inner.executions.get(domain) else {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: match ingestor.routes.first() {
-                    Some(route) => route.relay.as_str().to_string(),
-                    None => "<missing>".to_string(),
-                },
-            });
+        let domain = &ingestor.domain;
+        let routing = match self.inner.executions.get(domain) {
+            Some(execution) => execution.routing.staged(),
+            None => {
+                return Err(RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!(
+                        "domain execution is unavailable while starting ingestor '{}'",
+                        ingestor.name.as_str()
+                    ),
+                });
+            }
         };
-        let Some(codec) = execution.codecs.get(&ingestor.decode_using_codec).cloned() else {
+        let Some(codec) = routing.codecs.get(&ingestor.decode_using_codec).cloned() else {
             return Err(RuntimeError::CodecNotInstantiated {
                 domain: domain.as_str().to_string(),
                 codec: ingestor.decode_using_codec.as_str().to_string(),
             });
         };
-        let empty_branching = ResolvedBranching::unbranched();
-        let filter_where = compile_expression_filter_program(
-            RuntimeCompileTarget {
-                domain,
-                identifier: &ModelName::from(&ingestor.name),
-            },
-            ingestor.filter_where.as_ref(),
-            RuntimeVmSchema {
-                schema: codec.schema().arrow_schema(),
-                sensitivity: codec.schema().vm_sensitivity(),
-            },
-            ingestor.allow_header_reads,
-            MessageErrorOperation::FilterWhere,
-            RuntimeVmCompileContext {
-                available_materialized_streams: &execution.materialized_stream_specs,
-                available_lookups: &execution.lookups,
-                current_branching: &empty_branching,
-                udfs: Some(&execution.udfs),
-            },
-        )?;
-        let mut output_routes = RelayProcessorOutputsNode {
-            routes: Vec::with_capacity(ingestor.routes.len()),
+        let programs = ExecutionBuildDeps::from_routing(domain, &routing)
+            .bind_ingestor(ingestor, &codec)
+            .map_err(|report| RuntimeError::entrypoint_binding(domain, report))?;
+        let relays = RelayRuntimeHandles {
+            registries: &routing.relay_registries,
+            services: &routing.relay_services,
         };
-        for output in &ingestor.routes {
-            if !execution.relay_services.contains_key(&output.relay) {
-                return Err(RuntimeError::RelayNotInstantiated {
-                    domain: domain.as_str().to_string(),
-                    relay: output.relay.as_str().to_string(),
-                });
-            }
-            let output_schema = execution
-                .relay_schemas
-                .get(&output.relay)
-                .cloned()
-                .ok_or_else(|| RuntimeError::RelayNotInstantiated {
-                    domain: domain.as_str().to_string(),
-                    relay: output.relay.as_str().to_string(),
-                })?;
-            let compiled_program = compile_ingestor_filter_map_program(
-                domain,
-                &ingestor.name,
-                ingestor.metadata_kind,
-                ingestor.allow_header_reads,
-                &output.construction,
-                RuntimeVmSchemaPair {
-                    input: codec.schema().arrow_schema(),
-                    input_sensitivity: codec.schema().vm_sensitivity(),
-                    output: output_schema.arrow_schema(),
-                    output_sensitivity: output_schema.vm_sensitivity(),
-                },
-                RuntimeVmCompileContext {
-                    available_materialized_streams: &execution.materialized_stream_specs,
-                    available_lookups: &execution.lookups,
-                    current_branching: &empty_branching,
-                    udfs: Some(&execution.udfs),
-                },
-            )?;
-            let target_branch_schema = relay_branch_schema_for_routing(&execution, &output.relay);
-            let compiled_branch_program = compile_output_branch_program(
-                RuntimeCompileTarget {
-                    domain,
-                    identifier: &ModelName::from(&ingestor.name),
-                },
-                output.branch.as_ref(),
-                RuntimeVmSchema {
-                    schema: codec.schema().arrow_schema(),
-                    sensitivity: codec.schema().vm_sensitivity(),
-                },
-                RuntimeVmSchema {
-                    schema: output_schema.arrow_schema(),
-                    sensitivity: output_schema.vm_sensitivity(),
-                },
-                target_branch_schema,
-                RuntimeVmCompileContext {
-                    available_materialized_streams: &execution.materialized_stream_specs,
-                    available_lookups: &execution.lookups,
-                    current_branching: &empty_branching,
-                    udfs: Some(&execution.udfs),
-                },
-            )?;
-            let flush_policy = output
-                .flush_policy
-                .as_ref()
-                .map(|policy| {
-                    Self::parse_runtime_node_flush_policy(
-                        domain,
-                        "ingestor output",
-                        &output.relay,
-                        policy,
-                    )
-                })
-                .transpose()?;
-            output_routes.routes.push(RelayProcessorOutputNode {
-                relay: output.relay.clone(),
-                construction: output.construction.clone(),
-                branch: output.branch.clone(),
-                flush_policy,
-                message_error_policy: output.message_error_policy.clone(),
-                pending: Vec::new(),
-                flush_timer: BranchBufferTimer::default(),
-                compiled_program,
-                compiled_branch_program,
-            });
-        }
-        if output_routes.base_relay().is_none() {
-            return Err(RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "ingestor '{}' must declare at least one output route",
-                    ingestor.name.as_str()
-                ),
-            });
-        }
-        let model_index = execution
-            .schedule
-            .nodes
-            .values()
-            .map(|node| (*node.config).clone())
-            .collect::<ModelIndex>();
-        let mut branched_templates = HashMap::default();
-        if let Some(specs) = execution
-            .branched_ingestors
-            .get(&ModelName::from(&ingestor.name))
-        {
-            for spec in specs {
-                let template = materialize_ingestor_route_template(
-                    spec,
-                    &model_index,
-                    &execution.relay_registries,
-                    &execution.relay_services,
-                )
-                .map_err(|reason| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: reason.to_string(),
-                })?;
-                branched_templates.insert(spec.root_relay.clone(), template);
-            }
-        }
-        drop(execution);
+        let branched_templates = relays
+            .route_templates(
+                ModelKind::Ingestor,
+                &ModelName::from(&ingestor.name),
+                &ingestor.routes,
+            )
+            .map_err(|report| RuntimeError::entrypoint_binding(domain, report))?;
         let dispatcher = self.inner.remote_dispatcher.load();
         let physical_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         let metrics = self.inner.metrics.resolve_global_node_message_metrics(
@@ -422,8 +266,8 @@ impl Runtime {
             "received",
         );
         Ok(IngestorDependencies {
-            output_routes,
-            filter_where,
+            output_routes: programs.routes,
+            filter_where: programs.filter_where,
             codec,
             branched_templates,
             metrics,
