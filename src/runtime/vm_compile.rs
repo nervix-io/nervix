@@ -2220,6 +2220,90 @@ mod tests {
     }
 
     #[test]
+    fn route_type_failures_keep_the_vm_report_at_each_runtime_binding() {
+        let domain = domain("default");
+        let identifier = named::<ModelName>("invalid_mapping");
+        let relay = named::<RelayName>("mapped");
+        let schema = test_schema(&[("value", ParseAsType::I64)]).arrow_schema();
+        let route = construction("SET value = \"text\"");
+        let available_materialized_streams = HashMap::default();
+        let available_lookups = HashMap::default();
+        let branching = ResolvedBranching::unbranched();
+        let context = || RuntimeVmCompileContext {
+            available_materialized_streams: &available_materialized_streams,
+            available_lookups: &available_lookups,
+            current_branching: &branching,
+            udfs: None,
+        };
+        let schemas = || RuntimeVmSchemaPair {
+            input: schema.clone(),
+            input_sensitivity: VmSchemaSensitivity::default(),
+            output: schema.clone(),
+            output_sensitivity: VmSchemaSensitivity::default(),
+        };
+
+        let failures = [
+            (
+                "processor",
+                compile_processor_output_filter_map_program(
+                    RuntimeCompileTarget {
+                        domain: &domain,
+                        identifier: &identifier,
+                    },
+                    &[named("source")],
+                    &relay,
+                    &route,
+                    schemas(),
+                    None,
+                    context(),
+                )
+                .expect_err("a processor cannot assign STRING to an I64 output"),
+            ),
+            (
+                "WASM processor",
+                compile_wasm_output_filter_map_program(
+                    &domain,
+                    &identifier,
+                    &route,
+                    schema.clone(),
+                    VmSchemaSensitivity::default(),
+                    context(),
+                )
+                .expect_err("a WASM route cannot assign STRING to an I64 output"),
+            ),
+            (
+                "ingestor",
+                compile_ingestor_filter_map_program(
+                    &domain,
+                    identifier.clone(),
+                    IngestMetadataKind::Headers,
+                    true,
+                    &route,
+                    schemas(),
+                    context(),
+                )
+                .expect_err("an ingestor cannot assign STRING to an I64 output"),
+            ),
+        ];
+        for (kind, error) in failures {
+            let RuntimeError::VmCompile {
+                domain: actual_domain,
+                reason,
+                report,
+            } = &error
+            else {
+                panic!("{kind} lost its VM compile report: {error:#}");
+            };
+            assert_eq!(actual_domain, domain.as_str());
+            assert!(reason.contains(identifier.as_str()), "{kind}: {reason}");
+            assert!(
+                reason.contains(&report.current_context().message),
+                "{kind} lost the VM's safe message: {error:#}"
+            );
+        }
+    }
+
+    #[test]
     fn processor_key_expressions_reject_relay_qualified_fields() {
         assert!(nervix_nspl::parse_expression("incoming_notifications.sequence").is_err());
     }

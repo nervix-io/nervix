@@ -1754,7 +1754,8 @@ pub(in crate::registry) fn validate_generator_output(
 #[cfg(test)]
 #[path = "processor/bytes_tests.rs"]
 mod bytes_tests;
-
+#[cfg(test)]
+mod vm_report_tests;
 #[cfg(test)]
 mod tests {
     use std::fs;

@@ -1862,6 +1862,96 @@ mod tests {
     }
 
     #[test]
+    fn direct_values_type_failure_keeps_the_vm_compile_cause() {
+        let domain: DomainName = named("default");
+        let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out")
+        else {
+            panic!("the emitter fixture constructs an emitter model");
+        };
+        let identifier = ModelName::from(&emitter.name);
+        let input_schema = CreateSchema {
+            name: named("event"),
+            fields: vec![SchemaField {
+                name: named("value"),
+                ty: ParseAsType::I64,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let mapping = nervix_models::ClickHouseValueMapping {
+            column: "external_value".to_string(),
+            expression: nervix_nspl::parse_expression("input.missing")
+                .expect("a missing field is still a valid expression"),
+        };
+        *emitter.sink = EmitSink::Postgres {
+            client: named("database"),
+            table: named("events"),
+            values: vec![mapping],
+            conflict_action: nervix_models::PostgresConflictAction::None,
+        };
+        let error = validate_direct_values_sensitivity(
+            &domain,
+            &identifier,
+            &ModelIndex::new(),
+            &emitter,
+            &input_schema,
+        )
+        .expect_err("an unknown source field must fail VALUES type inference");
+        assert!(matches!(
+            error.current_context(),
+            RegistryError::InvalidModel { domain, identifier, reason }
+                if domain == "default"
+                    && identifier == "emit"
+                    && reason.contains("emitter VALUES type inference failed")
+        ));
+        assert!(error.contains::<nervix_vm::CompileError>());
+    }
+
+    #[test]
+    fn http_request_type_failure_keeps_the_vm_compile_cause() {
+        let domain: DomainName = named("default");
+        let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out")
+        else {
+            panic!("the emitter fixture constructs an emitter model");
+        };
+        let identifier = ModelName::from(&emitter.name);
+        emitter.body = nervix_models::EmitterBody::WithoutBody;
+        *emitter.sink = EmitSink::Http {
+            client: named("api"),
+            method: nervix_nspl::parse_expression("input.value")
+                .expect("a field reference is a valid expression"),
+            path: nervix_nspl::parse_expression("'/events'")
+                .expect("a string literal is a valid expression"),
+        };
+        let schema = CreateSchema {
+            name: named("event"),
+            fields: vec![SchemaField {
+                name: named("value"),
+                ty: ParseAsType::I64,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let error = validate_http_request_expressions(
+            &domain,
+            &identifier,
+            &ModelIndex::new(),
+            &emitter,
+            &schema,
+            &schema,
+        )
+        .expect_err("HTTP METHOD must be an exact STRING");
+        assert!(matches!(
+            error.current_context(),
+            RegistryError::InvalidModel { domain, identifier, reason }
+                if domain == "default"
+                    && identifier == "emit"
+                    && reason.contains("HTTP METHOD and PATH require exact non-sensitive STRING")
+        ));
+        assert!(error.contains::<nervix_vm::CompileError>());
+    }
+
+    #[test]
     fn otel_mapping_contract_validates_signal_keys_before_runtime() {
         let domain = DomainName::parse("default").expect("valid domain");
         let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out")
