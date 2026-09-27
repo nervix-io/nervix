@@ -111,6 +111,12 @@ retain the selected entity or placement so an operator can correct the request. 
 Plane](./control-plane.md) for activation and [Typed States And Validation
 Boundaries](./typed-states.md) for required state.
 
+Domain activation has typed failures for a relay or codec missing its schema, a codec missing its
+wire definition, a relay missing its branch or carrying an invalid branch TTL, and an endpoint
+missing its VHOST or signaling protocol. The report identifies the owning relay, codec, or
+endpoint and the missing reference. Runtime installation adds domain context to that report; it
+does not select a fallback configuration.
+
 ## Runtime Message Errors
 
 A record-specific failure can become a structured message error. It carries a stable reference,

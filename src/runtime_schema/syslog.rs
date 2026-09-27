@@ -14,7 +14,7 @@ use arrow_array::{
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, Utc};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::{CreateCodec, ParseAsType};
+use nervix_models::{CodecEncodingRule, CodecName, ParseAsType};
 
 use super::{
     ArrowCodecRow, CodecError, CompiledCodec, CompiledSchema, RuntimeRecordBatchBuilder,
@@ -37,10 +37,11 @@ struct ParsedSyslog<'a> {
 }
 
 pub(super) fn validate_compiled_schema(
-    codec: &CreateCodec,
+    codec: &CodecName,
+    encoding_rules: &[CodecEncodingRule],
     schema: &CompiledSchema,
 ) -> Result<(), CodecError> {
-    if !codec.encoding_rules.is_empty() {
+    if !encoding_rules.is_empty() {
         return Err(invalid_codec(
             codec,
             "SYSLOG codecs do not support ENCODE field rules",
@@ -311,9 +312,9 @@ impl<'a> SyslogMessage<'a> {
     }
 }
 
-fn invalid_codec(codec: &CreateCodec, reason: impl Into<String>) -> CodecError {
+fn invalid_codec(codec: &CodecName, reason: impl Into<String>) -> CodecError {
     CodecError::InvalidCodec {
-        codec: codec.name.as_str().to_string(),
+        codec: codec.as_str().to_string(),
         reason: reason.into(),
     }
 }

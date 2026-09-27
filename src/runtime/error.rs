@@ -34,6 +34,11 @@ pub enum RuntimeError {
     },
     #[error("failed to build domain execution for '{domain}': {reason}")]
     BuildDomainExecution { domain: String, reason: String },
+    #[error("failed to plan domain activation for '{domain}': {report}")]
+    DomainActivationPlan {
+        domain: DomainName,
+        report: Report<DomainActivationPlanError>,
+    },
     #[error(
         "timed out waiting for runtime revision {revision} to be prepared on nodes \
          {pending_nodes:?}"
@@ -65,4 +70,16 @@ pub enum RuntimeError {
         relay: String,
         reason: String,
     },
+}
+
+impl RuntimeError {
+    pub(super) fn activation_plan(
+        domain: &DomainName,
+        report: Report<DomainActivationPlanError>,
+    ) -> Self {
+        Self::DomainActivationPlan {
+            domain: domain.clone(),
+            report,
+        }
+    }
 }

@@ -192,9 +192,10 @@ sequenceDiagram
   their transport implementations remain in their owning integration or server edge.
 - **WebSocket signaling.** The WebSocket crate owns the compiled signaling engine shared by
   client sources and server endpoint sessions. Its send, wait, and accept-data steps govern when
-  frames become payload; the host still owns intake and routing. This compilation currently
-  consumes a signaling-protocol Model at startup. This is an existing boundary defect to remove;
-  it does not give source or sink execution permission to parse NSPL or route graph records.
+  frames become payload; the host still owns intake and routing. Domain activation resolves the
+  endpoint's VHOST and signaling reference first. The runtime binds the pinned protobuf resource,
+  when present, and passes the protocol's typed format and connect steps to the WebSocket compiler.
+  The compiler never chooses a graph route or an endpoint listener.
 
 ## Failure and observation
 

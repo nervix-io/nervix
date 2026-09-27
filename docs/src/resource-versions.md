@@ -43,9 +43,11 @@ load, a hash map's file must exist at its path, and an inferencer's ONNX model m
 the tensors the inferencer declares. The rest of a version's content is proven by the consumers that
 load it.
 
-A runtime consumer receives its model, and with it the pinned number, in the execution plan it is
-built from. It resolves that number to a local directory and nothing else. No consumer reads the
-catalog to choose a version.
+Domain activation resolves codec, signaling-protocol, and VHOST bindings into typed specifications
+with their pinned resource identity before a node installs them. Runtime compilation loads that
+exact version from the local store; the HTTPS listener does the same for the VHOST certificates.
+Neither path reads the catalog to choose a version. Running and stopped domains use the same
+activation decision, so a stop, restart, or reassignment cannot select another version.
 
 The HTTPS listener runs on every live node, independent of Raft leadership and graph placement,
 like every other entity that binds a configured listening port. It presents the TLS VHOSTs of the
@@ -204,7 +206,7 @@ clause. Omitting the clause is a parse error.
 | --- | --- | --- |
 | `VHOST ... WITH TLS` | `tls.crt`, `tls.key`, and `ca.crt` at the version root | When a node installs the TLS VHOSTs of a runtime revision into its HTTPS listener: on every live node, for running and stopped domains |
 | Protobuf `CODEC` | The `.proto` sources its configuration selects, or every `.proto` file in the version when it selects none, compiled into descriptors | When a node builds the domain's execution: on every live node, for running and stopped domains |
-| Protobuf `SIGNALING PROTOCOL` | The `.proto` sources it selects the same way, compiled into the descriptors of its send and wait messages | When a node builds the execution of a running domain |
+| Protobuf `SIGNALING PROTOCOL` | The `.proto` sources it selects the same way, compiled into the descriptors of its send and wait messages | When a node builds the domain's execution: on every live node, for running and stopped domains |
 | `INFERENCER` | The ONNX model file it names | When a branch instance first flushes output; each branch instance holds its own inference session |
 | `WASM PROCESSOR` | The module file it names, compiled into machine code | When a node builds the execution of a running domain or replaces the processor; a node keeps the compiled module only while the schedule assigns the processor to it as owner or replica, and each branch instantiates it when it first needs its guest |
 | `HASH MAP` | The file it names, decoded line by line through its codec into an in-memory index | When a node builds the domain's execution: on every live node, whatever the schedule assigns, for running and stopped domains |
@@ -432,6 +434,9 @@ material in the command result or server log.
 
 Every node's HTTPS listener presents the TLS VHOSTs of every domain in the runtime revision that
 node applied, including domains that are stopped, because a stopped domain keeps its schedule. For
+each revision the decision layer supplies the listener with VHOST specifications whose TLS resource
+identities already include the pinned version. Endpoint host and path decisions use those same
+VHOST hostnames, while stopped domains keep their routes inactive until they start. For
 each TLS VHOST the listener loads the pinned version's certificate chain and private key and
 presents them to clients whose SNI names one of the VHOST's hostnames. The certificate must be valid
 for every one of those hostnames; the leader's content check does not compare them, so a

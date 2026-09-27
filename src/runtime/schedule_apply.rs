@@ -417,6 +417,8 @@ impl Runtime {
         if reassignments.is_empty() {
             return Ok(false);
         }
+        let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
+            .map_err(|report| RuntimeError::activation_plan(domain, report))?;
         let shutdown = match self.inner.executions.get(domain) {
             Some(execution) => execution.shutdown.clone(),
             None => {
@@ -679,7 +681,11 @@ impl Runtime {
                         RelayStateTaskSpec {
                             relay: relay.clone(),
                             state,
-                            retention: RelayRetention::from_schedule(domain, schedule, &relay)?,
+                            retention: activation_plan
+                                .relays
+                                .get(&relay)
+                                .verified("the domain plan covers every scheduled relay")
+                                .retention,
                             receiver: services.add_local_runtime_consumer(AckMode::Detached),
                         },
                     );
@@ -708,11 +714,11 @@ impl Runtime {
                     &RelayName::from(&entity.identifier),
                     registry,
                     services,
-                    RelayRetention::from_schedule(
-                        domain,
-                        schedule,
-                        &RelayName::from(&entity.identifier),
-                    )?,
+                    activation_plan
+                        .relays
+                        .get(&RelayName::from(&entity.identifier))
+                        .verified("the domain plan covers every scheduled relay")
+                        .retention,
                 );
                 if let Some(mut execution) = self.inner.executions.get_mut(domain) {
                     execution
@@ -738,6 +744,8 @@ impl Runtime {
         reassignments: &[NodeRef],
         dynamic_updates: &[nervix_models::DynamicModelUpdate],
     ) -> Result<(), RuntimeError> {
+        let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
+            .map_err(|report| RuntimeError::activation_plan(domain, report))?;
         let dispatcher = self.inner.remote_dispatcher.load_full();
         let local_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         // A reassignment only replaces this cluster node's runtime when the node stopped or
@@ -928,27 +936,30 @@ impl Runtime {
                         "the resolution above returned an error unless the local node id is \
                          present",
                     )) {
-                        Some(self.spawn_relay_state_task(
-                            domain,
-                            RelayStateTaskSpec {
-                                relay: RelayName::from(&entity.identifier.clone()),
-                                state: placement.materialized_state.clone().ok_or_else(|| {
-                                    RuntimeError::BuildDomainExecution {
-                                        domain: domain.as_str().to_string(),
-                                        reason: format!(
-                                            "missing materialized state for relay '{}'",
-                                            entity.identifier.as_str()
-                                        ),
-                                    }
-                                })?,
-                                retention: RelayRetention::from_schedule(
-                                    domain,
-                                    &schedule,
-                                    &RelayName::from(&entity.identifier),
-                                )?,
-                                receiver: services.add_local_runtime_consumer(AckMode::Detached),
-                            },
-                        ))
+                        Some(
+                            self.spawn_relay_state_task(
+                                domain,
+                                RelayStateTaskSpec {
+                                    relay: RelayName::from(&entity.identifier.clone()),
+                                    state: placement.materialized_state.clone().ok_or_else(
+                                        || RuntimeError::BuildDomainExecution {
+                                            domain: domain.as_str().to_string(),
+                                            reason: format!(
+                                                "missing materialized state for relay '{}'",
+                                                entity.identifier.as_str()
+                                            ),
+                                        },
+                                    )?,
+                                    retention: activation_plan
+                                        .relays
+                                        .get(&RelayName::from(&entity.identifier))
+                                        .verified("the domain plan covers every scheduled relay")
+                                        .retention,
+                                    receiver: services
+                                        .add_local_runtime_consumer(AckMode::Detached),
+                                },
+                            ),
+                        )
                     } else {
                         None
                     };

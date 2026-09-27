@@ -54,10 +54,10 @@ use nervix_approx_into::ApproxInto;
 use nervix_bounded_write::{BoundedWrite, BoundedWriter};
 use nervix_jaq::{CompiledJaqProgram, JaqNativeFormat};
 use nervix_models::{
-    AvroType, CodecJaqTransformations, CreateCodec, CreateSchema, CreateWireSchema, JsonType,
-    ModelName, ParseAsType, PayloadSizeLimit, RemoteRuntimeElementValue,
-    RemoteRuntimeRecordMetadata, RemoteRuntimeValue, ResolvedCodecWireFormat, Timestamp,
-    WireSchemaField, WireSchemaStrictness,
+    AvroType, CodecEncodingRule, CodecJaqTransformations, CodecName, CreateCodec, CreateSchema,
+    CreateWireSchema, JsonType, ModelName, ParseAsType, PayloadSizeLimit,
+    RemoteRuntimeElementValue, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
+    ResolvedCodecWireFormat, Timestamp, WireSchemaField, WireSchemaStrictness,
 };
 use nervix_wasm::{WasmProcessorField, WasmProcessorSchema, WasmProcessorType};
 use ordered_float::OrderedFloat;
@@ -161,7 +161,7 @@ struct CompiledJaqTransformations {
 
 impl CompiledJaqTransformations {
     fn compile(
-        codec: &CreateCodec,
+        codec: &CodecName,
         transformations: &CodecJaqTransformations,
     ) -> Result<Self, CodecError> {
         let compile = |program: Option<&str>| {
@@ -170,7 +170,7 @@ impl CompiledJaqTransformations {
                     CompiledJaqProgram::compile(program)
                         .map(Arc::new)
                         .map_err(|error| CodecError::InvalidJaqTransformation {
-                            codec: codec.name.as_str().to_string(),
+                            codec: codec.as_str().to_string(),
                             reason: error.to_string(),
                         })
                 })
@@ -2589,11 +2589,19 @@ pub fn compile_codec(
     schema: Arc<CompiledSchema>,
     wire_format: ResolvedCodecWireFormat<'_>,
 ) -> Result<Arc<CompiledCodec>, CodecError> {
-    compile_codec_with_protobuf(codec, schema, wire_format, None)
+    compile_codec_spec_with_protobuf(
+        &codec.name,
+        &codec.encoding_rules,
+        schema,
+        wire_format,
+        None,
+    )
 }
 
-pub fn compile_codec_with_protobuf(
-    codec: &CreateCodec,
+/// Compile a codec whose schema and wire reference were resolved by the decision layer.
+pub(crate) fn compile_codec_spec_with_protobuf(
+    name: &CodecName,
+    encoding_rules: &[CodecEncodingRule],
     schema: Arc<CompiledSchema>,
     wire_format: ResolvedCodecWireFormat<'_>,
     protobuf_descriptors: Option<ProtobufCodecDescriptors>,
@@ -2609,7 +2617,7 @@ pub fn compile_codec_with_protobuf(
             let schema_json = avro_schema_json(schema_def, schema.fields());
             let parsed =
                 AvroSchema::parse_str(&schema_json).map_err(|source| CodecError::InvalidCodec {
-                    codec: codec.name.as_str().to_string(),
+                    codec: name.as_str().to_string(),
                     reason: source.to_string(),
                 })?;
             let fields = schema_def
@@ -2638,43 +2646,43 @@ pub fn compile_codec_with_protobuf(
         } => {
             if !transformations.has_any() {
                 return Err(CodecError::InvalidCodec {
-                    codec: codec.name.as_str().to_string(),
+                    codec: name.as_str().to_string(),
                     reason: "JAQ-native codec must declare a JAQ transformation".to_string(),
                 });
             }
             CompiledWireSchema::JaqNative(CompiledJaqNativeCodec {
                 format: JaqNativeFormat::from(format),
-                transformations: CompiledJaqTransformations::compile(codec, transformations)?,
+                transformations: CompiledJaqTransformations::compile(name, transformations)?,
             })
         }
         ResolvedCodecWireFormat::Protobuf(config) => {
             if !config.transformations.has_any() {
                 return Err(CodecError::InvalidCodec {
-                    codec: codec.name.as_str().to_string(),
+                    codec: name.as_str().to_string(),
                     reason: "protobuf codec must declare a JAQ transformation".to_string(),
                 });
             }
             let descriptors = protobuf_descriptors.ok_or_else(|| CodecError::InvalidCodec {
-                codec: codec.name.as_str().to_string(),
+                codec: name.as_str().to_string(),
                 reason: "protobuf codec is missing compiled descriptor".to_string(),
             })?;
             CompiledWireSchema::Protobuf(CompiledProtobufCodec {
                 message: descriptors.message,
                 batch_message: descriptors.batch_message,
                 transformations: CompiledJaqTransformations::compile(
-                    codec,
+                    name,
                     &config.transformations,
                 )?,
             })
         }
         ResolvedCodecWireFormat::Syslog => {
-            syslog::validate_compiled_schema(codec, &schema)?;
+            syslog::validate_compiled_schema(name, encoding_rules, &schema)?;
             CompiledWireSchema::Syslog
         }
     };
 
     Ok(Arc::new(CompiledCodec {
-        name: ModelName::from(&codec.name),
+        name: ModelName::from(name),
         schema,
         wire_schema,
     }))
@@ -7146,8 +7154,9 @@ mod tests {
     fn protobuf_codec_applies_transformation_on_ingestion_before_decoding() {
         let codec = protobuf_codec("protobuf_ingest", Some("."), None);
         let compiled_schema = Arc::new(compile_schema(&protobuf_schema()));
-        let compiled_codec = compile_codec_with_protobuf(
-            &codec,
+        let compiled_codec = compile_codec_spec_with_protobuf(
+            &codec.name,
+            &codec.encoding_rules,
             compiled_schema,
             self_describing(&codec.wire_format),
             Some(ProtobufCodecDescriptors {
@@ -7186,8 +7195,9 @@ mod tests {
             None,
         );
         let compiled_schema = Arc::new(compile_schema(&protobuf_schema()));
-        let compiled_codec = compile_codec_with_protobuf(
-            &codec,
+        let compiled_codec = compile_codec_spec_with_protobuf(
+            &codec.name,
+            &codec.encoding_rules,
             compiled_schema,
             self_describing(&codec.wire_format),
             Some(ProtobufCodecDescriptors {
@@ -7220,8 +7230,9 @@ mod tests {
     fn protobuf_codec_applies_transformation_on_emitting_before_encoding() {
         let codec = protobuf_codec("protobuf_emit", None, Some("."));
         let compiled_schema = Arc::new(compile_schema(&protobuf_schema()));
-        let compiled_codec = compile_codec_with_protobuf(
-            &codec,
+        let compiled_codec = compile_codec_spec_with_protobuf(
+            &codec.name,
+            &codec.encoding_rules,
             compiled_schema,
             self_describing(&codec.wire_format),
             Some(ProtobufCodecDescriptors {
@@ -7305,8 +7316,9 @@ mod tests {
                 config.batch_message = batch_message.map(str::to_string);
                 config.transformations.on_emitting_batch = on_emitting_batch.map(str::to_string);
             }
-            compile_codec_with_protobuf(
-                &codec,
+            compile_codec_spec_with_protobuf(
+                &codec.name,
+                &codec.encoding_rules,
                 Arc::new(compile_schema(&protobuf_schema())),
                 self_describing(&codec.wire_format),
                 Some(protobuf_batch_descriptors(batch_message)),
@@ -7392,8 +7404,9 @@ mod tests {
     fn protobuf_codec_requires_compiled_descriptor() {
         let codec = protobuf_codec("protobuf_missing_descriptor", Some("."), None);
         let compiled_schema = Arc::new(compile_schema(&protobuf_schema()));
-        let err = compile_codec_with_protobuf(
-            &codec,
+        let err = compile_codec_spec_with_protobuf(
+            &codec.name,
+            &codec.encoding_rules,
             compiled_schema,
             self_describing(&codec.wire_format),
             None,
@@ -7596,8 +7609,9 @@ mod tests {
     #[test]
     fn a_protobuf_codec_measures_every_encoding_exactly() {
         let codec = protobuf_codec("bounded_protobuf", None, Some("."));
-        let compiled = compile_codec_with_protobuf(
-            &codec,
+        let compiled = compile_codec_spec_with_protobuf(
+            &codec.name,
+            &codec.encoding_rules,
             Arc::new(compile_schema(&protobuf_schema())),
             self_describing(&codec.wire_format),
             Some(ProtobufCodecDescriptors {

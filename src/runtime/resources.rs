@@ -235,54 +235,58 @@ impl Runtime {
     pub(super) async fn compile_domain_codec(
         &self,
         domain: &DomainName,
-        codec: &CreateCodec,
-        schema: Arc<CompiledSchema>,
-        wire_format: ResolvedCodecWireFormat<'_>,
+        codec: &PlannedCodec,
     ) -> Result<Arc<CompiledCodec>, RuntimeError> {
-        let protobuf_descriptors = if let CodecWireFormat::Protobuf(config) = &codec.wire_format {
-            let build_error = |reason: String| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason,
+        let protobuf_descriptors =
+            if let PlannedCodecWireFormat::Protobuf(config) = &codec.wire_format {
+                let build_error = |reason: String| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason,
+                };
+                let resource = ResourceId::new(
+                    domain.clone(),
+                    config.resource.clone(),
+                    config.resource_version,
+                );
+                let pool = self
+                    .compile_protobuf_descriptor_pool(resource, &config.config)
+                    .await
+                    .map_err(|error| build_error(error.to_string()))?;
+                let message = pool
+                    .message(&config.message)
+                    .map_err(|error| build_error(error.to_string()))?;
+                let batch_message = match &config.batch_message {
+                    Some(batch_message) => Some(
+                        pool.message(batch_message)
+                            .map_err(|error| build_error(error.to_string()))?,
+                    ),
+                    None => None,
+                };
+                Some(ProtobufCodecDescriptors {
+                    message,
+                    batch_message,
+                })
+            } else {
+                None
             };
-            let resource = ResourceId::new(
-                domain.clone(),
-                config.resource.clone(),
-                config.resource_version,
-            );
-            let pool = self
-                .compile_protobuf_descriptor_pool(resource, &config.config)
-                .await
-                .map_err(|error| build_error(error.to_string()))?;
-            let message = pool
-                .message(&config.message)
-                .map_err(|error| build_error(error.to_string()))?;
-            let batch_message = match &config.batch_message {
-                Some(batch_message) => Some(
-                    pool.message(batch_message)
-                        .map_err(|error| build_error(error.to_string()))?,
-                ),
-                None => None,
-            };
-            Some(ProtobufCodecDescriptors {
-                message,
-                batch_message,
-            })
-        } else {
-            None
-        };
 
-        compile_codec_with_protobuf(codec, schema, wire_format, protobuf_descriptors).map_err(
-            |err| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: err.to_string(),
-            },
+        compile_codec_spec_with_protobuf(
+            &codec.name,
+            &codec.encoding_rules,
+            codec.schema.clone(),
+            codec.wire_format.resolved(),
+            protobuf_descriptors,
         )
+        .map_err(|err| RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason: err.to_string(),
+        })
     }
 
     pub(super) async fn compile_signaling_protocol(
         &self,
         domain: &DomainName,
-        protocol: &CreateSignalingProtocol,
+        protocol: &PlannedSignalingProtocol,
     ) -> Result<Arc<CompiledSignalingProtocol>, RuntimeError> {
         let build_error = |reason: String| RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),
@@ -310,9 +314,14 @@ impl Runtime {
             None
         };
 
-        CompiledSignalingProtocol::compile(protocol, descriptors)
-            .map(Arc::new)
-            .map_err(|error| build_error(error.to_string()))
+        CompiledSignalingProtocol::compile_parts(
+            &protocol.name,
+            &protocol.format,
+            &protocol.on_connect,
+            descriptors,
+        )
+        .map(Arc::new)
+        .map_err(|error| build_error(error.to_string()))
     }
 
     /// Compiles the descriptors of the one resource version a codec or signaling protocol pins.
