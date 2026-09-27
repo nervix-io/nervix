@@ -275,6 +275,9 @@ admission, and the frozen plan.
 
 `REBIND RESOURCE` is a model mutation. It changes the version the selected models bind and nothing
 else: it does not touch the catalog, and every other field of each model stays as written.
+Its operation reasons, effective model-run pause, resource-binding effects, and retained
+attribution use the shared [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md)
+report. This chapter owns version selection, pinning, activation, and rebinding failure semantics.
 
 ### Selection And Validation
 

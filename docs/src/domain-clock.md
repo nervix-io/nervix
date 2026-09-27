@@ -7,6 +7,9 @@ and connectors receive time from that capability instead of choosing a clock the
 
 This chapter describes the internal architecture. See [Domains And Time](./domains-and-time.md)
 for the NSPL surface and operator-facing behavior.
+Explicit transactional `START` and `STOP` establish or revoke generations at ordered step
+boundaries; [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) owns how
+those lifecycle steps affect later planned scopes and the retained impact report.
 
 The central rule is that a paced clock is a committed mapping, not a stream of ticks. Each node
 projects its own current UTC observation through the same mapping. Tick progress records which
