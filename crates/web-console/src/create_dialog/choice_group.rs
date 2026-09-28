@@ -51,6 +51,18 @@ pub(super) fn ChoiceGroup(
             <Show when=move || load.get() == ChoiceLoad::Empty fallback=|| ()>
                 <p class="create-choice-state">"No choices"</p>
             </Show>
+            <Show when=move || matches!(load.get(), ChoiceLoad::MissingPrerequisite(_)) fallback=|| ()>
+                <p class="create-choice-state create-choice-missing">{move || match load.get() {
+                    ChoiceLoad::MissingPrerequisite(reason) => reason,
+                    _ => "",
+                }}</p>
+            </Show>
+            <Show when=move || load.get() == ChoiceLoad::StaleContext fallback=|| ()>
+                <div class="create-choice-recovery">
+                    <p class="create-choice-state create-choice-stale">"The form context changed. Refresh choices."</p>
+                    <button class="create-choice-retry" type="button" on:click=move |_| request_choices(signals, control, request_tx, session_generation.get_untracked(), false)>"Retry"</button>
+                </div>
+            </Show>
             <Show when=move || matches!(load.get(), ChoiceLoad::Failed(_)) fallback=|| ()>
                 <p class="create-choice-state choice-failed" role="alert">{move || match load.get() {
                     ChoiceLoad::Failed(reason) => reason,
@@ -61,7 +73,12 @@ pub(super) fn ChoiceGroup(
                 <For
                     each=move || match load.get() {
                         ChoiceLoad::Ready { choices, .. } => choices,
-                        ChoiceLoad::Waiting | ChoiceLoad::Loading | ChoiceLoad::Empty | ChoiceLoad::Failed(_) => Vec::new(),
+                        ChoiceLoad::Waiting
+                        | ChoiceLoad::Loading
+                        | ChoiceLoad::Empty
+                        | ChoiceLoad::MissingPrerequisite(_)
+                        | ChoiceLoad::StaleContext
+                        | ChoiceLoad::Failed(_) => Vec::new(),
                     }
                     key=|choice| choice.presentation.label.clone()
                     children=move |choice| {

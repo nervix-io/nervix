@@ -4,6 +4,9 @@ Nervix gives a failure its meaning at the boundary that can decide what went wro
 travels through the graph as a semantic error and an `error-stack` report. A public edge renders a
 diagnostic only after it has made the decision the error permits. Ordinary control outcomes, such
 as waiting for materialized state or following a new leader, remain distinct from failures.
+The web console applies the same distinction to structured choice lookups: an absent form
+prerequisite shows a neutral hint, and stale context offers a fresh request. A failed lookup,
+closed session channel, or unreadable reply appears as an alert.
 
 This chapter owns the error and diagnostic model across layers. [Typed States And Validation
 Boundaries](./typed-states.md) explains how missing values and semantic states are represented;
@@ -39,6 +42,12 @@ Codec jaq transformations are compiled during registry validation for every decl
 A syntax error names the codec, domain, and direction and rejects the transaction before the model
 is committed. The browser keeps the draft editable so the program can be corrected and submitted
 under the same name.
+
+Resource planning checks the committed lookup key and codec, generator materialized source,
+output branch and route construction, and WASM guest-state generation before runtime binding.
+These failures name the owning node and relevant relay, codec, or field. A missing
+lookup file is rejected during candidate binding validation; malformed records remain a loader
+failure when the pinned file is decoded. Neither failure silently selects another resource version.
 
 Schemaful JSON parsing has one codec decode failure carrying the simd-json source. Malformed
 syntax, invalid UTF-8, and invalid escapes enter through that failure; object shape, missing or
@@ -94,7 +103,10 @@ conversion. Canonical NSPL rendering refuses only a value the language has no sp
 infinite `F64` literal, which the error carries, or a codec declaration its wire format cannot
 express, such as encoding rules on `SYSLOG` or a JAQ-transformed format without a program, which the
 error names by codec. The execution-graph description keeps the JSON encoder's or decoder's error
-beneath its own when the public wire form cannot be written or read. Registry planning keeps an
+beneath its own when the public wire form cannot be written or read. It keeps a typed columnar
+JSON writer error beneath a named codec encode failure. Unsupported columns and invalid string
+offsets fail batch preparation with the codec name. Required nulls identify their field and row;
+write failures retain their source without quoting a payload value. Registry planning keeps an
 alteration's report beneath its invalid-model refusal of the named Model, and the refusal quotes the
 rejection's message, so a failed `ALTER` shows the same reason the vocabulary gave. `SHOW CREATE`
 answers a Model canonical NSPL cannot spell with a fixed diagnostic.
@@ -230,6 +242,15 @@ contract, by naming a record the write did not carry or answering twice for one,
 error of any member. It fails the attempt without a retry, and the emitter's unresolved rows then
 follow `ON MESSAGE ERROR` as a failed publish.
 
+The Sentry sink rejects a final serialized event above its decompressed event limit before sending
+the envelope. The Syslog sink rejects a UDP datagram above its payload limit, a stream frame whose
+octet count needs more than ten digits, or an LF-bearing non-transparent TCP frame before writing.
+A batching OTEL sink measures the full protobuf Export request after mapping; if
+halving still leaves one source record above `MAX SIZE`, that record receives an external publish
+message error. Other members can be sent in bounded requests. An OTLP receiver's
+`partial_success` has no member identities, so it acknowledges the entire request and emits a
+warning instead of inventing per-record rejections.
+
 An HTTP emitter rejects a record at the first request field that fails, in the order it evaluates
 them: `METHOD`, `PATH`, and then each header write. A failed expression keeps the `evaluation`
 code and an invalid value has the `validation` code. Method and path failures report the `publish`
@@ -240,6 +261,16 @@ the emitter and the violated rule and never quotes the evaluated value. An admit
 its original source record and the materialized state its batch was admitted with until it
 completes, so every rejection of it after admission gives the handler the same input, state and
 attempted codec record that a request-field failure does.
+
+An HTTP endpoint's complete final `2xx` headers deliver the record. Other `3xx`/`4xx` statuses,
+except `401`, `403`, `407`, `408`, `425` and `429`, reject only their record with code `external`
+and operation `publish`; `101` has the same outcome. The rejection message includes the numeric
+status but no evaluated destination, headers or body. The exception statuses and `5xx` keep the
+request pending as infrastructure failures; `401`, `403` and `407` name authentication or
+authorization in their typed cause. DNS, connection, TLS, timeout, malformed or oversized response
+headers, invalid final framing and loss before complete final headers are infrastructure failures
+as well. The connector reports them without a request URL or sensitive response value. The emitter
+host owns their retry schedule and keeps the prepared request and ACK lease while they are pending.
 
 `ON MESSAGE ERROR` belongs to the route and handles record-specific work. Ingestor and emitter
 `ON GENERAL ERROR` handles node-wide source and sink failures. A WASM processor's node-wide `ON
@@ -290,8 +321,11 @@ sequenceDiagram
 
 At the public edge, the session maps a typed validation or execution result to a command
 disposition, message, and diagnostics; a transaction's admitted and retained outcomes stay
-distinct from a new execution. `DESCRIBE TRANSACTION` and `SHOW TRANSACTIONS` read beside an
-attached transaction only as separate requests; combining either read with another statement
+distinct from a new execution. [Command
+Dispositions](./client-session-protocol.md#command-dispositions) defines each disposition, the phase
+that produces it, and what a client may conclude from it, and typed request rejections are covered
+in [Rejections](./client-session-protocol.md#rejections). `DESCRIBE TRANSACTION` and
+`SHOW TRANSACTIONS` read beside an attached transaction only as separate requests; combining either read with another statement
 returns a session planning diagnostic before anything enters the queue. An incomplete impact
 report carries its planning diagnostics and cannot supply a commit preview. A stale preview is a
 recoverable command disposition that applies no effects and tells the client to refresh its

@@ -92,8 +92,11 @@ flowchart LR
 ```
 
 Commands in different domains and independent resource uploads have separate execution ownership.
-Conflicting work in one domain uses that domain's alteration or handoff ownership. Reads, health,
-subscription delivery, and transport control frames continue while a command waits.
+Conflicting work in one domain uses that domain's alteration or handoff ownership. Other sessions,
+health, subscription delivery, and transport control frames continue while a command waits, and so
+do the waiting session's completion, choice, domain, and inspection requests. That session's later
+commands wait for it, because a session runs its commands in order; see [Requests, Lanes, And
+Cancellation](./client-session-protocol.md#requests-lanes-and-cancellation).
 
 `REBIND RESOURCE` completes only after its entire selected model set has been validated, committed,
 and activated under this same barrier. The successful response is therefore the boundary at which
@@ -271,8 +274,10 @@ waits for membership and all resulting schedules to become authoritative and usa
 
 The gRPC and WebSocket transport loops keep control frames, server events, subscription delivery,
 and close detection moving while an ordered command worker waits. Disconnecting either transport
-drops its binding and waiter. Service-owned command, commit, and fully admitted upload tasks keep
-running.
+ends the session's waiters. An unclean end releases the session's transaction binding, and a clean
+close with no request in flight reverts the open transaction bound to it. Service-owned command,
+commit, and fully admitted upload tasks keep running. [Client Session
+Protocol](./client-session-protocol.md) defines how a client recovers each of them by its identity.
 
 ```mermaid
 sequenceDiagram

@@ -16,6 +16,29 @@ use super::{
     resource_binding_editor::{ResourceBindingEditor, ResourceBindingForm},
 };
 
+#[derive(Clone, Copy)]
+enum ProgramDirection {
+    Ingestion,
+    Emitting,
+    EmittingBatch,
+}
+
+fn program_text(signals: CreateSignals, direction: ProgramDirection) -> String {
+    let draft = signals.codec.get();
+    let Some(transformations) = draft.transformations() else {
+        return String::new();
+    };
+    let program = match direction {
+        ProgramDirection::Ingestion => &transformations.ingestion,
+        ProgramDirection::Emitting => &transformations.emitting,
+        ProgramDirection::EmittingBatch => &transformations.emitting_batch,
+    };
+    match program {
+        Some(program) => program.clone(),
+        None => String::new(),
+    }
+}
+
 #[component]
 pub(super) fn CodecEditor(
     signals: CreateSignals,
@@ -111,7 +134,7 @@ pub(super) fn CodecEditor(
                 <Show when=move || signals.codec.get().transformations().is_some_and(|value| value.ingestion.is_some()) fallback=|| ()>
                     <label class="create-field"><span>"Ingestion jaq program"</span>
                         <textarea class="create-codec-ingestion-program" spellcheck="false"
-                            prop:value=move || signals.codec.get().transformations().and_then(|value| value.ingestion.clone()).unwrap_or_default()
+                            prop:value=move || program_text(signals, ProgramDirection::Ingestion)
                             disabled=pending
                             on:input=move |event| {
                                 let value = event_target_textarea_value(&event);
@@ -138,7 +161,7 @@ pub(super) fn CodecEditor(
                 <Show when=move || signals.codec.get().transformations().is_some_and(|value| value.emitting.is_some()) fallback=|| ()>
                     <label class="create-field"><span>"Emitting jaq program"</span>
                         <textarea class="create-codec-emitting-program" spellcheck="false"
-                            prop:value=move || signals.codec.get().transformations().and_then(|value| value.emitting.clone()).unwrap_or_default()
+                            prop:value=move || program_text(signals, ProgramDirection::Emitting)
                             disabled=pending
                             on:input=move |event| {
                                 let value = event_target_textarea_value(&event);
@@ -163,7 +186,7 @@ pub(super) fn CodecEditor(
                     <Show when=move || signals.codec.get().transformations().is_some_and(|value| value.emitting_batch.is_some()) fallback=|| ()>
                         <label class="create-field"><span>"Batch jaq program"</span>
                             <textarea class="create-codec-batch-program" spellcheck="false"
-                                prop:value=move || signals.codec.get().transformations().and_then(|value| value.emitting_batch.clone()).unwrap_or_default()
+                                prop:value=move || program_text(signals, ProgramDirection::EmittingBatch)
                                 disabled=pending
                                 on:input=move |event| {
                                     let value = event_target_textarea_value(&event);
@@ -186,7 +209,10 @@ pub(super) fn CodecEditor(
                         <div class="create-codec-encoding-entry create-field-row">
                             <label class="create-field"><span>"Field"</span>
                                 <input class="create-codec-encoding-field" type="text"
-                                    prop:value=move || signals.codec.get().encoding_rules.get(index).map(|rule| rule.field.clone()).unwrap_or_default()
+                                    prop:value=move || match signals.codec.get().encoding_rules.get(index) {
+                                        Some(rule) => rule.field.clone(),
+                                        None => String::new(),
+                                    }
                                     disabled=pending
                                     on:input=move |event| {
                                         let value = event_target_value(&event);

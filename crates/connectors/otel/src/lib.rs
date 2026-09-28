@@ -13,7 +13,15 @@
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
 
-use std::{io::Write, num::NonZeroU64, str::FromStr, sync::Arc as StdArc, time::Duration};
+use std::{
+    collections::VecDeque,
+    io::Write,
+    num::{NonZeroU32, NonZeroU64},
+    ops::Range,
+    str::FromStr,
+    sync::Arc as StdArc,
+    time::Duration,
+};
 
 use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 use arrow_array::{
@@ -81,6 +89,7 @@ const OTLP_PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
 pub struct OtelSink {
     client: OtelClient,
     signal: OtelSignal,
+    batch: Option<OtelBatchLimits>,
     /// Where each signal key sits among the mapped columns, resolved once at start.
     value_columns: HashMap<String, usize>,
     /// The attribute keys, in the order their columns follow the signal's own.
@@ -96,6 +105,8 @@ pub struct OtelSinkConfig {
     pub config: Vec<ClientConfigEntry>,
     pub dns: nervix_dns::DnsResolver,
     pub signal: OtelSignal,
+    /// The optional count and exact protobuf request-size limits.
+    pub batch: Option<OtelBatchLimits>,
     /// The signal keys this emitter maps, in the order of its mapped columns.
     pub values: Vec<String>,
     /// The attribute keys this emitter maps, whose columns follow the signal's own.
@@ -105,6 +116,13 @@ pub struct OtelSinkConfig {
     /// The mapped columns the host projects, whose exact types this sink validates before it
     /// accepts its first batch.
     pub mapped_schema: StdArc<arrow_schema::Schema>,
+}
+
+/// The validated request bounds handed to the OTEL connector by its host.
+#[derive(Clone, Copy)]
+pub struct OtelBatchLimits {
+    pub max_messages: NonZeroU32,
+    pub max_size: NonZeroU64,
 }
 
 /// The OTLP signal one emitter exports.
@@ -236,6 +254,118 @@ enum OtelExportRequest {
     Logs(ExportLogsServiceRequest),
     Traces(ExportTraceServiceRequest),
     Metrics(ExportMetricsServiceRequest),
+}
+
+impl OtelExportRequest {
+    /// The uncompressed protobuf bytes the receiver decodes, before transport framing or gzip.
+    fn encoded_len(&self) -> usize {
+        match self {
+            Self::Logs(request) => request.encoded_len(),
+            Self::Traces(request) => request.encoded_len(),
+            Self::Metrics(request) => request.encoded_len(),
+        }
+    }
+
+    /// One ordered range of successfully mapped members, with the same resource and scope.
+    fn members(&self, range: Range<usize>) -> Self {
+        match self {
+            Self::Logs(request) => {
+                let resource = request
+                    .resource_logs
+                    .first()
+                    .assured("the OTEL logs request constructor always installs one resource");
+                let scope = resource
+                    .scope_logs
+                    .first()
+                    .assured("the OTEL logs request constructor always installs one scope");
+                Self::Logs(ExportLogsServiceRequest {
+                    resource_logs: vec![ResourceLogs {
+                        resource: resource.resource.clone(),
+                        scope_logs: vec![ScopeLogs {
+                            scope: scope.scope.clone(),
+                            log_records: scope.log_records[range].to_vec(),
+                            schema_url: scope.schema_url.clone(),
+                        }],
+                        schema_url: resource.schema_url.clone(),
+                    }],
+                })
+            }
+            Self::Traces(request) => {
+                let resource = request
+                    .resource_spans
+                    .first()
+                    .assured("the OTEL trace request constructor always installs one resource");
+                let scope = resource
+                    .scope_spans
+                    .first()
+                    .assured("the OTEL trace request constructor always installs one scope");
+                Self::Traces(ExportTraceServiceRequest {
+                    resource_spans: vec![ResourceSpans {
+                        resource: resource.resource.clone(),
+                        scope_spans: vec![ScopeSpans {
+                            scope: scope.scope.clone(),
+                            spans: scope.spans[range].to_vec(),
+                            schema_url: scope.schema_url.clone(),
+                        }],
+                        schema_url: resource.schema_url.clone(),
+                    }],
+                })
+            }
+            Self::Metrics(request) => {
+                let resource = request
+                    .resource_metrics
+                    .first()
+                    .assured("the OTEL metric request constructor always installs one resource");
+                let scope = resource
+                    .scope_metrics
+                    .first()
+                    .assured("the OTEL metric request constructor always installs one scope");
+                let metric = scope
+                    .metrics
+                    .first()
+                    .assured("the OTEL metric request constructor always installs one metric");
+                let data = match metric
+                    .data
+                    .as_ref()
+                    .assured("the OTEL metric request constructor always installs metric data")
+                {
+                    metric::Data::Gauge(gauge) => Some(metric::Data::Gauge(Gauge {
+                        data_points: gauge.data_points[range].to_vec(),
+                    })),
+                    metric::Data::Sum(sum) => Some(metric::Data::Sum(Sum {
+                        data_points: sum.data_points[range].to_vec(),
+                        aggregation_temporality: sum.aggregation_temporality,
+                        is_monotonic: sum.is_monotonic,
+                    })),
+                    metric::Data::Histogram(histogram) => {
+                        Some(metric::Data::Histogram(Histogram {
+                            data_points: histogram.data_points[range].to_vec(),
+                            aggregation_temporality: histogram.aggregation_temporality,
+                        }))
+                    }
+                    _ => None,
+                }
+                .assured("the OTEL metric constructor builds only gauge, sum, or histogram data");
+                Self::Metrics(ExportMetricsServiceRequest {
+                    resource_metrics: vec![ResourceMetrics {
+                        resource: resource.resource.clone(),
+                        scope_metrics: vec![ScopeMetrics {
+                            scope: scope.scope.clone(),
+                            metrics: vec![Metric {
+                                name: metric.name.clone(),
+                                description: metric.description.clone(),
+                                unit: metric.unit.clone(),
+                                metadata: metric.metadata.clone(),
+                                data: Some(data),
+                            }],
+                            schema_url: scope.schema_url.clone(),
+                        }],
+                        schema_url: resource.schema_url.clone(),
+                    }],
+                })
+            }
+        }
+    }
 }
 
 struct OtelPartialSuccess {
@@ -459,6 +589,7 @@ impl OtelSink {
             config,
             dns,
             signal,
+            batch,
             values,
             attributes,
             resource,
@@ -502,6 +633,7 @@ impl OtelSink {
         Ok(Self {
             client,
             signal,
+            batch,
             attribute_offset: values.len(),
             value_columns,
             attributes,
@@ -871,32 +1003,78 @@ impl RowSink for OtelSink {
             return outcome;
         }
 
-        match self.client.export(request).await {
-            OtelTransportOutcome::Accepted(partial_success) => {
-                if let Some(partial) = partial_success
-                    && (partial.rejected != 0 || !partial.error_message.is_empty())
-                {
-                    warn!(
-                        rejected_records = partial.rejected,
-                        receiver_supplied_message = !partial.error_message.is_empty(),
-                        "OTEL receiver returned partial_success; request records are acknowledged \
-                         without retry"
-                    );
-                }
-                for position in positions {
-                    outcome.deliver(position);
+        let max_messages = match self.batch {
+            Some(policy) => usize::try_from(policy.max_messages.get())
+                .assured("Nervix runs on 64-bit targets, so usize holds every u32"),
+            None => positions.len(),
+        };
+        let mut pending = VecDeque::new();
+        let mut start = 0;
+        while start < positions.len() {
+            let end = start
+                .checked_add(max_messages)
+                .assured("a chunk starts inside the already bounded selection")
+                .min(positions.len());
+            pending.push_back(start..end);
+            start = end;
+        }
+        while let Some(range) = pending.pop_front() {
+            tokio::task::consume_budget().await;
+            let export = request.members(range.clone());
+            if let Some(policy) = self.batch {
+                let size = u64::try_from(export.encoded_len())
+                    .assured("Nervix runs on 64-bit targets, so u64 holds a protobuf length");
+                if size > policy.max_size.get() {
+                    if range.len() > 1 {
+                        let middle = range
+                            .start
+                            .checked_add(range.len() / 2)
+                            .assured("the midpoint is inside the selected request range");
+                        pending.push_front(middle..range.end);
+                        pending.push_front(range.start..middle);
+                    } else {
+                        outcome.reject(RejectedSinkRecord::external(
+                            positions[range.start],
+                            rows.occurred_at,
+                            format!(
+                                "encoded OTEL export request is {size} bytes; batch maximum is {}",
+                                policy.max_size
+                            ),
+                        ));
+                    }
+                    continue;
                 }
             }
-            OtelTransportOutcome::Rejected(reason) => {
-                for position in positions {
-                    outcome.reject(RejectedSinkRecord::external(
-                        position,
-                        rows.occurred_at,
-                        reason.clone(),
-                    ));
+            match self.client.export(export).await {
+                OtelTransportOutcome::Accepted(partial_success) => {
+                    if let Some(partial) = partial_success
+                        && (partial.rejected != 0 || !partial.error_message.is_empty())
+                    {
+                        warn!(
+                            rejected_records = partial.rejected,
+                            receiver_supplied_message = !partial.error_message.is_empty(),
+                            "OTEL receiver returned partial_success; request records are \
+                             acknowledged without retry"
+                        );
+                    }
+                    for position in &positions[range] {
+                        outcome.deliver(*position);
+                    }
+                }
+                OtelTransportOutcome::Rejected(reason) => {
+                    for position in &positions[range] {
+                        outcome.reject(RejectedSinkRecord::external(
+                            *position,
+                            rows.occurred_at,
+                            reason.clone(),
+                        ));
+                    }
+                }
+                OtelTransportOutcome::Failed(error) => {
+                    outcome.fail(error);
+                    return outcome;
                 }
             }
-            OtelTransportOutcome::Failed(error) => outcome.fail(error),
         }
         outcome
     }
@@ -2083,6 +2261,192 @@ mod tests {
         ]))
         .expect_err("unknown config keys must be rejected");
         assert!(format!("{unknown:?}").contains("unsupported"));
+    }
+
+    #[test]
+    fn protobuf_request_members_preserve_signal_values_resource_scope_and_order() {
+        let resource = Resource {
+            attributes: vec![KeyValue {
+                key: "service.name".to_string(),
+                value: Some(AnyValue {
+                    value: Some(any_value::Value::StringValue("checkout".to_string())),
+                }),
+            }],
+            ..Resource::default()
+        };
+        let scope = InstrumentationScope {
+            name: "nervix/test".to_string(),
+            ..InstrumentationScope::default()
+        };
+        let logs = OtelExportRequest::Logs(ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: Some(resource.clone()),
+                scope_logs: vec![ScopeLogs {
+                    scope: Some(scope.clone()),
+                    log_records: [(11, "first"), (22, "second"), (33, "third")]
+                        .into_iter()
+                        .map(|(time_unix_nano, value)| LogRecord {
+                            time_unix_nano,
+                            body: Some(AnyValue {
+                                value: Some(any_value::Value::StringValue(value.to_string())),
+                            }),
+                            ..LogRecord::default()
+                        })
+                        .collect(),
+                    ..ScopeLogs::default()
+                }],
+                ..ResourceLogs::default()
+            }],
+        });
+        let OtelExportRequest::Logs(logs) = logs.members(1..3) else {
+            panic!("a log request must stay a log request");
+        };
+        let encoded = logs.encode_to_vec();
+        assert_eq!(logs.encoded_len(), encoded.len());
+        let decoded = ExportLogsServiceRequest::decode(encoded.as_slice())
+            .assured("prost decodes the request bytes it just encoded");
+        let resource_logs = &decoded.resource_logs[0];
+        assert_eq!(resource_logs.resource.as_ref(), Some(&resource));
+        let scope_logs = &resource_logs.scope_logs[0];
+        assert_eq!(scope_logs.scope.as_ref(), Some(&scope));
+        assert_eq!(scope_logs.log_records.len(), 2);
+        assert_eq!(scope_logs.log_records[0].time_unix_nano, 22);
+        assert_eq!(scope_logs.log_records[1].time_unix_nano, 33);
+        assert_eq!(
+            scope_logs.log_records[0]
+                .body
+                .as_ref()
+                .and_then(|body| body.value.as_ref()),
+            Some(&any_value::Value::StringValue("second".to_string()))
+        );
+        assert_eq!(
+            scope_logs.log_records[1]
+                .body
+                .as_ref()
+                .and_then(|body| body.value.as_ref()),
+            Some(&any_value::Value::StringValue("third".to_string()))
+        );
+
+        let traces = OtelExportRequest::Traces(ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: Some(resource.clone()),
+                scope_spans: vec![ScopeSpans {
+                    scope: Some(scope.clone()),
+                    spans: [(11, "first"), (22, "second"), (33, "third")]
+                        .into_iter()
+                        .map(|(start_time_unix_nano, name)| Span {
+                            name: name.to_string(),
+                            start_time_unix_nano,
+                            ..Span::default()
+                        })
+                        .collect(),
+                    ..ScopeSpans::default()
+                }],
+                ..ResourceSpans::default()
+            }],
+        });
+        let OtelExportRequest::Traces(traces) = traces.members(1..3) else {
+            panic!("a trace request must stay a trace request");
+        };
+        let encoded = traces.encode_to_vec();
+        assert_eq!(traces.encoded_len(), encoded.len());
+        let decoded = ExportTraceServiceRequest::decode(encoded.as_slice())
+            .assured("prost decodes the request bytes it just encoded");
+        let resource_spans = &decoded.resource_spans[0];
+        assert_eq!(resource_spans.resource.as_ref(), Some(&resource));
+        let scope_spans = &resource_spans.scope_spans[0];
+        assert_eq!(scope_spans.scope.as_ref(), Some(&scope));
+        assert_eq!(scope_spans.spans[0].start_time_unix_nano, 22);
+        assert_eq!(scope_spans.spans[1].start_time_unix_nano, 33);
+        assert_eq!(
+            scope_spans
+                .spans
+                .iter()
+                .map(|span| span.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second", "third"]
+        );
+    }
+
+    #[test]
+    fn protobuf_metric_request_members_keep_each_supported_point_container() {
+        let number_points = [1, 2, 3]
+            .into_iter()
+            .map(|time_unix_nano| NumberDataPoint {
+                time_unix_nano,
+                ..NumberDataPoint::default()
+            })
+            .collect::<Vec<_>>();
+        let histogram_points = [1, 2, 3]
+            .into_iter()
+            .map(|time_unix_nano| HistogramDataPoint {
+                time_unix_nano,
+                ..HistogramDataPoint::default()
+            })
+            .collect::<Vec<_>>();
+        let data = [
+            metric::Data::Gauge(Gauge {
+                data_points: number_points.clone(),
+            }),
+            metric::Data::Sum(Sum {
+                data_points: number_points,
+                aggregation_temporality: i32::from(AggregationTemporality::Delta),
+                is_monotonic: true,
+            }),
+            metric::Data::Histogram(Histogram {
+                data_points: histogram_points,
+                aggregation_temporality: i32::from(AggregationTemporality::Cumulative),
+            }),
+        ];
+        for data in data {
+            let request = OtelExportRequest::Metrics(ExportMetricsServiceRequest {
+                resource_metrics: vec![ResourceMetrics {
+                    resource: Some(Resource::default()),
+                    scope_metrics: vec![ScopeMetrics {
+                        scope: Some(InstrumentationScope::default()),
+                        metrics: vec![Metric {
+                            name: "nervix.test".to_string(),
+                            data: Some(data),
+                            ..Metric::default()
+                        }],
+                        ..ScopeMetrics::default()
+                    }],
+                    ..ResourceMetrics::default()
+                }],
+            });
+            let OtelExportRequest::Metrics(request) = request.members(1..3) else {
+                panic!("a metric request must stay a metric request");
+            };
+            let encoded = request.encode_to_vec();
+            assert_eq!(request.encoded_len(), encoded.len());
+            let decoded = ExportMetricsServiceRequest::decode(encoded.as_slice())
+                .assured("prost decodes the request bytes it just encoded");
+            let metric = &decoded.resource_metrics[0].scope_metrics[0].metrics[0];
+            assert_eq!(metric.name, "nervix.test");
+            let point_times = match metric
+                .data
+                .as_ref()
+                .assured("the test constructed one metric with data and protobuf preserved it")
+            {
+                metric::Data::Gauge(gauge) => gauge
+                    .data_points
+                    .iter()
+                    .map(|point| point.time_unix_nano)
+                    .collect::<Vec<_>>(),
+                metric::Data::Sum(sum) => sum
+                    .data_points
+                    .iter()
+                    .map(|point| point.time_unix_nano)
+                    .collect::<Vec<_>>(),
+                metric::Data::Histogram(histogram) => histogram
+                    .data_points
+                    .iter()
+                    .map(|point| point.time_unix_nano)
+                    .collect::<Vec<_>>(),
+                _ => panic!("the test only constructs supported metric point containers"),
+            };
+            assert_eq!(point_times, vec![2, 3]);
+        }
     }
 
     #[tokio::test]

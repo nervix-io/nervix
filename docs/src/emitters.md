@@ -224,12 +224,40 @@ for it, so every retry resends it byte for byte: neither the request expressions
 again, including volatile calls such as `uuid_v4()`. Retained bodies occupy node memory, which
 memory pressure accounts for, until their requests complete.
 
-The emitter sends the requests of the records a flush releases one at a time and in order, and
-waits for each response's headers before it sends the next. The client's `timeout_ms` bounds each
-attempt. Complete `2xx` response headers deliver the record, and the response body is never read.
-No redirect is followed. Any other response, and any request that fails before its response
-headers arrive, fails the attempt: the emitter retries that request and every later one on its
-declared retry policy, and keeps their upstream acknowledgements alive until they complete.
+One active emitter execution has at most one request awaiting final response headers, across all
+source relays and branches it serves. It sends the requests a flush releases in publication order.
+Independent executions have no total order, and an endpoint can apply a request after Nervix loses
+its response, so this order does not settle ambiguous remote effects.
+
+The HTTP sink speaks HTTP/1.1. It creates a connection for each attempt and closes it after final
+headers, so an unread or stalled body cannot be reused as the next response. DNS resolution,
+connection acquisition, TLS negotiation, the complete request send, interim responses and
+complete final headers share the client's physical `timeout_ms`; queueing behind an earlier
+request and host retry backoff do not consume the next attempt's timeout. HTTPS validates trust and
+the destination hostname and uses the client's pinned CA and optional client certificate mounts.
+Starting the sink reads local configuration and sends no probe.
+
+The transport writes `Host`, `Connection: close`, and `Content-Length` when a body exists. It adds
+`Accept: */*` only when the application did not write `Accept`. It adds no `Accept-Encoding` or
+`Content-Type`. The application may write `Accept`, `Content-Type`, `Authorization`, and `Cookie`
+with `write_header`. Response cookies are
+not retained; an authentication challenge sends no additional request. There is no redirect or
+library retry: every repeat is a separate emitter attempt under its declared policy.
+
+Each interim and final response header block may contain at most 128 fields and 64 KiB of field
+name and value bytes. Malformed headers or final framing and any exceeded bound fail the attempt,
+even when the final status line says `200`. Complete valid final `200`–`299` headers deliver the
+record, including `202` and `204`; a stalled or failed body after those headers does not reverse
+delivery. The sink never waits for a body or uses bodies and trailers as graph data.
+
+`408`, `425`, `429`, and `500`–`599` retain the current request and all later work for host retry.
+`401`, `403`, and `407` do the same and report an authentication or authorization infrastructure
+failure. DNS, connection, TLS, send, timeout, malformed response and loss before complete final
+headers are also infrastructure failures. Other `300`–`499` statuses and `101` reject only their
+record through `ON MESSAGE ERROR`; later records proceed after that policy completes. Redirects
+are never followed, `304` is not delivery, and `409` never implies an earlier delivery. Rejection
+diagnostics include the numeric status but no evaluated URL, header value, request body or response
+body.
 
 `ALTER EMITTER ... SET TO HTTP` restates the complete method, path, mode and body selection.
 `SET CLIENT` changes the referenced client, `SET MODE` changes the retry policy, and `SET ENCODE
@@ -303,7 +331,8 @@ The complete contract for batch payloads — packing, containers per wire format
 measurement and failure attribution for every sink — is defined in
 [Optional emitter batching](https://github.com/nervix-io/nervix/blob/main/docs/specifications/emitter-batching.md).
 The database sinks bound every sequential insert or bulk write by `MAX MESSAGES`, as their sections
-below describe, and OTEL and Iceberg emitters keep their current request and data-file grouping.
+below describe. An OTEL emitter with the clause bounds each export request; without it, OTEL keeps
+one request per pending Arrow batch. Iceberg keeps its data-file and commit boundaries.
 
 ### Batch payloads
 
@@ -335,6 +364,10 @@ first half is re-encoded under the same limit and the rest returns to the front 
 halving is encoded again, because a batch transformation may write more bytes for fewer members, so
 a candidate of `n` members takes at most `⌈log2(n)⌉ + 1` encodings. The bound covers the payload
 only: keys, headers and the framing a transport adds around the payload are outside it.
+
+Schemaful JSON rows use the same bounded writer as other codecs. Their columnar encoder stops at
+the first write over the limit; its string classifier and direct column writes do not change exact
+byte measurement, halving, or the per-record error policy.
 
 A record is rejected alone, through `ON MESSAGE ERROR` with operation `encode`, when its member value
 cannot be produced — its `ON EMITTING` transformation fails, or, without a batch transformation, its
@@ -776,6 +809,11 @@ Success is local socket acceptance and flush, not remote delivery confirmation. 
 a codec and rejects header writes. See [Syslog](syslog.md) for client configuration, framing,
 message errors, retry behavior, and limits.
 
+With `BATCH`, a `SYSLOG` codec encodes one RFC 5424 frame whose `MSG` is a JSON array of the
+members' complete RFC 5424 messages. Members must share every header field except timestamp; the
+outer frame uses the first member's timestamp. The same frame travels as one UDP datagram, one
+octet-counted TCP/TLS frame, or one non-transparent TCP frame when it contains no LF.
+
 ### SQS
 
 ```nspl,ignore
@@ -848,6 +886,13 @@ route-local encoding error.
 Sentry sends one event per envelope and acknowledges the successful HTTP response. On `429` or
 `503`, Nervix honors `Retry-After` and `X-Sentry-Rate-Limits`; the server interval extends the
 declared retry delay when it is longer.
+
+With `BATCH`, `ON EMITTING BATCH` builds one event from the candidate array, usually placing its
+members under `extra`. The envelope still has exactly one `event` item. `MAX SIZE` measures the
+transformed event JSON; Nervix also checks the final serialized event, after default fields are
+added, against Sentry's 1 MB decompressed event limit before sending the envelope. An oversized
+event follows the emitter's message error policy. The envelope header, item header, and newline
+framing are outside `MAX SIZE`.
 
 Use a JSON wire codec or a JAQ-native codec with JSON output. Sentry emitters require `ENCODE
 USING`, do not accept `write_header`, and still require explicit leakage for sensitive event
@@ -963,10 +1008,14 @@ or `F64` array `explicit_bounds`. Optional keys are `start_time`, numeric `sum`,
 `len(bucket_counts)` must equal `len(explicit_bounds) + 1`. Exponential histograms and summaries
 are not supported.
 
-For each pending Arrow batch, Nervix builds one Export request containing one resource, one scope,
-and all successfully converted records. `FLUSH ... MAX BATCH SIZE` measures the Arrow batch before
-protobuf encoding, so the encoded request can be larger than the configured boundary and must fit
-the receiver's request-size limit. Nervix stamps log `observed_time_unix_nano` at emission.
+Without `BATCH`, each pending Arrow batch becomes one Export request containing one resource, one
+scope, and all successfully converted records. With `BATCH`, the connector keeps that resource and
+scope in every request, takes successfully converted records in source order, and divides them by
+`MAX MESSAGES` and the exact protobuf size of each Export request. When a candidate exceeds `MAX
+SIZE`, it is halved until each request fits or a singleton is rejected through `ON MESSAGE ERROR`.
+The byte limit measures the uncompressed protobuf request before optional gzip; HTTP and gRPC
+framing and headers are outside it. `FLUSH ... MAX BATCH SIZE` continues to measure the Arrow batch.
+Nervix stamps log `observed_time_unix_nano` at emission.
 
 Connection failures, HTTP `429` and `5xx`, and gRPC `UNAVAILABLE` or `RESOURCE_EXHAUSTED` retry with
 backpressure. `Retry-After` and gRPC `RetryInfo` can extend the declared retry delay. Bad IDs, enum
@@ -1017,6 +1066,12 @@ For HTTPS endpoints, mount a TLS resource and set `'tls_ca_file'` to the mounted
 ClickHouse requires the [batching clause](#batching). A larger flush is split into sequential
 inserts of at most `MAX MESSAGES` records, and each successful insert is an acknowledgment. For ClickHouse, Postgres, and
 MySQL, a failed multi-row insert is classified first as record-specific or infrastructure-wide.
+ClickHouse writes each `JSONEachRow` line directly from the mapped Arrow columns in `VALUES`
+order, using the same typed JSON column writer as schemaful JSON emission. Null mapped values are
+written as `null`, including null list elements. Column names are escaped once for the publish
+batch, and string values use the batch's escape classification.
+`F32` columns keep ClickHouse's JSON number formatting after widening to `F64`; schemaful JSON
+codecs format `F32` directly.
 Infrastructure failures retry with backpressure. A record-specific failure is isolated by
 re-executing the chunk one record at a time so healthy rows land and only poison rows follow `ON
 MESSAGE ERROR`. Isolation can reapply rows from the failed chunk; use the sink's idempotent write

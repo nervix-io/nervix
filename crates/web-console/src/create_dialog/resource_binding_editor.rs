@@ -68,24 +68,30 @@ pub(super) fn ResourceBindingEditor(
             control=resource_control signals=signals request_tx=request_tx
             session_generation=session_generation />
         <Show when=move || binding(signals, kind).and_then(|binding| binding.resource).is_some() fallback=|| ()>
-            <p class="create-selected-resource">{move || binding(signals, kind)
-                .and_then(|binding| binding.resource)
-                .map(|selected| format!("Selected resource: {}", selected.name()))
-                .unwrap_or_default()}</p>
+            <p class="create-selected-resource">{move || {
+                let draft = binding(signals, kind).unwrap_or_default();
+                match draft.resource {
+                    Some(selected) => format!("Selected resource: {}", selected.name()),
+                    None => String::new(),
+                }
+            }}</p>
         </Show>
         <ChoiceGroup class_name="create-protobuf-version" label="Completed version"
             control=version_control signals=signals request_tx=request_tx
             session_generation=session_generation />
         <Show when=move || binding(signals, kind).and_then(|binding| binding.version).is_some() fallback=|| ()>
-            <p class="create-selected-version">{move || binding(signals, kind)
-                .and_then(|binding| binding.version)
-                .map(|selected| format!("Requested version: {}", selected.name()))
-                .unwrap_or_default()}</p>
+            <p class="create-selected-version">{move || {
+                let draft = binding(signals, kind).unwrap_or_default();
+                match draft.version {
+                    Some(selected) => format!("Requested version: {}", selected.name()),
+                    None => String::new(),
+                }
+            }}</p>
         </Show>
         <label class="create-field">
             <span>"Proto file · optional; all .proto files when empty"</span>
             <input class="create-protobuf-file" type="text" autocomplete="off"
-                prop:value=move || binding(signals, kind).map(|binding| binding.file).unwrap_or_default()
+                prop:value=move || binding(signals, kind).unwrap_or_default().file
                 disabled=pending
                 on:input=move |event| {
                     let value = event_target_value(&event);
@@ -95,7 +101,7 @@ pub(super) fn ResourceBindingEditor(
         <label class="create-field">
             <span>"Proto include root · optional"</span>
             <input class="create-protobuf-include" type="text" autocomplete="off"
-                prop:value=move || binding(signals, kind).map(|binding| binding.include).unwrap_or_default()
+                prop:value=move || binding(signals, kind).unwrap_or_default().include
                 disabled=pending
                 on:input=move |event| {
                     let value = event_target_value(&event);
@@ -104,13 +110,19 @@ pub(super) fn ResourceBindingEditor(
         </label>
         <div class="create-config-list">
             <p>"Additional Protobuf compiler configuration"</p>
-            <For each=move || { (0..binding(signals, kind).map(|binding| binding.config.len()).unwrap_or(0)).collect::<Vec<_>>() }
+            <For each=move || { (0..binding(signals, kind).unwrap_or_default().config.len()).collect::<Vec<_>>() }
                 key=|index| *index
                 children=move |index| view! {
                     <div class="create-config-entry create-field-row">
                         <label class="create-field"><span>"Key"</span>
                             <input class="create-config-key" type="text"
-                                prop:value=move || binding(signals, kind).and_then(|binding| binding.config.get(index).cloned()).map(|entry| entry.key).unwrap_or_default()
+                                prop:value=move || {
+                                    let draft = binding(signals, kind).unwrap_or_default();
+                                    match draft.config.get(index) {
+                                        Some(entry) => entry.key.clone(),
+                                        None => String::new(),
+                                    }
+                                }
                                 disabled=pending
                                 on:input=move |event| {
                                     let value = event_target_value(&event);
@@ -121,7 +133,13 @@ pub(super) fn ResourceBindingEditor(
                         </label>
                         <label class="create-field"><span>"Value"</span>
                             <input class="create-config-value" type="text"
-                                prop:value=move || binding(signals, kind).and_then(|binding| binding.config.get(index).cloned()).map(|entry| entry.value).unwrap_or_default()
+                                prop:value=move || {
+                                    let draft = binding(signals, kind).unwrap_or_default();
+                                    match draft.config.get(index) {
+                                        Some(entry) => entry.value.clone(),
+                                        None => String::new(),
+                                    }
+                                }
                                 disabled=pending
                                 on:input=move |event| {
                                     let value = event_target_value(&event);

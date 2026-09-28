@@ -182,6 +182,16 @@ impl TestDependencies {
         suite.lock().await.otel_collector_contains(needle).await
     }
 
+    pub(crate) async fn otel_collector_logs(&self) -> io::Result<String> {
+        let suite = SUITE_DEPENDENCIES.get().ok_or_else(|| {
+            io::Error::other(
+                "OpenTelemetry Collector is unavailable; add 'Given OpenTelemetry Collector is \
+                 running'",
+            )
+        })?;
+        suite.lock().await.otel_collector_logs().await
+    }
+
     pub(crate) async fn shutdown_suite() -> Vec<String> {
         let Some(suite) = SUITE_DEPENDENCIES.get() else {
             return Vec::new();

@@ -24,7 +24,13 @@ expect_verification_failure() {
 }
 
 tmp_dir="$(mktemp -d)"
-trap 'rm -rf "${tmp_dir}"' EXIT
+self_test_cleanup() {
+    if [[ -n "${cleanup_run_id:-}" ]]; then
+        "${chaos_dir}/cleanup.sh" --run-id "${cleanup_run_id}" --quiet >/dev/null 2>&1 || true
+    fi
+    rm -rf "${tmp_dir}"
+}
+trap self_test_cleanup EXIT
 
 restart_verifier="${chaos_dir}/verify-restart-evidence.sh"
 inspection_before="${tmp_dir}/before.json"
@@ -142,6 +148,78 @@ jq '.[0].HostConfig.RestartPolicy.Name = "always"' "${inspection_before}" >"${tm
 expect_crash_failure 'automatic restart' before "${test_run_id}" "${test_project}" nervix-1 \
     "${test_image_id}" "${tmp_dir}/auto-restart.json" "${tmp_dir}/auto-restart.json"
 
+pause_verifier="${chaos_dir}/verify-pause-evidence.sh"
+pause_before="${tmp_dir}/pause-before.json"
+pause_active="${tmp_dir}/pause-active.json"
+pause_resumed="${tmp_dir}/pause-resumed.json"
+pause_events="${tmp_dir}/pause-events.ndjson"
+pause_result="${tmp_dir}/pause-duration.json"
+jq '.[0].Config.Env = [
+    "NERVIX_RAFT_HEARTBEAT_INTERVAL=250ms",
+    "NERVIX_RAFT_ELECTION_TIMEOUT_MIN=10s",
+    "NERVIX_RAFT_ELECTION_TIMEOUT_MAX=12s",
+    "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=15s"
+] | .[0].State.Paused = false' "${inspection_before}" >"${pause_before}"
+jq '.[0].State.Paused = true' "${pause_before}" >"${pause_active}"
+cp "${pause_before}" "${pause_resumed}"
+printf '%s\n' \
+    "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"pause",Actor:{ID:$id},timeNano:1800000000000000000}')" \
+    "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"unpause",Actor:{ID:$id},timeNano:1800000006000000000}')" \
+    >"${pause_events}"
+"${pause_verifier}" before "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${pause_before}" "${pause_before}"
+"${pause_verifier}" paused "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${pause_before}" "${pause_active}"
+"${pause_verifier}" resumed "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${pause_before}" "${pause_resumed}" \
+    "${pause_events}" 5000 9999 "${pause_result}"
+jq -e '.pause_verified == true and .unpause_verified == true and (.actual_pause_ms - 6000 | fabs) < 1' \
+    "${pause_result}" >/dev/null || fail 'verified pause duration was incorrect'
+printf '%s\n' \
+    "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"pause",Actor:{ID:$id},timeNano:1800000000000000000}')" \
+    "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"unpause",Actor:{ID:$id},timeNano:1800000001000000000}')" \
+    >"${tmp_dir}/short-pause-events.ndjson"
+"${pause_verifier}" resumed "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${pause_before}" "${pause_resumed}" \
+    "${tmp_dir}/short-pause-events.ndjson" 800 2000 "${tmp_dir}/short-pause-duration.json"
+jq -e '.actual_pause_ms >= 800 and .actual_pause_ms <= 2000' \
+    "${tmp_dir}/short-pause-duration.json" >/dev/null \
+    || fail 'short pause duration missed its intended window'
+
+expect_pause_failure() {
+    local case_name="$1"
+    shift
+    local status=0
+    "${pause_verifier}" "$@" >"${tmp_dir}/pause-failure.txt" 2>&1 || status=$?
+    [[ "${status}" -eq 1 ]] || fail "${case_name} returned ${status}, expected failure 1"
+}
+
+expect_pause_failure 'no paused state' paused "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${pause_before}" "${pause_resumed}"
+expect_pause_failure 'still paused after injector' resumed "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${pause_before}" "${pause_active}" \
+    "${pause_events}" 5000 9999 "${pause_result}"
+expect_pause_failure 'missed long fault window' resumed "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${pause_before}" "${pause_resumed}" \
+    "${pause_events}" 15001 60000 "${pause_result}"
+expect_pause_failure 'missed short fault window' resumed "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${pause_before}" "${pause_resumed}" \
+    "${pause_events}" 800 2000 "${pause_result}"
+jq '.[0].State.StartedAt = "2026-09-27T00:01:00Z"' \
+    "${pause_resumed}" >"${tmp_dir}/pause-restarted.json"
+expect_pause_failure 'restarted paused process' resumed "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${pause_before}" "${tmp_dir}/pause-restarted.json" \
+    "${pause_events}" 5000 9999 "${pause_result}"
+sed 's/"Action":"unpause"/"Action":"stop"/' "${pause_events}" \
+    >"${tmp_dir}/pause-missing-unpause.ndjson"
+expect_pause_failure 'missing unpause event' resumed "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${pause_before}" "${pause_resumed}" \
+    "${tmp_dir}/pause-missing-unpause.ndjson" 5000 9999 "${pause_result}"
+jq '.[0].Config.Env |= map(select(. != "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=15s"))' \
+    "${pause_before}" >"${tmp_dir}/pause-wrong-threshold.json"
+expect_pause_failure 'wrong configured threshold' before "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${tmp_dir}/pause-wrong-threshold.json" "${tmp_dir}/pause-wrong-threshold.json"
+
 expected="${tmp_dir}/expected.ndjson"
 observed="${tmp_dir}/observed.ndjson"
 result="${tmp_dir}/result.json"
@@ -208,6 +286,7 @@ grep -Fq 'rolling-restart' <<<"${list_output}" || fail "scenario list omits roll
 for scenario in leader-crash follower-crash ingestor-owner-crash emitter-owner-crash; do
     grep -Fq "${scenario}" <<<"${list_output}" || fail "scenario list omits ${scenario}"
 done
+grep -Fq 'pause-resume' <<<"${list_output}" || fail 'scenario list omits pause-resume'
 
 expect_setup_rejection() {
     local case_name="$1" expected="$2"
@@ -227,12 +306,19 @@ expect_setup_rejection 'outage option is parsed' '--nodes must be 1 or 3' \
     "${chaos_dir}/run-baseline.sh" --scenario leader-crash --image fixture --nodes 2 --outage-seconds 8
 expect_setup_rejection 'unknown scenario' 'unknown scenario: unknown-crash' \
     "${chaos_dir}/run-baseline.sh" --scenario unknown-crash --image fixture
+expect_setup_rejection 'pause requires three nodes' 'requires --nodes 3' \
+    "${chaos_dir}/run-baseline.sh" --scenario pause-resume --image fixture --nodes 1
+expect_setup_rejection 'pause rejects crash outage' '--outage-seconds is for crash scenarios' \
+    "${chaos_dir}/run-baseline.sh" --scenario pause-resume --image fixture --outage-seconds 8
 
 status=0
 "${chaos_dir}/chaos.sh" run rolling-restart >"${tmp_dir}/rolling-missing-image.out" 2>&1 || status=$?
 [[ "${status}" -eq 2 ]] || fail "rolling-restart missing --image returned ${status}, expected 2"
 grep -Fq -- '--image is required' "${tmp_dir}/rolling-missing-image.out" \
     || fail "rolling-restart missing --image did not report the setup error"
+status=0
+"${chaos_dir}/chaos.sh" run pause-resume >"${tmp_dir}/pause-missing-image.out" 2>&1 || status=$?
+[[ "${status}" -eq 2 ]] || fail "pause-resume missing --image returned ${status}, expected 2"
 
 status=0
 "${chaos_dir}/chaos.sh" run baseline >"${tmp_dir}/missing-image.out" 2>&1 || status=$?
@@ -279,7 +365,9 @@ CHAOS_NODE_COUNT="3" \
     config --format json \
     >"${compose_json}"
 
-jq -e --arg image "${placeholder_image}" '
+jq -e --arg image "${placeholder_image}" \
+    --arg election_min "${CHAOS_RAFT_ELECTION_TIMEOUT_MIN:-1500ms}" \
+    --arg node_timeout "${CHAOS_NODE_UNAVAILABILITY_TIMEOUT:-10s}" '
     ([.services.admin, .services["nervix-1"], .services["nervix-2"], .services["nervix-3"]]
       | all(.image == $image))
     and ([.services[]] | all(has("build") | not))
@@ -289,6 +377,38 @@ jq -e --arg image "${placeholder_image}" '
          | all(.labels["io.nervix.chaos.run"] == "self-test"))
     and .services.load.labels["io.nervix.chaos.role"] == "load"
     and .services.observer.labels["io.nervix.chaos.role"] == "observer"
+    and .services["nervix-1"].environment.NERVIX_RAFT_ELECTION_TIMEOUT_MIN == $election_min
+    and .services["nervix-1"].environment.NERVIX_NODE_UNAVAILABILITY_TIMEOUT == $node_timeout
 ' "${compose_json}" >/dev/null || fail "Compose does not pin every Nervix service or contains a build"
+
+# A controller killed while Pumba owns the pause cannot run its EXIT trap.
+# The external cleanup path must unpause that exact labeled node before removal.
+cleanup_run_id="pause-cleanup-$$-${RANDOM}"
+cleanup_container="$(docker run --detach --rm \
+    --label "io.nervix.chaos.run=${cleanup_run_id}" \
+    --label io.nervix.chaos.role=node alpine:3.22 sleep 60)"
+docker pause "${cleanup_container}" >/dev/null
+[[ "$(docker inspect --format '{{.State.Paused}}' "${cleanup_container}")" == true ]] \
+    || fail 'cleanup exercise did not pause its run-owned target'
+"${chaos_dir}/cleanup.sh" --run-id "${cleanup_run_id}" --quiet
+if docker inspect "${cleanup_container}" >/dev/null 2>&1; then
+    fail 'external cleanup left the paused target behind'
+fi
+
+cleanup_run_id="pause-injector-failure-$$-${RANDOM}"
+cleanup_container="$(docker run --detach --rm \
+    --label "io.nervix.chaos.run=${cleanup_run_id}" \
+    --label io.nervix.chaos.role=node alpine:3.22 sleep 60)"
+docker pause "${cleanup_container}" >/dev/null
+injector_status=0
+docker run --rm \
+    --label "io.nervix.chaos.run=${cleanup_run_id}" \
+    --label io.nervix.chaos.role=fault alpine:3.22 false \
+    >"${tmp_dir}/injector-failure.txt" 2>&1 || injector_status=$?
+[[ "${injector_status}" -ne 0 ]] || fail 'injector-failure exercise did not fail'
+"${chaos_dir}/cleanup.sh" --run-id "${cleanup_run_id}" --quiet
+if docker inspect "${cleanup_container}" >/dev/null 2>&1; then
+    fail 'injector-failure cleanup left the paused target behind'
+fi
 
 printf 'chaos harness self-test passed\n'

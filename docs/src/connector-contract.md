@@ -152,9 +152,11 @@ For broker sources, `None` admits without an ACK root; `Sequential` requests one
 waits for its ACK tree; `Parallel` requests up to the declared in-flight limit within its batch
 timeout. The host waits for every accepted message's ACK outcome before acknowledging the batch's
 transport positions. A failed or timed-out ACK rejects the positions and retries according to the
-source's delivery policy. A transport without an acknowledged delivery mode has no redelivery
-guarantee from Nervix. The sequence below shows an acknowledged broker policy. The precise
-source-specific effects and NSPL modes are in
+source's delivery policy. If rejection itself fails, the host retains those positions, suspends
+the source, and reestablishes its assignment. It retries the same rejection before polling any
+later batch or committing a later position. A transport without an acknowledged delivery mode has
+no redelivery guarantee from Nervix. The sequence below shows an acknowledged broker policy. The
+precise source-specific effects and NSPL modes are in
 [Ingestors](./ingestors.md) and [Shutdown And Recovery](./shutdown.md#connector-contracts).
 
 ```mermaid
@@ -186,6 +188,11 @@ produced or no body at all. The host evaluates `VALUES` once per batch and exclu
 mapping errors before calling a row sink. It retains the ACKs of the source rows every record,
 mapped row or request carries, so no runtime ACK map enters the connector. Each publish is one call
 per batch, never a virtual call per row.
+
+The ClickHouse row sink uses the shared columnar JSON writer for `JSONEachRow`. It prepares typed
+column readers and string escape masks once for a mapped batch, then writes each selected row in
+mapping order without building per-row JSON values. It keeps the host's bounded chunks, request
+cadence, and per-record outcomes.
 
 An ordering group exists only where the sink plan declares one; today that is the SQS
 `FIFO GROUP`. The host compiles the declaration, evaluates it once per filtered source batch, and
@@ -245,6 +252,13 @@ exceeds that limit, with the same kind of reason, and writes the messages the br
 behind it again on a new channel. Anything else a destination reports when a message exceeds its
 limit is classified like any other publish failure.
 
+Syslog sends a completed codec payload as one transport frame. Its UDP writer rejects a frame above
+65,507 bytes, octet-counted TCP and TLS reject a count needing more than ten digits, and
+non-transparent TCP rejects one containing LF. The Sentry writer accepts one
+JSON event per envelope and checks the final event after default fields are added against the
+1 MB decompressed event limit. Both classify a definite local refusal as a record rejection;
+their transport and service failures retain their existing retry boundaries.
+
 The host owns that membership. It keeps every payload it offers the sink, with its exact bytes,
 key, headers, ordering group and member positions, in the emitter buffer beside the batches the
 members came from, and marks the members prepared so that no later attempt packs them again. A
@@ -261,6 +275,16 @@ the attempt for good releases them, and their members then follow the error poli
 unresolved row. A row sink names every member itself, so its retry writes only the rows it left
 unresolved; MongoDB's per-document results shrink a retried bulk write this way.
 
+OTEL is a row sink. Without `BATCH` it exports the successfully mapped rows of one Arrow carrier
+in one request. With `BATCH`, its typed plan passes the count and byte limits to the connector.
+The connector converts each selected row once, then takes the successful positions in order into
+requests of at most `MAX MESSAGES`. It measures the exact uncompressed protobuf Export request,
+including resource and scope, before optional gzip or transport framing. An oversized candidate
+is halved; an oversized singleton is rejected locally. Every accepted request answers for its own
+positions. A receiver's `partial_success` still acknowledges the whole request with a warning,
+because OTLP does not identify the rejected members. A failed request leaves only its unanswered
+positions for the host to retry.
+
 An HTTP emitter's request fields are the host's, not the connector's. When the emitter admits a
 batch, the host evaluates one compiled program over each record's original input, its finalized
 codec record and the batch's materialized state, only for the rows route `WHERE` kept: `METHOD` and
@@ -273,9 +297,28 @@ reads. When a flush releases a row, the
 host encodes its body and retains the request, as a prepared payload with that one member, in the
 same buffer that retains batch payloads. Every attempt hands the connector the retained requests
 unchanged, ahead of any request prepared after them, so a retry repeats the request the destination
-may already hold. The HTTP connector sends them one at a time, waits for each response's headers,
-and never follows a redirect; complete `2xx` headers deliver the request, and any other answer or a
-failed exchange ends the attempt with that request and every later one unresolved.
+may already hold. One connector publish call awaits at most one request across the emitter
+execution's served sources and branches. It sends them in their handed-over order, each on a
+fresh HTTP/1.1 connection using the node resolver and the shared rustls trust and client-identity
+configuration. The connection closes after final headers; no unread body can be reused. Its one
+physical `timeout_ms` spans DNS, connect, TLS, send, interim headers and complete final headers.
+The connector sends no startup probe, follows no redirect, stores no response cookie, answers no
+authentication challenge with another request, and has no independent retry policy. The host
+alone schedules another application attempt.
+
+The transport generates `Host`, `Connection: close` and, for a present body,
+`Content-Length`. It does not add `Accept-Encoding` or `Content-Type`. Application header writes
+can supply `Accept`, content type, authorization and cookie values. Without an application
+`Accept`, the transport adds `Accept: */*`.
+
+Each interim and final response header block is checked for at most 128 fields and 64 KiB of name
+and value bytes; invalid final framing fails before the status is classified. Complete valid final
+`2xx` headers deliver one request, without awaiting or interpreting its body. `408`, `425`, `429`,
+`5xx`, `401`, `403`, `407` and transport or header failures end the attempt with the current and
+later requests unresolved; the authentication statuses retain a distinct infrastructure reason.
+Other `3xx`/`4xx` and `101` reject their one request with a structured external message error,
+then publication continues with the next request. The host applies delivered and rejected
+members, branches and acknowledgements and keeps unresolved prepared bytes for retry.
 
 For a sink that stages writes, the lifecycle exposes a domain or physical commit deadline,
 staged-message count, pending ACKs, and a commit operation. The host includes that deadline in

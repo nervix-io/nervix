@@ -77,7 +77,10 @@ fn ProgramListEditor(
             <p>{label}</p>
             <For each=move || {
                     let draft = signals.signaling.get();
-                    let len = at.in_draft(&draft).map(Vec::len).unwrap_or(0);
+                    let len = match at.in_draft(&draft) {
+                        Some(programs) => programs.len(),
+                        None => 0,
+                    };
                     (0..len).collect::<Vec<_>>()
                 }
                 key=|index| *index

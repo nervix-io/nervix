@@ -79,6 +79,14 @@ fi
 
 status=0
 if ((${#containers[@]} > 0)); then
+    for container_id in "${containers[@]}"; do
+        paused="$(timeout --foreground --kill-after=5s 20s \
+            docker inspect --format '{{.State.Paused}}' "${container_id}")" || status=1
+        if [[ "${paused:-}" == true ]]; then
+            timeout --foreground --kill-after=5s 20s docker unpause "${container_id}" \
+                >/dev/null || status=1
+        fi
+    done
     timeout --foreground --kill-after=5s 60s docker container rm --force "${containers[@]}" \
         >/dev/null || status=$?
 fi
