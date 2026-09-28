@@ -16,8 +16,8 @@ For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.htm
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
 completion status messages.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
-schemas, and branches; use the same web-console chapter for their typed fields, reference lookup,
-and transaction behavior.
+schemas, branches, relays, and session subscriptions; use the same web-console chapter for their
+typed fields, reference lookup, and transaction behavior.
 
 ## Gather the configuration contract
 

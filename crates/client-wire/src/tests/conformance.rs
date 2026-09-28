@@ -124,6 +124,7 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
         ("client_attach_domain_clock.nxcm", client(15)),
         ("client_cancel.nxcm", client(13)),
         ("client_choice.nxcm", client(14)),
+        ("client_choice_relay_field.nxcm", client(17)),
         ("client_command.nxcm", client(0)),
         ("client_command_bare.nxcm", client(2)),
         ("client_commit.nxcm", client(1)),
@@ -178,6 +179,14 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                                 label: "orders".to_string(),
                                 detail: Some("RELAY".to_string()),
                                 group: Some("Models".to_string()),
+                            },
+                        },
+                        Choice {
+                            value: ChoiceValue::Field(name("amount")),
+                            presentation: ChoicePresentation {
+                                label: "amount".to_string(),
+                                detail: Some("I64 OPTIONAL".to_string()),
+                                group: Some("Relay field".to_string()),
                             },
                         },
                     ],
@@ -430,6 +439,7 @@ fn choice_value(value: &ChoiceValue) -> String {
         ChoiceValue::Model(node) => {
             format!("model:{}/{}", node.kind.as_str(), node.identifier.as_str())
         }
+        ChoiceValue::Field(field) => format!("field:{}", field.as_str()),
     }
 }
 

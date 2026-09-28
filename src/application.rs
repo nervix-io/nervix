@@ -131,6 +131,7 @@ mod cluster_status;
 mod command_execution;
 mod command_result;
 mod completion;
+mod configured_choices;
 mod describe_output;
 mod domain_clock;
 mod domain_lifecycle;
