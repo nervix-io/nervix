@@ -370,6 +370,24 @@ button {
   font-size: 12px;
 }
 
+.topbar-clock {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-d);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.topbar-clock strong {
+  color: var(--cyan);
+}
+
 .pill {
   display: inline-flex;
   align-items: center;
@@ -605,6 +623,80 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.domain-clock {
+  display: grid;
+  gap: 7px;
+  padding: 0 12px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-c);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+}
+
+.domain-clock-heading,
+.domain-clock-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.domain-clock-heading {
+  color: var(--text-d);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.domain-clock-heading strong {
+  overflow: hidden;
+  color: var(--text-b);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.domain-clock-state {
+  color: var(--cyan);
+  font-size: 11px;
+}
+
+.domain-clock-generation {
+  color: var(--text-d);
+}
+
+.domain-clock-details {
+  display: grid;
+  grid-template-columns: 66px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 4px 6px;
+}
+
+.domain-clock-details > span:nth-child(odd) {
+  color: var(--text-d);
+}
+
+.domain-clock-details > :nth-child(even) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.domain-clock-logical {
+  color: var(--text);
+}
+
+.domain-clock-tick-id {
+  color: var(--purple);
+}
+
+.domain-clock-error {
+  margin: 0;
+  color: #ef4444;
+  line-height: 1.4;
 }
 
 .domain-select:hover,

@@ -1027,9 +1027,11 @@ Every node serves attachments from its own installation, which it derives from t
 revision as every other node, and from progress it already accepted, so an attachment adds no
 interconnect traffic and survives nothing: it ends silently with its session. The Rust client
 attaches every clock it followed again on its next session, clears its previous tick, and reports
-the gap as an interruption. The web console does not follow domain clocks, and the shared binding
-does not expose them. Both requests are refused while the session holds a transaction, like every
-other session-local request.
+the gap as an interruption. The web console attaches the selected domain clock once per session,
+detaches it on selection changes, and restores it on reconnect; its REPL sends the same typed
+requests for explicit attach and detach statements. The shared binding does not expose clocks.
+Both requests are refused while the session holds a transaction, like every other session-local
+request.
 
 ## Resource Uploads
 

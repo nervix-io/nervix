@@ -403,6 +403,12 @@ contract, which the runtime and every connector crate share, so a connector stam
 through the same owner the runtime uses. Repository validation checks these ownership boundaries
 across the workspace, so a new runtime or connector path must choose its time class explicitly.
 
+The web console's clock display is an external observer: its clock-display module reads browser UTC
+to project an attached paced mapping for the screen. That projection does not enter a node's read
+watermark, alter tick progress, or supply domain time to execution. The repository clock-boundary
+check declares this module as the browser observation owner; other console modules receive its UTC
+sample instead of reading the wall clock themselves.
+
 ## Recovery And Distributed Guarantees
 
 The paced mapping, lifecycle generation, and authority fence recover from consensus state. Tick

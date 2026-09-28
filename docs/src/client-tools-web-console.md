@@ -47,12 +47,26 @@ The console is one screen with three regions:
 - the **REPL** below it, which also hosts any relay subscriptions you open
 
 The top bar carries the websocket connection state, the global **Create** menu, the domain
-lifecycle button, and the theme picker.
+lifecycle button, the selected clock state, and the theme picker. The clock panel below the domain
+selector shows the selected domain's clock in detail.
 
 Sidebar entries are counted per kind and each group collapses. Selecting an endpoint runs its
 `DESCRIBE` in the REPL; selecting a resource does the same and opens its version dialog.
 The **Cluster** footer stays independent of the selected domain: it reports the number of running
 domains, non-relay graph nodes, and relays across the current cluster graph.
+
+### Following the selected domain clock
+
+Selecting a domain attaches the console session to its clock once. The console detaches the
+previous clock when the selection changes. After a connection interruption, it attaches the
+selected clock again on the new session; the server releases the earlier attachment when its
+session ends. The panel shows the attached clock's typed state and START
+generation. For a paced clock it also shows logical now, rate, period, skew, and the latest accepted
+tick id and logical boundary. Logical now is projected from the committed mapping at the browser's
+UTC, refreshed four times a second; a browser whose clock differs from the cluster's can show a
+different projection. The tick is the serving node's accepted observation. Stopped, uninstalled,
+and unpaced states have no projected logical time. A refused attachment shows its reason and is
+not retried until the selection or connection changes.
 
 ## Creating Entities From Forms
 
@@ -296,12 +310,12 @@ The console sends a statement whether or not a domain is selected, and the serve
 it needs one: `SHOW CLUSTER STATUS` or `CREATE DOMAIN` runs with no domain selected, while a
 statement that acts on a domain fails with `no active domain selected`.
 
-The console event log renders domain-clock state and tick frames, including the tick id, boundary,
-authority UTC observation, and serving node's logical reading, when the session receives them.
-The console session does not yet follow domain clocks. `ATTACH DOMAIN CLOCK` and `DETACH DOMAIN CLOCK`
-typed into the REPL reach the server as commands, which refuses them as session-local; follow a
-domain clock with the [command line client](client-tools-cli.md#session-and-transaction-statements)
-or the [Rust client library](client-library.md#following-a-domain-clock).
+The console event log renders attachment outcomes, domain-clock state and tick frames, and
+attachment ends. Tick entries include the id, boundary, authority UTC observation, and serving
+node's logical reading. `ATTACH DOMAIN CLOCK` and `DETACH DOMAIN CLOCK` typed into the REPL use the
+same session-local requests as the automatic attachment. A typed second attach is refused as
+already attached. A typed detach releases the clock and leaves the panel detached until another
+domain selection or connection restores automatic following.
 
 `BEGIN` requires a selected domain that already exists and binds the transaction to it. The
 console follows the transaction's domain, so attaching switches the domain selector to it.
