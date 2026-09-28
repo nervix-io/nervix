@@ -152,9 +152,11 @@ For broker sources, `None` admits without an ACK root; `Sequential` requests one
 waits for its ACK tree; `Parallel` requests up to the declared in-flight limit within its batch
 timeout. The host waits for every accepted message's ACK outcome before acknowledging the batch's
 transport positions. A failed or timed-out ACK rejects the positions and retries according to the
-source's delivery policy. A transport without an acknowledged delivery mode has no redelivery
-guarantee from Nervix. The sequence below shows an acknowledged broker policy. The precise
-source-specific effects and NSPL modes are in
+source's delivery policy. If rejection itself fails, the host retains those positions, suspends
+the source, and reestablishes its assignment. It retries the same rejection before polling any
+later batch or committing a later position. A transport without an acknowledged delivery mode has
+no redelivery guarantee from Nervix. The sequence below shows an acknowledged broker policy. The
+precise source-specific effects and NSPL modes are in
 [Ingestors](./ingestors.md) and [Shutdown And Recovery](./shutdown.md#connector-contracts).
 
 ```mermaid
