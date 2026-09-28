@@ -33,6 +33,7 @@ use arrow_schema::{DataType, TimeUnit};
 use async_trait::async_trait;
 use error_stack::Report;
 use flate2::{Compression as GzipLevel, write::GzEncoder};
+use hyper_util::client::legacy::connect::HttpConnector;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_connector::{
@@ -694,7 +695,16 @@ impl OtelSink {
                         "OTEL TLS files require an https endpoint",
                     ));
                 }
-                let channel = endpoint.connect_lazy();
+                // Tonic keeps the configured URI for authority and TLS. Its custom connector
+                // still wraps DNS, TCP and TLS in the endpoint's connection deadline.
+                let mut connector = HttpConnector::new_with_resolver(dns.clone());
+                connector.enforce_http(false);
+                connector.set_nodelay(endpoint.get_tcp_nodelay());
+                connector.set_keepalive(endpoint.get_tcp_keepalive());
+                connector.set_keepalive_interval(endpoint.get_tcp_keepalive_interval());
+                connector.set_keepalive_retries(endpoint.get_tcp_keepalive_retries());
+                connector.set_connect_timeout(endpoint.get_connect_timeout());
+                let channel = endpoint.connect_with_connector_lazy(connector);
                 let metadata = Self::grpc_metadata(&settings.headers)?;
                 Ok(OtelTransport::Grpc {
                     channel,
@@ -2235,6 +2245,9 @@ fn any_value_at(array: &ArrayRef, row: usize) -> OtelValueResult<Option<AnyValue
 
 #[cfg(test)]
 mod tests {
+    use nervix_dns::{DnsConfiguration, NameServers};
+    use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
+
     use super::*;
 
     fn config(entries: &[(&str, &str)]) -> Vec<ClientConfigEntry> {
@@ -2478,6 +2491,54 @@ mod tests {
             "an unreachable receiver is a failure the host retries"
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn lazy_grpc_channel_resolves_only_when_an_export_needs_a_connection() {
+        let authority = DnsAuthority::start_on_loopback()
+            .await
+            .assured("a loopback DNS port is available");
+        let name = "otel-grpc.nervix.test";
+        authority.set(
+            name,
+            DnsAnswer::NameNotFound {
+                negative_ttl: Duration::from_secs(1),
+            },
+        );
+        let files = tempfile::tempdir().assured("a DNS fixture directory can be created");
+        let resolver_configuration = files.path().join("resolv.conf");
+        let hosts_file = files.path().join("hosts");
+        std::fs::write(
+            &resolver_configuration,
+            "search --\noptions ndots:1 timeout:1 attempts:1\n",
+        )
+        .assured("the fixture resolver configuration can be written");
+        std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
+        let dns = nervix_dns::DnsResolver::load(DnsConfiguration {
+            resolver_configuration,
+            hosts_file,
+            name_servers: NameServers::Explicit(vec![authority.address()]),
+        })
+        .await
+        .assured("the fixture DNS configuration is valid");
+        let transport = OtelSink::transport_from_config(
+            &config(&[
+                ("endpoint", "http://otel-grpc.nervix.test:4317"),
+                ("protocol", "grpc"),
+                ("timeout_ms", "2000"),
+            ]),
+            &dns,
+        )
+        .assured("a named endpoint constructs a lazy gRPC channel");
+        tokio::task::yield_now().await;
+        assert_eq!(authority.questions_for(name), 0);
+        let outcome = transport
+            .export(OtelExportRequest::Logs(ExportLogsServiceRequest {
+                resource_logs: Vec::new(),
+            }))
+            .await;
+        assert!(matches!(outcome, OtelTransportOutcome::Failed(_)));
+        assert!(authority.questions_for(name) > 0);
     }
 
     #[test]

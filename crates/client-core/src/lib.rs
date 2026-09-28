@@ -27,7 +27,7 @@ mod subscriptions;
 mod upload;
 
 pub use client::{Client, ExecutionHandle};
-pub use connection::{ConnectOptions, TlsRequirement};
+pub use connection::{ConnectDns, ConnectOptions, TlsRequirement};
 pub use domain_clock::{
     AttachedDomainClock, DomainClockEvent, DomainClockInterruption, DomainClockReadError,
 };

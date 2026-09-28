@@ -53,6 +53,16 @@ reference. An `https://` server is verified only against `ca_certificate_pem`: t
 system roots, so a TLS connection needs the certificate authority that signed the server's
 certificate.
 
+Native connections resolve a hostname through Hickory. By default the client loads the host's
+resolver configuration and hosts file once at connection setup. `ConnectOptions::dns` can name a
+different `DnsConfiguration` or an already loaded `DnsResolver` shared with the caller's runtime.
+The same resolver is reused for initial connections, seeds, redirects, and reconnects. Each new
+connection uses its current cached DNS answer, tries its addresses in order, and keeps the URL's
+hostname for HTTP/2 authority and TLS verification. The connection timeout includes lookup and
+all connection work; a failed DNS configuration returns `LoadDnsConfiguration`, and a failed lookup
+stays in the connection error's cause chain. DNS does not change execution identities,
+subscriptions, transactions, or cancellation.
+
 Minimal example:
 
 ```rust

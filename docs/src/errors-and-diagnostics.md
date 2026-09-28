@@ -111,6 +111,17 @@ connection error, which describes the connection and carries neither credentials
 response from the service keeps its existing description. None is a record rejection, and none
 acknowledges input.
 
+The native Rust session client loads its Hickory resolver before opening a server channel. An
+unreadable or invalid resolver configuration is `ClientError::LoadDnsConfiguration`, carrying the
+resolver's configuration report; the shared binding classifies it as a connection failure. A
+failed lookup within an initial, seed, redirect, or reconnect attempt is
+`ClientError::ConnectServer`. Tonic retains `DnsLookupError` in that transport error's cause chain,
+so callers can inspect its host and typed failure. The outer session retry deadline can instead
+end the wait as `RetryDeadline`. Connection timeouts and TLS name failures remain connection
+failures and do not become command dispositions. OTEL gRPC reports a failed lookup or
+connection through its existing infrastructure export failure; the emitter host keeps the batch
+and its acknowledgement under the declared retry policy. No record rejection is inferred from DNS.
+
 A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar sink: a message
 larger than the maximum message size the broker announced, which carries the measured size of its
 metadata and payload and the limit as typed fields, or a message the broker answered with

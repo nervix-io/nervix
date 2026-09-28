@@ -3,7 +3,9 @@ Feature: OTEL emission
   Scenario Outline: OTEL log and trace emitters export typed relay records over OTLP gRPC
     Given OpenTelemetry Collector is running
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
+    And the OTEL gRPC endpoint is published under fixture DNS
     And the leader node is configured with these NSPL commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
@@ -53,7 +55,7 @@ Feature: OTEL emission
       CREATE CLIENT otel_main
       TYPE OTEL
       CONFIG {
-        'endpoint' = '{{otel_collector_grpc_addr}}',
+        'endpoint' = '{{otel_collector_grpc_dns_addr}}',
         'protocol' = 'grpc',
         'timeout_ms' = 5000
       };
@@ -114,6 +116,7 @@ Feature: OTEL emission
       ON GENERAL ERROR LOG;
       START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
+    When the DNS fixture answers "otel-grpc.nervix.test" with "name not found"
     And sink client for emitter "audit_to_otel" enters unavailable fault mode
     And http payload is posted to host "otel-{{test_id}}.example.com" path "/audit"
       """
@@ -136,21 +139,30 @@ Feature: OTEL emission
       """
       reconnect backoff:
       """
-    And sink client for emitter "audit_to_otel" leaves fault mode
+    When sink client for emitter "audit_to_otel" leaves fault mode
+    Then within "10s" DESCRIBE EMITTER "audit_to_otel" on the leader node contains
+      """
+      transient error: OTEL gRPC export failed with The service is currently unavailable
+      """
+    And the DNS fixture eventually receives a question for "otel-grpc.nervix.test"
+    When the DNS fixture answers "otel-grpc.nervix.test" with addresses "127.0.0.1"
     Then OpenTelemetry Collector eventually contains "otel-log-{{test_id}}"
     And OpenTelemetry Collector eventually contains "otel-trace-{{test_id}}"
+    And the DNS fixture eventually receives a question for "otel-grpc.nervix.test"
 
     Examples:
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: OTEL metric emitters export over OTLP HTTP protobuf
+  Scenario Outline: OTEL metric emitters export over OTLP HTTP protobuf and gRPC
     Given OpenTelemetry Collector is running
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
     And the OTEL HTTP endpoint is published under fixture DNS
+    And the OTEL gRPC endpoint is published under fixture DNS
+    And the DNS fixture answers "otel-grpc.nervix.test" with addresses "127.0.5.3,127.0.0.1"
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -197,10 +209,34 @@ Feature: OTEL emission
         'compression' = 'gzip',
         'timeout_ms' = 5000
       };
+      CREATE CLIENT otel_grpc
+      TYPE OTEL
+      CONFIG {
+        'endpoint' = '{{otel_collector_grpc_dns_addr}}',
+        'protocol' = 'grpc',
+        'timeout_ms' = 5000
+      };
       CREATE EMITTER request_count_to_otel
       FROM request_counts
       TO OTEL otel_http
       METRIC 'nervix.test.request.count' UNIT '1' DESCRIPTION 'Cucumber request count'
+      SUM MONOTONIC DELTA
+      VALUES {
+        'time' = input.window_end,
+        'start_time' = input.window_start,
+        'value' = input.value
+      }
+      ATTRIBUTES { 'http.route' = input.route }
+      RESOURCE { 'service.name' = 'nervix-cucumber' }
+      SCOPE 'nervix/metrics' VERSION '1.0'
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE EMITTER request_count_to_otel_grpc
+      FROM request_counts
+      TO OTEL otel_grpc
+      METRIC 'nervix.test.request.count.grpc' UNIT '1' DESCRIPTION 'Cucumber request count over gRPC'
       SUM MONOTONIC DELTA
       VALUES {
         'time' = input.window_end,
@@ -226,7 +262,9 @@ Feature: OTEL emission
       }
       """
     Then OpenTelemetry Collector eventually contains "nervix.test.request.count"
+    And OpenTelemetry Collector eventually contains "nervix.test.request.count.grpc"
     And the DNS fixture eventually receives a question for "otel-http.nervix.test"
+    And the DNS fixture eventually receives a question for "otel-grpc.nervix.test"
 
     Examples:
       | cluster_size | replica_count |

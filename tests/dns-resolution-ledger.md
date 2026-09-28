@@ -8,9 +8,9 @@ node resolver only once its delivery has merged, and later deliveries extend the
 starting another.
 
 Run the named Cucumber evidence with `just test-scenarios --input <feature>`, the resolver's checks
-with `just test-dns`, the interconnect's with `just test-interconnect`, the RabbitMQ, Syslog,
-WebSocket, ClickHouse and SQS connectors' with `just test-package-lib <package>`, the dependency
-graphs with `just validate-dns-dependencies`, and the simulation with `just test-turmoil`.
+with `just test-dns`, the interconnect's with `just test-interconnect`, and focused connector and
+native-client units with `just test-package-lib <package>`. Check dependency graphs with
+`just validate-dns-dependencies` and the simulation with `just test-turmoil`.
 
 ## The node resolver
 
@@ -40,7 +40,8 @@ Resolution](../docs/src/interconnect.md#peer-name-resolution) is the public acco
 | WebSocket `ws` and `wss` client ingestion | Node resolver on every initial connection and resume, inside a 30-second budget shared with ordered TCP/TLS and upgrade attempts; the configured URL remains the request authority | [Hickory DNS 04](https://app.clickup.com/t/86bc7zpnf) | `runtime/websocket_client_ingestion.feature`, `runtime/websocket_client_tls_resource_mounts.feature`, and `runtime/websocket_dns_resolution.feature`, one and three nodes; `just validate-dns-dependencies` |
 | ClickHouse emission, plain HTTP and TLS clients (Hyper `HttpConnector`) | Node resolver injected as the connector's resolver service on every new connection, in both the plain-HTTP client that replaces the driver's default and the TLS client; the insert's `timeout_ms` wait covers the connection | [Hickory DNS 05](https://app.clickup.com/t/86bc7zpng) | `runtime/clickhouse_dns_resolution.feature`, one and three nodes; `just test-package-lib nervix-connector-clickhouse`; `just validate-dns-dependencies` |
 | SQS source and sink, default-root and custom-CA clients (Smithy HTTP client) | Node resolver injected through Smithy's `ResolveDns` with `build_with_resolver` on every new connection, in both the default-root client, which keeps the SDK default's proxy environment, and the custom-CA client; static credentials and region leave `aws-config`'s default provider chains unused, and its SSO token chain, never asked by SigV4 SQS, shares the same client | [Hickory DNS 05](https://app.clickup.com/t/86bc7zpng) | `runtime/sqs_dns_resolution.feature`, one and three nodes; `just test-package-lib nervix-connector-sqs`; `just validate-dns-dependencies` |
-| Native client sessions and OTEL gRPC export (Tonic) | Tonic's default connector | [Hickory DNS 06](https://app.clickup.com/t/86bc7zpnk) | Not yet on the node resolver |
+| Native CLI and SDK sessions (Tonic) | Hickory resolver loaded once from the system or explicit client configuration; a server-internal session shares its node's resolver. Tonic's custom eager connector resolves each new connection and retains the original URI authority and TLS name | [Hickory DNS 06](https://app.clickup.com/t/86bc7zpnk) | `tools/cli_session.feature`: hostname HTTP/HTTPS and wrong-name TLS cases; `runtime/client_wire_qualification.feature`: named-seed subscription and transaction recovery; `nervix-client-core`'s `native_session_` tests |
+| OTEL gRPC export (Tonic) | Node resolver through Tonic's custom lazy connector, asked only when an export needs a connection | [Hickory DNS 06](https://app.clickup.com/t/86bc7zpnk) | `runtime/otel_emission.feature`: hostname log, trace and metric exports, DNS failure and recovery, ordered addresses; `nervix-connector-otel`'s lazy channel test |
 | Redis pool and Pub/Sub | The driver's default resolver | [Hickory DNS 07](https://app.clickup.com/t/86bc7zpnn) | Not yet on the node resolver |
 | MongoDB | Hickory for SRV and TXT discovery inside the driver, through its `dns-resolver` feature; Tokio's `lookup_host` for the addresses it connects to | Residual driver boundary | `just validate-dns-dependencies` keeps the discovery feature selected; the address lookups are not replaceable without a supported injection contract |
 | NATS, MQTT, PostgreSQL and MySQL (SQLx, `mysql_async`), Pulsar, Kafka (librdkafka), ZeroMQ | Driver-owned system resolution | Residual driver boundary | Not replaceable without a supported injection contract |
@@ -134,3 +135,21 @@ the driver's error, where `DnsLookupError::find_in` recovers it as the report's 
 | SQS sources resume after a failed lookup without deleting or losing a message | *SQS sources resume once their service name resolves again after name not found* and *after silence*: `DESCRIBE INGESTOR` shows the lookup failure, and the message published meanwhile is delivered through the next answer |
 | Request deadlines include the lookup, and SDK retries stay as configured | `configured_timeout_bounds_clickhouse_insert_completion`; `client_timeout_bounds_each_request_while_sdk_retries_stay_disabled`; `request_timeout_cancels_a_silent_dns_lookup` for the shared hook budget |
 | The isolated connectors select the node resolver and AWS-LC | `just validate-dns-dependencies`; `just check-package nervix-connector-clickhouse`, `just check-package nervix-connector-sqs` |
+
+## Hickory DNS 06 acceptance
+
+Native sessions reuse one Hickory resolver across the first connection, seeds, redirects, and
+reconnects. A node that opens a peer session for shutdown drain passes its own loaded resolver.
+OTEL gRPC installs that same node resolver under Tonic's lazy channel; constructing the channel
+does not open a socket or ask DNS. Tonic keeps the configured URI for HTTP/2 authority and TLS
+verification, while its connection deadline includes lookup and ordered address attempts.
+
+| Acceptance item | Evidence |
+| --- | --- |
+| Native CLI commands reach a fixture hostname over HTTP and HTTPS in one- and three-node clusters | `tools/cli_session.feature`: *CLI connects by hostname over <mode> through the configured DNS fixture* |
+| A certificate for another DNS name is rejected after a successful lookup | `tools/cli_session.feature`: *CLI rejects a TLS certificate for a different DNS hostname* |
+| A subscription and open transaction retain their identities through leader loss and named-seed recovery | `runtime/client_wire_qualification.feature`: *Subscription restoration and typed transaction inspection survive the same leader loss* |
+| Native DNS errors remain typed, a silent lookup is canceled by the connection deadline, and a second address can connect | `just test-package-lib nervix-client-core native_session_` |
+| OTEL exports logs, traces and metrics to a hostname, retries through an outage, and tries a usable address after an unreachable first address | `runtime/otel_emission.feature`: the log/trace and HTTP/gRPC metric outlines, each with one and three nodes |
+| Constructing OTEL's lazy gRPC channel makes no DNS query; its first export does | `just test-package-lib nervix-connector-otel lazy_grpc_channel_resolves_only_when_an_export_needs_a_connection` |
+| The production, Shuttle, Turmoil and browser builds keep their boundaries | `just validate`, `just validate-dns-dependencies`, `just test-turmoil`; the web-console build is part of `just test-scenarios` setup |

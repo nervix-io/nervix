@@ -99,6 +99,7 @@ impl Failure {
             | ClientError::EncodeRequest { .. }
             | ClientError::BuildUploadArchive => FailureKind::InvalidArgument,
             ClientError::TlsRequired
+            | ClientError::LoadDnsConfiguration(_)
             | ClientError::ConfigureTls(_)
             | ClientError::ConnectServer(_)
             | ClientError::StartSession(_)

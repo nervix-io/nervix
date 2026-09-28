@@ -34,14 +34,18 @@ nervix-cli --server https://nervix.example.com:47390 --tls required --tls-ca-cer
 | `--server <URL>` | | `http://127.0.0.1:47391` | session gRPC endpoint; the scheme selects TLS |
 | `--tls <preferred\|required>` | | `preferred` | `required` refuses to connect over a non-`https` URL |
 | `--tls-ca-cert <PATH>` | | | PEM certificate authority used to verify the server |
+| `--dns-resolver-config <PATH>` | `NERVIX_DNS_RESOLVER_CONFIG` | `/etc/resolv.conf` | resolver configuration for native hostname connections |
+| `--dns-hosts-file <PATH>` | `NERVIX_DNS_HOSTS_FILE` | `/etc/hosts` | hosts file consulted before DNS |
+| `--dns-name-server <ADDRESS:PORT>` | `NERVIX_DNS_NAME_SERVERS` | from resolver configuration | replacement name server; repeatable or comma-separated |
 | `--domain <NAME>` | | `default` | domain the session starts in |
 | `--username <NAME>` | `NERVIX_USERNAME` | `default` | registry user |
 | `--password <PASSWORD>` | `NERVIX_PASSWORD` | | prompted interactively when unset |
 | `--command <NSPL>` | | | run statements once and exit |
 
-There is no configuration file and no `--version` flag. `--server`, `--domain`, and the TLS options
-have no environment-variable equivalents; only the credentials do, so a password never has to
-appear in shell history.
+There is no general CLI configuration file and no `--version` flag. `--server`, `--domain`, and the
+TLS options have no environment-variable equivalents. The DNS options select the resolver used by
+the native session; the system resolver and hosts files are the defaults. The password can come
+from `NERVIX_PASSWORD` so it need not appear in shell history.
 
 The table above is the short version. [nervix-cli Reference](nervix-cli-reference.md) is printed by
 the binary itself while this book is built, so it is the authoritative list of every option and
