@@ -466,11 +466,10 @@ test-coverage: tests-deps
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --all-targets --all-features --workspace \
         "${workspace_exclusions[@]}"
-    just coverage-cli-binary
-    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
-    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
-        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
-    cargo llvm-cov --no-report --all-targets --features testing --package nervix-server
+    # These server targets cover every server test except the scenario suite and the compile-fail
+    # capability checks, which run in their own jobs.
+    cargo llvm-cov --no-report --lib --bins --benches --test harness_liveness \
+        --features testing --package nervix-server
     cargo llvm-cov --no-report --all-targets \
         --package nervix-client-core \
         --package 'nervix-connector*' \
@@ -478,8 +477,21 @@ test-coverage: tests-deps
         --package nervix-execution \
         --package nervix-interconnect \
         --package nervix-wasm
-    cargo llvm-cov report --lcov --output-path lcov.info
-    cargo crap --lcov lcov.info --min 30 --threshold 30
+    cargo llvm-cov report --lcov --output-path lcov-workspace.info
+    cargo llvm-cov report --package nervix-cli --package nervix-web-console \
+        --package nervix-server --lcov --output-path lcov.info
+
+test-scenarios-coverage: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
+    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios
+    cargo llvm-cov report --lcov --output-path lcov-workspace.info
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
 
@@ -1458,7 +1470,7 @@ docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian
         -f Dockerfile.debian \
         --progress=plain \
         --platform "${normalized_platform}" \
-        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.19.0}" \
+        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.28.0}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
         --build-arg DEBIAN_VERSION={{ debian_version }} \
         --build-arg LLVM_VERSION={{ llvm_version }} \

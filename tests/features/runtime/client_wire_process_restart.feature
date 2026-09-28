@@ -1,5 +1,5 @@
 Feature: Client wire full-process restart
-  @client_wire_process_restart @exclusive
+  @client_wire_process_restart
   Scenario: A SIGKILL restart preserves a command admitted before the crash
     Given a nervix-server process is started
     And the server process is configured with these NSPL commands
@@ -23,7 +23,7 @@ Feature: Client wire full-process restart
       );
       """
 
-  @client_wire_inactivity_restart @exclusive
+  @client_wire_inactivity_restart
   Scenario: Physical inactivity while every node is stopped expires an open transaction
     Given a nervix-server process is started with transaction idle timeout "1s" and tombstone retention "5s"
     And the server process is configured with these NSPL commands
@@ -38,7 +38,7 @@ Feature: Client wire full-process restart
     And the server process is restarted
     Then server process transaction "{{transaction_id}}" eventually has state "EXPIRED"
 
-  @client_wire15 @exclusive
+  @client_wire15
   Scenario: Every killed process recovers retained commands and expires an overdue open transaction
     Given a 3 node nervix-server process cluster is started with transaction idle timeout "10s" and tombstone retention "5m"
     And the active domain is "{{domain}}"

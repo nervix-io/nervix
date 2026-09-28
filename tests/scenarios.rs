@@ -37,7 +37,7 @@ use cucumber::{
     writer::{self, Stats as _},
 };
 use futures_util::{
-    TryStreamExt,
+    StreamExt as _, TryStreamExt,
     future::{join_all, try_join_all},
 };
 use iceberg::{
@@ -117,7 +117,11 @@ use crate::common::{
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     raw_session::{TestUpload, TestUploadPart, WireOutcome as _},
-    scenario_phase::{ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase},
+    scenario_phase::{
+        ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
+        begin_suite_measurement, suite_summary,
+    },
+    scenario_schedule::{FeatureLimit, ScenarioAdmission, ScenarioRunSlots, prioritize_features},
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
         ServerProcessLaunch, ServerProcessOption, describe_exit,
@@ -141,13 +145,6 @@ const CUCUMBER_LOG_FILE: &str = "tests/logs/cucumber.log";
 static ONNX_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<StdMutex<BTreeMap<String, String>>> = OnceLock::new();
-// Every scenario holds a read guard; `@exclusive` scenarios hold the write guard.
-static SCENARIO_EXECUTION_LOCK: OnceLock<StdArc<tokio::sync::RwLock<()>>> = OnceLock::new();
-static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> = OnceLock::new();
-static WASM_STATE_RESET_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> =
-    OnceLock::new();
-const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
-const MAX_CONCURRENT_WASM_STATE_RESET_SCENARIOS: usize = 1;
 const WEB_CONSOLE_ASSERTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ZEROMQ_OBSERVER_BIND_ATTEMPTS: usize = 8;
 const DURABLE_CATCH_UP_STORAGE_COMMITS_PER_ENTRY: u32 = 2;
@@ -157,24 +154,8 @@ const MAX_DURABLE_CATCH_UP_WRITES: usize = 128;
 /// The execution class a follower charges its decoded append batches to.
 const COMMANDS_MEMORY_LABEL: &str = "class=\"commands\"";
 const BULK_MEMORY_LABEL: &str = "class=\"bulk\"";
-const WEB_CONSOLE_FEATURE_NAMES: [&str; 3] = [
-    "Web console NSPL REPL",
-    "Web console execution graph",
-    "Web console transaction inspector",
-];
-const WASM_STATE_RESET_FEATURE_NAME: &str = "Coordinated WASM processor state reset";
 const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
 const DEPENDENCY_LIFECYCLE_STARTED: &str = "NERVIX_DEPENDENCY_LIFECYCLE_STARTED=";
-
-#[derive(Debug)]
-enum ScenarioExecutionPermit {
-    Concurrent {
-        _permit: tokio::sync::OwnedRwLockReadGuard<()>,
-    },
-    Exclusive {
-        _permit: tokio::sync::OwnedRwLockWriteGuard<()>,
-    },
-}
 
 /// What a scenario's own steps did, as its after hook sees it.
 ///
@@ -270,7 +251,7 @@ struct CliClockProcess {
 
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
-    scenario_execution_permit: Option<ScenarioExecutionPermit>,
+    scenario_admission: Option<ScenarioAdmission>,
     /// Publishes which phase this scenario is in for as long as its world lives, so a reader of
     /// the registry sees the work in flight rather than the last work that finished.
     active_scenario: Option<ActiveScenarioRegistration>,
@@ -377,8 +358,6 @@ struct ScenarioWorld {
     browser_context: Option<playwright_rs::BrowserContext>,
     browser: Option<playwright_rs::Browser>,
     playwright: Option<Playwright>,
-    web_console_scenario_permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    wasm_state_reset_scenario_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     dependencies: TestDependencies,
     background_nspl: Option<AbortOnDropHandle<Result<String, String>>>,
     background_command_result:
@@ -473,11 +452,17 @@ impl fmt::Debug for ScenarioWorld {
             .field("browser_initialized", &self.browser.is_some())
             .field(
                 "web_console_permit_acquired",
-                &self.web_console_scenario_permit.is_some(),
+                &self
+                    .scenario_admission
+                    .as_ref()
+                    .is_some_and(|admission| admission.limit() == FeatureLimit::WebConsole),
             )
             .field(
                 "wasm_state_reset_permit_acquired",
-                &self.wasm_state_reset_scenario_permit.is_some(),
+                &self
+                    .scenario_admission
+                    .as_ref()
+                    .is_some_and(|admission| admission.limit() == FeatureLimit::WasmStateReset),
             )
             .field("dependencies", &self.dependencies)
             .field(
@@ -533,11 +518,23 @@ impl ScenarioWorld {
         };
         let published = registration.enter(phase);
         let marker = format!(
-            "scenario {phase}: {} age={:?} {detail}",
+            "scenario {phase}: {} suite_age={:?} age={:?} {detail}",
             published.identity,
+            ActiveScenario::suite_age(),
             published.age()
         );
         append_cucumber_log_line(marker.trim_end());
+    }
+
+    fn wait_for_admission(&self, reason: common::scenario_schedule::AdmissionWait) {
+        let Some(registration) = &self.active_scenario else {
+            return;
+        };
+        let published = registration.wait_for(reason);
+        append_cucumber_log_line(&format!(
+            "scenario queued: {} attempt={} waiting_for={reason}",
+            published.identity, published.attempt
+        ));
     }
 
     fn stop_durable_catch_up_work(&mut self) {
@@ -24989,6 +24986,44 @@ struct ScenarioRunArgs {
     watchdog: SuiteWatchdogArgs,
 }
 
+/// Parse the same Gherkin inputs and CLI options as Cucumber's basic parser, then take the
+/// limited feature chains up before the bulk. Cucumber may schedule all parsed scenarios at
+/// once; admission to a feature and to a run slot happens in the before hook.
+#[derive(Clone, Debug, Default)]
+struct PrioritizedScenarioParser;
+
+impl<I: AsRef<Path>> cucumber::parser::Parser<I> for PrioritizedScenarioParser {
+    type Cli = cucumber::parser::basic::Cli;
+    type Output = futures_util::stream::LocalBoxStream<
+        'static,
+        cucumber::parser::Result<cucumber::gherkin::Feature>,
+    >;
+
+    fn parse(self, input: I, cli: Self::Cli) -> Self::Output {
+        let parsed = cucumber::parser::Parser::parse(cucumber::parser::Basic::new(), input, cli);
+        futures_util::stream::once(async move {
+            let mut features = parsed.collect::<Vec<_>>().await;
+            prioritize_features(&mut features, |feature| {
+                feature.as_ref().ok().map(|feature| feature.name.as_str())
+            });
+            features
+        })
+        .flat_map(futures_util::stream::iter)
+        .boxed_local()
+    }
+}
+
+fn publish_suite_summary() {
+    let summary = suite_summary();
+    print!("{summary}");
+    for line in summary.lines() {
+        append_cucumber_log_line(line);
+    }
+    if let Err(error) = std::fs::write("tests/logs/suite-summary.md", &summary) {
+        eprintln!("failed to write suite summary: {error}");
+    }
+}
+
 async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     let mut cli =
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, ScenarioRunArgs>::parsed();
@@ -25007,9 +25042,14 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         .runner
         .concurrency
         .unwrap_or(default_max_concurrent_scenarios);
+    // Cucumber's cap controls task take-up, not work. All queued scenarios may enter their before
+    // hooks; the harness permits below are the only run capacity charged to a scenario.
+    cli.runner.concurrency = None;
+    let run_slots = StdArc::new(ScenarioRunSlots::new(effective_max_concurrent_scenarios));
     truncate_cucumber_log();
+    begin_suite_measurement(effective_max_concurrent_scenarios, watchdog.budget());
     append_cucumber_log_line(&format!(
-        "scenario parallelism: max_concurrent_scenarios={effective_max_concurrent_scenarios} \
+        "scenario parallelism: run_slots={effective_max_concurrent_scenarios} \
          concurrency_factor={concurrency_factor} tokio_worker_threads={} suite_budget={:?}",
         parallelism.tokio_worker_threads(),
         watchdog.budget()
@@ -25022,19 +25062,15 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     .summarized()
     .normalized()
     .repeat_failed();
-    let run = ScenarioWorld::cucumber()
-        .max_concurrent_scenarios(default_max_concurrent_scenarios)
+    let run = ScenarioWorld::cucumber::<&str>()
+        .with_parser(PrioritizedScenarioParser)
+        .max_concurrent_scenarios(usize::MAX)
         .retries(2)
-        .before(|feature, rule, scenario, world| {
+        .before(move |feature, _rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
             let scenario_line = scenario.position.line;
-            let exclusive = scenario
-                .tags
-                .iter()
-                .chain(rule.iter().flat_map(|rule| &rule.tags))
-                .chain(&feature.tags)
-                .any(|tag| tag == "exclusive");
+            let run_slots = run_slots.clone();
             Box::pin(async move {
                 // Published before the permits below, so a scenario the suite has taken up is
                 // visible while it waits for them rather than only once it runs.
@@ -25043,61 +25079,11 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                     &scenario_name,
                     scenario_line,
                 ));
-                let wasm_state_reset_scenario_permit =
-                    if feature_name == WASM_STATE_RESET_FEATURE_NAME {
-                        // Every reset scenario starts a cluster and compiles WASM. Running more
-                        // than one with the suite's coverage concurrency starves unrelated
-                        // scenario nodes, stretching subsecond assertions into tens of seconds.
-                        // Acquire this before the shared execution guard so queued reset scenarios
-                        // cannot keep an exclusive scenario from taking that guard.
-                        Some(
-                            WASM_STATE_RESET_SCENARIO_PERMITS
-                                .get_or_init(|| {
-                                    StdArc::new(tokio::sync::Semaphore::new(
-                                        MAX_CONCURRENT_WASM_STATE_RESET_SCENARIOS,
-                                    ))
-                                })
-                                .clone()
-                                .acquire_owned()
-                                .await
-                                .expect("WASM state reset scenario semaphore must remain open"),
-                        )
-                    } else {
-                        None
-                    };
-                let execution_lock = SCENARIO_EXECUTION_LOCK
-                    .get_or_init(|| StdArc::new(tokio::sync::RwLock::new(())))
-                    .clone();
-                let execution_permit = if exclusive {
-                    ScenarioExecutionPermit::Exclusive {
-                        _permit: execution_lock.write_owned().await,
-                    }
-                } else {
-                    ScenarioExecutionPermit::Concurrent {
-                        _permit: execution_lock.read_owned().await,
-                    }
-                };
-                world.wasm_state_reset_scenario_permit = wasm_state_reset_scenario_permit;
-                world.scenario_execution_permit = Some(execution_permit);
-                if WEB_CONSOLE_FEATURE_NAMES
-                    .iter()
-                    .any(|name| *name == feature_name)
-                {
-                    // Starting many three-node clusters and optimized WASM consoles together can
-                    // starve Chromium renderer event loops under the suite's global concurrency.
-                    world.web_console_scenario_permit = Some(
-                        WEB_CONSOLE_SCENARIO_PERMITS
-                            .get_or_init(|| {
-                                StdArc::new(tokio::sync::Semaphore::new(
-                                    MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS,
-                                ))
-                            })
-                            .clone()
-                            .acquire_owned()
-                            .await
-                            .expect("web console scenario semaphore must remain open"),
-                    );
-                }
+                let limit = FeatureLimit::for_name(&feature_name);
+                let admission = run_slots
+                    .admit_with(limit, |reason| world.wait_for_admission(reason))
+                    .await;
+                world.scenario_admission = Some(admission);
                 world.enter_phase(ScenarioPhase::Body, "");
             })
         })
@@ -25185,9 +25171,6 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.stallable_tcp_proxies.clear();
                 world.tcp_forwarders = None;
                 world.silent_interconnect_peers.clear();
-                world.web_console_scenario_permit = None;
-                world.wasm_state_reset_scenario_permit = None;
-                world.scenario_execution_permit = None;
                 // The ZeroMQ and syslog ports the scenario drew for itself were bound by its nodes
                 // and its observers, and both are gone by now, so the ports go back to the pool
                 // the next scenario draws from.
@@ -25198,6 +25181,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                     ScenarioPhase::Finished,
                     &format!("body={body} {cluster_cleanup}"),
                 );
+                world.scenario_admission = None;
             })
         })
         .with_writer(writer)
@@ -25213,7 +25197,10 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     // mid-scenario, leaving logs without the suite's own diagnostic. Cucumber's fail-fast is not
     // this guarantee — it stops scheduling and leaves the scenarios already running exactly where
     // they are — so the retry coverage below keeps running until the budget itself expires.
-    let writer = match watchdog.bound(run).await {
+    let writer = match watchdog
+        .bound_with_timeout_report(run, publish_suite_summary)
+        .await
+    {
         SuiteRun::Completed(writer) => writer,
         SuiteRun::TimedOut(timeout) => {
             for line in timeout.to_string().lines() {
@@ -25249,6 +25236,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         SuiteOutcome::Passed
     };
     drop(writer);
+
+    publish_suite_summary();
 
     execution_failure
 }

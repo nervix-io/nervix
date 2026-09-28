@@ -1,4 +1,3 @@
-@exclusive
 Feature: Interconnect health coordination
 
   Scenario: A partitioned peer does not evict connected peers or move their work

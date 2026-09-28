@@ -16,7 +16,8 @@ permissions:
   issues: write
 
 env:
-  KACHE_VERSION: "0.19.0"
+  KACHE_VERSION: "0.28.0"
+  KACHE_REMOTE_KEY_LISTING: "false"
 
 jobs:
   meta:
@@ -72,6 +73,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -204,9 +207,13 @@ jobs:
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "60GiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
           s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-prefix: "artifacts"
           s3-region: ${{ vars.KACHE_S3_REGION }}
           s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -217,10 +224,17 @@ jobs:
           "${NERVIX_BENCHMARK_IMAGE}"
           "${RUNNER_TEMP}/nervix-benchmarks"
 
-      - name: Kache stats
-        continue-on-error: true
+      - name: Publish kache report
         if: always()
-        run: kache stats
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
 
       - name: Publish benchmark summary
         if: always()
@@ -396,6 +410,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -471,9 +487,12 @@ jobs:
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
           s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-prefix: "artifacts"
           s3-region: ${{ vars.KACHE_S3_REGION }}
           s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -555,7 +574,14 @@ jobs:
               });
             }
 
-      - name: Kache stats
-        continue-on-error: true
+      - name: Publish kache report
         if: always()
-        run: kache stats
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
