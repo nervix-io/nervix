@@ -24,8 +24,6 @@ x-nervix-service: &nervix-service
     options:
       max-file: "2"
       max-size: 2m
-  networks:
-    - chaos
 
 x-run-labels: &run-labels
   io.nervix.chaos.run: ${CHAOS_RUN_ID:?CHAOS_RUN_ID is required}
@@ -63,6 +61,9 @@ services:
   nervix-1:
     <<: *nervix-service
     hostname: nervix-1
+    networks:
+      chaos:
+        ipv4_address: ${CHAOS_NODE_1_ADDRESS:?CHAOS_NODE_1_ADDRESS is required}
     labels:
       <<: *run-labels
       io.nervix.chaos.role: node
@@ -84,6 +85,9 @@ services:
   nervix-2:
     <<: *nervix-service
     hostname: nervix-2
+    networks:
+      chaos:
+        ipv4_address: ${CHAOS_NODE_2_ADDRESS:?CHAOS_NODE_2_ADDRESS is required}
     profiles:
       - three-node
     depends_on:
@@ -108,6 +112,9 @@ services:
   nervix-3:
     <<: *nervix-service
     hostname: nervix-3
+    networks:
+      chaos:
+        ipv4_address: ${CHAOS_NODE_3_ADDRESS:?CHAOS_NODE_3_ADDRESS is required}
     profiles:
       - three-node
     depends_on:
@@ -225,9 +232,15 @@ services:
       - chaos
 
 networks:
+  # Node addresses are fixed per run so peer-side partition rules keep matching a node across its
+  # restart. Dynamic addresses for every other container come from a range that excludes them.
   chaos:
     labels:
       <<: *run-labels
+    ipam:
+      config:
+        - subnet: ${CHAOS_SUBNET:?CHAOS_SUBNET is required}
+          ip_range: ${CHAOS_DYNAMIC_RANGE:?CHAOS_DYNAMIC_RANGE is required}
 
 volumes:
   node-1-data:
