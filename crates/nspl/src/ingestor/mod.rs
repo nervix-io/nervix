@@ -23,13 +23,12 @@ use crate::{
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_timeout, ack_window,
         alter_ingestor_route_body, alter_op_separator, boxed_choice, byte_size_lit, channel_ref,
-        client_ref, codec_ref,
-        consumer_group_ref, domain_clock_period_lit, duration_lit, endpoint_ref, field_ref,
-        filter_where_clause, flushed_ingestor_outputs, general_error_policy, if_not_exists_clause,
-        ingestor_name, into_parse_error, kw, kw_phrase2, lex_input, mqtt_topic_filter,
-        nats_queue_group_ref, nonzero_u64_value, parallel_ack_window, queue_ref, relay_ref,
-        retry_policy, schema_ref, sequential_ack_window, string_lit, subject_ref,
-        subscription_ref, suggest_from, tok, topic_ref, where_expression,
+        client_ref, codec_ref, consumer_group_ref, domain_clock_period_lit, duration_lit,
+        endpoint_ref, field_ref, filter_where_clause, flushed_ingestor_outputs,
+        general_error_policy, if_not_exists_clause, ingestor_name, into_parse_error, kw,
+        kw_phrase2, lex_input, mqtt_topic_filter, nats_queue_group_ref, nonzero_u64_value,
+        parallel_ack_window, queue_ref, relay_ref, retry_policy, schema_ref, sequential_ack_window,
+        string_lit, subject_ref, subscription_ref, suggest_from, tok, topic_ref, where_expression,
     },
 };
 
@@ -875,10 +874,7 @@ pub fn create_ingestor_parser<'src>()
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(
             |(
-                (
-                    ((((if_not_exists, name), input), timestamp_source), filter_where),
-                    output_routes,
-                ),
+                (((((if_not_exists, name), input), timestamp_source), filter_where), output_routes),
                 general_error_policy,
             )| {
                 CreateStatement::new(
@@ -2553,13 +2549,13 @@ mod tests {
     fn rejects_client_sources_outside_their_contract() {
         let invalid_sources = [
             // A client source decodes nothing, so it names no codec.
-            "CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s \
-             ON QUIESCE SUSPEND DECODE USING event_codec",
+            "CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX \
+             2s ON QUIESCE SUSPEND DECODE USING event_codec",
             // Suspension is the only quiesce mode a client source honors.
-            "CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s \
-             ON QUIESCE BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST",
-            "CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s \
-             ON QUIESCE DROP",
+            "CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX \
+             2s ON QUIESCE BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST",
+            "CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX \
+             2s ON QUIESCE DROP",
             // The mode acknowledges and states both its timeout and its whole retry policy.
             "CLIENT SCHEMA event MODE NO_ACK SEQUENTIAL ON QUIESCE SUSPEND",
             "CLIENT SCHEMA event MODE ACK SEQUENTIAL RETRY POLICY BACKOFF 1s MAX 2s ON QUIESCE \

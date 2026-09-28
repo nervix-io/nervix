@@ -96,7 +96,11 @@ fn a_cancelled_wait_loses_neither_the_outcome_nor_the_credit() {
             }
             None => {
                 let pending = slots.pending();
-                assert_eq!(pending.len(), 1, "a cancelled wait leaves its submission held");
+                assert_eq!(
+                    pending.len(),
+                    1,
+                    "a cancelled wait leaves its submission held"
+                );
                 let retaken = slots
                     .rejoin(id)
                     .await

@@ -4333,7 +4333,6 @@ fn format_number(value: f64) -> String {
         .to_string()
 }
 
-
 /// The series of one client ingestor on this node: its attached producers, the batches and bytes
 /// they have outstanding, the batches holding a slot of its acknowledgement window, and the
 /// batches it answered.
@@ -4375,14 +4374,15 @@ impl ClientIngestorSeries {
             i64::try_from(gauges.outstanding_batches)
                 .assured("every outstanding batch occupies memory, so the count fits in i64"),
         );
-        self.outstanding_bytes.set(i64::try_from(gauges.outstanding_bytes).assured(
-            "outstanding bytes are held in memory within the node's producer budget, so they fit \
-             in i64",
-        ));
-        self.admitted_batches.set(
-            i64::try_from(gauges.admitted_batches)
-                .assured("every admitted batch holds its ACK root in memory, so the count fits in i64"),
-        );
+        self.outstanding_bytes
+            .set(i64::try_from(gauges.outstanding_bytes).assured(
+                "outstanding bytes are held in memory within the node's producer budget, so they \
+                 fit in i64",
+            ));
+        self.admitted_batches
+            .set(i64::try_from(gauges.admitted_batches).assured(
+                "every admitted batch holds its ACK root in memory, so the count fits in i64",
+            ));
     }
 }
 #[cfg(test)]

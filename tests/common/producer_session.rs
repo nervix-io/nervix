@@ -290,9 +290,11 @@ impl RawProducerSession {
         timeout: Duration,
     ) -> io::Result<TimedReply> {
         self.inbox
-            .wait_for(timeout, &format!("the reply to request {request_id}"), |filed| {
-                filed.replies.get(&request_id).cloned()
-            })
+            .wait_for(
+                timeout,
+                &format!("the reply to request {request_id}"),
+                |filed| filed.replies.get(&request_id).cloned(),
+            )
             .await
     }
 

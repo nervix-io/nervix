@@ -15,14 +15,14 @@ use crate::{
     domain::ALL_DOMAIN_STATUSES,
     domain_clock::ALL_DOMAIN_CLOCK_ATTACHMENT_END_REASONS,
     event::ALL_NOTICE_LEVELS,
-    producer::{
-        ALL_OUTCOME_UNCERTAINTIES, ALL_PROCESSING_FAILURES, ALL_PRODUCER_ADMISSIONS,
-        ALL_PRODUCER_END_REASONS, ALL_PRODUCER_REFUSALS,
-    },
     impact::{
         ALL_ACTIVATION_ACTIONS, ALL_DOMAIN_LIFECYCLE_ACTIONS, ALL_IMPACT_DIAGNOSTIC_KINDS,
         ALL_IMPACT_EDGE_KINDS, ALL_MODEL_CHANGE_ASPECTS, ALL_REBUILD_REASONS,
         ALL_RESOURCE_CATALOG_ACTIONS, ALL_STATE_PURGES,
+    },
+    producer::{
+        ALL_OUTCOME_UNCERTAINTIES, ALL_PROCESSING_FAILURES, ALL_PRODUCER_ADMISSIONS,
+        ALL_PRODUCER_END_REASONS, ALL_PRODUCER_REFUSALS,
     },
     reply::{
         ALL_CANCEL_STATES, ALL_CANCELLATION_STAGES, ALL_INSPECTION_REJECTIONS,
@@ -148,14 +148,23 @@ fn every_enum_maps_exactly_to_its_schema_enum() {
         ALL_DOMAIN_CLOCK_ATTACHMENT_END_REASONS,
         wire::DomainClockAttachmentEndReason::ENUM_VALUES,
     );
-    assert_exact_mapping(ALL_PRODUCER_ADMISSIONS, wire::ProducerAdmission::ENUM_VALUES);
+    assert_exact_mapping(
+        ALL_PRODUCER_ADMISSIONS,
+        wire::ProducerAdmission::ENUM_VALUES,
+    );
     assert_exact_mapping(ALL_PRODUCER_REFUSALS, wire::ProducerRefusal::ENUM_VALUES);
-    assert_exact_mapping(ALL_PROCESSING_FAILURES, wire::ProcessingFailure::ENUM_VALUES);
+    assert_exact_mapping(
+        ALL_PROCESSING_FAILURES,
+        wire::ProcessingFailure::ENUM_VALUES,
+    );
     assert_exact_mapping(
         ALL_OUTCOME_UNCERTAINTIES,
         wire::OutcomeUncertainty::ENUM_VALUES,
     );
-    assert_exact_mapping(ALL_PRODUCER_END_REASONS, wire::ProducerEndReason::ENUM_VALUES);
+    assert_exact_mapping(
+        ALL_PRODUCER_END_REASONS,
+        wire::ProducerEndReason::ENUM_VALUES,
+    );
 }
 
 #[test]

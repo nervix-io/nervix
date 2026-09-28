@@ -20,12 +20,12 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::{
     AckWindow, ClientConfigEntry, ClientEndpointContract, ClientIngestSource, ClientName,
-    ClientProducerPolicy, ClientResourceMount, ClusterNodeName, CodecName, ConsumerGroupName, CreateIngestor,
-    CreateSchema, DomainName, EndpointName, FlushPolicy, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSource, IngestSourceKind, IngestTimestampSource, IngestorInput, IngestorName,
-    KafkaIngestMode, KafkaOffsetMode, MessageErrorOperation, Model, ModelName, MqttIngestMode,
-    PulsarIngestMode, RabbitMqIngestMode, ResolvedBranching, SchemaField, SchemaName,
-    ScheduledNode, SignalingProtocolName, SqsIngestMode,
+    ClientProducerPolicy, ClientResourceMount, ClusterNodeName, CodecName, ConsumerGroupName,
+    CreateIngestor, CreateSchema, DomainName, EndpointName, FlushPolicy, IngestAcknowledgement,
+    IngestQuiesceMode, IngestSource, IngestSourceKind, IngestTimestampSource, IngestorInput,
+    IngestorName, KafkaIngestMode, KafkaOffsetMode, MessageErrorOperation, Model, ModelName,
+    MqttIngestMode, PulsarIngestMode, RabbitMqIngestMode, ResolvedBranching, ScheduledNode,
+    SchemaField, SchemaName, SignalingProtocolName, SqsIngestMode,
 };
 use triomphe::Arc;
 
@@ -293,8 +293,11 @@ impl IngestorStartPlan {
         let identifier = ModelName::from(&ingestor.name);
         let owner = EntrypointOwner::ingestor(&identifier, ingestor);
         let input_arrow_schema = input_schema.arrow_schema();
-        let routes =
-            routes.plan_routes(&owner, ingestor.output_routes.outputs(), &input_arrow_schema)?;
+        let routes = routes.plan_routes(
+            &owner,
+            ingestor.output_routes.outputs(),
+            &input_arrow_schema,
+        )?;
         let filter_where = match ingestor.filter_where.as_ref() {
             Some(filter) => Some(LoweredFilter::planned(
                 &owner,
@@ -372,8 +375,12 @@ impl IngestorInputPlan {
     ) -> Result<DecidedInput, Report<EntrypointPlanError>> {
         match &ingestor.input {
             IngestorInput::Transport(transport) => {
-                let source =
-                    SourceStartPlan::decide(&ingestor.name, &transport.source, source_model, scheduled)?;
+                let source = SourceStartPlan::decide(
+                    &ingestor.name,
+                    &transport.source,
+                    source_model,
+                    scheduled,
+                )?;
                 let Some(codec) = activation.codecs.get(&transport.codec) else {
                     return Err(Report::new(EntrypointPlanError::MissingCodec {
                         ingestor: ingestor.name.clone(),
@@ -389,7 +396,8 @@ impl IngestorInputPlan {
                 })
             }
             IngestorInput::Client(client) => {
-                let plan = ClientIngestorStartPlan::decide(ingestor, client, source_model, activation)?;
+                let plan =
+                    ClientIngestorStartPlan::decide(ingestor, client, source_model, activation)?;
                 let schema = plan.schema.clone();
                 Ok(DecidedInput {
                     plan: Self::Client(plan),
@@ -431,7 +439,11 @@ impl ClientIngestorStartPlan {
         let policy = ClientProducerPolicy {
             window: mode.window,
             ack_timeout: Self::duration(name, "ACK TIMEOUT", &mode.ack_timeout)?,
-            retry_backoff: Self::duration(name, "RETRY POLICY BACKOFF", &mode.retry_policy.backoff)?,
+            retry_backoff: Self::duration(
+                name,
+                "RETRY POLICY BACKOFF",
+                &mode.retry_policy.backoff,
+            )?,
             retry_max_backoff: Self::duration(
                 name,
                 "RETRY POLICY MAX",
@@ -493,8 +505,12 @@ fn client_endpoint_contract(
         hasher.update(&length.to_le_bytes());
         hasher.update(part.as_bytes());
     };
-    add(&contract_ingestor.to_canonical_nspl().change_context_lazy(unrenderable)?);
-    add(&schema.to_canonical_nspl().change_context_lazy(unrenderable)?);
+    add(&contract_ingestor
+        .to_canonical_nspl()
+        .change_context_lazy(unrenderable)?);
+    add(&schema
+        .to_canonical_nspl()
+        .change_context_lazy(unrenderable)?);
     for route in ingestor.output_routes.outputs() {
         add(route.relay.as_str());
         let branching = activation
@@ -504,12 +520,16 @@ fn client_endpoint_contract(
         match branching {
             Some(ResolvedBranching::Branched { branch, schema }) => {
                 add(branch.as_str());
-                add(&schema.to_canonical_nspl().change_context_lazy(unrenderable)?);
+                add(&schema
+                    .to_canonical_nspl()
+                    .change_context_lazy(unrenderable)?);
             }
             Some(ResolvedBranching::Unbranched) | None => add("UNBRANCHED"),
         }
     }
-    Ok(ClientEndpointContract::from_digest(*hasher.finalize().as_bytes()))
+    Ok(ClientEndpointContract::from_digest(
+        *hasher.finalize().as_bytes(),
+    ))
 }
 
 impl SourceStartPlan {
@@ -863,7 +883,10 @@ mod tests {
     /// The transport input of a fixture ingestor, which always reads a transport.
     fn transport_plan(plan: &IngestorStartPlan) -> &TransportInputPlan {
         let IngestorInputPlan::Transport(transport) = &plan.input else {
-            panic!("the fixture ingestor reads a transport, planned as {:?}", plan.input);
+            panic!(
+                "the fixture ingestor reads a transport, planned as {:?}",
+                plan.input
+            );
         };
         transport
     }

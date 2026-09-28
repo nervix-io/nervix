@@ -564,12 +564,8 @@ impl DomainState {
                                 ModelKind::Codec,
                             )?;
                             graph.add_edge(codec, source, EdgeKind::RequiredBy);
-                            let codec_model = expect_codec_model(
-                                domain,
-                                identifier,
-                                models,
-                                &input.codec,
-                            )?;
+                            let codec_model =
+                                expect_codec_model(domain, identifier, models, &input.codec)?;
                             ensure_codec_supports_decoding(domain, identifier, codec_model)?;
 
                             match &input.source {
@@ -606,8 +602,8 @@ impl DomainState {
                                     let client_model = models
                                         .get(&NodeRef::new(ModelKind::Client, client.clone()))
                                         .verified(
-                                            "expect_kind above resolved this client reference against the \
-                                             same model set",
+                                            "expect_kind above resolved this client reference \
+                                             against the same model set",
                                         );
                                     if let Model::ClientSyslog(_) = client_model {
                                     } else {
@@ -615,11 +611,11 @@ impl DomainState {
                                             domain: domain.as_str().to_string(),
                                             identifier: identifier.as_str().to_string(),
                                             reason: format!(
-                                                "SYSLOG ingestor requires a SYSLOG client, found {} \
-                                                 client '{}'",
+                                                "SYSLOG ingestor requires a SYSLOG client, found \
+                                                 {} client '{}'",
                                                 client_model.client_type_label().verified(
-                                                    "this model was resolved as a client above, and every \
-                                                     client model carries a type label"
+                                                    "this model was resolved as a client above, \
+                                                     and every client model carries a type label"
                                                 ),
                                                 client.as_str(),
                                             ),

@@ -284,9 +284,7 @@ impl<'a> IpcMessages<'a> {
     }
 
     /// The next message's header, or `None` at the end-of-stream marker, which must end the body.
-    fn next_message(
-        &mut self,
-    ) -> Result<Option<arrow_ipc::Message<'a>>, Report<ClientBatchError>> {
+    fn next_message(&mut self) -> Result<Option<arrow_ipc::Message<'a>>, Report<ClientBatchError>> {
         let marker = self.take(FRAME_WORD)?;
         if marker != CONTINUATION_MARKER {
             return Err(ClientBatchError::malformed(
@@ -327,10 +325,14 @@ impl<'a> IpcMessages<'a> {
     fn take(&mut self, length: usize) -> Result<&'a [u8], Report<ClientBatchError>> {
         let body: &'a [u8] = self.body;
         let Some(end) = self.offset.checked_add(length) else {
-            return Err(ClientBatchError::malformed("the stream ends inside a message"));
+            return Err(ClientBatchError::malformed(
+                "the stream ends inside a message",
+            ));
         };
         let Some(bytes) = body.get(self.offset..end) else {
-            return Err(ClientBatchError::malformed("the stream ends inside a message"));
+            return Err(ClientBatchError::malformed(
+                "the stream ends inside a message",
+            ));
         };
         self.offset = end;
         Ok(bytes)
@@ -370,21 +372,17 @@ impl CompiledSchema {
             .change_context(ClientBatchError::Busy)?;
         let expected = StdArc::clone(&self.arrow_schema);
         let decoded = executor
-            .run_cpu(
-                CpuClass::Data,
-                reservation,
-                move |_charge, cancellation| {
-                    cancellation
-                        .check()
-                        .change_context(ClientBatchError::Busy)?;
-                    RuntimeRecordBatch::from_client_body(
-                        &body,
-                        &expected,
-                        limits.max_rows,
-                        decoded_limit,
-                    )
-                },
-            )
+            .run_cpu(CpuClass::Data, reservation, move |_charge, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(ClientBatchError::Busy)?;
+                RuntimeRecordBatch::from_client_body(
+                    &body,
+                    &expected,
+                    limits.max_rows,
+                    decoded_limit,
+                )
+            })
             .await;
         match decoded {
             Ok(batch) => batch,
@@ -414,8 +412,8 @@ impl RuntimeRecordBatch {
         decoded_limit: u64,
     ) -> Result<Self, Report<ClientBatchError>> {
         let scanned = IpcMessages::new(body).scan(max_rows)?;
-        let mut reader = StreamReader::try_new(Cursor::new(body), None)
-            .map_err(ClientBatchError::malformed)?;
+        let mut reader =
+            StreamReader::try_new(Cursor::new(body), None).map_err(ClientBatchError::malformed)?;
         let schema = reader.schema();
         if let Some(difference) = ClientSchemaDifference::between(expected, &schema) {
             return Err(Report::new(ClientBatchError::SchemaMismatch { difference }));

@@ -113,7 +113,10 @@ fn every_refusal_and_every_defect_has_its_own_schema_value() {
         ClientSubmissionRefusal::ProducerEnded,
         ClientSubmissionRefusal::CreditExceeded,
     ] {
-        assert!(refusals.contains(&refusal), "{refusal:?} has a schema value");
+        assert!(
+            refusals.contains(&refusal),
+            "{refusal:?} has a schema value"
+        );
     }
 }
 

@@ -33,6 +33,7 @@ use background_task::{
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
+use client_producers::ClientProducerRouter;
 use domain_clock::{
     DomainClockRetirements, DomainClockTask, reconcile_domain_clock_tasks,
     run_domain_clock_authority_reconciliation,
@@ -93,7 +94,6 @@ use scheduling::{
 };
 use session::grpc::SessionGrpcService;
 pub use session_service::SessionServiceImpl;
-use client_producers::ClientProducerRouter;
 use session_service::{
     RuntimeStateApplication, SESSION_EVENT_CAPACITY, SessionEvents, SessionServiceInner,
     apply_current_cluster_runtime_state,

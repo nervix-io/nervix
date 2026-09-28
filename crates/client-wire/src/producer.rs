@@ -238,7 +238,8 @@ impl SubmitBatchRequest {
         decoder: Decoder<'_>,
         submit: wire::SubmitBatchRequest<'_>,
     ) -> Result<Self, Report<WireDecodeError>> {
-        let producer = ProducerId::decode(decoder, "SubmitBatchRequest.producer", submit.producer())?;
+        let producer =
+            ProducerId::decode(decoder, "SubmitBatchRequest.producer", submit.producer())?;
         let batch = submit.batch().bytes();
         if batch.is_empty() {
             return Err(Report::new(WireDecodeError::EmptyCollection {
@@ -277,7 +278,11 @@ impl CloseIngestorRequest {
         close: wire::CloseIngestorRequest<'_>,
     ) -> Result<Self, Report<WireDecodeError>> {
         Ok(Self {
-            producer: ProducerId::decode(decoder, "CloseIngestorRequest.producer", close.producer())?,
+            producer: ProducerId::decode(
+                decoder,
+                "CloseIngestorRequest.producer",
+                close.producer(),
+            )?,
         })
     }
 }
@@ -334,7 +339,10 @@ impl OpenIngestorOutcome {
                 message: Some(message),
             },
         );
-        Ok(EncodedUnion::new(wire::ReplyBody::OpenIngestorOutcome, outcome))
+        Ok(EncodedUnion::new(
+            wire::ReplyBody::OpenIngestorOutcome,
+            outcome,
+        ))
     }
 
     pub(crate) fn decode(
@@ -402,7 +410,8 @@ impl ProducerOpened {
             ),
         };
         let policy = &description.policy;
-        let ack_timeout_nanos = encode_nanos("ProducerOpened.ack_timeout_nanos", policy.ack_timeout)?;
+        let ack_timeout_nanos =
+            encode_nanos("ProducerOpened.ack_timeout_nanos", policy.ack_timeout)?;
         let retry_backoff_nanos =
             encode_nanos("ProducerOpened.retry_backoff_nanos", policy.retry_backoff)?;
         let retry_max_backoff_nanos = encode_nanos(
@@ -588,10 +597,7 @@ impl SubmissionOutcome {
             }
             ClientSubmissionOutcome::Completed => EncodedUnion::new(
                 wire::SubmissionDisposition::SubmissionCompleted,
-                wire::SubmissionCompleted::create(
-                    encoder.fbb(),
-                    &wire::SubmissionCompletedArgs {},
-                ),
+                wire::SubmissionCompleted::create(encoder.fbb(), &wire::SubmissionCompletedArgs {}),
             ),
             ClientSubmissionOutcome::ProcessingFailed(failure) => {
                 let failed = wire::SubmissionFailed::create(
@@ -624,19 +630,19 @@ impl SubmissionOutcome {
                 message: Some(message),
             },
         );
-        Ok(EncodedUnion::new(wire::ReplyBody::SubmissionOutcome, outcome))
+        Ok(EncodedUnion::new(
+            wire::ReplyBody::SubmissionOutcome,
+            outcome,
+        ))
     }
 
     pub(crate) fn decode(
         decoder: Decoder<'_>,
         outcome: wire::SubmissionOutcome<'_>,
     ) -> Result<Self, Report<WireDecodeError>> {
-        let decoded = if let Some(not_admitted) = outcome.disposition_as_submission_not_admitted()
-        {
-            let refusal = decoder.required(
-                "SubmissionNotAdmitted.refusal",
-                not_admitted.refusal(),
-            )?;
+        let decoded = if let Some(not_admitted) = outcome.disposition_as_submission_not_admitted() {
+            let refusal =
+                decoder.required("SubmissionNotAdmitted.refusal", not_admitted.refusal())?;
             let Some(refusal) = submission_refusal(refusal) else {
                 return Err(Report::new(WireDecodeError::UnknownEnumValue {
                     field: "SubmissionNotAdmitted.refusal",
@@ -779,7 +785,10 @@ impl CloseIngestorOutcome {
                 message: Some(message),
             },
         );
-        Ok(EncodedUnion::new(wire::ReplyBody::CloseIngestorOutcome, outcome))
+        Ok(EncodedUnion::new(
+            wire::ReplyBody::CloseIngestorOutcome,
+            outcome,
+        ))
     }
 
     pub(crate) fn decode(

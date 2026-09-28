@@ -79,9 +79,9 @@ pub use frame::{
 };
 pub use limits::{LimitsError, SessionLimitSettings, SessionLimits};
 pub use producer::{
-    CloseIngestorDisposition, CloseIngestorOutcome, CloseIngestorRequest,
-    OpenIngestorDisposition, OpenIngestorOutcome, OpenIngestorRequest, ProducerAdmissionChanged,
-    ProducerEnded, ProducerId, ProducerOpened, SubmissionOutcome, SubmitBatchRequest,
+    CloseIngestorDisposition, CloseIngestorOutcome, CloseIngestorRequest, OpenIngestorDisposition,
+    OpenIngestorOutcome, OpenIngestorRequest, ProducerAdmissionChanged, ProducerEnded, ProducerId,
+    ProducerOpened, SubmissionOutcome, SubmitBatchRequest,
 };
 pub use reply::{
     CancelOutcome, CancelState, CancellationStage, InspectionOutcome, RequestCancelled,

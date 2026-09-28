@@ -47,25 +47,22 @@ pub use nervix_client_wire::{
     DomainClockAttachOutcome, DomainClockAttachmentEndReason, DomainClockAttachmentEnded,
     DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked,
     DomainInfo, DomainPaceChoice, ExecutionReferenceConflict, LeaderEndpoints, LeaderRedirect,
-    Leadership, NoticeLevel, OutcomeOrigin, RowConformanceError, RowSchema, SourceSpan,
+    Leadership, NoticeLevel, OutcomeOrigin, ProducerId, RowConformanceError, RowSchema, SourceSpan,
     StatementDisposition, StatementOutcome, SubscriptionDeliveryLost, SubscriptionEnded,
     SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionRowsSkipped,
     SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause, UploadFailure,
 };
 pub use nervix_models::{
-    CommandExecutionReference, DomainAdmissionWindow, DomainClockObservation,
-    DomainClockObservedState, DomainClockTickObservation, DomainName, ImpactPlanningBasis,
-    PacedDomainClock, ResourceUploadIdentity, SubscriptionDeliveryBehavior, Timestamp,
-    TransactionImpactReport, TransactionInspection, TransactionLifecycle,
-    TransactionOperationAdmission, TransactionOperationNumber, TransactionPosition,
-    TransactionPreviewIdentity, TransactionStatus,
-};
-pub use nervix_client_wire::ProducerId;
-pub use nervix_models::{
     AckWindow, ClientAttachmentId, ClientBatchDefect, ClientEndpointContract,
     ClientProcessingFailure, ClientProducerAdmission, ClientProducerDescription,
     ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy,
-    ClientProducerRefusal, ClientSubmissionRefusal, IngestorName, SchemaField,
+    ClientProducerRefusal, ClientSubmissionRefusal, CommandExecutionReference,
+    DomainAdmissionWindow, DomainClockObservation, DomainClockObservedState,
+    DomainClockTickObservation, DomainName, ImpactPlanningBasis, IngestorName, PacedDomainClock,
+    ResourceUploadIdentity, SchemaField, SubscriptionDeliveryBehavior, Timestamp,
+    TransactionImpactReport, TransactionInspection, TransactionLifecycle,
+    TransactionOperationAdmission, TransactionOperationNumber, TransactionPosition,
+    TransactionPreviewIdentity, TransactionStatus,
 };
 pub use outcome::{CommandOutcome, ResourceUploadOutcome};
 pub use producer::{

@@ -30,8 +30,7 @@
 // Producers opening through different sessions and links reserve from one node budget while ended
 // attachments return what they held, so the budget is Shuttle's atomic under the Shuttle feature: a
 // check needs a scheduling point at every read and compare-and-swap to explore racing reservations.
-#[cfg(feature = "shuttle")]
-use shuttle::sync::atomic::AtomicU64 as BudgetBytes;
+use std::num::NonZeroU32;
 #[cfg(not(feature = "shuttle"))]
 use std::sync::atomic::AtomicU64 as BudgetBytes;
 
@@ -45,8 +44,8 @@ use nervix_models::{
     ClientProducerPolicy, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
     MAX_CLIENT_BATCH_ROWS, SchemaField,
 };
-
-use std::num::NonZeroU32;
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::AtomicU64 as BudgetBytes;
 
 use super::*;
 use crate::runtime_schema::ClientBatchLimits;
@@ -637,7 +636,11 @@ impl Runtime {
         let Some(execution) = self.inner.executions.get(domain) else {
             return ClientProducerRefusal::EndpointUnavailable;
         };
-        match execution.entrypoints.ingestor(ingestor).map(|plan| &plan.input) {
+        match execution
+            .entrypoints
+            .ingestor(ingestor)
+            .map(|plan| &plan.input)
+        {
             None => ClientProducerRefusal::IngestorNotFound,
             Some(IngestorInputPlan::Transport(_)) => ClientProducerRefusal::NotClientIngestor,
             Some(IngestorInputPlan::Client(_)) => ClientProducerRefusal::EndpointUnavailable,
@@ -803,7 +806,10 @@ impl Runtime {
 
     /// Ends the endpoints of the client ingestors this node no longer executes, each with the
     /// reason that applies, once every ingestor this node should run has been started.
-    pub(crate) async fn reconcile_client_ingestor_endpoints(&self, local_node_id: &ClusterNodeName) {
+    pub(crate) async fn reconcile_client_ingestor_endpoints(
+        &self,
+        local_node_id: &ClusterNodeName,
+    ) {
         let keys = self
             .inner
             .client_ingestors
@@ -942,7 +948,8 @@ impl Endpoint {
             reservation,
             reply,
         } = attach;
-        let attached = self.attached_producer(expected_fields, limits, max_batch_bytes, reservation);
+        let attached =
+            self.attached_producer(expected_fields, limits, max_batch_bytes, reservation);
         if reply.send(attached).is_err() {
             // The open was cancelled before its answer arrived; the new attachment has no
             // producer and is released.
@@ -1089,9 +1096,9 @@ impl Endpoint {
         if !finished {
             return;
         }
-        self.attachments.shift_remove(&attachment).verified(
-            "the attachment was found above, and this task alone removes attachments",
-        );
+        self.attachments
+            .shift_remove(&attachment)
+            .verified("the attachment was found above, and this task alone removes attachments");
         debug!(
             domain = self.domain.as_str(),
             ingestor = self.ingestor.as_str(),
@@ -1278,7 +1285,9 @@ impl Endpoint {
                 outcome: resolution.outcome,
                 detail: resolution.detail,
             };
-            reports.send(command).means_shutdown("client ingestor endpoint");
+            reports
+                .send(command)
+                .means_shutdown("client ingestor endpoint");
         });
     }
 

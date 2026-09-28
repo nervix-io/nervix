@@ -269,10 +269,11 @@ mod tests {
         ModelKind, ModelName, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode, OutputBranch,
         ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode,
         RabbitMqIngestMode, RedisPubSubIngestMode, ReingestorName, RelayName, ReordererName,
-        RequestedResourceVersion, ResourceName, RetryPolicy, SchemaField, SchemaName, ShowIngestors,
-        SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
-        SignalingWireFormat, SqsIngestMode, Statement, SubscriptionBinding, SubscriptionLiteral,
-        UncordonNode, WasmProcessorName, WindowProcessorName, WireSchemaField, ZeroMqIngestMode,
+        RequestedResourceVersion, ResourceName, RetryPolicy, SchemaField, SchemaName,
+        ShowIngestors, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
+        SignalingWaitStep, SignalingWireFormat, SqsIngestMode, Statement, SubscriptionBinding,
+        SubscriptionLiteral, UncordonNode, WasmProcessorName, WindowProcessorName, WireSchemaField,
+        ZeroMqIngestMode,
     };
     use nonzero_ext::nonzero;
     use rstest::rstest;

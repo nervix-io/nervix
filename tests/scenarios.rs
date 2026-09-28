@@ -10146,7 +10146,8 @@ fn record_mqtt_ingestors(world: &mut ScenarioWorld, commands: &str) {
         let nervix_models::Model::Ingestor(ingestor) = *create.body else {
             continue;
         };
-        let Some(nervix_models::IngestSource::Mqtt { .. }) = ingestor.input.transport_source() else {
+        let Some(nervix_models::IngestSource::Mqtt { .. }) = ingestor.input.transport_source()
+        else {
             continue;
         };
         world

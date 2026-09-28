@@ -325,7 +325,9 @@ impl ProducerLinks {
     fn forget(&self, owner: &ClusterNodeName, link: &LinkHandle) {
         self.inner
             .links
-            .remove_if(owner, |_, current| current.commands.same_channel(&link.commands))
+            .remove_if(owner, |_, current| {
+                current.commands.same_channel(&link.commands)
+            })
             .discarded("a link another open already replaced stays in place");
     }
 }
@@ -435,7 +437,9 @@ impl ServingLink {
         for (_, route) in self.routes.drain() {
             route
                 .events
-                .send(ClientProducerEvent::Ended(ClientProducerEndReason::OwnerLost))
+                .send(ClientProducerEvent::Ended(
+                    ClientProducerEndReason::OwnerLost,
+                ))
                 .means_peer_left("forwarded producer");
         }
     }
@@ -491,7 +495,9 @@ impl ServingLink {
             }
         };
         // A writer that stopped ends the link at the next turn of its loop.
-        items.send(item).means_shutdown("client producer link writer");
+        items
+            .send(item)
+            .means_shutdown("client producer link writer");
     }
 
     /// Routes one answer of the owning node to the producer it concerns. A frame about a producer

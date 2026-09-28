@@ -760,15 +760,13 @@ mod tests {
         ));
 
         let client = "CREATE INGESTOR source FROM CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK \
-                      TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s ON QUIESCE SUSPEND TO outgoing SET \
-                      value = read_";
-        assert!(
-            suggest_client_expectations(client, client.len()).contains(
-                &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
-                    BuiltinFunctionScope::IngestSource(IngestSourceKind::Client),
-                ))
-            )
-        );
+                      TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s ON QUIESCE SUSPEND TO outgoing \
+                      SET value = read_";
+        assert!(suggest_client_expectations(client, client.len()).contains(
+            &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
+                BuiltinFunctionScope::IngestSource(IngestSourceKind::Client),
+            ))
+        ));
 
         let kafka = "CREATE EMITTER sink FROM incoming TO KAFKA broker TOPIC events MODE NO_ACK \
                      RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_";

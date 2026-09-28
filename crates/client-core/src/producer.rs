@@ -33,9 +33,9 @@ use nervix_client_wire::{
 };
 use nervix_models::{
     CLIENT_PRODUCER_SESSION_BYTES, ClientOutcomeUncertainty, ClientProcessingFailure,
-    ClientProducerAdmission,
-    ClientProducerDescription, ClientProducerEndReason, ClientProducerLimits,
-    ClientSubmissionOutcome, ClientSubmissionRefusal, DomainName, IngestorName, SchemaField,
+    ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
+    ClientProducerLimits, ClientSubmissionOutcome, ClientSubmissionRefusal, DomainName,
+    IngestorName, SchemaField,
 };
 use nervix_recovery::Discarded as _;
 use parking_lot::Mutex as SyncMutex;
@@ -318,7 +318,10 @@ impl ProducerRegistry {
             }
         }
         for removed in ended {
-            removed.signals.end.send_replace(Some(ProducerEnd::SessionLost));
+            removed
+                .signals
+                .end
+                .send_replace(Some(ProducerEnd::SessionLost));
         }
     }
 }
@@ -422,14 +425,9 @@ impl Client {
         tokio::spawn(async move {
             let sent = request_on_exchange(&exchange, request, RequestKind::OpenIngestor).await;
             let opened = match sent {
-                Ok(sent) => ProducerInner::opened(
-                    sent,
-                    domain,
-                    ingestor,
-                    exchange,
-                    generation,
-                    registry,
-                ),
+                Ok(sent) => {
+                    ProducerInner::opened(sent, domain, ingestor, exchange, generation, registry)
+                }
                 Err(error) => Err(error),
             };
             if let Err(Ok(producer)) = answer.send(opened) {
@@ -464,20 +462,20 @@ async fn request_on_exchange(
         request_id,
         request,
     };
-    let frame = message
-        .encode(&SESSION_LIMITS)
-        .map_err(|report| {
-            Report::new(ClientError::EncodeRequest {
-                request: kind,
-                source: report.current_context().clone(),
-            })
-        })?;
+    let frame = message.encode(&SESSION_LIMITS).map_err(|report| {
+        Report::new(ClientError::EncodeRequest {
+            request: kind,
+            source: report.current_context().clone(),
+        })
+    })?;
     if exchange.frames.send(frame).await.is_err() {
         return Err(Report::new(exchange.pending.lock().failure()));
     }
     match registered.receive().await {
         Some(body) => Ok(Answered { request_id, body }),
-        None => Err(Report::new(ClientError::RequestInterrupted { request: kind })),
+        None => Err(Report::new(ClientError::RequestInterrupted {
+            request: kind,
+        })),
     }
 }
 
@@ -620,8 +618,7 @@ impl ProducerInner {
                 Attempt::Lost => {
                     return ProducerOutcome::OutcomeUnknown {
                         cause: SubmissionUncertainty::SessionLost,
-                        message: "the session ended before the batch's outcome arrived"
-                            .to_string(),
+                        message: "the session ended before the batch's outcome arrived".to_string(),
                     };
                 }
             };
@@ -860,7 +857,10 @@ mod arrow_batch {
 
         /// Checks `batch` against the producer's schema and row limit and writes it as the
         /// canonical stream, without sending it.
-        pub fn batch(&self, batch: &RecordBatch) -> error_stack::Result<ProducerBatch, ProducerError> {
+        pub fn batch(
+            &self,
+            batch: &RecordBatch,
+        ) -> error_stack::Result<ProducerBatch, ProducerError> {
             let expected = self.arrow_schema();
             if batch.schema_ref().as_ref() != &expected {
                 return Err(Report::new(ProducerError::SchemaMismatch));

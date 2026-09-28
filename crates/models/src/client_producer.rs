@@ -219,7 +219,9 @@ pub struct ClientProducerPolicy {
 /// Everything an opened producer is told: the attachment it holds, the exact input schema its
 /// batches carry, the domain generation and endpoint contract it is bound to, the policy it
 /// submits under, what it was granted, and whether admission is open right now.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
 pub struct ClientProducerDescription {
     pub attachment: ClientAttachmentId,
     pub fields: Vec<SchemaField>,

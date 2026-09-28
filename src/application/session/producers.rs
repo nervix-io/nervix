@@ -29,10 +29,9 @@ use arch_into::ArchInto as _;
 use bytes::Bytes;
 use meticulous::OptionExt as _;
 use nervix_client_wire::{
-    CloseIngestorDisposition, CloseIngestorOutcome, CloseIngestorRequest,
-    OpenIngestorDisposition, OpenIngestorOutcome, OpenIngestorRequest, ProducerAdmissionChanged,
-    ProducerEnded, ProducerId, ProducerOpened, ReplyBody, RequestId, SubmissionOutcome,
-    SubmitBatchRequest,
+    CloseIngestorDisposition, CloseIngestorOutcome, CloseIngestorRequest, OpenIngestorDisposition,
+    OpenIngestorOutcome, OpenIngestorRequest, ProducerAdmissionChanged, ProducerEnded, ProducerId,
+    ProducerOpened, ReplyBody, RequestId, SubmissionOutcome, SubmitBatchRequest,
 };
 use nervix_models::{
     CLIENT_PRODUCER_SESSION_BYTES, ClientOutcomeUncertainty, ClientProducerEndReason,
@@ -79,10 +78,17 @@ struct OpenProducer {
 
 /// What the receive loop hands a producer's pump.
 enum PumpCommand {
-    Submit { submission: RequestId, batch: Bytes },
+    Submit {
+        submission: RequestId,
+        batch: Bytes,
+    },
     /// A batch beyond the producer's credit, which ends the producer.
-    Violation { submission: RequestId },
-    Close { request: RequestId },
+    Violation {
+        submission: RequestId,
+    },
+    Close {
+        request: RequestId,
+    },
 }
 
 /// The credit one producer was granted and what its outstanding batches hold of it.
@@ -292,7 +298,8 @@ impl SessionProducers {
                     disposition: OpenIngestorDisposition::Refused(refusal),
                     message,
                 };
-                shared.finish_with(request_id, ReplyBody::OpenIngestor(outcome))
+                shared
+                    .finish_with(request_id, ReplyBody::OpenIngestor(outcome))
                     .await;
                 return;
             }
@@ -444,7 +451,11 @@ impl SessionProducers {
             };
             return Err(OpenRefusal::new(refusal, message));
         }
-        let Some(node) = service.inner.runtime.client_producer_budget().try_reserve(limits.bytes)
+        let Some(node) = service
+            .inner
+            .runtime
+            .client_producer_budget()
+            .try_reserve(limits.bytes)
         else {
             self.release(bytes);
             return Err(OpenRefusal::new(
@@ -490,7 +501,6 @@ impl SessionProducers {
             }
         }
     }
-
 }
 
 impl SessionShared {
@@ -502,9 +512,7 @@ impl SessionShared {
             return;
         }
         let SubmitBatchRequest { producer, batch } = submit;
-        let routing = self
-            .producers
-            .route_submission(producer, request_id, batch);
+        let routing = self.producers.route_submission(producer, request_id, batch);
         let SubmissionRouting::Refused(refusal) = routing else {
             return;
         };
@@ -786,7 +794,3 @@ impl ProducerPump {
         }
     }
 }
-
-#[cfg(all(test, feature = "shuttle"))]
-#[path = "producers_shuttle_tests.rs"]
-mod shuttle_tests;

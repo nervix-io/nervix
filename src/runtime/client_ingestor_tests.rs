@@ -111,7 +111,10 @@ impl Fixture {
             .await
             .assured("the endpoint answers an open within the test's wait")
             .assured("the endpoint answers every open it receives");
-        assert!(refused.is_err(), "an open expecting other fields is refused");
+        assert!(
+            refused.is_err(),
+            "an open expecting other fields is refused"
+        );
         self.gauges.snapshot()
     }
 
@@ -295,13 +298,19 @@ async fn producers_take_the_one_window_in_turn() {
         }
     );
     root.ack_success();
-    assert_eq!(first.outcome().await, (1, ClientSubmissionOutcome::Completed));
+    assert_eq!(
+        first.outcome().await,
+        (1, ClientSubmissionOutcome::Completed)
+    );
 
     // The other producer's batch goes next, ahead of the first producer's second one.
     let job = fixture.next_job().await;
     assert_eq!(job.submission, submission(3));
     fixture.admit(&job, WAIT).ack_success();
-    assert_eq!(second.outcome().await, (3, ClientSubmissionOutcome::Completed));
+    assert_eq!(
+        second.outcome().await,
+        (3, ClientSubmissionOutcome::Completed)
+    );
     let job = fixture.next_job().await;
     assert_eq!(job.submission, submission(2));
     fixture.admit(&job, WAIT).no_ack("a route rejected it");
@@ -384,7 +393,10 @@ async fn a_suspension_refuses_queued_batches_and_reopening_admits_again() {
         .assured("the endpoint keeps the admission sender while attached");
     // The batch the worker held was admitted before the suspension and completes normally.
     fixture.admit(&job, WAIT).ack_success();
-    assert_eq!(producer.outcome().await, (1, ClientSubmissionOutcome::Completed));
+    assert_eq!(
+        producer.outcome().await,
+        (1, ClientSubmissionOutcome::Completed)
+    );
 
     producer.submit(3);
     assert_eq!(
@@ -430,7 +442,10 @@ async fn a_close_refuses_queued_batches_and_releases_after_the_admitted_ones() {
         )
     );
     fixture.admit(&job, WAIT).ack_success();
-    assert_eq!(producer.outcome().await, (1, ClientSubmissionOutcome::Completed));
+    assert_eq!(
+        producer.outcome().await,
+        (1, ClientSubmissionOutcome::Completed)
+    );
     assert_eq!(
         producer.next_event().await,
         None,
@@ -450,9 +465,16 @@ async fn a_changed_contract_or_generation_ends_producers_and_an_unchanged_one_ke
     fixture.install(1, 1, 1, WAIT);
     kept.submit(1);
     let job = fixture.next_job().await;
-    assert_eq!(job.submission, submission(1), "the producer survived the restart");
+    assert_eq!(
+        job.submission,
+        submission(1),
+        "the producer survived the restart"
+    );
     fixture.admit(&job, WAIT).ack_success();
-    assert_eq!(kept.outcome().await, (1, ClientSubmissionOutcome::Completed));
+    assert_eq!(
+        kept.outcome().await,
+        (1, ClientSubmissionOutcome::Completed)
+    );
 
     fixture.install(1, 2, 1, WAIT);
     assert_eq!(

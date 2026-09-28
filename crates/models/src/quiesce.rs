@@ -1776,13 +1776,16 @@ mod tests {
                     max_batch_size: "1MiB".to_string(),
                 },
             )]),
-            input: crate::IngestorInput::Transport(crate::TransportIngestorInput { source: IngestSource::Endpoint {
-                endpoint: named("ingress_a"),
-                mode: EndpointIngestMode::NoAckSequential,
-                quiesce: crate::IngestQuiesceMode::EndpointBuffer {
-                    max_size: "1MiB".to_string(),
+            input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                source: IngestSource::Endpoint {
+                    endpoint: named("ingress_a"),
+                    mode: EndpointIngestMode::NoAckSequential,
+                    quiesce: crate::IngestQuiesceMode::EndpointBuffer {
+                        max_size: "1MiB".to_string(),
+                    },
                 },
-            }, codec: named("event_codec") }),
+                codec: named("event_codec"),
+            }),
             timestamp_source: None,
             general_error_policy: GeneralErrorPolicy::Log,
             filter_where: None,

@@ -620,8 +620,8 @@ fn producer_lines(id: u64, opened: &ProducerOpened, message: &str, lines: &mut V
     };
     lines.push(format!(
         "REPLY {id} INGESTOR_OPENED domain={} ingestor={} generation={generation} contract={} \
-         attachment={} window={window} ack_timeout={} retry={}/{} granted={}/{} \
-         max_batch={}/{} admission={} message={}",
+         attachment={} window={window} ack_timeout={} retry={}/{} granted={}/{} max_batch={}/{} \
+         admission={} message={}",
         opened.domain.as_str(),
         opened.ingestor.as_str(),
         hex(contract.as_digest()),

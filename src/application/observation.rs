@@ -35,11 +35,10 @@ use nervix_models::{
     DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
     DescribeRelay, DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
     DescribeWindowProcessor, DomainName, DomainStatus, FieldName, IngestorName, InspectionFormat,
-    LookupName,
-    LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayName, ResourceDescription,
-    ResourceId, ResourceName, ResourceUsage, ResourceVersion, ResourceVersionDescription,
-    ResourceVersionEntries, ScheduledNode, SchemaName, ShowRelayMaterializedState,
-    UniquelyKindedModel, WasmStateInspection,
+    LookupName, LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayName,
+    ResourceDescription, ResourceId, ResourceName, ResourceUsage, ResourceVersion,
+    ResourceVersionDescription, ResourceVersionEntries, ScheduledNode, SchemaName,
+    ShowRelayMaterializedState, UniquelyKindedModel, WasmStateInspection,
 };
 use nervix_vm::window::{WindowAggregateProgram, lower_window_assignments};
 use tokio::time::Duration;
@@ -52,15 +51,14 @@ use super::{
         format_correlator_describe_output, format_deduplicator_describe_output,
         format_emitter_describe_output, format_endpoint_describe_output,
         format_ingestor_describe_output, format_ingestor_listing_line,
-        format_junction_describe_output,
-        format_lookup_describe_output, format_materialized_stream_state_output,
-        format_placement_runtime_node, format_placement_runtime_nodes,
-        format_placement_runtime_nodes_in_context, format_reingestor_describe_output,
-        format_relay_describe_output, format_reorderer_describe_output,
-        format_resource_description, format_resource_entry_lines, format_resource_usage_lines,
-        format_wasm_processor_describe_output, format_window_processor_describe_output,
-        ordered_placement_corridor, placement_claim_owner, placement_group_host,
-        placement_groups_claimed_by_rule, placement_rule_coverage_status,
+        format_junction_describe_output, format_lookup_describe_output,
+        format_materialized_stream_state_output, format_placement_runtime_node,
+        format_placement_runtime_nodes, format_placement_runtime_nodes_in_context,
+        format_reingestor_describe_output, format_relay_describe_output,
+        format_reorderer_describe_output, format_resource_description, format_resource_entry_lines,
+        format_resource_usage_lines, format_wasm_processor_describe_output,
+        format_window_processor_describe_output, ordered_placement_corridor, placement_claim_owner,
+        placement_group_host, placement_groups_claimed_by_rule, placement_rule_coverage_status,
         placement_rule_endpoint_nodes, placement_rule_runtime_nodes,
         runtime_ingestor_describe_from_envelope, runtime_ingestor_describe_to_envelope,
     },
@@ -692,7 +690,10 @@ impl SessionServiceImpl {
     /// Lists the ingestors of `domain`: each one's source, its schema or codec, the node that
     /// executes it and its state, and for a client ingestor whether it admits batches and the
     /// producers attached to it.
-    pub(in crate::application) async fn show_ingestors(&self, domain: &DomainName) -> CommandResult {
+    pub(in crate::application) async fn show_ingestors(
+        &self,
+        domain: &DomainName,
+    ) -> CommandResult {
         let names = match self
             .inner
             .registry

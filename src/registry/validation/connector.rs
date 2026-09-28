@@ -16,14 +16,12 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_jaq::StatefulJaqProgram;
 use nervix_models::{
     Assignment, AssignmentTarget, ClientIngestMode, CodecBatchContainer, CreateClientHttp,
-    CreateCodec,
-    CreateEmitter, CreateIngestor, CreateSchema, CreateSignalingProtocol, DomainName, EmitSink,
-    EndpointName, Expression, FieldName, HttpApplicationHeaders, HttpBodyMode, HttpHeaderName,
-    HttpHeaderValue, HttpMethod, HttpOrigin, IngestSource, IngestTimestampSource, IngestorInput,
-    Model,
-    ModelIndex, ModelName, OtelAggregationTemporality, OtelMetricKind, OtelSignal,
-    OtelValueMapping, ParseAsType, ProcessorOutput, RelayName, RouteConstruction, SchemaField,
-    SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName,
+    CreateCodec, CreateEmitter, CreateIngestor, CreateSchema, CreateSignalingProtocol, DomainName,
+    EmitSink, EndpointName, Expression, FieldName, HttpApplicationHeaders, HttpBodyMode,
+    HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, IngestSource, IngestTimestampSource,
+    IngestorInput, Model, ModelIndex, ModelName, OtelAggregationTemporality, OtelMetricKind,
+    OtelSignal, OtelValueMapping, ParseAsType, ProcessorOutput, RelayName, RouteConstruction,
+    SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName,
 };
 use nervix_vm::{
     CompileBinding, CompileOptions, OutputMode, SchemaSensitivity, SemanticScopePolicy,
@@ -2391,7 +2389,11 @@ mod tests {
         })
     }
 
-    fn client_mode(ack_timeout: &str, backoff: &str, max_backoff: &str) -> nervix_models::ClientIngestMode {
+    fn client_mode(
+        ack_timeout: &str,
+        backoff: &str,
+        max_backoff: &str,
+    ) -> nervix_models::ClientIngestMode {
         nervix_models::ClientIngestMode {
             window: AckWindow::Parallel {
                 max: nonzero!(4u64),
@@ -2418,7 +2420,11 @@ mod tests {
         }
         models.push(relay(
             "notifications",
-            if with_schema { "event_schema" } else { "other_schema" },
+            if with_schema {
+                "event_schema"
+            } else {
+                "other_schema"
+            },
         ));
         models.push(client_ingestor(mode));
         registry.apply_batch(&domain, models).map(|_| ())

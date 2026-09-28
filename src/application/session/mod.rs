@@ -45,20 +45,19 @@ use std::collections::BTreeMap;
 
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
+use meticulous::OptionExt as _;
 use nervix_client_wire::{
     AttachDomainClockRequest, AttachTransactionRequest, CancelOutcome, CancelRequest, CancelState,
     CancellationStage, ChoiceLookupRequest, ClientFrame, ClientMessage, ClientRequest,
     CommandRequest, DetachDomainClockRequest, DomainClockAttachDisposition,
     DomainClockAttachOutcome, DomainClockDetachDisposition, DomainClockDetachOutcome, DomainList,
     DomainSelection, EncodedFrame, InspectTransactionRequest, InspectionOutcome,
-    OpenIngestorRequest, Reply, ReplyBody,
-    ReplyDelivery, RequestCancelled, RequestId, RequestRejected, RequestRejection,
-    SelectDomainRequest, ServerFrame, SessionEndReason, SessionEnding, SessionLimits,
-    SubscribeDisposition, SubscribeOutcome, SubscribeRequest, SubscriptionType, SuggestRequest,
-    UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame, WireDecodeError,
-    WireEncodeError,
+    OpenIngestorRequest, Reply, ReplyBody, ReplyDelivery, RequestCancelled, RequestId,
+    RequestRejected, RequestRejection, SelectDomainRequest, ServerFrame, SessionEndReason,
+    SessionEnding, SessionLimits, SubscribeDisposition, SubscribeOutcome, SubscribeRequest,
+    SubscriptionType, SuggestRequest, UnsubscribeDisposition, UnsubscribeOutcome,
+    UnsubscribeRequest, VerifiedFrame, WireDecodeError, WireEncodeError,
 };
-use meticulous::OptionExt as _;
 use nervix_execution::{AdmissionError, CpuClass, ExecutionError, MemoryClass};
 use nervix_models::{
     CreateSubscription, DeleteSubscription, DomainName, TransactionInspectionRequest, UserName,

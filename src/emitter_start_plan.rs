@@ -38,10 +38,10 @@ use nervix_connector_otel::{
 use nervix_connector_postgres::PostgresConflictAction;
 use nervix_connector_sqs::SqsPublishingMode;
 use nervix_models::{
-    Assignment, AssignmentTarget, ChannelName, ClickHouseValueMapping, ClientConfigEntry,
-    ClientName, ClientPoolBounds, ClientResourceMount, CollectionName, CreateEmitter, EmitSink,
-    AckWindow, EmitterBatchPolicy, EmitterPublishingMode, Expression, FieldName, HttpOrigin,
-    IcebergCatalog, IcebergStorageBackend, Literal, Model, QueueName, RetryPolicy,
+    AckWindow, Assignment, AssignmentTarget, ChannelName, ClickHouseValueMapping,
+    ClientConfigEntry, ClientName, ClientPoolBounds, ClientResourceMount, CollectionName,
+    CreateEmitter, EmitSink, EmitterBatchPolicy, EmitterPublishingMode, Expression, FieldName,
+    HttpOrigin, IcebergCatalog, IcebergStorageBackend, Literal, Model, QueueName, RetryPolicy,
     RouteConstruction, SubjectName, TableName, TopicName,
 };
 use nervix_vm::{

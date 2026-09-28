@@ -20,9 +20,8 @@ use nervix_dataflow_graph::{
 use nervix_models::{
     ConcreteBranchCoverage, CreateSchema, DomainName, DomainSchedule, ImpactEdgeKind,
     ImpactNodeCoverage, IngestSource, IngestorInput, Model, ModelIndex, ModelKind, ModelName,
-    NodeRef,
-    ParseAsType, PlacementPolicy, RelayName, ResolvedBranching, ScheduledNode, SchemaField,
-    SchemaFingerprint,
+    NodeRef, ParseAsType, PlacementPolicy, RelayName, ResolvedBranching, ScheduledNode,
+    SchemaField, SchemaFingerprint,
 };
 use petgraph::{
     Direction, algo::is_cyclic_directed, graph::DiGraph, prelude::NodeIndex, visit::EdgeRef,

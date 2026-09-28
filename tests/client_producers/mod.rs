@@ -245,16 +245,24 @@ fn producer_limits(batches: u32, bytes: &str) -> ClientProducerLimits {
 /// A size such as `4KiB`, `2MiB` or `512`.
 fn parse_byte_size(text: &str) -> u64 {
     let text = text.trim();
-    let units: [(&str, u64); 3] = [("GiB", 1024 * 1024 * 1024), ("MiB", 1024 * 1024), ("KiB", 1024)];
+    let units: [(&str, u64); 3] = [
+        ("GiB", 1024 * 1024 * 1024),
+        ("MiB", 1024 * 1024),
+        ("KiB", 1024),
+    ];
     for (suffix, multiplier) in units {
         if let Some(number) = text.strip_suffix(suffix) {
-            let number: u64 = number.trim().parse().expect("a byte size is a whole number");
+            let number: u64 = number
+                .trim()
+                .parse()
+                .expect("a byte size is a whole number");
             return number
                 .checked_mul(multiplier)
                 .expect("a scenario byte size fits in u64");
         }
     }
-    text.parse().expect("a byte size is a whole number of bytes")
+    text.parse()
+        .expect("a byte size is a whole number of bytes")
 }
 
 /// One column of a step table as the Arrow array of `field`. An empty cell of an optional field
@@ -269,7 +277,10 @@ fn column(field: &SchemaField, cells: &[&str]) -> ArrayRef {
     };
     match &field.ty {
         ParseAsType::String => {
-            let values = cells.iter().map(|cell| optional_cell(cell)).collect::<Vec<_>>();
+            let values = cells
+                .iter()
+                .map(|cell| optional_cell(cell))
+                .collect::<Vec<_>>();
             StdArc::new(StringArray::from(values))
         }
         ParseAsType::I64 => {
@@ -302,8 +313,10 @@ fn column(field: &SchemaField, cells: &[&str]) -> ArrayRef {
         ParseAsType::Bool => {
             let mut values = Vec::with_capacity(cells.len());
             for cell in cells {
-                let value = optional_cell(cell)
-                    .map(|text| text.parse::<bool>().expect("a BOOL cell holds true or false"));
+                let value = optional_cell(cell).map(|text| {
+                    text.parse::<bool>()
+                        .expect("a BOOL cell holds true or false")
+                });
                 values.push(value);
             }
             StdArc::new(BooleanArray::from(values))
@@ -326,7 +339,10 @@ fn table_batch(fields: &[SchemaField], step: &Step) -> RecordBatch {
         let Some(index) = header.iter().position(|name| name == field.name.as_str()) else {
             panic!("the batch table has no column for field '{}'", field.name);
         };
-        let cells = rows.iter().map(|row| row[index].as_str()).collect::<Vec<_>>();
+        let cells = rows
+            .iter()
+            .map(|row| row[index].as_str())
+            .collect::<Vec<_>>();
         columns.push(column(field, &cells));
     }
     let schema = StdArc::new(SchemaField::arrow_schema(fields));
@@ -335,14 +351,22 @@ fn table_batch(fields: &[SchemaField], step: &Step) -> RecordBatch {
 
 /// `batches` written as one Arrow IPC stream under their shared schema.
 fn arrow_stream(batches: &[RecordBatch]) -> Bytes {
-    let first = batches.first().expect("a stream carries at least one batch");
+    let first = batches
+        .first()
+        .expect("a stream carries at least one batch");
     let mut writer =
         StreamWriter::try_new(Vec::new(), first.schema_ref()).expect("the stream writer opens");
     for batch in batches {
-        writer.write(batch).expect("the stream writer takes the batch");
+        writer
+            .write(batch)
+            .expect("the stream writer takes the batch");
     }
     writer.finish().expect("the stream writer finishes");
-    Bytes::from(writer.into_inner().expect("the stream writer yields its bytes"))
+    Bytes::from(
+        writer
+            .into_inner()
+            .expect("the stream writer yields its bytes"),
+    )
 }
 
 /// A body a scenario submits that is not the canonical stream of the producer's schema.
@@ -358,7 +382,8 @@ fn defective_body(fields: &[SchemaField], kind: &str) -> Bytes {
             };
             let schema = StdArc::new(SchemaField::arrow_schema(std::slice::from_ref(&field)));
             let values: ArrayRef = StdArc::new(StringArray::from(vec!["value"]));
-            let batch = RecordBatch::try_new(schema, vec![values]).expect("one column makes one batch");
+            let batch =
+                RecordBatch::try_new(schema, vec![values]).expect("one column makes one batch");
             arrow_stream(&[batch])
         }
         "two record batches" => {
@@ -580,8 +605,8 @@ async fn when_websocket_session_opens_producer(
 }
 
 #[when(
-    expr = "client {string} opens producer {string} on ingestor {string} expecting fields {string} \
-            with {int} batch(es) and {string} of credit"
+    expr = "client {string} opens producer {string} on ingestor {string} expecting fields \
+            {string} with {int} batch(es) and {string} of credit"
 )]
 async fn when_client_opens_producer_with_credit(
     world: &mut ScenarioWorld,
@@ -629,7 +654,14 @@ async fn then_client_cannot_open_producer(
     expected: String,
 ) {
     let client = expand_placeholders(world, &client);
-    refused_open(world, SessionRef::Client(client), ingestor, fields, expected).await;
+    refused_open(
+        world,
+        SessionRef::Client(client),
+        ingestor,
+        fields,
+        expected,
+    )
+    .await;
 }
 
 #[then(
@@ -701,14 +733,8 @@ async fn eventually_open_named_producer(
     let producer = expand_placeholders(world, &producer);
     loop {
         tokio::task::consume_budget().await;
-        let opened = open_producer(
-            world,
-            session.clone(),
-            &ingestor,
-            &fields,
-            default_limits(),
-        )
-        .await;
+        let opened =
+            open_producer(world, session.clone(), &ingestor, &fields, default_limits()).await;
         let refused = match opened {
             Ok(opened) => {
                 assert!(
@@ -832,7 +858,11 @@ async fn when_producer_submits_rows(
     batch: String,
     #[step] step: &Step,
 ) {
-    let fields = world.scenario_producer(&producer).description().fields.clone();
+    let fields = world
+        .scenario_producer(&producer)
+        .description()
+        .fields
+        .clone();
     let rows = table_batch(&fields, step);
     submit(world, producer, batch, arrow_stream(&[rows])).await;
 }
@@ -844,7 +874,11 @@ async fn when_producer_submits_defective_batch(
     batch: String,
     kind: String,
 ) {
-    let fields = world.scenario_producer(&producer).description().fields.clone();
+    let fields = world
+        .scenario_producer(&producer)
+        .description()
+        .fields
+        .clone();
     let body = defective_body(&fields, &kind);
     submit(world, producer, batch, body).await;
 }
@@ -984,12 +1018,10 @@ async fn submission_id(world: &ScenarioWorld, batch: &str) -> SubmissionId {
         panic!("only the Rust client's batches carry a submission identity");
     };
     let mut id = native.id.clone();
-    let identified = tokio::time::timeout(
-        PRODUCER_EXPECTATION_TIMEOUT,
-        id.wait_for(|id| id.is_some()),
-    )
-    .await
-    .unwrap_or_else(|_| panic!("the producer did not take batch '{batch}' in time"));
+    let identified =
+        tokio::time::timeout(PRODUCER_EXPECTATION_TIMEOUT, id.wait_for(|id| id.is_some()))
+            .await
+            .unwrap_or_else(|_| panic!("the producer did not take batch '{batch}' in time"));
     let identified = identified.unwrap_or_else(|_| panic!("batch '{batch}' was never taken"));
     identified.expect("the wait ended on an identity")
 }
@@ -1064,20 +1096,18 @@ async fn then_producer_reports_admission(
     };
     let deadline = Instant::now() + PRODUCER_EXPECTATION_TIMEOUT;
     let raw = match world.scenario_producer(&producer) {
-        ScenarioProducer::Native(native) => {
-            loop {
-                tokio::task::consume_budget().await;
-                if native.admission() == expected {
-                    return;
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "producer '{producer}' reports admission {:?}, not {expected:?}",
-                    native.admission()
-                );
-                tokio::time::sleep(PRODUCER_POLL_INTERVAL).await;
+        ScenarioProducer::Native(native) => loop {
+            tokio::task::consume_budget().await;
+            if native.admission() == expected {
+                return;
             }
-        }
+            assert!(
+                Instant::now() < deadline,
+                "producer '{producer}' reports admission {:?}, not {expected:?}",
+                native.admission()
+            );
+            tokio::time::sleep(PRODUCER_POLL_INTERVAL).await;
+        },
         ScenarioProducer::Raw {
             session,
             id,
@@ -1146,9 +1176,13 @@ async fn then_producer_ends(world: &mut ScenarioWorld, producer: String, expecte
     let (session, id) = raw;
     let found = world
         .raw_session(&session)
-        .producer_frame(id, 0, PRODUCER_EXPECTATION_TIMEOUT, "the producer's end", |frame| {
-            matches!(frame, ProducerFrame::Ended(_))
-        })
+        .producer_frame(
+            id,
+            0,
+            PRODUCER_EXPECTATION_TIMEOUT,
+            "the producer's end",
+            |frame| matches!(frame, ProducerFrame::Ended(_)),
+        )
         .await
         .unwrap_or_else(|error| panic!("producer '{producer}': {error}"));
     let ProducerFrame::Ended(ended) = found.frame else {
@@ -1201,7 +1235,9 @@ async fn when_producer_is_closed(world: &mut ScenarioWorld, producer: String) {
                 .get_mut(&session)
                 .unwrap_or_else(|| panic!("WebSocket session '{session}' is not connected"));
             let request = raw
-                .send(ClientRequest::CloseIngestor(CloseIngestorRequest { producer: id }))
+                .send(ClientRequest::CloseIngestor(CloseIngestorRequest {
+                    producer: id,
+                }))
                 .await
                 .unwrap_or_else(|error| panic!("producer '{producer}' close: {error}"));
             let reply = raw
@@ -1209,7 +1245,10 @@ async fn when_producer_is_closed(world: &mut ScenarioWorld, producer: String) {
                 .await
                 .unwrap_or_else(|error| panic!("producer '{producer}' close: {error}"));
             let ReplyBody::CloseIngestor(outcome) = reply.body else {
-                panic!("producer '{producer}' close was answered with {:?}", reply.body);
+                panic!(
+                    "producer '{producer}' close was answered with {:?}",
+                    reply.body
+                );
             };
             assert_eq!(
                 outcome.disposition,
@@ -1238,14 +1277,22 @@ async fn then_leader_describes_ingestor_with(
         let leader = current_leader_node(world).await;
         let described = world
             .cluster()
-            .run_command(&leader, &world.domain, &format!("DESCRIBE INGESTOR {ingestor};"))
+            .run_command(
+                &leader,
+                &world.domain,
+                &format!("DESCRIBE INGESTOR {ingestor};"),
+            )
             .await;
         let output = match described {
             Ok(output) => output,
             Err(error) => format!("DESCRIBE failed: {error}"),
         };
         let mut missing = Vec::new();
-        for line in expected.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        for line in expected
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
             if !output.contains(line) {
                 missing.push(line.to_string());
             }

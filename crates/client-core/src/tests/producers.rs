@@ -189,7 +189,10 @@ async fn only_a_temporary_refusal_is_sent_again_and_the_same_bytes_are_sent() {
         )
         .await;
     let (second_attempt, resent) = next_batch(&mut loopback).await;
-    assert_ne!(second_attempt, first_attempt, "a resent batch is a new request");
+    assert_ne!(
+        second_attempt, first_attempt,
+        "a resent batch is a new request"
+    );
     assert_eq!(resent.batch, Bytes::from_static(b"first"));
     loopback
         .answer(second_attempt, outcome(ClientSubmissionOutcome::Completed))
@@ -257,7 +260,10 @@ async fn a_cancelled_wait_keeps_its_submission_and_credit_until_the_outcome_is_t
         loop {
             tokio::task::consume_budget().await;
             let pending = producer.pending_submissions();
-            if pending.iter().any(|submission| submission.outcome.is_some()) {
+            if pending
+                .iter()
+                .any(|submission| submission.outcome.is_some())
+            {
                 return pending;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;

@@ -380,11 +380,7 @@ fn an_ending_producer_answers_every_batch_once(ending: ProducerEnding) {
         let acknowledger = tokio::spawn(async move {
             first_root.ack_success();
         });
-        let ender = tokio::spawn(end_producer(
-            ending,
-            model.handle,
-            model.commands.clone(),
-        ));
+        let ender = tokio::spawn(end_producer(ending, model.handle, model.commands.clone()));
         let answered = read_every_event(model.events).await;
         reporter.await.assured(CHECK_TASK_JOINS);
         acknowledger.await.assured(CHECK_TASK_JOINS);
@@ -399,7 +395,10 @@ fn an_ending_producer_answers_every_batch_once(ending: ProducerEnding) {
         );
         match ending {
             ProducerEnding::Close => {
-                assert_eq!(answered.ended, None, "a closed producer is released, not ended");
+                assert_eq!(
+                    answered.ended, None,
+                    "a closed producer is released, not ended"
+                );
                 assert_eq!(
                     answered.outcomes.get(&1),
                     Some(&ClientSubmissionOutcome::Completed),
@@ -441,5 +440,7 @@ fn shuttle_a_closing_producer_answers_every_admitted_batch_once_before_its_relea
 /// not admitted once it was admitted, and its end is the producer's last event.
 #[test]
 fn shuttle_an_ending_endpoint_answers_every_batch_once_and_ends_its_producer_last() {
-    check_interleavings(|| an_ending_producer_answers_every_batch_once(ProducerEnding::EndpointEnd));
+    check_interleavings(|| {
+        an_ending_producer_answers_every_batch_once(ProducerEnding::EndpointEnd)
+    });
 }

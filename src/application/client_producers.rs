@@ -29,8 +29,8 @@ use nervix_models::{
 
 use self::link::{ForwardedProducer, ProducerLinks};
 use crate::runtime::{
-    ClientProducerEvents, ClientProducerHandle, ClientProducerOpenRequest,
-    ClientProducerRetention, ClientSubmissionId, OpenedClientProducer, Runtime,
+    ClientProducerEvents, ClientProducerHandle, ClientProducerOpenRequest, ClientProducerRetention,
+    ClientSubmissionId, OpenedClientProducer, Runtime,
 };
 
 /// What a session asks for when it opens a producer.

@@ -1849,10 +1849,11 @@ impl Runtime {
         )?;
         let mut row_acks = Vec::with_capacity(row_count);
         acks.split_into(row_count, &mut row_acks);
-        let record_metadata = vec![
-            RuntimeRecordMetadata::from_ingested_at_watermarks(ingested_at, ingested_at);
-            row_count
-        ];
+        let record_metadata =
+            vec![
+                RuntimeRecordMetadata::from_ingested_at_watermarks(ingested_at, ingested_at);
+                row_count
+            ];
         let rows = IngestGroupRows {
             batch: Arc::new(batch),
             record_metadata,

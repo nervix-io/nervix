@@ -12,8 +12,8 @@ use arrow_array::{
     builder::StringDictionaryBuilder, types::Int32Type,
 };
 use arrow_ipc::{
-    BodyCompression, BodyCompressionArgs, BodyCompressionMethod, CompressionType,
-    DictionaryBatch, DictionaryBatchArgs, Message, MessageArgs, MessageHeader, MetadataVersion,
+    BodyCompression, BodyCompressionArgs, BodyCompressionMethod, CompressionType, DictionaryBatch,
+    DictionaryBatchArgs, Message, MessageArgs, MessageHeader, MetadataVersion,
     RecordBatch as IpcRecordBatch, RecordBatchArgs, root_as_message,
     writer::{IpcWriteOptions, StreamWriter},
 };
@@ -22,7 +22,9 @@ use bytes::Bytes;
 use flatbuffers::FlatBufferBuilder;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Executor, MemoryClass, Reservation};
-use nervix_models::{ClientBatchDefect, CreateSchema, FieldName, ParseAsType, SchemaField, SchemaName};
+use nervix_models::{
+    ClientBatchDefect, CreateSchema, FieldName, ParseAsType, SchemaField, SchemaName,
+};
 
 use super::{ClientBatchError, ClientBatchLimits, ClientSchemaDifference};
 use crate::runtime_schema::{CompiledSchema, compile_schema};
@@ -57,7 +59,13 @@ fn batch_of(schema: StdArc<Schema>, ids: &[u64]) -> RecordBatch {
     let id: ArrayRef = StdArc::new(UInt64Array::from(ids.to_vec()));
     let notes = ids
         .iter()
-        .map(|id| if id % 2 == 0 { Some(format!("note {id}")) } else { None })
+        .map(|id| {
+            if id % 2 == 0 {
+                Some(format!("note {id}"))
+            } else {
+                None
+            }
+        })
         .collect::<Vec<_>>();
     let note: ArrayRef = StdArc::new(StringArray::from(notes));
     RecordBatch::try_new(schema, vec![id, note]).assured("the columns match the schema")
@@ -65,13 +73,16 @@ fn batch_of(schema: StdArc<Schema>, ids: &[u64]) -> RecordBatch {
 
 /// Writes `batches` as one stream of `schema`.
 fn stream(schema: &Schema, batches: &[RecordBatch]) -> Vec<u8> {
-    let mut writer =
-        StreamWriter::try_new(Vec::new(), schema).assured("an in-memory writer opens");
+    let mut writer = StreamWriter::try_new(Vec::new(), schema).assured("an in-memory writer opens");
     for batch in batches {
-        writer.write(batch).assured("an in-memory writer takes a batch");
+        writer
+            .write(batch)
+            .assured("an in-memory writer takes a batch");
     }
     writer.finish().assured("an in-memory writer finishes");
-    writer.into_inner().assured("a finished writer yields its buffer")
+    writer
+        .into_inner()
+        .assured("a finished writer yields its buffer")
 }
 
 fn limits() -> ClientBatchLimits {
@@ -128,7 +139,11 @@ fn messages(stream: &[u8]) -> Vec<Vec<u8>> {
 fn framed(message: &[u8], body: &[u8]) -> Vec<u8> {
     let padded = message.len().div_ceil(8) * 8;
     let mut framed = vec![0xff; 4];
-    framed.extend_from_slice(&i32::try_from(padded).assured("a small message").to_le_bytes());
+    framed.extend_from_slice(
+        &i32::try_from(padded)
+            .assured("a small message")
+            .to_le_bytes(),
+    );
     framed.extend_from_slice(message);
     framed.resize(8 + padded, 0);
     framed.extend_from_slice(body);
@@ -152,7 +167,8 @@ async fn one_canonical_batch_of_the_schema_is_decoded_with_its_rows() {
 
 #[tokio::test]
 async fn another_schema_is_refused_with_its_first_difference() {
-    let field = |name: &str, data_type: DataType, nullable: bool| Field::new(name, data_type, nullable);
+    let field =
+        |name: &str, data_type: DataType, nullable: bool| Field::new(name, data_type, nullable);
     let cases = [
         (
             Schema::new(vec![field("id", DataType::UInt64, false)]),
@@ -233,7 +249,10 @@ async fn a_stream_without_exactly_one_batch_is_refused() {
     ));
     let two = stream(
         &arrow_schema(),
-        &[batch_of(arrow_schema(), &[1]), batch_of(arrow_schema(), &[2])],
+        &[
+            batch_of(arrow_schema(), &[1]),
+            batch_of(arrow_schema(), &[2]),
+        ],
     );
     assert!(matches!(
         decode(two, limits()).await,
@@ -257,7 +276,10 @@ async fn rows_and_bytes_beyond_the_limits_are_refused_before_decoding() {
         max_bytes: NonZeroU64::new(size - 1).assured("a stream has more than one byte"),
         ..limits()
     };
-    assert_eq!(defect(decode(three, smaller).await), ClientBatchDefect::TooLarge);
+    assert_eq!(
+        defect(decode(three, smaller).await),
+        ClientBatchDefect::TooLarge
+    );
 }
 
 #[tokio::test]
@@ -278,7 +300,9 @@ async fn a_body_that_is_not_one_canonical_stream_is_malformed() {
             .write(&batch_of(arrow_schema(), &[1]))
             .assured("an in-memory writer takes a batch");
         writer.finish().assured("an in-memory writer finishes");
-        writer.into_inner().assured("a finished writer yields its buffer")
+        writer
+            .into_inner()
+            .assured("a finished writer yields its buffer")
     };
     let batch_first = {
         let parts = messages(&canonical);
@@ -295,7 +319,10 @@ async fn a_body_that_is_not_one_canonical_stream_is_malformed() {
         legacy,
         batch_first,
     ] {
-        assert_eq!(defect(decode(body, limits()).await), ClientBatchDefect::Malformed);
+        assert_eq!(
+            defect(decode(body, limits()).await),
+            ClientBatchDefect::Malformed
+        );
     }
 }
 
