@@ -161,7 +161,7 @@ jobs:
     # suite's own diagnostic. The suite bounds itself well inside this limit and leaves the reserve
     # the upload below needs. Keep it in step with WORKFLOW_JOB_LIMIT in
     # tests/common/suite_watchdog.rs, which derives that budget from this number.
-    timeout-minutes: 60
+    timeout-minutes: 80
     permissions:
       contents: read
       id-token: write
@@ -304,7 +304,7 @@ jobs:
       RUST_LOG_STYLE: never
       NERVIX_TEST_CONCURRENCY_FACTOR: "2"
       # Nineteen scenarios finish in a few minutes. A short budget leaves the builds before them
-      # up to 40 minutes of the job limit instead of the suite job's 18.
+      # up to 40 minutes of the job limit instead of the suite job's 25.
       NERVIX_TEST_SUITE_BUDGET: "15m"
     steps:
       - name: Setup Rust

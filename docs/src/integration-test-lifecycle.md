@@ -46,6 +46,11 @@ batching scenario reads the Collector's debug exporter output to check the numbe
 records in each received export request, using unique test markers to distinguish simultaneous
 scenarios sharing that container.
 
+The raw session fixture records domain-clock replies and frames in the order it reads them. A wait
+for a detach reply can queue ticks that arrived before the reply; the post-detach assertion checks
+the recorded wire order, clears those already queued frames, and waits for any new frame. An unread
+pre-reply tick therefore does not masquerade as delivery after detach.
+
 `tests-deps` builds the CLI and NSPL formatter in the normal target directory. The full and focused
 client coverage recipes build a standalone instrumented CLI beside their instrumented server binary
 and place the normal NSPL formatter there. The scenario runner selects the covered CLI through
@@ -126,7 +131,7 @@ second module runs the operation, it is named after the owner.
 | Convergence of a restarted real-process cluster | `server_process_cluster.rs` | 120 seconds, with each status request capped at 10 seconds | The step fails with the last status or typed request failure from every member |
 | A one-shot CLI command or a streaming output assertion | `tests/scenarios.rs` | 60 seconds for a command, 30 seconds for a subscription line, 10 or 20 seconds for a clock line, and 10 seconds for clock-process exit after Ctrl-C | The step fails with the process result or retained output lines |
 | One draw from the port pool | `port_pool.rs` | 65,536 consecutive draws that land on reserved ports | The draw fails with the pool exhausted |
-| The whole scenario run | `suite_watchdog.rs` | 37 minutes, injectable | Every active scenario is reported, live nodes get a 60-second cleanup window, and the process exits `124` |
+| The whole scenario run | `suite_watchdog.rs` | 50 minutes, injectable | Every active scenario is reported, live nodes get a 60-second cleanup window, and the process exits `124` |
 | Stopping the test dependencies after the run | `suite_watchdog.rs` | 2 minutes | The containers are left to the runner |
 | Dropping the runtime after the run | `suite_watchdog.rs`, run by `tests/scenarios.rs` | 60 seconds | Blocking tasks still running are abandoned |
 
@@ -175,7 +180,7 @@ ordering fails to build rather than producing a harness that outwaits itself.
 | Startup attempt, 36 seconds | A policy input | The slowest healthy node startup, 24.2 seconds, fits in one attempt; the same 3,465 startups had a 2.0-second median and a 4.3-second 99th percentile |
 | Node startup, 84 seconds | Two full attempts, each 36 seconds of readiness, a 5-second cleanup slice, and a 1-second pause | Stays under a 90-second ceiling |
 | Cluster cleanup, 60 seconds | The slowest healthy cluster stop, rounded up to 15 seconds, times a headroom of 4 | 12.2 seconds at the slowest over 163 cleanups, with a 0.15-second median and 1.6 seconds at the 90th percentile |
-| Suite, 37 minutes | The 60-minute job limit, less 18 minutes of work before the suite and a 5-minute reserve after it | Outlasts the slowest healthy suite, 21m08s over five jobs and taken as 22 minutes, by 15 minutes of slack |
+| Suite, 50 minutes | The 80-minute job limit, less 25 minutes of work before the suite and a 5-minute reserve after it | Outlasts the slowest recent healthy suite, 34m40s and taken as 35 minutes, by 15 minutes of slack |
 
 The assertions keep these orderings, among others:
 
@@ -189,8 +194,8 @@ The assertions keep these orderings, among others:
 - The suite watchdog's cleanup window fits inside the reserve, and so do the dependency stop and the
   runtime shutdown together.
 
-The suite derivation holds with no margin: 22 minutes of slowest healthy suite plus 15 minutes of
-slack is exactly the 37-minute budget. Raising either measured input, and both the suite and the
+The suite derivation holds with no margin: 35 minutes of slowest healthy suite plus 15 minutes of
+slack is exactly the 50-minute budget. Raising either measured input, and both the suite and the
 work before it grow with the workspace, fails that assertion at compile time until the job limit or
 the slack changes. Measure the inputs again whenever the suite, its concurrency, or the runner
 changes.
@@ -737,7 +742,7 @@ minutes of the limit and keeps the same 5-minute reserve.
 
 ## The Suite Watchdog
 
-The scenario run has one budget, 37 minutes from the moment it starts, which `--suite-budget` or
+The scenario run has one budget, 50 minutes from the moment it starts, which `--suite-budget` or
 `NERVIX_TEST_SUITE_BUDGET` replaces with a duration such as `4m`. The budget is a clock rather than
 a count of failures. Cucumber's fail-fast stops scheduling scenarios and leaves those already
 running where they are, so it cannot end a run whose step, diagnostic, or node stop never returns;
@@ -787,17 +792,23 @@ a consensus commit delay that only its scenario's cleanup releases.
 
 The suite runs inside `just test-coverage` in the CI `tests` job, after the builds and the test
 binaries that precede it, the focused harness regressions among them. The job's `timeout-minutes` is
-60, and the budget is derived from it so that the job ends on its own.
+80, and the budget is derived from it so that the job ends on its own.
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |
-| Work before the scenario binary starts | 18 minutes | Measured at 6m28s, 7m50s, 9m25s, 12m21s, and 15m26s over five jobs, and rising with the workspace |
-| The scenario run | 37 minutes | What the limit leaves |
+| Work before the scenario binary starts | 25 minutes | Measured at 16m04s and 17m20s in successful runs 36405312545 and 36398312102, and 21m28s in run 36460760301 on 2026-09-28, with headroom for builds |
+| The scenario run | 50 minutes | What the limit leaves |
 | After the budget expires | 5-minute reserve | At most 60 seconds of cleanup window, 2 minutes of dependency stop, and 60 seconds of runtime shutdown, four minutes in all, and then the log upload, measured at 2 to 3 seconds with 8 seconds of steps after it |
 
 A healthy suite finishes inside its budget and exits `0` or reports its failures. A wedged one exits
 `124` with its diagnostic and leaves the upload its reserve. Either way, a step that runs whatever
 the job's result uploads the whole `tests/logs` directory as the `test-logs` artifact.
+
+The successful scenario runs measured 32m25s and 34m40s on 2026-09-28, at the CI concurrency
+factor of two scenarios per CPU. The slower run spent one retry. The slowest healthy input is
+rounded up to 35 minutes, keeping the existing 15 minutes of suite slack as the workspace grows.
+Run 36460760301 exhausted the previous budget while scenarios were still queued, so the current
+budget and job limit account for both the measured build time and scenario duration.
 
 The job's limit remains the emergency guard outside the budget rather than the mechanism that ends a
 wedged run. A job the limit cancels is killed wherever its scenarios are: the logs it uploads end
