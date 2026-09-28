@@ -11,7 +11,9 @@
 
 use error_stack::Report;
 use flatbuffers::WIPOffset;
-use nervix_models::{DomainName, FieldName, NodeRef, PlacementPolicy, ResourceName};
+use nervix_models::{
+    DomainName, FieldName, NodeRef, PlacementPolicy, RequestedResourceVersion, ResourceName,
+};
 
 use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
@@ -30,6 +32,11 @@ pub enum ChoiceTarget {
     /// The fields of one relay's records, asked with the domain and then the relay as
     /// dependencies.
     RelayField,
+    WireJsonSchema,
+    WireCborSchema,
+    WireAvroSchema,
+    Resource,
+    CompletedResourceVersion,
 }
 
 wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
@@ -39,6 +46,11 @@ wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
     Branch,
     Relay,
     RelayField,
+    WireJsonSchema,
+    WireCborSchema,
+    WireAvroSchema,
+    Resource,
+    CompletedResourceVersion,
 });
 
 /// Whether a domain clock advances with wall time.
@@ -67,6 +79,7 @@ pub enum ChoiceValue {
     PlacementPolicy(PlacementPolicy),
     Domain(DomainName),
     Resource(ResourceName),
+    ResourceVersion(RequestedResourceVersion),
     Model(NodeRef),
     /// A field of the record the lookup's dependencies select.
     Field(FieldName),
@@ -121,6 +134,20 @@ impl ChoiceValue {
                     ),
                 )
             }
+            Self::ResourceVersion(RequestedResourceVersion::Number(version)) => EncodedUnion::new(
+                wire::ChoiceValue::ResourceVersionNumber,
+                wire::ResourceVersionNumber::create(
+                    encoder.fbb(),
+                    &wire::ResourceVersionNumberArgs { version: *version },
+                ),
+            ),
+            Self::ResourceVersion(RequestedResourceVersion::Latest) => EncodedUnion::new(
+                wire::ChoiceValue::LatestResourceVersion,
+                wire::LatestResourceVersion::create(
+                    encoder.fbb(),
+                    &wire::LatestResourceVersionArgs {},
+                ),
+            ),
             Self::Model(node) => {
                 let node = encode_node_ref(encoder, node)?;
                 EncodedUnion::new(
@@ -166,6 +193,14 @@ impl ChoiceValue {
             let resource = decoder.name("ResourceChoiceReference.resource", value.resource())?;
             return Ok(Self::Resource(resource));
         }
+        if let Some(value) = selection.value_as_resource_version_number() {
+            return Ok(Self::ResourceVersion(RequestedResourceVersion::Number(
+                value.version(),
+            )));
+        }
+        if selection.value_as_latest_resource_version().is_some() {
+            return Ok(Self::ResourceVersion(RequestedResourceVersion::Latest));
+        }
         if let Some(value) = selection.value_as_model_choice_reference() {
             return Ok(Self::Model(decode_node_ref(decoder, value.node())?));
         }
@@ -196,6 +231,14 @@ impl ChoiceValue {
         if let Some(value) = choice.value_as_resource_choice_reference() {
             let resource = decoder.name("ResourceChoiceReference.resource", value.resource())?;
             return Ok(Self::Resource(resource));
+        }
+        if let Some(value) = choice.value_as_resource_version_number() {
+            return Ok(Self::ResourceVersion(RequestedResourceVersion::Number(
+                value.version(),
+            )));
+        }
+        if choice.value_as_latest_resource_version().is_some() {
+            return Ok(Self::ResourceVersion(RequestedResourceVersion::Latest));
         }
         if let Some(value) = choice.value_as_model_choice_reference() {
             return Ok(Self::Model(decode_node_ref(decoder, value.node())?));
