@@ -1,7 +1,7 @@
 //! The host projection every row sink writes from.
 //!
 //! Layer: data plane.
-//! - **Owns.** Compiling one emitter's `VALUES` mapping once, evaluating it once per batch into an
+//! - **Owns.** Binding one emitter's lowered `VALUES` mapping once, evaluating it once per batch into an
 //!   Arrow batch of mapped columns, the row selection and chunk ranges that batch is written in,
 //!   and handing each projected batch to the row sink it is mapped for.
 //! - **Depends on.** The VM's compile and execute API, Arrow batches and the connector contract's
@@ -142,43 +142,11 @@ fn compile_sql_values_program(
     namespace: &'static str,
     domain: &DomainName,
     emitter: &EmitterName,
-    values: &[ClickHouseValueMapping],
+    mapping: &MappedValuesPlan,
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
 ) -> Result<CompiledSqlValuesProgram, RuntimeError> {
-    if values.is_empty() {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "{label} emitter '{}' requires at least one VALUES mapping",
-                emitter.as_str()
-            ),
-        });
-    }
-    let mut assignments = Vec::with_capacity(values.len());
-    for (index, mapping) in values.iter().enumerate() {
-        let field = FieldName::parse(&format!("c{index}")).assured(
-            "a generated name containing c followed by decimal digits is a valid field name",
-        );
-        assignments.push(nervix_models::Assignment {
-            target: nervix_models::AssignmentTarget::bare(field),
-            value: mapping.expression.clone(),
-        });
-    }
-    let parsed = lower_route_construction(
-        &nervix_models::RouteConstruction {
-            assignments,
-            ..nervix_models::RouteConstruction::default()
-        },
-        nervix_vm::SemanticScopePolicy::read_write("input", namespace),
-    )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "{label} VALUES for '{}' is invalid: {reason}",
-            emitter.as_str()
-        ),
-    })?;
+    let parsed = &mapping.program;
     let empty_sink_schema =
         StdArc::new(arrow_schema::Schema::new(Vec::<arrow_schema::Field>::new()));
     let infer_bindings = vec![
@@ -187,7 +155,7 @@ fn compile_sql_values_program(
         VmCompileBinding::readonly("message", input_schema.clone()),
     ];
     let inferred_fields = infer_vm_set_expr_types_for_bindings_with_udfs(
-        &parsed,
+        parsed,
         infer_bindings,
         runtime_udf_signatures(udfs),
     )
@@ -213,7 +181,7 @@ fn compile_sql_values_program(
         VmCompileBinding::readonly("message", input_schema),
     ];
     let mut error_sites = compiled_message_error_sites(
-        &parsed,
+        parsed,
         &vec![MessageErrorOperation::Values; parsed.inner.set.len()],
         None,
     )
@@ -231,11 +199,11 @@ fn compile_sql_values_program(
         let Some(index) = site.operation_index.map(|index| index.arch_into()) else {
             continue;
         };
-        let Some(mapping) = values.get(index) else {
+        let Some(column) = mapping.columns.get(index) else {
             continue;
         };
         let internal_target = format!("{namespace}.c{index}");
-        let external_target = format!("{namespace}.{}", mapping.column);
+        let external_target = format!("{namespace}.{column}");
         site.fields = SortedSet::from_unsorted(
             site.fields
                 .iter()
@@ -250,7 +218,7 @@ fn compile_sql_values_program(
         );
     }
     let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
+        parsed,
         output_schema.clone(),
         VmSchemaSensitivity::default(),
         compile_bindings,
@@ -286,7 +254,7 @@ pub(in crate::runtime) struct MappedValuesProjectionInit<'a> {
     pub(in crate::runtime) namespace: &'static str,
     pub(in crate::runtime) domain: &'a DomainName,
     pub(in crate::runtime) emitter: &'a EmitterName,
-    pub(in crate::runtime) values: &'a [ClickHouseValueMapping],
+    pub(in crate::runtime) mapping: &'a MappedValuesPlan,
     pub(in crate::runtime) input_schema: StdArc<arrow_schema::Schema>,
     pub(in crate::runtime) udfs: Option<&'a UdfExecutor>,
     /// How many rows one write may carry, from the emitter's `BATCH MAX MESSAGES`. A sink that
@@ -317,7 +285,7 @@ impl MappedValuesProjection {
             namespace,
             domain,
             emitter,
-            values,
+            mapping,
             input_schema,
             udfs,
             max_batch,
@@ -327,14 +295,11 @@ impl MappedValuesProjection {
             namespace,
             domain,
             emitter,
-            values,
+            mapping,
             input_schema,
             udfs,
         )?;
-        let target_columns = values
-            .iter()
-            .map(|mapping| mapping.column.clone())
-            .collect::<Vec<_>>();
+        let target_columns = mapping.columns.clone();
         let output_fields = program.program.output_schema.fields();
         if output_fields.len() != target_columns.len() {
             return Err(RuntimeError::BuildDomainExecution {
@@ -556,10 +521,11 @@ impl ProjectedValueRows {
 #[cfg(test)]
 mod tests {
     use futures_util::FutureExt as _;
+    use nervix_models::ClickHouseValueMapping;
 
     use super::*;
     use crate::{
-        runtime::test_fixtures::{expression, input_schema, named, test_schema},
+        runtime::test_fixtures::{expression, named, test_schema},
         runtime_schema::test_runtime_row,
     };
 
@@ -579,13 +545,15 @@ mod tests {
             mapping("label", "input.name"),
             mapping("doubled", "input.value * 2"),
         ];
+        let mapping = MappedValuesPlan::decide(&emitter, "ClickHouse", "clickhouse", &values)
+            .expect("the mapping should lower");
 
         MappedValuesProjection::compile(MappedValuesProjectionInit {
             label: "ClickHouse",
             namespace: "clickhouse",
             domain: &domain,
             emitter: &emitter,
-            values: &values,
+            mapping: &mapping,
             input_schema: schema.arrow_schema(),
             udfs: None,
             max_batch,
@@ -645,12 +613,14 @@ mod tests {
         let emitter: EmitterName = named("test_emitter");
         let schema = test_schema(&[("value", ParseAsType::I64), ("name", ParseAsType::String)]);
         let values = vec![mapping("ratio", "100 / input.value")];
+        let mapping = MappedValuesPlan::decide(&emitter, "ClickHouse", "clickhouse", &values)
+            .expect("the mapping should lower");
         let projection = MappedValuesProjection::compile(MappedValuesProjectionInit {
             label: "ClickHouse",
             namespace: "clickhouse",
             domain: &domain,
             emitter: &emitter,
-            values: &values,
+            mapping: &mapping,
             input_schema: schema.arrow_schema(),
             udfs: None,
             max_batch: None,
@@ -740,24 +710,11 @@ mod tests {
     }
 
     #[test]
-    fn sql_value_compilers_reject_empty_mappings_before_compilation() {
-        let domain = DomainName::parse("emitter_tests").expect("valid domain");
+    fn mapped_value_decision_requires_mappings() {
         let emitter = EmitterName::parse("output").expect("valid emitter name");
-        let schema = input_schema().arrow_schema();
-
         let errors =
             [("Iceberg", "iceberg"), ("ClickHouse", "clickhouse")].map(|(label, namespace)| {
-                MappedValuesProjection::compile(MappedValuesProjectionInit {
-                    label,
-                    namespace,
-                    domain: &domain,
-                    emitter: &emitter,
-                    values: &[],
-                    input_schema: schema.clone(),
-                    udfs: None,
-                    max_batch: None,
-                })
-                .err()
+                MappedValuesPlan::decide(&emitter, label, namespace, &[]).err()
             });
         for result in errors {
             let Some(error) = result else {

@@ -5,9 +5,9 @@
 //! - **Depends on.** Typed execution plans, the expression VM and runtime infrastructure.
 //! - **Must not know.** NSPL text, parser state or control-plane transactions.
 //!
-//! Ingestor and reingestor programs arrive lowered by their decision-layer plans. The remaining
-//! compile functions still receive semantic Models directly instead of a validated execution
-//! plan.
+//! Ingestor, reingestor and emitter programs arrive lowered by their decision-layer plans. Some
+//! processor compile functions still receive semantic Models directly instead of validated
+//! execution plans.
 
 use error_stack::ResultExt as _;
 
@@ -1345,103 +1345,20 @@ pub(super) fn compile_wasm_output_filter_map_program(
     }))
 }
 
-/// Which construction an emitter's route compiles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::runtime) enum EmitterRoute {
-    /// The construction the emitter declares, which an emitter declaring none does not compile.
-    Declared,
-    /// An HTTP emitter's construction without its header writes, which are request fields it
-    /// evaluates after `METHOD` and `PATH` and only for the records the route keeps. With a codec
-    /// body the route always compiles, because it finalizes the record the codec encodes.
-    HttpRequest,
-}
-
 pub(in crate::runtime) fn compile_emitter_filter_map_program(
     domain: &DomainName,
-    emitter: &CreateEmitter,
-    route: EmitterRoute,
+    emitter: &EmitterName,
+    route: Option<&EmitterRoutePlan>,
     schemas: RuntimeVmSchemaPair,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledEmitterFilterMapProgram>, RuntimeError> {
-    let codec_route = emitter.body.codec().is_some();
-    let construction = match route {
-        EmitterRoute::Declared => {
-            if emitter.construction.is_empty() {
-                return Ok(None);
-            }
-            emitter.construction.clone()
-        }
-        EmitterRoute::HttpRequest => {
-            let construction = RouteConstruction {
-                invocations: Vec::new(),
-                ..emitter.construction.clone()
-            };
-            if construction.is_empty() && !codec_route {
-                return Ok(None);
-            }
-            construction
-        }
+    let Some(route) = route else {
+        return Ok(None);
     };
-    if !codec_route
-        && (construction.inherit.is_some()
-            || !construction.assignments.is_empty()
-            || !construction.invocations.is_empty())
-    {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "direct emitter '{}' supports VALUES and WHERE only",
-                emitter.name.as_str()
-            ),
-        });
-    }
-    let parsed = if codec_route {
-        lower_transforming_route(
-            &construction,
-            schemas.input.as_ref(),
-            schemas.output.as_ref(),
-        )
-    } else {
-        lower_route_construction(&construction, SemanticScopePolicy::read_only("input"))
-    }
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "emitter route '{}' is invalid: {reason}",
-            emitter.name.as_str()
-        ),
-    })?;
-    if parsed
-        .inner
-        .invoke
-        .iter()
-        .any(|invocation| invocation.inner.function == FunctionName::WriteHeader)
-        && !emit_sink_supports_headers(&emitter.sink)
-    {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "{} emitters do not support FILTER-MAP headers",
-                emitter.sink.transport_label()
-            ),
-        });
-    }
-    let inherited_count = if codec_route {
-        parsed
-            .inner
-            .set
-            .len()
-            .checked_sub(construction.assignments.len())
-            .verified(
-                "a compiled construction lists one set operation per inherited field before its \
-                 assignments",
-            )
-    } else {
-        0
-    };
+    let parsed = route.program.clone();
     let set_operations = (0..parsed.inner.set.len())
         .map(|index| {
-            if index < inherited_count {
+            if index < route.inherited_count {
                 MessageErrorOperation::Inherit
             } else {
                 MessageErrorOperation::Set
@@ -1461,15 +1378,18 @@ pub(in crate::runtime) fn compile_emitter_filter_map_program(
     let body = compile_emitter_filter_map_part(
         RuntimeCompileTarget {
             domain,
-            identifier: &ModelName::from(&emitter.name),
+            identifier: &ModelName::from(emitter),
         },
         parsed,
         schemas,
-        codec_route,
+        route.codec_route,
         error_sites,
         context,
     )?;
-    Ok(Some(CompiledEmitterFilterMapProgram { body, codec_route }))
+    Ok(Some(CompiledEmitterFilterMapProgram {
+        body,
+        codec_route: route.codec_route,
+    }))
 }
 
 pub(super) fn compile_emitter_filter_map_part(

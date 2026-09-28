@@ -5,8 +5,8 @@
 //! - **Depends on.** Vocabulary, installed plans and runtime infrastructure.
 //! - **Must not know.** Parsing or control-plane placement and transaction decisions.
 //!
-//! The installed schedule and client Models remain execution fields that violate the data-plane
-//! plan boundary; ingestors and reingestors run from the entrypoint plans installed beside them.
+//! The installed schedule remains an execution field for control-plane coordination. Entrypoints
+//! and emitters run from typed plans installed beside it and do not read client Models.
 
 use nervix_connector_websockets::CompiledSignalingProtocol;
 
@@ -121,6 +121,8 @@ pub(super) struct DomainExecution {
     /// The ingestor and reingestor plans decided from `schedule`, which ingestor starts, reingestor
     /// swaps, source placement and observation read instead of the schedule's Models.
     pub(super) entrypoints: Arc<EntrypointPlans>,
+    /// The sink, source-edge and expression plans decided from `schedule` for every emitter.
+    pub(super) emitter_plans: Arc<EmitterExecutionPlans>,
     pub(super) branched_entrypoints: HashMap<ModelName, Vec<Arc<IngestorRouteRuntime>>>,
     pub(super) endpoint_routes: HashMap<EndpointName, EndpointRoute>,
     pub(super) node_tasks: HashMap<NodeRef, ScheduledNodeTask>,
@@ -134,7 +136,6 @@ pub(super) struct DomainExecution {
     pub(super) relay_state_tasks: HashMap<RelayName, RelayStateTask>,
     /// The single buffer-and-fan-out task for every relay owned by this cluster node.
     pub(super) relay_owner_tasks: HashMap<RelayName, RelayOwnerTask>,
-    pub(super) clients: HashMap<ClientName, Arc<Model>>,
     pub(super) tasks: Vec<JoinHandle<()>>,
 }
 
@@ -373,7 +374,6 @@ impl Runtime {
         let mut relay_schemas = HashMap::new();
         let mut materialized_stream_specs = HashMap::new();
         let mut materialized_stream_owner_nodes = HashMap::new();
-        let mut transports = HashMap::new();
         let mut lookup_specs = Vec::new();
         let mut emitter_specs = Vec::new();
         let mut reingestor_inputs = Vec::new();
@@ -410,6 +410,13 @@ impl Runtime {
             EntrypointPlans::from_scheduled_nodes(domain, &scheduled_node_map, &activation_plan)
                 .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
         );
+        let emitter_plans = Arc::new(
+            EmitterExecutionPlans::from_scheduled_nodes(&scheduled_node_map, &activation_plan)
+                .map_err(|report| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to plan emitters: {report:#}"),
+                })?,
+        );
         let branch_relays = branch_relays_from_plans(&branched_specs, &entrypoints);
         let ActivatedDomainSurfaces {
             codecs,
@@ -418,12 +425,6 @@ impl Runtime {
         } = self
             .activate_domain_surfaces(domain, &activation_plan)
             .await?;
-
-        for node in graph.nodes() {
-            if node.config.kind() == ModelKind::Client {
-                transports.insert(ClientName::from(&node.identifier), node.config.clone());
-            }
-        }
 
         for relay in activation_plan.relays.values() {
             let expiring_state = if branch_relays.contains(&relay.name) {
@@ -491,24 +492,21 @@ impl Runtime {
             lookup_specs.push((lookup.name.clone(), Arc::new(runtime)));
         }
 
-        for node in graph.nodes() {
-            let Model::Emitter(emitter) = node.config.as_ref() else {
-                continue;
-            };
-            let mut inputs = Vec::with_capacity(emitter.from.relays().len());
-            for input_relay in emitter.from.relays() {
-                let Some(relay) = relay_builders.get_mut(input_relay) else {
+        for emitter in emitter_plans.emitters() {
+            let mut inputs = Vec::with_capacity(emitter.inputs.len());
+            for input in &emitter.inputs {
+                let Some(relay) = relay_builders.get_mut(&input.relay) else {
                     return Err(RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
-                        reason: format!("missing emitter input relay '{}'", input_relay),
+                        reason: format!("missing emitter input relay '{}'", input.relay),
                     });
                 };
                 inputs.push((
-                    input_relay.clone(),
+                    input.relay.clone(),
                     relay.runtime_consumer_fan_in_for_mode(emitter.mode),
                 ));
             }
-            emitter_specs.push((emitter.clone(), inputs));
+            emitter_specs.push((emitter.as_ref().clone(), inputs));
         }
         for plan in entrypoints.reingestors() {
             for input in &plan.inputs {
@@ -681,7 +679,6 @@ impl Runtime {
                         codecs: &codecs,
                         deps: self.emitter_task_deps(execution_build_deps, &emitter)?,
                     },
-                    &transports,
                     emitter,
                     inputs,
                 )?,
@@ -741,7 +738,7 @@ impl Runtime {
                 placement_tasks: HashMap::default(),
                 relay_state_tasks: HashMap::default(),
                 relay_owner_tasks,
-                clients: transports,
+                emitter_plans,
                 tasks,
             },
         );

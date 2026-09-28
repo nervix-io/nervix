@@ -65,17 +65,16 @@ use nervix_interconnect::{
     Transport, WasmStateResetTarget,
 };
 use nervix_models::{
-    AckMode, Assignment, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClickHouseValueMapping,
-    ClientConfigEntry, ClientName, ClientResourceMount, ClusterNodeIncarnation, ClusterNodeName,
-    ClusterSchedule, CodecName, CommandExecutionReference, CoordinationIdentity,
-    CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateEmitter, CreateRelay,
-    DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef, DomainSchedule, DomainState,
-    EmitSink, EmitterName, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
-    FlushPolicy, GeneralErrorPolicy, GeneratorName, InferencerExecutionMode,
-    InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestTimestampSource,
-    IngestorName, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
-    MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
-    ModelIndex, ModelKind, ModelName, NodeRef, OtelValueMapping, OwnershipStateComponent,
+    AckMode, Assignment, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClientConfigEntry,
+    ClientName, ClientResourceMount, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
+    CodecName, CommandExecutionReference, CoordinationIdentity, CorrelationTimeoutAction,
+    CorrelatorMatchPolicy, CreateRelay, DomainClockAuthority, DomainConfig, DomainName,
+    DomainNodeRef, DomainSchedule, DomainState, EmitterName, EndpointName, EndpointType,
+    ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName,
+    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestTimestampSource, IngestorName, KafkaPartitionSchedule, Literal as ModelLiteral,
+    LookupName, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation,
+    MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName, NodeRef, OwnershipStateComponent,
     OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
     ProcessorOutput, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
     RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName, RetryPolicy,
@@ -86,7 +85,8 @@ use nervix_models::{
 };
 #[cfg(test)]
 use nervix_models::{
-    CreateClientHttp, CreateClientPrometheus, CreateClientRabbitMq, EmitterPublishingMode,
+    CreateClientHttp, CreateClientPrometheus, CreateClientRabbitMq, CreateEmitter,
+    EmitterPublishingMode,
 };
 #[cfg(test)]
 use nervix_models::{CreateIngestor, CreateReingestor, IngestSource, OutputBranch};
@@ -144,6 +144,9 @@ use upon::Engine as TemplateEngine;
 use crate::runtime_schema::test_runtime_row;
 use crate::{
     ConfiguredFaultInjection, cluster,
+    emitter_execution_plan::{
+        EmitterExecutionPlan, EmitterExecutionPlans, EmitterOrderingGroupPlan, EmitterRoutePlan,
+    },
     emitter_start_plan::*,
     metrics::{
         BatchMetricsHandle, BranchEvictionReason, IngestorQuiesceMetricLabels,
@@ -388,7 +391,7 @@ use ingest_group::{
 pub(in crate::runtime) use ingest_metadata::IngestMetadataKind;
 use ingest_metadata::{
     BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, IngestHeaderFunctionInjector,
-    IngestMetadataBuilders, emit_sink_supports_headers,
+    IngestMetadataBuilders,
 };
 pub(in crate::runtime) use ingestor_quiesce::{
     BufferedIngestMetadata, BufferedIngestPayload, IngestorQuiesceCause, IngestorQuiesceControl,
@@ -525,9 +528,9 @@ use test_fixtures::{
     with_inherit_all,
 };
 pub(in crate::runtime) use vm_compile::{
-    CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, EmitterRoute,
-    KeyProjectionKind, MaterializedFieldInterest, MaterializedLookupKeyMode,
-    compile_emitter_filter_map_program, compile_key_projection_program,
+    CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, KeyProjectionKind,
+    MaterializedFieldInterest, MaterializedLookupKeyMode, compile_emitter_filter_map_program,
+    compile_key_projection_program,
 };
 use vm_compile::{
     CompiledMessageErrorSite, CompiledMessageErrorSites, GeneratorSetProgramSchemas,

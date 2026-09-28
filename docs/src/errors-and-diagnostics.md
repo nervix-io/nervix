@@ -212,6 +212,14 @@ an unparseable flush or collection cadence, rather than restating it. Runtime in
 domain context to either report, and an ingestor that fails to start while its domain execution is
 built records that report as its transient error.
 
+Emitter execution planning has typed failures for missing source relays or codecs, an unresolved
+or mismatched client, unsupported publishing mode, an invalid source predicate or route, invalid
+HTTP request fields or SQS ordering group, empty or invalid row mappings, nonliteral OTEL resource
+attributes, and invalid Iceberg commit settings. Each report names the emitter and, for a source
+predicate, its relay. The decision fails before a new emitter plan or remote consumer edge is
+published. Binding a valid plan against installed schemas and UDFs may still fail during startup;
+opening an external sink may fail independently and follows the emitter's retry policy.
+
 Node startup validates execution memory limits before admitting any work. A Commands budget must
 hold both the bounded resident replication window and one bounded normalized command-state write;
 the larger requirement controls admission. Arithmetic that cannot represent either requirement is

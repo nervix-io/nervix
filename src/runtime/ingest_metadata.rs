@@ -534,10 +534,6 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
     }
 }
 
-pub(super) fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
-    sink.capabilities().writes_headers()
-}
-
 #[cfg(test)]
 mod tests {
     use ahash::HashMap;

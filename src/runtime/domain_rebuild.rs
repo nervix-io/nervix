@@ -355,7 +355,6 @@ impl Runtime {
         let mut relay_schemas = HashMap::new();
         let mut materialized_stream_specs = HashMap::new();
         let mut materialized_stream_owner_nodes = HashMap::new();
-        let mut transports = HashMap::new();
         let mut lookup_specs = Vec::new();
         let mut relay_state_specs = Vec::new();
         let mut emitter_specs = Vec::new();
@@ -381,6 +380,13 @@ impl Runtime {
         let entrypoints = Arc::new(
             EntrypointPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
                 .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
+        );
+        let emitter_plans = Arc::new(
+            EmitterExecutionPlans::from_scheduled_nodes(&schedule.nodes, &activation_plan)
+                .map_err(|report| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to plan emitters: {report:#}"),
+                })?,
         );
         for plan in entrypoints.ingestors() {
             if let Err(error) = Self::parse_ingest_acknowledgement(
@@ -418,15 +424,6 @@ impl Runtime {
             signaling_protocols,
             endpoint_routes,
         } = Box::pin(self.activate_domain_surfaces(domain, &activation_plan)).await?;
-
-        for node in schedule.nodes.values() {
-            if node.kind() == ModelKind::Client {
-                transports.insert(
-                    ClientName::from(&node.identifier),
-                    Arc::new((*node.config).clone()),
-                );
-            }
-        }
 
         for relay in activation_plan.relays.values() {
             let node = schedule
@@ -568,24 +565,27 @@ impl Runtime {
                     }
                 }
             }
-            if let Model::Emitter(emitter) = node.config.as_ref() {
-                let mut inputs = Vec::with_capacity(emitter.from.relays().len());
-                for input_relay in emitter.from.relays() {
-                    let Some(relay) = relay_builders.get_mut(input_relay) else {
+            if node.kind() == ModelKind::Emitter {
+                let emitter = emitter_plans
+                    .emitter(&EmitterName::from(&node.identifier))
+                    .assured("every scheduled emitter has a plan from this schedule");
+                let mut inputs = Vec::with_capacity(emitter.inputs.len());
+                for input in &emitter.inputs {
+                    let Some(relay) = relay_builders.get_mut(&input.relay) else {
                         return Err(RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
-                            reason: format!("missing emitter input relay '{}'", input_relay),
+                            reason: format!("missing emitter input relay '{}'", input.relay),
                         });
                     };
                     if node.executes_on(local_node_id) {
                         inputs.push((
-                            input_relay.clone(),
+                            input.relay.clone(),
                             relay.runtime_consumer_fan_in_for_mode(emitter.mode),
                         ));
                     }
                 }
                 if node.executes_on(local_node_id) {
-                    emitter_specs.push((emitter.clone(), inputs));
+                    emitter_specs.push((emitter.as_ref().clone(), inputs));
                 }
             }
         }
@@ -674,8 +674,12 @@ impl Runtime {
 
         // Remote delivery targets follow only from the published schedule, so the same derivation
         // seeds a freshly built domain and re-points the relays of an incrementally moved node.
-        let remote_runtime_consumers =
-            Self::remote_runtime_consumers_for_schedule(&schedule, &entrypoints, local_node_id);
+        let remote_runtime_consumers = Self::remote_runtime_consumers_for_schedule(
+            &schedule,
+            &entrypoints,
+            &emitter_plans,
+            local_node_id,
+        );
         for (relay, builder) in relay_builders.iter_mut() {
             builder.remote_runtime_consumers = remote_runtime_consumers
                 .get(relay)
@@ -862,7 +866,6 @@ impl Runtime {
                         codecs: &codecs,
                         deps: self.emitter_task_deps(execution_build_deps, &emitter)?,
                     },
-                    &transports,
                     emitter,
                     inputs,
                 )?,
@@ -918,7 +921,7 @@ impl Runtime {
                 placement_tasks,
                 relay_state_tasks,
                 relay_owner_tasks,
-                clients: transports,
+                emitter_plans,
                 tasks: Vec::new(),
             },
         );
@@ -976,6 +979,13 @@ impl Runtime {
         let entrypoints = Arc::new(
             EntrypointPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
                 .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
+        );
+        let emitter_plans = Arc::new(
+            EmitterExecutionPlans::from_scheduled_nodes(&schedule.nodes, &activation_plan)
+                .map_err(|report| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to plan emitters: {report:#}"),
+                })?,
         );
         let ActivatedDomainSurfaces {
             codecs,
@@ -1105,7 +1115,7 @@ impl Runtime {
             placement_tasks: HashMap::default(),
             relay_state_tasks: HashMap::default(),
             relay_owner_tasks: HashMap::default(),
-            clients: HashMap::default(),
+            emitter_plans,
             tasks: Vec::new(),
         })
     }

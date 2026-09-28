@@ -3,8 +3,9 @@
 //! Layer: decisions.
 //!
 //! - **Owns.** Resolving an emitter and the client Models its sink names into one typed start
-//!   plan: each connector's clients, sink parameters and publishing mode, and the emitter's retry
-//!   policy. It also binds every planned client to the configuration the host resolved for it.
+//!   plan: each connector's clients, sink parameters and publishing mode, lowered row mappings,
+//!   and the emitter's retry policy. It also binds every planned client to the configuration the
+//!   host resolved for it.
 //! - **Depends on.** The emitter and client Models, runtime vocabulary values, and the contract
 //!   crate's resolved client configuration and parsed retry policy.
 //! - **Must not know.** Tokio, locks, shared maps, connector I/O, how a resource mount is
@@ -25,22 +26,27 @@ use nervix_connector::{
     AckConfirmation, BrokerPublishingMode, ParsedRetryPolicy, ResolvedClientConfig,
     optional_client_config_value,
 };
+use nervix_connector_iceberg::IcebergCommitPolicy;
 use nervix_connector_mongodb::MongoDbConflictAction;
 use nervix_connector_mqtt::MqttPublishingMode;
 use nervix_connector_mysql::MySqlConflictAction;
 use nervix_connector_nats::NatsPublishingMode;
 use nervix_connector_otel::{
-    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
+    OtelAggregationTemporality, OtelLiteral, OtelMetric, OtelMetricKind, OtelResourceAttribute,
+    OtelScope, OtelSignal,
 };
 use nervix_connector_postgres::PostgresConflictAction;
 use nervix_connector_sqs::SqsPublishingMode;
 use nervix_models::{
-    ChannelName, ClickHouseValueMapping, ClientConfigEntry, ClientName, ClientPoolBounds,
-    ClientResourceMount, CollectionName, CreateEmitter, EmitSink, EmitterAckWindow,
-    EmitterBatchPolicy, EmitterPublishingMode, Expression, HttpOrigin, IcebergCatalog,
-    IcebergStorageBackend, IcebergValueMapping, Invocation, Model, MongoDbValueMapping,
-    MySqlValueMapping, OtelValueMapping, PostgresValueMapping, QueueName, RetryPolicy,
-    SqsFifoGroup, SubjectName, TableName, TopicName,
+    Assignment, AssignmentTarget, ChannelName, ClickHouseValueMapping, ClientConfigEntry,
+    ClientName, ClientPoolBounds, ClientResourceMount, CollectionName, CreateEmitter, EmitSink,
+    EmitterAckWindow, EmitterBatchPolicy, EmitterPublishingMode, Expression, FieldName, HttpOrigin,
+    IcebergCatalog, IcebergStorageBackend, Literal, Model, QueueName, RetryPolicy,
+    RouteConstruction, SubjectName, TableName, TopicName,
+};
+use nervix_vm::{
+    SemanticScopePolicy, lower_route_construction,
+    program::{Program, SpannedNode},
 };
 use thiserror::Error;
 
@@ -53,6 +59,14 @@ pub(super) enum EmitterDurationSetting {
     RetryMaxBackoff,
     #[strum(serialize = "ack timeout")]
     AckTimeout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub(super) enum IcebergCommitSetting {
+    #[strum(serialize = "commit_each")]
+    CommitEach,
+    #[strum(serialize = "max_commit_size")]
+    MaxCommitSize,
 }
 
 impl EmitterDurationSetting {
@@ -115,6 +129,145 @@ pub(super) enum EmitterStartPlanError {
     BatchRequired { sink: &'static str },
     #[error("HTTP emitter client '{client}' declares no http or https origin endpoint")]
     InvalidHttpEndpoint { client: ClientName },
+    #[error("{sink} emitter '{emitter}' requires at least one VALUES mapping")]
+    EmptyValues {
+        sink: &'static str,
+        emitter: nervix_models::EmitterName,
+    },
+    #[error("{sink} emitter '{emitter}' has invalid VALUES mappings")]
+    InvalidValues {
+        sink: &'static str,
+        emitter: nervix_models::EmitterName,
+    },
+    #[error("OTEL emitter '{emitter}' has a nonliteral RESOURCE attribute '{attribute}'")]
+    InvalidOtelResource {
+        emitter: nervix_models::EmitterName,
+        attribute: String,
+    },
+    #[error("Iceberg emitter '{emitter}' has invalid {setting} '{value}'")]
+    InvalidIcebergCommit {
+        emitter: nervix_models::EmitterName,
+        setting: IcebergCommitSetting,
+        value: String,
+    },
+}
+
+/// A row sink's ordered external columns and its already lowered expression program.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct MappedValuesPlan {
+    pub(super) columns: Vec<String>,
+    pub(super) program: SpannedNode<Program>,
+}
+
+impl MappedValuesPlan {
+    pub(crate) fn decide(
+        emitter: &nervix_models::EmitterName,
+        sink: &'static str,
+        namespace: &'static str,
+        mappings: &[ClickHouseValueMapping],
+    ) -> Result<Self, Report<EmitterStartPlanError>> {
+        if mappings.is_empty() {
+            return Err(Report::new(EmitterStartPlanError::EmptyValues {
+                sink,
+                emitter: emitter.clone(),
+            }));
+        }
+        let assignments = mappings
+            .iter()
+            .enumerate()
+            .map(|(index, mapping)| {
+                let field = FieldName::parse(&format!("c{index}"))
+                    .assured("c followed by decimal digits is a valid field name");
+                Assignment {
+                    target: AssignmentTarget::bare(field),
+                    value: mapping.expression.clone(),
+                }
+            })
+            .collect();
+        let program = lower_route_construction(
+            &RouteConstruction {
+                assignments,
+                ..RouteConstruction::default()
+            },
+            SemanticScopePolicy::read_write("input", namespace),
+        )
+        .map_err(|reason| {
+            Report::new(EmitterStartPlanError::InvalidValues {
+                sink,
+                emitter: emitter.clone(),
+            })
+            .attach_printable(reason)
+        })?;
+        Ok(Self {
+            columns: mappings
+                .iter()
+                .map(|mapping| mapping.column.clone())
+                .collect(),
+            program,
+        })
+    }
+}
+
+fn otel_resource_attributes(
+    emitter: &CreateEmitter,
+    resource: &[ClickHouseValueMapping],
+) -> Result<Vec<OtelResourceAttribute>, Report<EmitterStartPlanError>> {
+    resource
+        .iter()
+        .map(|mapping| {
+            let value = otel_literal(&mapping.expression).ok_or_else(|| {
+                Report::new(EmitterStartPlanError::InvalidOtelResource {
+                    emitter: emitter.name.clone(),
+                    attribute: mapping.column.clone(),
+                })
+            })?;
+            Ok(OtelResourceAttribute {
+                key: mapping.column.clone(),
+                value,
+            })
+        })
+        .collect()
+}
+
+fn otel_literal(expression: &Expression) -> Option<OtelLiteral> {
+    match expression {
+        Expression::Literal(Literal::I64(value)) => Some(OtelLiteral::I64(*value)),
+        Expression::Literal(Literal::F64(value)) => Some(OtelLiteral::F64(value.value())),
+        Expression::Literal(Literal::Bool(value)) => Some(OtelLiteral::Bool(*value)),
+        Expression::Literal(Literal::String(value)) => Some(OtelLiteral::String(value.clone())),
+        Expression::Literal(Literal::Null) => Some(OtelLiteral::Null),
+        Expression::Array(items) => Some(OtelLiteral::Array(
+            items.iter().map(otel_literal).collect::<Option<Vec<_>>>()?,
+        )),
+        _ => None,
+    }
+}
+
+fn iceberg_commit_policy(
+    emitter: &CreateEmitter,
+    commit_each: &str,
+    max_commit_size: &str,
+) -> Result<IcebergCommitPolicy, Report<EmitterStartPlanError>> {
+    let interval = humantime::parse_duration(commit_each).map_err(|source| {
+        Report::new(EmitterStartPlanError::InvalidIcebergCommit {
+            emitter: emitter.name.clone(),
+            setting: IcebergCommitSetting::CommitEach,
+            value: commit_each.to_string(),
+        })
+        .attach_printable(source)
+    })?;
+    let max_size = max_commit_size
+        .parse::<ubyte::ByteUnit>()
+        .map_err(|source| {
+            Report::new(EmitterStartPlanError::InvalidIcebergCommit {
+                emitter: emitter.name.clone(),
+                setting: IcebergCommitSetting::MaxCommitSize,
+                value: max_commit_size.to_string(),
+            })
+            .attach_printable(source)
+        })?
+        .as_u64();
+    Ok(IcebergCommitPolicy { interval, max_size })
 }
 
 impl EmitterStartPlanError {
@@ -221,33 +374,12 @@ pub(super) struct PooledClientPlan {
     pub(super) bounds: ClientPoolBounds,
 }
 
-/// The ordering group a sink writes every record under, as the emitter declares it.
-///
-/// The host evaluates it for each record and hands the sink only the resulting group, so neither
-/// the declaration nor the reason a record has no group ever reaches the connector.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum EmitterOrderingGroup {
-    /// Each record's concrete branch key.
-    FromBranch,
-    /// The `STRING` this expression produces for each record's source row.
-    Expression(Expression),
-}
-
-impl EmitterOrderingGroup {
-    fn decide(group: &SqsFifoGroup) -> Self {
-        match group {
-            SqsFifoGroup::FromBranch => Self::FromBranch,
-            SqsFifoGroup::Expression(expression) => Self::Expression(expression.clone()),
-        }
-    }
-}
-
 /// Declares the plan of a sink that connects through one client, together with the step that binds
 /// that client to the configuration the host resolved for it.
 macro_rules! single_client_sink_plan {
     ($(#[$doc:meta])* $name:ident { $($field:ident: $type:ty),* $(,)? }) => {
         $(#[$doc])*
-        #[derive(Debug, Clone, PartialEq, Eq)]
+        #[derive(Debug, Clone, PartialEq)]
         pub(super) struct $name<Config = ResolvedClientConfig> {
             pub(super) client: EmitterClientSpec<Config>,
             $(pub(super) $field: $type,)*
@@ -270,22 +402,10 @@ macro_rules! single_client_sink_plan {
     };
 }
 
-/// The request fields an HTTP emitter declares. The host evaluates them for each record its route
-/// keeps, in this order: the method, the path, and then every header write as it is written.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct HttpRequestFieldsPlan {
-    pub(super) method: Expression,
-    pub(super) path: Expression,
-    /// The emitter's `write_header` invocations, in written order.
-    pub(super) header_writes: Vec<Invocation>,
-}
-
 single_client_sink_plan! {
-    /// An HTTP sink: the origin its client sends every request to, and the request fields the host
-    /// evaluates for each record.
+    /// An HTTP sink: the origin its client sends every request to.
     HttpSinkPlan {
         origin: HttpOrigin,
-        request: HttpRequestFieldsPlan,
     }
 }
 
@@ -359,13 +479,11 @@ single_client_sink_plan! {
 }
 
 single_client_sink_plan! {
-    /// An SQS sink: the queue it sends to, whether it batches its requests, and the FIFO message
-    /// group every record is sent under.
+    /// An SQS sink: the queue it sends to and whether it batches its requests.
     SqsSinkPlan {
         queue: String,
         mode: SqsPublishingMode,
         batch: Option<EmitterBatchPolicy>,
-        ordering_group: Option<EmitterOrderingGroup>,
     }
 }
 
@@ -380,9 +498,10 @@ single_client_sink_plan! {
     /// An OpenTelemetry sink: the signal it exports and the mappings that build each item.
     OtelSinkPlan {
         signal: OtelSignal,
-        values: Vec<OtelValueMapping>,
-        attributes: Vec<OtelValueMapping>,
-        resource: Vec<OtelValueMapping>,
+        mapping: MappedValuesPlan,
+        values: Vec<String>,
+        attributes: Vec<String>,
+        resource: Vec<OtelResourceAttribute>,
         scope: Option<OtelScope>,
         batch: Option<EmitterBatchPolicy>,
     }
@@ -393,7 +512,7 @@ single_client_sink_plan! {
     /// one insert carries.
     ClickHouseSinkPlan {
         table: TableName,
-        values: Vec<ClickHouseValueMapping>,
+        mapping: MappedValuesPlan,
         batch: EmitterBatchPolicy,
     }
 }
@@ -404,7 +523,7 @@ single_client_sink_plan! {
     PostgresSinkPlan {
         pool: ClientPoolBounds,
         table: TableName,
-        values: Vec<PostgresValueMapping>,
+        mapping: MappedValuesPlan,
         conflict_action: PostgresConflictAction,
         batch: EmitterBatchPolicy,
     }
@@ -416,7 +535,7 @@ single_client_sink_plan! {
     MySqlSinkPlan {
         pool: ClientPoolBounds,
         table: TableName,
-        values: Vec<MySqlValueMapping>,
+        mapping: MappedValuesPlan,
         conflict_action: MySqlConflictAction,
         batch: EmitterBatchPolicy,
     }
@@ -429,7 +548,7 @@ single_client_sink_plan! {
     MongoDbSinkPlan {
         pool: ClientPoolBounds,
         collection: CollectionName,
-        values: Vec<MongoDbValueMapping>,
+        mapping: MappedValuesPlan,
         conflict_action: MongoDbConflictAction,
         batch: EmitterBatchPolicy,
     }
@@ -574,18 +693,15 @@ impl<Config> MongoDbSinkPlan<Config> {
 /// An Iceberg sink: the object store it stages data files in, the REST catalog it commits
 /// through, and the table, mappings, location and commit cadence it writes with.
 ///
-/// The commit cadence and size stay as declared: the sink resolves them when it opens, where a
-/// value it cannot use is reported as that sink's initialization failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct IcebergSinkPlan<Config = ResolvedClientConfig> {
     pub(super) backend: IcebergStorageBackend,
     pub(super) storage: EmitterClientSpec<Config>,
     pub(super) catalog: EmitterClientSpec<Config>,
     pub(super) table: TableName,
-    pub(super) values: Vec<IcebergValueMapping>,
+    pub(super) mapping: MappedValuesPlan,
     pub(super) location: String,
-    pub(super) commit_each: String,
-    pub(super) max_commit_size: String,
+    pub(super) commit: IcebergCommitPolicy,
     pub(super) batch: Option<EmitterBatchPolicy>,
 }
 
@@ -603,17 +719,16 @@ impl IcebergSinkPlan<DeclaredClientConfig> {
             storage,
             catalog,
             table: self.table,
-            values: self.values,
+            mapping: self.mapping,
             location: self.location,
-            commit_each: self.commit_each,
-            max_commit_size: self.max_commit_size,
+            commit: self.commit,
             batch: self.batch,
         })
     }
 }
 
 /// The sink one emitter publishes to, with each connector's typed configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) enum EmitterSinkPlan<Config = ResolvedClientConfig> {
     Http(HttpSinkPlan<Config>),
     Kafka(KafkaSinkPlan<Config>),
@@ -659,29 +774,6 @@ impl<Config> EmitterSinkPlan<Config> {
             Self::MySql(plan) => Some(plan.batch),
             Self::MongoDb(plan) => Some(plan.batch),
             Self::Iceberg(plan) => plan.batch,
-        }
-    }
-
-    /// The ordering group this sink writes every record under, absent when it declares none.
-    pub(super) fn ordering_group(&self) -> Option<&EmitterOrderingGroup> {
-        match self {
-            Self::Sqs(plan) => plan.ordering_group.as_ref(),
-            Self::Http(_)
-            | Self::Kafka(_)
-            | Self::Pulsar(_)
-            | Self::RabbitMq(_)
-            | Self::Redis(_)
-            | Self::Mqtt(_)
-            | Self::Nats(_)
-            | Self::ZeroMq(_)
-            | Self::Syslog(_)
-            | Self::Sentry(_)
-            | Self::Otel(_)
-            | Self::ClickHouse(_)
-            | Self::Postgres(_)
-            | Self::MySql(_)
-            | Self::MongoDb(_)
-            | Self::Iceberg(_) => None,
         }
     }
 
@@ -751,7 +843,7 @@ pub(super) struct EmitterClientModels<'a> {
 }
 
 /// Everything one emitter's sink is started with.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct EmitterStartPlan<Config = ResolvedClientConfig> {
     /// The backoff the emitter waits between publish retries and sink reconnects.
     pub(super) retry_policy: ParsedRetryPolicy,
@@ -776,9 +868,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
         let sink_plan = match (sink, client) {
             (
                 EmitSink::Http {
-                    client: expected,
-                    method,
-                    path,
+                    client: expected, ..
                 },
                 Model::ClientHttp(client),
             ) => {
@@ -791,11 +881,6 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                         &client.config,
                     )?,
                     origin: Self::decide_http_origin(expected, &client.config)?,
-                    request: HttpRequestFieldsPlan {
-                        method: method.clone(),
-                        path: path.clone(),
-                        header_writes: emitter.construction.invocations.clone(),
-                    },
                 })
             }
             (
@@ -931,7 +1016,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 EmitSink::Sqs {
                     client: expected,
                     queue,
-                    fifo_group,
+                    ..
                 },
                 Model::ClientSqs(client),
             ) => EmitterSinkPlan::Sqs(SqsSinkPlan {
@@ -944,7 +1029,6 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 )?,
                 queue: queue.clone(),
                 mode: decide_sqs_publishing_mode(sink, mode)?,
-                ordering_group: fifo_group.as_ref().map(EmitterOrderingGroup::decide),
             }),
             (EmitSink::Sentry { client: expected }, Model::ClientSentry(client)) => {
                 Self::require_request_ack(sink, mode)?;
@@ -979,9 +1063,21 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                         &client.config,
                     )?,
                     signal: otel_signal(signal),
-                    values: values.clone(),
-                    attributes: attributes.clone(),
-                    resource: resource.clone(),
+                    mapping: MappedValuesPlan::decide(
+                        &emitter.name,
+                        "OTEL",
+                        "otel",
+                        &values.iter().chain(attributes).cloned().collect::<Vec<_>>(),
+                    )?,
+                    values: values
+                        .iter()
+                        .map(|mapping| mapping.column.clone())
+                        .collect(),
+                    attributes: attributes
+                        .iter()
+                        .map(|mapping| mapping.column.clone())
+                        .collect(),
+                    resource: otel_resource_attributes(emitter, resource)?,
                     scope: scope.as_ref().map(otel_scope),
                 })
             }
@@ -1003,7 +1099,12 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                         &client.config,
                     )?,
                     table: table.clone(),
-                    values: values.clone(),
+                    mapping: MappedValuesPlan::decide(
+                        &emitter.name,
+                        "ClickHouse",
+                        "clickhouse",
+                        values,
+                    )?,
                 })
             }
             (
@@ -1026,7 +1127,12 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     )?,
                     pool: client.pool,
                     table: table.clone(),
-                    values: values.clone(),
+                    mapping: MappedValuesPlan::decide(
+                        &emitter.name,
+                        "Postgres",
+                        "postgres",
+                        values,
+                    )?,
                     conflict_action: postgres_conflict_action(conflict_action),
                 })
             }
@@ -1050,7 +1156,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     )?,
                     pool: client.pool,
                     table: table.clone(),
-                    values: values.clone(),
+                    mapping: MappedValuesPlan::decide(&emitter.name, "MySQL", "mysql", values)?,
                     conflict_action: mysql_conflict_action(conflict_action),
                 })
             }
@@ -1074,7 +1180,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     )?,
                     pool: client.pool,
                     collection: collection.clone(),
-                    values: values.clone(),
+                    mapping: MappedValuesPlan::decide(&emitter.name, "MongoDB", "mongodb", values)?,
                     conflict_action: mongodb_conflict_action(conflict_action),
                 })
             }
@@ -1100,10 +1206,9 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     storage,
                     catalog,
                     table: table.clone(),
-                    values: values.clone(),
+                    mapping: MappedValuesPlan::decide(&emitter.name, "Iceberg", "iceberg", values)?,
                     location: location.clone(),
-                    commit_each: commit_each.clone(),
-                    max_commit_size: max_commit_size.clone(),
+                    commit: iceberg_commit_policy(emitter, commit_each, max_commit_size)?,
                 }))
             }
             (sink, client) => {
@@ -1386,8 +1491,11 @@ mod tests {
         nervix_nspl::parse_expression(raw).expect("valid semantic expression")
     }
 
-    fn construction(raw: &str) -> RouteConstruction {
-        nervix_nspl::parse_route_construction(raw).expect("valid route construction")
+    fn value_mapping(column: &str, raw: &str) -> ClickHouseValueMapping {
+        ClickHouseValueMapping {
+            column: column.to_string(),
+            expression: expression(raw),
+        }
     }
 
     fn named<T>(value: &str) -> T
@@ -1488,7 +1596,7 @@ mod tests {
             backend,
             client: named("upstream"),
             table: named("orders"),
-            values: Vec::new(),
+            values: vec![value_mapping("id", "input.id")],
             location: "s3://warehouse/orders".to_string(),
             catalog: IcebergCatalog::Rest {
                 client: named("catalog"),
@@ -1732,7 +1840,7 @@ mod tests {
                     sink: EmitSink::Otel {
                         client: client(),
                         signal: nervix_models::OtelSignal::Logs,
-                        values: Vec::new(),
+                        values: vec![value_mapping("id", "input.id")],
                         attributes: Vec::new(),
                         resource: Vec::new(),
                         scope: None,
@@ -1749,7 +1857,7 @@ mod tests {
                     sink: EmitSink::ClickHouse {
                         client: client(),
                         table: named("orders"),
-                        values: Vec::new(),
+                        values: vec![value_mapping("id", "input.id")],
                     },
                     mode: request_ack(),
                     client: Model::ClientClickHouse(CreateClientClickHouse {
@@ -1763,7 +1871,7 @@ mod tests {
                     sink: EmitSink::Postgres {
                         client: client(),
                         table: named("orders"),
-                        values: Vec::new(),
+                        values: vec![value_mapping("id", "input.id")],
                         conflict_action: nervix_models::PostgresConflictAction::None,
                     },
                     mode: request_ack(),
@@ -1779,7 +1887,7 @@ mod tests {
                     sink: EmitSink::MySql {
                         client: client(),
                         table: named("orders"),
-                        values: Vec::new(),
+                        values: vec![value_mapping("id", "input.id")],
                         conflict_action: nervix_models::MySqlConflictAction::None,
                     },
                     mode: request_ack(),
@@ -1795,7 +1903,7 @@ mod tests {
                     sink: EmitSink::MongoDb {
                         client: client(),
                         collection: named("orders"),
-                        values: Vec::new(),
+                        values: vec![value_mapping("id", "input.id")],
                         conflict_action: nervix_models::MongoDbConflictAction::None,
                     },
                     mode: request_ack(),
@@ -1868,7 +1976,6 @@ mod tests {
             .expect("a sink with a matching client must be planned");
 
         assert_eq!(plan.sink.label(), kind.label());
-        assert_eq!(plan.sink.ordering_group(), None);
         assert_eq!(
             plan.retry_policy,
             ParsedRetryPolicy {
@@ -1879,36 +1986,104 @@ mod tests {
     }
 
     #[test]
-    fn carries_the_sqs_fifo_group_as_the_ordering_group_of_the_sink() {
-        let case = SinkKind::Sqs.case();
-        for (declared, planned) in [
-            (SqsFifoGroup::FromBranch, EmitterOrderingGroup::FromBranch),
-            (
-                SqsFifoGroup::Expression(expression("input.tenant")),
-                EmitterOrderingGroup::Expression(expression("input.tenant")),
-            ),
+    fn every_row_sink_carries_its_lowered_mapping_into_the_start_plan() {
+        for kind in [
+            SinkKind::ClickHouse,
+            SinkKind::Postgres,
+            SinkKind::MySql,
+            SinkKind::MongoDb,
+            SinkKind::IcebergS3,
         ] {
-            let mut emitter = case.emitter();
-            let EmitSink::Sqs {
-                queue, fifo_group, ..
-            } = emitter.sink.as_mut()
-            else {
-                panic!("the SQS case must declare an SQS sink");
+            let plan = kind
+                .case()
+                .decide()
+                .expect("the row sink should be planned");
+            let mapping = match &plan.sink {
+                EmitterSinkPlan::ClickHouse(sink) => &sink.mapping,
+                EmitterSinkPlan::Postgres(sink) => &sink.mapping,
+                EmitterSinkPlan::MySql(sink) => &sink.mapping,
+                EmitterSinkPlan::MongoDb(sink) => &sink.mapping,
+                EmitterSinkPlan::Iceberg(sink) => &sink.mapping,
+                _ => panic!("the case must be a row sink"),
             };
-            *queue = "orders.fifo".to_string();
-            *fifo_group = Some(declared);
-
-            let plan = EmitterStartPlan::decide(
-                &emitter,
-                EmitterClientModels {
-                    client: Some(&case.client),
-                    catalog_client: None,
-                },
-            )
-            .expect("an SQS FIFO sink must be planned");
-
-            assert_eq!(plan.sink.ordering_group(), Some(&planned));
+            assert_eq!(mapping.columns, ["id"], "{}", kind.label());
+            assert_eq!(mapping.program.inner.set.len(), 1, "{}", kind.label());
+            assert_eq!(
+                mapping.program.inner.set[0].0.field,
+                "c0",
+                "{}",
+                kind.label()
+            );
         }
+    }
+
+    #[test]
+    fn otel_plan_combines_values_and_attributes_in_declared_order() {
+        let mut case = SinkKind::Otel.case();
+        let EmitSink::Otel {
+            attributes,
+            resource,
+            ..
+        } = &mut case.sink
+        else {
+            panic!("the case must be OTEL");
+        };
+        attributes.push(value_mapping("customer", "input.customer"));
+        resource.push(value_mapping("service.name", "'orders'"));
+        let plan = case.decide().expect("OTEL mappings should be planned");
+        let EmitterSinkPlan::Otel(sink) = plan.sink else {
+            panic!("the plan must be OTEL");
+        };
+        assert_eq!(sink.mapping.columns, ["id", "customer"]);
+        assert_eq!(sink.values, ["id"]);
+        assert_eq!(sink.attributes, ["customer"]);
+        assert_eq!(
+            sink.resource,
+            [OtelResourceAttribute {
+                key: "service.name".to_string(),
+                value: OtelLiteral::String("orders".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn otel_resource_requires_a_literal_during_planning() {
+        let mut case = SinkKind::Otel.case();
+        let EmitSink::Otel { resource, .. } = &mut case.sink else {
+            panic!("the case must be OTEL");
+        };
+        resource.push(value_mapping("service.name", "input.customer"));
+        let error = case
+            .decide()
+            .expect_err("resource attributes must be fixed values");
+        assert_eq!(
+            *error.current_context(),
+            EmitterStartPlanError::InvalidOtelResource {
+                emitter: named("orders_out"),
+                attribute: "service.name".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn iceberg_commit_limits_are_parsed_during_planning() {
+        let mut case = SinkKind::IcebergS3.case();
+        let EmitSink::Iceberg {
+            max_commit_size, ..
+        } = &mut case.sink
+        else {
+            panic!("the case must be Iceberg");
+        };
+        *max_commit_size = "invalid".to_string();
+        let error = case.decide().expect_err("the commit size must be valid");
+        assert_eq!(
+            *error.current_context(),
+            EmitterStartPlanError::InvalidIcebergCommit {
+                emitter: named("orders_out"),
+                setting: IcebergCommitSetting::MaxCommitSize,
+                value: "invalid".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -1956,13 +2131,9 @@ mod tests {
     }
 
     #[test]
-    fn plans_an_http_sink_with_its_origin_and_request_fields_in_evaluation_order() {
+    fn plans_an_http_sink_with_its_client_origin() {
         let case = SinkKind::Http.case();
-        let mut emitter = case.emitter();
-        emitter.body = nervix_models::EmitterBody::WithoutBody;
-        emitter.construction = construction(
-            "INVOKE write_header('X-Tenant', input.tenant), write_header('X-Order', input.id)",
-        );
+        let emitter = case.emitter();
 
         let plan = EmitterStartPlan::decide(
             &emitter,
@@ -1982,12 +2153,6 @@ mod tests {
             HttpOrigin::parse("https://orders.example.com:8443")
                 .expect("the fixture endpoint is an origin")
         );
-        assert_eq!(sink.request.method, expression("input.method"));
-        assert_eq!(
-            sink.request.path,
-            expression("concat('/orders/', input.id)")
-        );
-        assert_eq!(sink.request.header_writes, emitter.construction.invocations);
         assert_eq!(sink.client.name, named::<ClientName>("upstream"));
     }
 
@@ -2098,8 +2263,8 @@ mod tests {
         assert_eq!(sink.storage, declared_client("upstream"));
         assert_eq!(sink.catalog, declared_client("catalog"));
         assert_eq!(sink.location, "s3://warehouse/orders");
-        assert_eq!(sink.commit_each, "1s");
-        assert_eq!(sink.max_commit_size, "1MiB");
+        assert_eq!(sink.commit.interval, Duration::from_secs(1));
+        assert_eq!(sink.commit.max_size, 1_048_576);
     }
 
     #[test]

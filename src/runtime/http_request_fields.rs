@@ -16,8 +16,8 @@
 
 use error_stack::ResultExt as _;
 use nervix_models::{
-    AssignmentTarget, HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue,
-    HttpMethod, HttpOrigin, HttpRequestFieldError, HttpTarget,
+    HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin,
+    HttpRequestFieldError, HttpTarget,
 };
 use nervix_vm::SideError as VmSideError;
 
@@ -42,8 +42,6 @@ const FIRST_HEADER_POSITION: usize = 2;
 /// cannot be read or reported, which fails the whole batch rather than one record.
 #[derive(Debug, Error)]
 pub(in crate::runtime) enum HttpRequestFieldsError {
-    #[error("HTTP emitter '{emitter}' request fields cannot be lowered")]
-    Lower { emitter: EmitterName },
     #[error("HTTP emitter '{emitter}' request fields cannot record where they fail")]
     Sites { emitter: EmitterName },
     #[error("HTTP emitter '{emitter}' request fields cannot bind the materialized state they read")]
@@ -357,42 +355,11 @@ impl CompiledHttpRequestFields {
     pub(in crate::runtime) fn compile(
         emitter: &EmitterName,
         sink: &HttpSinkPlan,
+        request: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
         schemas: HttpRequestSchemas,
         context: RuntimeVmCompileContext<'_>,
     ) -> error_stack::Result<Self, HttpRequestFieldsError> {
-        let construction = RouteConstruction {
-            assignments: vec![
-                Assignment {
-                    target: AssignmentTarget::bare(
-                        FieldName::parse(METHOD_FIELD)
-                            .assured("the method field name is a valid literal"),
-                    ),
-                    value: sink.request.method.clone(),
-                },
-                Assignment {
-                    target: AssignmentTarget::bare(
-                        FieldName::parse(PATH_FIELD)
-                            .assured("the path field name is a valid literal"),
-                    ),
-                    value: sink.request.path.clone(),
-                },
-            ],
-            invocations: sink.request.header_writes.clone(),
-            ..RouteConstruction::default()
-        };
-        // Bare fields read the working message, which is the finalized codec record when the
-        // emitter sends a body and the source record when it sends none.
-        let parsed = lower_route_construction(
-            &construction,
-            SemanticScopePolicy::read_write("message", HTTP_REQUEST_NAMESPACE),
-        )
-        .map_err(|reason| {
-            Report::new(HttpRequestFieldsError::Lower {
-                emitter: emitter.clone(),
-            })
-            .attach_printable(reason.to_string())
-        })?;
-        let RequestFieldSites { sites, positions } = RequestFieldSites::of(&parsed)
+        let RequestFieldSites { sites, positions } = RequestFieldSites::of(request)
             .change_context(HttpRequestFieldsError::Sites {
                 emitter: emitter.clone(),
             })?;
@@ -436,7 +403,7 @@ impl CompiledHttpRequestFields {
         ]);
         let (materialized_bindings, materialized_interest) =
             referenced_materialized_stream_bindings(
-                &parsed,
+                request,
                 &local_namespaces,
                 context.available_materialized_streams,
                 context.current_branching,
@@ -446,7 +413,7 @@ impl CompiledHttpRequestFields {
             })?;
         bindings.extend(materialized_bindings);
         let (parsed, pending_lookup_calls) =
-            rewrite_lookup_hash_map_program(&parsed, context.available_lookups).change_context(
+            rewrite_lookup_hash_map_program(request, context.available_lookups).change_context(
                 HttpRequestFieldsError::Lookups {
                     emitter: emitter.clone(),
                 },
@@ -999,32 +966,48 @@ mod tests {
         (batch, completions)
     }
 
-    fn sink(method: &str, path: &str, header_writes: &str) -> HttpSinkPlan {
-        HttpSinkPlan {
-            client: EmitterClientSpec {
-                name: named("api"),
-                config: ResolvedClientConfig::default(),
-            },
-            origin: HttpOrigin::parse("https://api.example.com")
-                .expect("the test origin has an HTTPS scheme and a host"),
-            request: HttpSinkRequestFields::fields(method, path, header_writes),
-        }
+    struct HttpSinkTestPlan {
+        sink: HttpSinkPlan,
+        request: nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     }
 
-    struct HttpSinkRequestFields;
+    fn sink(method: &str, path: &str, header_writes: &str) -> HttpSinkTestPlan {
+        use nervix_models::AssignmentTarget;
 
-    impl HttpSinkRequestFields {
-        fn fields(method: &str, path: &str, header_writes: &str) -> HttpRequestFieldsPlan {
-            HttpRequestFieldsPlan {
-                method: expression(method),
-                path: expression(path),
-                header_writes: construction(header_writes).invocations,
-            }
+        let construction = RouteConstruction {
+            assignments: vec![
+                Assignment {
+                    target: AssignmentTarget::bare(named("method")),
+                    value: expression(method),
+                },
+                Assignment {
+                    target: AssignmentTarget::bare(named("path")),
+                    value: expression(path),
+                },
+            ],
+            invocations: construction(header_writes).invocations,
+            ..RouteConstruction::default()
+        };
+        let request = lower_route_construction(
+            &construction,
+            SemanticScopePolicy::read_write("message", HTTP_REQUEST_NAMESPACE),
+        )
+        .expect("the test request fields must lower");
+        HttpSinkTestPlan {
+            sink: HttpSinkPlan {
+                client: EmitterClientSpec {
+                    name: named("api"),
+                    config: ResolvedClientConfig::default(),
+                },
+                origin: HttpOrigin::parse("https://api.example.com")
+                    .expect("the test origin has an HTTPS scheme and a host"),
+            },
+            request,
         }
     }
 
     fn compile(
-        sink: &HttpSinkPlan,
+        plan: &HttpSinkTestPlan,
         output: Option<Arc<CompiledSchema>>,
     ) -> CompiledHttpRequestFields {
         let source = source_schema();
@@ -1037,7 +1020,8 @@ mod tests {
         });
         CompiledHttpRequestFields::compile(
             &named("deliver"),
-            sink,
+            &plan.sink,
+            &plan.request,
             HttpRequestSchemas {
                 input: RuntimeVmSchema {
                     schema: source.arrow_schema(),
