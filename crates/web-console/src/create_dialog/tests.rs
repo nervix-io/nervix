@@ -7,9 +7,7 @@
 //! - **Must not know.** Connector execution or cluster placement.
 
 use futures_channel::mpsc::unbounded;
-use leptos::prelude::{
-    GetUntracked as _, Owner, RenderHtml as _, RwSignal, Set as _, Update as _,
-};
+use leptos::prelude::{GetUntracked as _, Owner, RenderHtml as _, RwSignal, Set as _, Update as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     Choice, ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceTarget, ChoiceValue,
@@ -23,10 +21,10 @@ use nervix_models::{
 
 use super::{
     super::ConsoleRequest,
-    ChoiceControl, ChoiceGroup, ChoiceGroupProps, ChoiceLoad, ChoiceRequestContext,
-    CreateDialog, CreateDialogProps, CreateDispatch, CreateDraftError, CreateKind, CreateMenu,
-    CreateMenuProps, CreateProgress, CreateSignals, CreateSubmission, DomainDraft,
-    ResourceDraft, SelectedReference, UserDraft, open_form_controls, request_choices,
+    ChoiceControl, ChoiceGroup, ChoiceGroupProps, ChoiceLoad, ChoiceRequestContext, CreateDialog,
+    CreateDialogProps, CreateDispatch, CreateDraftError, CreateKind, CreateMenu, CreateMenuProps,
+    CreateProgress, CreateSignals, CreateSubmission, DomainDraft, ResourceDraft, SelectedReference,
+    UserDraft, open_form_controls, request_choices,
     schema_draft::{SchemaFieldDraft, SchemaTypeDraft, WireFieldDraft, WireFieldType},
     select_choice, selected_choice,
 };
@@ -1114,9 +1112,7 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
                     .load
                     .set(ChoiceLoad::Ready {
                         choices: vec![Choice {
-                            value: ChoiceValue::PlacementPolicy(
-                                PlacementPolicy::PreferColocation,
-                            ),
+                            value: ChoiceValue::PlacementPolicy(PlacementPolicy::PreferColocation),
                             presentation: ChoicePresentation {
                                 label: "PREFER COLOCATION".to_string(),
                                 detail: None,
@@ -1225,8 +1221,7 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
             ),
         ] {
             signals.structured.update(|drafts| {
-                let wire =
-                    drafts.wire_mut(kind.wire_format().assured("a wire kind has a format"));
+                let wire = drafts.wire_mut(kind.wire_format().assured("a wire kind has a format"));
                 wire.name = "visual_wire".to_string();
                 wire.mode = Some(WireSchemaStrictness::Loose);
                 wire.fields.push(WireFieldDraft {
@@ -1237,9 +1232,7 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
             });
             signals.open(kind, Some(scope.clone()), "global-create-button");
             let wire_markup = render();
-            assert!(
-                wire_markup.contains(&format!("CREATE WIRE {format_name} SCHEMA visual_wire"))
-            );
+            assert!(wire_markup.contains(&format!("CREATE WIRE {format_name} SCHEMA visual_wire")));
             assert!(wire_markup.contains("payload STRING OPTIONAL"));
         }
 
@@ -1301,9 +1294,11 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
         assert!(subscription_markup.contains("Reads as WHERE input.amount = 1"));
         assert!(subscription_markup.contains("I64 OPTIONAL"));
         assert!(!subscription_markup.contains("create-if-not-exists"));
-        assert!(subscription_markup.contains(
-            "TO visual_orders DROPPING BATCH SAMPLE RATE 0.5 WHERE input.amount = 1;"
-        ));
+        assert!(
+            subscription_markup.contains(
+                "TO visual_orders DROPPING BATCH SAMPLE RATE 0.5 WHERE input.amount = 1;"
+            )
+        );
         signals
             .subscription
             .update(|draft| draft.filter = "input.amount =".to_string());

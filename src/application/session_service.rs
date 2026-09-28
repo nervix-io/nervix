@@ -795,6 +795,8 @@ impl ChoicePageBasis {
             ChoiceTarget::WireAvroSchema => 8,
             ChoiceTarget::Resource => 9,
             ChoiceTarget::CompletedResourceVersion => 10,
+            ChoiceTarget::Vhost => 11,
+            ChoiceTarget::SignalingProtocol => 12,
         }]);
         hash_choice_text(&mut hasher, request.search());
         for dependency in request.dependencies() {
@@ -1022,6 +1024,9 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         | ChoiceTarget::CompletedResourceVersion => {
             return Err(ChoiceStatus::MissingContext);
         }
+        ChoiceTarget::Vhost | ChoiceTarget::SignalingProtocol => {
+            return Err(ChoiceStatus::MissingContext);
+        }
     };
     let search = request.search().to_ascii_lowercase();
     choices.retain(|choice| {
@@ -1239,6 +1244,9 @@ impl SessionServiceImpl {
             | ChoiceTarget::WireAvroSchema
             | ChoiceTarget::Resource
             | ChoiceTarget::CompletedResourceVersion => {
+                self.configured_choices_for(&request, session).await
+            }
+            ChoiceTarget::Vhost | ChoiceTarget::SignalingProtocol => {
                 self.configured_choices_for(&request, session).await
             }
         };

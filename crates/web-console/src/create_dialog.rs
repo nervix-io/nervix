@@ -34,26 +34,37 @@ use wasm_bindgen::JsCast as _;
 use super::{ConsoleConnectionState, ConsoleRequest};
 
 mod choice_group;
+mod client_draft;
+mod client_editor;
 mod codec_draft;
 mod codec_editor;
+mod endpoint_draft;
+mod endpoint_editor;
 mod relay_draft;
 mod relay_editor;
 mod resource_binding_draft;
 mod resource_binding_editor;
+mod resource_pin_draft;
 mod schema_draft;
 mod schema_editor;
 mod signaling_draft;
 mod signaling_editor;
 mod subscription_draft;
 mod subscription_editor;
+mod vhost_draft;
+mod vhost_editor;
 #[cfg(test)]
 mod visual_forms_tests;
 
 use choice_group::ChoiceGroup;
 #[cfg(test)]
 use choice_group::{ChoiceGroupProps, select_choice, selected_choice};
+use client_draft::{ClientDraft, ClientDraftError, ClientTransport};
+use client_editor::ClientEditor;
 use codec_draft::{CodecDraft, CodecDraftError, CodecFormatDraft, CodecFormatKind};
 use codec_editor::CodecEditor;
+use endpoint_draft::{EndpointDraft, EndpointDraftError};
+use endpoint_editor::EndpointEditor;
 use relay_draft::{RelayDraft, RelayDraftError};
 use relay_editor::RelayEditor;
 use schema_draft::{SchemaDraftError, StructuredDrafts, WireFormat};
@@ -62,6 +73,8 @@ use signaling_draft::{SignalingDraft, SignalingDraftError, SignalingFormatDraft}
 use signaling_editor::SignalingEditor;
 use subscription_draft::{SubscriptionDraft, SubscriptionDraftError};
 use subscription_editor::SubscriptionEditor;
+use vhost_draft::{VhostDraft, VhostDraftError};
+use vhost_editor::VhostEditor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CreateKind {
@@ -77,6 +90,9 @@ pub(crate) enum CreateKind {
     Subscription,
     Codec,
     SignalingProtocol,
+    Client,
+    Vhost,
+    Endpoint,
 }
 
 impl CreateKind {
@@ -94,6 +110,9 @@ impl CreateKind {
             Self::Subscription => "subscription",
             Self::Codec => "codec",
             Self::SignalingProtocol => "signaling protocol",
+            Self::Client => "client",
+            Self::Vhost => "VHOST",
+            Self::Endpoint => "endpoint",
         }
     }
 
@@ -104,20 +123,7 @@ impl CreateKind {
     /// Whether the created statement takes `IF NOT EXISTS`. A session subscription is not a stored
     /// entity, so its statement has no such modifier.
     fn takes_if_not_exists(self) -> bool {
-        match self {
-            Self::Subscription => false,
-            Self::Domain
-            | Self::User
-            | Self::Resource
-            | Self::Schema
-            | Self::WireJsonSchema
-            | Self::WireCborSchema
-            | Self::WireAvroSchema
-            | Self::Branch
-            | Self::Relay
-            | Self::Codec
-            | Self::SignalingProtocol => true,
-        }
+        self != Self::Subscription
     }
 
     fn wire_format(self) -> Option<WireFormat> {
@@ -133,7 +139,10 @@ impl CreateKind {
             | Self::Relay
             | Self::Subscription
             | Self::Codec
-            | Self::SignalingProtocol => None,
+            | Self::SignalingProtocol
+            | Self::Client
+            | Self::Vhost
+            | Self::Endpoint => None,
         }
     }
 }
@@ -154,6 +163,13 @@ pub(crate) enum ChoiceControl {
     CodecVersion,
     SignalingResource,
     SignalingVersion,
+    ClientResource,
+    ClientVersion,
+    ClientSignaling,
+    VhostResource,
+    VhostVersion,
+    EndpointVhost,
+    EndpointSignaling,
 }
 
 impl ChoiceControl {
@@ -169,6 +185,11 @@ impl ChoiceControl {
             | Self::CodecResource
             | Self::CodecVersion => CreateKind::Codec,
             Self::SignalingResource | Self::SignalingVersion => CreateKind::SignalingProtocol,
+            Self::ClientResource | Self::ClientVersion | Self::ClientSignaling => {
+                CreateKind::Client
+            }
+            Self::VhostResource | Self::VhostVersion => CreateKind::Vhost,
+            Self::EndpointVhost | Self::EndpointSignaling => CreateKind::Endpoint,
         }
     }
 }
@@ -227,6 +248,13 @@ struct ChoiceControls {
     codec_version: ChoiceControlSignals,
     signaling_resource: ChoiceControlSignals,
     signaling_version: ChoiceControlSignals,
+    client_resource: ChoiceControlSignals,
+    client_version: ChoiceControlSignals,
+    client_signaling: ChoiceControlSignals,
+    vhost_resource: ChoiceControlSignals,
+    vhost_version: ChoiceControlSignals,
+    endpoint_vhost: ChoiceControlSignals,
+    endpoint_signaling: ChoiceControlSignals,
 }
 
 impl ChoiceControls {
@@ -245,6 +273,13 @@ impl ChoiceControls {
             codec_version: ChoiceControlSignals::new(),
             signaling_resource: ChoiceControlSignals::new(),
             signaling_version: ChoiceControlSignals::new(),
+            client_resource: ChoiceControlSignals::new(),
+            client_version: ChoiceControlSignals::new(),
+            client_signaling: ChoiceControlSignals::new(),
+            vhost_resource: ChoiceControlSignals::new(),
+            vhost_version: ChoiceControlSignals::new(),
+            endpoint_vhost: ChoiceControlSignals::new(),
+            endpoint_signaling: ChoiceControlSignals::new(),
         }
     }
 
@@ -263,6 +298,13 @@ impl ChoiceControls {
             ChoiceControl::CodecVersion => self.codec_version,
             ChoiceControl::SignalingResource => self.signaling_resource,
             ChoiceControl::SignalingVersion => self.signaling_version,
+            ChoiceControl::ClientResource => self.client_resource,
+            ChoiceControl::ClientVersion => self.client_version,
+            ChoiceControl::ClientSignaling => self.client_signaling,
+            ChoiceControl::VhostResource => self.vhost_resource,
+            ChoiceControl::VhostVersion => self.vhost_version,
+            ChoiceControl::EndpointVhost => self.endpoint_vhost,
+            ChoiceControl::EndpointSignaling => self.endpoint_signaling,
         }
     }
 }
@@ -542,6 +584,12 @@ enum CreateDraftError {
     Codec(#[from] CodecDraftError),
     #[error("{0}")]
     Signaling(#[from] SignalingDraftError),
+    #[error("{0}")]
+    Client(#[from] ClientDraftError),
+    #[error("{0}")]
+    Vhost(#[from] VhostDraftError),
+    #[error("{0}")]
+    Endpoint(#[from] EndpointDraftError),
     #[error("Canonical NSPL could not be rendered")]
     CanonicalNspl,
 }
@@ -621,13 +669,36 @@ impl CreateSubmission {
         if_not_exists: bool,
         scope: DomainName,
     ) -> error_stack::Result<Self, CreateDraftError> {
+        let presentation = model.clone();
+        Self::domain_requested_model_with_presentation(
+            kind,
+            model,
+            presentation,
+            if_not_exists,
+            scope,
+        )
+    }
+
+    fn domain_requested_model_with_presentation(
+        kind: CreateKind,
+        model: Model<RequestedResourceVersion>,
+        presentation_model: Model<RequestedResourceVersion>,
+        if_not_exists: bool,
+        scope: DomainName,
+    ) -> error_stack::Result<Self, CreateDraftError> {
         let statement = Statement::Create(CreateStatement::new(Box::new(model), if_not_exists));
         let query = statement
             .to_canonical_nspl()
             .change_context(CreateDraftError::CanonicalNspl)?;
+        let presentation = Statement::Create(CreateStatement::new(
+            Box::new(presentation_model),
+            if_not_exists,
+        ))
+        .to_canonical_nspl()
+        .change_context(CreateDraftError::CanonicalNspl)?;
         Ok(Self {
             kind,
-            presentation: query.clone(),
+            presentation,
             dispatch: CreateDispatch::Command(CommandDispatch {
                 query,
                 domain: Some(scope),
@@ -668,6 +739,9 @@ pub(crate) struct CreateSignals {
     subscription: RwSignal<SubscriptionDraft>,
     codec: RwSignal<CodecDraft>,
     signaling: RwSignal<SignalingDraft>,
+    client: RwSignal<ClientDraft>,
+    vhost: RwSignal<VhostDraft>,
+    endpoint: RwSignal<EndpointDraft>,
     /// The number the next generated subscription name carries. Numbers only increase, so no two
     /// generated names of one console coincide.
     next_subscription_name: RwSignal<u64>,
@@ -697,6 +771,9 @@ impl CreateSignals {
             )),
             codec: RwSignal::new(CodecDraft::default()),
             signaling: RwSignal::new(SignalingDraft::default()),
+            client: RwSignal::new(ClientDraft::default()),
+            vhost: RwSignal::new(VhostDraft::default()),
+            endpoint: RwSignal::new(EndpointDraft::default()),
             next_subscription_name: RwSignal::new(2),
             choices: ChoiceControls::new(),
         }
@@ -803,6 +880,9 @@ impl CreateSignals {
                 CreateKind::SignalingProtocol => {
                     self.signaling.update(SignalingDraft::invalidate_references)
                 }
+                CreateKind::Client => self.client.update(ClientDraft::invalidate_references),
+                CreateKind::Vhost => self.vhost.update(VhostDraft::invalidate_references),
+                CreateKind::Endpoint => self.endpoint.update(EndpointDraft::invalidate_references),
                 CreateKind::Domain
                 | CreateKind::User
                 | CreateKind::Resource
@@ -981,12 +1061,17 @@ impl CreateSignals {
                 };
                 self.domain_question(target, "Select a domain before choosing a wire schema")
             }
-            ChoiceControl::CodecResource | ChoiceControl::SignalingResource => self
-                .domain_question(
-                    ChoiceTarget::Resource,
-                    "Select a domain before choosing a resource",
-                ),
-            ChoiceControl::CodecVersion | ChoiceControl::SignalingVersion => {
+            ChoiceControl::CodecResource
+            | ChoiceControl::SignalingResource
+            | ChoiceControl::ClientResource
+            | ChoiceControl::VhostResource => self.domain_question(
+                ChoiceTarget::Resource,
+                "Select a domain before choosing a resource",
+            ),
+            ChoiceControl::CodecVersion
+            | ChoiceControl::SignalingVersion
+            | ChoiceControl::ClientVersion
+            | ChoiceControl::VhostVersion => {
                 let Some(domain) = self.captured_domain.get_untracked() else {
                     return Err("Select a domain before choosing a resource version");
                 };
@@ -1001,6 +1086,12 @@ impl CreateSignals {
                         .get_untracked()
                         .binding()
                         .and_then(|binding| binding.current_resource().cloned()),
+                    ChoiceControl::ClientVersion => {
+                        self.client.get_untracked().current_resource().cloned()
+                    }
+                    ChoiceControl::VhostVersion => {
+                        self.vhost.get_untracked().current_resource().cloned()
+                    }
                     _ => None,
                 };
                 let Some(resource) = resource else {
@@ -1022,6 +1113,15 @@ impl CreateSignals {
             ChoiceControl::RelayBranch => self.domain_question(
                 ChoiceTarget::Branch,
                 "Select a domain before choosing a branch",
+            ),
+            ChoiceControl::ClientSignaling | ChoiceControl::EndpointSignaling => self
+                .domain_question(
+                    ChoiceTarget::SignalingProtocol,
+                    "Select a domain before choosing a signaling protocol",
+                ),
+            ChoiceControl::EndpointVhost => self.domain_question(
+                ChoiceTarget::Vhost,
+                "Select a domain before choosing a VHOST",
             ),
             ChoiceControl::SubscriptionRelay => self.domain_question(
                 ChoiceTarget::Relay,
@@ -1148,6 +1248,43 @@ impl CreateSignals {
                     scope,
                 )
             }
+            CreateKind::Client => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.client.get_untracked();
+                let completed = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_requested_model_with_presentation(
+                    kind,
+                    completed.actual,
+                    completed.presentation,
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
+            CreateKind::Vhost => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.vhost.get_untracked();
+                let vhost = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_requested_model(
+                    kind,
+                    Model::Vhost(vhost),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
+            CreateKind::Endpoint => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.endpoint.get_untracked();
+                let endpoint = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_model(
+                    kind,
+                    Model::Endpoint(endpoint),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
             CreateKind::Subscription => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
@@ -1234,6 +1371,15 @@ pub(crate) fn CreateMenu(
                 </button>
                 <button type="button" role="menuitem" data-create-kind="signaling-protocol" on:click=move |_| choose(CreateKind::SignalingProtocol)>
                     <span>"Signaling protocol"</span><em>"Ordered connection handshake"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="client" on:click=move |_| choose(CreateKind::Client)>
+                    <span>"Client"</span><em>"External transport configuration"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="vhost" on:click=move |_| choose(CreateKind::Vhost)>
+                    <span>"VHOST"</span><em>"Hostnames and optional TLS"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="endpoint" on:click=move |_| choose(CreateKind::Endpoint)>
+                    <span>"Endpoint"</span><em>"HTTP or WebSocket path"</em>
                 </button>
             </div>
         </div>
@@ -1352,6 +1498,34 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
             } else {
                 Vec::new()
             }
+        }
+        CreateKind::Client => {
+            let draft = signals.client.get_untracked();
+            let mut controls = Vec::new();
+            if draft.mount_enabled {
+                controls.push(ChoiceControl::ClientResource);
+                controls.push(ChoiceControl::ClientVersion);
+            }
+            if draft.transport.is_some_and(ClientTransport::websockets) {
+                controls.push(ChoiceControl::ClientSignaling);
+            }
+            controls
+        }
+        CreateKind::Vhost => {
+            if signals.vhost.get_untracked().tls_enabled {
+                vec![ChoiceControl::VhostResource, ChoiceControl::VhostVersion]
+            } else {
+                Vec::new()
+            }
+        }
+        CreateKind::Endpoint => {
+            let mut controls = vec![ChoiceControl::EndpointVhost];
+            if signals.endpoint.get_untracked().endpoint_type
+                == Some(nervix_models::EndpointType::Websockets)
+            {
+                controls.push(ChoiceControl::EndpointSignaling);
+            }
+            controls
         }
         CreateKind::User
         | CreateKind::Resource
@@ -1585,6 +1759,15 @@ pub(crate) fn CreateDialog(
                         <Show when=move || signals.open.get() == Some(CreateKind::SignalingProtocol) fallback=|| ()>
                             <SignalingEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
                         </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Client) fallback=|| ()>
+                            <ClientEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Vhost) fallback=|| ()>
+                            <VhostEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Endpoint) fallback=|| ()>
+                            <EndpointEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
 
                         <Show when=move || signals.open.get().is_some_and(CreateKind::takes_if_not_exists) fallback=|| ()>
                             <label class="create-check">
@@ -1603,6 +1786,9 @@ pub(crate) fn CreateDialog(
                                         Some(CreateKind::Relay) => signals.relay.get().if_not_exists,
                                         Some(CreateKind::Codec) => signals.codec.get().if_not_exists,
                                         Some(CreateKind::SignalingProtocol) => signals.signaling.get().if_not_exists,
+                                        Some(CreateKind::Client) => signals.client.get().if_not_exists,
+                                        Some(CreateKind::Vhost) => signals.vhost.get().if_not_exists,
+                                        Some(CreateKind::Endpoint) => signals.endpoint.get().if_not_exists,
                                         Some(CreateKind::Subscription) | None => false,
                                     }
                                     disabled=move || signals.progress.get().is_pending()
@@ -1620,6 +1806,9 @@ pub(crate) fn CreateDialog(
                                             Some(CreateKind::Relay) => signals.relay.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Codec) => signals.codec.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::SignalingProtocol) => signals.signaling.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Client) => signals.client.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Vhost) => signals.vhost.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Endpoint) => signals.endpoint.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Subscription) | None => {}
                                         }
                                         signals.edit();

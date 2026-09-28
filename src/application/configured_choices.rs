@@ -31,6 +31,8 @@ pub(in crate::application) enum ConfiguredQuestion {
     Schemas,
     Branches,
     Relays,
+    Vhosts,
+    SignalingProtocols,
     WireJsonSchemas,
     WireCborSchemas,
     WireAvroSchemas,
@@ -55,6 +57,8 @@ impl<'a> ConfiguredQuery<'a> {
             ChoiceTarget::Schema => ConfiguredQuestion::Schemas,
             ChoiceTarget::Branch => ConfiguredQuestion::Branches,
             ChoiceTarget::Relay => ConfiguredQuestion::Relays,
+            ChoiceTarget::Vhost => ConfiguredQuestion::Vhosts,
+            ChoiceTarget::SignalingProtocol => ConfiguredQuestion::SignalingProtocols,
             ChoiceTarget::WireJsonSchema => ConfiguredQuestion::WireJsonSchemas,
             ChoiceTarget::WireCborSchema => ConfiguredQuestion::WireCborSchemas,
             ChoiceTarget::WireAvroSchema => ConfiguredQuestion::WireAvroSchemas,
@@ -170,6 +174,8 @@ impl ConfiguredChoices {
             ConfiguredQuestion::Schemas
             | ConfiguredQuestion::Branches
             | ConfiguredQuestion::Relays
+            | ConfiguredQuestion::Vhosts
+            | ConfiguredQuestion::SignalingProtocols
             | ConfiguredQuestion::WireJsonSchemas
             | ConfiguredQuestion::WireCborSchemas
             | ConfiguredQuestion::WireAvroSchemas => self.models(question, &search),
@@ -197,6 +203,21 @@ impl ConfiguredChoices {
                     ModelCandidate::branch(branch)?
                 }
                 (ConfiguredQuestion::Relays, Model::Relay(relay)) => ModelCandidate::relay(relay)?,
+                (ConfiguredQuestion::Vhosts, Model::Vhost(vhost)) => ModelCandidate::new(
+                    NodeRef::new(ModelKind::Vhost, &vhost.name),
+                    format!("{} hostnames", vhost.hostnames.len()),
+                    "VHOST",
+                    Model::<RequestedResourceVersion>::Vhost(vhost.clone()).to_canonical_nspl(),
+                )?,
+                (ConfiguredQuestion::SignalingProtocols, Model::SignalingProtocol(protocol)) => {
+                    ModelCandidate::new(
+                        NodeRef::new(ModelKind::SignalingProtocol, &protocol.name),
+                        "WebSocket handshake".to_string(),
+                        "Signaling protocol",
+                        Model::<RequestedResourceVersion>::SignalingProtocol(protocol.clone())
+                            .to_canonical_nspl(),
+                    )?
+                }
                 (ConfiguredQuestion::WireJsonSchemas, Model::WireJsonSchema(schema)) => {
                     ModelCandidate::new(
                         NodeRef::new(ModelKind::WireJsonSchema, &schema.name),
@@ -482,12 +503,13 @@ mod tests {
     };
     use nervix_models::{
         AvroType, BranchEviction, BranchName, CreateBranch, CreateRelay, CreateSchema,
-        CreateWireSchema, DomainName, FieldName, JsonType, MaterializedRelayState, Model,
-        ModelKind, ModelName, NodeRef, ParseAsType, RelayBranching, RelayName,
-        RequestedResourceVersion, ResourceName, ResourceUpload, ResourceUploadIdentity,
+        CreateSignalingProtocol, CreateVhost, CreateWireSchema, DomainName, FieldName, JsonType,
+        MaterializedRelayState, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayBranching,
+        RelayName, RequestedResourceVersion, ResourceName, ResourceUpload, ResourceUploadIdentity,
         ResourceUploadKey, ResourceUploadState, ResourceUploads, ResourceVersionCounter,
-        ResourceVersionStatus, SchemaField, SchemaName, UserName, WireSchemaField, WireSchemaName,
-        WireSchemaStrictness,
+        ResourceVersionStatus, SchemaField, SchemaName, SignalingProtocolName,
+        SignalingProtocolOnConnect, SignalingStep, SignalingWireFormat, UserName, VhostName,
+        WireSchemaField, WireSchemaName, WireSchemaStrictness,
     };
     use sorted_vec::SortedVec;
 
@@ -692,6 +714,78 @@ mod tests {
             schemas.choices[0].presentation.detail.as_deref(),
             Some("3 fields")
         );
+    }
+
+    #[test]
+    fn vhost_and_signaling_choices_use_typed_domain_references() {
+        let domain = domain();
+        let configured = ConfiguredChoices::new(
+            domain.clone(),
+            vec![
+                Model::Vhost(CreateVhost::<RequestedResourceVersion> {
+                    name: VhostName::parse("edge").assured("valid VHOST"),
+                    hostnames: vec!["api.example.com".to_string()],
+                    tls: None,
+                }),
+                Model::SignalingProtocol(CreateSignalingProtocol::<RequestedResourceVersion> {
+                    name: SignalingProtocolName::parse("handshake").assured("valid protocol"),
+                    format: SignalingWireFormat::Json,
+                    on_connect: SignalingProtocolOnConnect {
+                        accept_data: false,
+                        steps: vec![SignalingStep::Send(vec!["{hello: true}".to_string()])],
+                        fail_matchers: Vec::new(),
+                        timeout: "5s".to_string(),
+                    },
+                }),
+            ],
+            ResourceVersionStatus::default(),
+            Vec::new(),
+        );
+        for (target, question, kind, name) in [
+            (
+                ChoiceTarget::Vhost,
+                ConfiguredQuestion::Vhosts,
+                ModelKind::Vhost,
+                "edge",
+            ),
+            (
+                ChoiceTarget::SignalingProtocol,
+                ConfiguredQuestion::SignalingProtocols,
+                ModelKind::SignalingProtocol,
+                "handshake",
+            ),
+        ] {
+            let request = ChoiceLookupRequest::new(
+                target,
+                vec![ChoiceSelection {
+                    value: ChoiceValue::Domain(domain.clone()),
+                }],
+                String::new(),
+            );
+            assert_eq!(
+                ConfiguredQuery::of(&request)
+                    .assured("domain dependency is typed")
+                    .question,
+                question
+            );
+            let choices = configured
+                .resolve(&question, "")
+                .assured("models resolve")
+                .choices;
+            assert_eq!(choices.len(), 1);
+            assert_eq!(
+                choices[0].value,
+                ChoiceValue::Model(NodeRef::new(
+                    kind,
+                    ModelName::parse(name).assured("valid model name"),
+                ))
+            );
+            assert_eq!(choices[0].presentation.label, name);
+            assert_eq!(
+                ConfiguredQuery::of(&ChoiceLookupRequest::new(target, Vec::new(), String::new())),
+                None
+            );
+        }
     }
 
     #[test]
