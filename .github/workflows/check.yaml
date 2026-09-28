@@ -455,6 +455,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coverage-scenarios
+          overwrite: true
           path: |
             lcov-workspace.info
             lcov.info
@@ -479,6 +480,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: runner-load-${{ github.job }}
+          overwrite: true
           path: |
             ${{ runner.temp }}/runner-load.csv
             ${{ runner.temp }}/runner-load.md
@@ -501,6 +503,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          overwrite: true
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
@@ -509,6 +512,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: scenario-logs
+          overwrite: true
           path: tests/logs
           if-no-files-found: ignore
 

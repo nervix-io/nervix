@@ -841,6 +841,11 @@ wedged run. A job the limit cancels is killed wherever its scenarios are: the lo
 mid-scenario, with no summary and no record of what each scenario was doing. The limit and the
 harness's copy of it change together.
 
+A same-commit rerun of the scenarios job replaces that job's four report artifacts: scenario logs,
+runner load, kache report, and scenario coverage. This lets a rerun publish its own diagnostics
+under GitHub Actions' immutable artifact names while the first run's merged Codecov upload stays
+single.
+
 ## How Failure Reaches CI Output
 
 The job log carries the scenario binary's standard output and standard error, and the `scenario-logs`
