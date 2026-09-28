@@ -268,6 +268,12 @@ pub(crate) enum RegistryError {
         identifier: String,
         reason: String,
     },
+    #[error("codec '{codec}' in domain '{domain}' has an invalid {direction} jaq transformation")]
+    InvalidCodecJaq {
+        domain: DomainName,
+        codec: ModelName,
+        direction: &'static str,
+    },
     #[error(
         "{} '{node}' route '{route}' ON MESSAGE ERROR relay '{error_relay}' uses branch \
          {actual_branch}, expected {expected_branch} in domain '{domain}'",

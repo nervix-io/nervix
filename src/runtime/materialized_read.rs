@@ -1156,7 +1156,7 @@ mod tests {
                 placement_tasks: HashMap::default(),
                 relay_state_tasks: HashMap::default(),
                 relay_owner_tasks: HashMap::default(),
-                clients: HashMap::default(),
+                emitter_plans: Arc::new(EmitterExecutionPlans::default()),
                 tasks: Vec::new(),
             },
         );

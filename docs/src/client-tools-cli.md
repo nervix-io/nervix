@@ -122,7 +122,7 @@ offending span highlighted in place rather than described by offset.
 
 ### Asynchronous Output
 
-Subscription deliveries, server notifications, and changes of an attached domain clock arrive
+Subscription deliveries, server notifications, and state changes and ticks of an attached clock arrive
 independently of the prompt and are printed above it:
 
 ```text
@@ -130,9 +130,11 @@ independently of the prompt and are printed above it:
 [events] server ERROR: emitter 'redis_orders' publish failed
 [events] topology INFO: raft transition: node-2 became leader
 [events] domain clock [simulation]: generation 2, stopped
+[events] domain clock [simulation] tick: generation 3, id 12, boundary 2030-01-01T00:00:01.100000000Z, authority UTC 2026-09-27T00:00:00Z, node logical 2030-01-01T00:00:01.120000000Z
 ```
 
-A domain clock line follows every change after the attach reply. When the server ends an
+A domain clock line follows every state change or accepted tick after the attach reply. A slow
+client may skip tick ids because its pending tick is replaced by the newest one. When the server ends an
 attachment, or the session holding it is interrupted and the clock is attached again on the next
 session, the line reads `[events] domain clock [<domain>] notice: ...` with the reason.
 

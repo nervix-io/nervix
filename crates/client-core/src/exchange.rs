@@ -835,6 +835,10 @@ impl ExchangeReader {
                 self.sinks.clocks.apply_observed(observed, &self.generation);
                 ReaderFlow::Continue
             }
+            wire::ServerEvent::DomainClockTicked(ticked) => {
+                self.sinks.clocks.apply_ticked(ticked, &self.generation);
+                ReaderFlow::Continue
+            }
             wire::ServerEvent::DomainClockAttachmentEnded(ended) => {
                 self.sinks.clocks.apply_ended(ended, &self.generation);
                 ReaderFlow::Continue

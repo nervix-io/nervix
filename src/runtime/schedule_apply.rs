@@ -735,6 +735,13 @@ impl Runtime {
             EntrypointPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
                 .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
         );
+        let emitter_plans = Arc::new(
+            EmitterExecutionPlans::from_scheduled_nodes(&schedule.nodes, &activation_plan)
+                .map_err(|report| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to plan emitters: {report:#}"),
+                })?,
+        );
         let dispatcher = self.inner.remote_dispatcher.load_full();
         let local_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         // A reassignment only replaces this cluster node's runtime when the node stopped or
@@ -1029,16 +1036,22 @@ impl Runtime {
                 continue;
             }
             if entity.kind == ModelKind::Emitter {
-                let ScheduledModel {
-                    config: desired_emitter,
-                    node: desired_node,
-                } = schedule
-                    .scheduled::<CreateEmitter>(entity.identifier.clone())
-                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!("missing desired emitter '{}'", entity.identifier.as_str()),
-                    })?;
-                let desired_emitter = desired_emitter.clone();
+                let emitter_name = EmitterName::from(&entity.identifier);
+                let desired_emitter =
+                    emitter_plans
+                        .emitter(&emitter_name)
+                        .cloned()
+                        .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "missing desired emitter '{}'",
+                                entity.identifier.as_str()
+                            ),
+                        })?;
+                let desired_node = schedule
+                    .nodes
+                    .get(entity)
+                    .assured("the emitter plan was decided from this same schedule");
                 let (old_emitter, old_task) = {
                     let mut execution = self.inner.executions.get_mut(domain).ok_or_else(|| {
                         RuntimeError::BuildDomainExecution {
@@ -1046,10 +1059,10 @@ impl Runtime {
                             reason: "domain execution is unavailable for emitter swap".to_string(),
                         }
                     })?;
-                    let old_node = execution
-                        .schedule
-                        .nodes
-                        .get(&NodeRef::new(ModelKind::Emitter, entity.identifier.clone()))
+                    let old_emitter = execution
+                        .emitter_plans
+                        .emitter(&emitter_name)
+                        .cloned()
                         .ok_or_else(|| RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
                             reason: format!(
@@ -1057,16 +1070,6 @@ impl Runtime {
                                 entity.identifier.as_str()
                             ),
                         })?;
-                    let Model::Emitter(old_emitter) = old_node.config.as_ref() else {
-                        return Err(RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "missing existing emitter '{}'",
-                                entity.identifier.as_str()
-                            ),
-                        });
-                    };
-                    let old_emitter = old_emitter.clone();
                     let old_task = execution.emitter_tasks.remove(entity);
                     (old_emitter, old_task)
                 };
@@ -1094,7 +1097,6 @@ impl Runtime {
                 struct EmitterSpawnInputs {
                     shutdown: watch::Sender<bool>,
                     codecs: HashMap<CodecName, Arc<CompiledCodec>>,
-                    clients: HashMap<ClientName, Arc<Model>>,
                     deps: EmitterTaskDeps,
                     inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
                 }
@@ -1107,8 +1109,8 @@ impl Runtime {
                         }
                     })?;
                     if had_old_task {
-                        for input_relay in old_emitter.from.relays() {
-                            if let Some(services) = execution.relay_services.get(input_relay) {
+                        for input in &old_emitter.inputs {
+                            if let Some(services) = execution.relay_services.get(&input.relay) {
                                 services.remove_local_runtime_consumer(old_emitter.mode);
                             }
                         }
@@ -1117,22 +1119,21 @@ impl Runtime {
                         None
                     } else {
                         let inputs = desired_emitter
-                            .from
-                            .relays()
+                            .inputs
                             .iter()
-                            .map(|input_relay| {
-                                let Some(services) = execution.relay_services.get(input_relay)
+                            .map(|input| {
+                                let Some(services) = execution.relay_services.get(&input.relay)
                                 else {
                                     return Err(RuntimeError::BuildDomainExecution {
                                         domain: domain.as_str().to_string(),
                                         reason: format!(
                                             "missing relay services for swapped emitter input '{}'",
-                                            input_relay.as_str()
+                                            input.relay.as_str()
                                         ),
                                     });
                                 };
                                 Ok((
-                                    input_relay.clone(),
+                                    input.relay.clone(),
                                     services.add_local_runtime_consumer(desired_emitter.mode),
                                 ))
                             })
@@ -1144,7 +1145,6 @@ impl Runtime {
                         Some(EmitterSpawnInputs {
                             shutdown: execution.shutdown.clone(),
                             codecs: execution.codecs.clone(),
-                            clients: execution.clients.clone(),
                             deps,
                             inputs,
                         })
@@ -1158,8 +1158,7 @@ impl Runtime {
                             codecs: &spawn.codecs,
                             deps: spawn.deps,
                         },
-                        &spawn.clients,
-                        desired_emitter,
+                        desired_emitter.as_ref().clone(),
                         spawn.inputs,
                     )?;
                     self.inner
@@ -1542,6 +1541,7 @@ impl Runtime {
                 let remote_consumers = Self::remote_runtime_consumers_for_schedule(
                     &schedule,
                     &entrypoints,
+                    &emitter_plans,
                     local_node_id,
                 );
                 for (relay, services) in &execution.relay_services {
@@ -1562,6 +1562,7 @@ impl Runtime {
             }
             execution.schedule = schedule;
             execution.entrypoints = entrypoints;
+            execution.emitter_plans = emitter_plans;
             execution.routing.processor_plans = processor_plans;
             execution.routing.publish();
             routing_published = true;
@@ -1599,6 +1600,13 @@ impl Runtime {
             EntrypointPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
                 .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
         );
+        let emitter_plans = Arc::new(
+            EmitterExecutionPlans::from_scheduled_nodes(&schedule.nodes, &activation_plan)
+                .map_err(|report| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to plan emitters: {report:#}"),
+                })?,
+        );
         let graph = ActiveGraph::from_scheduled_models(&schedule).map_err(|error| {
             RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
@@ -1613,6 +1621,7 @@ impl Runtime {
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
             execution.schedule = schedule;
             execution.entrypoints = entrypoints;
+            execution.emitter_plans = emitter_plans;
             execution.routing.processor_plans = processor_plans;
             execution.routing.publish();
         } else {
@@ -1702,12 +1711,17 @@ impl Runtime {
                         None
                     };
                     if let Some(commands) = commands {
-                        ScheduledEmitterTask::reconfigure_via(&commands, config.clone())
-                            .await
-                            .map_err(|error| RuntimeError::BuildDomainExecution {
+                        ScheduledEmitterTask::reconfigure_via(
+                            &commands,
+                            config.flush_policy.clone(),
+                        )
+                        .await
+                        .map_err(|error| {
+                            RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
                                 reason: error.to_string(),
-                            })?;
+                            }
+                        })?;
                     }
                 }
             }

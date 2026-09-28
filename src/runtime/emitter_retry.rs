@@ -173,10 +173,11 @@ impl EmitterRetrySchedule {
 
     /// Defers the next publish attempt and records the transient error that explains the wait.
     ///
-    /// Constructing the monotonic deadline is the only fallible part. A configured or
-    /// server-supplied wait the monotonic clock cannot represent leaves no retry scheduled, so the
-    /// emitter falls back to its unchanged flush cadence and the failure is recorded as the
-    /// emitter's transient error instead of disappearing.
+    /// Constructing the monotonic deadline is the only fallible part. A server-supplied wait the
+    /// monotonic clock cannot represent never reaches here, because it contributes nothing to the
+    /// wait. A configured one leaves no retry scheduled, so the emitter falls back to its unchanged
+    /// flush cadence and the failure is recorded as the emitter's transient error instead of
+    /// disappearing.
     pub(super) fn defer(
         &mut self,
         context: &EmitterSinkContext,
@@ -218,11 +219,21 @@ impl EmitterRetrySchedule {
 }
 
 /// How long the sink asked this emitter to wait, which bounds its next attempt from below.
+///
+/// A delay whose end the monotonic clock cannot represent asks for an attempt that could never be
+/// scheduled, so it contributes nothing and the declared backoff alone decides the wait.
 fn emitter_minimum_retry_delay(error: &Report<EmitterRuntimeError>) -> Duration {
-    match error.downcast_ref::<SinkRetryDelay>() {
-        Some(attachment) => attachment.0,
-        None => Duration::ZERO,
+    let Some(attachment) = error.downcast_ref::<SinkRetryDelay>() else {
+        return Duration::ZERO;
+    };
+    let delay = attachment.0;
+    if PhysicalDeadlineCapability::operational()
+        .after(delay)
+        .is_err()
+    {
+        return Duration::ZERO;
     }
+    delay
 }
 
 pub(super) fn emitter_retry_delay(
@@ -276,6 +287,24 @@ mod tests {
         assert_eq!(
             emitter_retry_delay(&mut backoff, &error),
             Duration::from_secs(2)
+        );
+        assert_eq!(backoff.next_delay(), Duration::from_millis(20));
+    }
+
+    #[test]
+    fn a_server_delay_the_monotonic_clock_cannot_represent_leaves_the_declared_backoff() {
+        let mut backoff = RuntimeReconnectBackoff::from_policy(ParsedRetryPolicy {
+            backoff: Duration::from_millis(10),
+            max_backoff: Duration::from_millis(100),
+        });
+        let error = sink_publish_failure(
+            Report::new(SinkPublishError::Publish { sink: "test" })
+                .attach(SinkRetryDelay(Duration::MAX)),
+        );
+
+        assert_eq!(
+            emitter_retry_delay(&mut backoff, &error),
+            Duration::from_millis(10)
         );
         assert_eq!(backoff.next_delay(), Duration::from_millis(20));
     }

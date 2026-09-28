@@ -29,7 +29,7 @@ use std::{
 
 use arch_into::ArchInto as _;
 use bytes::Bytes;
-use error_stack::Report;
+use error_stack::{Report, Result as StackResult, ResultExt as _};
 use flatbuffers::{Allocator, FlatBufferBuilder};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{ParseAsType, Timestamp, WasmProcessorLimits};
@@ -167,7 +167,7 @@ pub enum WasmGuestCallError {
     #[error("wasm guest reported global error: {reason}")]
     GlobalError { reason: String },
     #[error("wasm guest emitted an output envelope the host cannot decode")]
-    InvalidEmission(#[source] WasmProtocolError),
+    InvalidEmission,
     #[error("failed to write guest memory")]
     MemoryWrite(#[source] wasmtime::MemoryAccessError),
     #[error("failed to read guest memory")]
@@ -215,23 +215,28 @@ impl WasmGuestCallError {
 
     /// Classifies a failed call of `export`: an exhausted limit, a trap the guest raised, or a call
     /// the host could not complete.
-    fn call(limits: WasmProcessorLimits, export: &'static str, source: wasmtime::Error) -> Self {
+    fn call(
+        limits: WasmProcessorLimits,
+        export: &'static str,
+        source: wasmtime::Error,
+    ) -> Report<Self> {
         if let Some(cause) = Self::limit_exceeded(limits, Some(export), &source) {
-            return cause;
+            return Report::new(cause).attach(source);
         }
         if let Some(trap) = source.downcast_ref::<Trap>() {
-            return Self::Trap {
+            return Report::new(Self::Trap {
                 export,
                 trap: *trap,
-            };
+            })
+            .attach(source);
         }
-        Self::Call { export, source }
+        Report::new(Self::Call { export, source })
     }
 
-    fn instantiation(limits: WasmProcessorLimits, source: wasmtime::Error) -> Self {
+    fn instantiation(limits: WasmProcessorLimits, source: wasmtime::Error) -> Report<Self> {
         match Self::limit_exceeded(limits, None, &source) {
-            Some(cause) => cause,
-            None => Self::Instantiate(source),
+            Some(cause) => Report::new(cause).attach(source),
+            None => Report::new(Self::Instantiate(source)),
         }
     }
 
@@ -244,7 +249,7 @@ impl WasmGuestCallError {
             Self::FuelExhausted { export, .. } | Self::MemoryLimitExceeded { export, .. } => {
                 *export
             }
-            Self::InvalidEmission(_) => Some("nervix_read_emit"),
+            Self::InvalidEmission => Some("nervix_read_emit"),
             Self::Instantiate(_)
             | Self::ResetFuel { .. }
             | Self::GlobalError { .. }
@@ -268,11 +273,7 @@ impl WasmGuestCallError {
 #[derive(Debug, Error)]
 pub enum WasmGuestError {
     #[error("wasm guest {operation} failed")]
-    Failed {
-        operation: WasmGuestOperation,
-        #[source]
-        cause: WasmGuestCallError,
-    },
+    Failed { operation: WasmGuestOperation },
     #[error(
         "wasm guest rejected the snapshot envelope of its saved state{}",
         GuestReason(.reason.as_deref())
@@ -286,14 +287,21 @@ pub enum WasmGuestError {
 }
 
 impl WasmGuestError {
-    fn failed(operation: WasmGuestOperation, cause: WasmGuestCallError) -> Self {
-        Self::Failed { operation, cause }
+    fn failed(operation: WasmGuestOperation, cause: Report<WasmGuestCallError>) -> Report<Self> {
+        cause.change_context(Self::Failed { operation })
     }
 
-    fn saved_state_rejected(rejection: SavedStateRejection, reason: Option<String>) -> Self {
+    fn saved_state_rejected(
+        rejection: SavedStateRejection,
+        reason: Option<String>,
+    ) -> Report<Self> {
         match rejection {
-            SavedStateRejection::SnapshotEnvelope => Self::SnapshotEnvelopeRejected { reason },
-            SavedStateRejection::ApplicationState => Self::ApplicationStateRejected { reason },
+            SavedStateRejection::SnapshotEnvelope => {
+                Report::new(Self::SnapshotEnvelopeRejected { reason })
+            }
+            SavedStateRejection::ApplicationState => {
+                Report::new(Self::ApplicationStateRejected { reason })
+            }
         }
     }
 
@@ -315,40 +323,41 @@ impl WasmGuestError {
             Self::Failed { .. } => None,
         }
     }
+}
 
-    /// Whether the operation exhausted `MAX FUEL` or `MAX MEMORY`, which leaves the instance's
-    /// store unusable.
-    pub const fn is_resource_limit_exceeded(&self) -> bool {
+/// Classification available to callers without discarding the typed cause frames of a failed
+/// guest operation.
+pub trait WasmGuestReportExt {
+    fn is_resource_limit_exceeded(&self) -> bool;
+    fn is_invalid_emission(&self) -> bool;
+    fn export(&self) -> Option<&'static str>;
+}
+
+impl WasmGuestReportExt for Report<WasmGuestError> {
+    fn is_resource_limit_exceeded(&self) -> bool {
         matches!(
-            self,
-            Self::Failed {
-                cause: WasmGuestCallError::FuelExhausted { .. }
-                    | WasmGuestCallError::MemoryLimitExceeded { .. },
-                ..
-            }
+            self.downcast_ref::<WasmGuestCallError>(),
+            Some(
+                WasmGuestCallError::FuelExhausted { .. }
+                    | WasmGuestCallError::MemoryLimitExceeded { .. }
+            )
         )
     }
 
-    /// Whether the operation failed because the guest emitted output the host cannot decode.
-    pub const fn is_invalid_emission(&self) -> bool {
+    fn is_invalid_emission(&self) -> bool {
         matches!(
-            self,
-            Self::Failed {
-                cause: WasmGuestCallError::InvalidEmission(_),
-                ..
-            }
+            self.downcast_ref::<WasmGuestCallError>(),
+            Some(WasmGuestCallError::InvalidEmission)
         )
     }
 
-    /// The export whose call failed, or the export that runs the operation when the failure is not
-    /// attributable to one call.
-    pub fn export(&self) -> Option<&'static str> {
-        match self {
-            Self::Failed { operation, cause } => cause.export().or(operation.entry_export()),
-            Self::SnapshotEnvelopeRejected { .. } | Self::ApplicationStateRejected { .. } => {
-                WasmGuestOperation::StateRestore.entry_export()
-            }
+    fn export(&self) -> Option<&'static str> {
+        if let Some(cause) = self.downcast_ref::<WasmGuestCallError>()
+            && let Some(export) = cause.export()
+        {
+            return Some(export);
         }
+        self.current_context().operation().entry_export()
     }
 }
 
@@ -495,12 +504,6 @@ unsafe impl Allocator for GuestBufferAllocator<'_> {
     }
 }
 
-#[derive(Debug, Error)]
-pub enum WasmProtocolError {
-    #[error(transparent)]
-    FlatBuffers(#[from] protocol::ProtocolError),
-}
-
 #[derive(Debug, Clone)]
 pub struct WasmRuntimeConfig {
     pub optimize: bool,
@@ -529,7 +532,7 @@ pub struct WasmRuntime {
 }
 
 impl WasmRuntime {
-    pub fn new(config: WasmRuntimeConfig) -> Result<Self, Report<WasmProcessorError>> {
+    pub fn new(config: WasmRuntimeConfig) -> StackResult<Self, WasmProcessorError> {
         let mut wasmtime_config = Config::new();
         wasmtime_config.consume_fuel(true);
         wasmtime_config.epoch_interruption(true);
@@ -542,14 +545,15 @@ impl WasmRuntime {
         } else {
             OptLevel::None
         });
-        let engine = Engine::new(&wasmtime_config).map_err(WasmProcessorError::Configure)?;
+        let engine = Engine::new(&wasmtime_config)
+            .map_err(|source| Report::new(WasmProcessorError::Configure(source)))?;
         let stop = StdArc::new(AtomicBool::new(false));
         spawn_epoch_driver(
             engine.clone(),
             StdArc::clone(&stop),
             config.epoch_tick_interval,
         )
-        .map_err(WasmProcessorError::SpawnEpochDriver)?;
+        .map_err(|source| Report::new(WasmProcessorError::SpawnEpochDriver(source)))?;
         Ok(Self {
             engine,
             stop,
@@ -561,19 +565,20 @@ impl WasmRuntime {
     pub async fn compile_processor(
         &self,
         wasm: impl AsRef<[u8]>,
-    ) -> Result<CompiledWasmProcessor, Report<WasmProcessorError>> {
+    ) -> StackResult<CompiledWasmProcessor, WasmProcessorError> {
         let engine = self.engine.clone();
         let wasm = wasm.as_ref().to_vec();
         let instance_pre = tokio::task::spawn_blocking(move || {
-            let module = Module::new(&engine, wasm).map_err(WasmProcessorError::Compile)?;
+            let module = Module::new(&engine, wasm)
+                .map_err(|source| Report::new(WasmProcessorError::Compile(source)))?;
             let mut linker = Linker::<BranchStore>::new(&engine);
             define_host_functions(&mut linker)?;
             linker
                 .instantiate_pre(&module)
-                .map_err(WasmProcessorError::Link)
+                .map_err(|source| Report::new(WasmProcessorError::Link(source)))
         })
         .await
-        .map_err(WasmProcessorError::CompileTask)??;
+        .map_err(|source| Report::new(WasmProcessorError::CompileTask(source)))??;
         Ok(CompiledWasmProcessor {
             engine: self.engine.clone(),
             instance_pre,
@@ -1115,22 +1120,24 @@ impl WasmEnvelope {
         }
     }
 
-    pub fn encode(&self) -> Result<Vec<u8>, WasmProtocolError> {
+    pub fn encode(&self) -> StackResult<Vec<u8>, protocol::ProtocolError> {
         let encoding = ProtocolEnvelopeEncoding::new(self);
         let mut builder = FlatBufferBuilder::new();
         encoding.encode_in(&mut builder);
         Ok(builder.finished_data().to_vec())
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, WasmProtocolError> {
+    pub fn decode(bytes: &[u8]) -> StackResult<Self, protocol::ProtocolError> {
         Self::decode_owned(bytes.to_vec())
     }
 
-    pub fn decode_borrowed(bytes: &[u8]) -> Result<protocol::EnvelopeRef<'_>, WasmProtocolError> {
-        Ok(protocol::EnvelopeRef::decode(bytes)?)
+    pub fn decode_borrowed(
+        bytes: &[u8],
+    ) -> StackResult<protocol::EnvelopeRef<'_>, protocol::ProtocolError> {
+        protocol::EnvelopeRef::decode(bytes)
     }
 
-    fn decode_owned(bytes: Vec<u8>) -> Result<Self, WasmProtocolError> {
+    fn decode_owned(bytes: Vec<u8>) -> StackResult<Self, protocol::ProtocolError> {
         let bytes = Bytes::from(bytes);
         let envelope = protocol::EnvelopeRef::decode(&bytes)?;
         match envelope {
@@ -1498,7 +1505,7 @@ impl CompiledWasmProcessor {
         init: WasmBranchInit,
         context: WasmExecutionContext,
         restored_state: Option<&[u8]>,
-    ) -> Result<WasmBranchInstance, Report<WasmGuestError>> {
+    ) -> StackResult<WasmBranchInstance, WasmGuestError> {
         self.instantiate_branch_with_emitter(limits, init, context, restored_state, None)
             .await
     }
@@ -1510,7 +1517,7 @@ impl CompiledWasmProcessor {
         context: WasmExecutionContext,
         restored_state: Option<&[u8]>,
         emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
-    ) -> Result<WasmBranchInstance, Report<WasmGuestError>> {
+    ) -> StackResult<WasmBranchInstance, WasmGuestError> {
         let instantiation = INVOCATION_NOW
             .scope(
                 context.now(),
@@ -1520,10 +1527,10 @@ impl CompiledWasmProcessor {
         let mut branch = match instantiation {
             Ok(branch) => branch,
             Err(cause) => {
-                return Err(Report::new(WasmGuestError::failed(
+                return Err(WasmGuestError::failed(
                     WasmGuestOperation::Instantiation,
                     cause,
-                )));
+                ));
             }
         };
         branch.init(init, context).await?;
@@ -1537,19 +1544,19 @@ impl CompiledWasmProcessor {
         &self,
         limits: WasmProcessorLimits,
         emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
-    ) -> Result<WasmBranchInstance, WasmGuestCallError> {
+    ) -> StackResult<WasmBranchInstance, WasmGuestCallError> {
         let max_memory_bytes = limits.max_memory_bytes.get().arch_into();
         let mut store = Store::new(
             &self.engine,
             BranchStore::new(max_memory_bytes, emitted_batch_sender),
         );
         store.limiter(|state| &mut state.memory_limiter);
-        store
-            .set_fuel(limits.max_fuel.get())
-            .map_err(|source| WasmGuestCallError::ResetFuel {
+        store.set_fuel(limits.max_fuel.get()).map_err(|source| {
+            Report::new(WasmGuestCallError::ResetFuel {
                 limit: limits.max_fuel,
                 source,
-            })?;
+            })
+        })?;
         store.set_epoch_deadline(self.epoch_deadline_ticks);
         store.epoch_deadline_async_yield_and_update(self.epoch_deadline_ticks);
         let instance = self
@@ -1599,10 +1606,10 @@ impl WasmBranchInstance {
         instance: Instance,
         max_guest_buffer_bytes: usize,
         limits: WasmProcessorLimits,
-    ) -> Result<Self, WasmGuestCallError> {
+    ) -> StackResult<Self, WasmGuestCallError> {
         let memory = instance
             .get_memory(&mut store, EXPORT_MEMORY)
-            .ok_or(WasmGuestCallError::MissingExport(EXPORT_MEMORY))?;
+            .ok_or_else(|| Report::new(WasmGuestCallError::MissingExport(EXPORT_MEMORY)))?;
         Ok(Self {
             alloc: typed_export(&mut store, &instance, "nervix_alloc")?,
             init: typed_export(&mut store, &instance, "nervix_init")?,
@@ -1628,12 +1635,14 @@ impl WasmBranchInstance {
         })
     }
 
-    fn begin_operation(&mut self) -> Result<(), WasmGuestCallError> {
+    fn begin_operation(&mut self) -> StackResult<(), WasmGuestCallError> {
         self.store
             .set_fuel(self.limits.max_fuel.get())
-            .map_err(|source| WasmGuestCallError::ResetFuel {
-                limit: self.limits.max_fuel,
-                source,
+            .map_err(|source| {
+                Report::new(WasmGuestCallError::ResetFuel {
+                    limit: self.limits.max_fuel,
+                    source,
+                })
             })
     }
 
@@ -1672,23 +1681,23 @@ impl WasmBranchInstance {
         &mut self,
         export: &'static str,
         call_result: wasmtime::Result<i32>,
-    ) -> Result<(), WasmGuestCallError> {
+    ) -> StackResult<(), WasmGuestCallError> {
         let code = match call_result {
             Ok(code) => code,
             Err(source) => {
                 if let Some(cause) =
                     WasmGuestCallError::limit_exceeded(self.limits, Some(export), &source)
                 {
-                    return Err(cause);
+                    return Err(Report::new(cause).attach(source));
                 }
                 if let Some(reason) = self.take_global_error().await? {
-                    return Err(WasmGuestCallError::GlobalError { reason });
+                    return Err(Report::new(WasmGuestCallError::GlobalError { reason }));
                 }
                 return Err(WasmGuestCallError::call(self.limits, export, source));
             }
         };
         if let Some(reason) = self.take_global_error().await? {
-            return Err(WasmGuestCallError::GlobalError { reason });
+            return Err(Report::new(WasmGuestCallError::GlobalError { reason }));
         }
         ensure_success(export, code)
     }
@@ -1697,7 +1706,7 @@ impl WasmBranchInstance {
         &mut self,
         init: WasmBranchInit,
         context: WasmExecutionContext,
-    ) -> Result<(), WasmGuestError> {
+    ) -> StackResult<(), WasmGuestError> {
         let initialization = INVOCATION_NOW
             .scope(context.now(), async {
                 self.begin_operation()?;
@@ -1718,14 +1727,14 @@ impl WasmBranchInstance {
         &mut self,
         init: WasmBranchInit,
         context: WasmExecutionContext,
-    ) -> Result<(), Report<WasmGuestError>> {
-        self.init(init, context).await.map_err(Report::new)
+    ) -> StackResult<(), WasmGuestError> {
+        self.init(init, context).await
     }
 
     async fn current_domain_time(
         &mut self,
         context: WasmExecutionContext,
-    ) -> Result<Timestamp, WasmGuestError> {
+    ) -> StackResult<Timestamp, WasmGuestError> {
         let read = INVOCATION_NOW
             .scope(context.now(), async {
                 self.begin_operation()?;
@@ -1749,15 +1758,15 @@ impl WasmBranchInstance {
     pub async fn current_domain_time_in_context(
         &mut self,
         context: WasmExecutionContext,
-    ) -> Result<Timestamp, Report<WasmGuestError>> {
-        self.current_domain_time(context).await.map_err(Report::new)
+    ) -> StackResult<Timestamp, WasmGuestError> {
+        self.current_domain_time(context).await
     }
 
     pub async fn process_batch_in_context(
         &mut self,
         arrow_ipc_batch: &[u8],
         context: WasmExecutionContext,
-    ) -> Result<Vec<WasmEnvelope>, Report<WasmGuestError>> {
+    ) -> StackResult<Vec<WasmEnvelope>, WasmGuestError> {
         let envelope = WasmEnvelope::input_arrow_only(arrow_ipc_batch.to_vec());
         self.process_envelope_in_context(&envelope, context).await
     }
@@ -1766,7 +1775,7 @@ impl WasmBranchInstance {
         &mut self,
         envelope: &WasmEnvelope,
         context: WasmExecutionContext,
-    ) -> Result<Vec<WasmEnvelope>, WasmGuestError> {
+    ) -> StackResult<Vec<WasmEnvelope>, WasmGuestError> {
         let processing = INVOCATION_NOW
             .scope(context.now(), async {
                 self.begin_operation()?;
@@ -1786,17 +1795,15 @@ impl WasmBranchInstance {
         &mut self,
         envelope: &WasmEnvelope,
         context: WasmExecutionContext,
-    ) -> Result<Vec<WasmEnvelope>, Report<WasmGuestError>> {
-        self.process_envelope(envelope, context)
-            .await
-            .map_err(Report::new)
+    ) -> StackResult<Vec<WasmEnvelope>, WasmGuestError> {
+        self.process_envelope(envelope, context).await
     }
 
     async fn on_timeout(
         &mut self,
         handle: WasmTimeoutHandle,
         context: WasmExecutionContext,
-    ) -> Result<Vec<WasmEnvelope>, WasmGuestError> {
+    ) -> StackResult<Vec<WasmEnvelope>, WasmGuestError> {
         let callback = INVOCATION_NOW
             .scope(context.now(), async {
                 self.begin_operation()?;
@@ -1814,8 +1821,8 @@ impl WasmBranchInstance {
         &mut self,
         handle: WasmTimeoutHandle,
         context: WasmExecutionContext,
-    ) -> Result<Vec<WasmEnvelope>, Report<WasmGuestError>> {
-        self.on_timeout(handle, context).await.map_err(Report::new)
+    ) -> StackResult<Vec<WasmEnvelope>, WasmGuestError> {
+        self.on_timeout(handle, context).await
     }
 
     /// Asks the guest to release everything it is holding because the host is quiescing this
@@ -1824,7 +1831,7 @@ impl WasmBranchInstance {
     async fn flush(
         &mut self,
         context: WasmExecutionContext,
-    ) -> Result<Vec<WasmEnvelope>, WasmGuestError> {
+    ) -> StackResult<Vec<WasmEnvelope>, WasmGuestError> {
         let flush = INVOCATION_NOW
             .scope(context.now(), async {
                 self.begin_operation()?;
@@ -1840,8 +1847,8 @@ impl WasmBranchInstance {
     pub async fn flush_in_context(
         &mut self,
         context: WasmExecutionContext,
-    ) -> Result<Vec<WasmEnvelope>, Report<WasmGuestError>> {
-        self.flush(context).await.map_err(Report::new)
+    ) -> StackResult<Vec<WasmEnvelope>, WasmGuestError> {
+        self.flush(context).await
     }
 
     /// Asks the guest to serialize its state. `nervix_dump_state` returns the size of the snapshot
@@ -1849,7 +1856,7 @@ impl WasmBranchInstance {
     async fn save_state(
         &mut self,
         context: WasmExecutionContext,
-    ) -> Result<Vec<u8>, WasmGuestError> {
+    ) -> StackResult<Vec<u8>, WasmGuestError> {
         let snapshot = INVOCATION_NOW
             .scope(context.now(), async {
                 let export = "nervix_dump_state";
@@ -1861,9 +1868,12 @@ impl WasmBranchInstance {
                     .map_err(|source| WasmGuestCallError::call(self.limits, export, source))?;
                 if size < 0 {
                     if let Some(reason) = self.take_global_error().await? {
-                        return Err(WasmGuestCallError::GlobalError { reason });
+                        return Err(Report::new(WasmGuestCallError::GlobalError { reason }));
                     }
-                    return Err(WasmGuestCallError::ErrorCode { export, code: size });
+                    return Err(Report::new(WasmGuestCallError::ErrorCode {
+                        export,
+                        code: size,
+                    }));
                 }
                 self.read_guest_buffer(size).await
             })
@@ -1874,8 +1884,8 @@ impl WasmBranchInstance {
     pub async fn save_state_in_context(
         &mut self,
         context: WasmExecutionContext,
-    ) -> Result<Vec<u8>, Report<WasmGuestError>> {
-        self.save_state(context).await.map_err(Report::new)
+    ) -> StackResult<Vec<u8>, WasmGuestError> {
+        self.save_state(context).await
     }
 
     /// Hands the guest the state saved last. A rejection code is the guest's verdict on that
@@ -1884,7 +1894,7 @@ impl WasmBranchInstance {
         &mut self,
         state: &[u8],
         context: WasmExecutionContext,
-    ) -> Result<(), WasmGuestError> {
+    ) -> StackResult<(), WasmGuestError> {
         let restore = WasmGuestOperation::StateRestore;
         INVOCATION_NOW
             .scope(context.now(), async {
@@ -1920,7 +1930,7 @@ impl WasmBranchInstance {
                     Some(reason) => WasmGuestCallError::GlobalError { reason },
                     None => WasmGuestCallError::ErrorCode { export, code },
                 };
-                Err(WasmGuestError::failed(restore, cause))
+                Err(WasmGuestError::failed(restore, Report::new(cause)))
             })
             .await
     }
@@ -1929,11 +1939,14 @@ impl WasmBranchInstance {
         &mut self,
         state: &[u8],
         context: WasmExecutionContext,
-    ) -> Result<(), Report<WasmGuestError>> {
-        self.load_state(state, context).await.map_err(Report::new)
+    ) -> StackResult<(), WasmGuestError> {
+        self.load_state(state, context).await
     }
 
-    async fn reset_state(&mut self, context: WasmExecutionContext) -> Result<(), WasmGuestError> {
+    async fn reset_state(
+        &mut self,
+        context: WasmExecutionContext,
+    ) -> StackResult<(), WasmGuestError> {
         let reset = INVOCATION_NOW
             .scope(context.now(), async {
                 self.begin_operation()?;
@@ -1953,8 +1966,8 @@ impl WasmBranchInstance {
     pub async fn reset_state_in_context(
         &mut self,
         context: WasmExecutionContext,
-    ) -> Result<(), Report<WasmGuestError>> {
-        self.reset_state(context).await.map_err(Report::new)
+    ) -> StackResult<(), WasmGuestError> {
+        self.reset_state(context).await
     }
 
     pub fn timeout_requests(&self) -> &[WasmTimeoutRequest] {
@@ -1985,7 +1998,7 @@ impl WasmBranchInstance {
         due
     }
 
-    async fn take_global_error(&mut self) -> Result<Option<String>, WasmGuestCallError> {
+    async fn take_global_error(&mut self) -> StackResult<Option<String>, WasmGuestCallError> {
         let Some(exports) = &self.global_error else {
             return Ok(None);
         };
@@ -1999,12 +2012,13 @@ impl WasmBranchInstance {
         if size == 0 {
             return Ok(None);
         }
-        let size = usize::try_from(size).map_err(|_| WasmGuestCallError::InvalidSize(size))?;
+        let size = usize::try_from(size)
+            .map_err(|_| Report::new(WasmGuestCallError::InvalidSize(size)))?;
         if size > self.max_guest_buffer_bytes {
-            return Err(WasmGuestCallError::GuestBufferTooLarge {
+            return Err(Report::new(WasmGuestCallError::GuestBufferTooLarge {
                 size,
                 limit: self.max_guest_buffer_bytes,
-            });
+            }));
         }
         let ptr = exports
             .ptr
@@ -2013,11 +2027,12 @@ impl WasmBranchInstance {
             .map_err(|source| {
                 WasmGuestCallError::call(self.limits, "nervix_global_error_ptr", source)
             })?;
-        let ptr = usize::try_from(ptr).map_err(|_| WasmGuestCallError::InvalidOffset(ptr))?;
+        let ptr = usize::try_from(ptr)
+            .map_err(|_| Report::new(WasmGuestCallError::InvalidOffset(ptr)))?;
         let mut bytes = vec![0; size];
         self.memory
             .read(&mut self.store, ptr, &mut bytes)
-            .map_err(WasmGuestCallError::MemoryRead)?;
+            .map_err(|source| Report::new(WasmGuestCallError::MemoryRead(source)))?;
         let code = exports
             .clear
             .call_async(&mut self.store, ())
@@ -2026,15 +2041,15 @@ impl WasmBranchInstance {
                 WasmGuestCallError::call(self.limits, "nervix_clear_global_error", source)
             })?;
         ensure_success("nervix_clear_global_error", code)?;
-        let reason =
-            String::from_utf8(bytes).map_err(WasmGuestCallError::InvalidGlobalErrorText)?;
+        let reason = String::from_utf8(bytes)
+            .map_err(|source| Report::new(WasmGuestCallError::InvalidGlobalErrorText(source)))?;
         Ok(Some(reason))
     }
 
     async fn write_envelope_to_guest(
         &mut self,
         envelope: &WasmEnvelope,
-    ) -> Result<(i32, i32), WasmGuestCallError> {
+    ) -> StackResult<(i32, i32), WasmGuestCallError> {
         let encoding = ProtocolEnvelopeEncoding::new(envelope);
         self.write_message_to_guest(&encoding, envelope.serialized_capacity_hint())
             .await
@@ -2044,33 +2059,32 @@ impl WasmBranchInstance {
         &mut self,
         encoding: &E,
         capacity_hint: usize,
-    ) -> Result<(i32, i32), WasmGuestCallError> {
+    ) -> StackResult<(i32, i32), WasmGuestCallError> {
         let capacity = self
             .guest_buffer_capacity
             .max(capacity_hint)
             .min(self.max_guest_buffer_bytes);
         let base_ptr = self.allocate_guest_buffer(capacity).await?;
-        let base_offset =
-            usize::try_from(base_ptr).map_err(|_| WasmGuestCallError::InvalidOffset(base_ptr))?;
+        let base_offset = usize::try_from(base_ptr)
+            .map_err(|_| Report::new(WasmGuestCallError::InvalidOffset(base_ptr)))?;
 
         let build = {
             let memory = self.memory.data_mut(&mut self.store);
             let memory_size = memory.len();
-            let end = base_offset.checked_add(capacity).ok_or(
-                WasmGuestCallError::InvalidBufferRange {
+            let end = base_offset.checked_add(capacity).ok_or_else(|| {
+                Report::new(WasmGuestCallError::InvalidBufferRange {
                     offset: base_offset,
                     size: capacity,
                     memory_size,
-                },
-            )?;
-            let region =
-                memory
-                    .get_mut(base_offset..end)
-                    .ok_or(WasmGuestCallError::InvalidBufferRange {
-                        offset: base_offset,
-                        size: capacity,
-                        memory_size,
-                    })?;
+                })
+            })?;
+            let region = memory.get_mut(base_offset..end).ok_or_else(|| {
+                Report::new(WasmGuestCallError::InvalidBufferRange {
+                    offset: base_offset,
+                    size: capacity,
+                    memory_size,
+                })
+            })?;
             let allocator = GuestBufferAllocator::Direct(region);
             let mut builder = FlatBufferBuilder::new_in(allocator);
             encoding.encode_in(&mut builder);
@@ -2087,29 +2101,31 @@ impl WasmBranchInstance {
 
         match build {
             GuestBufferBuild::Direct { offset, size } => {
-                let ptr = base_offset.checked_add(offset).ok_or(
-                    WasmGuestCallError::InvalidBufferRange {
+                let ptr = base_offset.checked_add(offset).ok_or_else(|| {
+                    Report::new(WasmGuestCallError::InvalidBufferRange {
                         offset: base_offset,
                         size,
                         memory_size: self.memory.data_size(&self.store),
-                    },
-                )?;
-                let ptr =
-                    i32::try_from(ptr).map_err(|_| WasmGuestCallError::InvalidBufferRange {
+                    })
+                })?;
+                let ptr = i32::try_from(ptr).map_err(|_| {
+                    Report::new(WasmGuestCallError::InvalidBufferRange {
                         offset: ptr,
                         size,
                         memory_size: self.memory.data_size(&self.store),
-                    })?;
-                let size = i32::try_from(size).map_err(|_| WasmGuestCallError::InvalidSize(-1))?;
+                    })
+                })?;
+                let size = i32::try_from(size)
+                    .map_err(|_| Report::new(WasmGuestCallError::InvalidSize(-1)))?;
                 Ok((ptr, size))
             }
             GuestBufferBuild::Spill { buffer, start } => {
                 let bytes = &buffer[start..];
                 if bytes.len() > self.max_guest_buffer_bytes {
-                    return Err(WasmGuestCallError::GuestBufferTooLarge {
+                    return Err(Report::new(WasmGuestCallError::GuestBufferTooLarge {
                         size: bytes.len(),
                         limit: self.max_guest_buffer_bytes,
-                    });
+                    }));
                 }
                 // Doubling is a growth policy rather than an exact size: the target is clamped
                 // to the configured guest buffer limit, so a doubling that leaves `usize` clamps
@@ -2126,32 +2142,33 @@ impl WasmBranchInstance {
                             .verified("the guest allocator returned a non-negative pointer"),
                         bytes,
                     )
-                    .map_err(WasmGuestCallError::MemoryWrite)?;
-                let size =
-                    i32::try_from(bytes.len()).map_err(|_| WasmGuestCallError::InvalidSize(-1))?;
+                    .map_err(|source| Report::new(WasmGuestCallError::MemoryWrite(source)))?;
+                let size = i32::try_from(bytes.len())
+                    .map_err(|_| Report::new(WasmGuestCallError::InvalidSize(-1)))?;
                 Ok((ptr, size))
             }
         }
     }
 
-    async fn allocate_guest_buffer(&mut self, size: usize) -> Result<i32, WasmGuestCallError> {
+    async fn allocate_guest_buffer(&mut self, size: usize) -> StackResult<i32, WasmGuestCallError> {
         if size > self.max_guest_buffer_bytes {
-            return Err(WasmGuestCallError::GuestBufferTooLarge {
+            return Err(Report::new(WasmGuestCallError::GuestBufferTooLarge {
                 size,
                 limit: self.max_guest_buffer_bytes,
-            });
+            }));
         }
-        let size = i32::try_from(size).map_err(|_| WasmGuestCallError::InvalidSize(-1))?;
+        let size =
+            i32::try_from(size).map_err(|_| Report::new(WasmGuestCallError::InvalidSize(-1)))?;
         let ptr = self
             .alloc
             .call_async(&mut self.store, size)
             .await
             .map_err(|source| WasmGuestCallError::call(self.limits, "nervix_alloc", source))?;
         if ptr < 0 {
-            return Err(WasmGuestCallError::ErrorCode {
+            return Err(Report::new(WasmGuestCallError::ErrorCode {
                 export: "nervix_alloc",
                 code: ptr,
-            });
+            }));
         }
         self.guest_buffer_capacity = self.guest_buffer_capacity.max(
             usize::try_from(size)
@@ -2163,9 +2180,10 @@ impl WasmBranchInstance {
     async fn write_to_guest_buffer(
         &mut self,
         bytes: &[u8],
-    ) -> Result<(i32, i32), WasmGuestCallError> {
+    ) -> StackResult<(i32, i32), WasmGuestCallError> {
         let ptr = self.allocate_guest_buffer(bytes.len()).await?;
-        let size = i32::try_from(bytes.len()).map_err(|_| WasmGuestCallError::InvalidSize(-1))?;
+        let size = i32::try_from(bytes.len())
+            .map_err(|_| Report::new(WasmGuestCallError::InvalidSize(-1)))?;
         self.memory
             .write(
                 &mut self.store,
@@ -2173,32 +2191,34 @@ impl WasmBranchInstance {
                     .verified("the guest allocator returned a non-negative pointer"),
                 bytes,
             )
-            .map_err(WasmGuestCallError::MemoryWrite)?;
+            .map_err(|source| Report::new(WasmGuestCallError::MemoryWrite(source)))?;
         Ok((ptr, size))
     }
 
-    async fn read_guest_buffer(&mut self, size: i32) -> Result<Vec<u8>, WasmGuestCallError> {
-        let size = usize::try_from(size).map_err(|_| WasmGuestCallError::InvalidSize(size))?;
+    async fn read_guest_buffer(&mut self, size: i32) -> StackResult<Vec<u8>, WasmGuestCallError> {
+        let size = usize::try_from(size)
+            .map_err(|_| Report::new(WasmGuestCallError::InvalidSize(size)))?;
         if size > self.max_guest_buffer_bytes {
-            return Err(WasmGuestCallError::GuestBufferTooLarge {
+            return Err(Report::new(WasmGuestCallError::GuestBufferTooLarge {
                 size,
                 limit: self.max_guest_buffer_bytes,
-            });
+            }));
         }
         let ptr = self
             .buffer_ptr
             .call_async(&mut self.store, ())
             .await
             .map_err(|source| WasmGuestCallError::call(self.limits, "nervix_buffer_ptr", source))?;
-        let ptr = usize::try_from(ptr).map_err(|_| WasmGuestCallError::InvalidOffset(ptr))?;
+        let ptr = usize::try_from(ptr)
+            .map_err(|_| Report::new(WasmGuestCallError::InvalidOffset(ptr)))?;
         let mut out = vec![0; size];
         self.memory
             .read(&mut self.store, ptr, &mut out)
-            .map_err(WasmGuestCallError::MemoryRead)?;
+            .map_err(|source| Report::new(WasmGuestCallError::MemoryRead(source)))?;
         Ok(out)
     }
 
-    async fn read_pending_emit(&mut self) -> Result<Vec<WasmEnvelope>, WasmGuestCallError> {
+    async fn read_pending_emit(&mut self) -> StackResult<Vec<WasmEnvelope>, WasmGuestCallError> {
         let mut batches = Vec::new();
         loop {
             tokio::task::consume_budget().await;
@@ -2214,16 +2234,16 @@ impl WasmBranchInstance {
             }
             if size < 0 {
                 if let Some(reason) = self.take_global_error().await? {
-                    return Err(WasmGuestCallError::GlobalError { reason });
+                    return Err(Report::new(WasmGuestCallError::GlobalError { reason }));
                 }
-                return Err(WasmGuestCallError::ErrorCode {
+                return Err(Report::new(WasmGuestCallError::ErrorCode {
                     export: "nervix_read_emit",
                     code: size,
-                });
+                }));
             }
             let emitted = self.read_guest_buffer(size).await?;
-            let batch =
-                WasmEnvelope::decode_owned(emitted).map_err(WasmGuestCallError::InvalidEmission)?;
+            let batch = WasmEnvelope::decode_owned(emitted)
+                .change_context(WasmGuestCallError::InvalidEmission)?;
             if let Some(sender) = self.store.data().emitted_batch_sender.as_ref() {
                 sender
                     .send(batch.clone())
@@ -2235,14 +2255,14 @@ impl WasmBranchInstance {
     }
 }
 
-fn define_host_functions(linker: &mut Linker<BranchStore>) -> Result<(), WasmProcessorError> {
+fn define_host_functions(linker: &mut Linker<BranchStore>) -> StackResult<(), WasmProcessorError> {
     linker
         .func_wrap(
             ENV_MODULE,
             "nervix_domain_time_nanos",
             |caller: Caller<'_, BranchStore>| caller.data().now().unix_nanos(),
         )
-        .map_err(WasmProcessorError::Link)?;
+        .map_err(|source| Report::new(WasmProcessorError::Link(source)))?;
     linker
         .func_wrap(
             ENV_MODULE,
@@ -2251,14 +2271,14 @@ fn define_host_functions(linker: &mut Linker<BranchStore>) -> Result<(), WasmPro
                 caller.data_mut().timeout_after(delay_nanos)
             },
         )
-        .map_err(WasmProcessorError::Link)?;
+        .map_err(|source| Report::new(WasmProcessorError::Link(source)))?;
     linker
         .func_wrap(
             ENV_MODULE,
             "nervix_request_state_reset",
             |mut caller: Caller<'_, BranchStore>| caller.data_mut().request_state_reset(),
         )
-        .map_err(WasmProcessorError::Link)?;
+        .map_err(|source| Report::new(WasmProcessorError::Link(source)))?;
     Ok(())
 }
 
@@ -2266,21 +2286,21 @@ fn typed_export<Params, Results>(
     store: &mut Store<BranchStore>,
     instance: &Instance,
     name: &'static str,
-) -> Result<TypedFunc<Params, Results>, WasmGuestCallError>
+) -> StackResult<TypedFunc<Params, Results>, WasmGuestCallError>
 where
     Params: wasmtime::WasmParams,
     Results: wasmtime::WasmResults,
 {
     instance
         .get_typed_func(store, name)
-        .map_err(|_| WasmGuestCallError::MissingExport(name))
+        .map_err(|_| Report::new(WasmGuestCallError::MissingExport(name)))
 }
 
 fn optional_typed_export<Params, Results>(
     store: &mut Store<BranchStore>,
     instance: &Instance,
     name: &'static str,
-) -> Result<Option<TypedFunc<Params, Results>>, WasmGuestCallError>
+) -> StackResult<Option<TypedFunc<Params, Results>>, WasmGuestCallError>
 where
     Params: wasmtime::WasmParams,
     Results: wasmtime::WasmResults,
@@ -2297,7 +2317,7 @@ where
 fn optional_global_error_exports(
     store: &mut Store<BranchStore>,
     instance: &Instance,
-) -> Result<Option<WasmGlobalErrorExports>, WasmGuestCallError> {
+) -> StackResult<Option<WasmGlobalErrorExports>, WasmGuestCallError> {
     let ptr = optional_typed_export(store, instance, "nervix_global_error_ptr")?;
     let len = optional_typed_export(store, instance, "nervix_global_error_len")?;
     let clear = optional_typed_export(store, instance, "nervix_clear_global_error")?;
@@ -2312,16 +2332,16 @@ fn optional_global_error_exports(
             } else {
                 "nervix_clear_global_error"
             };
-            Err(WasmGuestCallError::MissingExport(missing))
+            Err(Report::new(WasmGuestCallError::MissingExport(missing)))
         }
     }
 }
 
-fn ensure_success(export: &'static str, code: i32) -> Result<(), WasmGuestCallError> {
+fn ensure_success(export: &'static str, code: i32) -> StackResult<(), WasmGuestCallError> {
     if code == SUCCESS {
         Ok(())
     } else {
-        Err(WasmGuestCallError::ErrorCode { export, code })
+        Err(Report::new(WasmGuestCallError::ErrorCode { export, code }))
     }
 }
 
@@ -2989,6 +3009,16 @@ mod tests {
             .expect_err("the branch instance must not come up")
     }
 
+    fn call_failure(
+        error: &Report<WasmGuestError>,
+        operation: WasmGuestOperation,
+    ) -> &WasmGuestCallError {
+        assert_eq!(error.current_context().operation(), operation);
+        error
+            .downcast_ref::<WasmGuestCallError>()
+            .expect("a failed guest operation keeps its typed call cause")
+    }
+
     #[tokio::test]
     async fn an_application_state_rejection_carries_the_guest_reason() {
         let wasm = lifecycle_wasm(
@@ -3005,7 +3035,7 @@ mod tests {
             Some(SavedStateRejection::ApplicationState)
         );
         assert_eq!(failure.operation(), WasmGuestOperation::StateRestore);
-        assert_eq!(failure.export(), Some("nervix_load_state"));
+        assert_eq!(error.export(), Some("nervix_load_state"));
         assert!(
             matches!(
                 failure,
@@ -3042,13 +3072,10 @@ mod tests {
         assert_eq!(failure.saved_state_rejection(), None);
         assert!(
             matches!(
-                failure,
-                WasmGuestError::Failed {
-                    operation: WasmGuestOperation::StateRestore,
-                    cause: WasmGuestCallError::ErrorCode {
-                        export: "nervix_load_state",
-                        code: -1
-                    },
+                call_failure(&error, WasmGuestOperation::StateRestore),
+                WasmGuestCallError::ErrorCode {
+                    export: "nervix_load_state",
+                    code: -1
                 }
             ),
             "unexpected restore failure: {failure:?}"
@@ -3065,13 +3092,10 @@ mod tests {
         assert_eq!(failure.saved_state_rejection(), None);
         assert!(
             matches!(
-                failure,
-                WasmGuestError::Failed {
-                    operation: WasmGuestOperation::StateRestore,
-                    cause: WasmGuestCallError::Trap {
-                        export: "nervix_load_state",
-                        trap: Trap::UnreachableCodeReached
-                    },
+                call_failure(&error, WasmGuestOperation::StateRestore),
+                WasmGuestCallError::Trap {
+                    export: "nervix_load_state",
+                    trap: Trap::UnreachableCodeReached
                 }
             ),
             "unexpected restore failure: {failure:?}"
@@ -3094,7 +3118,7 @@ mod tests {
 
         let failure = error.current_context();
         assert_eq!(failure.saved_state_rejection(), None);
-        assert!(failure.is_resource_limit_exceeded());
+        assert!(error.is_resource_limit_exceeded());
         assert_eq!(failure.operation(), WasmGuestOperation::StateRestore);
     }
 
@@ -3121,14 +3145,11 @@ mod tests {
             .expect_err("a guest that cannot serialize its state must not look saved");
 
         let failure = error.current_context();
-        assert_eq!(failure.export(), Some("nervix_dump_state"));
+        assert_eq!(error.export(), Some("nervix_dump_state"));
         assert!(
             matches!(
-                failure,
-                WasmGuestError::Failed {
-                    operation: WasmGuestOperation::StateSnapshot,
-                    cause: WasmGuestCallError::GlobalError { reason },
-                } if reason == LIFECYCLE_REASON
+                call_failure(&error, WasmGuestOperation::StateSnapshot),
+                WasmGuestCallError::GlobalError { reason } if reason == LIFECYCLE_REASON
             ),
             "unexpected snapshot failure: {failure:?}"
         );
@@ -3148,14 +3169,11 @@ mod tests {
         for error in [fresh, restoring] {
             let failure = error.current_context();
             assert_eq!(failure.saved_state_rejection(), None);
-            assert_eq!(failure.export(), Some("nervix_init"));
+            assert_eq!(error.export(), Some("nervix_init"));
             assert!(
                 matches!(
-                    failure,
-                    WasmGuestError::Failed {
-                        operation: WasmGuestOperation::Initialization,
-                        cause: WasmGuestCallError::GlobalError { reason },
-                    } if reason == LIFECYCLE_REASON
+                    call_failure(&error, WasmGuestOperation::Initialization),
+                    WasmGuestCallError::GlobalError { reason } if reason == LIFECYCLE_REASON
                 ),
                 "unexpected initialization failure: {failure:?}"
             );
@@ -3295,10 +3313,7 @@ mod tests {
             .await
             .expect_err("the failing callback must be reported");
 
-        assert_eq!(
-            error.current_context().export(),
-            Some("nervix_process_batch")
-        );
+        assert_eq!(error.export(), Some("nervix_process_batch"));
         assert_eq!(
             branch.take_requested_state_reset(),
             WasmGuestStateLifetime::ResetRequested
@@ -3317,11 +3332,8 @@ mod tests {
             .await
             .expect_err("the guest returns the refusal it received");
 
-        match error.current_context() {
-            WasmGuestError::Failed {
-                operation: WasmGuestOperation::StateSnapshot,
-                cause: WasmGuestCallError::ErrorCode { export, code },
-            } => {
+        match call_failure(&error, WasmGuestOperation::StateSnapshot) {
+            WasmGuestCallError::ErrorCode { export, code } => {
                 assert_eq!(*export, "nervix_dump_state");
                 assert_eq!(*code, protocol::StateResetRequestAnswer::Refused.code());
             }
@@ -3361,11 +3373,8 @@ mod tests {
             .await
             .expect_err("oversized input should be rejected by host");
 
-        match error.current_context() {
-            WasmGuestError::Failed {
-                operation: WasmGuestOperation::BatchProcessing,
-                cause: WasmGuestCallError::GuestBufferTooLarge { size, limit },
-            } => {
+        match call_failure(&error, WasmGuestOperation::BatchProcessing) {
+            WasmGuestCallError::GuestBufferTooLarge { size, limit } => {
                 assert!(*size > 512);
                 assert_eq!(*limit, 512);
             }
@@ -3395,11 +3404,8 @@ mod tests {
             .await
             .expect_err("negative process code should be reported");
 
-        match error.current_context() {
-            WasmGuestError::Failed {
-                operation: WasmGuestOperation::BatchProcessing,
-                cause: WasmGuestCallError::ErrorCode { export, code },
-            } => {
+        match call_failure(&error, WasmGuestOperation::BatchProcessing) {
+            WasmGuestCallError::ErrorCode { export, code } => {
                 assert_eq!(*export, "nervix_process_batch");
                 assert_eq!(*code, -4);
             }
@@ -3429,13 +3435,10 @@ mod tests {
             .await
             .expect_err("negative timeout code should be reported");
 
-        match error {
-            WasmGuestError::Failed {
-                operation: WasmGuestOperation::TimeoutCallback,
-                cause: WasmGuestCallError::ErrorCode { export, code },
-            } => {
-                assert_eq!(export, "nervix_on_timeout");
-                assert_eq!(code, -5);
+        match call_failure(&error, WasmGuestOperation::TimeoutCallback) {
+            WasmGuestCallError::ErrorCode { export, code } => {
+                assert_eq!(*export, "nervix_on_timeout");
+                assert_eq!(*code, -5);
             }
             other => panic!("expected timeout guest error, got {other:?}"),
         }
@@ -3463,13 +3466,10 @@ mod tests {
             .await
             .expect_err("a guest that refuses to quiesce must be reported, not ignored");
 
-        match error {
-            WasmGuestError::Failed {
-                operation: WasmGuestOperation::QuiesceFlush,
-                cause: WasmGuestCallError::ErrorCode { export, code },
-            } => {
-                assert_eq!(export, "nervix_flush");
-                assert_eq!(code, -6);
+        match call_failure(&error, WasmGuestOperation::QuiesceFlush) {
+            WasmGuestCallError::ErrorCode { export, code } => {
+                assert_eq!(*export, "nervix_flush");
+                assert_eq!(*code, -6);
             }
             other => panic!("expected flush guest error, got {other:?}"),
         }
@@ -3543,13 +3543,10 @@ mod tests {
             .await
             .expect_err("a trapping quiesce flush must surface as a trap");
 
-        match error {
-            WasmGuestError::Failed {
-                operation: WasmGuestOperation::QuiesceFlush,
-                cause: WasmGuestCallError::Trap { export, trap },
-            } => {
-                assert_eq!(export, "nervix_flush");
-                assert_eq!(trap, Trap::UnreachableCodeReached);
+        match call_failure(&error, WasmGuestOperation::QuiesceFlush) {
+            WasmGuestCallError::Trap { export, trap } => {
+                assert_eq!(*export, "nervix_flush");
+                assert_eq!(*trap, Trap::UnreachableCodeReached);
             }
             other => panic!("expected flush trap, got {other:?}"),
         }
@@ -3603,11 +3600,8 @@ mod tests {
             "a guest that reports a global error while quiescing must not look drained",
         );
 
-        match error {
-            WasmGuestError::Failed {
-                operation: WasmGuestOperation::QuiesceFlush,
-                cause: WasmGuestCallError::GlobalError { reason },
-            } => assert_eq!(reason, "flush refused"),
+        match call_failure(&error, WasmGuestOperation::QuiesceFlush) {
+            WasmGuestCallError::GlobalError { reason } => assert_eq!(reason, "flush refused"),
             other => panic!("expected flush global error, got {other:?}"),
         }
     }
@@ -3671,11 +3665,8 @@ mod tests {
             .await
             .expect_err("a guest that cannot be quiesced must be rejected at instantiation");
 
-        match error.current_context() {
-            WasmGuestError::Failed {
-                operation: WasmGuestOperation::Instantiation,
-                cause: WasmGuestCallError::MissingExport(export),
-            } => assert_eq!(*export, "nervix_flush"),
+        match call_failure(&error, WasmGuestOperation::Instantiation) {
+            WasmGuestCallError::MissingExport(export) => assert_eq!(*export, "nervix_flush"),
             other => panic!("expected missing flush export, got {other:?}"),
         }
     }
@@ -3712,11 +3703,8 @@ mod tests {
             .await
             .expect_err("missing export should reject instantiation");
 
-        match error.current_context() {
-            WasmGuestError::Failed {
-                operation: WasmGuestOperation::Instantiation,
-                cause: WasmGuestCallError::MissingExport(export),
-            } => {
+        match call_failure(&error, WasmGuestOperation::Instantiation) {
+            WasmGuestCallError::MissingExport(export) => {
                 assert_eq!(*export, "nervix_read_emit");
             }
             other => panic!("expected missing export error, got {other:?}"),
@@ -4382,11 +4370,9 @@ mod tests {
         assert_eq!(failure.export(), Some("nervix_dump_state"));
         assert!(
             matches!(
-                &failure,
-                WasmGuestError::Failed {
-                    operation: WasmGuestOperation::StateSnapshot,
-                    cause: WasmGuestCallError::GlobalError { reason },
-                } if reason == "guest cannot serialize its state for value -400"
+                call_failure(&failure, WasmGuestOperation::StateSnapshot),
+                WasmGuestCallError::GlobalError { reason }
+                    if reason == "guest cannot serialize its state for value -400"
             ),
             "unexpected snapshot failure: {failure:?}"
         );
@@ -4425,10 +4411,15 @@ mod tests {
             .process_envelope(&input_row_batch(1, 10), test_execution_context())
             .await
             .expect("input must process");
-        owner
+        let latched = owner
             .process_envelope(&input_row_batch(-300, 20), test_execution_context())
             .await
             .expect_err("the sentinel latches the guest into error state");
+        assert!(matches!(
+            call_failure(&latched, WasmGuestOperation::BatchProcessing),
+            WasmGuestCallError::GlobalError { reason }
+                if reason == "guest error state for value -300"
+        ));
         let snapshot = owner
             .save_state(test_execution_context())
             .await
@@ -4737,6 +4728,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resetting_a_guest_clears_its_saved_computation_state() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(TEST_WASM)
+            .await
+            .expect("module must compile");
+        let context = test_execution_context();
+        let mut branch = compiled
+            .instantiate_branch(limits(), init(), context, None)
+            .await
+            .expect("branch must instantiate");
+        branch
+            .process_batch_in_context(b"one", context)
+            .await
+            .expect("batch must process");
+        assert_eq!(
+            branch
+                .save_state_in_context(context)
+                .await
+                .expect("guest state must save"),
+            1_i64.to_le_bytes()
+        );
+
+        branch
+            .reset_state_in_context(context)
+            .await
+            .expect("guest reset must succeed");
+
+        assert_eq!(
+            branch
+                .save_state_in_context(context)
+                .await
+                .expect("reset state must save"),
+            0_i64.to_le_bytes()
+        );
+    }
+
+    #[tokio::test]
     async fn emitted_batches_can_be_streamed_to_integration_owner() {
         let runtime = runtime();
         let compiled = runtime
@@ -4833,13 +4862,10 @@ mod tests {
             .expect_err("CPU-bound guest must exhaust its fuel budget");
 
         assert!(matches!(
-            error.current_context(),
-            WasmGuestError::Failed {
-                operation: WasmGuestOperation::BatchProcessing,
-                cause: WasmGuestCallError::FuelExhausted {
-                    limit,
-                    export: Some("nervix_process_batch"),
-                },
+            call_failure(&error, WasmGuestOperation::BatchProcessing),
+            WasmGuestCallError::FuelExhausted {
+                limit,
+                export: Some("nervix_process_batch"),
             } if *limit == nonzero!(1_000u64)
         ));
     }
@@ -4908,15 +4934,12 @@ mod tests {
 
         assert!(
             matches!(
-                error.current_context(),
-                WasmGuestError::Failed {
-                    operation: WasmGuestOperation::BatchProcessing,
-                    cause: WasmGuestCallError::MemoryLimitExceeded {
-                        limit: 131_072,
-                        allocated: 131_072,
-                        growth: 65_536,
-                        export: Some("nervix_process_batch"),
-                    },
+                call_failure(&error, WasmGuestOperation::BatchProcessing),
+                WasmGuestCallError::MemoryLimitExceeded {
+                    limit: 131_072,
+                    allocated: 131_072,
+                    growth: 65_536,
+                    export: Some("nervix_process_batch"),
                 }
             ),
             "unexpected growth memory error: {error:?}"
@@ -4947,15 +4970,12 @@ mod tests {
 
         assert!(
             matches!(
-                error.current_context(),
-                WasmGuestError::Failed {
-                    operation: WasmGuestOperation::Instantiation,
-                    cause: WasmGuestCallError::MemoryLimitExceeded {
-                        limit: 65_536,
-                        allocated: 65_536,
-                        growth: 65_536,
-                        export: None,
-                    },
+                call_failure(&error, WasmGuestOperation::Instantiation),
+                WasmGuestCallError::MemoryLimitExceeded {
+                    limit: 65_536,
+                    allocated: 65_536,
+                    growth: 65_536,
+                    export: None,
                 }
             ),
             "unexpected instantiation memory error: {error:?}"

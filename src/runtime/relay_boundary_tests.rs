@@ -855,7 +855,7 @@ async fn owner_ingress_touches_expiring_stream_state() {
             placement_tasks: HashMap::default(),
             relay_state_tasks: HashMap::default(),
             relay_owner_tasks: HashMap::default(),
-            clients: HashMap::default(),
+            emitter_plans: Arc::new(EmitterExecutionPlans::default()),
             tasks: Vec::new(),
         },
     );
@@ -1079,7 +1079,7 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
                 placement_tasks: HashMap::default(),
                 relay_state_tasks: HashMap::default(),
                 relay_owner_tasks: HashMap::default(),
-                clients: HashMap::default(),
+                emitter_plans: Arc::new(EmitterExecutionPlans::default()),
                 tasks: Vec::new(),
             },
         )

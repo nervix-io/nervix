@@ -108,7 +108,9 @@ return the typed `DomainClockAttachOutcome` and `DomainClockDetachOutcome`, whos
 an attachment from each refusal.
 
 Once attached, `Client::domain_clock(&domain)` returns an `AttachedDomainClock` holding the newest
-clock the session received. It answers with the same vocabulary arithmetic the cluster runs,
+clock and accepted tick the session received. `latest_tick()` gives the tick id, logical boundary,
+authority UTC observation, and serving node's logical reading; `frontier()` gives that boundary.
+It answers with the same vocabulary arithmetic the cluster runs,
 `DomainClockState::logical_time_at` and `DomainAdmissionWindow::reached`, for a UTC instant the
 caller supplies:
 
@@ -122,6 +124,9 @@ client.execute("ATTACH DOMAIN CLOCK;").await?;
 let clock = client.domain_clock(&domain).expect("the session follows this clock");
 let now = Timestamp::now();
 let logical_now = clock.logical_time_at(now)?;
+if let Some(frontier) = clock.frontier() {
+    println!("latest accepted tick boundary: {frontier}");
+}
 if let Some(window) = clock.admission_window(now)? {
     // The newest center the ingestor has reached, admitted within SKEW on either side.
     let occurred_at = window.latest_center();
@@ -130,6 +135,7 @@ if let Some(window) = clock.admission_window(now)? {
 
 match client.next_domain_clock_event().await? {
     DomainClockEvent::Observed(observed) => println!("{}", observed.clock),
+    DomainClockEvent::Ticked(ticked) => println!("tick {}", ticked.tick.tick_id),
     DomainClockEvent::Ended(ended) => println!("ended because {}", ended.reason),
     DomainClockEvent::Interrupted(gap) => println!("{} is attached again", gap.domain),
 }
@@ -144,10 +150,11 @@ host whose UTC is offset from the cluster's receives answers shifted by that off
 the rate.
 
 `Client::next_domain_clock_event()` reports what the session receives after each attach reply:
-`Observed` with a changed clock, `Ended` when the server ended the attachment because the domain no
-longer exists on the serving node, and `Interrupted` when the session holding an attachment ended.
-Events are coalesced per domain, so a caller that reads late receives the newest clock of each
-domain rather than every change in between. After a reconnect, the client attaches every followed
+`Observed` with a changed clock, `Ticked` with the newest accepted progress, `Ended` when the server
+ended the attachment because the domain no longer exists on the serving node, and `Interrupted`
+when the session holding an attachment ended. Events are coalesced per domain: an unread state
+arrives before a tick of its generation, while older unread ticks are replaced by the newest one.
+After a reconnect, the client attaches every followed
 clock again on the new session before any other request, and the clock that attachment reports
 follows the interruption as an `Observed` event; changes in between are not reported. Waiting for
 the next event reopens a closed session when a followed clock waits for it. A detach, or an end,

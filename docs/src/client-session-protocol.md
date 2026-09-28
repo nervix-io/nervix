@@ -307,6 +307,18 @@ lane; nothing about the refused request was admitted. A request identity that is
 is refused with `DuplicateRequestId`, and that refusal necessarily names the same identity as the
 request still in flight.
 
+Choice lookups on the concurrent lane return typed values for structured client controls. A domain
+dependency selects internal schemas, branches, relays, VHOSTs, signaling protocols,
+JSON/CBOR/AVRO wire schemas, or resource catalogs; a domain and relay reference select relay
+fields; a domain and resource reference select completed resource versions. Wire-schema targets
+have separate discriminants, so a codec cannot
+mistake a JSON wire schema for a CBOR or AVRO schema with the same name. A completed-version value
+is either an explicit number or `LATEST`, not a label to parse. Resource catalogs include resources
+staged earlier in the attached transaction, while version choices include completed uploads only.
+The cursor binds the selected candidate set and its definitions; a changed context returns
+`StaleContext` instead of continuing an earlier page. [Sessions](./sessions.md#structured-choices)
+owns the complete lookup contract and the server's transaction-aware resolution.
+
 ```mermaid
 flowchart LR
     Client -- ClientMessage --> Decode[Verify and decode]
@@ -331,6 +343,9 @@ and takes subscription frames only while the control lane is empty. A reply, inc
 the unsubscribe that stops a subscription, therefore never waits behind rows the client has not
 read. The lanes never reorder what the transport already took: a frame handed to the transport stays
 ahead of every frame queued after it.
+An attached clock's tick holds one replaceable control slot per domain. Its delivery task can
+overwrite the slot while the lane is full or after queueing it, until the transport takes it; a
+changed clock state withdraws a superseded tick still in that slot.
 
 Because every frame is at most the frame limit, the two lanes bound what a session holds for a
 client that reads slowly. Backpressure reaches the client's requests too: a rejection or a
@@ -417,11 +432,10 @@ several statements to the transaction the session holds. Outside a transaction a
 statement. `DESCRIBE TRANSACTION` and `SHOW TRANSACTIONS` read beside the transaction and are always
 sent alone.
 
-Two refusals do not always arrive with their own disposition. A reference the history no longer
-holds, and a conflict that the replicated state machine rather than the leader's own check detects
-in a race, are refused as `RequestFailed` whose message says the reference expired or names the
-conflict; [Exact Recovery](#exact-recovery) explains when each happens. Nothing was admitted for the
-request in either case.
+The leader's reference check and replicated admission return the same typed dispositions. A
+reference the history no longer holds returns `ExecutionReferenceExpired`; a conflicting request
+detected during replicated admission returns `ExecutionReferenceConflict` with the conflict kind.
+Neither refusal admits the request. [Exact Recovery](#exact-recovery) explains the retry fence.
 
 ### Four Boundaries
 
@@ -522,8 +536,8 @@ A reference names one request forever. Repeating it with a different owner, doma
 position, or content, checked in that order, is refused as `ExecutionReferenceConflict` naming what
 differed, and nothing about the new request is admitted. A session bound to a transaction other than
 the one the reference was recorded against is refused as a position conflict. When two leaders race
-and the replicated state machine, rather than the leader's own check, detects the conflict, the
-refusal arrives as `RequestFailed` with a message that names the conflict.
+and the replicated state machine detects the conflict after the leader's local check, the refusal
+carries the same typed `ExecutionReferenceConflict` and kind.
 
 ### Bounded History And Expired Identities
 
@@ -533,11 +547,8 @@ capacity failure, and admitted work is never evicted to make room. A finished re
 the retry validity after the command finished, 15 minutes by default, and then reclaimed; an
 applying record is never reclaimed. Reclamation advances a durable, monotonic retry fence first, so
 a reclaimed reference, repeated at any later time, fails the admission check and never starts its
-effect again. That refusal carries the typed `ExecutionReferenceExpired` only while the history
-still holds a tombstone for the reference, which it keeps only for a reference created ahead of the
-leader's clock. Every other reclaimed reference is refused as `RequestFailed` whose message says the
-reference has expired. In both cases the command was not executed again, and the outcome of the
-original attempt can no longer be recovered.
+effect again. The refusal is `ExecutionReferenceExpired` whether the history still holds a
+tombstone or only the retry fence. The outcome of the original attempt can no longer be recovered.
 
 ### Why Aggregate State Proves Nothing
 
@@ -787,7 +798,7 @@ stateDiagram-v2
     [*] --> Prepared: one execution reference, domain, expected position, and preview captured
     Prepared --> Sent: new request identity
     Sent --> Completed: CommandCompleted
-    Sent --> Failed: RequestFailed, conflict, expired, or taken over
+    Sent --> Failed: RequestFailed, ExecutionReferenceConflict, ExecutionReferenceExpired, or TransactionTakenOver
     Sent --> Stale: PreviewStale
     Sent --> Sent: LeaderRedirect or OutcomeUnknown, repeated under the same reference
     Sent --> Reattaching: TransactionDetached
@@ -993,29 +1004,43 @@ A session can follow the clock of a domain. `ATTACH DOMAIN CLOCK;` and `DETACH D
 the server as `AttachDomainClockRequest` and `DetachDomainClockRequest` naming the active domain,
 and the reply to an attach carries the `START` generation and the clock as the serving node has it
 installed. [Sessions](./sessions.md#domain-clock-attachment) owns the public contract and [Domain
-Clock](./domain-clock.md#session-observation) owns how an installation maps to the observed clock;
-this section places the attachment in the protocol.
+Clock](./domain-clock.md#session-observation) owns how an installation and accepted progress become
+observations; this section places the attachment in the protocol.
 
 An attachment is not a subscription, and the protocol keeps the two apart end to end. It reads no
 relay, takes no interest lease, and has no name or generation of its own: it is keyed by its domain,
 so a session follows each domain clock at most once, and every frame about it names the domain. Its
-frames travel on the control lane rather than the subscription lane, because a clock frame is a
-small replaceable observation rather than data that must wait its turn behind rows. Attach and
-detach run on the ordered lane, in order with the session's commands. The attach reply is queued
-before delivery starts, so the clock it carries precedes every `DomainClockObserved` frame, and
-detach stops delivery before its reply is queued, so nothing about the domain follows that reply. A
-frame waits for room on the control lane instead of buffering, and changes published meanwhile
-collapse into the newest installation, so a slow client holds at most one pending frame per attached
-domain and never receives an older clock after a newer one. When the serving node no longer has the
-domain, `DomainClockAttachmentEnded` with reason `DomainRemoved` is the last frame about the
-attachment.
+frames travel on the control lane rather than the subscription lane. Attach and detach run on the
+ordered lane, in order with the session's commands. The attach reply is queued before delivery
+starts, so its state precedes every frame. If the node already holds a tick of that installed
+generation, its newest tick is the first frame after the reply. Each changed installation arrives
+as `DomainClockObserved` before any tick of its generation. A committed unassigned authority
+produces uninstalled and then the same mapping on reassignment; a direct authority move retains the
+mapping and produces no state frame.
+
+`DomainClockTicked` carries the domain, generation, nonzero tick id, logical boundary, the
+authority's UTC observation, and the serving node's logical reading from a clock snapshot taken
+when the frame is built. The three timestamps use signed Unix nanoseconds. The serving reading lets
+a client anchor itself even when its local UTC differs from the cluster's. The runtime publishes
+only accepted progress, fenced by generation and authority; a late attachment reads the newest
+accepted tick without waiting for another one. Tick ids can skip when the authority coalesces
+missed periods or a slow client's pending tick is replaced.
+
+A state frame waits for room on the control lane, and changes published meanwhile collapse into
+the newest installation. A tick occupies one replaceable slot per attached domain, including while
+the control lane is full, so a slow client never accumulates a tick backlog. Delivery withdraws a
+pending tick when state changes and rechecks installation before selecting another. Detach stops
+delivery before its reply is queued, so nothing about the domain follows that reply. When the
+serving node no longer has the domain, `DomainClockAttachmentEnded` with reason `DomainRemoved` is
+the last frame about the attachment.
 
 Every node serves attachments from its own installation, which it derives from the same committed
-revision as every other node, so an attachment adds no interconnect traffic and survives nothing: it
-ends silently with its session. The Rust client attaches every clock it followed again on its next
-session and reports the gap as an interruption. The web console does not follow domain clocks, and
-the shared binding does not expose them. Both requests are refused while the session holds a
-transaction, like every other session-local request.
+revision as every other node, and from progress it already accepted, so an attachment adds no
+interconnect traffic and survives nothing: it ends silently with its session. The Rust client
+attaches every clock it followed again on its next session, clears its previous tick, and reports
+the gap as an interruption. The web console does not follow domain clocks, and the shared binding
+does not expose them. Both requests are refused while the session holds a transaction, like every
+other session-local request.
 
 ## Resource Uploads
 

@@ -486,7 +486,7 @@ test-coverage: tests-deps
 # Rewrite lcov.info from the profiles the last coverage recipe collected, over the sources of every
 # workspace package, so crate lines the server's tests executed are measured as CI measures them.
 coverage-report-workspace:
-    cargo llvm-cov report --workspace --lcov --output-path lcov.info
+    cargo llvm-cov report --package 'nervix-*' --lcov --output-path lcov.info
 
 # Measure changed server lines against its unit tests and selected Cucumber features while iterating.
 # The full `test-coverage` recipe remains the CI gate for workspace coverage and CRAP.
@@ -501,6 +501,13 @@ test-coverage-feature +features: tests-deps
             --test scenarios -- --input "${feature}" --concurrency 1
     done
     cargo llvm-cov report --lcov --output-path lcov.info
+
+# Add client and vocabulary tests to an existing coverage profile without clearing server and
+# public-scenario coverage collected by `test-coverage-feature`.
+test-coverage-client-packages:
+    cargo llvm-cov --no-report --all-targets \
+        --package nervix-client-core --package nervix-client-wire \
+        --package nervix-models --package nervix-cli --package nervix-web-console
 
 # Measure browser and CLI binary tests together with their public session scenarios.
 test-coverage-clients: tests-deps
@@ -554,7 +561,7 @@ coverage-visual-create output="target/visual-create.lcov": tests-deps
         --package nervix-models --package nervix-client-wire --package nervix-nspl
     cargo llvm-cov --no-report --bin nervix-web-console --package nervix-web-console
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
-    for feature in visual_create_schema visual_create_relay; do
+    for feature in visual_create_schema visual_create_relay visual_create_codec visual_create_client_endpoint; do
         cargo llvm-cov --no-report --features testing --package nervix-server \
             --test scenarios -- --input "tests/features/web-console/${feature}.feature" \
             --concurrency 1 --retry 0
@@ -599,6 +606,8 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
         --package nervix-connector-rabbitmq \
         --package nervix-connector-syslog \
         --package nervix-connector-websockets \
+        --package nervix-connector-clickhouse \
+        --package nervix-connector-sqs \
         --package nervix-interconnect
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
     run_scenario() {
@@ -615,6 +624,8 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
     run_scenario tests/features/runtime/websocket_client_ingestion.feature 'Websocket client ingestor connects'
     run_scenario tests/features/runtime/websocket_client_tls_resource_mounts.feature 'Websocket client keeps'
     run_scenario tests/features/runtime/websocket_dns_resolution.feature 'WebSocket clients reconnect'
+    run_scenario tests/features/runtime/clickhouse_dns_resolution.feature 'ClickHouse'
+    run_scenario tests/features/runtime/sqs_dns_resolution.feature 'SQS'
     just coverage-dns-clients-report {{ quote(output) }}
 
 # Export the profiles collected by `coverage-dns-clients` without rebuilding its test binaries.
@@ -631,6 +642,8 @@ coverage-dns-clients-report output="target/dns-clients.lcov":
         --package nervix-connector-rabbitmq \
         --package nervix-connector-syslog \
         --package nervix-connector-websockets \
+        --package nervix-connector-clickhouse \
+        --package nervix-connector-sqs \
         --package nervix-interconnect
 
 # Measure the Shuttle-only test paths, which production-mode workspace coverage cannot compile.
@@ -686,8 +699,7 @@ coverage-turmoil output:
     cargo llvm-cov report --no-default-ignore-filename-regex \
         --lcov --output-path {{ quote(output) }}
 
-# Run every Criterion suite. Extra arguments are forwarded to Criterion, so CI can use
-# `just bench --test` to execute each benchmark body once without recording runner timings.
+# Run every Criterion suite with the release profile. Extra arguments are forwarded to Criterion.
 # The server benches link the console the server serves, so the console is built first rather than
 # left to whatever ran before them.
 bench *args: build-web-console
@@ -696,6 +708,14 @@ bench *args: build-web-console
     cargo bench --package nervix-server --bench wasm_checkpoint --features benchmarks -- {{ args }}
     cargo bench --package nervix-columnar-json --bench json_encode -- {{ args }}
     cargo bench --package nervix-vm --bench vm -- {{ args }}
+
+# Exercise every Criterion body once without spending CI's smoke-test budget on release codegen.
+bench-smoke: build-web-console
+    cargo bench --profile dev --package nervix-server --bench relay_interaction --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-server --bench subscription_row_encoding --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-server --bench wasm_checkpoint --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
+    cargo bench --profile dev --package nervix-vm --bench vm -- --test
 
 # Measure one batch of schemaful JSON rows, including the escape classification made once per
 # Arrow batch. The suite compares the column writer against serde's per-row reference encoding.
@@ -1009,6 +1029,27 @@ validate-dns-dependencies:
             exit 1
         fi
     done
+    # ClickHouse and SQS hand the node resolver to their drivers' own DNS hooks, Hyper's connector
+    # and Smithy's HTTP client, even when built without the server's feature graph, and complete
+    # TLS with AWS-LC alone.
+    for package in nervix-connector-clickhouse nervix-connector-sqs; do
+        graph="$(cargo tree --package "${package}" --edges normal --format '{p} {f}' --prefix none)"
+        if ! rg -q '^nervix-dns v' <<< "${graph}" || \
+            ! rg -q '^hickory-resolver v0\.26\.[0-9]+ .*tokio' <<< "${graph}"; then
+            echo "${package} lacks the node resolver for its outbound connections" >&2
+            exit 1
+        fi
+        if rg -q '^rustls v[^ ]+ (.*,)?ring(,|$)' <<< "${graph}"; then
+            echo "${package} selected Rustls's Ring provider" >&2
+            exit 1
+        fi
+    done
+    graph="$(cargo tree --package nervix-connector-sqs --edges normal --format '{p} {f}' --prefix none)"
+    if ! rg -q '^aws-smithy-http-client v[^ ]+ (.*,)?rustls-aws-lc(,|$)' <<< "${graph}" || \
+        rg -q '^aws-smithy-http-client v[^ ]+ (.*,)?(rustls-ring|legacy-rustls-ring|s2n-tls)(,|$)' <<< "${graph}"; then
+        echo "nervix-connector-sqs does not select AWS-LC alone for its Smithy HTTP client" >&2
+        exit 1
+    fi
     # MongoDB keeps its driver's Hickory SRV and TXT discovery; the driver still resolves the
     # addresses it connects to through Tokio.
     graph="$(cargo tree --package nervix-connector-mongodb --edges normal --format '{p} {f}' --prefix none)"
