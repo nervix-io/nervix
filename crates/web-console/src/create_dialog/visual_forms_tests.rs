@@ -1,4 +1,4 @@
-//! Native rendering checks for the codec and signaling browser forms.
+//! Native rendering and typed-choice checks for the visual create forms.
 //!
 //! Layer: edges.
 //!
@@ -14,13 +14,348 @@ use nervix_models::{
 };
 
 use super::{
-    ChoiceControl, CreateDialog, CreateDialogProps, CreateKind, CreateSignals,
+    ChoiceControl, CreateDialog, CreateDialogProps, CreateDispatch, CreateKind, CreateSignals,
+    client_draft::{ClientConfigDraft, ClientTransport},
     codec_draft::{CodecFormatDraft, CodecFormatKind},
     open_form_controls,
     resource_binding_draft::ConfigEntryDraft,
     select_choice, selected_choice,
     signaling_draft::{SignalingFormatDraft, SignalingFormatKind, SignalingStepDraft},
 };
+
+#[test]
+fn client_vhost_and_endpoint_forms_render_every_transport_and_typed_reference_control() {
+    super::super::initialize_test_executor();
+    Owner::new().with(|| {
+        let scope = DomainName::parse("orders").assured("valid domain");
+        let active_domain = RwSignal::new(Some(scope.clone()));
+        let connection_state = RwSignal::new(super::super::ConsoleConnectionState::Waiting);
+        let generation = RwSignal::new(1);
+        let request_tx = RwSignal::new(None);
+        let signals = CreateSignals::new();
+        let render = || {
+            let dialog = CreateDialog(
+                CreateDialogProps::builder()
+                    .signals(signals)
+                    .active_domain(active_domain)
+                    .connection_state(connection_state)
+                    .session_generation(generation)
+                    .request_tx(request_tx)
+                    .submit(|_, _, _| {})
+                    .build(),
+            );
+            any_spawner::Executor::poll_local();
+            dialog.to_html()
+        };
+
+        signals.open(
+            CreateKind::Client,
+            Some(scope.clone()),
+            "global-create-button",
+        );
+        let client = render();
+        for transport in ClientTransport::ALL {
+            assert!(client.contains(&format!("data-type=\"{}\"", transport.key())));
+        }
+        signals.client.update(|draft| {
+            draft.set_transport(ClientTransport::Redis);
+            draft.mount_enabled = true;
+        });
+        let pooled = render();
+        assert!(pooled.contains("create-client-pool-min"));
+        assert!(pooled.contains("create-client-pool-max"));
+        assert!(pooled.contains("create-client-resource"));
+        assert!(pooled.contains("create-client-version"));
+        signals.client.update(|draft| {
+            draft.config.push(ClientConfigDraft {
+                key: "password".to_string(),
+                value: "hidden-value".to_string(),
+                secret: false,
+            });
+        });
+        let configured = render();
+        assert!(configured.contains("create-client-config-entry"));
+        assert!(configured.contains("type=\"password\""));
+        assert!(configured.contains("create-client-config-secret"));
+        signals
+            .client
+            .update(|draft| draft.set_transport(ClientTransport::Websockets));
+        assert!(render().contains("create-client-signaling"));
+        assert!(!render().contains("create-client-config-entry"));
+        signals.client.update(|draft| {
+            draft.select_signaling(&node(ModelKind::SignalingProtocol, "handshake"));
+        });
+        assert!(render().contains("create-client-signaling-clear"));
+
+        signals.open(
+            CreateKind::Vhost,
+            Some(scope.clone()),
+            "global-create-button",
+        );
+        assert!(open_form_controls(signals, CreateKind::Vhost).is_empty());
+        signals.vhost.update(|draft| draft.tls_enabled = true);
+        let vhost = render();
+        assert!(vhost.contains("create-vhost-hostname"));
+        assert!(vhost.contains("create-vhost-resource"));
+        assert!(vhost.contains("create-vhost-version"));
+
+        signals.open(CreateKind::Endpoint, Some(scope), "global-create-button");
+        signals
+            .endpoint
+            .update(|draft| draft.select_type(nervix_models::EndpointType::Websockets));
+        let endpoint = render();
+        assert!(endpoint.contains("create-endpoint-vhost"));
+        assert!(endpoint.contains("create-endpoint-signaling"));
+        signals.endpoint.update(|draft| {
+            draft.select_signaling(&node(ModelKind::SignalingProtocol, "handshake"));
+        });
+        assert!(render().contains("create-endpoint-signaling-clear"));
+    });
+}
+
+#[test]
+fn client_vhost_and_endpoint_submissions_use_current_models_and_mask_secrets() {
+    Owner::new().with(|| {
+        let scope = DomainName::parse("orders").assured("valid domain");
+        let signals = CreateSignals::new();
+
+        signals.open(
+            CreateKind::Client,
+            Some(scope.clone()),
+            "global-create-button",
+        );
+        signals.client.update(|draft| {
+            draft.name = "external_http".to_string();
+            draft.set_transport(ClientTransport::Http);
+            draft.config.push(ClientConfigDraft {
+                key: "password".to_string(),
+                value: "private-value".to_string(),
+                secret: false,
+            });
+        });
+        let client = signals.submission().assured("client draft is complete");
+        assert!(!client.presentation.contains("private-value"));
+        let CreateDispatch::Command(command) = client.dispatch else {
+            panic!("client creation must use the command dispatcher");
+        };
+        assert!(command.query.contains("private-value"));
+        assert_eq!(command.domain, Some(scope.clone()));
+
+        signals.open(
+            CreateKind::Vhost,
+            Some(scope.clone()),
+            "global-create-button",
+        );
+        signals.vhost.update(|draft| {
+            draft.name = "external_edge".to_string();
+            draft.hostnames = vec!["api.example.com".to_string()];
+        });
+        let vhost = signals.submission().assured("VHOST draft is complete");
+        assert!(
+            vhost
+                .presentation
+                .contains("CREATE VHOST external_edge api.example.com")
+        );
+
+        signals.open(CreateKind::Endpoint, Some(scope), "global-create-button");
+        signals.endpoint.update(|draft| {
+            draft.name = "external_path".to_string();
+            draft.select_vhost(&node(ModelKind::Vhost, "external_edge"));
+            draft.path = "/external".to_string();
+            draft.select_type(nervix_models::EndpointType::Http);
+        });
+        let endpoint = signals.submission().assured("endpoint draft is complete");
+        assert!(
+            endpoint.presentation.contains(
+                "CREATE ENDPOINT external_path ON external_edge PATH '/external' TYPE HTTP"
+            )
+        );
+    });
+}
+
+#[test]
+fn client_vhost_and_endpoint_choices_keep_their_typed_dependencies() {
+    Owner::new().with(|| {
+        let scope = DomainName::parse("orders").assured("valid domain");
+        let elsewhere = DomainName::parse("elsewhere").assured("valid domain");
+        let resource =
+            ChoiceValue::Resource(ResourceName::parse("bundle").assured("valid resource"));
+        let version = ChoiceValue::ResourceVersion(RequestedResourceVersion::Number(2));
+        let protocol = ChoiceValue::Model(node(ModelKind::SignalingProtocol, "handshake"));
+        let vhost = ChoiceValue::Model(node(ModelKind::Vhost, "edge"));
+        let signals = CreateSignals::new();
+        for (control, kind) in [
+            (ChoiceControl::ClientResource, CreateKind::Client),
+            (ChoiceControl::ClientVersion, CreateKind::Client),
+            (ChoiceControl::ClientSignaling, CreateKind::Client),
+            (ChoiceControl::VhostResource, CreateKind::Vhost),
+            (ChoiceControl::VhostVersion, CreateKind::Vhost),
+            (ChoiceControl::EndpointVhost, CreateKind::Endpoint),
+            (ChoiceControl::EndpointSignaling, CreateKind::Endpoint),
+        ] {
+            assert_eq!(control.form(), kind);
+        }
+        assert_eq!(CreateKind::Endpoint.wire_format(), None);
+
+        signals.open(
+            CreateKind::Client,
+            Some(scope.clone()),
+            "global-create-button",
+        );
+        signals.client.update(|draft| {
+            draft.set_transport(ClientTransport::Websockets);
+            draft.mount_enabled = true;
+        });
+        assert_eq!(
+            signals.choice_query(ChoiceControl::ClientVersion).err(),
+            Some("Select a resource to list its completed versions")
+        );
+        select_choice(signals, ChoiceControl::ClientResource, resource.clone());
+        select_choice(signals, ChoiceControl::ClientVersion, version.clone());
+        select_choice(signals, ChoiceControl::ClientSignaling, protocol.clone());
+        for (control, value) in [
+            (ChoiceControl::ClientResource, &resource),
+            (ChoiceControl::ClientVersion, &version),
+            (ChoiceControl::ClientSignaling, &protocol),
+        ] {
+            assert!(selected_choice(signals, control, value));
+        }
+        assert_eq!(
+            signals
+                .choice_query(ChoiceControl::ClientSignaling)
+                .assured("signaling choices are scoped")
+                .target,
+            ChoiceTarget::SignalingProtocol
+        );
+        assert_eq!(
+            signals
+                .choice_query(ChoiceControl::ClientVersion)
+                .assured("selected resource is a typed dependency")
+                .dependencies[1]
+                .value,
+            resource
+        );
+        assert_eq!(
+            open_form_controls(signals, CreateKind::Client),
+            [
+                ChoiceControl::ClientResource,
+                ChoiceControl::ClientVersion,
+                ChoiceControl::ClientSignaling,
+            ]
+        );
+        signals.change_scope(Some(elsewhere.clone()));
+        assert!(!selected_choice(
+            signals,
+            ChoiceControl::ClientResource,
+            &resource
+        ));
+        assert!(!selected_choice(
+            signals,
+            ChoiceControl::ClientVersion,
+            &version
+        ));
+        assert!(!selected_choice(
+            signals,
+            ChoiceControl::ClientSignaling,
+            &protocol
+        ));
+
+        signals.open(
+            CreateKind::Vhost,
+            Some(scope.clone()),
+            "global-create-button",
+        );
+        signals.vhost.update(|draft| draft.tls_enabled = true);
+        select_choice(signals, ChoiceControl::VhostResource, resource.clone());
+        select_choice(signals, ChoiceControl::VhostVersion, version.clone());
+        assert!(selected_choice(
+            signals,
+            ChoiceControl::VhostResource,
+            &resource
+        ));
+        assert!(selected_choice(
+            signals,
+            ChoiceControl::VhostVersion,
+            &version
+        ));
+        assert_eq!(
+            signals
+                .choice_query(ChoiceControl::VhostVersion)
+                .assured("TLS resource is a typed dependency")
+                .dependencies[1]
+                .value,
+            resource
+        );
+        assert_eq!(
+            open_form_controls(signals, CreateKind::Vhost),
+            [ChoiceControl::VhostResource, ChoiceControl::VhostVersion]
+        );
+        signals.change_scope(Some(elsewhere.clone()));
+        assert!(!selected_choice(
+            signals,
+            ChoiceControl::VhostResource,
+            &resource
+        ));
+        assert!(!selected_choice(
+            signals,
+            ChoiceControl::VhostVersion,
+            &version
+        ));
+
+        signals.open(
+            CreateKind::Endpoint,
+            Some(scope.clone()),
+            "global-create-button",
+        );
+        signals.endpoint.update(|draft| {
+            draft.select_type(nervix_models::EndpointType::Websockets);
+        });
+        select_choice(signals, ChoiceControl::EndpointVhost, vhost.clone());
+        select_choice(signals, ChoiceControl::EndpointSignaling, protocol.clone());
+        assert!(selected_choice(
+            signals,
+            ChoiceControl::EndpointVhost,
+            &vhost
+        ));
+        assert!(selected_choice(
+            signals,
+            ChoiceControl::EndpointSignaling,
+            &protocol
+        ));
+        assert_eq!(
+            signals
+                .choice_query(ChoiceControl::EndpointVhost)
+                .assured("VHOST choices are scoped")
+                .target,
+            ChoiceTarget::Vhost
+        );
+        assert_eq!(
+            signals
+                .choice_query(ChoiceControl::EndpointSignaling)
+                .assured("signaling choices are scoped")
+                .target,
+            ChoiceTarget::SignalingProtocol
+        );
+        assert_eq!(
+            open_form_controls(signals, CreateKind::Endpoint),
+            [
+                ChoiceControl::EndpointVhost,
+                ChoiceControl::EndpointSignaling
+            ]
+        );
+        signals.change_scope(Some(elsewhere));
+        assert!(!selected_choice(
+            signals,
+            ChoiceControl::EndpointVhost,
+            &vhost
+        ));
+        assert!(!selected_choice(
+            signals,
+            ChoiceControl::EndpointSignaling,
+            &protocol
+        ));
+    });
+}
 
 fn node(kind: ModelKind, name: &str) -> NodeRef {
     NodeRef::new(

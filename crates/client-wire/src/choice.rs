@@ -37,6 +37,8 @@ pub enum ChoiceTarget {
     WireAvroSchema,
     Resource,
     CompletedResourceVersion,
+    Vhost,
+    SignalingProtocol,
 }
 
 wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
@@ -51,6 +53,8 @@ wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
     WireAvroSchema,
     Resource,
     CompletedResourceVersion,
+    Vhost,
+    SignalingProtocol,
 });
 
 /// Whether a domain clock advances with wall time.

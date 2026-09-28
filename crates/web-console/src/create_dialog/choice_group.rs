@@ -185,6 +185,43 @@ pub(super) fn selected_choice(
             .binding()
             .and_then(|binding| binding.version.as_ref())
             .is_some_and(|selected| selected.is_current() && selected.name() == version),
+        (ChoiceControl::ClientResource, ChoiceValue::Resource(resource)) => signals
+            .client
+            .get()
+            .mount
+            .resource
+            .as_ref()
+            .is_some_and(|selected| selected.is_current() && selected.name() == resource),
+        (ChoiceControl::ClientVersion, ChoiceValue::ResourceVersion(version)) => signals
+            .client
+            .get()
+            .mount
+            .version
+            .as_ref()
+            .is_some_and(|selected| selected.is_current() && selected.name() == version),
+        (ChoiceControl::ClientSignaling, ChoiceValue::Model(node)) => {
+            signals.client.get().selects_signaling(node)
+        }
+        (ChoiceControl::VhostResource, ChoiceValue::Resource(resource)) => signals
+            .vhost
+            .get()
+            .tls
+            .resource
+            .as_ref()
+            .is_some_and(|selected| selected.is_current() && selected.name() == resource),
+        (ChoiceControl::VhostVersion, ChoiceValue::ResourceVersion(version)) => signals
+            .vhost
+            .get()
+            .tls
+            .version
+            .as_ref()
+            .is_some_and(|selected| selected.is_current() && selected.name() == version),
+        (ChoiceControl::EndpointVhost, ChoiceValue::Model(node)) => {
+            signals.endpoint.get().selects_vhost(node)
+        }
+        (ChoiceControl::EndpointSignaling, ChoiceValue::Model(node)) => {
+            signals.endpoint.get().selects_signaling(node)
+        }
         // A field reference is inserted into the filter rather than held as a selection.
         _ => false,
     }
@@ -256,6 +293,37 @@ pub(super) fn select_choice(signals: CreateSignals, control: ChoiceControl, valu
                     binding.select_version(version);
                 }
             });
+        }
+        (ChoiceControl::ClientResource, ChoiceValue::Resource(resource)) => {
+            signals
+                .client
+                .update(|draft| draft.mount.select_resource(resource));
+        }
+        (ChoiceControl::ClientVersion, ChoiceValue::ResourceVersion(version)) => {
+            signals
+                .client
+                .update(|draft| draft.mount.select_version(version));
+        }
+        (ChoiceControl::ClientSignaling, ChoiceValue::Model(node)) => {
+            signals.client.update(|draft| draft.select_signaling(&node));
+        }
+        (ChoiceControl::VhostResource, ChoiceValue::Resource(resource)) => {
+            signals
+                .vhost
+                .update(|draft| draft.tls.select_resource(resource));
+        }
+        (ChoiceControl::VhostVersion, ChoiceValue::ResourceVersion(version)) => {
+            signals
+                .vhost
+                .update(|draft| draft.tls.select_version(version));
+        }
+        (ChoiceControl::EndpointVhost, ChoiceValue::Model(node)) => {
+            signals.endpoint.update(|draft| draft.select_vhost(&node));
+        }
+        (ChoiceControl::EndpointSignaling, ChoiceValue::Model(node)) => {
+            signals
+                .endpoint
+                .update(|draft| draft.select_signaling(&node));
         }
         _ => {}
     }

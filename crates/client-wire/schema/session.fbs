@@ -141,7 +141,11 @@ enum ChoiceTarget : ubyte {
   WireAvroSchema,
   Resource,
   /// Completed versions of a resource. Requires a domain and then a resource reference.
-  CompletedResourceVersion
+  CompletedResourceVersion,
+  /// Configured VHOSTs in a domain.
+  Vhost,
+  /// Configured signaling protocols in a domain.
+  SignalingProtocol
 }
 
 enum DomainPaceChoice : ubyte {

@@ -56,8 +56,9 @@ domains, non-relay graph nodes, and relays across the current cluster graph.
 
 ## Creating Entities From Forms
 
-The top bar's **Create** menu opens keyboard-accessible forms for domains, users, and resource
-catalogs. The resource group in the sidebar also provides a contextual create action. A form keeps
+The top bar's **Create** menu opens keyboard-accessible forms for domains, users, resource
+catalogs, schemas, codecs, signaling protocols, clients, VHOSTs, endpoints, relays, branches, and
+subscriptions. The resource group in the sidebar also provides a contextual create action. A form keeps
 its unfinished draft when it closes, restores focus to the action that opened it, reports
 validation and server failures inline, and shows the canonical NSPL statement before submission.
 The domain form supports paced and unpaced clocks, period and skew for a paced clock, placement
@@ -143,6 +144,29 @@ failure matchers, an optional capture when there is exactly one matcher, and ACC
 also offers connection-wide ACCEPT DATA, failure matchers, and the handshake timeout. Its canonical
 preview and command preserve the order and raw program text. Both forms use the existing durable
 command dispatcher and retain rejected drafts, transaction positions, and reconnect handling.
+
+A client form offers every current transport as a typed selection. Connector `CONFIG` remains an
+ordered key/value editor whose keys and values are passed to the connector unchanged; the form
+does not provision external services, topics, buckets, tables, or other objects. Redis, Postgres,
+MySQL, and MongoDB clients require explicit minimum and maximum pool sizes. A client may mount an
+existing resource and a completed version. A WebSocket client may select a configured signaling
+protocol. Switching transports clears transport-specific configuration and signaling choices;
+changing the resource or captured domain invalidates its version selection. `LATEST` remains a
+request until the server applies the statement, when the stored binding becomes an exact version.
+Configuration rows can be marked secret, and common credential keys and URLs with passwords are
+treated as secret automatically. Secret inputs use password controls. The preview and the command
+line history mask those values, while the transmitted command keeps the actual values.
+
+A VHOST form accepts ordered hostnames and may bind TLS to an existing resource and completed
+version. A TLS VHOST installs its certificate in the HTTPS listener of every live node at command
+completion, including nodes that do not lead or run the domain's graph. The certificate bundle
+must already be uploaded; missing or invalid material follows the existing command failure path
+and leaves the draft editable. An endpoint form selects an existing VHOST, requires a path, and
+chooses HTTP or WEBSOCKETS. A WebSocket endpoint may also select a signaling protocol. VHOST and
+signaling lists are typed, searchable, paged, and scoped to the captured domain, including the
+attached transaction prefix. An upstream selection or domain change refreshes dependent choices;
+stale selections must be chosen again before submission. A completed VHOST or endpoint is usable
+immediately by later commands through the same session.
 
 ## The Execution Graph
 

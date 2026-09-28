@@ -9299,12 +9299,20 @@ mod tests {
             ChoiceControl::SubscriptionRelay => nervix_client_wire::ChoiceTarget::Relay,
             ChoiceControl::SubscriptionField => nervix_client_wire::ChoiceTarget::RelayField,
             ChoiceControl::CodecWireSchema => nervix_client_wire::ChoiceTarget::WireJsonSchema,
-            ChoiceControl::CodecResource | ChoiceControl::SignalingResource => {
-                nervix_client_wire::ChoiceTarget::Resource
-            }
-            ChoiceControl::CodecVersion | ChoiceControl::SignalingVersion => {
+            ChoiceControl::CodecResource
+            | ChoiceControl::SignalingResource
+            | ChoiceControl::ClientResource
+            | ChoiceControl::VhostResource => nervix_client_wire::ChoiceTarget::Resource,
+            ChoiceControl::CodecVersion
+            | ChoiceControl::SignalingVersion
+            | ChoiceControl::ClientVersion
+            | ChoiceControl::VhostVersion => {
                 nervix_client_wire::ChoiceTarget::CompletedResourceVersion
             }
+            ChoiceControl::ClientSignaling | ChoiceControl::EndpointSignaling => {
+                nervix_client_wire::ChoiceTarget::SignalingProtocol
+            }
+            ChoiceControl::EndpointVhost => nervix_client_wire::ChoiceTarget::Vhost,
         };
         ConsoleRequest::Choice {
             request: ChoiceLookupRequest::new(target, Vec::new(), String::new()),

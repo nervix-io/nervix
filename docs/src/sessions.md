@@ -228,9 +228,10 @@ they neither enter the command admission gate nor change the transaction queue.
 `ChoiceLookupRequest` resolves values for structured client controls without constructing partial
 NSPL. It carries a semantic target, typed dependent selections, search text, a page size from 1
 through 100, and an optional page cursor. Targets resolve domain pace, placement policy, and a
-domain's internal schemas, each wire-schema format, branches, relays, relay fields, resource
-catalogs, and completed resource versions. Placement requires exactly one domain-pace dependency.
-Schema, wire-schema, branch, relay, and resource lookups require exactly one domain reference. A
+domain's internal schemas, each wire-schema format, branches, relays, VHOSTs, signaling protocols,
+relay fields, resource catalogs, and completed resource versions. Placement requires exactly one
+domain-pace dependency. Schema, wire-schema, branch, relay, VHOST, signaling-protocol, and resource
+lookups require exactly one domain reference. A
 relay-field lookup requires that domain reference followed by a relay model reference, and returns
 the fields of the relay's records in the order its schema declares them; the other configuration
 lookups order their models by name. A completed-version lookup requires the domain followed by a
@@ -254,7 +255,8 @@ label. `Ready` with no values is an ordinary empty match; `MissingContext`, `Sta
 A page cursor binds the target, every dependent value, search text, application revision, and the
 ordered typed candidate set including its presentation metadata. Changing any part returns
 `StaleContext` instead of continuing through a different result. Schema, branch, and relay pages
-also bind the canonical definition of each matching model, and relay-field pages bind the relay
+also bind the canonical definition of each matching model, as do VHOST and signaling-protocol
+pages. Relay-field pages bind the relay
 and its schema, so a change within an attached transaction invalidates a cursor even when names and
 field counts stay the same. Wire-schema pages bind their canonical definitions; resource pages
 bind names and completed-version counts, and version pages bind the offered version values. Choice
