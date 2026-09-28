@@ -428,11 +428,10 @@ several statements to the transaction the session holds. Outside a transaction a
 statement. `DESCRIBE TRANSACTION` and `SHOW TRANSACTIONS` read beside the transaction and are always
 sent alone.
 
-Two refusals do not always arrive with their own disposition. A reference the history no longer
-holds, and a conflict that the replicated state machine rather than the leader's own check detects
-in a race, are refused as `RequestFailed` whose message says the reference expired or names the
-conflict; [Exact Recovery](#exact-recovery) explains when each happens. Nothing was admitted for the
-request in either case.
+The leader's reference check and replicated admission return the same typed dispositions. A
+reference the history no longer holds returns `ExecutionReferenceExpired`; a conflicting request
+detected during replicated admission returns `ExecutionReferenceConflict` with the conflict kind.
+Neither refusal admits the request. [Exact Recovery](#exact-recovery) explains the retry fence.
 
 ### Four Boundaries
 
@@ -533,8 +532,8 @@ A reference names one request forever. Repeating it with a different owner, doma
 position, or content, checked in that order, is refused as `ExecutionReferenceConflict` naming what
 differed, and nothing about the new request is admitted. A session bound to a transaction other than
 the one the reference was recorded against is refused as a position conflict. When two leaders race
-and the replicated state machine, rather than the leader's own check, detects the conflict, the
-refusal arrives as `RequestFailed` with a message that names the conflict.
+and the replicated state machine detects the conflict after the leader's local check, the refusal
+carries the same typed `ExecutionReferenceConflict` and kind.
 
 ### Bounded History And Expired Identities
 
@@ -544,11 +543,8 @@ capacity failure, and admitted work is never evicted to make room. A finished re
 the retry validity after the command finished, 15 minutes by default, and then reclaimed; an
 applying record is never reclaimed. Reclamation advances a durable, monotonic retry fence first, so
 a reclaimed reference, repeated at any later time, fails the admission check and never starts its
-effect again. That refusal carries the typed `ExecutionReferenceExpired` only while the history
-still holds a tombstone for the reference, which it keeps only for a reference created ahead of the
-leader's clock. Every other reclaimed reference is refused as `RequestFailed` whose message says the
-reference has expired. In both cases the command was not executed again, and the outcome of the
-original attempt can no longer be recovered.
+effect again. The refusal is `ExecutionReferenceExpired` whether the history still holds a
+tombstone or only the retry fence. The outcome of the original attempt can no longer be recovered.
 
 ### Why Aggregate State Proves Nothing
 
@@ -789,7 +785,7 @@ stateDiagram-v2
     [*] --> Prepared: one execution reference, domain, expected position, and preview captured
     Prepared --> Sent: new request identity
     Sent --> Completed: CommandCompleted
-    Sent --> Failed: RequestFailed, conflict, expired, or taken over
+    Sent --> Failed: RequestFailed, ExecutionReferenceConflict, ExecutionReferenceExpired, or TransactionTakenOver
     Sent --> Stale: PreviewStale
     Sent --> Sent: LeaderRedirect or OutcomeUnknown, repeated under the same reference
     Sent --> Reattaching: TransactionDetached
