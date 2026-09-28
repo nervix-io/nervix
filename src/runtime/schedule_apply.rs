@@ -725,6 +725,12 @@ impl Runtime {
     ) -> Result<(), RuntimeError> {
         let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
             .map_err(|report| RuntimeError::activation_plan(domain, report))?;
+        let error_specs =
+            MessageErrorRouteSpecs::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
+                .map_err(|reason| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to plan message-error routes: {reason:#}"),
+                })?;
         let resource_plans =
             ResourceExecutionPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
                 .map_err(|report| RuntimeError::BuildDomainExecution {
@@ -1535,6 +1541,30 @@ impl Runtime {
                 domain: domain.as_str().to_string(),
                 reason: format!("{error:#}"),
             })?;
+        let message_error_plans = {
+            let execution = self.inner.executions.get(domain).ok_or_else(|| {
+                RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: "domain execution is unavailable for message-error binding".to_string(),
+                }
+            })?;
+            Arc::new(
+                BoundMessageErrorRoutes::bind(
+                    error_specs,
+                    MessageErrorRouteBindingContext {
+                        relay_registries: &execution.relay_registries,
+                        relay_services: &execution.relay_services,
+                        materialized_stream_specs: &execution.materialized_stream_specs,
+                        lookups: &execution.lookups,
+                        udfs: &execution.udfs,
+                    },
+                )
+                .map_err(|reason| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to bind message-error routes: {reason:#}"),
+                })?,
+            )
+        };
         let mut routing_published = false;
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
             if let Some(local_node_id) = local_node_id {
@@ -1563,6 +1593,7 @@ impl Runtime {
             execution.schedule = schedule;
             execution.entrypoints = entrypoints;
             execution.emitter_plans = emitter_plans;
+            execution.message_error_plans = message_error_plans;
             execution.routing.processor_plans = processor_plans;
             execution.routing.publish();
             routing_published = true;
@@ -1596,6 +1627,12 @@ impl Runtime {
             })?;
         let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
             .map_err(|report| RuntimeError::activation_plan(domain, report))?;
+        let error_specs =
+            MessageErrorRouteSpecs::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
+                .map_err(|reason| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to plan message-error routes: {reason:#}"),
+                })?;
         let entrypoints = Arc::new(
             EntrypointPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
                 .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
@@ -1619,9 +1656,26 @@ impl Runtime {
         self.install_state_identities(&schedule);
         self.apply_dynamic_model_updates(domain, updates).await?;
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
+            let message_error_plans = Arc::new(
+                BoundMessageErrorRoutes::bind(
+                    error_specs,
+                    MessageErrorRouteBindingContext {
+                        relay_registries: &execution.relay_registries,
+                        relay_services: &execution.relay_services,
+                        materialized_stream_specs: &execution.materialized_stream_specs,
+                        lookups: &execution.lookups,
+                        udfs: &execution.udfs,
+                    },
+                )
+                .map_err(|reason| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to bind message-error routes: {reason:#}"),
+                })?,
+            );
             execution.schedule = schedule;
             execution.entrypoints = entrypoints;
             execution.emitter_plans = emitter_plans;
+            execution.message_error_plans = message_error_plans;
             execution.routing.processor_plans = processor_plans;
             execution.routing.publish();
         } else {

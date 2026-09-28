@@ -17,6 +17,7 @@ mod entrypoint_plan;
 mod error;
 mod graph;
 mod ingestor_plan;
+mod message_error_plan;
 mod mutation;
 mod placement;
 mod processor_plan;
@@ -54,6 +55,11 @@ pub(crate) use ingestor_plan::{
     NatsIngestorStartPlan, PrometheusIngestorStartPlan, PulsarIngestorStartPlan,
     RabbitMqIngestorStartPlan, RedisPubSubIngestorStartPlan, SourceStartPlan, SqsIngestorStartPlan,
     SyslogIngestorStartPlan, WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan,
+};
+#[cfg(test)]
+pub(crate) use message_error_plan::MessageErrorRouteSpec;
+pub(crate) use message_error_plan::{
+    MessageErrorCompileSchemas, MessageErrorRouteKey, MessageErrorRouteSpecs,
 };
 pub(crate) use mutation::{PlannedMutations, RegistryMutation};
 pub(crate) use placement::{

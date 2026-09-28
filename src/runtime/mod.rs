@@ -11,12 +11,9 @@
 //! - **Must not know.** NSPL text, transactions, the gRPC surface or consensus. It is told what to
 //!   run and runs it.
 //!
-//! Generator, lookup, WASM, emitter, UDF compilation, relay transition, relay state replication
-//! and message-error paths still read Models directly instead of consuming plans, and `just
-//! ratchet` counts those remaining violations. Processor tasks consume published typed plans, and
-//! ingestors and reingestors start from the entrypoint plans each domain installs with its
-//! schedule. This module also holds the connectors themselves rather than hosting them; moving each
-//! integration into its connector crate closes that violation.
+//! Schedule coordination and one state-replication path still read Models directly; `just ratchet`
+//! counts the remaining direct matches. Processor tasks, entrypoints, emitters and message-error
+//! delivery consume prepared typed plans. This module also holds connector host composition.
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -65,9 +62,9 @@ use nervix_interconnect::{
     Transport, WasmStateResetTarget,
 };
 use nervix_models::{
-    AckMode, Assignment, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClientConfigEntry,
-    ClientName, ClientResourceMount, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
-    CodecName, CommandExecutionReference, CoordinationIdentity, CorrelationTimeoutAction,
+    AckMode, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClientConfigEntry, ClientName,
+    ClientResourceMount, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule, CodecName,
+    CommandExecutionReference, CoordinationIdentity, CorrelationTimeoutAction,
     CorrelatorMatchPolicy, CreateRelay, DomainClockAuthority, DomainConfig, DomainName,
     DomainNodeRef, DomainSchedule, DomainState, EmitterName, EndpointName, EndpointType,
     ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName,
@@ -76,12 +73,11 @@ use nervix_models::{
     LookupName, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation,
     MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName, NodeRef, OwnershipStateComponent,
     OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
-    ProcessorOutput, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName, RetryPolicy,
-    RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes, SchemaFingerprint,
-    SignalingProtocolName, SignalingWireFormat, StructuredMessageError, SubscriptionName,
-    Timestamp, WasmCheckpointInspection, WasmRejectedStatePolicy, WasmSavedStateRejection,
-    WasmStateGeneration, WasmStateResetScope,
+    RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
+    ResolvedBranching, ResourceId, ResourceName, RetryPolicy, RouteConstruction, ScheduledModel,
+    ScheduledNode, ScheduledNodes, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
+    StructuredMessageError, SubscriptionName, Timestamp, WasmCheckpointInspection,
+    WasmRejectedStatePolicy, WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
 };
 #[cfg(test)]
 use nervix_models::{
@@ -141,6 +137,8 @@ use triomphe::Arc;
 use upon::Engine as TemplateEngine;
 
 #[cfg(test)]
+use crate::registry::MessageErrorRouteSpec;
+#[cfg(test)]
 use crate::runtime_schema::test_runtime_row;
 use crate::{
     ConfiguredFaultInjection, cluster,
@@ -160,7 +158,8 @@ use crate::{
         EndpointIngestorStartPlan, EntrypointPlanError, EntrypointPlans, GeneratorExecutionPlan,
         GeneratorRoutePlan, HttpIngestorStartPlan, IngestorSpec, IngestorStartPlan,
         KafkaDomainOffsetPlacement, KafkaIngestorStartPlan, KafkaOffsetPlan, LookupResourcePlan,
-        LoweredConstruction, MqttIngestorStartPlan, NatsIngestorStartPlan, PlannedCodec,
+        LoweredConstruction, MessageErrorCompileSchemas, MessageErrorRouteKey,
+        MessageErrorRouteSpecs, MqttIngestorStartPlan, NatsIngestorStartPlan, PlannedCodec,
         PlannedCodecWireFormat, PlannedEntryRoute, PlannedRouteBranch, PlannedSignalingProtocol,
         PrometheusIngestorStartPlan, PulsarIngestorStartPlan, RabbitMqIngestorStartPlan,
         RedisPubSubIngestorStartPlan, ReingestorInputPlan, ReingestorPlan, ResourceExecutionPlans,
@@ -234,6 +233,7 @@ mod materialized_snapshot;
 mod materialized_state;
 mod message_error;
 mod message_error_delivery;
+mod message_error_plan;
 mod node;
 mod node_settings;
 mod observability;
@@ -420,14 +420,16 @@ use materialized_state::{
     ReplicatedMaterializedRelayState,
 };
 use message_error::{
-    MessageErrorCompileSchemas, MessageErrorFailure, MessageErrorHandling,
-    MessageErrorSourceContext, SingleRecordFilterMapOutcome, captured_partial_output,
-    finalized_partial_output, invalid_output_fields, planned_structured_message_error,
-    structured_message_error, vm_partial_output_row_to_runtime_batch,
+    MessageErrorFailure, MessageErrorHandling, MessageErrorSourceContext,
+    SingleRecordFilterMapOutcome, captured_partial_output, finalized_partial_output,
+    invalid_output_fields, planned_structured_message_error, structured_message_error,
+    vm_partial_output_row_to_runtime_batch,
 };
 use message_error_delivery::{
-    MessageErrorDelivery, MessageErrorRouteKey, MessageErrorRouteRuntime, MessageErrorRouteTarget,
-    matching_message_error_output,
+    MessageErrorDelivery, MessageErrorRouteRuntime, MessageErrorRouteTarget,
+};
+use message_error_plan::{
+    BoundMessageErrorRoute, BoundMessageErrorRoutes, MessageErrorRouteBindingContext,
 };
 use nervix_connector_kafka::KafkaOffsetPosition;
 use nervix_models::{DeduplicatorName, ReingestorName};

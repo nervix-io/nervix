@@ -123,6 +123,8 @@ pub(super) struct DomainExecution {
     pub(super) entrypoints: Arc<EntrypointPlans>,
     /// The sink, source-edge and expression plans decided from `schedule` for every emitter.
     pub(super) emitter_plans: Arc<EmitterExecutionPlans>,
+    /// Fully bound error routes installed as one revision before failed records can use them.
+    pub(super) message_error_plans: Arc<BoundMessageErrorRoutes>,
     pub(super) branched_entrypoints: HashMap<ModelName, Vec<Arc<IngestorRouteRuntime>>>,
     pub(super) endpoint_routes: HashMap<EndpointName, EndpointRoute>,
     pub(super) node_tasks: HashMap<NodeRef, ScheduledNodeTask>,
@@ -615,6 +617,31 @@ impl Runtime {
             domain: domain.as_str().to_string(),
             reason: format!("failed to bind published processor plans: {reason:#}"),
         })?;
+        let error_specs = MessageErrorRouteSpecs::from_scheduled_nodes(
+            domain,
+            &scheduled_node_map,
+            &activation_plan,
+        )
+        .map_err(|reason| RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason: format!("failed to plan message-error routes: {reason:#}"),
+        })?;
+        let message_error_plans = Arc::new(
+            BoundMessageErrorRoutes::bind(
+                error_specs,
+                MessageErrorRouteBindingContext {
+                    relay_registries: &relay_registries,
+                    relay_services: &relay_services,
+                    materialized_stream_specs: &materialized_stream_specs,
+                    lookups: &lookup_runtimes,
+                    udfs: &udf_executor,
+                },
+            )
+            .map_err(|reason| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!("failed to bind message-error routes: {reason:#}"),
+            })?,
+        );
 
         for (node_spec, inputs) in processor_input_specs {
             let entity = NodeRef {
@@ -731,6 +758,7 @@ impl Runtime {
                     },
                 ),
                 entrypoints,
+                message_error_plans,
                 branched_entrypoints,
                 endpoint_routes,
                 node_tasks,

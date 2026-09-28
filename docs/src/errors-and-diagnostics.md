@@ -277,6 +277,16 @@ of the internal report. The route may inspect the eligible original input, its c
 materialized-state snapshot, and an all-optional `partial_output` of construction completed before
 failure. An error handler whose own construction fails does not recursively invoke itself.
 
+Before a domain execution or replacement becomes active, the registry selects each DLQ route and
+resolves its source, partial-output and destination schemas, branch declarations and flush
+contract, then lowers its ordered SET assignments. The runtime binds that program, lookups, state
+and UDFs once for that installed revision. Missing inputs, codecs or relays fail planning;
+missing runtime relay services, invalid flush settings or a failed VM compilation fail binding
+with the owning node and DLQ relay. A failed record uses the installed plan and never reads the
+scheduled Model or compiles its handler. If unavailable, it reports the delivery failure and does
+not acknowledge the source record. Replacing a buffered route starts a task for the new bound plan and
+drains the earlier task, preserving the earlier task's pending acknowledgements.
+
 A batch payload's rejection becomes one message error per member, each a copy of the sink's
 structured error: the members share its reference, so an operator can see that they failed
 together, while each keeps its own occurrence time and branch. A sink answer that breaks the write

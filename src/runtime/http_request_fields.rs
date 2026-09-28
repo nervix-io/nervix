@@ -974,7 +974,7 @@ mod tests {
     }
 
     fn sink(method: &str, path: &str, header_writes: &str) -> HttpSinkTestPlan {
-        use nervix_models::AssignmentTarget;
+        use nervix_models::{Assignment, AssignmentTarget};
 
         let construction = RouteConstruction {
             assignments: vec![
