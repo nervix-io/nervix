@@ -240,8 +240,12 @@ pub(super) enum BoundIngestorInput {
         codec: Arc<CompiledCodec>,
         source: SourceStartPlan,
     },
-    /// Batches producers submit, which already carry the plan's schema.
-    Client(ClientIngestorStartPlan),
+    /// Batches producers submit, which already carry the plan's schema, and the `START`
+    /// generation of the execution the ingestor was bound in.
+    Client {
+        plan: ClientIngestorStartPlan,
+        generation: u64,
+    },
 }
 
 impl BoundIngestorInput {
@@ -249,7 +253,7 @@ impl BoundIngestorInput {
     pub(super) fn schema(&self) -> Arc<CompiledSchema> {
         match self {
             Self::Transport { codec, .. } => codec.schema(),
-            Self::Client(plan) => plan.schema.clone(),
+            Self::Client { plan, .. } => plan.schema.clone(),
         }
     }
 }

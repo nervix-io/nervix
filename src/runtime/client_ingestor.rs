@@ -13,9 +13,9 @@
 //!
 //! Each client ingestor this node executes has one endpoint task. It owns every attachment, the
 //! batches each queued, the round-robin order among them, and how many admitted batches still
-//! await their acknowledgement. Nothing else mutates that state, so nothing locks it: producers,
-//! the admission worker, acknowledgement watchers and lifecycle changes all reach it through its
-//! command channel, in the order they sent their commands.
+//! await their acknowledgement, which it awaits itself. Nothing else mutates that state, so nothing
+//! locks it: producers, the admission worker, the quiesce watch and lifecycle changes all reach it
+//! through its command channel, in the order they sent their commands.
 //!
 //! The endpoint task outlives one execution of its ingestor. An alteration that restarts the
 //! ingestor without changing its endpoint contract finds the same producers attached once the new
@@ -35,6 +35,7 @@ use std::num::NonZeroU32;
 use std::sync::atomic::AtomicU64 as BudgetBytes;
 
 use bytes::Bytes;
+use futures_util::{future::BoxFuture, stream::FuturesUnordered};
 use indexmap::IndexMap;
 use nervix_connector::physical_time::actual_utc_now;
 use nervix_models::{
@@ -365,12 +366,6 @@ enum EndpointCommand {
     Uninstall,
     Intake(ClientIntakeState),
     Admission(AdmissionReport),
-    Resolved {
-        attachment: ClientAttachmentId,
-        submission: ClientSubmissionId,
-        outcome: ClientSubmissionOutcome,
-        detail: Option<String>,
-    },
     End {
         reason: ClientProducerEndReason,
         done: oneshot::Sender<()>,
@@ -526,8 +521,9 @@ struct Endpoint {
     domain: DomainName,
     ingestor: IngestorName,
     commands: mpsc::UnboundedReceiver<EndpointCommand>,
-    /// Handed to the workers and watchers that report back to this task.
-    reports: mpsc::WeakUnboundedSender<EndpointCommand>,
+    /// The acknowledgement of every admitted batch, awaited by this task among its commands, so
+    /// an ending endpoint leaves no task behind.
+    acknowledgements: FuturesUnordered<BoxFuture<'static, ResolvedAcknowledgement>>,
     execution: Option<Arc<ClientExecution>>,
     intake: ClientIntakeState,
     attachments: IndexMap<ClientAttachmentId, Attachment, RandomState>,
@@ -537,8 +533,6 @@ struct Endpoint {
     window_used: usize,
     /// The batch handed to the worker and not reported yet.
     in_worker: Option<WorkerBatch>,
-    /// Cancelled when this task ends, which stops every acknowledgement watcher it started.
-    ended: CancellationToken,
     series: ClientIngestorSeries,
     gauges: Arc<PublishedClientGauges>,
     /// The counts last published, so a command that changes none of them publishes nothing.
@@ -654,6 +648,7 @@ impl Runtime {
         &self,
         ingestor: &IngestorSpec,
         plan: &ClientIngestorStartPlan,
+        generation: u64,
         quiesce: Arc<IngestorQuiesceControl>,
         dependencies: IngestorDependencies,
     ) {
@@ -672,10 +667,6 @@ impl Runtime {
         self.prepare_ingestor_readiness(domain, &ingestor.name, NonZeroU64::MIN);
         let (shutdown_tx, _) = watch::channel(false);
         let (jobs, job_receiver) = mpsc::channel(1);
-        let generation = match self.inner.executions.get(domain) {
-            Some(execution) => execution.start_version,
-            None => 0,
-        };
         let execution = Arc::new(ClientExecution {
             contract: plan.contract,
             generation,
@@ -699,17 +690,6 @@ impl Runtime {
             trackers: self.ingestor_ack_root_trackers(domain, &ingestor.name),
             ack_timeout: plan.policy.ack_timeout,
         };
-        let worker = tokio::spawn(run_admission_worker(
-            intake,
-            job_receiver,
-            commands.downgrade(),
-            shutdown_tx.subscribe(),
-        ));
-        let watcher = tokio::spawn(watch_client_intake(
-            quiesce,
-            commands.downgrade(),
-            shutdown_tx.subscribe(),
-        ));
         if commands.send(EndpointCommand::Install(execution)).is_err() {
             debug!(
                 domain = domain.as_str(),
@@ -717,6 +697,22 @@ impl Runtime {
                 "a client ingestor's endpoint ended while its execution was installed"
             );
         }
+        // Both start after the installation was sent, so the endpoint applies it before the
+        // intake watch's first report and before any admission report of the new worker.
+        let worker = AdmissionWorker {
+            intake,
+            mailbox: WorkerMailbox {
+                jobs: job_receiver,
+                reports: commands.clone(),
+                shutdown: shutdown_tx.subscribe(),
+            },
+        };
+        let worker = tokio::spawn(worker.run());
+        let watcher = tokio::spawn(watch_client_intake(
+            quiesce,
+            commands.clone(),
+            shutdown_tx.subscribe(),
+        ));
         self.mark_ingestor_instance_ready(domain, &ingestor.name, 0);
         info!(
             domain = domain.as_str(),
@@ -752,14 +748,13 @@ impl Runtime {
             domain: domain.clone(),
             ingestor: ingestor.clone(),
             commands: receiver,
-            reports: commands.downgrade(),
+            acknowledgements: FuturesUnordered::new(),
             execution: None,
             intake: ClientIntakeState::Suspended,
             attachments: IndexMap::with_hasher(RandomState::default()),
             cursor: 0,
             window_used: 0,
             in_worker: None,
-            ended: CancellationToken::new(),
             series: self.inner.metrics.client_ingestor_series(domain, ingestor),
             gauges: gauges.clone(),
             published: ClientIngestorGauges::default(),
@@ -904,8 +899,35 @@ impl Runtime {
 
 impl Endpoint {
     async fn run(mut self) {
-        while let Some(command) = self.commands.recv().await {
+        /// What the task takes next.
+        enum Next {
+            Resolved(ResolvedAcknowledgement),
+            Command(Option<EndpointCommand>),
+        }
+
+        loop {
             tokio::task::consume_budget().await;
+            // A resolution frees a slot of the window, so it is taken before further commands.
+            let next = tokio::select! {
+                biased;
+                Some(resolved) = self.acknowledgements.next() => Next::Resolved(resolved),
+                command = self.commands.recv() => Next::Command(command),
+            };
+            let command = match next {
+                Next::Resolved(resolved) => {
+                    self.resolved(resolved);
+                    self.pump();
+                    self.publish_gauges();
+                    continue;
+                }
+                Next::Command(Some(command)) => command,
+                Next::Command(None) => {
+                    // Every command sender is gone: the node is shutting down and ended no
+                    // producer itself.
+                    self.end(ClientProducerEndReason::ShuttingDown);
+                    return;
+                }
+            };
             match command {
                 EndpointCommand::Attach(attach) => self.attach(attach),
                 EndpointCommand::Submit {
@@ -919,12 +941,6 @@ impl Endpoint {
                 EndpointCommand::Uninstall => self.uninstall(),
                 EndpointCommand::Intake(intake) => self.set_intake(intake),
                 EndpointCommand::Admission(report) => self.admission(report),
-                EndpointCommand::Resolved {
-                    attachment,
-                    submission,
-                    outcome,
-                    detail,
-                } => self.resolved(attachment, submission, outcome, detail),
                 EndpointCommand::End { reason, done } => {
                     self.end(reason);
                     if done.send(()).is_err() {
@@ -936,8 +952,6 @@ impl Endpoint {
             self.pump();
             self.publish_gauges();
         }
-        // Every command sender is gone: the node is shutting down and ended no producer itself.
-        self.end(ClientProducerEndReason::ShuttingDown);
     }
 
     fn attach(&mut self, attach: AttachCommand) {
@@ -1136,22 +1150,26 @@ impl Endpoint {
         for EndedAttachment { attachment, reason } in ended {
             self.end_attachment(attachment, reason);
         }
-        self.refuse_lost_job();
+        self.abandon_interrupted_job();
         self.execution = Some(execution);
-        // The new execution's intake watch reports its state before any batch is handed over.
+        // The new execution's intake watch starts after this installation was sent, so its first
+        // report, which opens admission, is applied after this.
         self.set_intake(ClientIntakeState::Suspended);
     }
 
     fn uninstall(&mut self) {
-        // The worker reports every batch it took before its task ends, and the task is joined
-        // before this command is sent, so a batch still held here never reached it.
-        self.refuse_lost_job();
+        self.abandon_interrupted_job();
         self.execution = None;
         self.set_intake(ClientIntakeState::Suspended);
     }
 
-    /// Answers the batch handed to a worker that stopped before it took it.
-    fn refuse_lost_job(&mut self) {
+    /// Answers the batch handed to a worker that never reported it.
+    ///
+    /// A stopping worker reports every batch it took and refuses the one it was handed and never
+    /// took, and its task is joined before the execution is uninstalled. A batch still held here
+    /// was therefore taken by a worker that was aborted when its stop outlasted the grace period,
+    /// possibly while dispatching it, so whether any of it entered the graph is unknown.
+    fn abandon_interrupted_job(&mut self) {
         let Some(WorkerBatch {
             attachment,
             submission,
@@ -1166,7 +1184,7 @@ impl Endpoint {
         self.answer_outstanding(
             attachment,
             submission,
-            ClientSubmissionOutcome::NotAdmitted(ClientSubmissionRefusal::Suspended),
+            ClientSubmissionOutcome::OutcomeUnknown(ClientOutcomeUncertainty::Interrupted),
             None,
         );
     }
@@ -1225,18 +1243,22 @@ impl Endpoint {
         }
     }
 
-    fn resolved(
-        &mut self,
-        attachment: ClientAttachmentId,
-        submission: ClientSubmissionId,
-        outcome: ClientSubmissionOutcome,
-        detail: Option<String>,
-    ) {
+    fn resolved(&mut self, resolved: ResolvedAcknowledgement) {
+        let ResolvedAcknowledgement {
+            attachment,
+            submission,
+            acknowledgement,
+        } = resolved;
         self.window_used = self
             .window_used
             .checked_sub(1)
             .verified("an admitted batch holds one slot of the window until it is resolved");
-        self.answer_outstanding(attachment, submission, outcome, detail);
+        self.answer_outstanding(
+            attachment,
+            submission,
+            acknowledgement.outcome,
+            acknowledgement.detail,
+        );
     }
 
     /// Answers a batch an attachment holds outstanding, if the attachment still holds it.
@@ -1261,34 +1283,23 @@ impl Endpoint {
         self.release_if_closed(attachment);
     }
 
+    /// Awaits an admitted batch's acknowledgement among this task's commands.
     fn watch_acknowledgement(
-        &self,
+        &mut self,
         attachment: ClientAttachmentId,
         submission: ClientSubmissionId,
         completion: AckCompletion,
         ack_timeout: Duration,
     ) {
-        let reports = self.reports.clone();
-        let ended = self.ended.clone();
-        tokio::spawn(async move {
-            let resolution = tokio::select! {
-                biased;
-                () = ended.cancelled() => return,
-                resolution = await_client_acknowledgement(completion, ack_timeout) => resolution,
-            };
-            let Some(reports) = reports.upgrade() else {
-                return;
-            };
-            let command = EndpointCommand::Resolved {
+        let resolution = async move {
+            let acknowledgement = await_client_acknowledgement(completion, ack_timeout).await;
+            ResolvedAcknowledgement {
                 attachment,
                 submission,
-                outcome: resolution.outcome,
-                detail: resolution.detail,
-            };
-            reports
-                .send(command)
-                .means_shutdown("client ingestor endpoint");
-        });
+                acknowledgement,
+            }
+        };
+        self.acknowledgements.push(Box::pin(resolution));
     }
 
     /// Hands the worker the next batch, taking the attachments in turn, while the execution admits,
@@ -1380,7 +1391,9 @@ impl Endpoint {
     }
 
     fn end(&mut self, reason: ClientProducerEndReason) {
-        self.ended.cancel();
+        // Every admitted batch is answered below as of unknown outcome, so its acknowledgement
+        // is no longer awaited.
+        self.acknowledgements.clear();
         let attachments = std::mem::take(&mut self.attachments);
         if !attachments.is_empty() {
             info!(
@@ -1458,6 +1471,13 @@ struct ClientAcknowledgement {
     detail: Option<String>,
 }
 
+/// The resolved acknowledgement of one admitted batch, and the batch it answers.
+struct ResolvedAcknowledgement {
+    attachment: ClientAttachmentId,
+    submission: ClientSubmissionId,
+    acknowledgement: ClientAcknowledgement,
+}
+
 /// Waits for an admitted batch's ACK root. The timeout counts the time without progress, so a
 /// batch whose downstream work keeps reporting that it is alive does not time out.
 async fn await_client_acknowledgement(
@@ -1517,20 +1537,17 @@ fn bounded_detail(mut detail: String) -> String {
 /// admitted, starting with the state at installation.
 async fn watch_client_intake(
     quiesce: Arc<IngestorQuiesceControl>,
-    reports: mpsc::WeakUnboundedSender<EndpointCommand>,
+    reports: mpsc::UnboundedSender<EndpointCommand>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut observation = quiesce.observation();
     loop {
         tokio::task::consume_budget().await;
         let state = quiesce.client_intake_state();
-        let Some(sender) = reports.upgrade() else {
-            return;
-        };
-        if sender.send(EndpointCommand::Intake(state)).is_err() {
+        if reports.send(EndpointCommand::Intake(state)).is_err() {
+            // The endpoint ended, and nothing it served is left to tell.
             return;
         }
-        drop(sender);
         tokio::select! {
             biased;
             changed = shutdown.changed() => {
@@ -1543,43 +1560,89 @@ async fn watch_client_intake(
     }
 }
 
-/// Admits the batches one execution's endpoint hands over, one at a time, until the execution
-/// stops. Every batch it takes is reported, admitted or refused, before its task ends.
-async fn run_admission_worker(
+/// The task that admits the batches one execution's endpoint hands over, one at a time.
+struct AdmissionWorker {
     intake: ClientIntake,
-    mut jobs: mpsc::Receiver<AdmissionJob>,
-    reports: mpsc::WeakUnboundedSender<EndpointCommand>,
-    mut shutdown: watch::Receiver<bool>,
-) {
-    loop {
-        tokio::task::consume_budget().await;
-        let job = tokio::select! {
-            biased;
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    return;
-                }
-                continue;
+    mailbox: WorkerMailbox,
+}
+
+impl AdmissionWorker {
+    /// Admits batches until the execution stops, reporting every batch it takes, admitted or
+    /// refused.
+    async fn run(mut self) {
+        loop {
+            tokio::task::consume_budget().await;
+            let Some(job) = self.mailbox.next_job().await else {
+                return;
+            };
+            let attachment = job.attachment;
+            let submission = job.submission;
+            let result = self.intake.admit(job).await;
+            let reported = self.mailbox.report(AdmissionReport {
+                attachment,
+                submission,
+                result,
+            });
+            if !reported {
+                return;
             }
-            job = jobs.recv() => job,
-        };
-        let Some(job) = job else {
-            return;
-        };
-        let attachment = job.attachment;
-        let submission = job.submission;
-        let result = intake.admit(job).await;
-        let Some(reports) = reports.upgrade() else {
-            return;
-        };
-        let report = EndpointCommand::Admission(AdmissionReport {
-            attachment,
-            submission,
-            result,
-        });
-        if reports.send(report).is_err() {
-            return;
         }
+    }
+}
+
+/// The admission worker's side of its endpoint: the batch handed over, one at a time, the reports
+/// sent back, and the signal that stops the execution.
+struct WorkerMailbox {
+    jobs: mpsc::Receiver<AdmissionJob>,
+    reports: mpsc::UnboundedSender<EndpointCommand>,
+    shutdown: watch::Receiver<bool>,
+}
+
+impl WorkerMailbox {
+    /// The next batch handed over, or `None` once the execution stops. A stopping worker first
+    /// refuses the batch it was handed and never took.
+    async fn next_job(&mut self) -> Option<AdmissionJob> {
+        loop {
+            tokio::task::consume_budget().await;
+            tokio::select! {
+                biased;
+                changed = self.shutdown.changed() => {
+                    if changed.is_err() || *self.shutdown.borrow() {
+                        self.refuse_untaken_jobs();
+                        return None;
+                    }
+                }
+                job = self.jobs.recv() => return job,
+            }
+        }
+    }
+
+    /// Refuses the batch the endpoint handed over and the stopping worker never took: nothing of
+    /// it was dispatched. Closing the channel first makes the endpoint refuse any later batch
+    /// itself.
+    fn refuse_untaken_jobs(&mut self) {
+        self.jobs.close();
+        while let Ok(job) = self.jobs.try_recv() {
+            let reported = self.report(AdmissionReport {
+                attachment: job.attachment,
+                submission: job.submission,
+                result: AdmissionResult::Refused {
+                    refusal: ClientSubmissionRefusal::Suspended,
+                    detail: None,
+                },
+            });
+            if !reported {
+                return;
+            }
+        }
+    }
+
+    /// Reports one batch to the endpoint. `false` means the endpoint ended, and it answered every
+    /// batch it held when it did.
+    fn report(&self, report: AdmissionReport) -> bool {
+        self.reports
+            .send(EndpointCommand::Admission(report))
+            .is_ok()
     }
 }
 

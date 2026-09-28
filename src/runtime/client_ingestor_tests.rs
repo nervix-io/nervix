@@ -75,14 +75,13 @@ impl Fixture {
             domain,
             ingestor,
             commands: receiver,
-            reports: commands.downgrade(),
+            acknowledgements: FuturesUnordered::new(),
             execution: None,
             intake: ClientIntakeState::Suspended,
             attachments: IndexMap::with_hasher(RandomState::default()),
             cursor: 0,
             window_used: 0,
             in_worker: None,
-            ended: CancellationToken::new(),
             gauges: gauges.clone(),
             published: ClientIngestorGauges::default(),
         };
@@ -497,7 +496,7 @@ async fn a_changed_contract_or_generation_ends_producers_and_an_unchanged_one_ke
 }
 
 #[tokio::test]
-async fn an_uninstalled_execution_refuses_the_batch_its_worker_never_took() {
+async fn an_uninstalled_execution_leaves_the_batch_its_aborted_worker_took_unknown() {
     let mut fixture = Fixture::start();
     fixture.install(1, 1, 1, WAIT);
     let mut producer = fixture
@@ -505,12 +504,52 @@ async fn an_uninstalled_execution_refuses_the_batch_its_worker_never_took() {
         .await
         .assured("an open with the right schema attaches");
     producer.submit(1);
-    // The worker never takes the batch; the execution stops with it still handed over.
+    // The worker takes the batch and is aborted before it reports it, possibly mid-dispatch.
+    let _job = fixture.next_job().await;
     fixture.send(EndpointCommand::Uninstall);
     assert_eq!(
         producer.outcome().await,
         (
             1,
+            ClientSubmissionOutcome::OutcomeUnknown(ClientOutcomeUncertainty::Interrupted)
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_batch_a_stopped_worker_never_took_is_refused_and_so_is_every_later_one() {
+    let mut fixture = Fixture::start();
+    fixture.install(1, 1, 1, WAIT);
+    let mut producer = fixture
+        .attach(fields(&["id"]), limits(4, 4096))
+        .await
+        .assured("an open with the right schema attaches");
+    producer.submit(1);
+    producer.submit(2);
+    // The worker stops with the first batch handed over and never taken: it refuses that batch,
+    // and the endpoint refuses the next one the closed channel no longer takes.
+    let (stop, shutdown) = watch::channel(false);
+    let mut mailbox = WorkerMailbox {
+        jobs: std::mem::replace(&mut fixture.jobs, mpsc::channel(1).1),
+        reports: fixture.commands.clone(),
+        shutdown,
+    };
+    stop.send_replace(true);
+    let taken = timeout(WAIT, mailbox.next_job())
+        .await
+        .assured("a stopped worker takes nothing more within the test's wait");
+    assert!(taken.is_none(), "a stopped worker takes no batch");
+    assert_eq!(
+        producer.outcome().await,
+        (
+            1,
+            ClientSubmissionOutcome::NotAdmitted(ClientSubmissionRefusal::Suspended)
+        )
+    );
+    assert_eq!(
+        producer.outcome().await,
+        (
+            2,
             ClientSubmissionOutcome::NotAdmitted(ClientSubmissionRefusal::Suspended)
         )
     );

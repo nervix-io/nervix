@@ -140,11 +140,6 @@ impl ProducerCredit {
             .checked_sub(bytes)
             .verified("a batch releases exactly the bytes `take` counted for it");
     }
-
-    #[cfg(test)]
-    pub(super) fn held(&self) -> HeldCredit {
-        *self.held.lock()
-    }
 }
 
 /// How the receive loop routed a batch.

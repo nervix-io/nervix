@@ -19,13 +19,11 @@ use std::{
     },
 };
 
-use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckWindow, CLIENT_PRODUCER_NODE_BYTES, ClientEndpointContract, ClientProcessingFailure,
     ClientProducerEndReason, ClientProducerLimits, ClientProducerPolicy, ClientSubmissionOutcome,
     FieldName, IngestQuiesceMode, ParseAsType, SchemaField,
 };
-use nervix_recovery::Discarded as _;
 use tokio::sync::{mpsc, oneshot};
 
 use super::*;
@@ -211,14 +209,13 @@ impl EndpointModel {
             domain,
             ingestor,
             commands: receiver,
-            reports: commands.downgrade(),
+            acknowledgements: FuturesUnordered::new(),
             execution: None,
             intake: ClientIntakeState::Suspended,
             attachments: IndexMap::with_hasher(RandomState::default()),
             cursor: 0,
             window_used: 0,
             in_worker: None,
-            ended: CancellationToken::new(),
             gauges: Arc::new(PublishedClientGauges::default()),
             published: ClientIngestorGauges::default(),
         };

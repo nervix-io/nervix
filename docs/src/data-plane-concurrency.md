@@ -217,13 +217,18 @@ them when it fails. Holding them needs no lock and no shared registry.
 Each client ingestor a node executes has one endpoint task that owns every producer attached to it:
 the batches each queued, the round-robin order among them, the batches handed to the execution's
 admission worker or admitted and awaiting acknowledgement, and whether admission is open. Producers,
-the admission worker, acknowledgement watchers, the quiesce watch, and lifecycle changes reach that
-state only as commands on the task's channel, applied in the order they were sent, so nothing locks
-it. The admission worker takes one batch at a time over a channel of one, which is how the
-endpoint knows exactly which batch a worker that stopped never took. Each admitted batch's
-acknowledgement is awaited by a watcher task that reports its resolution as a command; the
-endpoint's cancellation token stops every watcher when it ends, and a report arriving after an
-attachment ended finds nothing to answer.
+the admission worker, the quiesce watch, and lifecycle changes reach that state only as commands on
+the task's channel, applied in the order they were sent, so nothing locks it. An execution is installed before its admission worker and quiesce watch start, so the watch's
+first report, which opens admission, is applied after the installation.
+
+The admission worker takes one batch at a time over a channel of one. A worker that stops refuses
+the batch it was handed and never took, and closes the channel so that the endpoint refuses any
+later batch itself. The worker's task is joined before the endpoint learns that the execution
+stopped, so a batch the endpoint still holds then was taken by a worker that was aborted when its
+stop outlasted the grace period, possibly while dispatching it: its outcome is unknown, never
+refused. The endpoint task awaits each admitted batch's acknowledgement itself, among its commands
+and before further ones once it resolves, so an ending endpoint leaves no task behind, and a
+resolution for an attachment that already ended finds nothing to answer.
 
 After each command the task publishes its producer, outstanding, and window counts into plain
 atomics that `DESCRIBE` reads, and into metric gauges it resolved once. Each count is exact when

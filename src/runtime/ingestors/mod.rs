@@ -51,8 +51,8 @@ impl Runtime {
         } = self.ingestor_dependencies(ingestor, input).await?;
         let (codec, source) = match input {
             BoundIngestorInput::Transport { codec, source } => (codec, source),
-            BoundIngestorInput::Client(plan) => {
-                self.host_client_source(ingestor, &plan, quiesce, dependencies);
+            BoundIngestorInput::Client { plan, generation } => {
+                self.host_client_source(ingestor, &plan, generation, quiesce, dependencies);
                 return Ok(());
             }
         };

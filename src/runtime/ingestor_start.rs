@@ -237,8 +237,19 @@ impl Runtime {
         input: &IngestorInputPlan,
     ) -> Result<BoundIngestor, RuntimeError> {
         let domain = &ingestor.domain;
-        let routing = match self.inner.executions.get(domain) {
-            Some(execution) => execution.routing.staged(),
+        /// What the ingestor binds from its domain's execution, read under one lookup.
+        struct BindingExecution {
+            routing: StdArc<DomainRoutingSnapshot>,
+            generation: u64,
+        }
+        let BindingExecution {
+            routing,
+            generation,
+        } = match self.inner.executions.get(domain) {
+            Some(execution) => BindingExecution {
+                routing: execution.routing.staged(),
+                generation: execution.start_version,
+            },
             None => {
                 return Err(RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
@@ -262,7 +273,10 @@ impl Runtime {
                     source: transport.source.clone(),
                 }
             }
-            IngestorInputPlan::Client(plan) => BoundIngestorInput::Client(plan.clone()),
+            IngestorInputPlan::Client(plan) => BoundIngestorInput::Client {
+                plan: plan.clone(),
+                generation,
+            },
         };
         let input_schema = input.schema();
         let programs = ExecutionBuildDeps::from_routing(domain, &routing)
