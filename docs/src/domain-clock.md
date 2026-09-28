@@ -275,7 +275,9 @@ that reply. When the observer reports the domain missing, the task marks the att
 queues the end frame with reason `DomainRemoved`, and ends. Because the mark precedes the frame, a
 request the client sends after reading the frame finds the attachment ending: an attach replaces it
 and a detach reports it not attached. The end of the session stops every delivery task without a
-frame. See [Domain Clock Attachment](./sessions.md#domain-clock-attachment) for the public contract.
+frame. See [Domain Clock Attachment](./sessions.md#domain-clock-attachment) for the public contract
+and [Client Session Protocol](./client-session-protocol.md#domain-clock-attachment) for how the
+attachment travels in the protocol.
 
 ## Execution-Time Snapshots
 
