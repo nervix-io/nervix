@@ -224,12 +224,40 @@ for it, so every retry resends it byte for byte: neither the request expressions
 again, including volatile calls such as `uuid_v4()`. Retained bodies occupy node memory, which
 memory pressure accounts for, until their requests complete.
 
-The emitter sends the requests of the records a flush releases one at a time and in order, and
-waits for each response's headers before it sends the next. The client's `timeout_ms` bounds each
-attempt. Complete `2xx` response headers deliver the record, and the response body is never read.
-No redirect is followed. Any other response, and any request that fails before its response
-headers arrive, fails the attempt: the emitter retries that request and every later one on its
-declared retry policy, and keeps their upstream acknowledgements alive until they complete.
+One active emitter execution has at most one request awaiting final response headers, across all
+source relays and branches it serves. It sends the requests a flush releases in publication order.
+Independent executions have no total order, and an endpoint can apply a request after Nervix loses
+its response, so this order does not settle ambiguous remote effects.
+
+The HTTP sink speaks HTTP/1.1. It creates a connection for each attempt and closes it after final
+headers, so an unread or stalled body cannot be reused as the next response. DNS resolution,
+connection acquisition, TLS negotiation, the complete request send, interim responses and
+complete final headers share the client's physical `timeout_ms`; queueing behind an earlier
+request and host retry backoff do not consume the next attempt's timeout. HTTPS validates trust and
+the destination hostname and uses the client's pinned CA and optional client certificate mounts.
+Starting the sink reads local configuration and sends no probe.
+
+The transport writes `Host`, `Connection: close`, and `Content-Length` when a body exists. It adds
+`Accept: */*` only when the application did not write `Accept`. It adds no `Accept-Encoding` or
+`Content-Type`. The application may write `Accept`, `Content-Type`, `Authorization`, and `Cookie`
+with `write_header`. Response cookies are
+not retained; an authentication challenge sends no additional request. There is no redirect or
+library retry: every repeat is a separate emitter attempt under its declared policy.
+
+Each interim and final response header block may contain at most 128 fields and 64 KiB of field
+name and value bytes. Malformed headers or final framing and any exceeded bound fail the attempt,
+even when the final status line says `200`. Complete valid final `200`–`299` headers deliver the
+record, including `202` and `204`; a stalled or failed body after those headers does not reverse
+delivery. The sink never waits for a body or uses bodies and trailers as graph data.
+
+`408`, `425`, `429`, and `500`–`599` retain the current request and all later work for host retry.
+`401`, `403`, and `407` do the same and report an authentication or authorization infrastructure
+failure. DNS, connection, TLS, send, timeout, malformed response and loss before complete final
+headers are also infrastructure failures. Other `300`–`499` statuses and `101` reject only their
+record through `ON MESSAGE ERROR`; later records proceed after that policy completes. Redirects
+are never followed, `304` is not delivery, and `409` never implies an earlier delivery. Rejection
+diagnostics include the numeric status but no evaluated URL, header value, request body or response
+body.
 
 `ALTER EMITTER ... SET TO HTTP` restates the complete method, path, mode and body selection.
 `SET CLIENT` changes the referenced client, `SET MODE` changes the retry policy, and `SET ENCODE
