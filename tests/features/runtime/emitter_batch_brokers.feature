@@ -3,9 +3,9 @@ Feature: Batching across broker and message emitters
   payload as one external message through their own driver, in every publishing mode, and without
   the BATCH clause each record stays its own message. A batch message carries the key, headers and
   FIFO group its members share. An SQS request answers for each batch message it carries. A payload
-  that fits MAX SIZE but not a limit the destination declares is rejected, with every member it
-  carries, before it is written, and one a Pulsar topic refuses for its size is rejected the same
-  way once the broker answers.
+  that fits MAX SIZE but not the destination's own limit is rejected with every member it carries:
+  before it is written where the connector can read the limit, and on the broker's refusal where
+  only the broker applies it, as with a Pulsar topic policy or RabbitMQ's max_message_size.
 
   @emitter_batch_brokers
   Scenario Outline: Every broker publishing mode carries one batch in one external message
@@ -279,7 +279,7 @@ Feature: Batching across broker and message emitters
       | 3            |
 
   @emitter_batch_brokers @emitter_batch_destination_limits
-  Scenario Outline: A batch within MAX SIZE that the destination cannot carry is rejected before it is written
+  Scenario Outline: A batch within MAX SIZE that the destination cannot carry is rejected with every member
     Given the "<target>" emission target is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -334,10 +334,12 @@ Feature: Batching across broker and message emitters
       START;
       """
     # Each of the first three records grows to about 400 KB, so their message of about 1.2 MB fits
-    # MAX SIZE 2MiB but not the 1 MB the destination accepts. The connector checks that limit
-    # against everything it writes around the payload before it writes anything, rejects every
-    # member of the message with one reference, and keeps publishing: the records after them still
-    # leave in their own message.
+    # MAX SIZE 2MiB but not the 1 MB the destination accepts. Kafka, MQTT, NATS and Pulsar check that
+    # limit against everything they write around the payload before they write anything. A RabbitMQ
+    # client cannot read its broker's max_message_size, so the broker refuses the message by closing
+    # the channel, and the connector rejects the message on that answer and publishes the rest on a
+    # new channel. Either way every member of the message is rejected with one reference and
+    # publishing continues: the records after them still leave in their own message, exactly once.
     And http payload is posted to host "limited-{{test_id}}.example.com" path "/events"
       """
       [{"seq":1,"note":"xy"},{"seq":2,"note":"xy"},{"seq":3,"note":"xy"},{"seq":4,"note":""},{"seq":5,"note":""}]
@@ -363,6 +365,10 @@ Feature: Batching across broker and message emitters
       | 3            | NATS JetStream | CREATE CLIENT sink TYPE NATS CONFIG { 'addr' = '{{nats_addr}}' };                | NATS sink SUBJECT limited_{{test_id}} MODE JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s | max payload size exceeded             |
       | 1            | Pulsar         | CREATE CLIENT sink TYPE PULSAR CONFIG { 'addr' = '{{pulsar_addr}}' };            | PULSAR sink TOPIC limited_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s           | maximum message size of 1048576 bytes |
       | 3            | Pulsar         | CREATE CLIENT sink TYPE PULSAR CONFIG { 'addr' = '{{pulsar_addr}}' };            | PULSAR sink TOPIC limited_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s                                   | maximum message size of 1048576 bytes |
+      | 1            | RabbitMQ       | CREATE CLIENT sink TYPE RABBITMQ CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | RABBITMQ sink QUEUE limited_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s         | max_message_size of 1048576 bytes     |
+      | 3            | RabbitMQ       | CREATE CLIENT sink TYPE RABBITMQ CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | RABBITMQ sink QUEUE limited_{{test_id}} MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s     | max_message_size of 1048576 bytes     |
+      | 1            | RabbitMQ       | CREATE CLIENT sink TYPE RABBITMQ CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | RABBITMQ sink QUEUE limited_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s                                 | max_message_size of 1048576 bytes     |
+      | 3            | RabbitMQ       | CREATE CLIENT sink TYPE RABBITMQ CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | RABBITMQ sink QUEUE limited_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s                                 | max_message_size of 1048576 bytes     |
 
   @emitter_batch_brokers @emitter_batch_destination_limits
   Scenario Outline: A Pulsar batch message larger than its topic allows is rejected with every member
