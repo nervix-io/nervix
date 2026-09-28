@@ -220,6 +220,7 @@ impl EmitterSinkStarter {
                         config: sink.client.config.entries.clone(),
                         queue: sink.queue.clone(),
                         mode: sink.mode,
+                        dns: context.dns()?,
                     },
                     context.sink_host(),
                 )
@@ -283,6 +284,7 @@ impl EmitterSinkStarter {
                         ClickHouseSinkConfig {
                             config: sink.client.config.entries.clone(),
                             table: sink.table.clone(),
+                            dns: context.dns()?,
                         },
                         context.sink_host(),
                     ),

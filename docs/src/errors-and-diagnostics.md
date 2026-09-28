@@ -98,6 +98,19 @@ missing-name, no-address, timeout, invalid-name or transport cause stays in the 
 Address, TLS and WebSocket-upgrade failures remain connection outcomes. None is a record rejection,
 and a DNS result by itself never marks a Syslog record delivered.
 
+ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
+driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
+cause of its connection error, and the connector finds it there by type and keeps it as the context
+beneath its existing infrastructure failure: `SinkPublishError::Publish` for a ClickHouse insert or
+an SQS send, `SinkStartError::Initialize` while an SQS sink looks up its queue, and the
+`SqsSourceError` of opening the queue, receiving or deleting beneath the source's `SourceError`.
+The failure's message names the host and the lookup failure, which `DESCRIBE EMITTER` and
+`DESCRIBE INGESTOR` show. Any other failure to reach the service, such as a refused connection or a
+certificate that does not name the configured host, is described by every cause of the driver's
+connection error, which describes the connection and carries neither credentials nor a record; a
+response from the service keeps its existing description. None is a record rejection, and none
+acknowledges input.
+
 A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar sink: a message
 larger than the maximum message size the broker announced, which carries the measured size of its
 metadata and payload and the limit as typed fields, or a message the broker answered with

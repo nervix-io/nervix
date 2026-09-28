@@ -833,6 +833,16 @@ Set the SQS client's optional `timeout_ms` CONFIG key to bound both the complete
 and its single SDK attempt. Nervix disables the AWS SDK's internal retries, so a timeout returns to
 the emitter and the mode's declared `RETRY POLICY` owns all retry pacing.
 
+The client resolves the host of its `endpoint` through the node's asynchronous resolver each time it
+opens a connection, and tries the answers in order; a literal IPv4 or IPv6 address is dialled as
+written. Every request is still signed for the configured host, and over HTTPS the service
+certificate must name that host, whichever address accepted the connection. The lookup counts
+against the SDK's 3.1-second connect timeout and against `timeout_ms`. Without `tls_ca_file` the
+client trusts the platform's native roots and follows the `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`
+environment variables; with it, the client trusts that CA alone and connects directly. A missing
+name, a silent name server or an unreachable answer fails the queue lookup or the send, which the
+emitter retries on its `RETRY POLICY`; nothing is acknowledged until SQS answers.
+
 For FIFO queues, one batch request contains at most one record from each message group. A partial
 batch failure therefore cannot deliver a later record from a group ahead of the failed record;
 other groups may still make progress independently.
@@ -1062,6 +1072,15 @@ Optional config keys are `'user'`, `'password'`, `'database'`, and `'timeout_ms'
 bounds both sending an insert body and waiting for ClickHouse to finish the insert and return its
 result.
 For HTTPS endpoints, mount a TLS resource and set `'tls_ca_file'` to the mounted CA path.
+
+The client resolves the host in `addr` through the node's asynchronous resolver for each new
+connection and tries the answers in order; a literal IPv4 or IPv6 address is dialled as written.
+Every request keeps `addr` as its authority, and over HTTPS the server certificate must name that
+host, whichever address accepted the connection. The connection, lookup included, is made while the
+insert waits for its result, so `timeout_ms` bounds it too. A missing name, a silent name server or
+an unreachable answer fails the insert, which the emitter retries on its `RETRY POLICY`; nothing is
+acknowledged until ClickHouse returns the insert's result. A pooled connection stays in use when its
+host's answer changes, and the next connection resolves again.
 
 ClickHouse requires the [batching clause](#batching). A larger flush is split into sequential
 inserts of at most `MAX MESSAGES` records, and each successful insert is an acknowledgment. For ClickHouse, Postgres, and

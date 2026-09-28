@@ -386,6 +386,8 @@ aws-sdk-sqs = { version = "1.76", default-features = false, features = [
   "rt-tokio",
 ] }
 aws-smithy-http-client = "1.1.12"
+# The DNS hook trait a Smithy HTTP client resolves hosts through, implemented by nervix-dns.
+aws-smithy-runtime-api = { version = "1.18", features = ["client"] }
 base64 = "0.22"
 base64-simd = "0.8"
 bb8 = "0.9.1"
@@ -654,6 +656,8 @@ tokio-stream = "0.1"
 tokio-tungstenite = "0.24"
 tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.8"
+# The resolver service `hyper-util`'s connector resolves hosts through, implemented by nervix-dns.
+tower-service = "0.3"
 # Keep tonic/build on 0.13 for the workspace's Prost 0.13 API while selecting AWS-LC TLS.
 any_spawner = "0.3.0"
 tonic = { version = "0.13", features = ["tls-aws-lc", "tls-webpki-roots"] }
