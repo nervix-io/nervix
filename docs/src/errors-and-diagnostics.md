@@ -63,6 +63,14 @@ metadata and payload and the limit as typed fields, or a message the broker answ
 `external` and operation `publish`. Every other failure of the client, its connection or the broker
 stays an infrastructure failure of the attempt, which the emitter retries.
 
+A RabbitMQ publish that ends with the broker closing the sink's channel is classified by the
+broker's own reason, which the sink reads from its connection. A refusal of a message body larger
+than `max_message_size` is a `RabbitMqRecordError`, owned by the RabbitMQ sink, which carries the
+body size and the limit as typed fields and becomes a record rejection of that message with code
+`external` and operation `publish`, reaching every member of a batch message. Any other close, a
+lost connection, and a close whose reason never arrives fail the attempt as an infrastructure
+failure, which the emitter retries on its backoff.
+
 The vocabulary is the innermost owner, and its Model operations report the same way. An alteration
 is applied to a copy of the stored Model, which replaces the original only when every operation
 succeeds, so a refusal leaves the stored Model unchanged. Each refusal names what it refused in
