@@ -21,9 +21,9 @@ steps. Three rules hold throughout.
 The harness is test code outside the layer order: it may name any layer, and no product code names
 it. It observes product behavior and never redefines it. Product deadlines stay with the chapters
 that own them: node shutdown with [Shutdown And Recovery](./shutdown.md), node-to-node communication
-with [Cluster Interconnect](./interconnect.md), and client requests, redirects, reconnects, and
-command identity with [Sessions](./sessions.md), the [Rust Client Library](./client-library.md), and
-[Command Completion](./command-completion.md).
+with [Cluster Interconnect](./interconnect.md), client requests, redirects, reconnects, and exact
+recovery with [Client Session Protocol](./client-session-protocol.md), and command identity and
+completion with [Command Completion](./command-completion.md).
 
 ## What Runs Where
 

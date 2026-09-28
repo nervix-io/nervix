@@ -281,8 +281,11 @@ sequenceDiagram
 
 At the public edge, the session maps a typed validation or execution result to a command
 disposition, message, and diagnostics; a transaction's admitted and retained outcomes stay
-distinct from a new execution. `DESCRIBE TRANSACTION` and `SHOW TRANSACTIONS` read beside an
-attached transaction only as separate requests; combining either read with another statement
+distinct from a new execution. [Command
+Dispositions](./client-session-protocol.md#command-dispositions) defines each disposition, the phase
+that produces it, and what a client may conclude from it, and typed request rejections are covered
+in [Rejections](./client-session-protocol.md#rejections). `DESCRIBE TRANSACTION` and
+`SHOW TRANSACTIONS` read beside an attached transaction only as separate requests; combining either read with another statement
 returns a session planning diagnostic before anything enters the queue. An incomplete impact
 report carries its planning diagnostics and cannot supply a commit preview. A stale preview is a
 recoverable command disposition that applies no effects and tells the client to refresh its

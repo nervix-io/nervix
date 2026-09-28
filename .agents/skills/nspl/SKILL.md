@@ -114,7 +114,9 @@ commit identity through redirects or reconnects. Do not manufacture a new identi
 uncertain admitted operation.
 
 For storage failures or uncertain administrative outcomes, consult `Control Plane` → `Durability
-and recovery` before suggesting a retry.
+and recovery` before suggesting a retry, and
+[Exact Recovery](https://docs.nervix.io/client-session-protocol.html#exact-recovery) for how a retry
+under the same execution reference recovers the recorded outcome instead of repeating the effect.
 
 For model evolution, read the `Altering Schemas` section of `Schemas And Codecs` and the transaction
 and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, supported `ALTER`, and

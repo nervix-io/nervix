@@ -77,7 +77,9 @@ recorded under that identity, with the number already assigned; the same identit
 digest is rejected as a digest conflict. An upload admitted through the client protocol keeps
 installing when the uploading connection closes. The identity rules and client retries are covered
 in [Resources](./resources.md#lifecycle) and
-[Command Completion](./command-completion.md#lifecycle-and-ownership).
+[Command Completion](./command-completion.md#lifecycle-and-ownership), and the upload stream, its
+typed failures, and its recovery in
+[Resource Uploads](./client-session-protocol.md#resource-uploads).
 
 ### Installing One Copy
 
@@ -155,7 +157,9 @@ If an applying upload loses the task that was installing it, because leadership 
 upload's connection was aborted, the leader resumes it at its next reconciliation. An upload whose
 version was never published fails with
 `the admitted archive is unavailable before durable version installation`, because only the node
-that admitted it held the archive. A published version keeps waiting for the live set as above.
+that admitted it held the archive. A retry of the same upload identity that reaches the leader
+before that reconciliation carries the archive again, so it installs the version and completes the
+upload instead. A published version keeps waiting for the live set as above.
 
 A node that joins after completion does not change the outcome. Its reconciliation installs every
 published version it does not hold from a live node that holds it, and

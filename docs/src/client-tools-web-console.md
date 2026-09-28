@@ -183,7 +183,7 @@ endpoint rather than here — see
 The subscription dialog builds a read-only session subscription against a relay. The relay's schema
 is listed field by field; clicking a field inserts an `input.<field>` reference into the `WHERE`
 box, so a filter can be written without retyping field names. A sample rate of 100%, 10%, 1%, or
-0.1% limits how many arriving batches are delivered.
+0.1% limits the share of selected rows that are delivered.
 
 The subscription opens as a tab beside the REPL and streams records into it. Closing the tab ends
 the subscription. Subscriptions are read-only views: they cannot construct, inherit, or produce
@@ -227,7 +227,8 @@ commit remains pending through `COMMITTING` until its exact terminal result. A
 second session can attach the same owner's transaction and take it over; the displaced console
 then gets an explicit takeover error. A clean console session close reverts an open transaction,
 while an accepted commit continues on the leader without the browser. See
-[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions).
+[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions) and
+[Client Session Protocol](client-session-protocol.md).
 
 `Tab` cycles through completions offered by the server for the current cursor position. `ArrowUp`
 and `ArrowDown` walk the session's command history, `Ctrl`/`Cmd` with `Enter` submits, and `clear`

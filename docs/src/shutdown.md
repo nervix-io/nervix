@@ -168,16 +168,19 @@ nothing was cordoned and nothing is cleared.
 Stop admission closes the node's public surface. It stops accepting on the session gRPC, connector,
 observability, and console listeners and closes the client connections those listeners had accepted.
 
-Closing a connection cancels the requests it carries. A session first tells its client that the
-server is shutting down, then ends. The ending follows the replies already queued for the client
-and is the last frame of the session, but the session does not wait for the client to read it:
-a session whose client reads nothing ends just as promptly, and its subscriptions stop and release
+Closing a connection cancels the requests it carries. A console session is told that the server
+is shutting down, after the replies already queued for its client, and that ending is its last
+frame. A native gRPC session's connection is cut when admission closes, so its client sees the
+stream fail as it would after any transport loss. Neither waits for the client to read anything: a
+session whose client reads nothing ends just as promptly, and its subscriptions stop and release
 the relays they held. Every request the session had not yet admitted is cancelled before admission
 and never begins an effect, so the client can send it again, with the same execution reference, to
 another node. A session stream or a resource upload waiting on its client ends at once, so no
 client can hold the drain or the process open. An authenticated upload held open
 at any point of its progress — before its first message, between chunks, or trickling chunks
-indefinitely — is cancelled this way and does not delay the exit.
+indefinitely — is cancelled this way and does not delay the exit. [Node Stop And Restart As A
+Client Observes Them](./client-session-protocol.md#node-stop-and-restart-as-a-client-observes-them)
+describes what a client sees at each ending and what it recovers.
 
 Work that a session command had already admitted is not cancelled here. Its session stops waiting
 for it, and no reply follows for it, but its effect keeps running. A transaction commit in progress
