@@ -35,6 +35,12 @@ Values a caller acts on belong in typed fields; display formatting happens when 
 reported. `anyhow` remains at integration and tooling boundaries whose caller has no domain choice
 to make, such as a foreign callback that only accepts a general error.
 
+Resource planning checks the committed lookup key and codec, generator materialized source,
+output branch and route construction, and WASM guest-state generation before runtime binding.
+These failures name the owning node and relevant relay, codec, or field. A missing
+lookup file is rejected during candidate binding validation; malformed records remain a loader
+failure when the pinned file is decoded. Neither failure silently selects another resource version.
+
 Schemaful JSON parsing has one codec decode failure carrying the simd-json source. Malformed
 syntax, invalid UTF-8, and invalid escapes enter through that failure; object shape, missing or
 unexpected fields, nullability, exact wire types, integer ranges, datetime parsing, base64, and

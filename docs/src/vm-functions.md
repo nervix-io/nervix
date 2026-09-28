@@ -43,8 +43,8 @@ Five rules hold throughout:
 | Vocabulary | Expression Models in `nervix-models` | `Expression`, `RouteConstruction`, `Assignment`, `Invocation`, and `JsonPath`. A builtin name is a validated `BuiltinFunctionName` identifier, not a closed set, and a UDF name is a `UdfName`. |
 | Language | `nervix-nspl` | Parsing a call as a generic `name(args)` or `udf::name(args)` into those Models. The grammar has no function-name table; completion emits a typed builtin or UDF expectation at a call position. |
 | Engines and infrastructure | `nervix-vm` | Lowering Models into VM programs, the semantic catalog of every operator, cast, and builtin, type and sensitivity checking, compilation into instructions over typed registers, every kernel, and window aggregate lowering and route compilation. |
-| Engines and infrastructure | `nervix-roto` | Compiling a `CREATE UDF`, and the `FunctionInjector` that answers the VM's UDF calls over Arrow arrays under a watchdog. |
-| Decisions | Registry validation | Compiling every expression it can check with the same compiler the runtime uses when a statement is applied, so a statement is rejected with exactly the error execution would report. |
+| Engines and infrastructure | `nervix-roto` | Compiling a typed UDF program, and the `FunctionInjector` that answers the VM's UDF calls over Arrow arrays under a watchdog. |
+| Decisions | Registry validation and resource planning | Compiling every expression it can check with the same compiler the runtime uses when a statement is applied, then selecting scheduled UDF programs and lowering generator routes against their exact output schemas. |
 | Data plane | Runtime plan binding and hosts | Binding runtime programs against installed schemas once per typed node revision, projecting carrier batches into VM input, supplying the execution context and injectors, turning row errors into structured message errors, and owning branch-local window accumulators. |
 | Control plane | Subscriptions | Compiling a session subscription's `WHERE` into a read-only predicate when the subscription is created. |
 
@@ -334,7 +334,7 @@ against runtime schemas:
 | Reingestor `FROM ... WHERE`, `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | Lowered once by the domain's entrypoint plans, then bound for each input relay before that input's task starts |
 | Emitter `FROM ... WHERE`, routes, HTTP request fields, SQS `FIFO GROUP`, `VALUES`, and OpenTelemetry mappings | When the emitter task starts |
 | Window aggregate argument and output programs, inferencer `INPUTS`, and inferencer output routes | Once when the installed typed processor revision is bound, then shared by every concrete branch |
-| Generator routes | When the domain's execution is built |
+| Generator routes | Lowered into typed ordered route plans from the committed schedule, then compiled once when the domain's execution is built or the generator is swapped; each concrete branch task retains those compiled programs and the exact materialized source branch. |
 | Materialized-state `DEFAULT` | Compiled and executed in one step when the default binds |
 | `ON MESSAGE ERROR SEND TO ... SET` | Once for each error record it builds |
 | Subscription `WHERE` | When the subscription is created |
