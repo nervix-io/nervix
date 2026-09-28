@@ -1200,9 +1200,10 @@ pub(super) async fn run_request_source<C>(
     host.mark_unready();
 }
 
-enum BatchDisposition {
+enum BatchDisposition<P> {
     Accepted,
     Retry,
+    RetryRejection(Vec<P>),
     Shutdown,
 }
 
@@ -1217,6 +1218,7 @@ pub(super) async fn run_source_instance_with_retry<C>(
 {
     let mut retry_delay = retry_policy.backoff;
     let mut ready = false;
+    let mut pending_rejection: Option<Vec<C::Position>> = None;
 
     loop {
         tokio::task::consume_budget().await;
@@ -1253,9 +1255,11 @@ pub(super) async fn run_source_instance_with_retry<C>(
             match source.resume().await {
                 Ok(SourceResume::Ready) => {
                     ready = true;
-                    retry_delay = retry_policy.backoff;
-                    host.mark_ready();
-                    host.clear_transient_error();
+                    if pending_rejection.is_none() {
+                        retry_delay = retry_policy.backoff;
+                        host.mark_ready();
+                        host.clear_transient_error();
+                    }
                     // A quiesce released while the source was resuming was not waited on by
                     // anything, so the iteration starts over and replays what it buffered
                     // before the loop blocks on the next batch.
@@ -1282,6 +1286,30 @@ pub(super) async fn run_source_instance_with_retry<C>(
                     continue;
                 }
             }
+        }
+
+        // A failed rewind leaves the connector's cursor beyond an unacknowledged message.
+        // Reestablish its assignment and retry that same rewind before reading another batch:
+        // acknowledging a later Kafka offset would otherwise commit past the missing record.
+        if let Some(positions) = pending_rejection.take() {
+            if let Err(error) = source.reject(&positions).await {
+                host.report_error(format!("{error:#}"));
+                pending_rejection = Some(positions);
+                if let Err(error) = source.suspend().await {
+                    host.report_error(format!("{error:#}"));
+                }
+                ready = false;
+                host.mark_unready();
+                let delay = source_retry_delay(retry_delay);
+                if !wait_for_retry(&mut host, &mut shutdown, delay).await {
+                    break;
+                }
+                retry_delay = next_retry_delay(retry_delay, retry_policy);
+                continue;
+            }
+            retry_delay = retry_policy.backoff;
+            host.mark_ready();
+            host.clear_transient_error();
         }
 
         let request = batch_request(acknowledgement);
@@ -1337,6 +1365,19 @@ pub(super) async fn run_source_instance_with_retry<C>(
                 }
                 retry_delay = next_retry_delay(retry_delay, retry_policy);
             }
+            BatchDisposition::RetryRejection(positions) => {
+                pending_rejection = Some(positions);
+                if let Err(error) = source.suspend().await {
+                    host.report_error(format!("{error:#}"));
+                }
+                ready = false;
+                host.mark_unready();
+                let delay = source_retry_delay(retry_delay);
+                if !wait_for_retry(&mut host, &mut shutdown, delay).await {
+                    break;
+                }
+                retry_delay = next_retry_delay(retry_delay, retry_policy);
+            }
             BatchDisposition::Shutdown => break,
         }
     }
@@ -1370,7 +1411,7 @@ async fn handle_batch<C>(
     host: &mut SourceHost,
     acknowledgement: SourceAckPolicy,
     messages: Vec<C::Message>,
-) -> BatchDisposition
+) -> BatchDisposition<C::Position>
 where
     C: BrokerSourceConnector,
 {
@@ -1402,8 +1443,7 @@ where
         Err(error) => {
             host.report_error(format!("{error:#}"));
             if mode == SourceIntakeMode::Acknowledged {
-                reject_batch(source, host, &positions).await;
-                return BatchDisposition::Retry;
+                return reject_batch(source, host, positions).await;
             }
             return BatchDisposition::Accepted;
         }
@@ -1422,8 +1462,7 @@ where
                 outcome.acknowledgements.len(),
                 positions.len(),
             ));
-            reject_batch(source, host, &positions).await;
-            return BatchDisposition::Retry;
+            return reject_batch(source, host, positions).await;
         }
         for acknowledgement in outcome.acknowledgements {
             tokio::task::consume_budget().await;
@@ -1431,8 +1470,7 @@ where
                 SourceAcknowledgementOutcome::Ack => {}
                 SourceAcknowledgementOutcome::NoAck(reason) => {
                     host.handle_ack_failure(reason);
-                    reject_batch(source, host, &positions).await;
-                    return BatchDisposition::Retry;
+                    return reject_batch(source, host, positions).await;
                 }
                 SourceAcknowledgementOutcome::Shutdown => return BatchDisposition::Shutdown,
             }
@@ -1443,18 +1481,25 @@ where
 
     if let Err(error) = source.acknowledge(&positions).await {
         host.report_error(format!("{error:#}"));
-        reject_batch(source, host, &positions).await;
-        return BatchDisposition::Retry;
+        return reject_batch(source, host, positions).await;
     }
     BatchDisposition::Accepted
 }
 
-async fn reject_batch<C>(source: &mut C, host: &mut SourceHost, positions: &[C::Position])
+async fn reject_batch<C>(
+    source: &mut C,
+    host: &mut SourceHost,
+    positions: Vec<C::Position>,
+) -> BatchDisposition<C::Position>
 where
     C: BrokerSourceConnector,
 {
-    if let Err(error) = source.reject(positions).await {
-        host.report_error(format!("{error:#}"));
+    match source.reject(&positions).await {
+        Ok(()) => BatchDisposition::Retry,
+        Err(error) => {
+            host.report_error(format!("{error:#}"));
+            BatchDisposition::RetryRejection(positions)
+        }
     }
 }
 
@@ -1511,6 +1556,7 @@ mod tests {
         poll_errors: Vec<String>,
         reported_errors: Vec<String>,
         ack_waits: usize,
+        ack_outcomes: VecDeque<SourceAcknowledgementOutcome>,
         resumes: usize,
         suspends: usize,
         closes: usize,
@@ -1555,6 +1601,8 @@ mod tests {
         messages: VecDeque<FakeMessage>,
         resume_required: bool,
         resume_results: VecDeque<SourceResult<SourceResume>>,
+        reject_failures_left: usize,
+        replay_rejected: bool,
         /// Replays each resume leaves pending, as a quiesce released during it would.
         replays_pending_after_resume: usize,
         observations: Arc<Mutex<SourceLoopObservations>>,
@@ -1636,6 +1684,21 @@ mod tests {
 
         async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
             self.observations.lock().rejected.push(positions.to_vec());
+            if self.reject_failures_left > 0 {
+                self.reject_failures_left -= 1;
+                return Err(Report::new(SourceError::Reject { connector: "fake" }));
+            }
+            if self.replay_rejected {
+                for position in positions.iter().rev() {
+                    self.messages.push_front(FakeMessage {
+                        position: *position,
+                        payload: vec![
+                            u8::try_from(*position)
+                                .verified("the test positions are all below 256"),
+                        ],
+                    });
+                }
+            }
             Ok(())
         }
     }
@@ -1647,8 +1710,12 @@ mod tests {
     #[async_trait]
     impl SourceAcknowledgementServices for ImmediateAcknowledgement {
         async fn wait(self: Box<Self>, _timeout: Duration) -> SourceAcknowledgementOutcome {
-            self.observations.lock().ack_waits += 1;
-            SourceAcknowledgementOutcome::Ack
+            let mut observations = self.observations.lock();
+            observations.ack_waits += 1;
+            observations
+                .ack_outcomes
+                .pop_front()
+                .unwrap_or(SourceAcknowledgementOutcome::Ack)
         }
     }
 
@@ -1796,6 +1863,8 @@ mod tests {
             messages: three_messages(),
             resume_required,
             resume_results: VecDeque::new(),
+            reject_failures_left: 0,
+            replay_rejected: false,
             replays_pending_after_resume: 0,
             observations: observations.clone(),
         };
@@ -1822,6 +1891,8 @@ mod tests {
             messages: VecDeque::new(),
             resume_required: false,
             resume_results: VecDeque::new(),
+            reject_failures_left: 0,
+            replay_rejected: false,
             replays_pending_after_resume: 0,
             observations,
         }
@@ -1834,6 +1905,8 @@ mod tests {
             messages: three_messages(),
             resume_required: false,
             resume_results: VecDeque::new(),
+            reject_failures_left: 0,
+            replay_rejected: false,
             replays_pending_after_resume: 2,
             observations: observations.clone(),
         };
@@ -2010,6 +2083,39 @@ mod tests {
         assert_eq!(observations.acknowledged, vec![vec![0], vec![1], vec![2]]);
         assert_eq!(observations.ack_waits, 3);
         assert!(observations.rejected.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_rewind_cannot_commit_past_an_unacknowledged_kafka_position() {
+        let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+        observations.lock().ack_outcomes = VecDeque::from([
+            SourceAcknowledgementOutcome::NoAck("relay owner crashed".to_string()),
+            SourceAcknowledgementOutcome::Ack,
+            SourceAcknowledgementOutcome::Ack,
+        ]);
+        let source = FakeSource {
+            messages: three_messages().into_iter().take(2).collect(),
+            resume_required: false,
+            resume_results: VecDeque::new(),
+            reject_failures_left: 2,
+            replay_rejected: true,
+            replays_pending_after_resume: 0,
+            observations: observations.clone(),
+        };
+        let host = SourceHost::new(FakeHost::running(observations.clone()));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let policy = SourceAckPolicy::Sequential {
+            timeout: Duration::from_secs(1),
+            retry: retry_policy(),
+        };
+        run_source_instance_with_retry(source, host, policy, policy.retry(), shutdown_rx).await;
+        drop(shutdown_tx);
+
+        let observations = observations.lock();
+        assert_eq!(observations.rejected, vec![vec![0], vec![0], vec![0]]);
+        assert_eq!(observations.acknowledged, vec![vec![0], vec![1]]);
+        assert_eq!(observations.suspends, 2);
+        assert_eq!(observations.resumes, 3);
     }
 
     #[tokio::test]
