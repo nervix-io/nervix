@@ -151,7 +151,7 @@ impl Default for TransportOptions {
 }
 
 impl TransportOptions {
-    pub(crate) fn validate(&self) -> Result<(), TransportError> {
+    pub(crate) fn validate(&self) -> Result<(), Report<TransportError>> {
         let nonzero = [
             (self.max_peers, "max_peers"),
             (self.max_connections, "max_connections"),
@@ -160,18 +160,18 @@ impl TransportOptions {
         ];
         for (value, name) in nonzero {
             if value == 0 {
-                return Err(TransportError::InvalidOptions {
+                return Err(Report::new(TransportError::InvalidOptions {
                     reason: format!("{name} must be greater than zero"),
-                });
+                }));
             }
         }
         if self.initial_stream_window_bytes == 0
             || self.initial_connection_window_bytes == 0
             || self.max_header_bytes == 0
         {
-            return Err(TransportError::InvalidOptions {
+            return Err(Report::new(TransportError::InvalidOptions {
                 reason: "HTTP/2 windows and header limit must be greater than zero".to_string(),
-            });
+            }));
         }
         let preconnected_connections = self
             .max_peers
@@ -189,12 +189,12 @@ impl TransportOptions {
                 }
             })?;
         if self.max_connections <= preconnected_connections {
-            return Err(TransportError::InvalidOptions {
+            return Err(Report::new(TransportError::InvalidOptions {
                 reason: "max_connections must reserve inbound and outbound management, command, \
                          replication, and relay capacity for every peer and at least one \
                          on-demand connection"
                     .to_string(),
-            });
+            }));
         }
         if self.connection_setup_timeout.is_zero()
             || self.request_timeout.is_zero()
@@ -202,14 +202,14 @@ impl TransportOptions {
             || self.reconnect_backoff.is_zero()
             || self.shutdown_drain_timeout.is_zero()
         {
-            return Err(TransportError::InvalidOptions {
+            return Err(Report::new(TransportError::InvalidOptions {
                 reason: "transport deadlines must be greater than zero".to_string(),
-            });
+            }));
         }
         if self.max_reconnect_backoff < self.reconnect_backoff {
-            return Err(TransportError::InvalidOptions {
+            return Err(Report::new(TransportError::InvalidOptions {
                 reason: "max_reconnect_backoff must not be below reconnect_backoff".to_string(),
-            });
+            }));
         }
         Ok(())
     }
@@ -809,7 +809,7 @@ impl Transport {
         options: TransportOptions,
         executor: Executor,
         resolver: PeerResolver,
-    ) -> Result<(Self, mpsc::Receiver<ReceivedEnvelope>), TransportError> {
+    ) -> Result<(Self, mpsc::Receiver<ReceivedEnvelope>), Report<TransportError>> {
         let (inner, incoming) = connection::TransportState::bind(
             listen_addr,
             identity,
@@ -856,7 +856,7 @@ impl Transport {
         &self,
         peer_node_id: &ClusterNodeName,
         envelope: Envelope,
-    ) -> Result<(), TransportError> {
+    ) -> Result<(), Report<TransportError>> {
         self.inner.send(peer_node_id, envelope).await
     }
 
@@ -898,7 +898,7 @@ impl Transport {
     pub async fn bootstrap_target(
         &self,
         target: PeerTarget,
-    ) -> Result<ClusterNodeName, TransportError> {
+    ) -> Result<ClusterNodeName, Report<TransportError>> {
         self.inner.bootstrap_target(target).await
     }
 
@@ -909,7 +909,7 @@ impl Transport {
         &self,
         node_id: ClusterNodeName,
         endpoint: NodeEndpoint,
-    ) -> Result<(), TransportError> {
+    ) -> Result<(), Report<TransportError>> {
         self.inner.register_outbound_target(node_id, endpoint)
     }
 
@@ -931,7 +931,7 @@ impl Transport {
         self.inner.snapshot()
     }
 
-    pub async fn replace_tls(&self, tls: TlsConfigBundle) -> Result<(), TransportError> {
+    pub async fn replace_tls(&self, tls: TlsConfigBundle) -> Result<(), Report<TransportError>> {
         self.inner.replace_tls(tls).await
     }
 
@@ -1025,6 +1025,17 @@ pub enum TransportError {
     RelayIndeterminate,
     #[error("relay delivery was rejected before runtime admission: {0}")]
     RelayRejected(String),
+}
+
+impl TransportError {
+    /// Preserve a typed cause while retaining the transport's existing failure wording.
+    pub(crate) fn with_cause<C: error_stack::Context>(
+        cause: Report<C>,
+        classify: impl FnOnce(String) -> Self,
+    ) -> Report<Self> {
+        let message = cause.to_string();
+        cause.change_context(classify(message))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]

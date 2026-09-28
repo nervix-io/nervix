@@ -417,7 +417,7 @@ pub(super) fn configure_client_builder(
     builder: &mut client::Builder,
     options: &TransportOptions,
     class: PoolClass,
-) -> Result<(), TransportError> {
+) -> Result<(), Report<TransportError>> {
     let stream_slots = class.stream_slots_per_connection();
     let streams = u32::try_from(stream_slots).map_err(|_| TransportError::InvalidOptions {
         reason: "pool stream slots exceed the HTTP/2 setting width".to_string(),
@@ -437,7 +437,7 @@ pub(super) fn configure_client_builder(
 pub(super) fn configure_server_builder(
     builder: &mut server::Builder,
     options: &TransportOptions,
-) -> Result<(), TransportError> {
+) -> Result<(), Report<TransportError>> {
     let streams =
         u32::try_from(PoolClass::Management.stream_slots_per_connection()).map_err(|_| {
             TransportError::InvalidOptions {

@@ -341,6 +341,10 @@ boundary for an already classified failure; it is not used to recover a new clas
 replication and materialized-snapshot description use this envelope, and local errors retain the
 remote class alongside their target and placement. [Cluster Interconnect](./interconnect.md)
 defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries.
+Local interconnect transport, typed request, and streaming-handler failures carry reports through
+their callers. A layer that changes the failure's meaning adds context to the existing report, so
+the caller can still inspect the transport or producer cause. The HTTP/2 and rkyv boundary sends
+the classified remote result or its rejection text, rather than serializing the local cause chain.
 
 ```mermaid
 sequenceDiagram
@@ -443,7 +447,8 @@ in the type. A dropped result with no stated recovery class does not establish t
 The former `result_string_errors` debt measure is now a zero-tolerance rule:
 `just validate-typed-errors`, run by `just validate`, rejects `Result<_, String>` in product code
 without a baseline. `just ratchet` still counts `bare_error_signatures`: a Nervix error returned
-without an `error-stack` report cannot increase that debt. The ratchet also guards raw dropped
+without an `error-stack` report cannot increase that debt, including a locally owned error nested
+in a `Future` output or `Stream` item callback contract. The ratchet also guards raw dropped
 outcomes and panic sites. For a new fallible site, a reviewer asks in order: which layer decides its
 meaning; whether it is an ordinary outcome, a recoverable failure, or a broken invariant; which
 typed fields let the caller act; which context must cross each boundary; and which public

@@ -24,13 +24,14 @@ use chitchat::{
     Serializable as _, spawn_chitchat,
     transport::{Socket as GossipSocket, Transport as GossipTransport},
 };
+use error_stack::Report;
 use futures_util::future::join_all;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{GossipNode, GossipState};
 use nervix_execution::sync::{ArcSwap, DashMap, Guard};
 use nervix_interconnect::{
     ApplicationRevisionResponse, InterconnectRequest, PeerTarget, PoolClass, RequestContext,
-    RequestSubquota, Transport as InterconnectTransport,
+    RequestError, RequestSubquota, Transport as InterconnectTransport, TransportError,
 };
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, NodeEndpoint, NodeServiceUrl,
@@ -888,6 +889,15 @@ struct GossipRoute {
     target: PeerTarget,
 }
 
+/// Chitchat requires a standard error; keep the interconnect report inside that boundary.
+#[derive(Debug, thiserror::Error)]
+enum GossipExchangeFailure {
+    #[error("{0}")]
+    Transport(Report<TransportError>),
+    #[error("{0}")]
+    Request(Report<RequestError>),
+}
+
 impl InterconnectGossipTransport {
     fn build(
         interconnect: InterconnectTransport,
@@ -1092,7 +1102,8 @@ impl InterconnectGossipTransport {
                 // configured seeds, so restore the authenticated route before trying the probe.
                 self.inner
                     .interconnect
-                    .register_outbound_target(node_id.clone(), route.target.endpoint())?;
+                    .register_outbound_target(node_id.clone(), route.target.endpoint())
+                    .map_err(|error| anyhow::Error::new(GossipExchangeFailure::Transport(error)))?;
                 node_id
             }
             None => {
@@ -1100,7 +1111,8 @@ impl InterconnectGossipTransport {
                     .inner
                     .interconnect
                     .bootstrap_target(route.target.clone())
-                    .await?;
+                    .await
+                    .map_err(|error| anyhow::Error::new(GossipExchangeFailure::Transport(error)))?;
                 self.inner.routes.insert(
                     to,
                     GossipRoute {
@@ -1125,7 +1137,7 @@ impl InterconnectGossipTransport {
                 },
             )
             .await
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            .map_err(|error| anyhow::Error::new(GossipExchangeFailure::Request(error)))?;
         response?;
         Ok(())
     }

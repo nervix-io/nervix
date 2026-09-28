@@ -533,16 +533,14 @@ impl RemoteDispatcher {
                 }
             };
             if Instant::now() >= deadline {
-                return Err(
-                    Report::new(error).change_context(RemoteDispatchError::Send {
-                        target: node_id.clone(),
-                    }),
-                );
+                return Err(error.change_context(RemoteDispatchError::Send {
+                    target: node_id.clone(),
+                }));
             }
             tokio::select! {
                 _ = sleep_until(deadline) => {
                     return Err(
-                        Report::new(error).change_context(RemoteDispatchError::Send {
+                        error.change_context(RemoteDispatchError::Send {
                             target: node_id.clone(),
                         }),
                     );

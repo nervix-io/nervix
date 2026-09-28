@@ -162,27 +162,27 @@ impl Runtime {
     pub(crate) async fn stream_sealed_materialized_snapshot(
         &self,
         request: FetchStateSnapshot,
-    ) -> Result<StreamingResponse, StreamHandlerError> {
+    ) -> Result<StreamingResponse, Report<StreamHandlerError>> {
         let placement = RuntimeStatePlacement::from_remote(request.placement)
-            .map_err(|error| StreamHandlerError::new(error.to_string()))?;
+            .map_err(StreamHandlerError::with_cause)?;
         let state = self
             .inner
             .replicated_materialized_stream_states
             .get(&placement)
             .map(|state| super::ReplicatedMaterializedRelayState::read(state.value()));
         let Some(state) = state else {
-            return Err(StreamHandlerError::new(format!(
+            return Err(Report::new(StreamHandlerError::new(format!(
                 "this node is not currently assigned materialized state for {} '{}'",
                 placement.kind.as_str(),
                 placement.identifier.as_str()
-            )));
+            ))));
         };
         let Some(sealed) = state.sealed_at(request.revision) else {
-            return Err(StreamHandlerError::new(format!(
+            return Err(Report::new(StreamHandlerError::new(format!(
                 "materialized relay '{}' no longer holds the sealed generation at revision {}",
                 placement.identifier.as_str(),
                 request.revision
-            )));
+            ))));
         };
         let chunk_bytes = self.inner.executor.limits().bulk_chunk_bytes.as_u64();
         let length = sealed.descriptor.length;
@@ -357,7 +357,7 @@ struct SealedChunks {
 }
 
 impl SealedChunks {
-    fn next(&mut self) -> Option<Result<ChargedBytes, StreamHandlerError>> {
+    fn next(&mut self) -> Option<Result<ChargedBytes, Report<StreamHandlerError>>> {
         if self.offset >= self.bytes.len() {
             return None;
         }
@@ -370,9 +370,9 @@ impl SealedChunks {
             .unwrap_or(self.bytes.len())
             .min(self.bytes.len());
         let Some(chunk) = self.bytes.slice(self.offset, end) else {
-            return Some(Err(StreamHandlerError::new(
+            return Some(Err(Report::new(StreamHandlerError::new(
                 "the sealed snapshot ended before the chunk it declared",
-            )));
+            ))));
         };
         self.offset = end;
         Some(Ok(chunk))
