@@ -249,6 +249,11 @@ A scenario step can also read status inside a window of its own, passing that wi
 deadline. Where the window bounds how long something is watched rather than how long one read may
 take, every read keeps a full request timeout instead.
 
+The harness session client keeps domain-clock replies and frames in arrival order. When a detach
+reply ends an attachment, it retires that domain's unread frames from the pending observation
+queue while preserving them in the ordered log. Assertions about events after detachment therefore
+start at the acknowledged boundary, including when ticks arrived while the client awaited the reply.
+
 ## Node Tasks And Readiness
 
 An in-process node is the server application running as one Tokio task. The harness holds that task
