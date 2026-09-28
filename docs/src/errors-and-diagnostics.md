@@ -4,6 +4,9 @@ Nervix gives a failure its meaning at the boundary that can decide what went wro
 travels through the graph as a semantic error and an `error-stack` report. A public edge renders a
 diagnostic only after it has made the decision the error permits. Ordinary control outcomes, such
 as waiting for materialized state or following a new leader, remain distinct from failures.
+The web console applies the same distinction to structured choice lookups: an absent form
+prerequisite shows a neutral hint, and stale context offers a fresh request. A failed lookup,
+closed session channel, or unreadable reply appears as an alert.
 
 This chapter owns the error and diagnostic model across layers. [Typed States And Validation
 Boundaries](./typed-states.md) explains how missing values and semantic states are represented;
