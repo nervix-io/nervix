@@ -919,7 +919,9 @@ A missing, stale, or capacity-exhausted observation produces unknown availabilit
 a peer unavailable and does not extend a previous run of failures. Only continuous, fresh failures
 for the configured node-unavailability interval produce unavailable status; a healthy observation
 resets that run. Scheduling and runtime availability retain a previously discovered incarnation
-through a temporary gossip loss until application health marks it unavailable. Consensus membership
+through a temporary gossip loss only while its latest application-health observation is fresh and
+has not marked it unavailable. Once that observation expires, gossip absence removes the peer from
+the effective availability view even though its health status remains unknown. Consensus membership
 continues to use the cluster topology established by gossip.
 
 `SHOW CLUSTER STATUS` exposes the interconnect address, endpoint generation, observation age,

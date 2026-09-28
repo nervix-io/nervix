@@ -353,6 +353,7 @@ pub(crate) struct PeerHealthSnapshot {
     targets: BTreeMap<ClusterNodeName, PeerHealthProbeTarget>,
     latest_outcomes: BTreeMap<ClusterNodeName, PeerHealthObservationKind>,
     observation_times: BTreeMap<ClusterNodeName, Instant>,
+    fresh_observations: BTreeSet<ClusterNodeName>,
 }
 
 impl PeerHealthSnapshot {
@@ -394,9 +395,11 @@ impl PeerHealthSnapshot {
     }
 
     /// A previously discovered incarnation keeps its established health target while Chitchat
-    /// briefly stops calling it live. A replacement incarnation or endpoint needs fresh discovery.
+    /// briefly stops calling it live while its last application-health observation is fresh. A
+    /// replacement incarnation or endpoint needs fresh discovery.
     pub(crate) fn retains_known_node(&self, node: &GossipNode) -> bool {
         self.status(&node.node_id) != Some(PeerHealthStatus::Unavailable)
+            && self.fresh_observations.contains(&node.node_id)
             && self
                 .targets
                 .get(&node.node_id)
@@ -607,6 +610,16 @@ impl PeerHealthStateSnapshot {
                 .filter_map(|(node_id, peer)| {
                     let observation = peer.observation.as_ref()?;
                     Some((node_id.clone(), observation.observed_at))
+                })
+                .collect(),
+            fresh_observations: self
+                .peers
+                .iter()
+                .filter_map(|(node_id, peer)| {
+                    let observed_at = peer.observation.as_ref()?.observed_at;
+                    now.checked_duration_since(observed_at)
+                        .is_some_and(|age| age < observation_freshness)
+                        .then(|| node_id.clone())
                 })
                 .collect(),
         }
@@ -2132,6 +2145,54 @@ mod tests {
                 .effective_snapshot(almost_unavailable, timeout)
                 .retains_known_node(&changed_endpoint)
         );
+    }
+
+    #[test]
+    fn stale_failure_does_not_keep_a_gossip_dead_peer_available() {
+        let timeout = Duration::from_secs(10);
+        let observed_at = Instant::now();
+        let stale_at = observed_at
+            .checked_add(timeout)
+            .assured("the test observation time fits in the monotonic clock range");
+        let mut health = PeerHealthStateSnapshot::default();
+        let target = health
+            .replace_endpoints(
+                [health_endpoint("node-2", 7, "node-2.example:7001")],
+                observed_at,
+                timeout,
+            )
+            .into_iter()
+            .next()
+            .assured("one endpoint produces one health target");
+        health.record_result(
+            PeerHealthProbeResult::new(target, PeerHealthProbeOutcome::Failure, observed_at),
+            timeout,
+        );
+
+        let mut gossip_state = NodeState::for_test();
+        gossip_state.set(KEY_INTERCONNECT_ADVERTISE_ADDR, "node-2.example:7001");
+        let node = to_gossip_node(&gossip_id("node-2", 7), &gossip_state)
+            .assured("the test gossip identity is valid");
+        let node_id = node.node_id.clone();
+        let known_nodes = BTreeMap::from([(node_id.clone(), node.clone())]);
+        let gossip_miss = || GossipState {
+            live_nodes: Vec::new(),
+            dead_node_ids: BTreeSet::from([node_id.clone()]),
+            dead_node_identities: BTreeSet::from([node.identity()]),
+        };
+
+        let mut recent = gossip_miss();
+        health
+            .effective_snapshot(observed_at, timeout)
+            .retain_known_nodes(&mut recent, &known_nodes);
+        assert_eq!(recent.live_node_ids(), BTreeSet::from([node_id.clone()]));
+
+        let mut stale = gossip_miss();
+        let snapshot = health.effective_snapshot(stale_at, timeout);
+        assert_eq!(snapshot.status(&node_id), Some(PeerHealthStatus::Unknown));
+        snapshot.retain_known_nodes(&mut stale, &known_nodes);
+        assert!(stale.live_node_ids().is_empty());
+        assert_eq!(stale.dead_node_ids, BTreeSet::from([node_id]));
     }
 
     #[test]

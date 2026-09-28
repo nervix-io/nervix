@@ -227,6 +227,7 @@ async fn then_clock_session_is_detached(world: &mut ScenarioWorld, domain: Strin
         DomainClockDetachDisposition::Detached(domain),
         "{outcome:?}"
     );
+    clock_session(world).discard_clock_frames_before_reply();
 }
 
 #[then(
