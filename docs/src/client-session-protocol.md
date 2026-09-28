@@ -307,6 +307,17 @@ lane; nothing about the refused request was admitted. A request identity that is
 is refused with `DuplicateRequestId`, and that refusal necessarily names the same identity as the
 request still in flight.
 
+Choice lookups on the concurrent lane return typed values for structured client controls. A domain
+dependency selects internal schemas, branches, relays, JSON/CBOR/AVRO wire schemas, or resource
+catalogs; a domain and relay reference select relay fields; a domain and resource reference select
+completed resource versions. Wire-schema targets have separate discriminants, so a codec cannot
+mistake a JSON wire schema for a CBOR or AVRO schema with the same name. A completed-version value
+is either an explicit number or `LATEST`, not a label to parse. Resource catalogs include resources
+staged earlier in the attached transaction, while version choices include completed uploads only.
+The cursor binds the selected candidate set and its definitions; a changed context returns
+`StaleContext` instead of continuing an earlier page. [Sessions](./sessions.md#structured-choices)
+owns the complete lookup contract and the server's transaction-aware resolution.
+
 ```mermaid
 flowchart LR
     Client -- ClientMessage --> Decode[Verify and decode]

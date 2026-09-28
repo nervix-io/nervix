@@ -23,8 +23,8 @@ use nervix_client_wire::{
 use nervix_models::{
     CanonicalNsplError, CreateDomain, CreateResource, CreateStatement, CreateSubscription,
     CreateUser, DomainClockPeriod, DomainClockSkew, DomainConfig, DomainName, DomainPace, Model,
-    ModelKind, ModelName, PlacementPolicy, RelayName, ResourceName, Statement, SubscriptionName,
-    UserName,
+    ModelKind, ModelName, PlacementPolicy, RelayName, RequestedResourceVersion, ResourceName,
+    Statement, SubscriptionName, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use nervix_recovery::Discarded as _;
@@ -33,17 +33,33 @@ use wasm_bindgen::JsCast as _;
 
 use super::{ConsoleConnectionState, ConsoleRequest};
 
+mod choice_group;
+mod codec_draft;
+mod codec_editor;
 mod relay_draft;
 mod relay_editor;
+mod resource_binding_draft;
+mod resource_binding_editor;
 mod schema_draft;
 mod schema_editor;
+mod signaling_draft;
+mod signaling_editor;
 mod subscription_draft;
 mod subscription_editor;
+#[cfg(test)]
+mod visual_forms_tests;
 
+use choice_group::ChoiceGroup;
+#[cfg(test)]
+use choice_group::{ChoiceGroupProps, select_choice, selected_choice};
+use codec_draft::{CodecDraft, CodecDraftError, CodecFormatDraft, CodecFormatKind};
+use codec_editor::CodecEditor;
 use relay_draft::{RelayDraft, RelayDraftError};
 use relay_editor::RelayEditor;
 use schema_draft::{SchemaDraftError, StructuredDrafts, WireFormat};
 use schema_editor::{BranchEditor, SchemaEditor, WireSchemaEditor};
+use signaling_draft::{SignalingDraft, SignalingDraftError, SignalingFormatDraft};
+use signaling_editor::SignalingEditor;
 use subscription_draft::{SubscriptionDraft, SubscriptionDraftError};
 use subscription_editor::SubscriptionEditor;
 
@@ -59,6 +75,8 @@ pub(crate) enum CreateKind {
     Branch,
     Relay,
     Subscription,
+    Codec,
+    SignalingProtocol,
 }
 
 impl CreateKind {
@@ -74,6 +92,8 @@ impl CreateKind {
             Self::Branch => "branch",
             Self::Relay => "relay",
             Self::Subscription => "subscription",
+            Self::Codec => "codec",
+            Self::SignalingProtocol => "signaling protocol",
         }
     }
 
@@ -94,7 +114,9 @@ impl CreateKind {
             | Self::WireCborSchema
             | Self::WireAvroSchema
             | Self::Branch
-            | Self::Relay => true,
+            | Self::Relay
+            | Self::Codec
+            | Self::SignalingProtocol => true,
         }
     }
 
@@ -109,7 +131,9 @@ impl CreateKind {
             | Self::Schema
             | Self::Branch
             | Self::Relay
-            | Self::Subscription => None,
+            | Self::Subscription
+            | Self::Codec
+            | Self::SignalingProtocol => None,
         }
     }
 }
@@ -124,6 +148,12 @@ pub(crate) enum ChoiceControl {
     SubscriptionRelay,
     /// Inserts typed references to the selected relay's fields into the subscription filter.
     SubscriptionField,
+    CodecSchema,
+    CodecWireSchema,
+    CodecResource,
+    CodecVersion,
+    SignalingResource,
+    SignalingVersion,
 }
 
 impl ChoiceControl {
@@ -134,6 +164,11 @@ impl ChoiceControl {
             Self::BranchSchema => CreateKind::Branch,
             Self::RelaySchema | Self::RelayBranch => CreateKind::Relay,
             Self::SubscriptionRelay | Self::SubscriptionField => CreateKind::Subscription,
+            Self::CodecSchema
+            | Self::CodecWireSchema
+            | Self::CodecResource
+            | Self::CodecVersion => CreateKind::Codec,
+            Self::SignalingResource | Self::SignalingVersion => CreateKind::SignalingProtocol,
         }
     }
 }
@@ -186,6 +221,12 @@ struct ChoiceControls {
     relay_branch: ChoiceControlSignals,
     subscription_relay: ChoiceControlSignals,
     subscription_field: ChoiceControlSignals,
+    codec_schema: ChoiceControlSignals,
+    codec_wire_schema: ChoiceControlSignals,
+    codec_resource: ChoiceControlSignals,
+    codec_version: ChoiceControlSignals,
+    signaling_resource: ChoiceControlSignals,
+    signaling_version: ChoiceControlSignals,
 }
 
 impl ChoiceControls {
@@ -198,6 +239,12 @@ impl ChoiceControls {
             relay_branch: ChoiceControlSignals::new(),
             subscription_relay: ChoiceControlSignals::new(),
             subscription_field: ChoiceControlSignals::new(),
+            codec_schema: ChoiceControlSignals::new(),
+            codec_wire_schema: ChoiceControlSignals::new(),
+            codec_resource: ChoiceControlSignals::new(),
+            codec_version: ChoiceControlSignals::new(),
+            signaling_resource: ChoiceControlSignals::new(),
+            signaling_version: ChoiceControlSignals::new(),
         }
     }
 
@@ -210,6 +257,12 @@ impl ChoiceControls {
             ChoiceControl::RelayBranch => self.relay_branch,
             ChoiceControl::SubscriptionRelay => self.subscription_relay,
             ChoiceControl::SubscriptionField => self.subscription_field,
+            ChoiceControl::CodecSchema => self.codec_schema,
+            ChoiceControl::CodecWireSchema => self.codec_wire_schema,
+            ChoiceControl::CodecResource => self.codec_resource,
+            ChoiceControl::CodecVersion => self.codec_version,
+            ChoiceControl::SignalingResource => self.signaling_resource,
+            ChoiceControl::SignalingVersion => self.signaling_version,
         }
     }
 }
@@ -485,6 +538,10 @@ enum CreateDraftError {
     Relay(#[from] RelayDraftError),
     #[error("{0}")]
     Subscription(#[from] SubscriptionDraftError),
+    #[error("{0}")]
+    Codec(#[from] CodecDraftError),
+    #[error("{0}")]
+    Signaling(#[from] SignalingDraftError),
     #[error("Canonical NSPL could not be rendered")]
     CanonicalNspl,
 }
@@ -555,8 +612,16 @@ impl CreateSubmission {
         if_not_exists: bool,
         scope: DomainName,
     ) -> error_stack::Result<Self, CreateDraftError> {
-        let statement =
-            Statement::Create(CreateStatement::new(Box::new(model.into()), if_not_exists));
+        Self::domain_requested_model(kind, model.into(), if_not_exists, scope)
+    }
+
+    fn domain_requested_model(
+        kind: CreateKind,
+        model: Model<RequestedResourceVersion>,
+        if_not_exists: bool,
+        scope: DomainName,
+    ) -> error_stack::Result<Self, CreateDraftError> {
+        let statement = Statement::Create(CreateStatement::new(Box::new(model), if_not_exists));
         let query = statement
             .to_canonical_nspl()
             .change_context(CreateDraftError::CanonicalNspl)?;
@@ -601,6 +666,8 @@ pub(crate) struct CreateSignals {
     structured: RwSignal<StructuredDrafts>,
     relay: RwSignal<RelayDraft>,
     subscription: RwSignal<SubscriptionDraft>,
+    codec: RwSignal<CodecDraft>,
+    signaling: RwSignal<SignalingDraft>,
     /// The number the next generated subscription name carries. Numbers only increase, so no two
     /// generated names of one console coincide.
     next_subscription_name: RwSignal<u64>,
@@ -628,6 +695,8 @@ impl CreateSignals {
                 SubscriptionName::parse("web_console_subscription_1")
                     .assured("the first generated subscription name is a valid name"),
             )),
+            codec: RwSignal::new(CodecDraft::default()),
+            signaling: RwSignal::new(SignalingDraft::default()),
             next_subscription_name: RwSignal::new(2),
             choices: ChoiceControls::new(),
         }
@@ -730,6 +799,10 @@ impl CreateSignals {
                 CreateKind::Subscription => self
                     .subscription
                     .update(SubscriptionDraft::invalidate_references),
+                CreateKind::Codec => self.codec.update(CodecDraft::invalidate_references),
+                CreateKind::SignalingProtocol => {
+                    self.signaling.update(SignalingDraft::invalidate_references)
+                }
                 CreateKind::Domain
                 | CreateKind::User
                 | CreateKind::Resource
@@ -889,6 +962,63 @@ impl CreateSignals {
                 ChoiceTarget::Schema,
                 "Select a domain before choosing a schema",
             ),
+            ChoiceControl::CodecSchema => self.domain_question(
+                ChoiceTarget::Schema,
+                "Select a domain before choosing a schema",
+            ),
+            ChoiceControl::CodecWireSchema => {
+                let target = match self
+                    .codec
+                    .get_untracked()
+                    .format
+                    .as_ref()
+                    .map(CodecFormatDraft::kind)
+                {
+                    Some(CodecFormatKind::WireJson) => ChoiceTarget::WireJsonSchema,
+                    Some(CodecFormatKind::WireCbor) => ChoiceTarget::WireCborSchema,
+                    Some(CodecFormatKind::WireAvro) => ChoiceTarget::WireAvroSchema,
+                    _ => return Err("Choose a wire schema format first"),
+                };
+                self.domain_question(target, "Select a domain before choosing a wire schema")
+            }
+            ChoiceControl::CodecResource | ChoiceControl::SignalingResource => self
+                .domain_question(
+                    ChoiceTarget::Resource,
+                    "Select a domain before choosing a resource",
+                ),
+            ChoiceControl::CodecVersion | ChoiceControl::SignalingVersion => {
+                let Some(domain) = self.captured_domain.get_untracked() else {
+                    return Err("Select a domain before choosing a resource version");
+                };
+                let resource = match control {
+                    ChoiceControl::CodecVersion => self
+                        .codec
+                        .get_untracked()
+                        .binding()
+                        .and_then(|binding| binding.current_resource().cloned()),
+                    ChoiceControl::SignalingVersion => self
+                        .signaling
+                        .get_untracked()
+                        .binding()
+                        .and_then(|binding| binding.current_resource().cloned()),
+                    _ => None,
+                };
+                let Some(resource) = resource else {
+                    return Err("Select a resource to list its completed versions");
+                };
+                Ok(ChoiceQuery {
+                    target: ChoiceTarget::CompletedResourceVersion,
+                    dependencies: vec![
+                        ChoiceSelection {
+                            value: ChoiceValue::Domain(domain),
+                        },
+                        ChoiceSelection {
+                            value: ChoiceValue::Resource(resource),
+                        },
+                    ],
+                    page_size: 100,
+                })
+            }
             ChoiceControl::RelayBranch => self.domain_question(
                 ChoiceTarget::Branch,
                 "Select a domain before choosing a branch",
@@ -994,6 +1124,30 @@ impl CreateSignals {
                     scope,
                 )
             }
+            CreateKind::Codec => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.codec.get_untracked();
+                let codec = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_requested_model(
+                    kind,
+                    Model::Codec(codec),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
+            CreateKind::SignalingProtocol => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.signaling.get_untracked();
+                let protocol = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_requested_model(
+                    kind,
+                    Model::SignalingProtocol(protocol),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
             CreateKind::Subscription => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
@@ -1074,6 +1228,12 @@ pub(crate) fn CreateMenu(
                 </button>
                 <button type="button" role="menuitem" data-create-kind="subscription" on:click=move |_| choose(CreateKind::Subscription)>
                     <span>"Subscription"</span><em>"Read-only relay tab"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="codec" on:click=move |_| choose(CreateKind::Codec)>
+                    <span>"Codec"</span><em>"Wire format and schema mapping"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="signaling-protocol" on:click=move |_| choose(CreateKind::SignalingProtocol)>
+                    <span>"Signaling protocol"</span><em>"Ordered connection handshake"</em>
                 </button>
             </div>
         </div>
@@ -1166,6 +1326,33 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
             ChoiceControl::SubscriptionRelay,
             ChoiceControl::SubscriptionField,
         ],
+        CreateKind::Codec => {
+            let mut controls = vec![ChoiceControl::CodecSchema];
+            match signals.codec.get_untracked().format {
+                Some(CodecFormatDraft::Wire { .. }) => {
+                    controls.push(ChoiceControl::CodecWireSchema)
+                }
+                Some(CodecFormatDraft::Protobuf { .. }) => {
+                    controls.push(ChoiceControl::CodecResource);
+                    controls.push(ChoiceControl::CodecVersion);
+                }
+                _ => {}
+            }
+            controls
+        }
+        CreateKind::SignalingProtocol => {
+            if matches!(
+                signals.signaling.get_untracked().format,
+                Some(SignalingFormatDraft::Protobuf { .. })
+            ) {
+                vec![
+                    ChoiceControl::SignalingResource,
+                    ChoiceControl::SignalingVersion,
+                ]
+            } else {
+                Vec::new()
+            }
+        }
         CreateKind::User
         | CreateKind::Resource
         | CreateKind::Schema
@@ -1392,6 +1579,12 @@ pub(crate) fn CreateDialog(
                         <Show when=move || signals.open.get() == Some(CreateKind::Subscription) fallback=|| ()>
                             <SubscriptionEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
                         </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Codec) fallback=|| ()>
+                            <CodecEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::SignalingProtocol) fallback=|| ()>
+                            <SignalingEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
 
                         <Show when=move || signals.open.get().is_some_and(CreateKind::takes_if_not_exists) fallback=|| ()>
                             <label class="create-check">
@@ -1408,6 +1601,8 @@ pub(crate) fn CreateDialog(
                                         Some(CreateKind::WireAvroSchema) => signals.structured.get().wire_avro.if_not_exists,
                                         Some(CreateKind::Branch) => signals.structured.get().branch.if_not_exists,
                                         Some(CreateKind::Relay) => signals.relay.get().if_not_exists,
+                                        Some(CreateKind::Codec) => signals.codec.get().if_not_exists,
+                                        Some(CreateKind::SignalingProtocol) => signals.signaling.get().if_not_exists,
                                         Some(CreateKind::Subscription) | None => false,
                                     }
                                     disabled=move || signals.progress.get().is_pending()
@@ -1423,6 +1618,8 @@ pub(crate) fn CreateDialog(
                                             Some(CreateKind::WireAvroSchema) => signals.structured.update(|draft| draft.wire_avro.if_not_exists = checked),
                                             Some(CreateKind::Branch) => signals.structured.update(|draft| draft.branch.if_not_exists = checked),
                                             Some(CreateKind::Relay) => signals.relay.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Codec) => signals.codec.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::SignalingProtocol) => signals.signaling.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Subscription) | None => {}
                                         }
                                         signals.edit();
@@ -1463,172 +1660,12 @@ pub(crate) fn CreateDialog(
     }
 }
 
-#[component]
-fn ChoiceGroup(
-    class_name: &'static str,
-    label: &'static str,
-    control: ChoiceControl,
-    signals: CreateSignals,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
-    session_generation: RwSignal<u64>,
-    /// Shows each choice's detail beside its label, as a typed field shows its type.
-    #[prop(optional)]
-    show_detail: bool,
-) -> impl IntoView {
-    let ChoiceControlSignals { search, load } = signals.choices.of(control);
-    view! {
-        <fieldset class=format!("create-choice-group {class_name}")>
-            <legend>{label}</legend>
-            <label class="create-choice-search-label">
-                <span class="sr-only">{format!("Search {label}")}</span>
-                <input
-                    class="create-choice-search"
-                    type="search"
-                    placeholder=format!("Search {}", label.to_ascii_lowercase())
-                    prop:value=move || search.get()
-                    on:input=move |event| {
-                        search.set(event_target_value(&event));
-                        signals.edit();
-                    }
-                />
-            </label>
-            <Show when=move || matches!(load.get(), ChoiceLoad::Loading | ChoiceLoad::Waiting) fallback=|| ()>
-                <p class="create-choice-state">{move || if load.get() == ChoiceLoad::Waiting { "Waiting for connection" } else { "Loading choices" }}</p>
-            </Show>
-            <Show when=move || load.get() == ChoiceLoad::Empty fallback=|| ()>
-                <p class="create-choice-state">"No choices"</p>
-            </Show>
-            <Show when=move || matches!(load.get(), ChoiceLoad::MissingPrerequisite(_)) fallback=|| ()>
-                <p class="create-choice-state create-choice-missing">{move || match load.get() {
-                    ChoiceLoad::MissingPrerequisite(reason) => reason,
-                    _ => "",
-                }}</p>
-            </Show>
-            <Show when=move || load.get() == ChoiceLoad::StaleContext fallback=|| ()>
-                <div class="create-choice-recovery">
-                    <p class="create-choice-state create-choice-stale">"The form context changed. Refresh choices."</p>
-                    <button class="create-choice-retry" type="button" on:click=move |_| request_choices(signals, control, request_tx, session_generation.get_untracked(), false)>"Retry"</button>
-                </div>
-            </Show>
-            <Show when=move || matches!(load.get(), ChoiceLoad::Failed(_)) fallback=|| ()>
-                <p class="create-choice-state choice-failed" role="alert">{move || match load.get() {
-                    ChoiceLoad::Failed(reason) => reason,
-                    _ => String::new(),
-                }}</p>
-            </Show>
-            <div class="create-choice-buttons">
-                <For
-                    each=move || match load.get() {
-                        ChoiceLoad::Ready { choices, .. } => choices,
-                        ChoiceLoad::Waiting
-                        | ChoiceLoad::Loading
-                        | ChoiceLoad::Empty
-                        | ChoiceLoad::MissingPrerequisite(_)
-                        | ChoiceLoad::StaleContext
-                        | ChoiceLoad::Failed(_) => Vec::new(),
-                    }
-                    key=|choice| choice.presentation.label.clone()
-                    children=move |choice| {
-                        let label = choice.presentation.label.clone();
-                        let detail = choice.presentation.detail.clone().unwrap_or_default();
-                        let shown_detail = if show_detail { Some(detail.clone()) } else { None };
-                        let selected_value = choice.value.clone();
-                        let selected_for_class = selected_value.clone();
-                        view! {
-                            <button
-                                type="button"
-                                data-value=label.clone()
-                                class:active=move || selected_choice(signals, control, &selected_for_class)
-                                title=detail
-                                on:click=move |_| {
-                                    select_choice(signals, control, selected_value.clone());
-                                    signals.edit();
-                                }
-                            >
-                                <span>{label.clone()}</span>
-                                {shown_detail.map(|detail| view! { <em>{detail}</em> })}
-                            </button>
-                        }
-                    }
-                />
-            </div>
-            <Show when=move || matches!(load.get(), ChoiceLoad::Ready { page_cursor: Some(_), .. }) fallback=|| ()>
-                <button class="create-choice-more" type="button" on:click=move |_| request_choices(
-                    signals,
-                    control,
-                    request_tx,
-                    session_generation.get_untracked(),
-                    true,
-                )>"Load more"</button>
-            </Show>
-        </fieldset>
-    }
-}
-
-/// Whether `value` is the selection `control` currently holds. A value of another kind than the
-/// control asks for selects nothing.
-fn selected_choice(signals: CreateSignals, control: ChoiceControl, value: &ChoiceValue) -> bool {
-    match (control, value) {
-        (ChoiceControl::DomainPace, ChoiceValue::DomainPace(value)) => {
-            signals.domain.get().pace == *value
-        }
-        (ChoiceControl::PlacementPolicy, ChoiceValue::PlacementPolicy(value)) => {
-            signals.domain.get().placement == *value
-        }
-        (ChoiceControl::BranchSchema, ChoiceValue::Model(node)) => {
-            signals.structured.get().branch.selects_schema(node)
-        }
-        (ChoiceControl::RelaySchema, ChoiceValue::Model(node)) => {
-            signals.relay.get().selects_schema(node)
-        }
-        (ChoiceControl::RelayBranch, ChoiceValue::Model(node)) => {
-            signals.relay.get().selects_branch(node)
-        }
-        (ChoiceControl::SubscriptionRelay, ChoiceValue::Model(node)) => {
-            signals.subscription.get().selects_relay(node)
-        }
-        // A field reference is inserted into the filter rather than held as a selection.
-        _ => false,
-    }
-}
-
-/// Applies `value` to the draft `control` edits. A value of another kind than the control asks
-/// for changes nothing.
-fn select_choice(signals: CreateSignals, control: ChoiceControl, value: ChoiceValue) {
-    match (control, value) {
-        (ChoiceControl::DomainPace, ChoiceValue::DomainPace(value)) => {
-            signals.domain.update(|draft| draft.pace = value);
-        }
-        (ChoiceControl::PlacementPolicy, ChoiceValue::PlacementPolicy(value)) => {
-            signals.domain.update(|draft| draft.placement = value);
-        }
-        (ChoiceControl::BranchSchema, ChoiceValue::Model(node)) => {
-            signals
-                .structured
-                .update(|drafts| drafts.branch.select_schema(&node));
-        }
-        (ChoiceControl::RelaySchema, ChoiceValue::Model(node)) => {
-            signals.relay.update(|draft| draft.select_schema(&node));
-        }
-        (ChoiceControl::RelayBranch, ChoiceValue::Model(node)) => {
-            signals.relay.update(|draft| draft.select_branch(&node));
-        }
-        (ChoiceControl::SubscriptionRelay, ChoiceValue::Model(node)) => {
-            signals
-                .subscription
-                .update(|draft| draft.select_relay(&node));
-        }
-        (ChoiceControl::SubscriptionField, ChoiceValue::Field(field)) => {
-            signals
-                .subscription
-                .update(|draft| draft.insert_field_reference(field));
-        }
-        _ => {}
-    }
-}
-
 fn event_target_value(event: &ev::Event) -> String {
     event_target::<web_sys::HtmlInputElement>(event).value()
+}
+
+fn event_target_textarea_value(event: &ev::Event) -> String {
+    event_target::<web_sys::HtmlTextAreaElement>(event).value()
 }
 
 fn event_target_checked(event: &ev::Event) -> bool {

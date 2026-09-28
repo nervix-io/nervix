@@ -650,6 +650,13 @@ Each node's Chitchat live set is its own failure-detector estimate. An isolated 
 listed live until its missing heartbeats are observed, even after its links stop carrying requests;
 application probes provide the separate signal that eventually makes its work eligible for failover.
 
+Chitchat continues to select known dead peers for exchanges during its 24-hour dead-node retention
+period. When application health has retired one of those peers from the outbound pool, a gossip
+exchange reinstalls its known route before sending. The replacement connection still authenticates
+the peer's node identity and advertised endpoint. This lets a node with no configured bootstrap
+seed contact retained peers again after a partition heals; the returning exchange restores gossip
+membership, after which application health and Raft reconciliation use the current advertisements.
+
 Admission to consensus membership requires an available interconnect endpoint. A discovered node
 without one is not an admission candidate, so it is neither added as a learner nor promoted to
 voter, and it becomes eligible on the round that publishes an endpoint this node accepts. The
@@ -925,6 +932,13 @@ milliseconds and capped at five seconds. A peer removal, incarnation change, or 
 change retires the old target and cancels work tied to its slots. New operations use only the new
 target generation. A new DNS answer for the same advertised endpoint is not a target change: it
 leaves established connections in place and is used by the next connection attempt.
+
+Each established HTTP/2 connection sends a protocol ping every 15 seconds and waits at most ten
+seconds for its acknowledgement. The outbound and inbound ends both close a session that cannot
+answer, independently of the operating system's TCP retransmission timeout. Closing the outbound
+end starts its pool slot's bounded reconnect; closing the inbound end releases the per-peer class
+slot so that reconnect can be accepted. Ordinary request deadlines still apply to individual
+operations during the detection window.
 
 Interconnect certificate, key, and CA files are watched as one credential bundle. A candidate must
 be complete, valid, and identical in two consecutive reads before it replaces the active bundle, so

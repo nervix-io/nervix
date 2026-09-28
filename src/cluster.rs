@@ -1086,7 +1086,15 @@ impl InterconnectGossipTransport {
             },
         };
         let node_id = match route.node_id {
-            Some(node_id) => node_id,
+            Some(node_id) => {
+                // The application-health topology can retire a peer after Chitchat declares it
+                // dead. Chitchat still probes that peer, including on a bootstrap node with no
+                // configured seeds, so restore the authenticated route before trying the probe.
+                self.inner
+                    .interconnect
+                    .register_outbound_target(node_id.clone(), route.target.endpoint())?;
+                node_id
+            }
             None => {
                 let node_id = self
                     .inner
@@ -1951,6 +1959,33 @@ pub fn derive_peer_addr(grpc_addr: SocketAddr) -> Option<SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn gossip_reconnects_a_known_route_after_its_outbound_target_is_retired() {
+        let node = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");
+        let interconnect =
+            crate::application::test_fixtures::test_interconnect("test", &node).await;
+        let address = interconnect.local_addr();
+        let peer = PeerTarget::new(address, address.ip().to_string());
+        let gossip = InterconnectGossipTransport::build(
+            interconnect.clone(),
+            address,
+            vec![(address, peer)],
+        )
+        .assured("the gossip handler is registered once");
+
+        gossip
+            .exchange(address, vec![1])
+            .await
+            .assured("the initial authenticated exchange establishes the route");
+        interconnect.replace_live_nodes(&BTreeSet::new());
+        gossip
+            .exchange(address, vec![2])
+            .await
+            .assured("a retained gossip route reconnects after its peer left the live set");
+
+        interconnect.shutdown().await;
+    }
 
     #[test]
     fn a_gossip_exchange_larger_than_one_message_is_refused() {
