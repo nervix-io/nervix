@@ -5,7 +5,7 @@ on:
     types: [opened, synchronize, reopened]
 
 env:
-  KACHE_VERSION: "0.19.0"
+  KACHE_VERSION: "0.28.0"
   TINYGO_VERSION: "0.41.1"
 
 permissions:
