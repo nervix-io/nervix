@@ -356,14 +356,17 @@ mod tests {
         let planned = GossipState {
             live_nodes: vec![gossip_node("node-1", 1, false)],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let terminating = GossipState {
             live_nodes: vec![gossip_node("node-1", 1, true)],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let restarted = GossipState {
             live_nodes: vec![gossip_node("node-1", 2, false)],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let unrelated = GossipState {
             live_nodes: vec![
@@ -371,6 +374,7 @@ mod tests {
                 gossip_node("learner", 1, true),
             ],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
 
         assert!(!DomainSchedulePlanningSnapshot::same_eligibility(

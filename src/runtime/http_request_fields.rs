@@ -443,10 +443,12 @@ impl CompiledHttpRequestFields {
             }),
         )
         .map_err(|error| {
-            Report::new(HttpRequestFieldsError::Compile {
-                emitter: emitter.clone(),
-            })
-            .attach_printable(error.message)
+            let message = error.current_context().message.clone();
+            error
+                .change_context(HttpRequestFieldsError::Compile {
+                    emitter: emitter.clone(),
+                })
+                .attach_printable(message)
         })?;
         Ok(Self {
             program: CompiledProgramWithMaterializedInterest {
@@ -1037,6 +1039,47 @@ mod tests {
             },
         )
         .expect("the test request fields compile")
+    }
+
+    #[test]
+    fn request_field_type_failure_retains_the_vm_compile_report() {
+        let source = source_schema();
+        let materialized = HashMap::default();
+        let lookups = HashMap::default();
+        let branching = ResolvedBranching::unbranched();
+        let plan = sink(
+            "input.divisor",
+            "'/events'",
+            "INVOKE write_header('X-Test', 'value')",
+        );
+        let report = CompiledHttpRequestFields::compile(
+            &named("deliver"),
+            &plan.sink,
+            &plan.request,
+            HttpRequestSchemas {
+                input: RuntimeVmSchema {
+                    schema: source.arrow_schema(),
+                    sensitivity: source.vm_sensitivity(),
+                },
+                output: None,
+            },
+            RuntimeVmCompileContext {
+                available_materialized_streams: &materialized,
+                available_lookups: &lookups,
+                current_branching: &branching,
+                udfs: None,
+            },
+        )
+        .err()
+        .expect("an I64 method cannot satisfy the exact STRING request contract");
+        assert!(matches!(
+            report.current_context(),
+            HttpRequestFieldsError::Compile { emitter } if emitter.as_str() == "deliver"
+        ));
+        let compile = report
+            .downcast_ref::<nervix_vm::CompileError>()
+            .expect("the HTTP request context retains the VM compile cause");
+        assert!(format!("{report:?}").contains(&compile.message));
     }
 
     fn field_paths(error: &StructuredMessageError) -> Vec<&str> {

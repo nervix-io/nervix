@@ -26,12 +26,7 @@ pub(super) enum LookupHashMapError {
         span: VmSpan,
     },
     #[error("failed to infer the LOOKUP_HASH_MAP key for hash map '{lookup}' field '{field}'")]
-    KeyInference {
-        lookup: LookupName,
-        field: String,
-        #[source]
-        source: nervix_vm::CompileError,
-    },
+    KeyInference { lookup: LookupName, field: String },
     #[error(
         "LOOKUP_HASH_MAP key for hash map '{lookup}' field '{field}' has unsupported BYTES type"
     )]
@@ -40,12 +35,7 @@ pub(super) enum LookupHashMapError {
         field: FieldName,
     },
     #[error("failed to compile the LOOKUP_HASH_MAP key for hash map '{lookup}' field '{field}'")]
-    KeyCompilation {
-        lookup: LookupName,
-        field: String,
-        #[source]
-        source: nervix_vm::CompileError,
-    },
+    KeyCompilation { lookup: LookupName, field: String },
 }
 
 #[derive(Debug, Clone)]
@@ -541,10 +531,9 @@ pub(super) fn compile_lookup_hash_map_calls(
             signatures,
         )
         .map_err(|source| {
-            Report::new(LookupHashMapError::KeyInference {
+            source.change_context(LookupHashMapError::KeyInference {
                 lookup: call.lookup.clone(),
                 field: call.lookup_field.clone(),
-                source,
             })
         })?;
         if key_types
@@ -581,10 +570,9 @@ pub(super) fn compile_lookup_hash_map_calls(
             ),
         )
         .map_err(|source| {
-            Report::new(LookupHashMapError::KeyCompilation {
+            source.change_context(LookupHashMapError::KeyCompilation {
                 lookup: call.lookup.clone(),
                 field: call.lookup_field.clone(),
-                source,
             })
         })?;
         compiled_calls.push(LookupHashMapCall {

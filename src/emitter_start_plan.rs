@@ -20,7 +20,7 @@
 use std::{num::NonZeroUsize, time::Duration};
 
 use arch_into::ArchInto as _;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     AckConfirmation, BrokerPublishingMode, ParsedRetryPolicy, ResolvedClientConfig,
@@ -191,12 +191,9 @@ impl MappedValuesPlan {
             },
             SemanticScopePolicy::read_write("input", namespace),
         )
-        .map_err(|reason| {
-            Report::new(EmitterStartPlanError::InvalidValues {
-                sink,
-                emitter: emitter.clone(),
-            })
-            .attach_printable(reason)
+        .change_context(EmitterStartPlanError::InvalidValues {
+            sink,
+            emitter: emitter.clone(),
         })?;
         Ok(Self {
             columns: mappings

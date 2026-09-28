@@ -34,7 +34,7 @@ fn operand_schema() -> Arc<Schema> {
 fn compile_assignment(
     expression: &str,
     output_type: DataType,
-) -> Result<CompiledProgram, CompileError> {
+) -> error_stack::Result<CompiledProgram, CompileError> {
     let program = parse_program(&format!("SET out = {expression}")).expect("must parse");
     let input = operand_schema();
     let mut fields = input
@@ -159,11 +159,15 @@ fn calls_outside_a_signature_are_rejected_when_the_statement_is_applied() {
     for (expression, code, message) in rejected {
         let error = compile_assignment(expression, DataType::Int64)
             .expect_err("a call outside its signature must be rejected");
-        assert_eq!(error.code, code, "`{expression}`: {error}");
+        assert_eq!(
+            error.current_context().code(),
+            code,
+            "`{expression}`: {error}"
+        );
         assert!(
-            error.message.contains(message),
+            error.current_context().message.contains(message),
             "`{expression}` reported `{}`",
-            error.message
+            error.current_context().message
         );
     }
 }
@@ -172,11 +176,11 @@ fn calls_outside_a_signature_are_rejected_when_the_statement_is_applied() {
 fn a_result_must_match_the_exact_type_of_its_destination() {
     let error = compile_assignment("bit_count(input.u8)", DataType::UInt8)
         .expect_err("bit_count returns I64");
-    assert_eq!(error.code, "type_mismatch");
+    assert_eq!(error.current_context().code(), "type_mismatch");
 
     let error = compile_assignment("sign(input.i16)", DataType::Int64)
         .expect_err("sign returns its operand's type");
-    assert_eq!(error.code, "type_mismatch");
+    assert_eq!(error.current_context().code(), "type_mismatch");
 }
 
 #[test]

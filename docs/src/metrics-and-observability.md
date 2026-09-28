@@ -118,7 +118,9 @@ quiesce buffers do not migrate during termination or failover.
 
 The two session-subscription families use `domain` and `relay` labels and describe the node that
 exports them: the subscriptions its sessions hold and the rows those sessions lost. A client is told
-of its own losses directly, as described in [Sessions](sessions.md).
+of its own losses directly, as described in [Sessions](sessions.md). The server exports no other
+session metrics; [Client Session Protocol](./client-session-protocol.md#observability) describes
+what clients and operators observe instead.
 
 ## Interconnection Metrics
 

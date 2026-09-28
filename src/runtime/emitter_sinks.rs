@@ -472,7 +472,7 @@ impl EmitterSinkStarter {
     fn projection(
         init: MappedValuesProjectionInit<'_>,
     ) -> EmitterRuntimeResult<MappedValuesProjection> {
-        MappedValuesProjection::compile(init).map_err(emitter_init_error)
+        MappedValuesProjection::compile(init).change_context(EmitterRuntimeError::InitializeSink)
     }
 }
 

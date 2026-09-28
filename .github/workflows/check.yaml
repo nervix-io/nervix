@@ -545,7 +545,7 @@ jobs:
       # Criterion's test mode executes every benchmark body once, catching panics and deadlocks
       # without treating noisy shared-runner timings as a performance regression signal.
       - name: Benchmark smoke tests
-        run: just bench --test
+        run: just bench-smoke
 
       - name: Shuttle concurrency checks
         run: just test-shuttle
