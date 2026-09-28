@@ -385,6 +385,34 @@ pub(super) struct RemoteRuntimeConsumer {
     pub(super) mode: AckMode,
 }
 
+/// How a batch reaches this node's runtime consumers of a relay, which decides what reaching no
+/// attached consumer here means.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum RuntimeConsumerDispatch {
+    /// The relay owner fans out a batch of its own relay. Its remote consumers can take what no
+    /// local consumer does, and a relay that no attached consumer reads leaves nothing to wait for.
+    Owner,
+    /// The owner of the relay on another node routed the batch here, because its schedule places an
+    /// attached consumer of the relay on this node.
+    Routed,
+}
+
+impl RuntimeConsumerDispatch {
+    /// Whether a batch that carries record acknowledgements must reach an attached consumer on this
+    /// node.
+    ///
+    /// A routed batch that finds none was routed for a consumer that has since left the node, as
+    /// when a forced recovery moves it off a node the scheduler judged unavailable while the batch
+    /// was in flight. Nothing here can complete the work its acknowledgements stand for, so
+    /// completing them would report records no consumer processed.
+    fn requires_local_attached_consumer(self) -> bool {
+        match self {
+            Self::Owner => false,
+            Self::Routed => true,
+        }
+    }
+}
+
 pub(super) struct RelayOwnerTask {
     pub(super) shutdown: watch::Sender<bool>,
     pub(super) task: JoinHandle<()>,
@@ -689,6 +717,7 @@ impl RelayConsumerFanout {
 
     pub(super) async fn dispatch_runtime_consumers(
         &self,
+        dispatch: RuntimeConsumerDispatch,
         attached_runtime_consumer_count: usize,
         detached_runtime_consumer_count: usize,
         batch: &RelayRecordBatch,
@@ -701,6 +730,19 @@ impl RelayConsumerFanout {
         {
             for ack in batch.acks.iter() {
                 ack.no_ack("runtime consumer unavailable for attached delivery");
+            }
+            return Err(Box::new(batch.clone()));
+        }
+        // A consumer that leaves after this count was read keeps the share the broadcast below
+        // reserves for it unresolved, which fails the batch as well.
+        if attached_receiver_count == 0
+            && dispatch.requires_local_attached_consumer()
+            && batch.carries_record_acknowledgements()
+        {
+            for ack in batch.acks.iter() {
+                ack.no_ack(
+                    "no attached consumer of the relay runs on the node the batch was routed to",
+                );
             }
             return Err(Box::new(batch.clone()));
         }
@@ -774,12 +816,14 @@ impl BranchCollapseNode {
 
     pub(super) async fn dispatch_runtime_consumers(
         &self,
+        dispatch: RuntimeConsumerDispatch,
         attached_runtime_consumer_count: usize,
         detached_runtime_consumer_count: usize,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         self.fanout
             .dispatch_runtime_consumers(
+                dispatch,
                 attached_runtime_consumer_count,
                 detached_runtime_consumer_count,
                 batch,
@@ -958,6 +1002,7 @@ impl RelayBoundaryFanout {
 
     pub(super) async fn dispatch_runtime_consumers(
         &self,
+        dispatch: RuntimeConsumerDispatch,
         attached_runtime_consumer_count: usize,
         detached_runtime_consumer_count: usize,
         batch: &RelayRecordBatch,
@@ -966,6 +1011,7 @@ impl RelayBoundaryFanout {
             Self::Direct(fanout) => {
                 fanout
                     .dispatch_runtime_consumers(
+                        dispatch,
                         attached_runtime_consumer_count,
                         detached_runtime_consumer_count,
                         batch,
@@ -975,6 +1021,7 @@ impl RelayBoundaryFanout {
             Self::BranchCollapse(branch_collapse) => {
                 branch_collapse
                     .dispatch_runtime_consumers(
+                        dispatch,
                         attached_runtime_consumer_count,
                         detached_runtime_consumer_count,
                         batch,
@@ -1311,10 +1358,12 @@ impl RelayBoundaryServices {
 
     pub(super) async fn dispatch_local_runtime_consumers(
         &self,
+        dispatch: RuntimeConsumerDispatch,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         self.fanout
             .dispatch_runtime_consumers(
+                dispatch,
                 self.attached_runtime_consumer_count.load(Ordering::Acquire),
                 self.detached_runtime_consumer_count.load(Ordering::Acquire),
                 batch,
@@ -1484,16 +1533,22 @@ impl RelayBoundaryServices {
     ) -> RelayDispatchResult {
         self.fanout_local_subscriptions(batch).await;
         self.fanout_remote_subscriptions(domain, relay, batch).await;
-        self.dispatch_local_runtime_consumers(batch).await?;
+        self.dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Owner, batch)
+            .await?;
         self.dispatch_remote_runtime_consumers(domain, batch).await
     }
 
+    /// Hands a batch another node's relay owner routed here to the runtime consumers this node runs
+    /// for the relay. A batch that carries record acknowledgements fails them when no attached
+    /// consumer of the relay runs here any more, so its source delivers it again along the owner's
+    /// current routes rather than committing a record no consumer processed.
     pub(super) async fn inject_remote_message(
         &self,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         self.fanout_local_subscriptions(batch).await;
-        self.dispatch_local_runtime_consumers(batch).await
+        self.dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Routed, batch)
+            .await
     }
 }
 

@@ -623,6 +623,26 @@ Removing or evicting a concrete branch cancels its unadmitted channel generation
 reserved work. If the branch appears again, it uses a fresh channel incarnation and sequence. This
 keeps a previous branch lifetime from being confused with the new runtime instance.
 
+### Consumers That Leave The Receiver
+
+The receiver decides admission before it hands the batch to the runtime consumers of the relay, and
+it hands the batch to the consumers that run on the node at that moment. An owner routes an attached
+batch to a node because its schedule places an attached consumer of the relay there. That consumer
+can leave the node after the owner routed the batch: a forced recovery moves every runtime node off
+a node that application health or gossip judged unavailable, including one that is still running,
+and the node stops the moved consumer when it applies the published schedule. The gap between
+admission and dispatch can be long: the receiver sends the terminal admission outcome to the owner
+before it dispatches the batch, and that send can take up to its five-second deadline while the
+owner is unreachable.
+
+A routed batch that carries record acknowledgements and finds no attached consumer of its relay on
+the receiving node fails those acknowledgements. Its admission stands, so the transport does not
+send it again, but the owner receives a failed record acknowledgement and fails its source attempt.
+The source then redelivers the record along the owner's current routes. The receiver never reports
+an attached record acknowledged when no attached consumer took the batch, so an attached record
+cannot be committed at its source without a consumer having completed it. A batch without record
+acknowledgements, such as a detached send, completes at admission as before.
+
 ## Membership, Consensus, And Bulk Transfer
 
 Cluster membership gossip uses management discovery capacity. It discovers topology and

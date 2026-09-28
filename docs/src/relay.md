@@ -118,6 +118,9 @@ Operationally that means:
 - the owner serializes an admitted batch once for each remote consuming cluster node; every local
   runtime consumer on that node shares the delivery, and a session subscription on the same node
   piggybacks on it
+- a delivery that reaches a node after its attached consumer moved away fails its attached
+  acknowledgements, so the source redelivers the record along the owner's current routes; see
+  [Consumers That Leave The Receiver](interconnect.md#consumers-that-leave-the-receiver)
 
 Lookup and state-replication control paths are separate from this relay payload model. The Arrow batch path applies to relay movement inside the data plane.
 
