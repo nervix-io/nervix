@@ -6518,6 +6518,7 @@ dependencies = [
  "nervix-recovery",
  "parking_lot",
  "rustls",
+ "shuttle",
  "shuttle-tokio",
  "shuttle-tokio-stream",
  "strum 0.26.3",

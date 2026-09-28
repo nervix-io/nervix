@@ -13,7 +13,7 @@
 use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc as StdArc};
 
 use error_stack::Report;
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
 use parking_lot::Mutex as SyncMutex;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 

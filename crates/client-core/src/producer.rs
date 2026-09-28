@@ -25,7 +25,7 @@ use ahash::HashMap;
 use arch_into::ArchInto as _;
 use bytes::Bytes;
 use error_stack::Report;
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::ResultExt as _;
 use nervix_client_wire::{
     ClientMessage, ClientRequest, CloseIngestorRequest, OpenIngestorDisposition,
     OpenIngestorRequest, ProducerAdmissionChanged, ProducerEnded, ProducerId, ReplyBody, RequestId,
