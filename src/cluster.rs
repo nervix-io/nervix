@@ -1971,6 +1971,8 @@ mod tests {
             interconnect.clone(),
             address,
             vec![(address, peer)],
+            node.clone(),
+            crate::ConfiguredFaultInjection::default(),
         )
         .assured("the gossip handler is registered once");
 
