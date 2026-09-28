@@ -66,10 +66,16 @@ placement, so every live node can receive every class of interconnect operation.
 confidentiality and integrity as well as peer authentication.
 
 Cluster discovery supplies the current node identity, incarnation, and advertised endpoint for each
-peer. A configured bootstrap endpoint is the one exception: the initiating node knows the endpoint
-before it knows the remote node identifier, then obtains and authenticates that identifier from the
-peer certificate. Once discovered, a peer is addressed by its authenticated identity rather than by
-an unverified endpoint claim.
+peer. A bootstrap seed, configured or recovered, is the exception: the initiating node knows the
+endpoint before it knows the remote node identifier, then obtains and authenticates that identifier
+from the peer certificate. Once discovered, a peer is addressed by its authenticated identity
+rather than by an unverified endpoint claim.
+
+On restart, the node also uses the peer endpoints in its recovered Raft membership as gossip seeds,
+excluding its own endpoint. These are contact hints, not current discovery advertisements: the
+bootstrap exchange authenticates the answering node, and gossip then replaces the hint with that
+node's current incarnation and advertised endpoint. This lets a former bootstrap node contact
+survivors even when its deployment has no configured bootstrap host.
 
 A peer advertises three endpoints independently: its interconnect endpoint as a host and port, and
 its client and web-console endpoints as URLs. Discovery converges field by field, so each one is
@@ -144,18 +150,24 @@ A host resolves in this order:
 ### Where The Interconnect Resolves
 
 At startup a node resolves its own advertised interconnect endpoint, whose first address becomes
-its gossip identity address, and its bootstrap endpoint, every address of which becomes a gossip
-seed. Each lookup has the connection setup timeout, five seconds by default, and a lookup that fails
-fails startup.
+its gossip identity address, and its configured bootstrap endpoint, every address of which becomes a
+gossip seed. Each lookup has the connection setup timeout, five seconds by default; failure of
+either required lookup fails startup. It also resolves the recovered Raft members' advertised
+endpoints in parallel. Their successful answers become additional gossip seeds; an unavailable
+recovered endpoint is reported and skipped so it does not prevent the node from starting or using
+another reachable member. Once gossip discovers a live peer, the interconnect replaces the
+recovery hint with that peer's current advertised endpoint.
 
 A discovered peer is registered at the interconnect endpoint it advertised, and every attempt to
 open one of its pool connections resolves that endpoint again, inside the attempt's connection setup
 deadline. The attempt dials the resolved addresses in order, giving each an equal share of the time
-that remains, so an address that refuses or never answers leaves time for the next one. The first
-address that accepts carries the TLS handshake. The advertised host stays the TLS server name, which
-the peer's certificate must name, and the authority of every request on the connection; a literal
-IPv6 host is written in brackets there. A bootstrap exchange is the one exception: it dials the
-exact seed address it was given, and the node it authenticates is dialled at that address until
+that remains, so an address that refuses or never answers leaves time for the next one. The
+connection budget and ordered address-attempt policy are owned by `nervix-dns` and shared with
+outbound connector transports; interconnect retains its socket and peer failure classification.
+The first address that accepts carries the TLS handshake. The advertised host stays the TLS server
+name, which the peer's certificate must name, and the authority of every request on the connection;
+a literal IPv6 host is written in brackets there. A bootstrap exchange is the one exception: it
+dials the exact seed address it was given, and the node it authenticates is dialled there until
 discovery publishes the node's own endpoint.
 
 Answers are cached for their DNS TTL, bounded above by one hour for addresses and thirty seconds for

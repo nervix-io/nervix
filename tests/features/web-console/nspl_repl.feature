@@ -893,7 +893,8 @@ Feature: Web console NSPL REPL
     And selector ".terminal" does not contain "expected WHERE"
     When selector ".relay-hit:has-text('notifications')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "notifications"
+    Then selector ".create-dialog" contains "Create subscription"
+    And selector ".create-selected-relay" contains "notifications"
 
   Scenario: Web console graph relay subscribe streams in a REPL peer tab
     Given a 3 node nervix cluster is started
@@ -914,14 +915,15 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "notifications"
     When selector ".relay-hit:has-text('notifications')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "notifications"
-    And selector ".subscribe-dialog" contains "user_id"
-    And selector ".subscribe-dialog" contains "I64"
-    And selector ".subscribe-dialog" does not contain "created_at"
-    When selector ".schema-field-button:has-text('user_id')" is clicked
-    Then selector ".subscribe-dialog input" has value "input.user_id"
-    When selector ".subscribe-dialog input" is filled with ""
-    When selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "notifications"
+    And selector ".create-field-refs [data-value='user_id']" contains "I64"
+    And selector ".create-field-refs" does not contain "created_at"
+    When selector ".create-field-refs [data-value='user_id']" is clicked
+    Then selector ".create-filter" has value "input.user_id"
+    When selector ".create-filter" is filled with ""
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".subscription-tab[data-subscription-state='active']" contains "NOTIFICATIONS"
     And selector ".terminal" does not contain "using domain"
     And selector ".terminal" does not contain "connected to leader"
@@ -931,9 +933,11 @@ Feature: Web console NSPL REPL
     Then selector ".subscription-tab:has-text('NOTIFICATIONS')" eventually disappears
     When selector ".relay-hit:has-text('notifications')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "notifications"
-    When selector ".subscribe-dialog input" is filled with "WHERE true"
-    And selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "notifications"
+    When selector ".create-filter" is filled with "true"
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".subscription-tab[data-subscription-state='active']" contains "NOTIFICATIONS"
     And selector ".terminal" does not contain "parse error"
     When selector ".subscription-tab:has-text('NOTIFICATIONS') .tab-close" is clicked
@@ -954,8 +958,11 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "notifications"
     When selector ".relay-hit:has-text('notifications')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    And selector ".subscribe-dialog input" is filled with "WHERE input.user_id = 'wrong type'"
-    And selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "notifications"
+    When selector ".create-filter" is filled with "input.user_id = 'wrong type'"
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Failed"
+    When selector ".create-close" is clicked
     Then selector ".terminal" contains "error:"
     And selector ".repl-toolbar" does not contain "NOTIFICATIONS"
 
@@ -984,15 +991,19 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "notifications"
     When selector ".relay-hit:has-text('notifications')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "notifications"
-    When selector ".subscribe-dialog input" is filled with "WHERE input.tenant = 'acme'"
-    And selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "notifications"
+    When selector ".create-filter" is filled with "input.tenant = 'acme'"
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".repl-toolbar" contains "NOTIFICATIONS"
     When selector ".relay-hit:has-text('notifications')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "notifications"
-    When selector ".subscribe-dialog input" is filled with "WHERE input.tenant = 'beta'"
-    And selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "notifications"
+    When selector ".create-filter" is filled with "input.tenant = 'beta'"
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".repl-toolbar" contains "ACME"
     And selector ".repl-toolbar" contains "BETA"
     When http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"
@@ -1046,8 +1057,10 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "raw_metrics"
     When selector ".relay-hit:has-text('raw_metrics')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "raw_metrics"
-    When selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "raw_metrics"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".repl-toolbar" contains "RAW_METRICS"
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -1096,7 +1109,9 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "raw_metrics"
     When selector ".relay-hit:has-text('raw_metrics')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    And selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -1131,7 +1146,9 @@ Feature: Web console NSPL REPL
     Then selector ".graph-hit-layer" contains "raw_metrics"
     When selector ".relay-hit:has-text('raw_metrics')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    And selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
     When 270 sequential metric http payloads are posted to host "http-{{test_id}}.example.com" path "/metrics"
     Then selector ".terminal" contains ":270}"
@@ -1161,7 +1178,9 @@ Feature: Web console NSPL REPL
     Then selector ".graph-hit-layer" contains "raw_metrics"
     When selector ".relay-hit:has-text('raw_metrics')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    And selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
     When node "{{stopped_node}}" is stopped
     Then selector ".terminal" contains "delivery interrupted"
@@ -1204,18 +1223,24 @@ Feature: Web console NSPL REPL
     And selector ".graph-hit-layer" contains "go_filtered_metrics"
     When selector ".relay-hit:has-text('raw_metrics')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "raw_metrics"
-    When selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "raw_metrics"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".repl-toolbar" contains "RAW_METRICS"
     When selector ".relay-hit:has-text('rust_filtered_metrics')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "rust_filtered_metrics"
-    When selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "rust_filtered_metrics"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".repl-toolbar" contains "RUST_FILTERED_METRICS"
     When selector ".relay-hit:has-text('go_filtered_metrics')" is clicked by script
     And selector ".graph-action-menu button:has-text('SUBSCRIBE')" is clicked
-    Then selector ".subscribe-dialog" contains "go_filtered_metrics"
-    When selector ".subscribe-actions button:has-text('SUBSCRIBE')" is clicked
+    Then selector ".create-selected-relay" contains "go_filtered_metrics"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
     Then selector ".repl-toolbar" contains "GO_FILTERED_METRICS"
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
       """

@@ -11,7 +11,7 @@
 
 use error_stack::Report;
 use flatbuffers::WIPOffset;
-use nervix_models::{DomainName, NodeRef, PlacementPolicy, ResourceName};
+use nervix_models::{DomainName, FieldName, NodeRef, PlacementPolicy, ResourceName};
 
 use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
@@ -25,12 +25,20 @@ pub enum ChoiceTarget {
     DomainPace,
     PlacementPolicy,
     Schema,
+    Branch,
+    Relay,
+    /// The fields of one relay's records, asked with the domain and then the relay as
+    /// dependencies.
+    RelayField,
 }
 
 wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
     DomainPace,
     PlacementPolicy,
     Schema,
+    Branch,
+    Relay,
+    RelayField,
 });
 
 /// Whether a domain clock advances with wall time.
@@ -60,6 +68,8 @@ pub enum ChoiceValue {
     Domain(DomainName),
     Resource(ResourceName),
     Model(NodeRef),
+    /// A field of the record the lookup's dependencies select.
+    Field(FieldName),
 }
 
 impl ChoiceValue {
@@ -121,6 +131,16 @@ impl ChoiceValue {
                     ),
                 )
             }
+            Self::Field(field) => {
+                let field = encoder.text("FieldChoiceReference.field", field.as_str())?;
+                EncodedUnion::new(
+                    wire::ChoiceValue::FieldChoiceReference,
+                    wire::FieldChoiceReference::create(
+                        encoder.fbb(),
+                        &wire::FieldChoiceReferenceArgs { field: Some(field) },
+                    ),
+                )
+            }
         };
         Ok(encoded)
     }
@@ -149,6 +169,10 @@ impl ChoiceValue {
         if let Some(value) = selection.value_as_model_choice_reference() {
             return Ok(Self::Model(decode_node_ref(decoder, value.node())?));
         }
+        if let Some(value) = selection.value_as_field_choice_reference() {
+            let field = decoder.name("FieldChoiceReference.field", value.field())?;
+            return Ok(Self::Field(field));
+        }
         Err(decoder.unknown_union("ChoiceSelection.value", selection.value_type().0))
     }
 
@@ -175,6 +199,10 @@ impl ChoiceValue {
         }
         if let Some(value) = choice.value_as_model_choice_reference() {
             return Ok(Self::Model(decode_node_ref(decoder, value.node())?));
+        }
+        if let Some(value) = choice.value_as_field_choice_reference() {
+            let field = decoder.name("FieldChoiceReference.field", value.field())?;
+            return Ok(Self::Field(field));
         }
         Err(decoder.unknown_union("Choice.value", choice.value_type().0))
     }

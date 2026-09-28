@@ -167,6 +167,25 @@ pub(crate) fn client_messages() -> Vec<ClientMessage> {
         ClientRequest::DetachDomainClock(DetachDomainClockRequest {
             domain: name(&"d".repeat(128)),
         }),
+        ClientRequest::Choice(
+            ChoiceLookupRequest::new(
+                ChoiceTarget::RelayField,
+                vec![
+                    ChoiceSelection {
+                        value: ChoiceValue::Domain(name("tenant")),
+                    },
+                    ChoiceSelection {
+                        value: ChoiceValue::Model(NodeRef::new(
+                            ModelKind::Relay,
+                            name::<ModelName>("orders"),
+                        )),
+                    },
+                ],
+                "amo".to_string(),
+            )
+            .with_page(100, None)
+            .assured("the largest bounded page is a valid page size"),
+        ),
     ];
     requests
         .into_iter()

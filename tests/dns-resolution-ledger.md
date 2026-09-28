@@ -8,8 +8,8 @@ node resolver only once its delivery has merged, and later deliveries extend the
 starting another.
 
 Run the named Cucumber evidence with `just test-scenarios --input <feature>`, the resolver's checks
-with `just test-dns`, the interconnect's with `just test-interconnect`, the RabbitMQ connector's
-with `just test-package-lib nervix-connector-rabbitmq`, the dependency graphs with
+with `just test-dns`, the interconnect's with `just test-interconnect`, the RabbitMQ, Syslog and
+WebSocket connectors' with `just test-package-lib <package>`, the dependency graphs with
 `just validate-dns-dependencies`, and the simulation with `just test-turmoil`.
 
 ## The node resolver
@@ -36,7 +36,8 @@ Resolution](../docs/src/interconnect.md#peer-name-resolution) is the public acco
 | Iceberg REST catalog and its OAuth request (Reqwest 0.12) | Node resolver injected through `RestCatalogBuilder::with_client`; both catalog and token requests use that client | Hickory DNS 02 | `runtime/iceberg_emission.feature`: *Iceberg catalog and object storage resolve through the node DNS fixture*, one and three nodes; `just validate-dns-dependencies` |
 | Iceberg S3, GCS and Azure object storage and its credential HTTP path (OpenDAL 0.57, Reqwest 0.13) | Node resolver injected through OpenDAL's `HttpClientLayer`; `AccessorInfoHttpSend` shares the client used by object requests | Hickory DNS 02 | The Iceberg scenario above writes and commits to a hostname S3 endpoint; `just validate-dns-dependencies` verifies the isolated connector feature graph |
 | RabbitMQ source and sink (Lapin) | Node resolver, again for every connection: each answer dialled in order within a 30 second budget shared with TLS, and the transport handed to Lapin's `Connection::connector`. Lapin's `hickory-dns` feature, a process-wide resolver read from `/etc/resolv.conf`, stays off | [Hickory DNS 03](https://app.clickup.com/t/86bc7zpnc) | `runtime/rabbitmq_dns_resolution.feature`, every scenario, one and three nodes; `just test-package-lib nervix-connector-rabbitmq`; `just validate-dns-dependencies` |
-| Syslog UDP, TCP and TLS emission, WebSocket ingestion | Tokio's `lookup_host` and host-name dials, on the blocking pool | [Hickory DNS 04](https://app.clickup.com/t/86bc7zpnf) | Not yet on the node resolver |
+| Syslog UDP, TCP and TLS emission | Node resolver on each new sender, inside a 30-second budget shared with UDP setup or ordered TCP/TLS address attempts and the TLS handshake | [Hickory DNS 04](https://app.clickup.com/t/86bc7zpnf) | `runtime/syslog_dns_resolution.feature`, one and three nodes; `just validate-dns-dependencies` |
+| WebSocket `ws` and `wss` client ingestion | Node resolver on every initial connection and resume, inside a 30-second budget shared with ordered TCP/TLS and upgrade attempts; the configured URL remains the request authority | [Hickory DNS 04](https://app.clickup.com/t/86bc7zpnf) | `runtime/websocket_client_ingestion.feature`, `runtime/websocket_client_tls_resource_mounts.feature`, and `runtime/websocket_dns_resolution.feature`, one and three nodes; `just validate-dns-dependencies` |
 | ClickHouse and SQS | Hyper's default connector and the AWS SDK's default client | [Hickory DNS 05](https://app.clickup.com/t/86bc7zpng) | Not yet on the node resolver |
 | Native client sessions and OTEL gRPC export (Tonic) | Tonic's default connector | [Hickory DNS 06](https://app.clickup.com/t/86bc7zpnk) | Not yet on the node resolver |
 | Redis pool and Pub/Sub | The driver's default resolver | [Hickory DNS 07](https://app.clickup.com/t/86bc7zpnn) | Not yet on the node resolver |

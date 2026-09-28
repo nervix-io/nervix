@@ -69,6 +69,10 @@ func choiceValue(kind session.ChoiceValue, table tableOf) (string, error) {
 			return "", errors.New("a model choice has no typed node reference")
 		}
 		return fmt.Sprintf("model:%s/%s", strings.ToLower(session.EnumNamesModelKind[*node.Kind()]), node.Name()), nil
+	case session.ChoiceValueFieldChoiceReference:
+		value := new(session.FieldChoiceReference)
+		value.Init(table.Bytes, table.Pos)
+		return "field:" + string(value.Field()), nil
 	}
 	return "", fmt.Errorf("undeclared choice value %d", kind)
 }

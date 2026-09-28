@@ -3,7 +3,9 @@ Feature: Websocket client ingestion
     Given Kafka is running
     And the HTTP mock server is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
+    And the WebSocket mock endpoints are published under fixture DNS
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -37,7 +39,7 @@ Feature: Websocket client ingestion
       CREATE CLIENT ws_main
         TYPE WEBSOCKETS
         CONFIG {
-          'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
+          'endpoint' = '{{mock_ws_dns_addr}}/ws/{{test_id}}'
         };
 
       CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
@@ -64,6 +66,7 @@ Feature: Websocket client ingestion
       """
       {"user_id":42}
       """
+    And the DNS fixture eventually receives a question for "websocket.nervix.test"
 
     Examples:
       | cluster_size | replica_count |

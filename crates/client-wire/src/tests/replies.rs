@@ -369,6 +369,14 @@ fn typed_choices_and_lookup_states_round_trip() {
                 group: Some("Models".to_string()),
             },
         },
+        Choice {
+            value: ChoiceValue::Field(name("amount")),
+            presentation: ChoicePresentation {
+                label: "amount".to_string(),
+                detail: Some("I64".to_string()),
+                group: None,
+            },
+        },
     ];
     assert_round_trips(ReplyBody::Choice(ChoiceOutcome {
         status: ChoiceStatus::Ready,

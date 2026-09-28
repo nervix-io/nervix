@@ -56,6 +56,13 @@ resolver's own lookup error. The sink changes it into a configuration failure fo
 address or CA file and an initialization failure otherwise, leading with the connection error's
 message, which `DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
 
+Syslog emission and WebSocket-client ingestion retain DNS failures from the node resolver beneath
+their existing infrastructure contexts: `SinkStartError::Initialize` while a Syslog sender opens
+and `SourceError::Resume` while a WebSocket source connects or reconnects. The resolver's typed
+missing-name, no-address, timeout, invalid-name or transport cause stays in the error report.
+Address, TLS and WebSocket-upgrade failures remain connection outcomes. None is a record rejection,
+and a DNS result by itself never marks a Syslog record delivered.
+
 A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar sink: a message
 larger than the maximum message size the broker announced, which carries the measured size of its
 metadata and payload and the limit as typed fields, or a message the broker answered with
@@ -166,12 +173,16 @@ retain the selected entity or placement so an operator can correct the request. 
 Plane](./control-plane.md) for activation and [Typed States And Validation
 Boundaries](./typed-states.md) for required state.
 
-Visual schema and branch editors report incomplete names, fields, types, modes, references and
-instance limits before submitting a command, while retaining the editable draft. Once a completed
-branch command reaches the registry, the registry remains the owner of branch key validation: a
-schema containing `BYTES`, even under a collection type, returns the branch, domain and field in
-its diagnostic. The console presents that command failure inline and does not replace it with a
-local guess or silently change the selected schema.
+Visual schema, branch, relay, and subscription editors report incomplete names, fields, types,
+modes, references, branching, capacities, instance limits, filters and sample rates before
+submitting, while retaining the editable draft. Once a completed branch command reaches the
+registry, the registry remains the owner of branch key validation: a schema containing `BYTES`,
+even under a collection type, returns the branch, domain and field in its diagnostic. The console
+presents that command failure inline and does not replace it with a local guess or silently change
+the selected schema. A subscription filter is parsed locally only to confirm that it is an
+expression. The server compiles it against the relay's schema when it creates the subscription, and
+its refusal of an unknown field or scope, a type mismatch, a relay that no longer exists, or an open
+transaction is the subscription's failure, shown inline without opening a tab.
 
 Domain activation has typed failures for a relay or codec missing its schema, a codec missing its
 wire definition, a relay missing its branch or carrying an invalid branch TTL, and an endpoint
@@ -216,6 +227,15 @@ together, while each keeps its own occurrence time and branch. A sink answer tha
 contract, by naming a record the write did not carry or answering twice for one, is not a message
 error of any member. It fails the attempt without a retry, and the emitter's unresolved rows then
 follow `ON MESSAGE ERROR` as a failed publish.
+
+The Sentry sink rejects a final serialized event above its decompressed event limit before sending
+the envelope. The Syslog sink rejects a UDP datagram above its payload limit, a stream frame whose
+octet count needs more than ten digits, or an LF-bearing non-transparent TCP frame before writing.
+A batching OTEL sink measures the full protobuf Export request after mapping; if
+halving still leaves one source record above `MAX SIZE`, that record receives an external publish
+message error. Other members can be sent in bounded requests. An OTLP receiver's
+`partial_success` has no member identities, so it acknowledges the entire request and emits a
+warning instead of inventing per-record rejections.
 
 An HTTP emitter rejects a record at the first request field that fails, in the order it evaluates
 them: `METHOD`, `PATH`, and then each header write. A failed expression keeps the `evaluation`

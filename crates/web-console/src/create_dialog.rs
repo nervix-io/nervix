@@ -1,13 +1,14 @@
-//! Structured creation of the small entities operators need before a graph can be configured.
+//! Structured creation of the entities operators configure before and around a graph.
 //!
 //! Layer: edges.
 //!
 //! - **Owns.** Browser-local create drafts, typed choice presentation, canonical previews, dialog
-//!   accessibility, and the state shown for one durable submission.
-//! - **Depends on.** Public semantic models, the session choice contract, and the console request
-//!   dispatcher owned by the parent module.
-//! - **Must not know.** Registry state, command execution internals, or how the server resolves a
-//!   choice.
+//!   accessibility, the state shown for one submission, and how a completed draft is dispatched:
+//!   as a durable command or as a session subscription.
+//! - **Depends on.** Public semantic models, the canonical client statement renderer, the session
+//!   choice contract, and the console request dispatcher owned by the parent module.
+//! - **Must not know.** Registry state, command execution internals, subscription tabs, or how the
+//!   server resolves a choice.
 
 use std::collections::BTreeMap;
 
@@ -20,21 +21,31 @@ use nervix_client_wire::{
     ChoiceValue, DomainPaceChoice,
 };
 use nervix_models::{
-    CreateDomain, CreateResource, CreateStatement, CreateUser, DomainClockPeriod, DomainClockSkew,
-    DomainConfig, DomainName, DomainPace, Model, ModelKind, PlacementPolicy, ResourceName,
-    SchemaName, Statement, UserName,
+    CanonicalNsplError, CreateDomain, CreateResource, CreateStatement, CreateSubscription,
+    CreateUser, DomainClockPeriod, DomainClockSkew, DomainConfig, DomainName, DomainPace, Model,
+    ModelKind, ModelName, PlacementPolicy, RelayName, ResourceName, Statement, SubscriptionName,
+    UserName,
 };
+use nervix_nspl::client_statement::ClientStatement;
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
 use wasm_bindgen::JsCast as _;
 
 use super::{ConsoleConnectionState, ConsoleRequest};
 
+mod relay_draft;
+mod relay_editor;
 mod schema_draft;
 mod schema_editor;
+mod subscription_draft;
+mod subscription_editor;
 
+use relay_draft::{RelayDraft, RelayDraftError};
+use relay_editor::RelayEditor;
 use schema_draft::{SchemaDraftError, StructuredDrafts, WireFormat};
 use schema_editor::{BranchEditor, SchemaEditor, WireSchemaEditor};
+use subscription_draft::{SubscriptionDraft, SubscriptionDraftError};
+use subscription_editor::SubscriptionEditor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CreateKind {
@@ -46,6 +57,8 @@ pub(crate) enum CreateKind {
     WireCborSchema,
     WireAvroSchema,
     Branch,
+    Relay,
+    Subscription,
 }
 
 impl CreateKind {
@@ -59,6 +72,8 @@ impl CreateKind {
             Self::WireCborSchema => "wire CBOR schema",
             Self::WireAvroSchema => "wire AVRO schema",
             Self::Branch => "branch",
+            Self::Relay => "relay",
+            Self::Subscription => "subscription",
         }
     }
 
@@ -66,12 +81,35 @@ impl CreateKind {
         !matches!(self, Self::Domain | Self::User)
     }
 
+    /// Whether the created statement takes `IF NOT EXISTS`. A session subscription is not a stored
+    /// entity, so its statement has no such modifier.
+    fn takes_if_not_exists(self) -> bool {
+        match self {
+            Self::Subscription => false,
+            Self::Domain
+            | Self::User
+            | Self::Resource
+            | Self::Schema
+            | Self::WireJsonSchema
+            | Self::WireCborSchema
+            | Self::WireAvroSchema
+            | Self::Branch
+            | Self::Relay => true,
+        }
+    }
+
     fn wire_format(self) -> Option<WireFormat> {
         match self {
             Self::WireJsonSchema => Some(WireFormat::Json),
             Self::WireCborSchema => Some(WireFormat::Cbor),
             Self::WireAvroSchema => Some(WireFormat::Avro),
-            Self::Domain | Self::User | Self::Resource | Self::Schema | Self::Branch => None,
+            Self::Domain
+            | Self::User
+            | Self::Resource
+            | Self::Schema
+            | Self::Branch
+            | Self::Relay
+            | Self::Subscription => None,
         }
     }
 }
@@ -81,6 +119,23 @@ pub(crate) enum ChoiceControl {
     DomainPace,
     PlacementPolicy,
     BranchSchema,
+    RelaySchema,
+    RelayBranch,
+    SubscriptionRelay,
+    /// Inserts typed references to the selected relay's fields into the subscription filter.
+    SubscriptionField,
+}
+
+impl ChoiceControl {
+    /// The form whose draft this control edits.
+    fn form(self) -> CreateKind {
+        match self {
+            Self::DomainPace | Self::PlacementPolicy => CreateKind::Domain,
+            Self::BranchSchema => CreateKind::Branch,
+            Self::RelaySchema | Self::RelayBranch => CreateKind::Relay,
+            Self::SubscriptionRelay | Self::SubscriptionField => CreateKind::Subscription,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +156,114 @@ enum ChoiceLoad {
     },
     Empty,
     Failed(String),
+}
+
+/// The search text and the loaded choices of one structured control.
+#[derive(Clone, Copy)]
+struct ChoiceControlSignals {
+    search: RwSignal<String>,
+    load: RwSignal<ChoiceLoad>,
+}
+
+impl ChoiceControlSignals {
+    fn new() -> Self {
+        Self {
+            search: RwSignal::new(String::new()),
+            load: RwSignal::new(ChoiceLoad::Waiting),
+        }
+    }
+}
+
+/// Every structured control's signals, one set per control so each owns its own latest request.
+#[derive(Clone, Copy)]
+struct ChoiceControls {
+    domain_pace: ChoiceControlSignals,
+    placement_policy: ChoiceControlSignals,
+    branch_schema: ChoiceControlSignals,
+    relay_schema: ChoiceControlSignals,
+    relay_branch: ChoiceControlSignals,
+    subscription_relay: ChoiceControlSignals,
+    subscription_field: ChoiceControlSignals,
+}
+
+impl ChoiceControls {
+    fn new() -> Self {
+        Self {
+            domain_pace: ChoiceControlSignals::new(),
+            placement_policy: ChoiceControlSignals::new(),
+            branch_schema: ChoiceControlSignals::new(),
+            relay_schema: ChoiceControlSignals::new(),
+            relay_branch: ChoiceControlSignals::new(),
+            subscription_relay: ChoiceControlSignals::new(),
+            subscription_field: ChoiceControlSignals::new(),
+        }
+    }
+
+    fn of(self, control: ChoiceControl) -> ChoiceControlSignals {
+        match control {
+            ChoiceControl::DomainPace => self.domain_pace,
+            ChoiceControl::PlacementPolicy => self.placement_policy,
+            ChoiceControl::BranchSchema => self.branch_schema,
+            ChoiceControl::RelaySchema => self.relay_schema,
+            ChoiceControl::RelayBranch => self.relay_branch,
+            ChoiceControl::SubscriptionRelay => self.subscription_relay,
+            ChoiceControl::SubscriptionField => self.subscription_field,
+        }
+    }
+}
+
+/// A reference a picker selected, kept visible after the context it was chosen in changes.
+///
+/// A draft that moves to another domain keeps showing the name, but no longer offers it to its
+/// Model until the operator selects it again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelectedReference<N> {
+    name: N,
+    /// Whether the draft still holds the captured domain the reference was selected in.
+    current: bool,
+}
+
+impl<N> SelectedReference<N> {
+    fn chosen(name: N) -> Self {
+        Self {
+            name,
+            current: true,
+        }
+    }
+
+    fn name(&self) -> &N {
+        &self.name
+    }
+
+    fn is_current(&self) -> bool {
+        self.current
+    }
+
+    /// The selected name, while it still belongs to the draft's context.
+    fn current_name(&self) -> Option<&N> {
+        if self.current { Some(&self.name) } else { None }
+    }
+
+    fn invalidate(&mut self) {
+        self.current = false;
+    }
+}
+
+impl<N> SelectedReference<N>
+where
+    for<'a> &'a N: Into<ModelName>,
+{
+    /// Whether this is a current selection of `node`, a Model of `kind`.
+    fn selects(&self, kind: ModelKind, node: &nervix_models::NodeRef) -> bool {
+        self.current && *node == nervix_models::NodeRef::new(kind, &self.name)
+    }
+}
+
+/// The question a control asks the session, or why it cannot ask one yet.
+struct ChoiceQuery {
+    target: ChoiceTarget,
+    dependencies: Vec<ChoiceSelection>,
+    page_size: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +328,51 @@ impl Default for DomainDraft {
     }
 }
 
+impl DomainDraft {
+    fn submission(&self) -> error_stack::Result<CreateSubmission, CreateDraftError> {
+        let name = DomainName::parse(self.name.trim())
+            .map_err(|_| Report::new(CreateDraftError::DomainName))?;
+        let pace = match self.pace {
+            DomainPaceChoice::Unpaced => DomainPace::Unpaced,
+            DomainPaceChoice::Paced => DomainPace::Paced {
+                period: self
+                    .period
+                    .trim()
+                    .parse::<DomainClockPeriod>()
+                    .map_err(|_| Report::new(CreateDraftError::Period))?,
+                skew: self
+                    .skew
+                    .trim()
+                    .parse::<DomainClockSkew>()
+                    .map_err(|_| Report::new(CreateDraftError::Skew))?,
+            },
+        };
+        let statement = Statement::CreateDomain(CreateStatement::new(
+            CreateDomain {
+                id: name.clone(),
+                config: DomainConfig {
+                    pace,
+                    placement: self.placement,
+                },
+            },
+            self.if_not_exists,
+        ));
+        let query = statement
+            .to_canonical_nspl()
+            .change_context(CreateDraftError::CanonicalNspl)?;
+        Ok(CreateSubmission {
+            kind: CreateKind::Domain,
+            presentation: query.clone(),
+            dispatch: CreateDispatch::Command(CommandDispatch {
+                query,
+                domain: None,
+                resource: None,
+                created_domain: Some(name),
+            }),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct UserDraft {
     name: String,
@@ -172,10 +380,81 @@ struct UserDraft {
     if_not_exists: bool,
 }
 
+impl UserDraft {
+    /// The submitted statement carries the password; its presentation masks it, so the cleartext
+    /// never reaches the preview or the terminal.
+    fn submission(&self) -> error_stack::Result<CreateSubmission, CreateDraftError> {
+        let name = UserName::parse(self.name.trim())
+            .map_err(|_| Report::new(CreateDraftError::UserName))?;
+        if self.password.is_empty() {
+            return Err(Report::new(CreateDraftError::PasswordRequired));
+        }
+        let statement = Statement::CreateUser(CreateStatement::new(
+            CreateUser {
+                name: name.clone(),
+                password: self.password.clone(),
+            },
+            self.if_not_exists,
+        ));
+        let presentation_statement = Statement::CreateUser(CreateStatement::new(
+            CreateUser {
+                name,
+                password: "********".to_string(),
+            },
+            self.if_not_exists,
+        ));
+        Ok(CreateSubmission {
+            kind: CreateKind::User,
+            presentation: presentation_statement
+                .to_canonical_nspl()
+                .change_context(CreateDraftError::CanonicalNspl)?,
+            dispatch: CreateDispatch::Command(CommandDispatch {
+                query: statement
+                    .to_canonical_nspl()
+                    .change_context(CreateDraftError::CanonicalNspl)?,
+                domain: None,
+                resource: None,
+                created_domain: None,
+            }),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct ResourceDraft {
     name: String,
     if_not_exists: bool,
+}
+
+impl ResourceDraft {
+    fn submission(
+        &self,
+        captured_domain: Option<DomainName>,
+    ) -> error_stack::Result<CreateSubmission, CreateDraftError> {
+        let scope =
+            captured_domain.ok_or_else(|| Report::new(CreateDraftError::ResourceDomainRequired))?;
+        let name = ResourceName::parse(self.name.trim())
+            .map_err(|_| Report::new(CreateDraftError::ResourceName))?;
+        let statement = Statement::CreateResource(CreateStatement::new(
+            CreateResource {
+                identifier: name.clone(),
+            },
+            self.if_not_exists,
+        ));
+        let query = statement
+            .to_canonical_nspl()
+            .change_context(CreateDraftError::CanonicalNspl)?;
+        Ok(CreateSubmission {
+            kind: CreateKind::Resource,
+            presentation: query.clone(),
+            dispatch: CreateDispatch::Command(CommandDispatch {
+                query,
+                domain: Some(scope),
+                resource: Some(name.to_string()),
+                created_domain: None,
+            }),
+        })
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -200,18 +479,96 @@ enum CreateDraftError {
     ScopedDomainRequired,
     #[error("{0}")]
     Structured(#[from] SchemaDraftError),
+    #[error("{0}")]
+    Relay(#[from] RelayDraftError),
+    #[error("{0}")]
+    Subscription(#[from] SubscriptionDraftError),
     #[error("Canonical NSPL could not be rendered")]
     CanonicalNspl,
 }
 
+/// Carries a draft's own error as the create dialog's, keeping the draft's report beneath it.
+fn draft_error<E>(error: Report<E>) -> Report<CreateDraftError>
+where
+    E: error_stack::Context + Clone + Into<CreateDraftError>,
+{
+    let context = error.current_context().clone().into();
+    error.change_context(context)
+}
+
+/// A completed draft, the statement it previews, and how it is dispatched.
 #[derive(Debug, Clone)]
 pub(crate) struct CreateSubmission {
     pub(crate) kind: CreateKind,
-    pub(crate) query: String,
+    /// The canonical statement as the preview and the terminal show it, with secrets masked.
     pub(crate) presentation: String,
+    pub(crate) dispatch: CreateDispatch,
+}
+
+/// Where a completed draft goes: a persistent statement runs on the durable command path, and a
+/// session subscription opens a tab under the subscription lifecycle.
+#[derive(Debug, Clone)]
+pub(crate) enum CreateDispatch {
+    Command(CommandDispatch),
+    Subscription(SubscriptionDispatch),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CommandDispatch {
+    pub(crate) query: String,
     pub(crate) domain: Option<DomainName>,
     pub(crate) resource: Option<String>,
     pub(crate) created_domain: Option<DomainName>,
+}
+
+/// A session subscription, the canonical statement that opens it, and the domain it reads.
+#[derive(Debug, Clone)]
+pub(crate) struct SubscriptionDispatch {
+    pub(crate) domain: DomainName,
+    pub(crate) subscription: CreateSubscription,
+    pub(crate) statement: String,
+}
+
+impl SubscriptionDispatch {
+    /// Renders `subscription` as the canonical client statement a subscribe request carries.
+    pub(crate) fn new(
+        domain: DomainName,
+        subscription: CreateSubscription,
+    ) -> error_stack::Result<Self, CanonicalNsplError> {
+        let statement =
+            ClientStatement::CreateSubscription(subscription.clone()).to_canonical_nspl()?;
+        Ok(Self {
+            domain,
+            subscription,
+            statement,
+        })
+    }
+}
+
+impl CreateSubmission {
+    /// A domain-owned Model created through the durable command path.
+    fn domain_model(
+        kind: CreateKind,
+        model: Model,
+        if_not_exists: bool,
+        scope: DomainName,
+    ) -> error_stack::Result<Self, CreateDraftError> {
+        let statement =
+            Statement::Create(CreateStatement::new(Box::new(model.into()), if_not_exists));
+        let query = statement
+            .to_canonical_nspl()
+            .change_context(CreateDraftError::CanonicalNspl)?;
+        Ok(Self {
+            kind,
+            presentation: query.clone(),
+            dispatch: CreateDispatch::Command(CommandDispatch {
+                query,
+                domain: Some(scope),
+                resource: None,
+                created_domain: None,
+            }),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -240,12 +597,12 @@ pub(crate) struct CreateSignals {
     user: RwSignal<UserDraft>,
     resource: RwSignal<ResourceDraft>,
     structured: RwSignal<StructuredDrafts>,
-    pace_search: RwSignal<String>,
-    placement_search: RwSignal<String>,
-    schema_search: RwSignal<String>,
-    pace_choices: RwSignal<ChoiceLoad>,
-    placement_choices: RwSignal<ChoiceLoad>,
-    schema_choices: RwSignal<ChoiceLoad>,
+    relay: RwSignal<RelayDraft>,
+    subscription: RwSignal<SubscriptionDraft>,
+    /// The number the next generated subscription name carries. Numbers only increase, so no two
+    /// generated names of one console coincide.
+    next_subscription_name: RwSignal<u64>,
+    choices: ChoiceControls,
 }
 
 impl CreateSignals {
@@ -264,12 +621,13 @@ impl CreateSignals {
             user: RwSignal::new(UserDraft::default()),
             resource: RwSignal::new(ResourceDraft::default()),
             structured: RwSignal::new(StructuredDrafts::default()),
-            pace_search: RwSignal::new(String::new()),
-            placement_search: RwSignal::new(String::new()),
-            schema_search: RwSignal::new(String::new()),
-            pace_choices: RwSignal::new(ChoiceLoad::Waiting),
-            placement_choices: RwSignal::new(ChoiceLoad::Waiting),
-            schema_choices: RwSignal::new(ChoiceLoad::Waiting),
+            relay: RwSignal::new(RelayDraft::default()),
+            subscription: RwSignal::new(SubscriptionDraft::named(
+                SubscriptionName::parse("web_console_subscription_1")
+                    .assured("the first generated subscription name is a valid name"),
+            )),
+            next_subscription_name: RwSignal::new(2),
+            choices: ChoiceControls::new(),
         }
     }
 
@@ -300,6 +658,35 @@ impl CreateSignals {
         self.advance_revision();
     }
 
+    /// Opens a new subscription draft that reads `relay` in `domain`, as the graph's relay action
+    /// does. The action names what the operator wants to read, so it replaces a retained
+    /// subscription draft rather than editing it, under a newly generated name.
+    pub(crate) fn open_subscription(
+        self,
+        domain: DomainName,
+        relay: RelayName,
+        return_focus: &'static str,
+    ) {
+        let name = self.generate_subscription_name();
+        self.subscription
+            .set(SubscriptionDraft::for_relay(name, relay));
+        self.captured_scopes.update(|scopes| {
+            scopes.insert(CreateKind::Subscription, Some(domain.clone()));
+        });
+        self.open(CreateKind::Subscription, Some(domain), return_focus);
+    }
+
+    fn generate_subscription_name(self) -> SubscriptionName {
+        let number = self.next_subscription_name.get_untracked();
+        self.next_subscription_name.set(
+            number
+                .checked_add(1)
+                .assured("a console cannot generate 2^64 subscription names"),
+        );
+        SubscriptionName::parse(&format!("web_console_subscription_{number}"))
+            .assured("lower-case letters, underscores and at most 20 digits form a valid name")
+    }
+
     fn close(self) {
         self.open.set(None);
         self.advance_revision();
@@ -323,6 +710,8 @@ impl CreateSignals {
         self.advance_revision();
     }
 
+    /// Moves the open draft to `domain`. References the draft selected in its previous domain stay
+    /// visible but must be selected again before the draft completes.
     fn change_scope(self, domain: Option<DomainName>) {
         let Some(kind) = self.open.get_untracked() else {
             return;
@@ -330,12 +719,23 @@ impl CreateSignals {
         if !kind.domain_scoped() {
             return;
         }
-        if kind == CreateKind::Branch && self.captured_domain.get_untracked() != domain {
-            self.structured.update(|drafts| {
-                if drafts.branch.schema.is_some() {
-                    drafts.branch.schema_valid = false;
-                }
-            });
+        if self.captured_domain.get_untracked() != domain {
+            match kind {
+                CreateKind::Branch => self
+                    .structured
+                    .update(|drafts| drafts.branch.invalidate_references()),
+                CreateKind::Relay => self.relay.update(RelayDraft::invalidate_references),
+                CreateKind::Subscription => self
+                    .subscription
+                    .update(SubscriptionDraft::invalidate_references),
+                CreateKind::Domain
+                | CreateKind::User
+                | CreateKind::Resource
+                | CreateKind::Schema
+                | CreateKind::WireJsonSchema
+                | CreateKind::WireCborSchema
+                | CreateKind::WireAvroSchema => {}
+            }
         }
         self.captured_scopes.update(|scopes| {
             scopes.insert(kind, domain.clone());
@@ -408,19 +808,13 @@ impl CreateSignals {
         current_generation: u64,
         outcome: ChoiceOutcome,
     ) {
-        let relevant = match context.control {
-            ChoiceControl::DomainPace | ChoiceControl::PlacementPolicy => {
-                self.open.get_untracked() == Some(CreateKind::Domain)
-            }
-            ChoiceControl::BranchSchema => self.open.get_untracked() == Some(CreateKind::Branch),
-        };
-        if !relevant
+        if self.open.get_untracked() != Some(context.control.form())
             || self.revision.get_untracked() != context.draft_revision
             || current_generation != context.session_generation
         {
             return;
         }
-        let target = self.choice_load(context.control);
+        let target = self.choices.of(context.control).load;
         match outcome.status {
             ChoiceStatus::Ready if outcome.choices.is_empty() && !context.append => {
                 target.set(ChoiceLoad::Empty);
@@ -468,188 +862,154 @@ impl CreateSignals {
         if self.revision.get_untracked() == context.draft_revision
             && current_generation == context.session_generation
         {
-            self.choice_load(context.control)
+            self.choices
+                .of(context.control)
+                .load
                 .set(ChoiceLoad::Failed(reason));
         }
     }
 
-    fn choice_load(self, control: ChoiceControl) -> RwSignal<ChoiceLoad> {
+    /// The typed question `control` asks, or why it cannot ask one while the draft lacks what the
+    /// question depends on.
+    fn choice_query(self, control: ChoiceControl) -> Result<ChoiceQuery, &'static str> {
         match control {
-            ChoiceControl::DomainPace => self.pace_choices,
-            ChoiceControl::PlacementPolicy => self.placement_choices,
-            ChoiceControl::BranchSchema => self.schema_choices,
+            ChoiceControl::DomainPace => Ok(ChoiceQuery {
+                target: ChoiceTarget::DomainPace,
+                dependencies: Vec::new(),
+                page_size: 2,
+            }),
+            ChoiceControl::PlacementPolicy => Ok(ChoiceQuery {
+                target: ChoiceTarget::PlacementPolicy,
+                dependencies: vec![ChoiceSelection {
+                    value: ChoiceValue::DomainPace(self.domain.get_untracked().pace),
+                }],
+                page_size: 3,
+            }),
+            ChoiceControl::BranchSchema | ChoiceControl::RelaySchema => self.domain_question(
+                ChoiceTarget::Schema,
+                "Select a domain before choosing a schema",
+            ),
+            ChoiceControl::RelayBranch => self.domain_question(
+                ChoiceTarget::Branch,
+                "Select a domain before choosing a branch",
+            ),
+            ChoiceControl::SubscriptionRelay => self.domain_question(
+                ChoiceTarget::Relay,
+                "Select a domain before choosing a relay",
+            ),
+            ChoiceControl::SubscriptionField => {
+                let Some(domain) = self.captured_domain.get_untracked() else {
+                    return Err("Select a domain before choosing a relay");
+                };
+                let draft = self.subscription.get_untracked();
+                let Some(relay) = draft.current_relay() else {
+                    return Err("Select a relay to list the fields of its records");
+                };
+                Ok(ChoiceQuery {
+                    target: ChoiceTarget::RelayField,
+                    dependencies: vec![
+                        ChoiceSelection {
+                            value: ChoiceValue::Domain(domain),
+                        },
+                        ChoiceSelection {
+                            value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                                ModelKind::Relay,
+                                relay,
+                            )),
+                        },
+                    ],
+                    page_size: 100,
+                })
+            }
         }
+    }
+
+    /// A lookup of the models of the draft's captured domain.
+    fn domain_question(
+        self,
+        target: ChoiceTarget,
+        missing_domain: &'static str,
+    ) -> Result<ChoiceQuery, &'static str> {
+        let Some(domain) = self.captured_domain.get_untracked() else {
+            return Err(missing_domain);
+        };
+        Ok(ChoiceQuery {
+            target,
+            dependencies: vec![ChoiceSelection {
+                value: ChoiceValue::Domain(domain),
+            }],
+            page_size: 20,
+        })
     }
 
     fn submission(self) -> error_stack::Result<CreateSubmission, CreateDraftError> {
-        build_submission(
-            self.open
-                .get_untracked()
-                .ok_or_else(|| Report::new(CreateDraftError::KindRequired))?,
-            &self.domain.get_untracked(),
-            &self.user.get_untracked(),
-            &self.resource.get_untracked(),
-            &self.structured.get_untracked(),
-            self.captured_domain.get_untracked(),
-        )
-    }
-}
-
-fn build_submission(
-    kind: CreateKind,
-    domain_draft: &DomainDraft,
-    user_draft: &UserDraft,
-    resource_draft: &ResourceDraft,
-    structured_drafts: &StructuredDrafts,
-    captured_domain: Option<DomainName>,
-) -> error_stack::Result<CreateSubmission, CreateDraftError> {
-    match kind {
-        CreateKind::Domain => {
-            let name = DomainName::parse(domain_draft.name.trim())
-                .map_err(|_| Report::new(CreateDraftError::DomainName))?;
-            let pace = match domain_draft.pace {
-                DomainPaceChoice::Unpaced => DomainPace::Unpaced,
-                DomainPaceChoice::Paced => DomainPace::Paced {
-                    period: domain_draft
-                        .period
-                        .trim()
-                        .parse::<DomainClockPeriod>()
-                        .map_err(|_| Report::new(CreateDraftError::Period))?,
-                    skew: domain_draft
-                        .skew
-                        .trim()
-                        .parse::<DomainClockSkew>()
-                        .map_err(|_| Report::new(CreateDraftError::Skew))?,
-                },
-            };
-            let statement = Statement::CreateDomain(CreateStatement::new(
-                CreateDomain {
-                    id: name.clone(),
-                    config: DomainConfig {
-                        pace,
-                        placement: domain_draft.placement,
-                    },
-                },
-                domain_draft.if_not_exists,
-            ));
-            let query = statement
-                .to_canonical_nspl()
-                .change_context(CreateDraftError::CanonicalNspl)?;
-            Ok(CreateSubmission {
-                kind,
-                presentation: query.clone(),
-                query,
-                domain: None,
-                resource: None,
-                created_domain: Some(name),
-            })
-        }
-        CreateKind::User => {
-            let name = UserName::parse(user_draft.name.trim())
-                .map_err(|_| Report::new(CreateDraftError::UserName))?;
-            if user_draft.password.is_empty() {
-                return Err(Report::new(CreateDraftError::PasswordRequired));
+        let kind = self
+            .open
+            .get_untracked()
+            .ok_or_else(|| Report::new(CreateDraftError::KindRequired))?;
+        let captured_domain = self.captured_domain.get_untracked();
+        match kind {
+            CreateKind::Domain => self.domain.get_untracked().submission(),
+            CreateKind::User => self.user.get_untracked().submission(),
+            CreateKind::Resource => self.resource.get_untracked().submission(captured_domain),
+            CreateKind::Schema
+            | CreateKind::WireJsonSchema
+            | CreateKind::WireCborSchema
+            | CreateKind::WireAvroSchema
+            | CreateKind::Branch => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let drafts = self.structured.get_untracked();
+                let (model, if_not_exists) = match kind {
+                    CreateKind::Schema => (
+                        Model::Schema(drafts.schema.build().map_err(draft_error)?),
+                        drafts.schema.if_not_exists,
+                    ),
+                    CreateKind::Branch => (
+                        Model::Branch(drafts.branch.build().map_err(draft_error)?),
+                        drafts.branch.if_not_exists,
+                    ),
+                    _ => {
+                        let format = kind.wire_format().assured(
+                            "the structured kinds left after schema and branch are wire schemas",
+                        );
+                        let draft = drafts.wire(format);
+                        (
+                            draft.build(format).map_err(draft_error)?,
+                            draft.if_not_exists,
+                        )
+                    }
+                };
+                CreateSubmission::domain_model(kind, model, if_not_exists, scope)
             }
-            let statement = Statement::CreateUser(CreateStatement::new(
-                CreateUser {
-                    name: name.clone(),
-                    password: user_draft.password.clone(),
-                },
-                user_draft.if_not_exists,
-            ));
-            let presentation_statement = Statement::CreateUser(CreateStatement::new(
-                CreateUser {
-                    name,
-                    password: "********".to_string(),
-                },
-                user_draft.if_not_exists,
-            ));
-            Ok(CreateSubmission {
-                kind,
-                query: statement
-                    .to_canonical_nspl()
-                    .change_context(CreateDraftError::CanonicalNspl)?,
-                presentation: presentation_statement
-                    .to_canonical_nspl()
-                    .change_context(CreateDraftError::CanonicalNspl)?,
-                domain: None,
-                resource: None,
-                created_domain: None,
-            })
-        }
-        CreateKind::Resource => {
-            let scope = captured_domain
-                .ok_or_else(|| Report::new(CreateDraftError::ResourceDomainRequired))?;
-            let name = ResourceName::parse(resource_draft.name.trim())
-                .map_err(|_| Report::new(CreateDraftError::ResourceName))?;
-            let statement = Statement::CreateResource(CreateStatement::new(
-                CreateResource {
-                    identifier: name.clone(),
-                },
-                resource_draft.if_not_exists,
-            ));
-            let query = statement
-                .to_canonical_nspl()
-                .change_context(CreateDraftError::CanonicalNspl)?;
-            Ok(CreateSubmission {
-                kind,
-                presentation: query.clone(),
-                query,
-                domain: Some(scope),
-                resource: Some(name.to_string()),
-                created_domain: None,
-            })
-        }
-        CreateKind::Schema
-        | CreateKind::WireJsonSchema
-        | CreateKind::WireCborSchema
-        | CreateKind::WireAvroSchema
-        | CreateKind::Branch => {
-            let scope = captured_domain
-                .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
-            let (model, if_not_exists) = match kind {
-                CreateKind::Schema => (
-                    Model::Schema(structured_drafts.schema.build().map_err(|error| {
-                        let context = CreateDraftError::Structured(error.current_context().clone());
-                        error.change_context(context)
-                    })?),
-                    structured_drafts.schema.if_not_exists,
-                ),
-                CreateKind::Branch => (
-                    Model::Branch(structured_drafts.branch.build().map_err(|error| {
-                        let context = CreateDraftError::Structured(error.current_context().clone());
-                        error.change_context(context)
-                    })?),
-                    structured_drafts.branch.if_not_exists,
-                ),
-                _ => {
-                    let format = kind.wire_format().assured(
-                        "the domain-owned structured kind is a wire schema after schema and branch",
-                    );
-                    let draft = structured_drafts.wire(format);
-                    (
-                        draft.build(format).map_err(|error| {
-                            let context =
-                                CreateDraftError::Structured(error.current_context().clone());
-                            error.change_context(context)
-                        })?,
-                        draft.if_not_exists,
-                    )
-                }
-            };
-            let statement =
-                Statement::Create(CreateStatement::new(Box::new(model.into()), if_not_exists));
-            let query = statement
-                .to_canonical_nspl()
-                .change_context(CreateDraftError::CanonicalNspl)?;
-            Ok(CreateSubmission {
-                kind,
-                presentation: query.clone(),
-                query,
-                domain: Some(scope),
-                resource: None,
-                created_domain: None,
-            })
+            CreateKind::Relay => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.relay.get_untracked();
+                let relay = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_model(
+                    kind,
+                    Model::Relay(relay),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
+            CreateKind::Subscription => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let subscription = self
+                    .subscription
+                    .get_untracked()
+                    .build()
+                    .map_err(draft_error)?;
+                let dispatch = SubscriptionDispatch::new(scope, subscription)
+                    .change_context(CreateDraftError::CanonicalNspl)?;
+                Ok(CreateSubmission {
+                    kind,
+                    presentation: dispatch.statement.clone(),
+                    dispatch: CreateDispatch::Subscription(dispatch),
+                })
+            }
         }
     }
 }
@@ -709,6 +1069,12 @@ pub(crate) fn CreateMenu(
                 <button type="button" role="menuitem" data-create-kind="branch" on:click=move |_| choose(CreateKind::Branch)>
                     <span>"Branch"</span><em>"Key schema and lifetime"</em>
                 </button>
+                <button type="button" role="menuitem" data-create-kind="relay" on:click=move |_| choose(CreateKind::Relay)>
+                    <span>"Relay"</span><em>"Schema, branching and capacity"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="subscription" on:click=move |_| choose(CreateKind::Subscription)>
+                    <span>"Subscription"</span><em>"Read-only relay tab"</em>
+                </button>
             </div>
         </div>
     }
@@ -721,59 +1087,31 @@ fn request_choices(
     generation: u64,
     append: bool,
 ) {
-    let (target, dependencies, search, page_size, cursor) = match control {
-        ChoiceControl::DomainPace => (
-            ChoiceTarget::DomainPace,
-            Vec::new(),
-            signals.pace_search.get_untracked(),
-            2,
-            if append {
-                page_cursor(signals.pace_choices)
-            } else {
-                None
-            },
-        ),
-        ChoiceControl::PlacementPolicy => (
-            ChoiceTarget::PlacementPolicy,
-            vec![ChoiceSelection {
-                value: ChoiceValue::DomainPace(signals.domain.get_untracked().pace),
-            }],
-            signals.placement_search.get_untracked(),
-            3,
-            if append {
-                page_cursor(signals.placement_choices)
-            } else {
-                None
-            },
-        ),
-        ChoiceControl::BranchSchema => {
-            let Some(domain) = signals.captured_domain.get_untracked() else {
-                signals.schema_choices.set(ChoiceLoad::Failed(
-                    "Select a domain before choosing a schema".to_string(),
-                ));
-                return;
-            };
-            (
-                ChoiceTarget::Schema,
-                vec![ChoiceSelection {
-                    value: ChoiceValue::Domain(domain),
-                }],
-                signals.schema_search.get_untracked(),
-                20,
-                if append {
-                    page_cursor(signals.schema_choices)
-                } else {
-                    None
-                },
-            )
+    let control_signals = signals.choices.of(control);
+    let query = match signals.choice_query(control) {
+        Ok(query) => query,
+        Err(reason) => {
+            control_signals
+                .load
+                .set(ChoiceLoad::Failed(reason.to_string()));
+            return;
         }
+    };
+    let cursor = if append {
+        page_cursor(control_signals.load)
+    } else {
+        None
     };
     if append && cursor.is_none() {
         return;
     }
-    let request = ChoiceLookupRequest::new(target, dependencies, search)
-        .with_page(page_size, cursor)
-        .assured("the create dialog uses a bounded choice page size");
+    let request = ChoiceLookupRequest::new(
+        query.target,
+        query.dependencies,
+        control_signals.search.get_untracked(),
+    )
+    .with_page(query.page_size, cursor)
+    .assured("the create dialog uses a bounded choice page size");
     let context = ChoiceRequestContext {
         control,
         draft_revision: signals.revision.get_untracked(),
@@ -781,10 +1119,10 @@ fn request_choices(
         append,
     };
     if !append {
-        signals.choice_load(control).set(ChoiceLoad::Loading);
+        control_signals.load.set(ChoiceLoad::Loading);
     }
     let Some(request_tx) = request_tx.get_untracked() else {
-        signals.choice_load(control).set(ChoiceLoad::Failed(
+        control_signals.load.set(ChoiceLoad::Failed(
             "The session is not available".to_string(),
         ));
         return;
@@ -793,7 +1131,7 @@ fn request_choices(
         .unbounded_send(ConsoleRequest::Choice { request, context })
         .is_err()
     {
-        signals.choice_load(control).set(ChoiceLoad::Failed(
+        control_signals.load.set(ChoiceLoad::Failed(
             "The session channel is closed".to_string(),
         ));
     }
@@ -805,6 +1143,32 @@ fn page_cursor(load: RwSignal<ChoiceLoad>) -> Option<String> {
         ChoiceLoad::Waiting | ChoiceLoad::Loading | ChoiceLoad::Empty | ChoiceLoad::Failed(_) => {
             None
         }
+    }
+}
+
+/// The controls the open form asks the session about. Each asks again whenever its draft changes,
+/// so a reply to an older draft or connection never fills it.
+fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceControl> {
+    match kind {
+        CreateKind::Domain => vec![ChoiceControl::DomainPace, ChoiceControl::PlacementPolicy],
+        CreateKind::Branch => vec![ChoiceControl::BranchSchema],
+        CreateKind::Relay => {
+            let mut controls = vec![ChoiceControl::RelaySchema];
+            if signals.relay.get_untracked().branching.is_branched() {
+                controls.push(ChoiceControl::RelayBranch);
+            }
+            controls
+        }
+        CreateKind::Subscription => vec![
+            ChoiceControl::SubscriptionRelay,
+            ChoiceControl::SubscriptionField,
+        ],
+        CreateKind::User
+        | CreateKind::Resource
+        | CreateKind::Schema
+        | CreateKind::WireJsonSchema
+        | CreateKind::WireCborSchema
+        | CreateKind::WireAvroSchema => Vec::new(),
     }
 }
 
@@ -830,46 +1194,33 @@ pub(crate) fn CreateDialog(
     });
     Effect::new(move |_| {
         let open = signals.open.get();
-        let revision = signals.revision.get();
+        signals.revision.track();
         let generation = session_generation.get();
         let connected = connection_state.get() == ConsoleConnectionState::Connected;
-        if open == Some(CreateKind::Domain) && connected {
-            request_choices(
-                signals,
-                ChoiceControl::DomainPace,
-                request_tx,
-                generation,
-                false,
-            );
-            request_choices(
-                signals,
-                ChoiceControl::PlacementPolicy,
-                request_tx,
-                generation,
-                false,
-            );
-        } else if open == Some(CreateKind::Domain) {
-            signals.pace_choices.set(ChoiceLoad::Waiting);
-            signals.placement_choices.set(ChoiceLoad::Waiting);
-        } else if open == Some(CreateKind::Branch) && connected {
-            request_choices(
-                signals,
-                ChoiceControl::BranchSchema,
-                request_tx,
-                generation,
-                false,
-            );
-        } else if open == Some(CreateKind::Branch) {
-            signals.schema_choices.set(ChoiceLoad::Waiting);
+        let Some(kind) = open else {
+            return;
+        };
+        for control in open_form_controls(signals, kind) {
+            if connected {
+                request_choices(signals, control, request_tx, generation, false);
+            } else {
+                signals.choices.of(control).load.set(ChoiceLoad::Waiting);
+            }
         }
-        let _ = revision;
     });
     let scope_changed = move || {
         signals.captured_domain.get() != active_domain.get()
             && signals.open.get().is_some_and(CreateKind::domain_scoped)
     };
+    // The drafts own validation and report it inline, so the form is `novalidate`: the browser's
+    // constraint checks, such as a number input's minimum, never keep a submit from reaching them.
     let submit_form = move |event: ev::SubmitEvent| {
         event.prevent_default();
+        // A submitted draft is not submitted again until it is edited. The handler holds the rule
+        // the disabled button shows, because a form can be submitted without clicking it.
+        if signals.progress.get_untracked().blocks_repeat_submit() {
+            return;
+        }
         match signals.submission() {
             Ok(submission) => {
                 signals.validation.set(None);
@@ -915,7 +1266,7 @@ pub(crate) fn CreateDialog(
                         </div>
                         <button class="dialog-close create-close" type="button" title="Close" aria-label="Close create dialog" on:click=move |_| signals.close()>"×"</button>
                     </header>
-                    <form on:submit=submit_form>
+                    <form novalidate on:submit=submit_form>
                         <div class="create-scope-row">
                             <span>"Scope"</span>
                             <strong class="create-scope">{move || match signals.open.get() {
@@ -923,8 +1274,7 @@ pub(crate) fn CreateDialog(
                                     Some(domain) => domain.to_string(),
                                     None => "No domain selected".to_string(),
                                 },
-                                Some(CreateKind::Domain | CreateKind::User) | None => "Cluster".to_string(),
-                                Some(_) => "Cluster".to_string(),
+                                Some(_) | None => "Cluster".to_string(),
                             }}</strong>
                             <Show when=scope_changed fallback=|| ()>
                                 <button
@@ -1033,41 +1383,51 @@ pub(crate) fn CreateDialog(
                         <Show when=move || signals.open.get() == Some(CreateKind::Branch) fallback=|| ()>
                             <BranchEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
                         </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Relay) fallback=|| ()>
+                            <RelayEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Subscription) fallback=|| ()>
+                            <SubscriptionEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
 
-                        <label class="create-check">
-                            <input
-                                class="create-if-not-exists"
-                                type="checkbox"
-                                prop:checked=move || match signals.open.get() {
-                                    Some(CreateKind::Domain) => signals.domain.get().if_not_exists,
-                                    Some(CreateKind::User) => signals.user.get().if_not_exists,
-                                    Some(CreateKind::Resource) => signals.resource.get().if_not_exists,
-                                    Some(CreateKind::Schema) => signals.structured.get().schema.if_not_exists,
-                                    Some(CreateKind::WireJsonSchema) => signals.structured.get().wire_json.if_not_exists,
-                                    Some(CreateKind::WireCborSchema) => signals.structured.get().wire_cbor.if_not_exists,
-                                    Some(CreateKind::WireAvroSchema) => signals.structured.get().wire_avro.if_not_exists,
-                                    Some(CreateKind::Branch) => signals.structured.get().branch.if_not_exists,
-                                    None => false,
-                                }
-                                disabled=move || signals.progress.get().is_pending()
-                                on:change=move |event| {
-                                    let checked = event_target_checked(&event);
-                                    match signals.open.get_untracked() {
-                                        Some(CreateKind::Domain) => signals.domain.update(|draft| draft.if_not_exists = checked),
-                                        Some(CreateKind::User) => signals.user.update(|draft| draft.if_not_exists = checked),
-                                        Some(CreateKind::Resource) => signals.resource.update(|draft| draft.if_not_exists = checked),
-                                        Some(CreateKind::Schema) => signals.structured.update(|draft| draft.schema.if_not_exists = checked),
-                                        Some(CreateKind::WireJsonSchema) => signals.structured.update(|draft| draft.wire_json.if_not_exists = checked),
-                                        Some(CreateKind::WireCborSchema) => signals.structured.update(|draft| draft.wire_cbor.if_not_exists = checked),
-                                        Some(CreateKind::WireAvroSchema) => signals.structured.update(|draft| draft.wire_avro.if_not_exists = checked),
-                                        Some(CreateKind::Branch) => signals.structured.update(|draft| draft.branch.if_not_exists = checked),
-                                        None => {}
+                        <Show when=move || signals.open.get().is_some_and(CreateKind::takes_if_not_exists) fallback=|| ()>
+                            <label class="create-check">
+                                <input
+                                    class="create-if-not-exists"
+                                    type="checkbox"
+                                    prop:checked=move || match signals.open.get() {
+                                        Some(CreateKind::Domain) => signals.domain.get().if_not_exists,
+                                        Some(CreateKind::User) => signals.user.get().if_not_exists,
+                                        Some(CreateKind::Resource) => signals.resource.get().if_not_exists,
+                                        Some(CreateKind::Schema) => signals.structured.get().schema.if_not_exists,
+                                        Some(CreateKind::WireJsonSchema) => signals.structured.get().wire_json.if_not_exists,
+                                        Some(CreateKind::WireCborSchema) => signals.structured.get().wire_cbor.if_not_exists,
+                                        Some(CreateKind::WireAvroSchema) => signals.structured.get().wire_avro.if_not_exists,
+                                        Some(CreateKind::Branch) => signals.structured.get().branch.if_not_exists,
+                                        Some(CreateKind::Relay) => signals.relay.get().if_not_exists,
+                                        Some(CreateKind::Subscription) | None => false,
                                     }
-                                    signals.edit();
-                                }
-                            />
-                            <span>"If not exists"</span>
-                        </label>
+                                    disabled=move || signals.progress.get().is_pending()
+                                    on:change=move |event| {
+                                        let checked = event_target_checked(&event);
+                                        match signals.open.get_untracked() {
+                                            Some(CreateKind::Domain) => signals.domain.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::User) => signals.user.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Resource) => signals.resource.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Schema) => signals.structured.update(|draft| draft.schema.if_not_exists = checked),
+                                            Some(CreateKind::WireJsonSchema) => signals.structured.update(|draft| draft.wire_json.if_not_exists = checked),
+                                            Some(CreateKind::WireCborSchema) => signals.structured.update(|draft| draft.wire_cbor.if_not_exists = checked),
+                                            Some(CreateKind::WireAvroSchema) => signals.structured.update(|draft| draft.wire_avro.if_not_exists = checked),
+                                            Some(CreateKind::Branch) => signals.structured.update(|draft| draft.branch.if_not_exists = checked),
+                                            Some(CreateKind::Relay) => signals.relay.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Subscription) | None => {}
+                                        }
+                                        signals.edit();
+                                    }
+                                />
+                                <span>"If not exists"</span>
+                            </label>
+                        </Show>
 
                         <div class="create-preview-block">
                             <span>"Canonical NSPL preview"</span>
@@ -1108,13 +1468,11 @@ fn ChoiceGroup(
     signals: CreateSignals,
     request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
     session_generation: RwSignal<u64>,
+    /// Shows each choice's detail beside its label, as a typed field shows its type.
+    #[prop(optional)]
+    show_detail: bool,
 ) -> impl IntoView {
-    let load = signals.choice_load(control);
-    let search = match control {
-        ChoiceControl::DomainPace => signals.pace_search,
-        ChoiceControl::PlacementPolicy => signals.placement_search,
-        ChoiceControl::BranchSchema => signals.schema_search,
-    };
+    let ChoiceControlSignals { search, load } = signals.choices.of(control);
     view! {
         <fieldset class=format!("create-choice-group {class_name}")>
             <legend>{label}</legend>
@@ -1153,20 +1511,22 @@ fn ChoiceGroup(
                     children=move |choice| {
                         let label = choice.presentation.label.clone();
                         let detail = choice.presentation.detail.clone().unwrap_or_default();
+                        let shown_detail = if show_detail { Some(detail.clone()) } else { None };
                         let selected_value = choice.value.clone();
                         let selected_for_class = selected_value.clone();
                         view! {
                             <button
                                 type="button"
                                 data-value=label.clone()
-                                class:active=move || selected_choice(signals, &selected_for_class)
+                                class:active=move || selected_choice(signals, control, &selected_for_class)
                                 title=detail
                                 on:click=move |_| {
-                                    select_choice(signals, selected_value.clone());
+                                    select_choice(signals, control, selected_value.clone());
                                     signals.edit();
                                 }
                             >
-                                {label.clone()}
+                                <span>{label.clone()}</span>
+                                {shown_detail.map(|detail| view! { <em>{detail}</em> })}
                             </button>
                         }
                     }
@@ -1185,38 +1545,65 @@ fn ChoiceGroup(
     }
 }
 
-fn selected_choice(signals: CreateSignals, value: &ChoiceValue) -> bool {
-    match value {
-        ChoiceValue::DomainPace(value) => signals.domain.get().pace == *value,
-        ChoiceValue::PlacementPolicy(value) => signals.domain.get().placement == *value,
-        ChoiceValue::Model(node) if node.kind == ModelKind::Schema => {
-            let branch = signals.structured.get();
-            branch.branch.schema_valid
-                && branch
-                    .branch
-                    .schema
-                    .as_ref()
-                    .is_some_and(|schema| schema.as_str() == node.identifier.as_str())
+/// Whether `value` is the selection `control` currently holds. A value of another kind than the
+/// control asks for selects nothing.
+fn selected_choice(signals: CreateSignals, control: ChoiceControl, value: &ChoiceValue) -> bool {
+    match (control, value) {
+        (ChoiceControl::DomainPace, ChoiceValue::DomainPace(value)) => {
+            signals.domain.get().pace == *value
         }
-        ChoiceValue::Domain(_) | ChoiceValue::Resource(_) | ChoiceValue::Model(_) => false,
+        (ChoiceControl::PlacementPolicy, ChoiceValue::PlacementPolicy(value)) => {
+            signals.domain.get().placement == *value
+        }
+        (ChoiceControl::BranchSchema, ChoiceValue::Model(node)) => {
+            signals.structured.get().branch.selects_schema(node)
+        }
+        (ChoiceControl::RelaySchema, ChoiceValue::Model(node)) => {
+            signals.relay.get().selects_schema(node)
+        }
+        (ChoiceControl::RelayBranch, ChoiceValue::Model(node)) => {
+            signals.relay.get().selects_branch(node)
+        }
+        (ChoiceControl::SubscriptionRelay, ChoiceValue::Model(node)) => {
+            signals.subscription.get().selects_relay(node)
+        }
+        // A field reference is inserted into the filter rather than held as a selection.
+        _ => false,
     }
 }
 
-fn select_choice(signals: CreateSignals, value: ChoiceValue) {
-    match value {
-        ChoiceValue::DomainPace(value) => signals.domain.update(|draft| draft.pace = value),
-        ChoiceValue::PlacementPolicy(value) => {
+/// Applies `value` to the draft `control` edits. A value of another kind than the control asks
+/// for changes nothing.
+fn select_choice(signals: CreateSignals, control: ChoiceControl, value: ChoiceValue) {
+    match (control, value) {
+        (ChoiceControl::DomainPace, ChoiceValue::DomainPace(value)) => {
+            signals.domain.update(|draft| draft.pace = value);
+        }
+        (ChoiceControl::PlacementPolicy, ChoiceValue::PlacementPolicy(value)) => {
             signals.domain.update(|draft| draft.placement = value);
         }
-        ChoiceValue::Model(node) if node.kind == ModelKind::Schema => {
-            if let Ok(name) = SchemaName::parse(node.identifier.as_str()) {
-                signals.structured.update(|drafts| {
-                    drafts.branch.schema = Some(name);
-                    drafts.branch.schema_valid = true;
-                });
-            }
+        (ChoiceControl::BranchSchema, ChoiceValue::Model(node)) => {
+            signals
+                .structured
+                .update(|drafts| drafts.branch.select_schema(&node));
         }
-        ChoiceValue::Domain(_) | ChoiceValue::Resource(_) | ChoiceValue::Model(_) => {}
+        (ChoiceControl::RelaySchema, ChoiceValue::Model(node)) => {
+            signals.relay.update(|draft| draft.select_schema(&node));
+        }
+        (ChoiceControl::RelayBranch, ChoiceValue::Model(node)) => {
+            signals.relay.update(|draft| draft.select_branch(&node));
+        }
+        (ChoiceControl::SubscriptionRelay, ChoiceValue::Model(node)) => {
+            signals
+                .subscription
+                .update(|draft| draft.select_relay(&node));
+        }
+        (ChoiceControl::SubscriptionField, ChoiceValue::Field(field)) => {
+            signals
+                .subscription
+                .update(|draft| draft.insert_field_reference(field));
+        }
+        _ => {}
     }
 }
 
@@ -1236,43 +1623,78 @@ mod tests {
     };
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_client_wire::{
-        Choice, ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceValue, DomainPaceChoice,
+        Choice, ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceTarget, ChoiceValue,
+        DomainPaceChoice,
     };
     use nervix_models::{
-        AvroType, DomainName, JsonType, ModelKind, ModelName, NodeRef, ParseAsType,
-        PlacementPolicy, SchemaName, WireSchemaStrictness,
+        AvroType, DomainName, FieldName, JsonType, MaterializedRelayState, ModelKind, ModelName,
+        NodeRef, ParseAsType, PlacementPolicy, RelayName, SchemaName, SubscriptionDeliveryBehavior,
+        WireSchemaStrictness,
     };
 
     use super::{
         super::ConsoleRequest,
         ChoiceControl, ChoiceLoad, ChoiceRequestContext, CreateDialog, CreateDialogProps,
-        CreateDraftError, CreateKind, CreateMenu, CreateMenuProps, CreateProgress, CreateSignals,
-        DomainDraft, ResourceDraft, UserDraft, build_submission, request_choices,
-        schema_draft::{
-            SchemaFieldDraft, SchemaTypeDraft, StructuredDrafts, WireFieldDraft, WireFieldType,
-        },
+        CreateDispatch, CreateDraftError, CreateKind, CreateMenu, CreateMenuProps, CreateProgress,
+        CreateSignals, CreateSubmission, DomainDraft, ResourceDraft, SelectedReference, UserDraft,
+        open_form_controls, request_choices,
+        schema_draft::{SchemaFieldDraft, SchemaTypeDraft, WireFieldDraft, WireFieldType},
         select_choice, selected_choice,
     };
 
+    fn domain(name: &str) -> DomainName {
+        DomainName::parse(name).assured("the test domain names are valid")
+    }
+
+    fn node(kind: ModelKind, name: &str) -> NodeRef {
+        NodeRef::new(
+            kind,
+            ModelName::parse(name).assured("the test names are valid"),
+        )
+    }
+
+    fn command_query(submission: &CreateSubmission) -> &str {
+        let CreateDispatch::Command(command) = &submission.dispatch else {
+            panic!("the submission runs on the durable command path");
+        };
+        &command.query
+    }
+
+    fn command_domain(submission: &CreateSubmission) -> Option<&DomainName> {
+        let CreateDispatch::Command(command) = &submission.dispatch else {
+            panic!("the submission runs on the durable command path");
+        };
+        command.domain.as_ref()
+    }
+
+    fn outcome(value: ChoiceValue, label: &str) -> ChoiceOutcome {
+        ChoiceOutcome {
+            status: ChoiceStatus::Ready,
+            choices: vec![Choice {
+                value,
+                presentation: ChoicePresentation {
+                    label: label.to_string(),
+                    detail: None,
+                    group: None,
+                },
+            }],
+            page_cursor: None,
+        }
+    }
+
     #[test]
     fn typed_drafts_render_the_canonical_statements_the_dispatcher_sends() {
-        let domain = DomainDraft {
+        let domain_draft = DomainDraft {
             name: "orders".to_string(),
             if_not_exists: true,
-            placement: nervix_models::PlacementPolicy::PreferColocation,
+            placement: PlacementPolicy::PreferColocation,
             ..DomainDraft::default()
         };
-        let submission = build_submission(
-            CreateKind::Domain,
-            &domain,
-            &UserDraft::default(),
-            &ResourceDraft::default(),
-            &StructuredDrafts::default(),
-            None,
-        )
-        .assured("the domain draft is valid");
+        let submission = domain_draft
+            .submission()
+            .assured("the domain draft is valid");
         assert_eq!(
-            submission.query,
+            command_query(&submission),
             "CREATE IF NOT EXISTS UNPACED DOMAIN orders PLACEMENT PREFER COLOCATION;"
         );
 
@@ -1280,18 +1702,12 @@ mod tests {
             name: "bundle".to_string(),
             if_not_exists: false,
         };
-        let scope = DomainName::parse("orders").assured("the scope is a valid domain name");
-        let submission = build_submission(
-            CreateKind::Resource,
-            &DomainDraft::default(),
-            &UserDraft::default(),
-            &resource,
-            &StructuredDrafts::default(),
-            Some(scope.clone()),
-        )
-        .assured("the resource draft and scope are valid");
-        assert_eq!(submission.query, "CREATE RESOURCE bundle;");
-        assert_eq!(submission.domain, Some(scope));
+        let scope = domain("orders");
+        let submission = resource
+            .submission(Some(scope.clone()))
+            .assured("the resource draft and scope are valid");
+        assert_eq!(command_query(&submission), "CREATE RESOURCE bundle;");
+        assert_eq!(command_domain(&submission), Some(&scope));
     }
 
     #[test]
@@ -1301,16 +1717,8 @@ mod tests {
             password: "it's-secret".to_string(),
             if_not_exists: false,
         };
-        let submission = build_submission(
-            CreateKind::User,
-            &DomainDraft::default(),
-            &user,
-            &ResourceDraft::default(),
-            &StructuredDrafts::default(),
-            None,
-        )
-        .assured("the user draft is valid");
-        assert!(submission.query.contains("it's-secret"));
+        let submission = user.submission().assured("the user draft is valid");
+        assert!(command_query(&submission).contains("it's-secret"));
         assert!(!submission.presentation.contains("it's-secret"));
         assert_eq!(
             submission.presentation,
@@ -1324,15 +1732,9 @@ mod tests {
             name: "bundle".to_string(),
             if_not_exists: false,
         };
-        let error = build_submission(
-            CreateKind::Resource,
-            &DomainDraft::default(),
-            &UserDraft::default(),
-            &resource,
-            &StructuredDrafts::default(),
-            None,
-        )
-        .expect_err("resource creation needs a selected domain");
+        let error = resource
+            .submission(None)
+            .expect_err("resource creation needs a selected domain");
         assert_eq!(
             error.current_context(),
             &CreateDraftError::ResourceDomainRequired
@@ -1355,18 +1757,8 @@ mod tests {
                 control: ChoiceControl::PlacementPolicy,
                 ..pace_context
             };
-            let outcome = |value, label: &str| ChoiceOutcome {
-                status: ChoiceStatus::Ready,
-                choices: vec![Choice {
-                    value,
-                    presentation: ChoicePresentation {
-                        label: label.to_string(),
-                        detail: None,
-                        group: None,
-                    },
-                }],
-                page_cursor: None,
-            };
+            let pace = signals.choices.domain_pace.load;
+            let placement = signals.choices.placement_policy.load;
 
             signals.apply_choice(
                 placement_context,
@@ -1385,11 +1777,11 @@ mod tests {
                 ),
             );
             assert!(matches!(
-                signals.pace_choices.get_untracked(),
+                pace.get_untracked(),
                 ChoiceLoad::Ready { choices, .. } if choices[0].presentation.label == "UNPACED"
             ));
             assert!(matches!(
-                signals.placement_choices.get_untracked(),
+                placement.get_untracked(),
                 ChoiceLoad::Ready { choices, .. } if choices[0].presentation.label == "NEUTRAL"
             ));
 
@@ -1411,12 +1803,57 @@ mod tests {
                 ),
             );
             assert!(matches!(
-                signals.pace_choices.get_untracked(),
+                pace.get_untracked(),
                 ChoiceLoad::Ready { choices, .. } if choices[0].presentation.label == "UNPACED"
             ));
             assert!(matches!(
-                signals.placement_choices.get_untracked(),
+                placement.get_untracked(),
                 ChoiceLoad::Ready { choices, .. } if choices[0].presentation.label == "NEUTRAL"
+            ));
+        });
+    }
+
+    #[test]
+    fn a_reply_fills_only_a_control_of_the_open_form() {
+        Owner::new().with(|| {
+            let signals = CreateSignals::new();
+            signals.open(CreateKind::Relay, Some(domain("orders")), "trigger");
+            let context = |control| ChoiceRequestContext {
+                control,
+                draft_revision: signals.revision.get_untracked(),
+                session_generation: 1,
+                append: false,
+            };
+            let relay = ChoiceValue::Model(node(ModelKind::Relay, "orders"));
+            signals.apply_choice(
+                context(ChoiceControl::SubscriptionRelay),
+                1,
+                outcome(relay.clone(), "orders"),
+            );
+            assert_eq!(
+                signals.choices.subscription_relay.load.get_untracked(),
+                ChoiceLoad::Waiting
+            );
+            let schema = ChoiceValue::Model(node(ModelKind::Schema, "order_record"));
+            signals.apply_choice(
+                context(ChoiceControl::RelaySchema),
+                1,
+                outcome(schema, "order_record"),
+            );
+            assert!(matches!(
+                signals.choices.relay_schema.load.get_untracked(),
+                ChoiceLoad::Ready { .. }
+            ));
+
+            signals.open(CreateKind::Subscription, Some(domain("orders")), "trigger");
+            signals.apply_choice(
+                context(ChoiceControl::SubscriptionRelay),
+                1,
+                outcome(relay, "orders"),
+            );
+            assert!(matches!(
+                signals.choices.subscription_relay.load.get_untracked(),
+                ChoiceLoad::Ready { .. }
             ));
         });
     }
@@ -1476,6 +1913,7 @@ mod tests {
         Owner::new().with(|| {
             let signals = CreateSignals::new();
             signals.open(CreateKind::Domain, None, "trigger");
+            let pace = signals.choices.domain_pace.load;
             let revision = signals.revision.get_untracked();
             let context = ChoiceRequestContext {
                 control: ChoiceControl::DomainPace,
@@ -1489,7 +1927,7 @@ mod tests {
                 page_cursor,
             };
             signals.apply_choice(context, 3, outcome(ChoiceStatus::Ready, Vec::new(), None));
-            assert_eq!(signals.pace_choices.get_untracked(), ChoiceLoad::Empty);
+            assert_eq!(pace.get_untracked(), ChoiceLoad::Empty);
 
             let choice = |pace, label: &str| Choice {
                 value: ChoiceValue::DomainPace(pace),
@@ -1521,7 +1959,7 @@ mod tests {
                 ),
             );
             assert!(matches!(
-                signals.pace_choices.get_untracked(),
+                pace.get_untracked(),
                 ChoiceLoad::Ready { choices, page_cursor: None } if choices.len() == 2
             ));
 
@@ -1538,18 +1976,18 @@ mod tests {
             ] {
                 signals.apply_choice(context, 3, outcome(status, Vec::new(), None));
                 assert_eq!(
-                    signals.pace_choices.get_untracked(),
+                    pace.get_untracked(),
                     ChoiceLoad::Failed(message.to_string())
                 );
             }
             signals.fail_choice(context, 3, "transport ended".to_string());
             assert_eq!(
-                signals.pace_choices.get_untracked(),
+                pace.get_untracked(),
                 ChoiceLoad::Failed("transport ended".to_string())
             );
             signals.fail_choice(context, 4, "stale transport".to_string());
             assert_eq!(
-                signals.pace_choices.get_untracked(),
+                pace.get_untracked(),
                 ChoiceLoad::Failed("transport ended".to_string())
             );
         });
@@ -1557,52 +1995,34 @@ mod tests {
 
     #[test]
     fn paced_domain_and_password_validation_report_the_owning_field() {
-        let mut domain = DomainDraft {
+        let mut draft = DomainDraft {
             name: "orders".to_string(),
             pace: DomainPaceChoice::Paced,
             period: "2s".to_string(),
             skew: "500ms".to_string(),
             ..DomainDraft::default()
         };
-        let submission = build_submission(
-            CreateKind::Domain,
-            &domain,
-            &UserDraft::default(),
-            &ResourceDraft::default(),
-            &StructuredDrafts::default(),
-            None,
-        )
-        .assured("the paced domain draft is valid");
-        assert!(submission.query.contains("PACED"));
-        assert!(submission.query.contains("PERIOD 2s"));
+        let submission = draft
+            .submission()
+            .assured("the paced domain draft is valid");
+        assert!(command_query(&submission).contains("PACED"));
+        assert!(command_query(&submission).contains("PERIOD 2s"));
 
-        domain.period = "soon".to_string();
+        draft.period = "soon".to_string();
         assert_eq!(
-            build_submission(
-                CreateKind::Domain,
-                &domain,
-                &UserDraft::default(),
-                &ResourceDraft::default(),
-                &StructuredDrafts::default(),
-                None,
-            )
-            .expect_err("an invalid period is rejected")
-            .current_context(),
+            draft
+                .submission()
+                .expect_err("an invalid period is rejected")
+                .current_context(),
             &CreateDraftError::Period
         );
-        domain.period = "2s".to_string();
-        domain.skew = "later".to_string();
+        draft.period = "2s".to_string();
+        draft.skew = "later".to_string();
         assert_eq!(
-            build_submission(
-                CreateKind::Domain,
-                &domain,
-                &UserDraft::default(),
-                &ResourceDraft::default(),
-                &StructuredDrafts::default(),
-                None,
-            )
-            .expect_err("an invalid skew is rejected")
-            .current_context(),
+            draft
+                .submission()
+                .expect_err("an invalid skew is rejected")
+                .current_context(),
             &CreateDraftError::Skew
         );
 
@@ -1612,16 +2032,9 @@ mod tests {
             if_not_exists: false,
         };
         assert_eq!(
-            build_submission(
-                CreateKind::User,
-                &DomainDraft::default(),
-                &user,
-                &ResourceDraft::default(),
-                &StructuredDrafts::default(),
-                None,
-            )
-            .expect_err("an empty password is rejected")
-            .current_context(),
+            user.submission()
+                .expect_err("an empty password is rejected")
+                .current_context(),
             &CreateDraftError::PasswordRequired
         );
     }
@@ -1631,7 +2044,8 @@ mod tests {
         Owner::new().with(|| {
             let signals = CreateSignals::new();
             signals.open(CreateKind::Domain, None, "trigger");
-            signals.pace_search.set("wall".to_string());
+            let pace = signals.choices.domain_pace;
+            pace.search.set("wall".to_string());
             let (sender, mut receiver) = unbounded();
             let request_tx = RwSignal::new(Some(sender));
             request_choices(signals, ChoiceControl::DomainPace, request_tx, 8, false);
@@ -1641,16 +2055,13 @@ mod tests {
             else {
                 panic!("the create dialog sends a typed choice request");
             };
-            assert_eq!(
-                request.target(),
-                nervix_client_wire::ChoiceTarget::DomainPace
-            );
+            assert_eq!(request.target(), ChoiceTarget::DomainPace);
             assert_eq!(request.search(), "wall");
             assert!(request.dependencies().is_empty());
             assert_eq!(context.session_generation, 8);
             assert!(!context.append);
 
-            signals.pace_choices.set(ChoiceLoad::Ready {
+            pace.load.set(ChoiceLoad::Ready {
                 choices: Vec::new(),
                 page_cursor: Some("page-two".to_string()),
             });
@@ -1682,7 +2093,7 @@ mod tests {
             let unavailable = RwSignal::new(None);
             request_choices(signals, ChoiceControl::DomainPace, unavailable, 8, false);
             assert_eq!(
-                signals.pace_choices.get_untracked(),
+                pace.load.get_untracked(),
                 ChoiceLoad::Failed("The session is not available".to_string())
             );
 
@@ -1696,23 +2107,28 @@ mod tests {
                 false,
             );
             assert_eq!(
-                signals.pace_choices.get_untracked(),
+                pace.load.get_untracked(),
                 ChoiceLoad::Failed("The session channel is closed".to_string())
             );
 
-            signals.pace_choices.set(ChoiceLoad::Empty);
+            pace.load.set(ChoiceLoad::Empty);
             request_choices(signals, ChoiceControl::DomainPace, request_tx, 8, true);
             assert!(receiver.try_recv().is_err());
         });
     }
 
     #[test]
-    fn typed_choice_selection_updates_only_supported_create_fields() {
+    fn typed_choice_selection_updates_only_the_draft_its_control_edits() {
         Owner::new().with(|| {
             let signals = CreateSignals::new();
-            select_choice(signals, ChoiceValue::DomainPace(DomainPaceChoice::Paced));
             select_choice(
                 signals,
+                ChoiceControl::DomainPace,
+                ChoiceValue::DomainPace(DomainPaceChoice::Paced),
+            );
+            select_choice(
+                signals,
+                ChoiceControl::PlacementPolicy,
                 ChoiceValue::PlacementPolicy(PlacementPolicy::RequireColocation),
             );
             assert_eq!(signals.domain.get_untracked().pace, DomainPaceChoice::Paced);
@@ -1720,17 +2136,69 @@ mod tests {
                 signals.domain.get_untracked().placement,
                 PlacementPolicy::RequireColocation
             );
-            let domain = DomainName::parse("orders").assured("the test domain is valid");
-            select_choice(signals, ChoiceValue::Domain(domain));
+            select_choice(
+                signals,
+                ChoiceControl::DomainPace,
+                ChoiceValue::Domain(domain("orders")),
+            );
             assert_eq!(signals.domain.get_untracked().pace, DomainPaceChoice::Paced);
+
+            let schema = ChoiceValue::Model(node(ModelKind::Schema, "order_record"));
+            select_choice(signals, ChoiceControl::RelaySchema, schema.clone());
+            assert!(selected_choice(
+                signals,
+                ChoiceControl::RelaySchema,
+                &schema
+            ));
+            assert!(!selected_choice(
+                signals,
+                ChoiceControl::BranchSchema,
+                &schema
+            ));
+            assert!(signals.structured.get_untracked().branch.schema.is_none());
+
+            let branch = ChoiceValue::Model(node(ModelKind::Branch, "by_tenant"));
+            select_choice(signals, ChoiceControl::RelayBranch, branch.clone());
+            assert!(selected_choice(
+                signals,
+                ChoiceControl::RelayBranch,
+                &branch
+            ));
+
+            let relay = ChoiceValue::Model(node(ModelKind::Relay, "orders"));
+            select_choice(signals, ChoiceControl::SubscriptionRelay, relay.clone());
+            assert!(selected_choice(
+                signals,
+                ChoiceControl::SubscriptionRelay,
+                &relay
+            ));
+
+            let field = ChoiceValue::Field(FieldName::parse("amount").assured("valid field"));
+            select_choice(signals, ChoiceControl::SubscriptionField, field.clone());
+            select_choice(signals, ChoiceControl::SubscriptionField, field.clone());
+            assert_eq!(
+                signals.subscription.get_untracked().filter,
+                "input.amount input.amount"
+            );
+            assert!(!selected_choice(
+                signals,
+                ChoiceControl::SubscriptionField,
+                &field
+            ));
+            select_choice(signals, ChoiceControl::RelaySchema, field);
+            assert!(selected_choice(
+                signals,
+                ChoiceControl::RelaySchema,
+                &schema
+            ));
         });
     }
 
     #[test]
     fn branch_scope_change_keeps_the_draft_and_requires_reselecting_its_schema() {
         Owner::new().with(|| {
-            let first = DomainName::parse("first").assured("valid domain");
-            let second = DomainName::parse("second").assured("valid domain");
+            let first = domain("first");
+            let second = domain("second");
             let schema = SchemaName::parse("tenant_key").assured("valid schema");
             let signals = CreateSignals::new();
 
@@ -1743,17 +2211,25 @@ mod tests {
             signals.open(CreateKind::Branch, Some(first.clone()), "trigger");
             signals.structured.update(|drafts| {
                 drafts.branch.name = "by_tenant".to_string();
-                drafts.branch.schema = Some(schema.clone());
-                drafts.branch.schema_valid = true;
+                drafts.branch.schema = Some(SelectedReference::chosen(schema.clone()));
                 drafts.branch.ttl = "5m".to_string();
             });
             signals.change_scope(Some(first.clone()));
-            assert!(signals.structured.get_untracked().branch.schema_valid);
+            assert!(
+                signals
+                    .structured
+                    .get_untracked()
+                    .branch
+                    .schema
+                    .assured("the schema stays selected")
+                    .is_current()
+            );
 
             signals.change_scope(Some(second.clone()));
             let retained = signals.structured.get_untracked().branch;
-            assert_eq!(retained.schema, Some(schema));
-            assert!(!retained.schema_valid);
+            let retained_schema = retained.schema.assured("the schema stays selected");
+            assert_eq!(retained_schema.name(), &schema);
+            assert!(!retained_schema.is_current());
             assert_eq!(retained.ttl, "5m");
             assert_eq!(
                 signals.captured_domain.get_untracked(),
@@ -1767,22 +2243,69 @@ mod tests {
     }
 
     #[test]
+    fn relay_and_subscription_scope_changes_invalidate_their_references() {
+        Owner::new().with(|| {
+            let signals = CreateSignals::new();
+            signals.open(CreateKind::Relay, Some(domain("first")), "trigger");
+            signals.relay.update(|draft| {
+                draft.select_schema(&node(ModelKind::Schema, "order_record"));
+                draft.select_branch(&node(ModelKind::Branch, "by_tenant"));
+            });
+            signals.change_scope(Some(domain("second")));
+            let relay = signals.relay.get_untracked();
+            assert!(!relay.selects_schema(&node(ModelKind::Schema, "order_record")));
+            assert!(!relay.selects_branch(&node(ModelKind::Branch, "by_tenant")));
+
+            signals.open_subscription(
+                domain("first"),
+                RelayName::parse("orders").assured("valid relay"),
+                "trigger",
+            );
+            signals.change_scope(Some(domain("first")));
+            assert!(
+                signals
+                    .subscription
+                    .get_untracked()
+                    .current_relay()
+                    .is_some()
+            );
+            signals.change_scope(Some(domain("second")));
+            assert!(
+                signals
+                    .subscription
+                    .get_untracked()
+                    .current_relay()
+                    .is_none()
+            );
+            assert_eq!(
+                signals
+                    .submission()
+                    .expect_err("the relay must be selected again")
+                    .current_context()
+                    .to_string(),
+                "The selected relay belongs to a changed context; select it again"
+            );
+        });
+    }
+
+    #[test]
     fn branch_schema_requests_bind_the_captured_domain_and_page_cursor() {
         Owner::new().with(|| {
             let signals = CreateSignals::new();
+            let branch_schema = signals.choices.branch_schema;
             let (sender, mut receiver) = unbounded();
             let request_tx = RwSignal::new(Some(sender));
             signals.open(CreateKind::Branch, None, "trigger");
             request_choices(signals, ChoiceControl::BranchSchema, request_tx, 9, false);
             assert_eq!(
-                signals.schema_choices.get_untracked(),
+                branch_schema.load.get_untracked(),
                 ChoiceLoad::Failed("Select a domain before choosing a schema".to_string())
             );
             assert!(receiver.try_recv().is_err());
 
-            let domain = DomainName::parse("orders").assured("valid domain");
-            signals.change_scope(Some(domain.clone()));
-            signals.schema_search.set("tenant".to_string());
+            let scope = domain("orders");
+            signals.change_scope(Some(scope.clone()));
+            branch_schema.search.set("tenant".to_string());
             request_choices(signals, ChoiceControl::BranchSchema, request_tx, 9, false);
             let ConsoleRequest::Choice { request, context } = receiver
                 .try_recv()
@@ -1790,13 +2313,13 @@ mod tests {
             else {
                 panic!("the schema picker must send a choice request");
             };
-            assert_eq!(request.target(), nervix_client_wire::ChoiceTarget::Schema);
+            assert_eq!(request.target(), ChoiceTarget::Schema);
             assert_eq!(request.search(), "tenant");
             assert_eq!(request.page_size(), 20);
-            assert_eq!(request.dependencies()[0].value, ChoiceValue::Domain(domain));
+            assert_eq!(request.dependencies()[0].value, ChoiceValue::Domain(scope));
             assert_eq!(context.control, ChoiceControl::BranchSchema);
 
-            signals.schema_choices.set(ChoiceLoad::Ready {
+            branch_schema.load.set(ChoiceLoad::Ready {
                 choices: Vec::new(),
                 page_cursor: Some("next-page".to_string()),
             });
@@ -1810,9 +2333,100 @@ mod tests {
             assert_eq!(request.page_cursor(), Some("next-page"));
             assert!(context.append);
 
-            signals.schema_choices.set(ChoiceLoad::Empty);
+            branch_schema.load.set(ChoiceLoad::Empty);
             request_choices(signals, ChoiceControl::BranchSchema, request_tx, 9, true);
             assert!(receiver.try_recv().is_err());
+        });
+    }
+
+    #[test]
+    fn relay_and_subscription_controls_ask_typed_questions_of_the_captured_domain() {
+        Owner::new().with(|| {
+            let signals = CreateSignals::new();
+            let (sender, mut receiver) = unbounded();
+            let request_tx = RwSignal::new(Some(sender));
+            let mut next_request = || {
+                let ConsoleRequest::Choice { request, context } = receiver
+                    .try_recv()
+                    .assured("the control sends a typed choice request")
+                else {
+                    panic!("a control sends a choice request");
+                };
+                (request, context)
+            };
+
+            signals.open(CreateKind::Subscription, None, "trigger");
+            for (control, reason) in [
+                (
+                    ChoiceControl::RelaySchema,
+                    "Select a domain before choosing a schema",
+                ),
+                (
+                    ChoiceControl::RelayBranch,
+                    "Select a domain before choosing a branch",
+                ),
+                (
+                    ChoiceControl::SubscriptionRelay,
+                    "Select a domain before choosing a relay",
+                ),
+                (
+                    ChoiceControl::SubscriptionField,
+                    "Select a domain before choosing a relay",
+                ),
+            ] {
+                request_choices(signals, control, request_tx, 2, false);
+                assert_eq!(
+                    signals.choices.of(control).load.get_untracked(),
+                    ChoiceLoad::Failed(reason.to_string())
+                );
+            }
+
+            let scope = domain("orders");
+            signals.change_scope(Some(scope.clone()));
+            request_choices(
+                signals,
+                ChoiceControl::SubscriptionField,
+                request_tx,
+                2,
+                false,
+            );
+            assert_eq!(
+                signals.choices.subscription_field.load.get_untracked(),
+                ChoiceLoad::Failed("Select a relay to list the fields of its records".to_string())
+            );
+            for (control, target) in [
+                (ChoiceControl::RelaySchema, ChoiceTarget::Schema),
+                (ChoiceControl::RelayBranch, ChoiceTarget::Branch),
+                (ChoiceControl::SubscriptionRelay, ChoiceTarget::Relay),
+            ] {
+                request_choices(signals, control, request_tx, 2, false);
+                let (request, context) = next_request();
+                assert_eq!(request.target(), target);
+                assert_eq!(request.page_size(), 20);
+                assert_eq!(
+                    request.dependencies()[0].value,
+                    ChoiceValue::Domain(scope.clone())
+                );
+                assert_eq!(context.control, control);
+            }
+
+            signals.subscription.update(|draft| {
+                draft.select_relay(&node(ModelKind::Relay, "orders"));
+            });
+            request_choices(
+                signals,
+                ChoiceControl::SubscriptionField,
+                request_tx,
+                2,
+                false,
+            );
+            let (request, _) = next_request();
+            assert_eq!(request.target(), ChoiceTarget::RelayField);
+            assert_eq!(request.page_size(), 100);
+            assert_eq!(
+                request.dependencies()[1].value,
+                ChoiceValue::Model(node(ModelKind::Relay, "orders"))
+            );
         });
     }
 
@@ -1820,32 +2434,194 @@ mod tests {
     fn branch_schema_selection_is_exact_and_does_not_clear_an_invalid_reference() {
         Owner::new().with(|| {
             let signals = CreateSignals::new();
-            let node = NodeRef::new(
-                ModelKind::Schema,
-                ModelName::parse("tenant_key").assured("valid model name"),
-            );
-            let choice = ChoiceValue::Model(node);
-            assert!(!selected_choice(signals, &choice));
-            select_choice(signals, choice.clone());
-            assert!(selected_choice(signals, &choice));
+            let choice = ChoiceValue::Model(node(ModelKind::Schema, "tenant_key"));
+            assert!(!selected_choice(
+                signals,
+                ChoiceControl::BranchSchema,
+                &choice
+            ));
+            select_choice(signals, ChoiceControl::BranchSchema, choice.clone());
+            assert!(selected_choice(
+                signals,
+                ChoiceControl::BranchSchema,
+                &choice
+            ));
 
             signals
                 .structured
-                .update(|drafts| drafts.branch.schema_valid = false);
-            assert!(!selected_choice(signals, &choice));
+                .update(|drafts| drafts.branch.invalidate_references());
+            assert!(!selected_choice(
+                signals,
+                ChoiceControl::BranchSchema,
+                &choice
+            ));
             assert_eq!(
-                signals.structured.get_untracked().branch.schema,
-                Some(SchemaName::parse("tenant_key").assured("valid schema"))
+                signals
+                    .structured
+                    .get_untracked()
+                    .branch
+                    .schema
+                    .assured("the schema stays selected")
+                    .name(),
+                &SchemaName::parse("tenant_key").assured("valid schema")
             );
 
             select_choice(
                 signals,
-                ChoiceValue::Model(NodeRef::new(
-                    ModelKind::Relay,
-                    ModelName::parse("tenant_key").assured("valid model name"),
-                )),
+                ChoiceControl::BranchSchema,
+                ChoiceValue::Model(node(ModelKind::Relay, "tenant_key")),
             );
-            assert!(!signals.structured.get_untracked().branch.schema_valid);
+            assert!(!selected_choice(
+                signals,
+                ChoiceControl::BranchSchema,
+                &choice
+            ));
+        });
+    }
+
+    #[test]
+    fn a_contextual_subscription_opens_a_fresh_named_draft_for_its_relay() {
+        Owner::new().with(|| {
+            let signals = CreateSignals::new();
+            assert_eq!(
+                signals.subscription.get_untracked().name,
+                "web_console_subscription_1"
+            );
+            signals.subscription.update(|draft| {
+                draft.filter = "input.amount > 1".to_string();
+            });
+            let scope = domain("orders");
+            let relay = RelayName::parse("orders").assured("valid relay");
+            signals.open_subscription(scope.clone(), relay.clone(), "graph-search");
+            assert_eq!(signals.open.get_untracked(), Some(CreateKind::Subscription));
+            assert_eq!(signals.captured_domain.get_untracked(), Some(scope.clone()));
+            let draft = signals.subscription.get_untracked();
+            assert_eq!(draft.name, "web_console_subscription_2");
+            assert_eq!(draft.current_relay(), Some(&relay));
+            assert!(draft.filter.is_empty());
+            assert_eq!(draft.delivery, SubscriptionDeliveryBehavior::Blocking);
+
+            let submission = signals
+                .submission()
+                .assured("a contextual draft is complete");
+            let CreateDispatch::Subscription(dispatch) = submission.dispatch else {
+                panic!("a subscription opens under the subscription lifecycle");
+            };
+            assert_eq!(dispatch.domain, scope);
+            assert_eq!(
+                dispatch.statement,
+                "CREATE SUBSCRIPTION web_console_subscription_2 TO orders;"
+            );
+            assert_eq!(submission.presentation, dispatch.statement);
+
+            signals.open_subscription(scope, relay, "graph-search");
+            assert_eq!(
+                signals.subscription.get_untracked().name,
+                "web_console_subscription_3"
+            );
+        });
+    }
+
+    #[test]
+    fn domain_scoped_forms_need_their_captured_domain_and_run_where_they_belong() {
+        Owner::new().with(|| {
+            let signals = CreateSignals::new();
+            signals.relay.update(|draft| {
+                draft.name = "orders".to_string();
+                draft.select_schema(&node(ModelKind::Schema, "order_record"));
+                draft.choose_unbranched();
+                draft.materialized_state = Some(MaterializedRelayState::LastByTimestamp);
+                draft.if_not_exists = true;
+            });
+            signals.open(CreateKind::Relay, None, "trigger");
+            assert_eq!(
+                signals
+                    .submission()
+                    .expect_err("a relay needs a domain")
+                    .current_context(),
+                &CreateDraftError::ScopedDomainRequired
+            );
+            signals.open(CreateKind::Subscription, None, "trigger");
+            assert_eq!(
+                signals
+                    .submission()
+                    .expect_err("a subscription needs a domain")
+                    .current_context(),
+                &CreateDraftError::ScopedDomainRequired
+            );
+
+            let scope = domain("orders");
+            signals.open(CreateKind::Relay, Some(scope.clone()), "trigger");
+            assert_eq!(signals.captured_domain.get_untracked(), None);
+            signals.change_scope(Some(scope.clone()));
+            signals.relay.update(|draft| {
+                draft.select_schema(&node(ModelKind::Schema, "order_record"));
+            });
+            let submission = signals.submission().assured("the relay draft is complete");
+            assert_eq!(
+                command_query(&submission),
+                "CREATE IF NOT EXISTS RELAY orders SCHEMA order_record UNBRANCHED CAPACITY 1 WITH \
+                 MATERIALIZED STATE LAST BY TIMESTAMP;"
+            );
+            assert_eq!(command_domain(&submission), Some(&scope));
+
+            signals
+                .relay
+                .update(|draft| draft.capacity = "none".to_string());
+            assert_eq!(
+                signals
+                    .submission()
+                    .expect_err("capacity must be a count")
+                    .current_context()
+                    .to_string(),
+                "Capacity must be a positive integer"
+            );
+            assert!(CreateKind::Relay.takes_if_not_exists());
+            assert!(!CreateKind::Subscription.takes_if_not_exists());
+            assert_eq!(
+                ChoiceControl::SubscriptionField.form(),
+                CreateKind::Subscription
+            );
+            assert_eq!(ChoiceControl::RelayBranch.form(), CreateKind::Relay);
+        });
+    }
+
+    #[test]
+    fn each_form_asks_only_the_questions_its_draft_needs() {
+        Owner::new().with(|| {
+            let signals = CreateSignals::new();
+            assert_eq!(
+                open_form_controls(signals, CreateKind::Domain),
+                [ChoiceControl::DomainPace, ChoiceControl::PlacementPolicy]
+            );
+            assert_eq!(
+                open_form_controls(signals, CreateKind::Branch),
+                [ChoiceControl::BranchSchema]
+            );
+            assert_eq!(
+                open_form_controls(signals, CreateKind::Relay),
+                [ChoiceControl::RelaySchema]
+            );
+            signals.relay.update(|draft| draft.choose_branched());
+            assert_eq!(
+                open_form_controls(signals, CreateKind::Relay),
+                [ChoiceControl::RelaySchema, ChoiceControl::RelayBranch]
+            );
+            assert_eq!(
+                open_form_controls(signals, CreateKind::Subscription),
+                [
+                    ChoiceControl::SubscriptionRelay,
+                    ChoiceControl::SubscriptionField
+                ]
+            );
+            for kind in [
+                CreateKind::User,
+                CreateKind::Resource,
+                CreateKind::Schema,
+                CreateKind::WireJsonSchema,
+            ] {
+                assert!(open_form_controls(signals, kind).is_empty());
+            }
         });
     }
 
@@ -1853,7 +2629,7 @@ mod tests {
     fn creation_components_render_each_typed_draft_and_accessible_status() {
         super::super::initialize_test_executor();
         Owner::new().with(|| {
-            let scope = DomainName::parse("orders").assured("the test scope is valid");
+            let scope = domain("orders");
             let active_domain = RwSignal::new(Some(scope.clone()));
             let connection_state = RwSignal::new(super::super::ConsoleConnectionState::Waiting);
             let generation = RwSignal::new(4);
@@ -1870,6 +2646,8 @@ mod tests {
             assert!(menu_markup.contains("global-create-button"));
             assert!(menu_markup.contains("Create"));
             assert!(menu_markup.contains("Resource"));
+            assert!(menu_markup.contains("data-create-kind=\"relay\""));
+            assert!(menu_markup.contains("data-create-kind=\"subscription\""));
 
             signals.domain.update(|draft| {
                 draft.name = "analytics".to_string();
@@ -1890,7 +2668,7 @@ mod tests {
                 );
                 any_spawner::Executor::poll_local();
                 if signals.open.get_untracked() == Some(CreateKind::Domain) {
-                    signals.pace_choices.set(ChoiceLoad::Ready {
+                    signals.choices.domain_pace.load.set(ChoiceLoad::Ready {
                         choices: vec![Choice {
                             value: ChoiceValue::DomainPace(DomainPaceChoice::Unpaced),
                             presentation: ChoicePresentation {
@@ -1901,17 +2679,42 @@ mod tests {
                         }],
                         page_cursor: Some("more-pace".to_string()),
                     });
-                    signals.placement_choices.set(ChoiceLoad::Ready {
-                        choices: vec![Choice {
-                            value: ChoiceValue::PlacementPolicy(PlacementPolicy::PreferColocation),
-                            presentation: ChoicePresentation {
-                                label: "PREFER COLOCATION".to_string(),
-                                detail: None,
-                                group: None,
-                            },
-                        }],
-                        page_cursor: None,
-                    });
+                    signals
+                        .choices
+                        .placement_policy
+                        .load
+                        .set(ChoiceLoad::Ready {
+                            choices: vec![Choice {
+                                value: ChoiceValue::PlacementPolicy(
+                                    PlacementPolicy::PreferColocation,
+                                ),
+                                presentation: ChoicePresentation {
+                                    label: "PREFER COLOCATION".to_string(),
+                                    detail: None,
+                                    group: None,
+                                },
+                            }],
+                            page_cursor: None,
+                        });
+                }
+                if signals.open.get_untracked() == Some(CreateKind::Subscription) {
+                    signals
+                        .choices
+                        .subscription_field
+                        .load
+                        .set(ChoiceLoad::Ready {
+                            choices: vec![Choice {
+                                value: ChoiceValue::Field(
+                                    FieldName::parse("amount").assured("valid field"),
+                                ),
+                                presentation: ChoicePresentation {
+                                    label: "amount".to_string(),
+                                    detail: Some("I64 OPTIONAL".to_string()),
+                                    group: None,
+                                },
+                            }],
+                            page_cursor: None,
+                        });
                 }
                 dialog.to_html()
             };
@@ -2013,16 +2816,70 @@ mod tests {
 
             signals.structured.update(|drafts| {
                 drafts.branch.name = "by_tenant".to_string();
-                drafts.branch.schema =
-                    Some(SchemaName::parse("visual_record").assured("valid name"));
-                drafts.branch.schema_valid = true;
+                drafts.branch.schema = Some(SelectedReference::chosen(
+                    SchemaName::parse("visual_record").assured("valid name"),
+                ));
                 drafts.branch.ttl = "5m".to_string();
             });
-            signals.open(CreateKind::Branch, Some(scope), "global-create-button");
+            signals.open(
+                CreateKind::Branch,
+                Some(scope.clone()),
+                "global-create-button",
+            );
             let branch_markup = render();
             assert!(branch_markup.contains("Create branch"));
             assert!(branch_markup.contains("Selected schema: visual_record"));
             assert!(branch_markup.contains("CREATE BRANCH by_tenant SCHEMA visual_record TTL 5m;"));
+
+            signals.relay.update(|draft| {
+                draft.name = "visual_orders".to_string();
+                draft.select_schema(&node(ModelKind::Schema, "visual_record"));
+                draft.select_branch(&node(ModelKind::Branch, "by_tenant"));
+                draft.capacity = "4".to_string();
+            });
+            signals.open(
+                CreateKind::Relay,
+                Some(scope.clone()),
+                "global-create-button",
+            );
+            let relay_markup = render();
+            assert!(relay_markup.contains("Create relay"));
+            assert!(relay_markup.contains("Selected schema: visual_record"));
+            assert!(relay_markup.contains("Selected branch: by_tenant"));
+            assert!(relay_markup.contains("LAST BY TIMESTAMP"));
+            assert!(relay_markup.contains(
+                "CREATE RELAY visual_orders SCHEMA visual_record BRANCHED BY by_tenant CAPACITY 4;"
+            ));
+            signals.change_scope(Some(domain("elsewhere")));
+            let changed_markup = render();
+            assert!(changed_markup.contains("domain changed. Select a schema again."));
+            assert!(changed_markup.contains("domain changed. Select a branch again."));
+
+            signals.open_subscription(
+                scope,
+                RelayName::parse("visual_orders").assured("valid relay"),
+                "graph-search",
+            );
+            signals.subscription.update(|draft| {
+                draft.filter = "input.amount=1".to_string();
+                draft.delivery = SubscriptionDeliveryBehavior::Dropping;
+                draft.sampled = true;
+                draft.sample_rate = "0.5".to_string();
+            });
+            let subscription_markup = render();
+            assert!(subscription_markup.contains("Create subscription"));
+            assert!(subscription_markup.contains("Selected relay: visual_orders"));
+            assert!(subscription_markup.contains("Reads as WHERE input.amount = 1"));
+            assert!(subscription_markup.contains("I64 OPTIONAL"));
+            assert!(!subscription_markup.contains("create-if-not-exists"));
+            assert!(subscription_markup.contains(
+                "TO visual_orders DROPPING BATCH SAMPLE RATE 0.5 WHERE input.amount = 1;"
+            ));
+            signals
+                .subscription
+                .update(|draft| draft.filter = "input.amount =".to_string());
+            let invalid_markup = render();
+            assert!(invalid_markup.contains("create-filter-reading invalid"));
         });
     }
 }

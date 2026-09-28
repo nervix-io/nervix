@@ -34,7 +34,7 @@ use crate::{
     EndpointIngestMode, Expression, FieldName, FieldScope, Float64Literal, FlushPolicy,
     GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorMapping, IngestSource, IngestTimestampSource, Inheritance, InputCollectPolicy,
-    InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState,
+    InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode, Literal,
     MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy,
     Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession,
     MySqlConflictAction, NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch, ParseAsType,
@@ -1756,8 +1756,8 @@ impl CreateRelay {
             }
         }
         if let Some(state) = &self.materialized_state {
-            rendered.push(' ');
-            rendered.push_str(materialized_relay_state_to_nspl(state));
+            rendered.push_str(" WITH MATERIALIZED STATE ");
+            rendered.push_str(state.as_ref());
         }
         rendered.push(';');
         Ok(rendered)
@@ -1775,12 +1775,6 @@ impl<Version: Display> CreateLookup<Version> {
             string_literal(&self.path),
             self.decode_using_codec.as_str()
         ))
-    }
-}
-
-fn materialized_relay_state_to_nspl(state: &MaterializedRelayState) -> &'static str {
-    match state {
-        MaterializedRelayState::LastByTimestamp => "WITH MATERIALIZED STATE LAST BY TIMESTAMP",
     }
 }
 

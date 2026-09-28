@@ -307,6 +307,12 @@ contains its records and final metadata together or not at all; and a marked sna
 is redone in full. See [Shutdown And Recovery](./shutdown.md#terminal-teardown) for the exact
 SIGTERM, SIGKILL, stream-teardown, and restart behavior.
 
+The recovered applied state includes the last stored membership and its peer endpoints. Startup
+discovery reads that membership before Raft has published its live topology metrics, so a former
+bootstrap leader can use surviving peers as authenticated gossip seeds. The stored endpoints are
+contact hints; current peer identity, incarnation, and endpoint still come from discovery. See
+[Cluster Interconnect](./interconnect.md#listener-and-peer-topology).
+
 ## Observability
 
 | Signal | What catch-up or retention looks like |
