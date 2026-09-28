@@ -227,6 +227,13 @@ and the NATS client check `message.max.bytes` and `max_payload` with the key and
 write. A limit the connector cannot learn stays with the destination, and whatever the destination
 reports when a message exceeds it is classified like any other publish failure.
 
+Syslog sends a completed codec payload as one transport frame. Its UDP writer rejects a frame above
+65,507 bytes, octet-counted TCP and TLS reject a count needing more than ten digits, and
+non-transparent TCP rejects one containing LF. The Sentry writer accepts one
+JSON event per envelope and checks the final event after default fields are added against the
+1 MB decompressed event limit. Both classify a definite local refusal as a record rejection;
+their transport and service failures retain their existing retry boundaries.
+
 The host owns that membership. It keeps every payload it offers the sink, with its exact bytes,
 key, headers, ordering group and member positions, in the emitter buffer beside the batches the
 members came from, and marks the members prepared so that no later attempt packs them again. A
@@ -242,6 +249,16 @@ than the connector, so reopening a connector between attempts keeps them; only a
 the attempt for good releases them, and their members then follow the error policy with every other
 unresolved row. A row sink names every member itself, so its retry writes only the rows it left
 unresolved; MongoDB's per-document results shrink a retried bulk write this way.
+
+OTEL is a row sink. Without `BATCH` it exports the successfully mapped rows of one Arrow carrier
+in one request. With `BATCH`, its typed plan passes the count and byte limits to the connector.
+The connector converts each selected row once, then takes the successful positions in order into
+requests of at most `MAX MESSAGES`. It measures the exact uncompressed protobuf Export request,
+including resource and scope, before optional gzip or transport framing. An oversized candidate
+is halved; an oversized singleton is rejected locally. Every accepted request answers for its own
+positions. A receiver's `partial_success` still acknowledges the whole request with a warning,
+because OTLP does not identify the rejected members. A failed request leaves only its unanswered
+positions for the host to retry.
 
 For a sink that stages writes, the lifecycle exposes a domain or physical commit deadline,
 staged-message count, pending ACKs, and a commit operation. The host includes that deadline in

@@ -179,6 +179,15 @@ contract, by naming a record the write did not carry or answering twice for one,
 error of any member. It fails the attempt without a retry, and the emitter's unresolved rows then
 follow `ON MESSAGE ERROR` as a failed publish.
 
+The Sentry sink rejects a final serialized event above its decompressed event limit before sending
+the envelope. The Syslog sink rejects a UDP datagram above its payload limit, a stream frame whose
+octet count needs more than ten digits, or an LF-bearing non-transparent TCP frame before writing.
+A batching OTEL sink measures the full protobuf Export request after mapping; if
+halving still leaves one source record above `MAX SIZE`, that record receives an external publish
+message error. Other members can be sent in bounded requests. An OTLP receiver's
+`partial_success` has no member identities, so it acknowledges the entire request and emits a
+warning instead of inventing per-record rejections.
+
 `ON MESSAGE ERROR` belongs to the route and handles record-specific work. Ingestor and emitter
 `ON GENERAL ERROR` handles node-wide source and sink failures. A WASM processor's node-wide `ON
 GLOBAL ERROR` handles guest failures outside an individual message route. Error delivery preserves

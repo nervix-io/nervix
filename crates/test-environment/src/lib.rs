@@ -1237,7 +1237,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         Ok(())
     }
 
-    pub async fn otel_collector_contains(&self, needle: &str) -> io::Result<bool> {
+    pub async fn otel_collector_logs(&self) -> io::Result<String> {
         let container = self
             .containers
             .iter()
@@ -1251,8 +1251,13 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             .stderr_to_vec()
             .await
             .map_err(testcontainers_error("OpenTelemetry Collector stderr"))?;
-        Ok(String::from_utf8_lossy(&stdout).contains(needle)
-            || String::from_utf8_lossy(&stderr).contains(needle))
+        let mut logs = String::from_utf8_lossy(&stdout).into_owned();
+        logs.push_str(&String::from_utf8_lossy(&stderr));
+        Ok(logs)
+    }
+
+    pub async fn otel_collector_contains(&self, needle: &str) -> io::Result<bool> {
+        Ok(self.otel_collector_logs().await?.contains(needle))
     }
 
     pub async fn start_jaeger(&mut self) -> io::Result<()> {
