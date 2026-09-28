@@ -153,6 +153,8 @@ mod schedule_planning;
 mod scheduling;
 mod service_tasks;
 mod session;
+#[cfg(test)]
+pub(crate) use session::{ClockDeliveryOrder, NextClockFrame};
 mod session_service;
 mod shutdown;
 mod startup;

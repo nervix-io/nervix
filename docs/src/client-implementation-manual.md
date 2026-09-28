@@ -60,7 +60,7 @@ Unsolicited `ServerMessage` bodies carry no request identity:
 | `DomainSnapshotObserved`, `ClusterObserved` | The selected domain's live graph and entities, and the cluster summary, after `SelectDomainRequest` |
 | `ServerNotice` | Text for display at `Info`, `Warning`, or `Error` |
 | `SubscriptionRows`, `SubscriptionDeliveryLost`, `SubscriptionRowsSkipped`, `SubscriptionEnded` | Frames of one subscription generation |
-| `DomainClockObserved`, `DomainClockAttachmentEnded` | Frames of one domain clock attachment |
+| `DomainClockObserved`, `DomainClockTicked`, `DomainClockAttachmentEnded` | State, accepted tick progress, and end frames of one domain clock attachment |
 | `SessionEnding` | The last frame of a session the server ends |
 
 An upload is a separate call with its own frames; see [Resource Uploads](#resource-uploads).
@@ -400,17 +400,25 @@ payload, infinity, and nullable and sensitive branch key fields.
   handle every disposition: `DomainClockAttached` with the clock, `DomainClockAlreadyAttached`,
   `DomainNotFound`, and `RequestFailed` for an attach; `DomainClockDetached`,
   `DomainClockNotAttached`, and `RequestFailed` for a detach.
-- **K-2.** A client MUST apply the clock in the attach reply before any `DomainClockObserved` for
-  the domain, MUST ignore frames about a domain it does not follow, and MUST treat
-  `DomainClockAttachmentEnded` as the last frame about the attachment.
-- **K-3.** A client MUST treat each `DomainClockObserved` as the newest clock, replacing the
-  previous one, and MUST NOT expect a frame for every intermediate change.
-- **K-4.** A client MUST read timestamps as signed 64-bit nanoseconds, period and skew as unsigned
-  64-bit nanoseconds, and the time rate as a positive finite double. [Domains And
-  Time](./domains-and-time.md#following-a-domain-clock) defines the projection a client computes
-  from a paced clock.
+- **K-2.** A client MUST apply the clock in the attach reply before any state or tick frame for
+  that domain. The attach reply's state, or a later `DomainClockObserved` for a changed generation,
+  MUST be applied before a `DomainClockTicked` of that generation. It MUST ignore frames about a
+  domain it does not follow and MUST treat
+  `DomainClockAttachmentEnded` as the last frame about that attachment.
+- **K-3.** A client MUST treat each `DomainClockObserved` as the newest installed clock and clear
+  an older generation's tick or any tick when the clock is not paced. It MUST retain only the newest
+  accepted `DomainClockTicked` per domain and generation, ignoring a tick id that does not advance.
+  State changes and tick ids can be coalesced, so it MUST NOT expect every intermediate state or
+  tick. It MUST discard unread ticks when it detaches or loses the session.
+- **K-4.** A client MUST read the tick generation and id as nonzero unsigned 64-bit integers; its
+  logical boundary, authority UTC observation, and serving-node logical reading are signed 64-bit
+  Unix nanoseconds. Period and skew are unsigned 64-bit nanoseconds, and the time rate is a positive
+  finite double. The serving-node reading anchors the tick when the client's UTC differs from the
+  cluster's. [Domains And Time](./domains-and-time.md#following-a-domain-clock) defines the
+  projection a client computes from a paced clock.
 - **K-5.** After it loses a session, a client that follows clocks MUST attach them again, and MUST
-  NOT assume it saw the changes made in between.
+  NOT assume it saw the changes or ticks made in between. It MUST clear the old tick frontier until
+  the new attachment reports accepted progress.
 
 ## Resource Uploads
 
@@ -536,7 +544,7 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | S-1 to S-6 | Every scenario of `session_subscription_lifecycle.feature` and `session_subscription_options.feature`; `Published interest starts, reopens, and stops remote subscription fan-out` in `subscription_interest.feature`; `a_subscription_type_must_be_selected_and_supported` |
 | S-7, S-8 | `A reconnected native client restores acknowledged subscriptions` in `client_wire_failures.feature`; `Subscription restoration and typed transaction inspection survive the same leader loss` in `client_wire_qualification.feature`; `deleting_while_creation_is_in_flight_drains_its_late_success_before_name_reuse`, `cancelling_an_in_flight_restore_cleans_up_its_late_success`, and `one_subscription_overflow_preserves_other_subscription_events` |
 | R-1 to R-5 | `A <runtime> client round-trips an operation, typed rows, an error and a closure` in `client_conformance.feature` for every runtime; `a_batch_round_trips_every_cell_kind_at_its_bounds`, `cells_must_follow_their_fields`, `branch_identity_must_match_the_schema`, and `lists_must_follow_their_element_type_and_length`; `a_batch_that_does_not_conform_to_its_schema_is_a_protocol_failure` in the binding |
-| K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; both scenarios of `domain_clock_attachment.feature`; `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock` |
+| K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; the state, tick, and client pacing outlines in `domain_clock_attachment.feature`; the owner-loss case in `domain_clock_contract.feature`; `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock`, `ticks_coalesce_per_domain_and_follow_their_generations_state`, and the `server_domain_clock_ticked.nxsm` conformance frame |
 | U-1 to U-5 | `An upload stream the protocol does not allow is refused with a typed failure and admits nothing` in `session_protocol.feature`; in `resource_describe.feature`, `An incomplete upload does not admit content or consume its identity`, `Upload retry reports one assigned version`, `Upload retry after leader change reports the assigned version`, and `An uncertain upload completes once across installation and leader change`; `a_lost_upload_reply_retries_with_the_same_identity_and_archive` and `malformed_upload_replies_are_rejected_by_their_correlations` |
 | B-1 to B-7 | The binding tests of `nervix-client-ffi`, such as `retained_references_keep_the_frame_until_the_last_one_is_released`, `string_and_bytes_columns_are_copied_with_offsets_and_borrowed_per_cell`, and `a_token_bounds_a_call_by_cancellation_and_by_deadline`; the C, C++, Python, Java, and Ruby cases of `client_conformance.feature` |
 

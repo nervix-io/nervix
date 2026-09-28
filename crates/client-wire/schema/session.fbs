@@ -1841,6 +1841,16 @@ table DomainClockObserved {
   clock: DomainClockObservation (required);
 }
 
+/// Newest tick accepted for an attached domain's paced clock generation.
+table DomainClockTicked {
+  domain: string (required);
+  generation: ulong;
+  tick_id: ulong;
+  logical_boundary_unix_nanos: long;
+  authority_utc_unix_nanos: long;
+  serving_logical_unix_nanos: long;
+}
+
 enum DomainClockAttachmentEndReason : ubyte {
   /// The domain no longer exists on the serving node.
   DomainRemoved
@@ -1884,7 +1894,8 @@ union ServerBody {
   SubscriptionEnded,
   SessionEnding,
   DomainClockObserved,
-  DomainClockAttachmentEnded
+  DomainClockAttachmentEnded,
+  DomainClockTicked
 }
 
 // ---------------------------------------------------------------------------------------------

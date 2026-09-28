@@ -379,6 +379,11 @@ reports a stopped or uninstalled clock, or a projection outside the timestamp ra
 `DomainClockReadError`. See
 [Domain Clock Attachment](./sessions.md#domain-clock-attachment).
 
+If a paced clock cannot convert one period through its rate, the authority can still emit its
+already-due first tick. Scheduling a later tick then reports a rate-conversion or cadence error and
+stops production. A next-boundary overflow reports its own clock arithmetic error. None of these
+cases emits an early tick or silently clamps the interval.
+
 ## Sensitive Data And Observability
 
 Error variants and public diagnostics identify operation, field, entity, and placement rather than
