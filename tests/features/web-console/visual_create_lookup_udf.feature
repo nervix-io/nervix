@@ -55,8 +55,8 @@ Feature: Web console visual hash map and Roto UDF creation
       | 3            |
 
   @visual_lookup_recovery
-  Scenario: A failed hash map load retains the entered draft
-    Given a 1 node nervix cluster is started
+  Scenario Outline: A failed hash map load retains the entered draft
+    Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And node "node-1" has resource directory "visual_lookup_mixed" containing
       """
@@ -95,9 +95,14 @@ Feature: Web console visual hash map and Roto UDF creation
     And selector ".create-hash-path" has value "bad.jsonl"
     And selector ".create-name" has value "recover_by_id"
 
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @visual_udf_create
-  Scenario: A tested Roto UDF is usable immediately after visual creation
-    Given a 1 node nervix cluster is started
+  Scenario Outline: A tested Roto UDF is usable immediately after visual creation
+    Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     When these NSPL commands are executed on the leader node
       """
@@ -162,6 +167,11 @@ Feature: Web console visual hash map and Roto UDF creation
       """
       "result":42
       """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   @visual_udf_recovery
   Scenario: A rejected Roto test leaves its source and typed signature editable
