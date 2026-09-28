@@ -1,6 +1,47 @@
 @exclusive
 Feature: Interconnect health coordination
 
+  Scenario: A connected quorum completes controls while its leader cannot reach one follower
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And node "node-1" eventually reports leader "node-1"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA quorum_event ( id I64 );
+      CREATE RELAY quorum_events_1 SCHEMA quorum_event UNBRANCHED;
+      CREATE RELAY quorum_events_2 SCHEMA quorum_event UNBRANCHED;
+      CREATE RELAY quorum_events_3 SCHEMA quorum_event UNBRANCHED;
+      CREATE RELAY quorum_events_4 SCHEMA quorum_event UNBRANCHED;
+      CREATE RELAY quorum_events_5 SCHEMA quorum_event UNBRANCHED;
+      CREATE RELAY quorum_events_6 SCHEMA quorum_event UNBRANCHED;
+      CREATE RELAY quorum_events_7 SCHEMA quorum_event UNBRANCHED;
+      CREATE RELAY quorum_events_8 SCHEMA quorum_event UNBRANCHED;
+      CREATE RELAY quorum_events_9 SCHEMA quorum_event UNBRANCHED;
+      CREATE RELAY quorum_events_10 SCHEMA quorum_event UNBRANCHED;
+      CREATE RELAY quorum_events_11 SCHEMA quorum_event UNBRANCHED;
+      CREATE RELAY quorum_events_12 SCHEMA quorum_event UNBRANCHED;
+      START;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status schedules nodes on at least 3 distinct owners
+    When runtime preparation on node "node-3" is paused
+    And application health probes from node "node-1" to node "node-3" fail
+    Then node "node-1" eventually reports interconnect to "node-3" as "unavailable"
+    And node "node-2" eventually reports interconnect to "node-3" as "connected"
+    And within "30s" node "node-1" reports no scheduled work on "node-3"
+    And node "node-3" reaches its runtime preparation pause
+    And node "node-2" sees node "node-3" live
+    And within "30s" these NSPL commands complete on node "node-2"
+      """
+      CREATE RELAY quorum_canary SCHEMA quorum_event UNBRANCHED;
+      CREATE USER quorum_admin WITH PASSWORD 'created-password';
+      """
+    When runtime preparation on node "node-3" is released
+    And application health probes from node "node-1" to node "node-3" are restored
+    Then node "node-1" eventually reports interconnect to "node-3" as "connected"
+    And node "node-3" eventually reports status containing "name=quorum_canary"
+
   Scenario: A partitioned peer does not evict connected peers or move their work
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started

@@ -77,6 +77,12 @@ wait with a typed failure, takes apart a task the harness owns, or ends the run.
 task is containment rather than a product outcome, and the harness records it as forced cleanup, not
 as something the node did.
 
+The cluster health scenario can fail application-health responses for one ordered probing-node and
+responding-node pair while other probes remain healthy. It can also hold one node immediately before
+that node reports a runtime revision prepared, wait until the hold is reached, and release it after
+asserting command completion. These are per-scenario injected conditions; their waits have harness
+bounds and do not shorten the product's completion deadline.
+
 The boundary between them is kept in four places.
 
 - **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,

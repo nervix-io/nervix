@@ -922,6 +922,15 @@ resets that run. Scheduling and runtime availability retain a previously discove
 through a temporary gossip loss until application health marks it unavailable. Consensus membership
 continues to use the cluster topology established by gossip.
 
+Command completion reads the leader's effective availability view through the
+`application_completion_peers` management progress request. The response names the leader's
+incarnation, Raft term, and required process incarnations. A follower uses it only while its own
+Raft leader and term still match, and includes its own incarnation in the barrier. Failure to reach
+the leader leaves the command pending. This avoids conflicting completion sets when application
+health is asymmetric: a connected follower may still probe an unreachable peer successfully after
+the leader has retired that peer. Revision and HTTPS listener progress requests remain bound to the
+reported incarnation.
+
 `SHOW CLUSTER STATUS` exposes the interconnect address, endpoint generation, observation age,
 observation outcome, and derived availability. Its `connected` status means the latest application
 probe is healthy, rather than merely that a transport pool exists.

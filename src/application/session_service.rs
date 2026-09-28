@@ -268,6 +268,10 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 );
             }
             runtime_application?;
+            #[cfg(feature = "testing")]
+            runtime
+                .pause_runtime_preparation_if_armed(local_node_id)
+                .await;
             cluster
                 .set_local_runtime_revision_prepared(state.revision)
                 .await;
@@ -302,6 +306,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             };
             let preparation = wait_for_application_revision(
                 cluster,
+                consensus,
                 interconnect,
                 state.revision,
                 ApplicationRevisionPhase::RuntimePrepared,
@@ -374,6 +379,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             drop(activation);
             let readiness = wait_for_application_revision(
                 cluster,
+                consensus,
                 interconnect,
                 state.revision,
                 ApplicationRevisionPhase::RuntimeReady,

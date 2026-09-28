@@ -1037,8 +1037,8 @@ impl Application {
                     #[cfg(not(feature = "testing"))]
                     drop(context);
                     #[cfg(feature = "testing")]
-                    let local_health_identity =
-                        health_fault_injection.health_response_identity(local_health_identity);
+                    let local_health_identity = health_fault_injection
+                        .health_response_identity(context.peer_node_id(), local_health_identity);
                     local_health_identity
                 }
             }
@@ -1050,6 +1050,18 @@ impl Application {
             completion::register_application_revision_handler(cluster.clone(), &interconnect);
         let startup = startup
             .require_handler_registration(&cluster, application_revision_handler)
+            .await?;
+        let completion_peers_handler = completion::register_completion_peers_handler(
+            cluster.clone(),
+            startup
+                .consensus
+                .as_ref()
+                .verified("startup assigns consensus before registering completion handlers")
+                .observer(),
+            &interconnect,
+        );
+        let startup = startup
+            .require_handler_registration(&cluster, completion_peers_handler)
             .await?;
         let ApplicationStartup {
             db,

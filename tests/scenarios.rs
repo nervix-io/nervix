@@ -8378,6 +8378,61 @@ async fn given_health_responses_fail(world: &mut ScenarioWorld, responding_node_
         .fail_health_responses_from(&responding_node_id);
 }
 
+#[when(expr = "application health probes from node {string} to node {string} fail")]
+async fn when_directed_health_probes_fail(
+    world: &mut ScenarioWorld,
+    probing_node_id: String,
+    responding_node_id: String,
+) {
+    let probing_node_id = expand_placeholders(world, &probing_node_id);
+    let responding_node_id = expand_placeholders(world, &responding_node_id);
+    world
+        .cluster()
+        .fail_health_responses_between(&probing_node_id, &responding_node_id);
+}
+
+#[when(expr = "runtime preparation on node {string} is paused")]
+async fn when_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_runtime_preparation_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "node {string} reaches its runtime preparation pause")]
+async fn then_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        world
+            .fault_injection
+            .wait_for_runtime_preparation_pause(&crate::common::cluster::node_name(&node_id)),
+    )
+    .await
+    .expect("runtime preparation did not reach its pause");
+}
+
+#[when(expr = "runtime preparation on node {string} is released")]
+async fn when_runtime_preparation_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_runtime_preparation_pause(&crate::common::cluster::node_name(&node_id));
+}
+
+#[when(expr = "application health probes from node {string} to node {string} are restored")]
+async fn when_directed_health_probes_are_restored(
+    world: &mut ScenarioWorld,
+    probing_node_id: String,
+    responding_node_id: String,
+) {
+    let probing_node_id = expand_placeholders(world, &probing_node_id);
+    let responding_node_id = expand_placeholders(world, &responding_node_id);
+    world
+        .cluster()
+        .restore_health_responses_between(&probing_node_id, &responding_node_id);
+}
+
 #[when(expr = "gossip exchanges involving node {string} are blocked with a {string} send delay")]
 async fn when_gossip_exchanges_are_blocked(
     world: &mut ScenarioWorld,
@@ -17067,6 +17122,37 @@ fn gossip_live_nodes_from_status(status: &str) -> BTreeSet<&str> {
         }
     }
     live_nodes
+}
+
+#[then(expr = "node {string} sees node {string} live")]
+async fn then_connected_quorum_observes_lagging_follower(
+    world: &mut ScenarioWorld,
+    connected_node: String,
+    lagging_node: String,
+) {
+    let connected_node = expand_placeholders(world, &connected_node);
+    let lagging_node = expand_placeholders(world, &lagging_node);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::task::consume_budget().await;
+        let connected_status = world
+            .cluster()
+            .status_text(
+                &connected_node,
+                PhaseDeadline::after(STATUS_REQUEST_TIMEOUT),
+            )
+            .await
+            .expect("connected node status request failed");
+        if gossip_live_nodes_from_status(&connected_status).contains(lagging_node.as_str()) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node '{connected_node}' did not see '{lagging_node}' live; \
+             status:\n{connected_status}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[then(expr = "the last cluster status work on healthy nodes {string} is saved")]

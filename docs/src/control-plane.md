@@ -333,6 +333,12 @@ Scheduling uses only observations that are current when it computes and publishe
 changed topology or effective-health revision causes the candidate to be recomputed. A newer
 observation with the same effective health does not invalidate an otherwise current candidate.
 
+The leader's effective availability view also defines the required process incarnations for
+authoritative visibility, runtime preparation and readiness, and HTTPS listener installation.
+Connected followers fetch that view with the leader's Raft term before completing a command. If
+the leader has retired an unreachable node, a follower's independent healthy observation of that
+node does not keep its runtime barrier open. The local incarnation must still finish its own work.
+
 The current leader owns membership changes and serializes them one at a time. Learner admission or
 catch-up and voting-membership changes each have a ten-second wait deadline. When that deadline
 expires, Nervix stops waiting and observes effective committed membership again before a later

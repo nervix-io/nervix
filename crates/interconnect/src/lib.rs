@@ -72,11 +72,12 @@ pub use operation::{RemoteOperationFailure, RemoteOperationSubject};
 pub use peer_target::PeerTarget;
 pub use pool::PoolClass;
 pub use request::{
-    ApplicationHealthProbe, ApplicationRevisionRequest, ApplicationRevisionResponse,
-    HandlerRegistrationError, HttpsListenerInstallation, HttpsListenerInstallationRequest,
-    HttpsListenerInstallationResponse, InterconnectDuplexRequest, InterconnectRequest,
-    InterconnectStreamRequest, RemoteRequestFailure, RequestContext, RequestError, RequestSubquota,
-    StreamHandlerError, StreamingResponse,
+    ApplicationCompletionPeersRequest, ApplicationCompletionPeersResponse, ApplicationHealthProbe,
+    ApplicationRevisionRequest, ApplicationRevisionResponse, HandlerRegistrationError,
+    HttpsListenerInstallation, HttpsListenerInstallationRequest, HttpsListenerInstallationResponse,
+    InterconnectDuplexRequest, InterconnectRequest, InterconnectStreamRequest,
+    RemoteRequestFailure, RequestContext, RequestError, RequestSubquota, StreamHandlerError,
+    StreamingResponse,
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 pub use runtime_state::{
