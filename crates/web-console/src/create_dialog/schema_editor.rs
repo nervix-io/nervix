@@ -387,14 +387,14 @@ pub(super) fn BranchEditor(
             <p class="create-selected-schema">{move || {
                 let branch = signals.structured.get().branch;
                 match branch.schema {
-                    Some(schema) => format!("Selected schema: {schema}"),
+                    Some(schema) => format!("Selected schema: {}", schema.name()),
                     None => String::new(),
                 }
             }}</p>
         </Show>
         <Show when=move || {
             let branch = signals.structured.get().branch;
-            branch.schema.is_some() && !branch.schema_valid
+            branch.schema.is_some_and(|schema| !schema.is_current())
         } fallback=|| ()>
             <p class="create-reference-invalid" role="alert">"The selected schema's domain changed. Select a schema again."</p>
         </Show>

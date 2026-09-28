@@ -23,9 +23,9 @@ use nervix_consensus::{Administrator, CommandExecutionTransactionTarget, Observe
 use nervix_execution::sync::DashMap;
 use nervix_interconnect::Transport;
 use nervix_models::{
-    BuiltinFunctionScope, CommandExecutionReference, DomainName, Model, ModelKind, ModelName,
-    NodeRef, PlacementPolicy, RequestedResourceVersion, ResourceId, ResourceName,
-    ResourceUploadKey, ResourceVersionStatus, SemanticReference, TransactionPosition,
+    BuiltinFunctionScope, CommandExecutionReference, DomainName, Model, ModelName, PlacementPolicy,
+    RequestedResourceVersion, ResourceId, ResourceName, ResourceUploadKey, ResourceVersionStatus,
+    SemanticReference, TransactionPosition,
 };
 use nervix_nspl::{
     Token, Word,
@@ -55,6 +55,7 @@ use super::{
         CommandDiagnostic, CommandDisposition, CommandOrigin, CommandResponse, CommandResult,
     },
     completion::{ApplicationRevisionPhase, wait_for_application_revision},
+    configured_choices::{ConfiguredChoices, ConfiguredQuery},
     describe_output::placement_runtime_node_ref_suggestions,
     model_mutation::command_error,
     resource::{
@@ -786,6 +787,9 @@ impl ChoicePageBasis {
             ChoiceTarget::DomainPace => 0,
             ChoiceTarget::PlacementPolicy => 1,
             ChoiceTarget::Schema => 2,
+            ChoiceTarget::Branch => 3,
+            ChoiceTarget::Relay => 4,
+            ChoiceTarget::RelayField => 5,
         }]);
         hash_choice_text(&mut hasher, request.search());
         for dependency in request.dependencies() {
@@ -864,7 +868,7 @@ impl ChoicePageBasis {
     }
 }
 
-fn hash_choice_text(hasher: &mut blake3::Hasher, value: &str) {
+pub(in crate::application) fn hash_choice_text(hasher: &mut blake3::Hasher, value: &str) {
     let length =
         u64::try_from(value.len()).assured("choice text fits the bounded session transfer limit");
     hasher.update(&length.to_le_bytes());
@@ -917,6 +921,10 @@ fn hash_choice_value(hasher: &mut blake3::Hasher, value: &ChoiceValue) {
             hasher.update(&[4]);
             hash_choice_text(hasher, node.kind.as_str());
             hash_choice_text(hasher, node.identifier.as_str());
+        }
+        ChoiceValue::Field(field) => {
+            hasher.update(&[5]);
+            hash_choice_text(hasher, field.as_str());
         }
     }
 }
@@ -990,7 +998,12 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
             })
             .collect()
         }
-        ChoiceTarget::DomainPace | ChoiceTarget::PlacementPolicy | ChoiceTarget::Schema => {
+        ChoiceTarget::DomainPace
+        | ChoiceTarget::PlacementPolicy
+        | ChoiceTarget::Schema
+        | ChoiceTarget::Branch
+        | ChoiceTarget::Relay
+        | ChoiceTarget::RelayField => {
             return Err(ChoiceStatus::MissingContext);
         }
     };
@@ -1197,10 +1210,14 @@ impl SessionServiceImpl {
     ) -> ChoiceOutcome {
         let revision = self.inner.consensus.current_revision().await;
         let basis = ChoicePageBasis::new(&request, revision);
-        let resolved = if request.target() == ChoiceTarget::Schema {
-            self.schema_choices_for(&request, session).await
-        } else {
-            choices_for(&request).map(|choices| (choices, None))
+        let resolved = match request.target() {
+            ChoiceTarget::DomainPace | ChoiceTarget::PlacementPolicy => {
+                choices_for(&request).map(|choices| (choices, None))
+            }
+            ChoiceTarget::Schema
+            | ChoiceTarget::Branch
+            | ChoiceTarget::Relay
+            | ChoiceTarget::RelayField => self.configured_choices_for(&request, session).await,
         };
         let (choices, content_digest) = match resolved {
             Ok(resolved) => resolved,
@@ -1222,17 +1239,15 @@ impl SessionServiceImpl {
         basis.page(&request, choices)
     }
 
-    async fn schema_choices_for(
+    /// Answers a question about the configuration of the domain `request` depends on, read with
+    /// the session's attached transaction prefix applied, so a model staged earlier in that
+    /// transaction is offered before commit.
+    async fn configured_choices_for(
         &self,
         request: &ChoiceLookupRequest,
         session: &SessionView,
     ) -> Result<(Vec<Choice>, Option<String>), ChoiceStatus> {
-        let [
-            ChoiceSelection {
-                value: ChoiceValue::Domain(domain),
-            },
-        ] = request.dependencies()
-        else {
+        let Some(ConfiguredQuery { domain, question }) = ConfiguredQuery::of(request) else {
             return Err(ChoiceStatus::MissingContext);
         };
         let domains = self.inner.consensus.current_domains().await;
@@ -1248,49 +1263,8 @@ impl SessionServiceImpl {
             .registry
             .resulting_models(domain, &queued.models)
             .map_err(|_| ChoiceStatus::LookupFailed)?;
-        let search = request.search().to_lowercase();
-        let mut choices = models
-            .into_iter()
-            .filter_map(|model| {
-                let Model::Schema(schema) = model else {
-                    return None;
-                };
-                let label = schema.name.to_string();
-                if !search.is_empty() && !label.to_lowercase().contains(&search) {
-                    return None;
-                }
-                let mut schema_hasher = blake3::Hasher::new();
-                for field in &schema.fields {
-                    hash_choice_text(&mut schema_hasher, field.name.as_str());
-                    hash_choice_text(&mut schema_hasher, &field.ty.to_string());
-                    schema_hasher.update(&[u8::from(field.optional), u8::from(field.sensitive)]);
-                }
-                Some((
-                    Choice {
-                        value: ChoiceValue::Model(NodeRef::new(ModelKind::Schema, schema.name)),
-                        presentation: ChoicePresentation {
-                            label,
-                            detail: Some(format!("{} fields", schema.fields.len())),
-                            group: Some("Schema".to_string()),
-                        },
-                    },
-                    schema_hasher.finalize().to_hex().to_string(),
-                ))
-            })
-            .collect::<Vec<_>>();
-        choices.sort_by(|left, right| left.0.presentation.label.cmp(&right.0.presentation.label));
-        let mut content_hasher = blake3::Hasher::new();
-        let choices = choices
-            .into_iter()
-            .map(|(choice, digest)| {
-                hash_choice_text(&mut content_hasher, &digest);
-                choice
-            })
-            .collect();
-        Ok((
-            choices,
-            Some(content_hasher.finalize().to_hex().to_string()),
-        ))
+        let resolved = ConfiguredChoices::new(models).resolve(&question, request.search())?;
+        Ok((resolved.choices, Some(resolved.content_digest)))
     }
 
     /// The completions at the request's cursor, read against the session as `session` last left
@@ -1776,6 +1750,8 @@ pub(in crate::application) fn conflicting_reference(
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::{ModelKind, NodeRef};
+
     use super::{
         super::{
             subscription::SessionSubscriptions,

@@ -61,25 +61,54 @@ fn subscription_delivery_behavior<'src>()
     ))
 }
 
+/// The rate after `BATCH SAMPLE RATE`: a number literal from 0 through 1, kept as written.
+fn batch_sample_rate_literal<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    select! { Token::NumberLiteral(value) => value }
+        .labelled("number_literal")
+        .try_map(|value, span| match value.parse::<f64>() {
+            Ok(rate) if (0.0..=1.0).contains(&rate) => Ok(value),
+            Ok(_) => Err(Rich::custom(
+                span,
+                "batch sample rate must be between 0.0 and 1.0",
+            )),
+            Err(error) => Err(Rich::custom(
+                span,
+                format!("invalid batch sample rate: {error}"),
+            )),
+        })
+}
+
 fn batch_sample_rate<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Batch)
         .ignore_then(kw_phrase2(Identifier::Sample, Identifier::Rate))
-        .ignore_then(
-            select! { Token::NumberLiteral(value) => value }
-                .labelled("number_literal")
-                .try_map(|value, span| match value.parse::<f64>() {
-                    Ok(rate) if (0.0..=1.0).contains(&rate) => Ok(value),
-                    Ok(_) => Err(Rich::custom(
-                        span,
-                        "batch sample rate must be between 0.0 and 1.0",
-                    )),
-                    Err(error) => Err(Rich::custom(
-                        span,
-                        format!("invalid batch sample rate: {error}"),
-                    )),
-                }),
-        )
+        .ignore_then(batch_sample_rate_literal())
+}
+
+/// Parses a batch sample rate on its own, as a structured control holds it apart from the
+/// statement. The rate is checked by the same rule `BATCH SAMPLE RATE` applies, and returned as
+/// written.
+pub fn parse_batch_sample_rate(input: &str) -> error_stack::Result<String, ParseFromSourceError> {
+    let LexedInput {
+        source,
+        spanned_tokens,
+        tokens,
+    } = lex_input(input)?;
+    let out = batch_sample_rate_literal()
+        .then_ignore(end())
+        .parse(tokens.as_slice());
+    if out.has_errors() {
+        return Err(into_parse_error(
+            source,
+            &spanned_tokens,
+            input.len(),
+            out.into_errors(),
+        ));
+    }
+    Ok(out
+        .into_output()
+        .verified("has_errors returned false above, so this parse produced output"))
 }
 
 fn subscription_where_clause<'src>()
@@ -253,6 +282,22 @@ mod tests {
             .parse(tokens.as_slice())
             .into_result();
         assert!(result.is_err(), "sample rate must be between 0.0 and 1.0");
+    }
+
+    #[test]
+    fn a_standalone_batch_sample_rate_follows_the_statement_rule() {
+        for rate in ["0", "0.25", "1", "1.0"] {
+            assert_eq!(
+                parse_batch_sample_rate(rate).expect("a probability is a sample rate"),
+                rate
+            );
+        }
+        for rejected in ["", "1.5", "-0.5", "half", "0.5 0.5"] {
+            assert!(
+                parse_batch_sample_rate(rejected).is_err(),
+                "{rejected:?} must not be accepted as a sample rate"
+            );
+        }
     }
 
     #[test]

@@ -644,6 +644,12 @@ function choiceValue(source: wire.Choice | wire.ChoiceSelection): string {
       const node = member(value.node());
       return `model:${wire.ModelKind[member(node.kind())].toLowerCase()}/${node.name()}`;
     }
+    case wire.ChoiceValue.FieldChoiceReference: {
+      const value = member(
+        source.value(new wire.FieldChoiceReference()) as wire.FieldChoiceReference | null,
+      );
+      return `field:${value.field()}`;
+    }
     default:
       throw new Error(`undeclared choice value ${source.valueType()}`);
   }
