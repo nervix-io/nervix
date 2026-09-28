@@ -174,6 +174,18 @@ Feature: Client ingestors
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
+      CREATE INGESTOR lenient_in
+        FROM CLIENT SCHEMA order_in
+          MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+          ON QUIESCE SUSPEND
+        TIMESTAMP NOW
+        TO orders
+          INHERIT ALL
+          SET amount = input.amount * 100
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR IGNORE
+        ON GENERAL ERROR LOG;
       CREATE CLIENT sink_api TYPE HTTP CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
       };
@@ -195,17 +207,31 @@ Feature: Client ingestors
     Then batch "foreign" is not admitted because "invalid batch: schema mismatch"
     When producer "orders" submits batch "doubled" that is "two record batches"
     Then batch "doubled" is not admitted because "invalid batch: not one batch"
-    # The second row's amount overflows its route assignment; ON MESSAGE ERROR LOG handles that row
-    # alone, and the batch completes once the other row is acknowledged by the sink.
+    # The second row's amount overflows its route assignment. The route's ON MESSAGE ERROR policy
+    # handles that row exactly as it does for any ingestor: LOG negatively acknowledges it, so the
+    # batch fails processing, while the other row is still published.
     When producer "orders" submits batch "overflowing" with rows
       | region | order_id | amount              | card   |
       | eu     | o-1      | 3                   | 4111-1 |
       | eu     | o-2      | 9223372036854775807 | 4111-2 |
-    Then batch "overflowing" completes
-    And HTTP receiver "sink" has captured exactly 1 request
+    Then batch "overflowing" fails processing because "rejected"
+    And HTTP receiver "sink" eventually receives at least 1 request
     And HTTP receiver "sink" request 1 is
       """
       POST /orders/eu/o-1
+      """
+    # IGNORE acknowledges the failed row instead, so the same batch completes once the sink
+    # acknowledges its other row.
+    When <session> opens producer "lenient" on ingestor "lenient_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
+    And producer "lenient" submits batch "forgiven" with rows
+      | region | order_id | amount              | card   |
+      | eu     | o-3      | 4                   | 4111-3 |
+      | eu     | o-4      | 9223372036854775807 | 4111-4 |
+    Then batch "forgiven" completes
+    And HTTP receiver "sink" has captured exactly 2 requests
+    And HTTP receiver "sink" request 2 is
+      """
+      POST /orders/eu/o-3
       """
 
     Examples:
@@ -365,7 +391,7 @@ Feature: Client ingestors
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
-      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       CREATE SCHEMA order_in (
         region STRING, order_id STRING, amount I64, card STRING SENSITIVE
       );
@@ -630,14 +656,17 @@ Feature: Client ingestors
         ON GENERAL ERROR LOG;
       START;
       """
+    # Only the leader serves a console session, so the producer enters through the leader while
+    # the ingestor executes on another node.
+    Then the current leader node is saved as placeholder "entry"
+    And a node other than placeholder "entry" is saved as placeholder "owner"
     When these NSPL commands are executed on the leader node
       """
-      DESCRIBE INGESTOR orders_in;
+      RELOCATE INGESTOR orders_in ONTO NODE {{owner}} IGNORE PREFERENCES;
       """
-    Then the last command output owner is saved as placeholder "owner"
-    And a node other than placeholder "owner" is saved as placeholder "entry"
+    Then within "30s" node "{{entry}}" eventually reports scheduled "ingestor" "orders_in" owner equals placeholder "owner"
     Given <session> is connected to node "{{entry}}"
-    When <session> opens producer "forwarded" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
+    When within "30s" <session> opens producer "forwarded" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
     And producer "forwarded" submits batch "through entry" with rows
       | region | order_id | amount | card   |
       | eu     | o-1      | 1      | 4111-1 |

@@ -245,7 +245,8 @@ relay. Do not use them to scan across branches.
   source: no `CREATE CLIENT`, codec, `DECODE USING`, headers, or `NO_ACK`. The schema is the exact
   contract producers declare, including optionality and sensitivity, and a paced domain requires
   its timestamp source. Changing its schema, mode, timestamp, filter, routes other than `FLUSH`, or
-  branch declarations ends attached producers.
+  branch declarations ends attached producers. A row that fails on a route follows that route's
+  `ON MESSAGE ERROR` policy, so under `LOG` its whole batch fails processing as `rejected`.
 - HTTP `EVERY`, Prometheus `EVERY`, and generator `EACH` use domain-logical cadence. HTTP and
   generators run once immediately; Prometheus first runs after one interval. Keep later work on
   the original schedule, coalesce missed periods without a catch-up burst, query Prometheus at the

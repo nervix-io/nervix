@@ -471,8 +471,9 @@ Timestamp selection, `FILTER WHERE`, route construction, `WHERE`, branch constru
 `FLUSH`, `ON MESSAGE ERROR`, and `ON GENERAL ERROR` behave as for every ingestor; `message` and
 `input` read the submitted row. Client batches carry no transport headers or metadata, so
 `read_header`, `read_headers`, and `metadata.*` are unavailable. The ingestor executes on its one
-scheduled cluster node, and a producer may connect through any live node, which forwards its
-batches to that node.
+scheduled cluster node. A producer is opened on a session that any live node may serve, and that
+node forwards the producer's batches to the ingestor's node; a console session, like every console
+session, is served only by the leader.
 
 `ALTER INGESTOR ... SET FROM CLIENT SCHEMA ...` replaces the complete source body, and
 `SET QUIESCE SUSPEND` restates the only quiesce mode. `SHOW CREATE INGESTOR` renders the whole
@@ -501,11 +502,15 @@ One batch is one source acknowledgement unit. It has exactly one terminal outcom
 | unknown outcome | The batch may have been admitted and processed, but no terminal result can be established. | `interrupted`, `owner_lost`; a client whose session ended adds `session_lost` |
 
 Transport receipt is never an outcome. A batch completes under the normal acknowledgement rules: a
-row a filter drops, or one an `ON MESSAGE ERROR` policy handles, is resolved; a detached boundary
-resolves where it detaches; and an acknowledging sink resolves its rows at its own success
-boundary, such as the complete response headers of an HTTP emitter. The defects of an invalid batch
-are `malformed`, `unexpected message`, `compressed`, `schema mismatch`, `not one batch`,
-`too many rows`, `too large`, and `invalid data`.
+row a filter drops is resolved; a detached boundary resolves where it detaches; and an
+acknowledging sink resolves its rows at its own success boundary, such as the complete response
+headers of an HTTP emitter. The defects of an invalid batch are `malformed`, `unexpected message`,
+`compressed`, `schema mismatch`, `not one batch`, `too many rows`, `too large`, and `invalid data`.
+
+A row that fails on a route of an admitted batch is handled by that route's `ON MESSAGE ERROR`
+policy exactly as for any other ingestor: `IGNORE` acknowledges it, `LOG` negatively acknowledges
+it, so its batch fails processing as `rejected`, and `SEND TO` acknowledges it once its error record
+is published to the error relay. The other rows of the batch are processed either way.
 
 Only `suspended` and `busy` are temporary: sending the same batch again on the same producer may
 succeed, and the Rust client does so on the declared backoff. Every other outcome is final for that

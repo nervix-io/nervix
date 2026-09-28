@@ -485,27 +485,48 @@ async fn open_producer(
     }
 }
 
+/// Opens a producer, opening again while the ingestor is not running on its scheduled node yet:
+/// right after `START`, while a relocation completes, or after a failover. Any other refusal fails
+/// the step at once.
 async fn open_named_producer(
     world: &mut ScenarioWorld,
+    within: Duration,
     session: SessionRef,
     producer: String,
     ingestor: String,
     fields: String,
     limits: ClientProducerLimits,
 ) {
+    let deadline = Instant::now() + within;
     let producer = expand_placeholders(world, &producer);
-    let opened = open_producer(world, session, &ingestor, &fields, limits).await;
-    let opened = opened.unwrap_or_else(|refused| {
-        panic!("producer '{producer}' was refused: {refused:?}");
-    });
-    assert!(
-        world
-            .producers
-            .producers
-            .insert(producer.clone(), opened)
-            .is_none(),
-        "producer '{producer}' is already open"
-    );
+    loop {
+        tokio::task::consume_budget().await;
+        let opened = open_producer(world, session.clone(), &ingestor, &fields, limits).await;
+        let refused = match opened {
+            Ok(opened) => {
+                assert!(
+                    world
+                        .producers
+                        .producers
+                        .insert(producer.clone(), opened)
+                        .is_none(),
+                    "producer '{producer}' is already open"
+                );
+                return;
+            }
+            Err(refused) => refused,
+        };
+        assert_eq!(
+            refused.refusal,
+            ClientProducerRefusal::EndpointUnavailable,
+            "producer '{producer}' was refused for good: {refused:?}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "producer '{producer}' was still refused after {within:?}: {refused:?}"
+        );
+        tokio::time::sleep(PRODUCER_POLL_INTERVAL).await;
+    }
 }
 
 async fn refused_open(
@@ -584,7 +605,16 @@ async fn when_client_opens_producer(
     let client = expand_placeholders(world, &client);
     let limits = default_limits();
     let session = SessionRef::Client(client);
-    open_named_producer(world, session, producer, ingestor, fields, limits).await;
+    open_named_producer(
+        world,
+        PRODUCER_EXPECTATION_TIMEOUT,
+        session,
+        producer,
+        ingestor,
+        fields,
+        limits,
+    )
+    .await;
 }
 
 #[when(
@@ -601,7 +631,16 @@ async fn when_websocket_session_opens_producer(
     let session = expand_placeholders(world, &session);
     let limits = default_limits();
     let session = SessionRef::WebSocket(session);
-    open_named_producer(world, session, producer, ingestor, fields, limits).await;
+    open_named_producer(
+        world,
+        PRODUCER_EXPECTATION_TIMEOUT,
+        session,
+        producer,
+        ingestor,
+        fields,
+        limits,
+    )
+    .await;
 }
 
 #[when(
@@ -620,7 +659,16 @@ async fn when_client_opens_producer_with_credit(
     let client = expand_placeholders(world, &client);
     let limits = producer_limits(batches, &bytes);
     let session = SessionRef::Client(client);
-    open_named_producer(world, session, producer, ingestor, fields, limits).await;
+    open_named_producer(
+        world,
+        PRODUCER_EXPECTATION_TIMEOUT,
+        session,
+        producer,
+        ingestor,
+        fields,
+        limits,
+    )
+    .await;
 }
 
 #[when(
@@ -639,7 +687,16 @@ async fn when_websocket_session_opens_producer_with_credit(
     let session = expand_placeholders(world, &session);
     let limits = producer_limits(batches, &bytes);
     let session = SessionRef::WebSocket(session);
-    open_named_producer(world, session, producer, ingestor, fields, limits).await;
+    open_named_producer(
+        world,
+        PRODUCER_EXPECTATION_TIMEOUT,
+        session,
+        producer,
+        ingestor,
+        fields,
+        limits,
+    )
+    .await;
 }
 
 #[then(
@@ -718,50 +775,6 @@ async fn then_websocket_session_cannot_open_producer_with_credit(
     refused_open_with(world, session, ingestor, fields, limits, expected).await;
 }
 
-/// Opens a producer, opening again while the ingestor is not running on its scheduled node yet,
-/// as after a failover.
-async fn eventually_open_named_producer(
-    world: &mut ScenarioWorld,
-    within: String,
-    session: SessionRef,
-    producer: String,
-    ingestor: String,
-    fields: String,
-) {
-    let within = humantime::parse_duration(&within).expect("the step names a valid duration");
-    let deadline = Instant::now() + within;
-    let producer = expand_placeholders(world, &producer);
-    loop {
-        tokio::task::consume_budget().await;
-        let opened =
-            open_producer(world, session.clone(), &ingestor, &fields, default_limits()).await;
-        let refused = match opened {
-            Ok(opened) => {
-                assert!(
-                    world
-                        .producers
-                        .producers
-                        .insert(producer.clone(), opened)
-                        .is_none(),
-                    "producer '{producer}' is already open"
-                );
-                return;
-            }
-            Err(refused) => refused,
-        };
-        assert_eq!(
-            refused.refusal,
-            ClientProducerRefusal::EndpointUnavailable,
-            "producer '{producer}' was refused for good: {refused:?}"
-        );
-        assert!(
-            Instant::now() < deadline,
-            "producer '{producer}' was still refused after {within:?}: {refused:?}"
-        );
-        tokio::time::sleep(PRODUCER_POLL_INTERVAL).await;
-    }
-}
-
 #[when(
     expr = "within {string} client {string} opens producer {string} on ingestor {string} \
             expecting fields {string}"
@@ -776,7 +789,9 @@ async fn when_client_eventually_opens_producer(
 ) {
     let client = expand_placeholders(world, &client);
     let session = SessionRef::Client(client);
-    eventually_open_named_producer(world, within, session, producer, ingestor, fields).await;
+    let within = humantime::parse_duration(&within).expect("the step names a valid duration");
+    let limits = default_limits();
+    open_named_producer(world, within, session, producer, ingestor, fields, limits).await;
 }
 
 #[when(
@@ -793,7 +808,9 @@ async fn when_websocket_session_eventually_opens_producer(
 ) {
     let session = expand_placeholders(world, &session);
     let session = SessionRef::WebSocket(session);
-    eventually_open_named_producer(world, within, session, producer, ingestor, fields).await;
+    let within = humantime::parse_duration(&within).expect("the step names a valid duration");
+    let limits = default_limits();
+    open_named_producer(world, within, session, producer, ingestor, fields, limits).await;
 }
 
 /// Submits `body` through `producer` under the name `batch`.
@@ -1261,6 +1278,8 @@ async fn when_producer_is_closed(world: &mut ScenarioWorld, producer: String) {
 }
 
 /// Runs `DESCRIBE INGESTOR` on the leader until its output contains every line of the docstring.
+/// The leader is the one the running nodes agree on, so the step also holds after a scenario
+/// stopped a node.
 #[then(expr = "within {string} the leader node describes ingestor {string} with")]
 async fn then_leader_describes_ingestor_with(
     world: &mut ScenarioWorld,
@@ -1274,7 +1293,7 @@ async fn then_leader_describes_ingestor_with(
     let deadline = Instant::now() + within;
     loop {
         tokio::task::consume_budget().await;
-        let leader = current_leader_node(world).await;
+        let leader = running_leader_node(world).await;
         let described = world
             .cluster()
             .run_command(
