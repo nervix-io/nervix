@@ -143,7 +143,12 @@ async fn a_refused_open_leaves_nothing_attached() {
     let client = loopback.client.clone();
     let opening = tokio::spawn(async move {
         client
-            .open_ingestor(domain("tenant"), ingestor(), Vec::new(), limits(1))
+            .open_ingestor(
+                domain("tenant"),
+                ingestor(),
+                vec![field("id", nervix_models::ParseAsType::String)],
+                limits(1),
+            )
             .await
     });
     let request = loopback.next_request().await;

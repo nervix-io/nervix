@@ -194,7 +194,7 @@ impl SubmissionSlots {
     }
 
     /// The granted batches no submission holds right now.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(super) fn available_batches(&self) -> usize {
         self.batches.available_permits()
     }

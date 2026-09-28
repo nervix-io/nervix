@@ -931,7 +931,7 @@ mod tests {
                 .assured("the registry holds its sender"),
             "an interrupted attachment wakes the caller"
         );
-        changed.mark_unchanged();
+        drop(changed.borrow_and_update());
         assert_eq!(
             clocks.take_event(),
             Some(DomainClockEvent::Interrupted(DomainClockInterruption {
@@ -954,7 +954,7 @@ mod tests {
             "the interruption was reported once"
         );
 
-        changed.mark_unchanged();
+        drop(changed.borrow_and_update());
         let third = Arc::new(());
         clocks.apply_attach(&attach_reply("sim", paced(1, 1.0)), &third);
         assert!(!clocks.awaits_restoration());
@@ -963,7 +963,7 @@ mod tests {
             "the restored clock is reported"
         );
         let unrelated = Arc::new(());
-        changed.mark_unchanged();
+        drop(changed.borrow_and_update());
         clocks.exchange_ended(&unrelated);
         assert!(
             !changed
