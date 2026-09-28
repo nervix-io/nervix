@@ -1021,6 +1021,7 @@ mod tests {
             fields: [
                 ("facility", ParseAsType::U8),
                 ("severity", ParseAsType::U8),
+                ("timestamp", ParseAsType::Datetime),
                 ("hostname", ParseAsType::String),
                 ("message", ParseAsType::String),
             ]
@@ -1028,7 +1029,7 @@ mod tests {
             .map(|(name, ty)| SchemaField {
                 name: named(name),
                 ty,
-                optional: name == "hostname",
+                optional: name == "hostname" || name == "timestamp",
                 sensitive: false,
             })
             .collect(),
@@ -1052,6 +1053,14 @@ mod tests {
         let columns: Vec<arrow_array::ArrayRef> = vec![
             std::sync::Arc::new(arrow_array::UInt8Array::from(vec![16, 16, 16])),
             std::sync::Arc::new(arrow_array::UInt8Array::from(vec![6, 6, 3])),
+            std::sync::Arc::new(
+                arrow_array::TimestampNanosecondArray::from(vec![
+                    946_684_800_000_000_000,
+                    946_684_801_000_000_000,
+                    946_684_802_000_000_000,
+                ])
+                .with_timezone("+00:00"),
+            ),
             std::sync::Arc::new(arrow_array::StringArray::from(vec!["app-01"; 3])),
             std::sync::Arc::new(arrow_array::StringArray::from(vec![
                 "order accepted",
@@ -1081,7 +1090,7 @@ mod tests {
         };
         assert_eq!(
             String::from_utf8(payload).expect("syslog is text"),
-            r#"<134>1 - app-01 - - - - ["<134>1 - app-01 - - - - order accepted","<134>1 - app-01 - - - - say \"hi\""]"#
+            r#"<134>1 2000-01-01T00:00:00Z app-01 - - - - ["<134>1 2000-01-01T00:00:00Z app-01 - - - - order accepted","<134>1 2000-01-01T00:00:01Z app-01 - - - - say \"hi\""]"#
         );
         let member = codec
             .batch_encoder(&batch)

@@ -60,6 +60,10 @@ enum SyslogPayloadError {
     #[error("encoded Syslog UDP payload is {size} bytes; maximum is {maximum}")]
     OversizedUdp { size: usize, maximum: usize },
     #[error(
+        "encoded Syslog payload is {size} bytes; RFC 6587 octet count permits at most {maximum}"
+    )]
+    OversizedOctetCount { size: usize, maximum: usize },
+    #[error(
         "encoded Syslog payload contains LF, which is not allowed with non-transparent framing"
     )]
     NonTransparentLf,
@@ -201,18 +205,34 @@ impl SyslogSink {
         }
     }
 
-    fn validate_payload(&self, payload: &[u8]) -> Result<(), SyslogPayloadError> {
+    fn validate_payload(&self, payload: &[u8]) -> error_stack::Result<(), SyslogPayloadError> {
         if self.config.protocol == SyslogProtocol::Udp && payload.len() > MAX_UDP_PAYLOAD_SIZE {
-            return Err(SyslogPayloadError::OversizedUdp {
+            return Err(Report::new(SyslogPayloadError::OversizedUdp {
                 size: payload.len(),
                 maximum: MAX_UDP_PAYLOAD_SIZE,
-            });
+            }));
         }
         if self.config.protocol == SyslogProtocol::Tcp
             && self.config.framing == SyslogFraming::NonTransparent
             && payload.contains(&b'\n')
         {
-            return Err(SyslogPayloadError::NonTransparentLf);
+            return Err(Report::new(SyslogPayloadError::NonTransparentLf));
+        }
+        if self.config.protocol != SyslogProtocol::Udp
+            && self.config.framing == SyslogFraming::OctetCounting
+        {
+            Self::validate_octet_count_size(payload.len())?;
+        }
+        Ok(())
+    }
+
+    fn validate_octet_count_size(size: usize) -> error_stack::Result<(), SyslogPayloadError> {
+        const MAX_OCTET_COUNT: usize = 9_999_999_999;
+        if size > MAX_OCTET_COUNT {
+            return Err(Report::new(SyslogPayloadError::OversizedOctetCount {
+                size,
+                maximum: MAX_OCTET_COUNT,
+            }));
         }
         Ok(())
     }
@@ -570,5 +590,11 @@ mod tests {
         let tcp = sink(config("tcp", Some("non-transparent"))).await;
         assert!(tcp.validate_payload(b"line one\nline two").is_err());
         assert!(tcp.validate_payload(b"one line").is_ok());
+    }
+
+    #[test]
+    fn octet_count_prefix_has_at_most_ten_digits() {
+        assert!(SyslogSink::validate_octet_count_size(9_999_999_999).is_ok());
+        assert!(SyslogSink::validate_octet_count_size(10_000_000_000).is_err());
     }
 }
