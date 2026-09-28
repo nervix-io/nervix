@@ -12,9 +12,11 @@ Feature: Cluster node rejoin
     And node "node-2" eventually reports raft voters "node-1,node-2,node-3"
     When node "node-1" is stopped
     Then node "node-2" eventually reports a leader other than "node-1"
+    When 1 domains named "rejoin_gap" are created on the leader node
     When node "node-1" is started
     Then node "node-1" eventually observes a stable leader
     And node "node-1" eventually reports raft state "Follower"
+    And within "10s" node "node-1" has applied 1 domains named "rejoin_gap"
     And node "node-2" eventually reports interconnect to "node-1" as "connected"
     And node "node-3" eventually reports interconnect to "node-1" as "connected"
     And node "node-2" eventually reports raft voters "node-1,node-2,node-3"
