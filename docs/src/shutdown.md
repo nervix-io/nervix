@@ -615,6 +615,13 @@ A former owner restarted while cut off from consensus therefore produces no outp
 connectivity is restored it observes the current schedule and forwards traffic to the node that now
 owns the work.
 
+At startup the node offers the peer endpoints retained in its Raft membership as gossip seeds. A
+former bootstrap node therefore has a path back to surviving peers even if it was originally
+configured without a bootstrap host. The endpoints only initiate authenticated contact; gossip
+establishes each peer's current incarnation and endpoint before normal peer routing and runtime
+admission proceed. A recovered endpoint that does not resolve is skipped while other seeds and
+incoming gossip remain available.
+
 This is the fence that prevents crash recovery from reviving an obsolete owner. It is a
 process-start admission proof only: connectivity lost after admission does not revoke execution.
 
