@@ -118,6 +118,18 @@ The [Cluster Interconnect](./interconnect.md) chapter defines peer identity, con
 wire contracts, resource isolation, exchange forms, relay delivery and reconciliation, consensus
 and bulk traffic, domain-clock progress, application health, lifecycle behavior, and observability.
 
+Clients reach the cluster through a separate public boundary. Every node serves the client session
+protocol: FlatBuffers frames, verified against one public schema and bounded by fixed session
+limits, over native gRPC and the console's binary WebSocket. A request identity pairs each reply
+with its request, while a durable execution reference names a command's effects across retries,
+redirects, reconnects, and restarts, so a client recovers an uncertain outcome exactly instead of
+repeating it. Row subscriptions deliver typed cells encoded directly from Arrow columns.
+
+The [Client Session Protocol](./client-session-protocol.md) chapter defines that boundary, its
+framing, correlation, dispositions, exact recovery, redirect and reconnection, subscriptions,
+uploads, bindings, and guarantees, and the [Client Implementation
+Manual](./client-implementation-manual.md) states what a client implementation must do.
+
 Stopping a node is its own ordered lifecycle. One owner advertises that the process incarnation is
 terminating, closes public admission, keeps the services admitted work depends on alive while the
 local graph drains, and only then tears down the node's tasks, connections, and storage. One
