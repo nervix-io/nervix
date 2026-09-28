@@ -48,6 +48,8 @@ guidance to select the relevant Markdown entries from the public index.
 
 Run the control plane with `nervix-server` and submit configuration through the separate
 `nervix-cli` client. Format saved `.nspl` files with `nervix-nspl-format`.
+Use the CLI's `subscribe` and `domain-clock` subcommands for shell streams of relay records and
+the selected domain's clock. See the Command Line Client chapter for their line formats.
 
 Build configuration in dependency order:
 
