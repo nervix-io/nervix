@@ -62,10 +62,9 @@ use super::{
 /// outside this budget rather than the mechanism that ends a wedged run.
 const WORKFLOW_JOB_LIMIT: Duration = Duration::from_secs(60 * 60);
 /// The `scenarios` job's setup and instrumented server and CLI build before the suite starts.
-/// The previous combined job's 18-minute ceiling remains until this split job is measured in CI;
-/// its full workspace test pass has moved to the parallel `tests` job. Re-measure this policy input
-/// from this PR's scenario jobs, including the first cold kache 0.28.0 build.
-const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(18 * 60);
+/// The first cold kache 0.28.0 PR run took 11m37s from job start to the scenario binary. Round
+/// that measurement up to 14 minutes so another cold runner has room for setup variation.
+const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(14 * 60);
 /// What the job keeps for itself once the suite budget has expired: the bounded cleanup the
 /// watchdog drives, the dependency containers the suite then stops, and the artifact upload that
 /// follows. The cleanup is bounded by [`WATCHDOG_CLEANUP_WINDOW`], the containers stop in seconds
@@ -84,9 +83,9 @@ pub(crate) const SUITE_BUDGET: Duration =
         },
         None => panic!("the workflow job limit must cover the work that precedes the suite"),
     };
-/// The previous observed healthy upper bound was 21m08s in the combined `tests` job, rounded to
-/// 22 minutes. Re-measure this policy input from this PR's `scenarios` job after the feature
-/// limits and run slots have changed; keep the fifteen-minute slack in the assertion below.
+/// The first split-job PR run completed all attempts in 21m49s, including four retries, with
+/// 88.3% run-slot utilization. One scenario still failed after those retries, so re-measure on a
+/// passing run while keeping 22 minutes as the observed suite ceiling.
 const SLOWEST_HEALTHY_SUITE: Duration = Duration::from_secs(22 * 60);
 /// What the budget must leave beyond the slowest healthy suite, so a runner slower than the
 /// measuring one still finishes its own scenarios.

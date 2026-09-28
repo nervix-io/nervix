@@ -13,7 +13,9 @@ import time
 
 def cpu_counters() -> tuple[int, int, int]:
     fields = Path("/proc/stat").read_text().splitlines()[0].split()
-    counts = [int(value) for value in fields[1:]]
+    # Linux already includes guest time in user and nice; counting those fields again would make
+    # utilization and steal percentages smaller than the time the runner actually received.
+    counts = [int(value) for value in fields[1:9]]
     total = sum(counts)
     idle = counts[3] + counts[4]
     steal = counts[7]
@@ -35,8 +37,9 @@ def main() -> None:
             current = cpu_counters()
             ticks = current[0] - previous[0]
             if ticks > 0:
-                utilization = 100 * (ticks - (current[1] - previous[1])) / ticks
-                steal = 100 * (current[2] - previous[2]) / ticks
+                stolen_ticks = current[2] - previous[2]
+                utilization = 100 * (ticks - (current[1] - previous[1]) - stolen_ticks) / ticks
+                steal = 100 * stolen_ticks / ticks
                 row = (round(time.monotonic() - began, 1), round(utilization, 2), round(steal, 2))
                 rows.append(row)
                 writer.writerow(row)

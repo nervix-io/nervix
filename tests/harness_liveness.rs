@@ -122,15 +122,34 @@ mod tests {
         use crate::scenario_schedule::{FeatureLimit, ScenarioRunSlots};
 
         let slots = StdArc::new(ScenarioRunSlots::new(3));
-        let first = slots.admit_with(FeatureLimit::WebConsole, |_| {}).await;
-        let second = slots.admit_with(FeatureLimit::WebConsole, |_| {}).await;
+        let first = slots
+            .admit_with(
+                FeatureLimit::WebConsole,
+                "Web console execution graph",
+                |_| {},
+            )
+            .await;
+        let second = slots
+            .admit_with(
+                FeatureLimit::WebConsole,
+                "Web console execution graph",
+                |_| {},
+            )
+            .await;
         let waiting = slots.clone();
-        let queued =
-            tokio::spawn(async move { waiting.admit_with(FeatureLimit::WebConsole, |_| {}).await });
+        let queued = tokio::spawn(async move {
+            waiting
+                .admit_with(
+                    FeatureLimit::WebConsole,
+                    "Web console execution graph",
+                    |_| {},
+                )
+                .await
+        });
         tokio::task::yield_now().await;
         let unrelated = timeout(
             Duration::from_millis(100),
-            slots.admit_with(FeatureLimit::Unlimited, |_| {}),
+            slots.admit_with(FeatureLimit::Unlimited, "ordinary", |_| {}),
         )
         .await;
         assert!(
@@ -149,13 +168,15 @@ mod tests {
         use crate::scenario_schedule::{AdmissionWait, FeatureLimit, ScenarioRunSlots};
 
         let slots = StdArc::new(ScenarioRunSlots::new(1));
-        let current = slots.admit_with(FeatureLimit::Unlimited, |_| {}).await;
+        let current = slots
+            .admit_with(FeatureLimit::Unlimited, "ordinary", |_| {})
+            .await;
         let (ordinary_waiting, ordinary_started) = oneshot::channel();
         let ordinary_slots = slots.clone();
         let ordinary = tokio::spawn(async move {
             let mut waiting = Some(ordinary_waiting);
             ordinary_slots
-                .admit_with(FeatureLimit::Unlimited, |reason| {
+                .admit_with(FeatureLimit::Unlimited, "ordinary", |reason| {
                     if reason == AdmissionWait::RunSlot {
                         waiting
                             .take()
@@ -174,15 +195,19 @@ mod tests {
         let limited = tokio::spawn(async move {
             let mut waiting = Some(limited_waiting);
             limited_slots
-                .admit_with(FeatureLimit::WebConsole, |reason| {
-                    if reason == AdmissionWait::RunSlot {
-                        waiting
-                            .take()
-                            .expect("limited waiter reports once")
-                            .send(())
-                            .expect("the test still observes admission");
-                    }
-                })
+                .admit_with(
+                    FeatureLimit::WebConsole,
+                    "Web console execution graph",
+                    |reason| {
+                        if reason == AdmissionWait::RunSlot {
+                            waiting
+                                .take()
+                                .expect("limited waiter reports once")
+                                .send(())
+                                .expect("the test still observes admission");
+                        }
+                    },
+                )
                 .await
         });
         limited_started
@@ -200,6 +225,188 @@ mod tests {
         );
         drop(limited_permit);
         ordinary.await.expect("bulk work takes the released slot");
+    }
+
+    #[tokio::test]
+    async fn releasing_a_limited_scenario_hands_its_slot_to_the_next_in_its_chain() {
+        use crate::scenario_schedule::{AdmissionWait, FeatureLimit, ScenarioRunSlots};
+
+        let slots = StdArc::new(ScenarioRunSlots::new(2));
+        let first = slots
+            .admit_with(
+                FeatureLimit::WebConsole,
+                "Web console execution graph",
+                |_| {},
+            )
+            .await;
+        let second = slots
+            .admit_with(
+                FeatureLimit::WebConsole,
+                "Web console execution graph",
+                |_| {},
+            )
+            .await;
+
+        let (limited_waiting, limited_started) = oneshot::channel();
+        let next_slots = slots.clone();
+        let next = tokio::spawn(async move {
+            let mut waiting = Some(limited_waiting);
+            next_slots
+                .admit_with(
+                    FeatureLimit::WebConsole,
+                    "Web console execution graph",
+                    |reason| {
+                        if reason == AdmissionWait::WebConsole {
+                            waiting
+                                .take()
+                                .expect("feature waiter reports once")
+                                .send(())
+                                .expect("the test still observes admission");
+                        }
+                    },
+                )
+                .await
+        });
+        limited_started.await.expect("limited successor starts");
+
+        let (ordinary_waiting, ordinary_started) = oneshot::channel();
+        let ordinary_slots = slots.clone();
+        let ordinary = tokio::spawn(async move {
+            let mut waiting = Some(ordinary_waiting);
+            ordinary_slots
+                .admit_with(FeatureLimit::Unlimited, "ordinary", |reason| {
+                    if reason == AdmissionWait::RunSlot {
+                        waiting
+                            .take()
+                            .expect("ordinary waiter reports once")
+                            .send(())
+                            .expect("the test still observes admission");
+                    }
+                })
+                .await
+        });
+        ordinary_started.await.expect("ordinary waiter starts");
+        tokio::task::yield_now().await;
+
+        drop(first);
+        let next_permit = timeout(Duration::from_millis(100), next)
+            .await
+            .expect("the limited successor takes the released slot")
+            .expect("limited successor task completes");
+        assert!(
+            !ordinary.is_finished(),
+            "bulk work waits while a limited chain has an admitted successor"
+        );
+        drop(next_permit);
+        ordinary.await.expect("bulk work takes the later slot");
+        drop(second);
+    }
+
+    #[tokio::test]
+    async fn each_web_console_feature_starts_before_one_feature_consumes_the_group() {
+        use crate::scenario_schedule::{AdmissionWait, FeatureLimit, ScenarioRunSlots};
+
+        let slots = StdArc::new(ScenarioRunSlots::new(2));
+        let first = slots
+            .admit_with(
+                FeatureLimit::WebConsole,
+                "Web console execution graph",
+                |_| {},
+            )
+            .await;
+        let second = slots
+            .admit_with(
+                FeatureLimit::WebConsole,
+                "Web console execution graph",
+                |_| {},
+            )
+            .await;
+
+        let (graph_waiting, graph_queued) = oneshot::channel();
+        let graph_slots = slots.clone();
+        let graph = tokio::spawn(async move {
+            let mut waiting = Some(graph_waiting);
+            graph_slots
+                .admit_with(
+                    FeatureLimit::WebConsole,
+                    "Web console execution graph",
+                    |reason| {
+                        if reason == AdmissionWait::WebConsole {
+                            waiting
+                                .take()
+                                .expect("reports once")
+                                .send(())
+                                .expect("observed");
+                        }
+                    },
+                )
+                .await
+        });
+        graph_queued.await.expect("graph successor is queued");
+
+        let (repl_waiting, repl_queued) = oneshot::channel();
+        let repl_slots = slots.clone();
+        let repl = tokio::spawn(async move {
+            let mut waiting = Some(repl_waiting);
+            repl_slots
+                .admit_with(
+                    FeatureLimit::WebConsole,
+                    "Web console NSPL REPL",
+                    |reason| {
+                        if reason == AdmissionWait::WebConsole {
+                            waiting
+                                .take()
+                                .expect("reports once")
+                                .send(())
+                                .expect("observed");
+                        }
+                    },
+                )
+                .await
+        });
+        repl_queued.await.expect("REPL successor is queued");
+
+        let (inspector_waiting, inspector_queued) = oneshot::channel();
+        let inspector_slots = slots.clone();
+        let inspector = tokio::spawn(async move {
+            let mut waiting = Some(inspector_waiting);
+            inspector_slots
+                .admit_with(
+                    FeatureLimit::WebConsole,
+                    "Web console transaction inspector",
+                    |reason| {
+                        if reason == AdmissionWait::WebConsole {
+                            waiting
+                                .take()
+                                .expect("reports once")
+                                .send(())
+                                .expect("observed");
+                        }
+                    },
+                )
+                .await
+        });
+        inspector_queued
+            .await
+            .expect("inspector successor is queued");
+
+        drop(first);
+        let repl_admission = timeout(Duration::from_millis(100), repl)
+            .await
+            .expect("the REPL takes the first released slot")
+            .expect("REPL admission task completes");
+        drop(second);
+        let inspector_admission = timeout(Duration::from_millis(100), inspector)
+            .await
+            .expect("the inspector takes the second released slot")
+            .expect("inspector admission task completes");
+        assert!(
+            !graph.is_finished(),
+            "a third graph case waits for its turn"
+        );
+        drop(repl_admission);
+        drop(inspector_admission);
+        graph.await.expect("graph successor eventually runs");
     }
 
     #[test]

@@ -25081,7 +25081,9 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 ));
                 let limit = FeatureLimit::for_name(&feature_name);
                 let admission = run_slots
-                    .admit_with(limit, |reason| world.wait_for_admission(reason))
+                    .admit_with(limit, &feature_name, |reason| {
+                        world.wait_for_admission(reason)
+                    })
                     .await;
                 world.scenario_admission = Some(admission);
                 world.enter_phase(ScenarioPhase::Body, "");

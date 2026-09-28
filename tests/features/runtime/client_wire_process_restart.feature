@@ -25,7 +25,7 @@ Feature: Client wire full-process restart
 
   @client_wire_inactivity_restart
   Scenario: Physical inactivity while every node is stopped expires an open transaction
-    Given a nervix-server process is started with transaction idle timeout "1s" and tombstone retention "5s"
+    Given a nervix-server process is started with transaction idle timeout "1s" and tombstone retention "5m"
     And the server process is configured with these NSPL commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100000h;

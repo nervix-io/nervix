@@ -24,7 +24,7 @@ def main() -> None:
     doctor = run("kache", "doctor")
     (destination / "doctor.txt").write_text(doctor.stdout + doctor.stderr)
 
-    report = run("kache", "report", "--format", "json", "--last-build", "--root", root)
+    report = run("kache", "report", "--format", "json", "--since", "3h", "--top", "20", "--root", root)
     (destination / "report.json").write_text(report.stdout)
     markdown = [f"## Kache: {os.environ.get('GITHUB_JOB', 'local build')}", ""]
     markdown.append(f"Doctor exit status: `{doctor.returncode}`. Problems are diagnostic only.")
@@ -48,13 +48,19 @@ def main() -> None:
             used = store.get("bytes", 0)
             limit = store.get("max_size", 0)
             markdown.append(f"Store: {used / 1024**3:.1f} GiB of {limit / 1024**3:.1f} GiB configured.")
-        misses = data.get("top_misses", [])[:5]
+        misses = []
+        named = set()
+        for miss in data.get("top_misses", []):
+            crate = miss.get("crate_name")
+            if crate and crate not in named:
+                misses.append(miss)
+                named.add(crate)
+            if len(misses) == 5:
+                break
         if misses:
             markdown.extend(["", "### Top misses", ""])
         for miss in misses:
-            crate = miss.get("crate_name", "")
-            if not crate:
-                continue
+            crate = miss["crate_name"]
             diagnosis = run("kache", "why-miss", crate)
             (destination / f"why-miss-{crate}.txt").write_text(
                 diagnosis.stdout + diagnosis.stderr

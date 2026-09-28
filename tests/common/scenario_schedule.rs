@@ -3,15 +3,19 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** Feature-group admission, run-slot admission, and feature take-up priority.
-//! - **Depends on.** Tokio semaphores and channels, a short synchronous queue lock, and feature
-//!   names supplied by the parser.
+//! - **Depends on.** Tokio channels, a short synchronous queue lock, and feature names supplied by
+//!   the parser.
 //! - **Must not know.** Scenario steps, node state, or Cucumber's result writer.
 
-use std::{collections::VecDeque, fmt, sync::Arc};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    fmt,
+    sync::Arc,
+};
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use parking_lot::Mutex;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+use tokio::sync::{oneshot, watch};
 
 pub(crate) const WEB_CONSOLE_FEATURE_NAMES: [&str; 3] = [
     "Web console NSPL REPL",
@@ -75,8 +79,8 @@ impl fmt::Display for AdmissionWait {
 #[derive(Debug)]
 pub(crate) struct ScenarioAdmission {
     limit: FeatureLimit,
-    _feature: Option<OwnedSemaphorePermit>,
-    _slot: RunSlotPermit,
+    pool: Arc<AdmissionPool>,
+    active: bool,
 }
 
 impl ScenarioAdmission {
@@ -85,143 +89,230 @@ impl ScenarioAdmission {
     }
 }
 
+impl Drop for ScenarioAdmission {
+    fn drop(&mut self) {
+        if self.active {
+            self.pool.release(self.limit);
+        }
+    }
+}
+
 pub(crate) struct ScenarioRunSlots {
-    slots: Arc<SlotPool>,
-    web_console: Arc<Semaphore>,
-    wasm_state_reset: Arc<Semaphore>,
+    pool: Arc<AdmissionPool>,
+}
+
+struct Waiter {
+    feature_name: String,
+    grant: oneshot::Sender<ScenarioAdmission>,
+    reason: watch::Sender<AdmissionWait>,
 }
 
 #[derive(Default)]
-struct SlotState {
-    available: usize,
-    limited: VecDeque<oneshot::Sender<RunSlotPermit>>,
-    ordinary: VecDeque<oneshot::Sender<RunSlotPermit>>,
+struct AdmissionState {
+    available_slots: usize,
+    available_web_console: usize,
+    available_wasm_state_reset: usize,
+    web_console: VecDeque<Waiter>,
+    web_console_grants: BTreeMap<String, usize>,
+    wasm_state_reset: VecDeque<Waiter>,
+    ordinary: VecDeque<Waiter>,
 }
 
-struct SlotPool {
-    state: Mutex<SlotState>,
-}
-
-/// One occupied run slot. A canceled waiter receives this guard in its channel, and dropping the
-/// channel gives the slot back even when the waiter was canceled just after it was selected.
-pub(crate) struct RunSlotPermit {
-    pool: Arc<SlotPool>,
-    active: bool,
-}
-
-impl fmt::Debug for RunSlotPermit {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("RunSlotPermit").finish()
+impl AdmissionState {
+    fn feature_available(&self, limit: FeatureLimit) -> bool {
+        match limit {
+            FeatureLimit::WebConsole => self.available_web_console > 0,
+            FeatureLimit::WasmStateReset => self.available_wasm_state_reset > 0,
+            FeatureLimit::Unlimited => true,
+        }
     }
-}
 
-impl Drop for RunSlotPermit {
-    fn drop(&mut self) {
-        if self.active {
-            self.pool.release();
+    fn waiting_for(&self, limit: FeatureLimit) -> AdmissionWait {
+        match limit {
+            FeatureLimit::WebConsole if !self.feature_available(limit) => AdmissionWait::WebConsole,
+            FeatureLimit::WasmStateReset if !self.feature_available(limit) => {
+                AdmissionWait::WasmStateReset
+            }
+            _ => AdmissionWait::RunSlot,
+        }
+    }
+
+    fn queue(&mut self, limit: FeatureLimit, waiter: Waiter) {
+        match limit {
+            FeatureLimit::WebConsole => self.web_console.push_back(waiter),
+            FeatureLimit::WasmStateReset => self.wasm_state_reset.push_back(waiter),
+            FeatureLimit::Unlimited => self.ordinary.push_back(waiter),
+        }
+    }
+
+    fn next_eligible(&mut self) -> Option<(FeatureLimit, Waiter)> {
+        if self.available_wasm_state_reset > 0
+            && let Some(waiter) = self.wasm_state_reset.pop_front()
+        {
+            return Some((FeatureLimit::WasmStateReset, waiter));
+        }
+        if self.available_web_console > 0
+            && let Some(index) = self
+                .web_console
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, waiter)| {
+                    self.web_console_grants
+                        .get(&waiter.feature_name)
+                        .copied()
+                        .unwrap_or_default()
+                })
+                .map(|(index, _)| index)
+        {
+            let waiter = self
+                .web_console
+                .remove(index)
+                .verified("the selected web console waiter is still at its queue index");
+            return Some((FeatureLimit::WebConsole, waiter));
+        }
+        self.ordinary
+            .pop_front()
+            .map(|waiter| (FeatureLimit::Unlimited, waiter))
+    }
+
+    fn take_feature(&mut self, limit: FeatureLimit) {
+        match limit {
+            FeatureLimit::WebConsole => self.available_web_console -= 1,
+            FeatureLimit::WasmStateReset => self.available_wasm_state_reset -= 1,
+            FeatureLimit::Unlimited => {}
+        }
+    }
+
+    fn release_feature(&mut self, limit: FeatureLimit) {
+        match limit {
+            FeatureLimit::WebConsole => self.available_web_console += 1,
+            FeatureLimit::WasmStateReset => self.available_wasm_state_reset += 1,
+            FeatureLimit::Unlimited => {}
+        }
+    }
+
+    fn refresh_wait_reasons(&self) {
+        for (limit, queue) in [
+            (FeatureLimit::WasmStateReset, &self.wasm_state_reset),
+            (FeatureLimit::WebConsole, &self.web_console),
+            (FeatureLimit::Unlimited, &self.ordinary),
+        ] {
+            let reason = self.waiting_for(limit);
+            for waiter in queue {
+                let previous = *waiter.reason.borrow();
+                if previous != reason {
+                    waiter.reason.send_replace(reason);
+                }
+            }
         }
     }
 }
 
-impl SlotPool {
-    fn dispatch(self: &Arc<Self>, state: &mut SlotState) {
-        while state.available > 0 {
-            let next = state
-                .limited
-                .pop_front()
-                .or_else(|| state.ordinary.pop_front());
-            let Some(waiter) = next else {
+struct AdmissionPool {
+    state: Mutex<AdmissionState>,
+}
+
+impl fmt::Debug for AdmissionPool {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("AdmissionPool").finish()
+    }
+}
+
+impl AdmissionPool {
+    fn dispatch(self: &Arc<Self>, state: &mut AdmissionState) {
+        while state.available_slots > 0 {
+            let Some((limit, waiter)) = state.next_eligible() else {
                 break;
             };
-            state.available -= 1;
-            let permit = RunSlotPermit {
+            state.available_slots -= 1;
+            state.take_feature(limit);
+            let feature_name = waiter.feature_name;
+            let admission = ScenarioAdmission {
+                limit,
                 pool: self.clone(),
                 active: true,
             };
-            if let Err(mut abandoned) = waiter.send(permit) {
-                // Keep the slot in this dispatch loop. Disarm before drop so a canceled receiver
-                // cannot recursively lock the same pool.
+            if let Err(mut abandoned) = waiter.grant.send(admission) {
+                // A canceled receiver returns the admission. Disarm it before dropping it under
+                // this lock, then offer the same capacity to the next waiter.
                 abandoned.active = false;
                 drop(abandoned);
-                state.available += 1;
+                state.available_slots += 1;
+                state.release_feature(limit);
+            } else if limit == FeatureLimit::WebConsole {
+                *state.web_console_grants.entry(feature_name).or_default() += 1;
             }
         }
+        state.refresh_wait_reasons();
     }
 
-    async fn acquire(self: &Arc<Self>, limit: FeatureLimit) -> RunSlotPermit {
-        let (sender, receiver) = oneshot::channel();
-        {
-            let mut state = self.state.lock();
-            if limit == FeatureLimit::Unlimited {
-                state.ordinary.push_back(sender);
-            } else {
-                state.limited.push_back(sender);
-            }
-            self.dispatch(&mut state);
-        }
-        receiver
-            .await
-            .assured("run slot pool holds every queued sender until it grants or the run ends")
-    }
-
-    fn release(self: &Arc<Self>) {
+    fn release(self: &Arc<Self>, limit: FeatureLimit) {
         let mut state = self.state.lock();
-        state.available += 1;
+        // Give the feature capacity and its run slot back in one decision. Otherwise an ordinary
+        // waiter can consume the slot before a feature waiter awakened by the release is polled.
+        state.available_slots += 1;
+        state.release_feature(limit);
         self.dispatch(&mut state);
     }
 }
 
 impl ScenarioRunSlots {
     pub(crate) fn new(slots: usize) -> Self {
+        assert!(slots > 0, "a scenario suite needs at least one run slot");
         Self {
-            slots: Arc::new(SlotPool {
-                state: Mutex::new(SlotState {
-                    available: slots,
-                    ..SlotState::default()
+            pool: Arc::new(AdmissionPool {
+                state: Mutex::new(AdmissionState {
+                    available_slots: slots,
+                    available_web_console: 2,
+                    available_wasm_state_reset: 1,
+                    ..AdmissionState::default()
                 }),
             }),
-            web_console: Arc::new(Semaphore::new(2)),
-            wasm_state_reset: Arc::new(Semaphore::new(1)),
         }
-    }
-
-    pub(crate) async fn acquire_feature(
-        &self,
-        feature: FeatureLimit,
-    ) -> Option<OwnedSemaphorePermit> {
-        let permits = match feature {
-            FeatureLimit::WebConsole => &self.web_console,
-            FeatureLimit::WasmStateReset => &self.wasm_state_reset,
-            FeatureLimit::Unlimited => return None,
-        };
-        Some(
-            permits
-                .clone()
-                .acquire_owned()
-                .await
-                .assured("scenario feature semaphores remain open for the run"),
-        )
     }
 
     pub(crate) async fn admit_with(
         &self,
         limit: FeatureLimit,
+        feature_name: &str,
         mut waiting_for: impl FnMut(AdmissionWait),
     ) -> ScenarioAdmission {
-        if let Some(reason) = match limit {
-            FeatureLimit::WebConsole => Some(AdmissionWait::WebConsole),
-            FeatureLimit::WasmStateReset => Some(AdmissionWait::WasmStateReset),
-            FeatureLimit::Unlimited => None,
-        } {
-            waiting_for(reason);
-        }
-        let feature = self.acquire_feature(limit).await;
-        waiting_for(AdmissionWait::RunSlot);
-        let slot = self.slots.acquire(limit).await;
-        ScenarioAdmission {
-            limit,
-            _feature: feature,
-            _slot: slot,
+        let (grant, mut granted) = oneshot::channel();
+        let (mut reason_changes, mut reason) = {
+            let mut state = self.pool.state.lock();
+            let reason = state.waiting_for(limit);
+            let (reason_sender, reason_changes) = watch::channel(reason);
+            state.queue(
+                limit,
+                Waiter {
+                    feature_name: feature_name.to_owned(),
+                    grant,
+                    reason: reason_sender,
+                },
+            );
+            self.pool.dispatch(&mut state);
+            (reason_changes, reason)
+        };
+        waiting_for(reason);
+        loop {
+            tokio::task::consume_budget().await;
+            tokio::select! {
+                biased;
+                admission = &mut granted => {
+                    return admission.assured(
+                        "the admission pool holds every queued sender until it grants or the run ends"
+                    );
+                }
+                changed = reason_changes.changed() => {
+                    if changed.is_ok() {
+                        let current = *reason_changes.borrow_and_update();
+                        if current != reason {
+                            waiting_for(current);
+                            reason = current;
+                        }
+                    }
+                }
+            }
         }
     }
 }
