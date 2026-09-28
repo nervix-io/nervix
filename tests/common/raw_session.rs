@@ -33,8 +33,7 @@ use nervix_client_wire::{
     CommandRequest, DetachDomainClockRequest, Diagnostic, DomainClockAttachmentEnded,
     DomainClockObserved, DomainClockTicked, LeaderRedirect, NoticeLevel, OutcomeOrigin, Reply,
     ReplyBody, RequestId, RowSchema, ServerEvent, ServerFrame, ServerMessage, SessionEndReason,
-    SessionLimits,
-    SubscribeDisposition, SubscribeRequest, SubscriptionEnded, SubscriptionHandle,
+    SessionLimits, SubscribeDisposition, SubscribeRequest, SubscriptionEnded, SubscriptionHandle,
     SubscriptionType, TransferAssembly, UnsubscribeDisposition, UnsubscribeRequest, UploadChunk,
     UploadReply, UploadStart, VerifiedFrame,
     grpc::{
