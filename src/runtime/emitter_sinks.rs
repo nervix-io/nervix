@@ -13,15 +13,13 @@ use error_stack::ResultExt as _;
 use nervix_connector::{HttpRequestSink, RecordSink, RowSink, SinkStartResult};
 use nervix_connector_clickhouse::{ClickHouseSink, ClickHouseSinkConfig};
 use nervix_connector_http::{HttpSink, HttpSinkConfig};
-use nervix_connector_iceberg::{IcebergCommitPolicy, IcebergSink, IcebergSinkConfig};
+use nervix_connector_iceberg::{IcebergSink, IcebergSinkConfig};
 use nervix_connector_kafka::{KafkaSink, KafkaSinkConfig};
 use nervix_connector_mongodb::{MongoDbSink, MongoDbSinkConfig};
 use nervix_connector_mqtt::{MqttSink, MqttSinkConfig};
 use nervix_connector_mysql::{MySqlSink, MySqlSinkConfig};
 use nervix_connector_nats::{NatsSink, NatsSinkConfig};
-use nervix_connector_otel::{
-    OtelBatchLimits, OtelLiteral, OtelResourceAttribute, OtelSink, OtelSinkConfig,
-};
+use nervix_connector_otel::{OtelBatchLimits, OtelSink, OtelSinkConfig};
 use nervix_connector_postgres::{PostgresSink, PostgresSinkConfig};
 use nervix_connector_pulsar::{PulsarSink, PulsarSinkConfig};
 use nervix_connector_rabbitmq::{RabbitMqSink, RabbitMqSinkConfig};
@@ -37,90 +35,6 @@ use super::{
     pooled_sink_clients::PooledSinkClient,
     *,
 };
-
-fn mapped_column_names(mappings: &[ClickHouseValueMapping]) -> Vec<String> {
-    mappings
-        .iter()
-        .map(|mapping| mapping.column.clone())
-        .collect()
-}
-
-/// The `RESOURCE` attributes an OTEL emitter exports with, which are fixed for its lifetime.
-///
-/// A resource value describes the emitting service rather than a record, so only a literal or a
-/// literal array can supply one.
-fn otel_resource_attributes(
-    resource: &[OtelValueMapping],
-) -> EmitterRuntimeResult<Vec<OtelResourceAttribute>> {
-    let mut attributes = Vec::with_capacity(resource.len());
-    for mapping in resource {
-        let value = otel_literal(&mapping.expression).ok_or_else(|| {
-            Report::new(EmitterRuntimeError::InvalidOtelResource {
-                attribute: mapping.column.clone(),
-            })
-        })?;
-        attributes.push(OtelResourceAttribute {
-            key: mapping.column.clone(),
-            value,
-        });
-    }
-    Ok(attributes)
-}
-
-/// The literal a `RESOURCE` value carries, or nothing for an expression that reads a record.
-fn otel_literal(expression: &nervix_models::Expression) -> Option<OtelLiteral> {
-    match expression {
-        nervix_models::Expression::Literal(ModelLiteral::I64(value)) => {
-            Some(OtelLiteral::I64(*value))
-        }
-        nervix_models::Expression::Literal(ModelLiteral::F64(value)) => {
-            Some(OtelLiteral::F64(value.value()))
-        }
-        nervix_models::Expression::Literal(ModelLiteral::Bool(value)) => {
-            Some(OtelLiteral::Bool(*value))
-        }
-        nervix_models::Expression::Literal(ModelLiteral::String(value)) => {
-            Some(OtelLiteral::String(value.clone()))
-        }
-        nervix_models::Expression::Literal(ModelLiteral::Null) => Some(OtelLiteral::Null),
-        nervix_models::Expression::Array(items) => {
-            let mut values = Vec::with_capacity(items.len());
-            for item in items {
-                values.push(otel_literal(item)?);
-            }
-            Some(OtelLiteral::Array(values))
-        }
-        _ => None,
-    }
-}
-
-impl EmitterSinkContext {
-    /// The commit cadence and maximum commit size a sink that publishes on its own commit
-    /// boundary was declared with, resolved here so the connector receives typed policy.
-    fn parse_commit_policy(
-        &self,
-        kind: &str,
-        commit_each: &str,
-        max_commit_size: &str,
-    ) -> EmitterRuntimeResult<IcebergCommitPolicy> {
-        let interval = Runtime::parse_runtime_node_duration_setting(
-            &self.domain,
-            kind,
-            &self.emitter,
-            "commit_each",
-            commit_each,
-        )
-        .map_err(|error| emitter_report(EmitterRuntimeError::InvalidSinkConfig, error))?;
-        let max_size = max_commit_size
-            .parse::<ubyte::ByteUnit>()
-            .map_err(|error| {
-                Report::new(EmitterRuntimeError::InvalidSinkConfig)
-                    .attach_printable(format!("max_commit_size '{max_commit_size}': {error}"))
-            })?
-            .as_u64();
-        Ok(IcebergCommitPolicy { interval, max_size })
-    }
-}
 
 /// The composition root of the sink side, and the only place that names every sink crate.
 ///
@@ -326,25 +240,16 @@ impl EmitterSinkStarter {
             EmitterSinkPlan::Otel(sink) => {
                 // The signal's own values and its attributes are mapped as one program, so the
                 // attribute columns follow the signal's own in the batch the host projects.
-                let mut mappings = Vec::with_capacity(
-                    sink.values
-                        .len()
-                        .checked_add(sink.attributes.len())
-                        .assured("an emitter maps fewer columns than usize can count"),
-                );
-                mappings.extend_from_slice(&sink.values);
-                mappings.extend_from_slice(&sink.attributes);
                 let projection = Self::projection(MappedValuesProjectionInit {
                     label: "OTEL",
                     namespace: "otel",
                     domain: &context.domain,
                     emitter: &context.emitter,
-                    values: &mappings,
+                    mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
                     max_batch: None,
                 })?;
-                let resource = otel_resource_attributes(&sink.resource)?;
                 let config = OtelSinkConfig {
                     config: sink.client.config.entries.clone(),
                     dns: context.dns()?,
@@ -353,9 +258,9 @@ impl EmitterSinkStarter {
                         max_messages: policy.max_messages.get(),
                         max_size: policy.max_size.bytes(),
                     }),
-                    values: mapped_column_names(&sink.values),
-                    attributes: mapped_column_names(&sink.attributes),
-                    resource,
+                    values: sink.values.clone(),
+                    attributes: sink.attributes.clone(),
+                    resource: sink.resource.clone(),
                     scope: sink.scope.clone(),
                     mapped_schema: projection.mapped_schema().clone(),
                 };
@@ -367,7 +272,7 @@ impl EmitterSinkStarter {
                     namespace: "clickhouse",
                     domain: &context.domain,
                     emitter: &context.emitter,
-                    values: &sink.values,
+                    mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
                     max_batch: Some(sink.batch.max_messages),
@@ -389,7 +294,7 @@ impl EmitterSinkStarter {
                     namespace: "postgres",
                     domain: &context.domain,
                     emitter: &context.emitter,
-                    values: &sink.values,
+                    mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
                     max_batch: Some(sink.batch.max_messages),
@@ -416,7 +321,7 @@ impl EmitterSinkStarter {
                     namespace: "mysql",
                     domain: &context.domain,
                     emitter: &context.emitter,
-                    values: &sink.values,
+                    mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
                     max_batch: Some(sink.batch.max_messages),
@@ -443,7 +348,7 @@ impl EmitterSinkStarter {
                     namespace: "mongodb",
                     domain: &context.domain,
                     emitter: &context.emitter,
-                    values: &sink.values,
+                    mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
                     max_batch: Some(sink.batch.max_messages),
@@ -470,18 +375,13 @@ impl EmitterSinkStarter {
                     namespace: "iceberg",
                     domain: &context.domain,
                     emitter: &context.emitter,
-                    values: &sink.values,
+                    mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
                     // One commit reads every staged file back at once, so a staged write carries
                     // the whole batch the host released to it.
                     max_batch: None,
                 })?;
-                let commit = context.parse_commit_policy(
-                    "iceberg emitter",
-                    &sink.commit_each,
-                    &sink.max_commit_size,
-                )?;
                 let mapped_schema = projection.mapped_schema().clone();
                 let opened = IcebergSink::new(
                     IcebergSinkConfig {
@@ -494,7 +394,7 @@ impl EmitterSinkStarter {
                         table: sink.table.clone(),
                         location: sink.location.clone(),
                         mapped_schema,
-                        commit,
+                        commit: sink.commit,
                         writer: context.emitter.as_str().to_string(),
                     },
                     context.sink_host(),
