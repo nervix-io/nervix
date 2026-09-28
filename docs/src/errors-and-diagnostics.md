@@ -4,6 +4,9 @@ Nervix gives a failure its meaning at the boundary that can decide what went wro
 travels through the graph as a semantic error and an `error-stack` report. A public edge renders a
 diagnostic only after it has made the decision the error permits. Ordinary control outcomes, such
 as waiting for materialized state or following a new leader, remain distinct from failures.
+The web console applies the same distinction to structured choice lookups: an absent form
+prerequisite shows a neutral hint, and stale context offers a fresh request. A failed lookup,
+closed session channel, or unreadable reply appears as an alert.
 
 This chapter owns the error and diagnostic model across layers. [Typed States And Validation
 Boundaries](./typed-states.md) explains how missing values and semantic states are represented;
@@ -34,6 +37,12 @@ report. It does not format a cause into a string and then classify that text as 
 Values a caller acts on belong in typed fields; display formatting happens when the result is
 reported. `anyhow` remains at integration and tooling boundaries whose caller has no domain choice
 to make, such as a foreign callback that only accepts a general error.
+
+Resource planning checks the committed lookup key and codec, generator materialized source,
+output branch and route construction, and WASM guest-state generation before runtime binding.
+These failures name the owning node and relevant relay, codec, or field. A missing
+lookup file is rejected during candidate binding validation; malformed records remain a loader
+failure when the pinned file is decoded. Neither failure silently selects another resource version.
 
 Schemaful JSON parsing has one codec decode failure carrying the simd-json source. Malformed
 syntax, invalid UTF-8, and invalid escapes enter through that failure; object shape, missing or
@@ -89,7 +98,10 @@ conversion. Canonical NSPL rendering refuses only a value the language has no sp
 infinite `F64` literal, which the error carries, or a codec declaration its wire format cannot
 express, such as encoding rules on `SYSLOG` or a JAQ-transformed format without a program, which the
 error names by codec. The execution-graph description keeps the JSON encoder's or decoder's error
-beneath its own when the public wire form cannot be written or read. Registry planning keeps an
+beneath its own when the public wire form cannot be written or read. It keeps a typed columnar
+JSON writer error beneath a named codec encode failure. Unsupported columns and invalid string
+offsets fail batch preparation with the codec name. Required nulls identify their field and row;
+write failures retain their source without quoting a payload value. Registry planning keeps an
 alteration's report beneath its invalid-model refusal of the named Model, and the refusal quotes the
 rejection's message, so a failed `ALTER` shows the same reason the vocabulary gave. `SHOW CREATE`
 answers a Model canonical NSPL cannot spell with a fixed diagnostic.
