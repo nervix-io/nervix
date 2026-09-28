@@ -340,7 +340,11 @@ sequenceDiagram
 
 At the public edge, the session maps a typed validation or execution result to a command
 disposition, message, and diagnostics; a transaction's admitted and retained outcomes stay
-distinct from a new execution. [Command
+distinct from a new execution. Replicated admission preserves an expired execution reference and
+the kind of a conflicting reference as typed consensus conflicts. The session returns
+`ExecutionReferenceExpired` or `ExecutionReferenceConflict` from those variants, including when a
+leader change lets the replicated check discover the conflict after the leader's local check. A
+client never has to classify those refusals from message text. [Command
 Dispositions](./client-session-protocol.md#command-dispositions) defines each disposition, the phase
 that produces it, and what a client may conclude from it, and typed request rejections are covered
 in [Rejections](./client-session-protocol.md#rejections). `DESCRIBE TRANSACTION` and
