@@ -24,6 +24,7 @@ use chitchat::{
     Serializable as _, spawn_chitchat,
     transport::{Socket as GossipSocket, Transport as GossipTransport},
 };
+use futures_util::future::join_all;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{GossipNode, GossipState};
 use nervix_execution::sync::{ArcSwap, DashMap, Guard};
@@ -47,7 +48,7 @@ use tokio::{
 use tokio_real as chitchat_tokio;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const KEY_CLUSTER_ID: &str = "cluster_id";
 const KEY_NODE_ID: &str = "node_id";
@@ -771,6 +772,7 @@ pub struct ClusterSettings {
     pub console_advertise_url: NodeServiceUrl,
     pub interconnect_advertise_addr: NodeEndpoint,
     pub bootstrap_host: Option<String>,
+    pub recovery_endpoints: BTreeSet<NodeEndpoint>,
     pub interconnect: InterconnectTransport,
     pub node_unavailability_timeout: Duration,
 }
@@ -1090,30 +1092,44 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         .next()
         .assured("a successful resolution holds at least one target")
         .addr;
-    let mut seed_targets = Vec::new();
-    let seed_nodes = match settings.bootstrap_host.as_deref() {
-        Some(seed) => {
-            let seed = seed
-                .parse::<NodeEndpoint>()
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-            let targets = settings
-                .interconnect
-                .resolve(&seed)
-                .await
-                .map_err(|report| io::Error::other(report.into_error()))?;
-            let mut addresses = Vec::new();
-            for target in targets {
-                addresses.push(target.addr.to_string());
-                seed_targets.push((target.addr, target));
+    let mut seed_targets = BTreeMap::new();
+    let mut seed_nodes = BTreeSet::new();
+    let recovered = join_all(settings.recovery_endpoints.into_iter().map(|endpoint| {
+        let interconnect = &settings.interconnect;
+        async move { (endpoint.clone(), interconnect.resolve(&endpoint).await) }
+    }))
+    .await;
+    for (endpoint, result) in recovered {
+        match result {
+            Ok(targets) => {
+                for target in targets {
+                    seed_nodes.insert(target.addr.to_string());
+                    seed_targets.insert(target.addr, target);
+                }
             }
-            addresses
+            Err(error) => {
+                warn!(%endpoint, %error, "could not resolve a recovered Raft peer for gossip");
+            }
         }
-        None => Vec::new(),
-    };
+    }
+    if let Some(seed) = settings.bootstrap_host.as_deref() {
+        let seed = seed
+            .parse::<NodeEndpoint>()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let targets = settings
+            .interconnect
+            .resolve(&seed)
+            .await
+            .map_err(|report| io::Error::other(report.into_error()))?;
+        for target in targets {
+            seed_nodes.insert(target.addr.to_string());
+            seed_targets.insert(target.addr, target);
+        }
+    }
     let transport = InterconnectGossipTransport::build(
         settings.interconnect.clone(),
         gossip_advertise_addr,
-        seed_targets,
+        seed_targets.into_iter().collect(),
     )?;
     let chitchat_id = ChitchatId {
         node_id: node_id.to_string(),
@@ -1126,7 +1142,7 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         cluster_id: settings.cluster_id.clone(),
         gossip_interval: Duration::from_millis(500),
         listen_addr: settings.interconnect.local_addr(),
-        seed_nodes,
+        seed_nodes: seed_nodes.into_iter().collect(),
         failure_detector_config: chitchat::FailureDetectorConfig::default(),
         marked_for_deletion_grace_period: Duration::from_secs(60),
         catchup_callback: None,

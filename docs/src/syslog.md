@@ -122,6 +122,16 @@ CREATE CLIENT <name>
 One client may be referenced by both ingestors and emitters. An ingestor binds `addr`; an emitter
 connects or sends to it.
 
+An emitter resolves the host in `addr` through the node's asynchronous resolver each time it
+opens a sender. Literal IPv4 and IPv6 addresses are used directly; hosts-file names and DNS
+answers follow the node's configured resolver and TTL policy. UDP tries answers in order, binding
+each socket to the answer's IP family, and sends to the first address whose setup succeeds. TCP
+and TLS try the answers in order, giving each an equal share of the time left in one 30-second
+connection budget. DNS, address attempts and the TLS
+handshake all spend that same budget. TLS verifies the original host from `addr`, whichever address
+accepted the connection. A new sender after a failure resolves again, so an expired answer can be
+replaced without restarting the node.
+
 | Config key | Required | Meaning |
 | --- | --- | --- |
 | `protocol` | Yes | `udp`, `tcp`, or `tls` |
@@ -266,6 +276,10 @@ remote delivery acknowledgment exists. Connection establishment and write failur
 infrastructure errors: the current batch is retained, the connection is rebuilt, and delivery is
 retried on the declared backoff. Records accepted before a later failure in the same batch may be
 delivered more than once.
+
+A missing name, silent DNS server, or unreachable answer is a connection failure. Resolving an
+address does not report record delivery. Shutdown or cancelled startup drops pending DNS and
+connection work; the physical connection budget also bounds an attempt if no cancellation occurs.
 
 ## Observability and limits
 

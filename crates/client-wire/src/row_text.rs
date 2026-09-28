@@ -31,11 +31,24 @@ impl RowBatchView<'_> {
     ) -> Result<Vec<String>, Report<RowConformanceError>> {
         self.conform(schema)?;
         let key = match (self.branch_key(), &schema.branch) {
-            (Some(key), Some(branch)) => Some(render_object(key, branch.fields(), None)),
+            (Some(key), Some(branch)) => {
+                let names = branch
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, field)| (index, json_name(field)))
+                    .collect::<Vec<_>>();
+                Some(render_object(key, &names))
+            }
             _ => None,
         };
-        let mut name_order = (0..schema.fields.len()).collect::<Vec<_>>();
-        name_order.sort_by(|left, right| {
+        let mut names = schema
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| (index, json_name(field)))
+            .collect::<Vec<_>>();
+        names.sort_by(|(left, _), (right, _)| {
             schema.fields[*left]
                 .name
                 .as_str()
@@ -43,7 +56,7 @@ impl RowBatchView<'_> {
         });
         let mut lines = Vec::with_capacity(self.len());
         for row in self.rows() {
-            let payload = render_object(row, &schema.fields, Some(&name_order));
+            let payload = render_object(row, &names);
             let line = match &key {
                 Some(key) => format!("key={key} payload={payload}"),
                 None => payload,
@@ -54,18 +67,13 @@ impl RowBatchView<'_> {
     }
 }
 
-/// Renders the cells of one row or branch key as a JSON object over `fields`, visiting them in
-/// `order` when one is given and in field order otherwise. The cells were already held to the
-/// fields, so there is one per field.
-fn render_object(cells: CellsView<'_>, fields: &[SchemaField], order: Option<&[usize]>) -> String {
-    let indices = match order {
-        Some(order) => order.to_vec(),
-        None => (0..fields.len()).collect(),
-    };
+/// Renders a row or branch key using field names escaped once for the whole batch. The cells were
+/// already held to the schema, so there is one per name.
+fn render_object(cells: CellsView<'_>, names: &[(usize, String)]) -> String {
     let mut object = String::from("{");
     let mut first = true;
-    for index in indices {
-        let Some(cell) = cells.get(index) else {
+    for (index, name) in names {
+        let Some(cell) = cells.get(*index) else {
             continue;
         };
         if let CellView::Null = cell {
@@ -75,12 +83,17 @@ fn render_object(cells: CellsView<'_>, fields: &[SchemaField], order: Option<&[u
             object.push(',');
         }
         first = false;
-        push_json_string(&mut object, fields[index].name.as_str());
+        object.push_str(name);
         object.push(':');
         push_cell(&mut object, cell);
     }
     object.push('}');
     object
+}
+
+fn json_name(field: &SchemaField) -> String {
+    serde_json::to_string(field.name.as_str())
+        .assured("serializing a field name to JSON has no failing case")
 }
 
 /// Appends one cell as a JSON value.

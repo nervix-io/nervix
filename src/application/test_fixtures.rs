@@ -576,6 +576,7 @@ pub(in crate::application) async fn build_test_service(
             console_advertise_url: test_service_url(grpc_addr),
             interconnect_advertise_addr: interconnect_addr.into(),
             bootstrap_host: None,
+            recovery_endpoints: Default::default(),
             interconnect: interconnect.clone(),
             node_unavailability_timeout: Duration::from_secs(10),
         })

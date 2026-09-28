@@ -820,13 +820,16 @@ fn write_runtime_value(
 pub mod benchmark {
     use std::sync::Arc as StdArc;
 
-    use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+    use arrow_array::{ArrayRef, BinaryArray, Int64Array, RecordBatch, StringArray};
     use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
     use nervix_client_wire::{EncodedFrame, RowBranch, ServerFrame};
     use nervix_models::SubscriptionName;
 
     use super::*;
     use crate::runtime_schema::RuntimeRecordBatch;
+
+    /// The session host's current row count cap for one frame.
+    const ROWS_PER_FRAME: usize = 256;
 
     /// Fixed Arrow input for the typed Row encoding measurement.
     pub struct SubscriptionRowBenchmark {
@@ -838,9 +841,28 @@ pub mod benchmark {
     impl SubscriptionRowBenchmark {
         /// Builds the task 01 subscription workload with alternating concrete branches.
         pub fn new(rows: NonZeroUsize, detail_bytes: NonZeroUsize) -> Self {
+            Self::build(rows, detail_bytes, true, false)
+        }
+
+        /// Builds a large batch of one branch so the frame's row limit is exercised.
+        pub fn batched(rows: NonZeroUsize, detail_bytes: NonZeroUsize) -> Self {
+            Self::build(rows, detail_bytes, false, false)
+        }
+
+        /// Builds a wide batch with strings, binary, nulls and redacted values.
+        pub fn wide(rows: NonZeroUsize, detail_bytes: NonZeroUsize) -> Self {
+            Self::build(rows, detail_bytes, false, true)
+        }
+
+        fn build(
+            rows: NonZeroUsize,
+            detail_bytes: NonZeroUsize,
+            alternate_branches: bool,
+            wide: bool,
+        ) -> Self {
             let detail = "x".repeat(detail_bytes.get());
             let tenants = StringArray::from_iter_values((0..rows.get()).map(|index| {
-                if index.is_multiple_of(2) {
+                if !alternate_branches || index.is_multiple_of(2) {
                     "acme"
                 } else {
                     "beta"
@@ -851,16 +873,110 @@ pub mod benchmark {
                 .collect::<Int64Array>();
             let details =
                 StringArray::from_iter_values(std::iter::repeat_n(detail.as_str(), rows.get()));
-            let arrow_schema = StdArc::new(ArrowSchema::new(vec![
+            let mut arrow_fields = vec![
                 ArrowField::new("tenant", ArrowDataType::Utf8, false),
                 ArrowField::new("sequence", ArrowDataType::Int64, false),
                 ArrowField::new("detail", ArrowDataType::Utf8, false),
-            ]));
-            let columns: Vec<ArrayRef> = vec![
+            ];
+            let mut columns: Vec<ArrayRef> = vec![
                 StdArc::new(tenants),
                 StdArc::new(sequence),
                 StdArc::new(details),
             ];
+            let mut payload_fields = vec![
+                SchemaField {
+                    name: named("tenant"),
+                    ty: ParseAsType::String,
+                    optional: false,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: named("sequence"),
+                    ty: ParseAsType::I64,
+                    optional: false,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: named("detail"),
+                    ty: ParseAsType::String,
+                    optional: false,
+                    sensitive: false,
+                },
+            ];
+            if wide {
+                for group in 0..4 {
+                    let text_name = format!("text_{group}");
+                    arrow_fields.push(ArrowField::new(
+                        text_name.clone(),
+                        ArrowDataType::Utf8,
+                        false,
+                    ));
+                    columns.push(StdArc::new(StringArray::from_iter_values(
+                        std::iter::repeat_n(detail.as_str(), rows.get()),
+                    )));
+                    payload_fields.push(SchemaField {
+                        name: named(&text_name),
+                        ty: ParseAsType::String,
+                        optional: false,
+                        sensitive: false,
+                    });
+
+                    let bytes_name = format!("bytes_{group}");
+                    arrow_fields.push(ArrowField::new(
+                        bytes_name.clone(),
+                        ArrowDataType::Binary,
+                        false,
+                    ));
+                    columns.push(StdArc::new(BinaryArray::from_iter_values(
+                        std::iter::repeat_n(detail.as_bytes(), rows.get()),
+                    )));
+                    payload_fields.push(SchemaField {
+                        name: named(&bytes_name),
+                        ty: ParseAsType::Bytes,
+                        optional: false,
+                        sensitive: false,
+                    });
+
+                    let nullable_name = format!("nullable_{group}");
+                    arrow_fields.push(ArrowField::new(
+                        nullable_name.clone(),
+                        ArrowDataType::Utf8,
+                        true,
+                    ));
+                    columns.push(StdArc::new(StringArray::from_iter((0..rows.get()).map(
+                        |index| {
+                            if index.is_multiple_of(2) {
+                                Some(detail.as_str())
+                            } else {
+                                None
+                            }
+                        },
+                    ))));
+                    payload_fields.push(SchemaField {
+                        name: named(&nullable_name),
+                        ty: ParseAsType::String,
+                        optional: true,
+                        sensitive: false,
+                    });
+
+                    let sensitive_name = format!("sensitive_{group}");
+                    arrow_fields.push(ArrowField::new(
+                        sensitive_name.clone(),
+                        ArrowDataType::Utf8,
+                        false,
+                    ));
+                    columns.push(StdArc::new(StringArray::from_iter_values(
+                        std::iter::repeat_n(detail.as_str(), rows.get()),
+                    )));
+                    payload_fields.push(SchemaField {
+                        name: named(&sensitive_name),
+                        ty: ParseAsType::String,
+                        optional: false,
+                        sensitive: true,
+                    });
+                }
+            }
+            let arrow_schema = StdArc::new(ArrowSchema::new(arrow_fields));
             let record_batch = RecordBatch::try_new(StdArc::clone(&arrow_schema), columns)
                 .assured("the benchmark columns follow the fixed Arrow schema");
             let batch = RuntimeRecordBatch::from_record_batch(arrow_schema, record_batch)
@@ -878,26 +994,7 @@ pub mod benchmark {
             )
             .assured("the benchmark branch has one field");
             let schema = RowSchema {
-                fields: vec![
-                    SchemaField {
-                        name: named("tenant"),
-                        ty: ParseAsType::String,
-                        optional: false,
-                        sensitive: false,
-                    },
-                    SchemaField {
-                        name: named("sequence"),
-                        ty: ParseAsType::I64,
-                        optional: false,
-                        sensitive: false,
-                    },
-                    SchemaField {
-                        name: named("detail"),
-                        ty: ParseAsType::String,
-                        optional: false,
-                        sensitive: false,
-                    },
-                ],
+                fields: payload_fields,
                 branch: Some(branch),
             };
             let acme = BranchKey::from_fields([(
@@ -909,7 +1006,7 @@ pub mod benchmark {
                 .assured("the benchmark branch key is nonempty");
             let keys = (0..rows.get())
                 .map(|index| {
-                    if index.is_multiple_of(2) {
+                    if !alternate_branches || index.is_multiple_of(2) {
                         Some(acme.clone())
                     } else {
                         Some(beta.clone())
@@ -924,7 +1021,8 @@ pub mod benchmark {
                 },
                 schema,
                 SessionLimits::DEFAULT,
-                rows,
+                NonZeroUsize::new(rows.get().min(ROWS_PER_FRAME))
+                    .assured("every benchmark batch has at least one row"),
             )
             .assured("the benchmark row count fits the default collection limit");
             let (_, encoder) = opening.open(named("baseline"), named("events"));
@@ -948,6 +1046,30 @@ pub mod benchmark {
                 .map(|frame| frame.frame)
                 .collect()
         }
+
+        /// Encodes strictly increasing selected row indices from the same Arrow batch.
+        pub fn encode_selected_rows(&self, selected: &[usize]) -> Vec<EncodedFrame<ServerFrame>> {
+            self.encoder
+                .encode(
+                    self.batch.batch(),
+                    &self.keys,
+                    SubscriptionRowSelection::Rows(selected),
+                )
+                .assured("the fixed selected benchmark rows encode")
+                .into_iter()
+                .map(|frame| frame.frame)
+                .collect()
+        }
+
+        /// The schema the benchmark's Row frames must conform to.
+        pub fn schema(&self) -> &RowSchema {
+            &self.encoder.schema
+        }
+
+        /// The host's configured row cap used by this benchmark fixture.
+        pub fn rows_per_frame(&self) -> usize {
+            self.encoder.rows_per_frame.get()
+        }
     }
 
     fn named<N>(raw: &str) -> N
@@ -960,7 +1082,51 @@ pub mod benchmark {
 
     #[cfg(test)]
     mod tests {
+        use nervix_client_wire::{CellView, ServerEvent, ServerMessage, VerifiedFrame};
+
         use super::*;
+
+        #[test]
+        fn wide_and_selected_workloads_keep_exact_row_semantics() {
+            let rows = NonZeroUsize::new(100).assured("the benchmark row count is nonzero");
+            let detail_bytes =
+                NonZeroUsize::new(16).assured("the benchmark detail width is nonzero");
+            let benchmark = SubscriptionRowBenchmark::wide(rows, detail_bytes);
+            let selected = (0..rows.get()).step_by(3).collect::<Vec<_>>();
+            let frames = benchmark.encode_selected_rows(&selected);
+            let mut received = 0;
+            for frame in frames {
+                let verified = VerifiedFrame::verify(frame.into_bytes(), &SessionLimits::DEFAULT)
+                    .assured("the benchmark encodes valid frames");
+                let ServerMessage::Event(ServerEvent::SubscriptionRows(rows)) =
+                    ServerMessage::decode(&verified).assured("the benchmark frame decodes")
+                else {
+                    panic!("the benchmark encodes subscription rows");
+                };
+                let batch = rows.batch();
+                batch
+                    .conform(benchmark.schema())
+                    .assured("the benchmark rows follow their schema");
+                let first = batch.row(0).assured("the benchmark frame has a row");
+                assert!(matches!(first.get(4), Some(CellView::Bytes(value)) if value.len() == 16));
+                assert!(matches!(first.get(5), Some(CellView::String(value)) if value.len() == 16));
+                assert!(matches!(first.get(6), Some(CellView::Redacted)));
+                if let Some(second) = batch.row(1) {
+                    assert!(matches!(second.get(5), Some(CellView::Null)));
+                }
+                received += batch.len();
+            }
+            assert_eq!(received, selected.len());
+
+            let batched = SubscriptionRowBenchmark::batched(rows, detail_bytes);
+            assert_eq!(batched.encode_typed_rows().len(), 1);
+            let larger = SubscriptionRowBenchmark::batched(
+                NonZeroUsize::new(1_000).assured("the benchmark row count is nonzero"),
+                detail_bytes,
+            );
+            assert_eq!(larger.rows_per_frame(), 256);
+            assert_eq!(larger.encode_typed_rows().len(), 4);
+        }
 
         #[test]
         fn reports_typed_row_allocation_evidence() {

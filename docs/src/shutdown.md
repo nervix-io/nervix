@@ -189,6 +189,9 @@ the node restarts.
 The terminating node then stops new intake on **every** one of its ingestors, including endpoint and
 Syslog ingestors that serve on every node and ingestors whose scheduled owner did not move. Its
 generators stop producing. Intake never reopens: there is no resume path out of a shutdown drain.
+If a broker-style source is still resuming, the host cancels that pending resume when shutdown
+arrives, drops its DNS, socket and handshake work, and closes the source before exiting. A quiesce
+change also cancels an in-progress resume so the next loop turn observes the new intake state.
 
 This intake stop ignores `ON QUIESCE`. That clause governs what an external source experiences
 during a resumable hold — a model alteration, a domain pause, or memory-pressure shedding — where
@@ -611,6 +614,13 @@ node, but no runtime routes exist, so a payload it accepts cannot reach recovere
 A former owner restarted while cut off from consensus therefore produces no output, and once
 connectivity is restored it observes the current schedule and forwards traffic to the node that now
 owns the work.
+
+At startup the node offers the peer endpoints retained in its Raft membership as gossip seeds. A
+former bootstrap node therefore has a path back to surviving peers even if it was originally
+configured without a bootstrap host. The endpoints only initiate authenticated contact; gossip
+establishes each peer's current incarnation and endpoint before normal peer routing and runtime
+admission proceed. A recovered endpoint that does not resolve is skipped while other seeds and
+incoming gossip remain available.
 
 This is the fence that prevents crash recovery from reviving an obsolete owner. It is a
 process-start admission proof only: connectivity lost after admission does not revoke execution.

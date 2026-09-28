@@ -67,12 +67,27 @@ resolver's own lookup error. The sink changes it into a configuration failure fo
 address or CA file and an initialization failure otherwise, leading with the connection error's
 message, which `DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
 
+Syslog emission and WebSocket-client ingestion retain DNS failures from the node resolver beneath
+their existing infrastructure contexts: `SinkStartError::Initialize` while a Syslog sender opens
+and `SourceError::Resume` while a WebSocket source connects or reconnects. The resolver's typed
+missing-name, no-address, timeout, invalid-name or transport cause stays in the error report.
+Address, TLS and WebSocket-upgrade failures remain connection outcomes. None is a record rejection,
+and a DNS result by itself never marks a Syslog record delivered.
+
 A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar sink: a message
 larger than the maximum message size the broker announced, which carries the measured size of its
 metadata and payload and the limit as typed fields, or a message the broker answered with
 `NotAllowedError`, which carries the broker's reason. Either becomes a record rejection with code
 `external` and operation `publish`. Every other failure of the client, its connection or the broker
 stays an infrastructure failure of the attempt, which the emitter retries.
+
+A RabbitMQ publish that ends with the broker closing the sink's channel is classified by the
+broker's own reason, which the sink reads from its connection. A refusal of a message body larger
+than `max_message_size` is a `RabbitMqRecordError`, owned by the RabbitMQ sink, which carries the
+body size and the limit as typed fields and becomes a record rejection of that message with code
+`external` and operation `publish`, reaching every member of a batch message. Any other close, a
+lost connection, and a close whose reason never arrives fail the attempt as an infrastructure
+failure, which the emitter retries on its backoff.
 
 The vocabulary is the innermost owner, and its Model operations report the same way. An alteration
 is applied to a copy of the stored Model, which replaces the original only when every operation
