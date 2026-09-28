@@ -331,6 +331,7 @@ pub(super) async fn attach_loopback_cluster(
         ),
         interconnect_advertise_addr: interconnect_addr.into(),
         bootstrap_host: None,
+        recovery_endpoints: Default::default(),
         interconnect: interconnect.clone(),
         node_unavailability_timeout: Duration::from_secs(10),
     })
