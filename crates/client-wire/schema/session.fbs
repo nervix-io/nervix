@@ -131,7 +131,11 @@ table NodeRef {
 enum ChoiceTarget : ubyte {
   DomainPace,
   PlacementPolicy,
-  Schema
+  Schema,
+  Branch,
+  Relay,
+  /// The fields of one relay's records. Requires a domain and then a relay model reference.
+  RelayField
 }
 
 enum DomainPaceChoice : ubyte {
@@ -166,6 +170,11 @@ table ModelChoiceReference {
   node: NodeRef (required);
 }
 
+/// A field of the record the lookup's dependencies select, such as a relay's.
+table FieldChoiceReference {
+  field: string (required);
+}
+
 /// One typed selection. Requests use these as dependent selections and replies use them as the
 /// semantic value of an offered choice.
 union ChoiceValue {
@@ -173,7 +182,8 @@ union ChoiceValue {
   PlacementPolicyVariant,
   DomainChoiceReference,
   ResourceChoiceReference,
-  ModelChoiceReference
+  ModelChoiceReference,
+  FieldChoiceReference
 }
 
 table ChoiceSelection {

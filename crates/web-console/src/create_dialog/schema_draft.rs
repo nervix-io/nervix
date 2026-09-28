@@ -14,10 +14,12 @@ use std::{
 use error_stack::Report;
 use nervix_models::{
     AvroType, BranchEviction, BranchName, CborType, CreateBranch, CreateSchema, CreateWireSchema,
-    FieldName, JsonType, Model, ParseAsType, SchemaField, SchemaName, WireSchemaField,
-    WireSchemaName, WireSchemaStrictness,
+    FieldName, JsonType, Model, ModelKind, NodeRef, ParseAsType, SchemaField, SchemaName,
+    WireSchemaField, WireSchemaName, WireSchemaStrictness,
 };
 use thiserror::Error;
+
+use super::SelectedReference;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum WireFormat {
@@ -356,24 +358,46 @@ fn remove_item<T>(items: &mut Vec<T>, index: usize) {
 pub(super) struct BranchDraft {
     pub(super) name: String,
     pub(super) if_not_exists: bool,
-    pub(super) schema: Option<SchemaName>,
     /// A changed domain keeps the prior reference visible until it is reselected.
-    pub(super) schema_valid: bool,
+    pub(super) schema: Option<SelectedReference<SchemaName>>,
     pub(super) ttl: String,
     pub(super) limit_instances: bool,
     pub(super) max_instances: String,
 }
 
 impl BranchDraft {
+    pub(super) fn select_schema(&mut self, node: &NodeRef) {
+        if node.kind == ModelKind::Schema {
+            self.schema = Some(SelectedReference::chosen(SchemaName::from(
+                &node.identifier,
+            )));
+        }
+    }
+
+    pub(super) fn selects_schema(&self, node: &NodeRef) -> bool {
+        match &self.schema {
+            Some(schema) => schema.selects(ModelKind::Schema, node),
+            None => false,
+        }
+    }
+
+    /// Keeps the selected key schema visible after the draft moved to another domain, but
+    /// requires selecting it again.
+    pub(super) fn invalidate_references(&mut self) {
+        if let Some(schema) = &mut self.schema {
+            schema.invalidate();
+        }
+    }
+
     pub(super) fn build(&self) -> error_stack::Result<CreateBranch, SchemaDraftError> {
         let name = BranchName::parse(self.name.trim())
             .map_err(|_| Report::new(SchemaDraftError::BranchName))?;
         let Some(schema) = &self.schema else {
             return Err(Report::new(SchemaDraftError::SchemaReferenceRequired));
         };
-        if !self.schema_valid {
+        let Some(schema) = schema.current_name() else {
             return Err(Report::new(SchemaDraftError::SchemaReferenceChanged));
-        }
+        };
         let ttl = self.ttl.trim();
         if ttl.is_empty() {
             return Err(Report::new(SchemaDraftError::TtlRequired));
@@ -568,10 +592,11 @@ mod tests {
     #[test]
     fn branch_limit_and_invalid_drafts_keep_exact_required_values() {
         let schema = SchemaName::parse("branch_key").assured("the test name is valid");
+        let mut selected = SelectedReference::chosen(schema.clone());
+        selected.invalidate();
         let mut branch = BranchDraft {
             name: "by_key".to_string(),
-            schema: Some(schema.clone()),
-            schema_valid: false,
+            schema: Some(selected),
             ttl: "5m".to_string(),
             limit_instances: true,
             max_instances: "3".to_string(),
@@ -581,7 +606,7 @@ mod tests {
             draft_error(branch.build()),
             SchemaDraftError::SchemaReferenceChanged
         );
-        branch.schema_valid = true;
+        branch.schema = Some(SelectedReference::chosen(schema.clone()));
         let model = branch
             .build()
             .assured("the selected schema and positive limit are valid");
@@ -705,8 +730,9 @@ mod tests {
             draft_error(branch.build()),
             SchemaDraftError::SchemaReferenceRequired
         );
-        branch.schema = Some(SchemaName::parse("tenant_key").assured("valid schema name"));
-        branch.schema_valid = true;
+        branch.schema = Some(SelectedReference::chosen(
+            SchemaName::parse("tenant_key").assured("valid schema name"),
+        ));
         assert_eq!(draft_error(branch.build()), SchemaDraftError::TtlRequired);
     }
 

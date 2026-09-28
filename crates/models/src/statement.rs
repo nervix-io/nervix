@@ -784,7 +784,17 @@ fn format_relocation_members(members: &[RelocationMember]) -> String {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr, EnumString, IntoStaticStr,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    AsRefStr,
+    EnumIter,
+    EnumString,
+    IntoStaticStr,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE", ascii_case_insensitive)]
 pub enum SubscriptionDeliveryBehavior {
@@ -4925,10 +4935,23 @@ impl RelayBranching {
     }
 }
 
+/// The materialized state a relay keeps, spelled in `AsRefStr` as the keyword phrase that follows
+/// `WITH MATERIALIZED STATE`.
 #[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+    EnumIter,
 )]
 pub enum MaterializedRelayState {
+    #[strum(serialize = "LAST BY TIMESTAMP")]
     LastByTimestamp,
 }
 

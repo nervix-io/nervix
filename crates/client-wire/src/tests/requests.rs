@@ -12,8 +12,9 @@ use super::{
     samples::client_messages,
 };
 use crate::{
-    ClientMessage, ClientRequest, CommandRequest, SessionLimitSettings, SuggestRequest,
-    WireDecodeError, WireEncodeError, WireValueError, wire,
+    ChoiceLookupRequest, ChoiceSelection, ChoiceTarget, ChoiceValue, ClientMessage, ClientRequest,
+    CommandRequest, SessionLimitSettings, SuggestRequest, WireDecodeError, WireEncodeError,
+    WireValueError, wire,
 };
 
 #[test]
@@ -50,6 +51,26 @@ fn every_request_variant_is_sampled() {
         13,
         "the schema declares NONE and one member per request variant"
     );
+}
+
+#[test]
+fn a_field_reference_round_trips_as_a_choice_dependency() {
+    let message = ClientMessage {
+        request_id: request(1),
+        request: ClientRequest::Choice(ChoiceLookupRequest::new(
+            ChoiceTarget::RelayField,
+            vec![
+                ChoiceSelection {
+                    value: ChoiceValue::Domain(name("tenant")),
+                },
+                ChoiceSelection {
+                    value: ChoiceValue::Field(name("amount")),
+                },
+            ],
+            String::new(),
+        )),
+    };
+    assert_eq!(round_trip_client(&message), message);
 }
 
 #[test]
