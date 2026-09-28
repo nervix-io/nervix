@@ -3002,6 +3002,7 @@ button {
 
 .create-choice-buttons button,
 .create-choice-more,
+.create-choice-retry,
 .create-actions button {
   min-height: 31px;
   padding: 6px 10px;
@@ -3030,6 +3031,12 @@ button {
 
 .create-choice-state {
   color: var(--text-d);
+}
+
+.create-choice-recovery {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .choice-failed,

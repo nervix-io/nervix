@@ -16,15 +16,22 @@ DETACH DOMAIN CLOCK;
 Following a domain clock is not a subscription; see
 [Domain Clock Attachment](#domain-clock-attachment).
 
+This page describes sessions as a user of NSPL sees them. [Client Session
+Protocol](./client-session-protocol.md) explains the protocol that carries them, and the [Client
+Implementation Manual](./client-implementation-manual.md) states what a client implementation must
+do.
+
 Current session behavior:
 
 - subscription creation validates the statement against the relay as the cluster schedule declares
-  it, and attaches only while this node executes the relay with that declaration
+  it, and attaches only while the serving node declares the relay with that same definition, whether
+  or not it owns the relay and whether or not the domain is running
 - subscription names are unique within one connected session and may refer to relays in different domains
 - `DELETE SUBSCRIPTION` resolves only the session-local subscription name, independent of the currently active domain
 - subscribing to a relay collects records from all active branch groups for that relay
-- a branched subscription reports its concrete branch key with each record; sensitive branch-key
-  fields are masked using the same rules as sensitive relay fields
+- a branched subscription reports the concrete branch key of every batch of rows it delivers, and
+  the text view repeats it on each row; sensitive branch-key fields are masked using the same rules
+  as sensitive relay fields
 - subscriptions are read-only views; only an optional `WHERE` predicate is supported, and a
   selected record is delivered without construction or transformation
 - the predicate is an ordinary `BOOL` expression, including membership, range, and null-safe
@@ -33,12 +40,17 @@ Current session behavior:
 - bare fields, `message.<field>`, and `input.<field>` all read the subscribed relay record; the
   compiler rejects `output`, `branch`, and `relay_state` scopes when the subscription is created
 - subscription syntax does not accept `INHERIT`, `SET`, `VALUES`, `INVOKE`, or other side effects
-- each admitted subscription batch receives one snapshot from its relay's bound domain clock;
-  every predicate expression and volatile UDF call for that batch sees the same instant
-- optional `BATCH SAMPLE RATE <rate>` samples arrivals after `WHERE` has been evaluated
+- a subscription with a `WHERE` predicate reads one snapshot of the domain's clock on the serving
+  node for each batch it evaluates; every predicate expression and volatile UDF call for that batch
+  sees the same instant, and a batch whose domain time cannot be read is skipped and reported
+- optional `BATCH SAMPLE RATE <rate>` samples each selected row, after `WHERE` has been evaluated,
+  with a pseudo-random draw; a rate of `1` delivers every selected row and `0` delivers none
 - `BLOCKING` delivery waits for room in the session's subscription queue, which holds back the
   relay it reads, while `DROPPING` discards rows when that queue is full and reports how many it
-  discarded before its next rows
+  discarded before its next rows; the queue holds 16 frames shared by every subscription of the
+  session, and a count still outstanding when the subscription ends is not reported
+- subscription changes belong to the session rather than to a transaction, so `CREATE SUBSCRIPTION`
+  and `DELETE SUBSCRIPTION` are refused while the session holds a transaction
 - subscription events are delivered asynchronously to the connected client session
 - the relay owner is the sole subscription fan-out source, so each admitted batch is delivered at
   most once to a subscription even when producers and consumers run on several cluster nodes
@@ -49,9 +61,9 @@ Current session behavior:
 
 Sessions are runtime-facing protocol interactions, not part of the persisted namespace model.
 
-A terminal reply may hold up to 64 MiB, including one string of that size. A reply above the 4 MiB
-frame bound is carried as ordered transfer parts that each fit one frame, then validated and
-reassembled before the client exposes it. This is how a rendered transaction report larger than one
+A terminal reply may hold up to 64 MiB. A reply above the 4 MiB frame bound is carried as ordered
+transfer parts that each fit one frame, then validated and reassembled before the client exposes
+it. This is how a rendered transaction report larger than one
 frame reaches the Rust client, CLI, and browser without truncation. A reply above the transfer bound
 is rejected whole; no client receives a successful partial result.
 
@@ -71,13 +83,16 @@ subscription belongs to the session that created it and moves through one lifecy
   precedes it. When that reply cannot be delivered, because the request was cancelled, the session
   ended, or the reply did not fit the session limits, the subscription is abandoned before it
   delivers anything.
-- **Ended by the server.** When its relay is redefined, so that a field, a type, nullability,
-  sensitivity, or the branching changes, the subscription receives `SubscriptionEnded` with reason
+- **Ended by the server.** When its relay is redefined, so that a field's name, position, type,
+  nullability, or sensitivity changes, the relay becomes branched or unbranched, or its branch or
+  branch key schema changes, the subscription receives `SubscriptionEnded` with reason
   `RelayChanged`. When its relay or the relay's domain is removed, the reason is `RelayRemoved`.
   Either is the last frame about that generation, and no row of a redefined relay reaches a
   subscription announced under its earlier definition. Stopping and starting a domain, and
   rebuilds that keep the relay's definition, keep its subscriptions delivering. An ended
-  subscription can still be deleted by name, and its name can be used again at once.
+  subscription can still be deleted by name, and its name can be used again once its end has been
+  sent; because replies travel ahead of queued subscription frames, that end can reach the client
+  after the reply that opens the new generation.
 - **Deleted.** `DELETE SUBSCRIPTION`, or the end of the session, stops the subscription at once
   even while its client reads nothing, and discards the frames it still has queued. Nothing about
   that generation follows the reply that deleted it.
@@ -93,9 +108,12 @@ interest in a relay while at least one of its subscriptions holds it; see
 
 Subscriptions are live views. They do not replay rows, keep durable offsets, or deliver exactly
 once. A session is told of the rows it lost where the server knows of them: a `DROPPING`
-subscription reports the rows it discarded, and rows a filter could not evaluate or the encoder
-could not write are reported as skipped. Rows in transit can also be lost without a report while
-relay ownership moves between nodes or a node-to-node delivery fails.
+subscription reports the rows it discarded, and rows a filter could not evaluate, rows of a batch
+whose domain time could not be read, and every selected row of a batch the encoder could not fit
+into a frame are reported as skipped. Rows in transit can also be lost without a report while
+relay ownership moves between nodes or a node-to-node delivery fails. [Row
+Subscriptions](./client-session-protocol.md#row-subscriptions) lists every gap and whether it is
+reported.
 
 Typed Row subscription frames carry a `BYTES` field as raw octets in a `BytesCell`; clients read
 the value as borrowed bytes, including empty and non-UTF-8 sequences. JSON subscription views
@@ -106,8 +124,11 @@ reference to the authenticated owner, selected domain, and semantic command, con
 work after the session disconnects, and retains one terminal result for the command retry
 validity, 15 minutes by default. The reference is a UUIDv7 whose creation time bounds how long it
 may be retried. The CLI, web console, and Rust client reuse the reference through redirects and
-reconnects. Reuse for changed content fails. While a long command waits, transport keepalives, server events, and
-subscription delivery continue independently. See [Command Completion](command-completion.md).
+reconnects. Reuse for changed content fails. While a long command waits, server events,
+subscription delivery, completion, and transaction inspection continue independently; the
+session's later commands wait for it, because a session runs its commands in the order it received
+them. See [Command Completion](command-completion.md) and [Exact
+Recovery](./client-session-protocol.md#exact-recovery).
 
 ## Domain Clock Attachment
 
@@ -237,9 +258,9 @@ most one session. The session protocol can attach by transaction id; the authent
 match the transaction owner. A later attach takes over the binding and the displaced session gets
 an explicit takeover error on its next transaction operation.
 
-A transaction also carries the domain it is bound to. Attaching adopts that domain as the session's
-selected domain, so a session can never queue a statement for a different domain than the
-transaction it holds. `USE` remains unavailable while a transaction is active.
+A transaction also carries the domain it is bound to, and every statement queued in it must name
+that domain. The CLI, web console, and Rust client adopt the transaction's domain as their selected
+domain when they attach it, and refuse `USE` while a transaction is active.
 
 The CLI, web console, and Rust client retain the transaction id, each append's execution reference
 and expected position, and the commit execution reference. They automatically attach after a
@@ -249,13 +270,14 @@ the client attaches again and replays the command instead of surfacing it. An un
 or leadership change therefore leaves an open transaction intact until attach or idle expiry. A
 client matches the attached progress to the outstanding append or commit and does not satisfy that
 request from an unrelated transaction count. During election convergence, a client also retries a
-bounded interval when a peer cannot yet advertise the new leader. A clean end of the session
-preserves the existing interactive behavior by reverting a bound open transaction. Ending a
-session never reverts admitted append work or a transaction whose replicated state is already
-`COMMITTING`; the leader finishes it without a client.
+bounded interval when a peer cannot yet advertise the new leader. A session that its client closes
+cleanly, with no request in flight, reverts the open transaction bound to it on the leader; any
+other ending only releases the binding. Ending a session never reverts admitted append work or a
+transaction whose replicated state is already `COMMITTING`; the leader finishes it without a
+client.
 
 Finished transaction outcomes remain available during tombstone retention. Attach during that
-window reports `COMMITTED`, `FAILED`, `REVERTED`, or `EXPIRED` and includes structured commit
-status plus the retained per-statement results. After retention, attach reports an unknown
-transaction id. See
-[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions).
+window reports `COMMITTED`, `FAILED`, `REVERTED`, or `EXPIRED` with the structured final status and
+the transaction's aggregate outcome. After retention, attach reports an unknown transaction id. See
+[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions) and [Transactions Over
+The Protocol](./client-session-protocol.md#transactions-over-the-protocol).

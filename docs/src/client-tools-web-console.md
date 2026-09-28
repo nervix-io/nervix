@@ -66,8 +66,12 @@ same creation modifier.
 
 Pace and placement are typed choices supplied by the session server. They are searchable and
 paged independently, and the placement lookup carries the selected pace as a typed dependency.
-Loading, no-match, stale-context, and lookup-failure states remain distinct. An edit, dialog close,
-or replacement session makes an older reply ineligible to change the form.
+Loading and no matches have separate neutral messages. A missing prerequisite, such as a captured
+domain or a selected relay for its field list, shows a neutral hint naming what to choose. A stale
+choice page shows a neutral message and **Retry**, which requests a fresh first page. Lookup,
+session-channel, and unreadable-reply failures remain alerts. These states apply to the domain,
+branch, relay, and subscription forms. An edit, dialog close, or replacement session makes an
+older reply ineligible to change the form.
 
 A resource draft captures the selected domain the first time it opens. If the console later
 selects another domain, reopening the retained draft keeps its captured scope and offers **Use
@@ -205,8 +209,8 @@ predicate over the relay's record. While it is edited, the form shows its canoni
 refuses to submit text that is not an expression. Checking the fields, scopes, and types the
 predicate uses belongs to the server, which reports a failure such as a string compared with an
 integer field when the subscription is created. Delivery is `BLOCKING` or `DROPPING`, and batch
-sampling takes a rate from 0 through 1. The preview is the canonical `CREATE SUBSCRIPTION`
-statement the tab sends.
+sampling takes a rate from 0 through 1 that each selected row passes with that probability. The
+preview is the canonical `CREATE SUBSCRIPTION` statement the tab sends.
 
 Submitting opens the tab through the same subscription lifecycle as a `CREATE SUBSCRIPTION` typed in
 the REPL. The tab waits until the session can serve it, opens and becomes active once the server
@@ -260,7 +264,8 @@ commit remains pending through `COMMITTING` until its exact terminal result. A
 second session can attach the same owner's transaction and take it over; the displaced console
 then gets an explicit takeover error. A clean console session close reverts an open transaction,
 while an accepted commit continues on the leader without the browser. See
-[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions).
+[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions) and
+[Client Session Protocol](client-session-protocol.md).
 
 `Tab` cycles through completions offered by the server for the current cursor position. `ArrowUp`
 and `ArrowDown` walk the session's command history, `Ctrl`/`Cmd` with `Enter` submits, and `clear`

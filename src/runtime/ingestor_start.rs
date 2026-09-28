@@ -276,24 +276,19 @@ impl Runtime {
 
     pub(in crate::runtime) async fn load_lookup_runtime(
         &self,
-        domain: &DomainName,
-        lookup: CreateLookup,
+        lookup: LookupResourcePlan,
         codec: Arc<CompiledCodec>,
     ) -> LookupRuntimeResult<LookupRuntime> {
+        let domain = &lookup.resource.domain;
         let Some(resource_store) = self.inner.resource_store.load_full() else {
             return Err(Report::new(LookupRuntimeError::ResourceStoreUnavailable));
         };
-        let resource_id = ResourceId::new(
-            domain.clone(),
-            lookup.resource.clone(),
-            lookup.resource_version,
-        );
         let path = resource_store
-            .resolve_content_path(&resource_id, &lookup.path)
+            .resolve_content_path(&lookup.resource, &lookup.path)
             .change_context(LookupRuntimeError::ResolveContentPath {
                 domain: domain.clone(),
                 lookup: lookup.name.clone(),
-                resource: lookup.resource.clone(),
+                resource: lookup.resource.identifier.clone(),
                 path: lookup.path.clone(),
             })?;
         let file = tokio::fs::File::open(&path).await.map_err(|source| {
@@ -374,7 +369,7 @@ impl Runtime {
             "received",
         );
         Ok(LookupRuntime {
-            model: lookup,
+            plan: lookup,
             schema,
             batch: Arc::new(batch),
             entries: Arc::new(entries),

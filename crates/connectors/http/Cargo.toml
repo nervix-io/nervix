@@ -19,13 +19,19 @@ shuttle = [
 [dependencies]
 async-trait = { workspace = true }
 error-stack = { workspace = true }
+httparse = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 reqwest = { workspace = true, features = ["rustls"] }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
 shuttle-tokio = { workspace = true, features = ["rt"], optional = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["io-util", "net", "rt", "time"] }
+tokio-rustls = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
+meticulous = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

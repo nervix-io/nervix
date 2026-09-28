@@ -699,7 +699,13 @@ bench *args: build-web-console
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
     cargo bench --package nervix-server --bench wasm_checkpoint --features benchmarks -- {{ args }}
+    cargo bench --package nervix-columnar-json --bench json_encode -- {{ args }}
     cargo bench --package nervix-vm --bench vm -- {{ args }}
+
+# Measure one batch of schemaful JSON rows, including the escape classification made once per
+# Arrow batch. The suite compares the column writer against serde's per-row reference encoding.
+bench-json-encode *args:
+    cargo bench --package nervix-columnar-json --bench json_encode -- {{ args }}
 
 # Measure direct Arrow-to-Row subscription encoding. The suite reports encoded bytes before
 # Criterion measures CPU; its unit probe measures allocations.
