@@ -3,9 +3,10 @@
 //!
 //! - **Owns.** Sending requests on the current exchange, the redirects, retries and reconnects a
 //!   reply calls for, the session's selected domain and transaction binding, the statements the
-//!   client serves itself, and attaching the domain clocks it follows again on a new exchange.
-//! - **Depends on.** The exchange dispatcher, the connector, the wire contract, and the language
-//!   layer for splitting and classifying statements.
+//!   client serves itself, and installing a new exchange, on which it restores what it holds before
+//!   it attaches its transaction.
+//! - **Depends on.** The exchange dispatcher, the restoration of a new exchange, the connector, the
+//!   wire contract, and the language layer for splitting and classifying statements.
 //! - **Must not know.** How a frame is routed off an exchange.
 
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc as SharedClientArc, time::Duration};
@@ -41,7 +42,11 @@ use crate::{
     events::{ServerEvent, SubscriptionEvent, SubscriptionRequest},
     exchange::{EventQueueError, Exchange, ExchangeRequests, SESSION_LIMITS, SessionEvents},
     outcome::{CommandOutcome, Routing},
-    subscriptions::{DeleteAttempt, RestoreAttempt, SubscriptionContract, SubscriptionLifecycle},
+    restoration::Restoration,
+    subscriptions::{
+        Cancellation, DeleteAttempt, DeletionResolution, DeletionTarget, RestoreAttempt,
+        SubscriptionContract, SubscriptionLifecycle,
+    },
 };
 
 /// What a command expects of the transaction it runs against.
@@ -733,26 +738,30 @@ impl Client {
                 })
                 .await
                 .map_err(ClientError::SubscriptionTask)?;
-                result.map_err(|report| {
-                    ClientError::SubscriptionOperation(Box::new(report.into_error()))
-                })
+                result.map_err(ClientError::subscription_operation)
             }
             StatementRoute::Unsubscribe(subscription) => {
                 let exchange = self.inner.exchange.lock().await;
                 let requests = exchange.requests();
                 let generation = exchange.generation.clone();
                 drop(exchange);
-                let Some(attempt) = self
+                let cancellation = self
                     .inner
                     .events
                     .sinks
                     .desired
-                    .cancel(subscription, generation)
-                else {
-                    return Ok(CommandOutcome::failed_locally(format!(
-                        "subscription '{}' is already being deleted",
-                        subscription.as_str()
-                    )));
+                    .cancel(subscription, generation);
+                let attempt = match cancellation {
+                    Cancellation::InFlight => {
+                        return Ok(CommandOutcome::failed_locally(format!(
+                            "subscription '{}' is already being deleted",
+                            subscription.as_str()
+                        )));
+                    }
+                    Cancellation::Closed => {
+                        return Ok(Self::held_by_no_session(subscription));
+                    }
+                    Cancellation::Delete(attempt) => attempt,
                 };
                 let client = self.clone();
                 let result =
@@ -761,9 +770,7 @@ impl Client {
                     )
                     .await
                     .map_err(ClientError::SubscriptionTask)?;
-                result.map_err(|report| {
-                    ClientError::SubscriptionOperation(Box::new(report.into_error()))
-                })
+                result.map_err(ClientError::subscription_operation)
             }
             StatementRoute::Command => {
                 let request = ClientRequest::Command(CommandRequest {
@@ -787,6 +794,22 @@ impl Client {
                 }
             }
         }
+    }
+
+    /// The outcome of deleting a subscription that no open session holds.
+    fn held_by_no_session(subscription: &SubscriptionName) -> CommandOutcome {
+        CommandOutcome::completed_locally(format!(
+            "subscription '{}' deleted; no open session held it",
+            subscription.as_str()
+        ))
+    }
+
+    /// The outcome of deleting a subscription whose session ended, and the subscription with it.
+    fn closed_with_session(subscription: &SubscriptionName) -> CommandOutcome {
+        CommandOutcome::completed_locally(format!(
+            "subscription '{}' closed with its session",
+            subscription.as_str()
+        ))
     }
 
     /// Completes a registered creation even if its caller stops waiting. The contract, ticket and
@@ -830,6 +853,9 @@ impl Client {
 
     /// Completes deletion even when its caller is cancelled. Waiting for an in-flight creation
     /// keeps the exchange reader draining, and avoids deleting before a late success is known.
+    ///
+    /// A subscription whose session ends before the deletion is answered ended with it, so that
+    /// deletion is complete. A name the client never held is asked about on a new session.
     async fn delete_subscription(
         &self,
         attempt: DeleteAttempt,
@@ -839,15 +865,15 @@ impl Client {
         let mut changed = desired.watch();
         while desired.deletion_waits(&attempt) {
             tokio::task::consume_budget().await;
-            if changed.changed().await.is_err() {
-                return Err(error_stack::Report::new(ClientError::SessionClosed));
-            }
+            changed
+                .changed()
+                .await
+                .assured("the client holds the sender of its own subscription notifications");
         }
-        if !desired.deletion_active(&attempt) {
-            return Ok(CommandOutcome::completed_locally(format!(
-                "subscription '{}' closed with its session",
-                attempt.name.as_str()
-            )));
+        match desired.deletion_target(&attempt) {
+            DeletionTarget::SessionEnded => return Ok(Self::closed_with_session(&attempt.name)),
+            DeletionTarget::NotOpened => return Ok(Self::held_by_no_session(&attempt.name)),
+            DeletionTarget::Server => {}
         }
         let request = ClientRequest::Unsubscribe(UnsubscribeRequest {
             subscription: attempt.name.clone(),
@@ -856,68 +882,32 @@ impl Client {
         match response {
             Ok(ReplyBody::Unsubscribe(outcome)) => {
                 let outcome = CommandOutcome::from(outcome);
-                desired.deleted(&attempt, outcome.succeeded());
+                let resolution = if outcome.succeeded() {
+                    DeletionResolution::Deleted
+                } else {
+                    DeletionResolution::Refused
+                };
+                desired.deleted(&attempt, resolution);
                 Ok(outcome)
             }
             Ok(other) => {
-                desired.deleted(&attempt, false);
+                desired.deleted(&attempt, DeletionResolution::Refused);
                 Err(error_stack::Report::new(ClientError::unexpected_reply(
                     RequestKind::Unsubscribe,
                     other,
                 )))
             }
-            Err(error) => {
-                desired.deleted(&attempt, false);
+            Err(error) if error.retryable_session_failure() => {
+                desired.deleted(&attempt, DeletionResolution::SessionEnded);
+                if attempt.tracked {
+                    return Ok(Self::closed_with_session(&attempt.name));
+                }
                 Err(error_stack::Report::new(error))
             }
-        }
-    }
-
-    pub(crate) fn restore_subscriptions(
-        &self,
-        generation: Arc<()>,
-        exchange: Arc<ExchangeRequests>,
-    ) {
-        let attempts = self.inner.events.sinks.desired.restore(generation.clone());
-        for initial in attempts {
-            let client = SharedClientArc::downgrade(&self.inner);
-            let exchange = exchange.clone();
-            let generation = generation.clone();
-            tokio::spawn(async move {
-                let name = initial.contract.create.name.clone();
-                let mut attempt = initial;
-                loop {
-                    tokio::task::consume_budget().await;
-                    let Some(inner) = client.upgrade() else {
-                        return;
-                    };
-                    let active_client = Client { inner };
-                    let statement = attempt.contract.request().statement;
-                    let outcome = active_client
-                        .create_subscription(attempt, exchange.clone(), statement, 0)
-                        .await;
-                    drop(active_client);
-                    match outcome {
-                        Ok(outcome) if outcome.succeeded() => return,
-                        Ok(_) => {}
-                        Err(error) => {
-                            tracing::debug!(%error, "subscription restoration remains interrupted");
-                        }
-                    }
-                    if !exchange.pending.lock().is_open() {
-                        return;
-                    }
-                    sleep(Duration::from_secs(1)).await;
-                    let Some(inner) = client.upgrade() else {
-                        return;
-                    };
-                    let next = inner.events.sinks.desired.retry(&name, &generation);
-                    let Some(next) = next else {
-                        return;
-                    };
-                    attempt = next;
-                }
-            });
+            Err(error) => {
+                desired.deleted(&attempt, DeletionResolution::Refused);
+                Err(error_stack::Report::new(error))
+            }
         }
     }
 
@@ -1096,8 +1086,8 @@ impl Client {
     pub async fn next_subscription(&self) -> Result<SubscriptionEvent, ClientError> {
         loop {
             tokio::task::consume_budget().await;
-            if let Some(interrupted) = self.inner.events.sinks.desired.take_interruption() {
-                return Ok(SubscriptionEvent::Interrupted(interrupted));
+            if let Some(event) = self.inner.events.sinks.desired.take_event() {
+                return Ok(event);
             }
             let desired = &self.inner.events.sinks.desired;
             let mut desired_changed = desired.watch();
@@ -1129,8 +1119,8 @@ impl Client {
                     });
                 }
                 Err(_) => {
-                    if let Some(interrupted) = self.inner.events.sinks.desired.take_interruption() {
-                        return Ok(SubscriptionEvent::Interrupted(interrupted));
+                    if let Some(event) = self.inner.events.sinks.desired.take_event() {
+                        return Ok(event);
                     }
                     if !self.inner.events.sinks.desired.has_acknowledged_desired() {
                         return Err(ClientError::SessionClosed);
@@ -1265,31 +1255,6 @@ impl Client {
         }
     }
 
-    /// Attaches every domain clock the client follows on a new exchange before the exchange is
-    /// published, so no other request of the client precedes those attachments on it.
-    ///
-    /// No caller waits for these replies. The exchange reader applies each one to the followed
-    /// clocks as it arrives, which moves the attachment to the new exchange.
-    async fn restore_domain_clocks(&self, exchange: &ExchangeRequests) {
-        for domain in self.inner.events.sinks.clocks.followed_domains() {
-            tokio::task::consume_budget().await;
-            let Some(registered) = exchange.register() else {
-                return;
-            };
-            let message = ClientMessage {
-                request_id: registered.request_id,
-                request: ClientRequest::AttachDomainClock(AttachDomainClockRequest { domain }),
-            };
-            let frame = message.encode(&SESSION_LIMITS).assured(
-                "an attach request names one domain, far below the session limits a client uses",
-            );
-            drop(registered);
-            if exchange.frames.send(frame).await.is_err() {
-                return;
-            }
-        }
-    }
-
     /// Waits for the next complete domain list the server observes. Only the latest list is kept,
     /// so a caller that reads late gets the current list rather than every list in between.
     pub async fn next_domain_list(&self) -> Result<Vec<DomainInfo>, ClientError> {
@@ -1410,12 +1375,23 @@ impl Client {
         )
         .await?;
         self.inner.servers.lock().await.connected(server);
-        self.restore_domain_clocks(&exchange.requests()).await;
+        self.install(exchange).await;
+        Ok(())
+    }
+
+    /// Makes `exchange` the client's exchange, restores on it what the client holds, and ends
+    /// the exchange it replaces.
+    ///
+    /// Every restoration request is sent before this returns, so a transaction the caller
+    /// attaches afterwards follows them: a session that holds a transaction refuses both.
+    pub(crate) async fn install(&self, exchange: Exchange) {
+        let mut restoration = Restoration::new(&exchange, self.inner.connector.request_timeout());
+        restoration.attach_followed_clocks().await;
         let previous = std::mem::replace(&mut *self.inner.exchange.lock().await, exchange);
         previous.close().await;
-        let exchange = self.inner.exchange.lock().await;
-        self.restore_subscriptions(exchange.generation.clone(), exchange.requests());
-        Ok(())
+        restoration.attach_interrupted_clocks().await;
+        restoration.open_subscriptions().await;
+        restoration.follow();
     }
 
     /// Reconnects a lost session and attaches its transaction again.

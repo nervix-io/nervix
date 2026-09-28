@@ -1214,6 +1214,11 @@ fn format_subscription_event(event: &SubscriptionEvent) -> Vec<String> {
             "[events] subscription [{subscription}] notice: delivery was interrupted; rows may be \
              missing before restoration"
         )],
+        SubscriptionEvent::RestorationFailed(failure) => vec![format!(
+            "[events] subscription [{subscription}] notice: opening the subscription again \
+             failed: {}; the next attempt follows in {:?}",
+            failure.message, failure.retry_after
+        )],
         SubscriptionEvent::ConsumerOverflow(_) => vec![format!(
             "[events] subscription [{subscription}] notice: the client event buffer filled; \
              delivery ended with a gap"
@@ -1236,6 +1241,11 @@ fn format_domain_clock_event(event: &DomainClockEvent) -> String {
             "[events] domain clock [{}] notice: the session was interrupted; the clock is \
              attached again on the next session",
             interrupted.domain
+        ),
+        DomainClockEvent::RestorationFailed(failure) => format!(
+            "[events] domain clock [{}] notice: attaching the clock again failed: {}; the next \
+             attempt follows in {:?}",
+            failure.domain, failure.message, failure.retry_after
         ),
     }
 }
@@ -2237,6 +2247,21 @@ mod tests {
                  could not take them in time"
             ]
         );
+
+        let refused = SubscriptionEvent::RestorationFailed(
+            nervix_client_core::SubscriptionRestorationFailure {
+                subscription: live_subscription(),
+                message: "stream 'orders' does not exist in domain 'tenant'".to_string(),
+                retry_after: std::time::Duration::from_secs(2),
+            },
+        );
+        assert_eq!(
+            format_subscription_event(&refused),
+            [
+                "[events] subscription [live] notice: opening the subscription again failed: \
+                 stream 'orders' does not exist in domain 'tenant'; the next attempt follows in 2s"
+            ]
+        );
     }
 
     #[test]
@@ -2261,6 +2286,18 @@ mod tests {
             format_domain_clock_event(&ended),
             "[events] domain clock [sim] notice: the attachment ended because the domain no \
              longer exists on the serving node"
+        );
+        let refused = DomainClockEvent::RestorationFailed(
+            nervix_client_core::DomainClockRestorationFailure {
+                domain: domain.clone(),
+                message: "the session holds a transaction".to_string(),
+                retry_after: std::time::Duration::from_secs(4),
+            },
+        );
+        assert_eq!(
+            format_domain_clock_event(&refused),
+            "[events] domain clock [sim] notice: attaching the clock again failed: the session \
+             holds a transaction; the next attempt follows in 4s"
         );
         let interrupted =
             DomainClockEvent::Interrupted(nervix_client_core::DomainClockInterruption { domain });

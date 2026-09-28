@@ -97,6 +97,17 @@ redefined, so the announced schema no longer describes its rows, or `RelayRemove
 or its domain no longer exists. The end is the last event of that subscription; subscribe again to
 keep reading a redefined relay. See [Sessions](sessions.md#subscription-lifecycle).
 
+A subscription the server acknowledged outlives its session. When the session ends,
+`next_subscription()` reports `Interrupted`, the gap before the subscription opens again, and the
+client opens it again as a new generation on its next session. When that session refuses it, for
+example because its relay no longer exists, `next_subscription()` reports `RestorationFailed` with
+the server's message and the wait before the next attempt; the client keeps trying on that session,
+after a wait that starts at one second and doubles up to thirty seconds, until the subscription
+opens, the session ends, or the subscription is deleted. `Client::subscription_lifecycle(&name)`
+reads the state a subscription is in. `subscribe` and `unsubscribe` reopen a closed session like
+every other call. Deleting a subscription that no open session holds, because its session ended or
+the current session refused to open it again, completes without a request and releases the name.
+
 ## Following A Domain Clock
 
 `execute` routes `ATTACH DOMAIN CLOCK;` and `DETACH DOMAIN CLOCK;` the way it routes `USE`: it sends
@@ -132,6 +143,9 @@ match client.next_domain_clock_event().await? {
     DomainClockEvent::Observed(observed) => println!("{}", observed.clock),
     DomainClockEvent::Ended(ended) => println!("ended because {}", ended.reason),
     DomainClockEvent::Interrupted(gap) => println!("{} is attached again", gap.domain),
+    DomainClockEvent::RestorationFailed(failure) => {
+        println!("{}: {}; retrying in {:?}", failure.domain, failure.message, failure.retry_after)
+    }
 }
 ```
 
@@ -149,9 +163,12 @@ longer exists on the serving node, and `Interrupted` when the session holding an
 Events are coalesced per domain, so a caller that reads late receives the newest clock of each
 domain rather than every change in between. After a reconnect, the client attaches every followed
 clock again on the new session before any other request, and the clock that attachment reports
-follows the interruption as an `Observed` event; changes in between are not reported. Waiting for
-the next event reopens a closed session when a followed clock waits for it. A detach, or an end,
-stops following the domain, and `domain_clock` returns `None` for it afterwards.
+follows the interruption as an `Observed` event; changes in between are not reported. When the new
+session refuses that attach or leaves it unanswered, the event is `RestorationFailed` with the
+server's message and the wait before the client sends the attach again on the same session; the
+wait starts at one second and doubles up to thirty seconds. Waiting for the next event reopens a
+closed session when a followed clock waits for it. A detach, or an end, stops following the domain,
+and `domain_clock` returns `None` for it afterwards.
 
 ## Transaction Handles And Attach
 

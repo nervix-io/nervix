@@ -864,7 +864,11 @@ async fn measure_control_with_slow_subscriber(
             Ok(Ok(SubscriptionEvent::ConsumerOverflow(_))) => consumer_overflow_events += 1,
             Ok(Ok(SubscriptionEvent::DeliveryLost(_))) => delivery_lost_events += 1,
             Ok(Ok(SubscriptionEvent::RowsSkipped(_))) => rows_skipped_events += 1,
-            Ok(Ok(SubscriptionEvent::Ended(_) | SubscriptionEvent::Interrupted(_))) => {
+            Ok(Ok(
+                SubscriptionEvent::Ended(_)
+                | SubscriptionEvent::Interrupted(_)
+                | SubscriptionEvent::RestorationFailed(_),
+            )) => {
                 return Err(anyhow!("slow subscriber ended during control measurement"));
             }
             Ok(Err(error)) => return Err(error).context("slow subscriber read failed"),

@@ -136,6 +136,16 @@ A domain clock line follows every change after the attach reply. When the server
 attachment, or the session holding it is interrupted and the clock is attached again on the next
 session, the line reads `[events] domain clock [<domain>] notice: ...` with the reason.
 
+After a reconnect the CLI opens every subscription and attaches every clock again. When the new
+session refuses one, a notice line reports the server's message and when the next attempt follows:
+
+```text
+[events] subscription [watch] notice: opening the subscription again failed: stream 'orders' does not exist in domain 'quickstart'; the next attempt follows in 2s
+```
+
+`DELETE SUBSCRIPTION` of a subscription no open session holds, because its session ended or the new
+session refused to open it again, completes at once and frees the name.
+
 ### Leaving
 
 `exit`, `quit`, `Ctrl-D`, or `Ctrl-C`.

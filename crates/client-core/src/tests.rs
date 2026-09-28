@@ -8,7 +8,10 @@
 //! gRPC server.
 
 // A Shuttle build replaces the client's synchronization with models that only run inside a
-// Shuttle test, so the tests over a real connection drive the production build only.
+// Shuttle test, so the tests over a real connection, and those that pause Tokio's clock, drive the
+// production build only.
+#[cfg(not(feature = "shuttle"))]
+mod restoration;
 #[cfg(not(feature = "shuttle"))]
 mod session;
 
@@ -335,6 +338,8 @@ impl Loopback {
             .assured("the client waits for the reply to its request");
     }
 
+    /// Replaces the exchange the way a reconnect does, restoring on the replacement what the
+    /// client holds.
     async fn replace_exchange(&mut self) {
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
@@ -342,15 +347,9 @@ impl Loopback {
         let sinks = self.client.inner.events.sinks.clone();
         replacement.generation = sinks.begin_generation();
         replacement.sinks = sinks;
-        let mut current = self.client.inner.exchange.lock().await;
-        let previous = std::mem::replace(&mut *current, replacement);
-        drop(current);
-        previous.close().await;
         self.requests = requests;
         self.pending = pending;
-        let current = self.client.inner.exchange.lock().await;
-        self.client
-            .restore_subscriptions(current.generation.clone(), current.requests());
+        self.client.install(replacement).await;
     }
 }
 
@@ -2086,7 +2085,15 @@ async fn a_session_lost_during_unsubscribe_releases_the_name_on_the_next_exchang
         .events
         .sinks
         .close_generation(&generation);
-    assert!(deleting.await.assured("the delete task completes").is_err());
+    let deleted = deleting
+        .await
+        .assured("the delete task completes")
+        .assured("the subscription ended with its session");
+    assert!(deleted.succeeded());
+    assert_eq!(
+        deleted.message,
+        "subscription 'live' closed with its session"
+    );
     let name = SubscriptionName::parse("live").assured("the test name is valid");
     assert_eq!(loopback.client.subscription_lifecycle(&name), None);
 

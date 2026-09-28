@@ -160,7 +160,10 @@ typedef enum nx_event_kind {
     /* The session was lost, leaving a gap before the subscription is restored. */
     NX_EVENT_INTERRUPTED = 5,
     /* The session could not retain more events for this subscription. */
-    NX_EVENT_CONSUMER_OVERFLOW = 6
+    NX_EVENT_CONSUMER_OVERFLOW = 6,
+    /* The session refused to open the interrupted subscription again, or did not answer; the
+       subscription stays interrupted and the session tries again later. */
+    NX_EVENT_RESTORATION_FAILED = 7
 } nx_event_kind;
 
 /* ---- Errors ------------------------------------------------------------------------------- */

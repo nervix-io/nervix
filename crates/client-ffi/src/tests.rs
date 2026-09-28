@@ -13,7 +13,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
     ClientError, CommandDisposition, CommandExecutionReference, CommandOutcome, Diagnostic,
     LeaderRedirect, OutcomeOrigin, RowSchema, SourceSpan, SubscriptionEvent, SubscriptionHandle,
-    SubscriptionInterruption, SubscriptionOpened, SubscriptionRowsEvent, UnknownOutcomeCause,
+    SubscriptionInterruption, SubscriptionOpened, SubscriptionRestorationFailure,
+    SubscriptionRowsEvent, UnknownOutcomeCause,
     wire::{
         CellWriter, RequestRejection, RowBranch, RowsSkippedCause, ServerEvent, ServerMessage,
         SessionLimits, SubscriptionDeliveryLost, SubscriptionEndReason, SubscriptionEnded,
@@ -707,6 +708,15 @@ fn every_event_kind_reports_its_subscription_and_count() {
                 subscription: handle(),
             }),
             EventKind::Interrupted,
+            0,
+        ),
+        (
+            SubscriptionEvent::RestorationFailed(SubscriptionRestorationFailure {
+                subscription: handle(),
+                message: "stream 'orders' does not exist".to_string(),
+                retry_after: Duration::from_secs(2),
+            }),
+            EventKind::RestorationFailed,
             0,
         ),
         (
