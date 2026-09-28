@@ -485,11 +485,7 @@ impl RemoteDispatcher {
                         relay: relay.clone(),
                         key: BranchKey::to_remote_key(&batch.key),
                         batch_ipc: batch_ipc.clone(),
-                        metadata: batch
-                            .metadata
-                            .iter()
-                            .map(RuntimeRecordMetadata::to_remote)
-                            .collect(),
+                        metadata: batch.metadata.to_remote(),
                         acks: vec![None; batch.acks.len()],
                         admission: None,
                     },
@@ -896,11 +892,7 @@ impl Runtime {
             schema,
             branch_key,
             decoded_batch,
-            remote
-                .metadata
-                .into_iter()
-                .map(RuntimeRecordMetadata::from_remote)
-                .collect(),
+            RecordMetadataColumns::from_remote(remote.metadata),
             acks,
         )
         .map_err(|reason| RuntimeError::DecodeRemoteRelay {
@@ -1031,11 +1023,7 @@ impl Runtime {
             schema,
             branch_key,
             decoded_batch,
-            remote
-                .metadata
-                .into_iter()
-                .map(RuntimeRecordMetadata::from_remote)
-                .collect(),
+            RecordMetadataColumns::from_remote(remote.metadata),
             vec![AckSet::empty(); ack_count],
         )
         .map_err(|reason| RuntimeError::DecodeRemoteRelay {

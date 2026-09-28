@@ -1573,12 +1573,13 @@ async fn a_three_destination_fanout_shares_one_encoded_body() {
                 .batch_from_test_rows([[("user_id".to_string(), RuntimeValue::U32(7))]])
                 .expect("the fanout test batch should build"),
         ),
-        metadata: vec![
-            test_runtime_row([("user_id".to_string(), RuntimeValue::U32(7))])
-                .with_ingested_at_watermarks(Timestamp::from_unix_nanos(11))
-                .metadata()
-                .clone(),
-        ],
+        metadata: RecordMetadataColumns::from_rows([test_runtime_row([(
+            "user_id".to_string(),
+            RuntimeValue::U32(7),
+        )])
+        .with_ingested_at_watermarks(Timestamp::from_unix_nanos(11))
+        .metadata()
+        .clone()]),
         acks: vec![AckSet::empty()],
     };
 

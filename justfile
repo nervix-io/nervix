@@ -719,6 +719,17 @@ bench-smoke: build-web-console
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
 
+# Run only the relay-interaction Criterion suite, including the delivery a node input records for
+# one batch at 1, 64, and 1,024 rows. Extra arguments are forwarded to Criterion.
+bench-relay-interaction *args: build-web-console
+    cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
+
+# Build the SIMD kernel crate's optimized unit-test binary for the x86-64-v3 payload the Docker
+# image ships, in its own target directory, so the generated instructions of each dispatch level can
+# be inspected with objdump without the host's native CPU tuning.
+build-simd-kernels-x86-64-v3:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/simd-kernels-x86-64-v3" RUSTFLAGS="-C target-cpu=x86-64-v3" cargo test --release --package nervix-simd-kernels --lib --no-run
+
 # Measure one batch of schemaful JSON rows, including the escape classification made once per
 # Arrow batch. The suite compares the column writer against serde's per-row reference encoding.
 bench-json-encode *args:

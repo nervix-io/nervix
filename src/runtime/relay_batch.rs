@@ -8,12 +8,11 @@ use meticulous::OptionExt as _;
 use nervix_models::Timestamp;
 use triomphe::Arc;
 
-use super::BranchKey;
+use super::{BranchKey, RecordMetadataColumns};
 use crate::{
+    metrics::DeliveryObservation,
     runtime_ack::AckSet,
-    runtime_schema::{
-        CompiledSchema, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow, RuntimeSchemaError,
-    },
+    runtime_schema::{CompiledSchema, RuntimeRecordBatch, RuntimeRow, RuntimeSchemaError},
 };
 
 #[derive(Debug, Clone)]
@@ -28,13 +27,8 @@ pub(crate) struct RelayRecordBatch {
     pub(super) key: Option<BranchKey>,
     pub(super) keys: Vec<Option<BranchKey>>,
     pub(super) batch: Arc<RuntimeRecordBatch>,
-    pub(super) metadata: Vec<RuntimeRecordMetadata>,
+    pub(super) metadata: RecordMetadataColumns,
     pub(super) acks: Vec<AckSet>,
-}
-
-pub(super) struct RelayDeliveryObservation {
-    pub(super) domain_timestamp: Option<Timestamp>,
-    pub(super) latency_seconds: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy, strum::Display)]
@@ -138,7 +132,7 @@ impl<T> RelayRecordBatchFailure<T> {
 /// is why this is not simply the batch plus metadata.
 pub(super) struct UnkeyedRelayBatchParts {
     pub(super) batch: Arc<RuntimeRecordBatch>,
-    pub(super) metadata: Vec<RuntimeRecordMetadata>,
+    pub(super) metadata: RecordMetadataColumns,
     pub(super) keys: Vec<Option<BranchKey>>,
     pub(super) acks: Vec<AckSet>,
 }
@@ -159,13 +153,13 @@ impl RelayRecordBatch {
         &self,
         row: usize,
     ) -> error_stack::Result<RuntimeRow, RelayRecordBatchError> {
-        if self.metadata.get(row).is_none() {
+        let Some(metadata) = self.metadata.row(row) else {
             return Err(Report::new(RelayRecordBatchError::MetadataRowOutOfBounds {
                 row,
                 metadata_rows: self.metadata.len(),
             }));
-        }
-        RuntimeRow::new(self.batch.clone(), row, self.metadata[row].clone()).change_context(
+        };
+        RuntimeRow::new(self.batch.clone(), row, metadata).change_context(
             RelayRecordBatchError::RuntimeSchema {
                 operation: RelayRecordBatchOperation::AddressRow,
             },
@@ -202,10 +196,11 @@ impl RelayRecordBatch {
             return Err(Report::new(RelayRecordBatchError::MixedBranchKeys));
         }
         let keys = vec![key.clone(); messages.len()];
-        let metadata = messages
-            .iter()
-            .map(|message| message.record.metadata().clone())
-            .collect::<Vec<_>>();
+        let metadata = RecordMetadataColumns::from_rows(
+            messages
+                .iter()
+                .map(|message| message.record.metadata().clone()),
+        );
         let (records, acks): (Vec<_>, Vec<_>) = messages
             .into_iter()
             .map(|message| (message.record, message.acks))
@@ -227,7 +222,7 @@ impl RelayRecordBatch {
         schema: Arc<CompiledSchema>,
         key: Option<BranchKey>,
         batch: RuntimeRecordBatch,
-        metadata: Vec<RuntimeRecordMetadata>,
+        metadata: RecordMetadataColumns,
         acks: Vec<AckSet>,
     ) -> error_stack::Result<Self, RelayRecordBatchError> {
         let row_count = batch.batch().num_rows();
@@ -267,7 +262,7 @@ impl RelayRecordBatch {
     pub(super) fn from_filtered_parts(
         key: Option<BranchKey>,
         batch: RuntimeRecordBatch,
-        metadata: Vec<RuntimeRecordMetadata>,
+        metadata: RecordMetadataColumns,
         acks: Vec<AckSet>,
     ) -> error_stack::Result<Self, RelayRecordBatchError> {
         let row_count = batch.batch().num_rows();
@@ -366,11 +361,14 @@ impl RelayRecordBatch {
             );
             selected
         }
+        let metadata = metadata
+            .take(rows)
+            .verified("every selected row was checked above to lie inside the batch");
         Ok(Self {
             key,
             keys: select(keys, rows),
             batch: Arc::new(batch),
-            metadata: select(metadata, rows),
+            metadata,
             acks: select(acks, rows),
         })
     }
@@ -452,11 +450,14 @@ impl RelayRecordBatch {
             acks,
             ..
         } = self;
+        let metadata = metadata
+            .take(row_order)
+            .verified("the row order was checked above to be a permutation of the batch's rows");
         Ok(Self {
             key,
             keys: reorder_owned_values(keys, row_order),
             batch: Arc::new(reordered_batch),
-            metadata: reorder_owned_values(metadata, row_order),
+            metadata,
             acks: reorder_owned_values(acks, row_order),
         })
     }
@@ -496,7 +497,7 @@ impl RelayRecordBatch {
             )));
         }
         let rows = match (0..row_count)
-            .zip(self.metadata.iter().cloned())
+            .zip(self.metadata.rows())
             .map(|(row, metadata)| RuntimeRow::new(self.batch.clone(), row, metadata))
             .collect::<Result<Vec<_>, _>>()
         {
@@ -566,17 +567,12 @@ impl RelayRecordBatch {
             }
         };
 
-        let total_metadata = batches
-            .iter()
-            .map(|batch| batch.metadata.len())
-            .sum::<usize>();
+        let metadata = RecordMetadataColumns::concat(batches.iter().map(|batch| &batch.metadata));
         let total_acks = batches.iter().map(|batch| batch.acks.len()).sum::<usize>();
         let total_keys = batches.iter().map(|batch| batch.keys.len()).sum::<usize>();
-        let mut metadata = Vec::with_capacity(total_metadata);
         let mut acks = Vec::with_capacity(total_acks);
         let mut keys = Vec::with_capacity(total_keys);
         for batch in batches {
-            metadata.extend(batch.metadata);
             acks.extend(batch.acks);
             keys.extend(batch.keys);
         }
@@ -665,20 +661,20 @@ impl RelayRecordBatch {
         self.acks.iter().any(|acks| !acks.is_empty())
     }
 
-    pub(super) fn delivery_observation(&self, now: Timestamp) -> RelayDeliveryObservation {
-        delivery_observation_from_timestamps(
-            now,
-            self.metadata
-                .iter()
-                .map(RuntimeRecordMetadata::ingested_at_high_watermark),
-        )
+    /// The batch as a node input that accepted it at `delivered_at` observes it: every row's
+    /// delivery latency is measured from its ingestion high watermark to that instant.
+    pub(super) fn delivery_observation(&self, delivered_at: Timestamp) -> DeliveryObservation<'_> {
+        DeliveryObservation {
+            messages: self.message_count(),
+            bytes: self.estimated_bytes(),
+            delivered_at,
+            ingested_at: self.metadata.high_watermarks(),
+        }
     }
 
+    /// The batch's domain time: the latest ingestion high watermark of any of its rows.
     pub(super) fn domain_timestamp(&self) -> Option<Timestamp> {
-        self.metadata
-            .iter()
-            .map(|metadata| metadata.ingested_at_high_watermark())
-            .max()
+        self.metadata.latest_high_watermark()
     }
 }
 
@@ -692,31 +688,6 @@ fn reorder_owned_values<T>(values: Vec<T>, row_order: &[usize]) -> Vec<T> {
                 .verified("the row order is a permutation, so each row is taken exactly once")
         })
         .collect()
-}
-
-fn delivery_observation_from_timestamps(
-    now: Timestamp,
-    timestamps: impl Iterator<Item = Timestamp>,
-) -> RelayDeliveryObservation {
-    let mut domain_timestamp: Option<Timestamp> = None;
-    let mut latency_seconds = Vec::with_capacity(timestamps.size_hint().0);
-    for timestamp in timestamps {
-        domain_timestamp = Some(match domain_timestamp {
-            Some(current) => current.max(timestamp),
-            None => timestamp,
-        });
-        if let Ok(duration) = now
-            .into_datetime()
-            .signed_duration_since(timestamp.into_datetime())
-            .to_std()
-        {
-            latency_seconds.push(duration.as_secs_f64());
-        }
-    }
-    RelayDeliveryObservation {
-        domain_timestamp,
-        latency_seconds,
-    }
 }
 
 pub(super) fn build_stream_record_batch_preserving_acks(
@@ -767,14 +738,14 @@ pub(super) fn build_stream_record_batch_preserving_acks(
         key,
         keys,
         batch,
-        metadata,
+        metadata: RecordMetadataColumns::from_rows(metadata),
         acks,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, sync::Arc as StdArc};
+    use std::sync::Arc as StdArc;
 
     use meticulous::ResultExt as _;
     use nervix_models::{
@@ -783,9 +754,9 @@ mod tests {
     use triomphe::Arc;
 
     use super::{
-        RelayMessage, RelayRecordBatch, RelayRecordBatchError, RelayRecordBatchOperation,
-        RelayRecordBatchSidecar, build_stream_record_batch_preserving_acks,
-        delivery_observation_from_timestamps,
+        RecordMetadataColumns, RelayMessage, RelayRecordBatch, RelayRecordBatchError,
+        RelayRecordBatchOperation, RelayRecordBatchSidecar,
+        build_stream_record_batch_preserving_acks,
     };
     use crate::{
         runtime::test_fixtures::string_branch_key,
@@ -1006,7 +977,7 @@ mod tests {
             schema.clone(),
             None,
             valid.batch.as_ref().clone(),
-            Vec::new(),
+            RecordMetadataColumns::from_rows([]),
             vec![AckSet::empty()],
         )
         .expect_err("one Arrow row requires one metadata sidecar");
@@ -1045,7 +1016,7 @@ mod tests {
         let missing_metadata = RelayRecordBatch::from_filtered_parts(
             None,
             valid.batch.as_ref().clone(),
-            Vec::new(),
+            RecordMetadataColumns::from_rows([]),
             vec![AckSet::empty()],
         )
         .expect_err("filtered metadata must remain row aligned");
@@ -1125,7 +1096,10 @@ mod tests {
         let schema = test_schema();
 
         let mut malformed = test_batch(&schema, &[10, 20]);
-        malformed.metadata.pop();
+        malformed.metadata = malformed
+            .metadata
+            .take(&[0])
+            .expect("the fixture has a first row");
         let malformed_failure = malformed
             .into_reordered(&[1, 0])
             .expect_err("reordering requires aligned sidecars");
@@ -1206,7 +1180,7 @@ mod tests {
         ));
 
         let mut missing_metadata = test_batch(&schema, &[10]);
-        missing_metadata.metadata.clear();
+        missing_metadata.metadata = RecordMetadataColumns::from_rows([]);
         let metadata_failure = missing_metadata
             .try_into_messages()
             .expect_err("message materialization requires one metadata row per Arrow row");
@@ -1331,28 +1305,107 @@ mod tests {
         );
     }
 
-    #[test]
-    fn delivery_observation_visits_each_timestamp_once() {
-        let visited = Cell::new(0);
-        let timestamps = [
-            Timestamp::from_unix_nanos(2_000_000_000),
-            Timestamp::from_unix_nanos(4_000_000_000),
-            Timestamp::from_unix_nanos(1_000_000_000),
-            Timestamp::from_unix_nanos(3_000_000_000),
-        ];
+    fn batch_with_watermarks(
+        schema: &Arc<CompiledSchema>,
+        rows: &[(i64, i64)],
+    ) -> RelayRecordBatch {
+        let values = rows.iter().map(|(value, _)| *value).collect::<Vec<_>>();
+        let messages = test_rows(schema, &values)
+            .into_iter()
+            .zip(rows)
+            .map(|(record, (_, watermark))| RelayMessage {
+                key: None,
+                record: record.with_ingested_at_watermarks(Timestamp::from_unix_nanos(*watermark)),
+                acks: AckSet::empty(),
+            })
+            .collect();
+        RelayRecordBatch::from_messages(schema.clone(), messages)
+            .expect("relay batch fixture must be valid")
+    }
 
-        let observation = delivery_observation_from_timestamps(
-            Timestamp::from_unix_nanos(5_000_000_000),
-            timestamps
-                .into_iter()
-                .inspect(|_| visited.set(visited.get() + 1)),
+    fn values_and_watermarks(batch: &RelayRecordBatch) -> Vec<(i64, i64)> {
+        (0..batch.record_batch().num_rows())
+            .map(|row| {
+                let record = batch.runtime_row(row).expect("the row exists");
+                let Some(RuntimeValue::I64(value)) = record.value("value").expect("value decodes")
+                else {
+                    panic!("the fixture stores an I64 value in every row");
+                };
+                (
+                    value,
+                    record.metadata().ingested_at_high_watermark().unix_nanos(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn delivery_observation_reads_every_high_watermark_and_the_latest_is_the_domain_time() {
+        let schema = test_schema();
+        let batch = batch_with_watermarks(
+            &schema,
+            &[
+                (10, 2_000_000_000),
+                (20, 4_000_000_000),
+                (30, 1_000_000_000),
+            ],
         );
 
-        assert_eq!(visited.get(), timestamps.len());
+        let delivered_at = Timestamp::from_unix_nanos(5_000_000_000);
+        let observation = batch.delivery_observation(delivered_at);
+
+        assert_eq!(observation.messages, 3);
+        assert_eq!(observation.bytes, batch.estimated_bytes());
+        assert_eq!(observation.delivered_at, delivered_at);
         assert_eq!(
-            observation.domain_timestamp,
+            observation.ingested_at,
+            [2_000_000_000, 4_000_000_000, 1_000_000_000]
+        );
+        assert_eq!(
+            batch.domain_timestamp(),
             Some(Timestamp::from_unix_nanos(4_000_000_000))
         );
-        assert_eq!(observation.latency_seconds, [3.0, 1.0, 4.0, 2.0]);
+    }
+
+    #[test]
+    fn selecting_reordering_and_concatenating_keep_each_rows_watermarks_with_it() {
+        let schema = test_schema();
+        let first = batch_with_watermarks(&schema, &[(10, 100), (20, 200), (30, 300)]);
+        let second = batch_with_watermarks(&schema, &[(40, 400)]);
+
+        let selected = first
+            .take(&[0, 2])
+            .unwrap_or_else(|failure| panic!("selection failed: {:?}", failure.error));
+        assert_eq!(values_and_watermarks(&selected), [(10, 100), (30, 300)]);
+
+        let reordered = selected
+            .into_reordered(&[1, 0])
+            .unwrap_or_else(|failure| panic!("reordering failed: {:?}", failure.error));
+        assert_eq!(values_and_watermarks(&reordered), [(30, 300), (10, 100)]);
+
+        let concatenated =
+            RelayRecordBatch::concat(vec![reordered, second]).expect("same-schema batches concat");
+        assert_eq!(
+            values_and_watermarks(&concatenated),
+            [(30, 300), (10, 100), (40, 400)]
+        );
+        assert_eq!(
+            concatenated.domain_timestamp(),
+            Some(Timestamp::from_unix_nanos(400))
+        );
+        let messages = concatenated
+            .try_into_messages()
+            .unwrap_or_else(|failure| panic!("materialization failed: {:?}", failure.error));
+        let watermarks = messages
+            .iter()
+            .map(|message| {
+                message
+                    .record
+                    .metadata()
+                    .ingested_at_low_watermark()
+                    .unix_nanos()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(watermarks, [300, 100, 400]);
     }
 }
