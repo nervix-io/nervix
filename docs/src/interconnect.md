@@ -895,8 +895,9 @@ through a typed management request with reserved liveness capacity.
 A peer becomes a health target and an outbound target once discovery publishes its interconnect
 endpoint. A target with no usable endpoint is neither probed nor dialled, and its availability stays
 unknown until discovery publishes one. A previously established target remains eligible for probes
-and outbound connections through a temporary Chitchat liveness loss. A different incarnation or
-advertised endpoint must establish a new target.
+and outbound connections through a Chitchat liveness loss while application health still has an
+observation of it from the node-unavailability interval, as described below. A different
+incarnation or advertised endpoint must establish a new target.
 
 Each health round has at most one probe in flight for each peer and at most 32 probes across the
 node. A probe has a one-second total deadline. Results are published as they complete, so a silent
@@ -920,9 +921,15 @@ Health observations distinguish:
 A missing, stale, or capacity-exhausted observation produces unknown availability. It does not mark
 a peer unavailable and does not extend a previous run of failures. Only continuous, fresh failures
 for the configured node-unavailability interval produce unavailable status; a healthy observation
-resets that run. Scheduling and runtime availability retain a previously discovered incarnation
-through a temporary gossip loss until application health marks it unavailable. Consensus membership
-continues to use the cluster topology established by gossip.
+resets that run. Consensus membership continues to use the cluster topology established by gossip.
+
+Scheduling and runtime availability retain a previously discovered incarnation that gossip stops
+listing live only while its latest application observation is younger than the node-unavailability
+interval and has not made it unavailable. A healthy, briefly failing, or capacity-refused
+observation from that interval keeps the peer available. A peer with no completed observation in the
+interval falls back to its gossip liveness, even though no failure was recorded. A stopped peer
+therefore leaves scheduling and runtime availability no later than when gossip declares it dead and
+its last observation has aged out, whether or not any probe to it completes.
 
 `SHOW CLUSTER STATUS` exposes the interconnect address, endpoint generation, observation age,
 observation outcome, and derived availability. Its `connected` status means the latest application
