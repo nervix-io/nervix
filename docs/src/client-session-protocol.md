@@ -303,9 +303,10 @@ A session serves each request on one of two lanes:
 A cancellation is on neither lane: it is answered as soon as it arrives. A session admits at most 64
 requests in flight, counting both lanes. A request beyond that is refused with
 `TooManyRequestsInFlight` rather than queued, which also bounds the requests waiting for the ordered
-lane; nothing about the refused request was admitted. The web console never sends an ordered
-request past that limit: it holds the request, in the order it was issued, until an earlier reply
-frees a place. A request identity that is already in flight
+lane; nothing about the refused request was admitted. The web console never sends a request that
+keeps its order past that limit: it holds the request, in the order it was issued, until an
+earlier reply frees a place. Its completions, choice lookups, and domain selections go out at once
+and report the refusal if they find the session full. A request identity that is already in flight
 is refused with `DuplicateRequestId`, and that refusal necessarily names the same identity as the
 request still in flight.
 
@@ -997,8 +998,9 @@ lines it omitted. The web console keeps at most 256 lines and 256 KiB per REPL a
 tab, and marks where it omitted earlier lines. It keeps the latest 256 commands and 256 KiB of its
 command history and the snapshot of the one domain it observes. It holds at most 64 requests of its
 controls waiting for a connection, carrying at most 4 MiB of text, and at most 256 held or awaiting
-their reply, carrying at most 16 MiB, of which at most 64 are in flight; a request past either bound
-is not sent, and the control that issued it reports why. It drops the parts of a reply nobody awaits, such as a superseded
+their reply, carrying at most 16 MiB, and sends the ordered ones only while the server has room for
+them in flight; a request past either bound is not sent, and the control that issued it reports
+why. It drops the parts of a reply nobody awaits, such as a superseded
 completion.
 
 A tab whose generation the server ended with `SubscriptionEnded` turns ended in the web console. It
