@@ -60,14 +60,13 @@ use super::{
 /// The `timeout-minutes` of the workflow job that runs the scenario suite. A policy input: keep it
 /// in step with the `tests` job in `.github/workflows/check.yaml`, which is the emergency guard
 /// outside this budget rather than the mechanism that ends a wedged run.
-const WORKFLOW_JOB_LIMIT: Duration = Duration::from_secs(60 * 60);
+const WORKFLOW_JOB_LIMIT: Duration = Duration::from_secs(75 * 60);
 /// What the job spends before the scenario binary starts: its setup steps, the toolchains it
 /// installs, and the builds and earlier test binaries the coverage step runs first. Measured at
-/// 6m28s, 7m50s, 9m25s, 12m21s and 15m26s over five `tests` jobs, and rising with the workspace:
-/// it gained thirteen crates in the week those were measured. A policy input, and the one most
-/// likely to exhaust the job limit first: measure it again when the job's steps or its build
-/// inputs change.
-const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(18 * 60);
+/// 6m28s, 7m50s, 9m25s, 12m21s, 15m26s, and 19m42s over six `tests` jobs, and rising with the
+/// workspace. A policy input, and the one most likely to exhaust the job limit first: measure it
+/// again when the job's steps or its build inputs change.
+const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(21 * 60);
 /// What the job keeps for itself once the suite budget has expired: the bounded cleanup the
 /// watchdog drives, the dependency containers the suite then stops, and the artifact upload that
 /// follows. The cleanup is bounded by [`WATCHDOG_CLEANUP_WINDOW`], the containers stop in seconds
@@ -88,18 +87,18 @@ pub(crate) const SUITE_BUDGET: Duration =
     };
 /// The slowest a healthy suite ran: 21m08s, against 15m20s, 15m26s, 16m47s and 18m53s over five
 /// `tests` jobs, all at the CI concurrency factor of two scenarios per CPU, and the slowest of
-/// them spent three scenario retries. A policy input, and a rising one: the suite gained 204
-/// scenarios in the week these were measured, so measure it again whenever the suite, its
-/// concurrency or the runner changes.
+/// them spent three scenario retries. A later CI run exhausted the former 37-minute budget with
+/// scenarios still queued; this is a rising input as the suite grows, so measure it again whenever
+/// the suite, its concurrency or the runner changes.
 const SLOWEST_HEALTHY_SUITE: Duration = Duration::from_secs(22 * 60);
 /// What the budget must leave beyond the slowest healthy suite, so a runner slower than the
 /// measuring one still finishes its own scenarios.
 ///
 /// An absolute slack rather than a multiple of the suite, because what stretches a whole-suite run
 /// adds rather than scales: a retry re-runs one scenario, and a loaded runner delays the steps it
-/// is running. The five measured runs spread over six minutes, so this is some two and a half
-/// times the spread that has been observed. A policy input.
-const SUITE_SLACK: Duration = Duration::from_secs(15 * 60);
+/// is running. The later CI run exhausted the former 15-minute slack with scenarios still queued,
+/// so this headroom also covers that observed run. A policy input.
+const SUITE_SLACK: Duration = Duration::from_secs(27 * 60);
 const _: () = assert!(
     match SLOWEST_HEALTHY_SUITE.checked_add(SUITE_SLACK) {
         Some(bound) => bound.as_nanos() <= SUITE_BUDGET.as_nanos(),

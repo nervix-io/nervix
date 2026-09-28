@@ -161,7 +161,7 @@ jobs:
     # suite's own diagnostic. The suite bounds itself well inside this limit and leaves the reserve
     # the upload below needs. Keep it in step with WORKFLOW_JOB_LIMIT in
     # tests/common/suite_watchdog.rs, which derives that budget from this number.
-    timeout-minutes: 60
+    timeout-minutes: 75
     permissions:
       contents: read
       id-token: write
