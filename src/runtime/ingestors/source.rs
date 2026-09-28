@@ -2194,6 +2194,8 @@ mod tests {
             reject_failures_left: 2,
             replay_rejected: true,
             replays_pending_after_resume: 0,
+            resume_started: None,
+            block_resume: false,
             observations: observations.clone(),
         };
         let host = SourceHost::new(FakeHost::running(observations.clone()));
