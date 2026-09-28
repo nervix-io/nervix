@@ -579,6 +579,7 @@ pub(in crate::application) async fn build_test_service(
             recovery_endpoints: Default::default(),
             interconnect: interconnect.clone(),
             node_unavailability_timeout: Duration::from_secs(10),
+            fault_injection: Default::default(),
         })
         .await
         .expect("cluster should start"),
