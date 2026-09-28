@@ -82,7 +82,10 @@ conversion. Canonical NSPL rendering refuses only a value the language has no sp
 infinite `F64` literal, which the error carries, or a codec declaration its wire format cannot
 express, such as encoding rules on `SYSLOG` or a JAQ-transformed format without a program, which the
 error names by codec. The execution-graph description keeps the JSON encoder's or decoder's error
-beneath its own when the public wire form cannot be written or read. Registry planning keeps an
+beneath its own when the public wire form cannot be written or read. It keeps a typed columnar
+JSON writer error beneath a named codec encode failure. Unsupported columns and invalid string
+offsets fail batch preparation with the codec name. Required nulls identify their field and row;
+write failures retain their source without quoting a payload value. Registry planning keeps an
 alteration's report beneath its invalid-model refusal of the named Model, and the refusal quotes the
 rejection's message, so a failed `ALTER` shows the same reason the vocabulary gave. `SHOW CREATE`
 answers a Model canonical NSPL cannot spell with a fixed diagnostic.

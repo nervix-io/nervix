@@ -760,13 +760,14 @@ These are three different claims, and the implementation makes them separately:
   executes this way, including the irregular ones.
 - **Compiler vectorization.** A buffer loop is written so that LLVM *can* widen it to the vector
   instructions of the CPU the binary targets, and its result is the same whether or not it does.
-  The repository sets no `target-cpu`, so an x86-64 build targets the baseline instruction set.
-  No kernel names an instruction set or an intrinsic. Neither the benchmark report nor this chapter
-  claims that a particular loop is vectorized, because that needs target-specific inspection of the
-  generated instructions, which has not been done.
-- **Explicit SIMD.** Only third-party libraries use explicit SIMD, and they choose instructions at
-  run time: simd-json, base64-simd, faster-hex, and sha2. xxhash chooses when the binary is built.
-  Nervix's own code contains no `std::arch`, `target_feature`, or runtime feature detection.
+  A local build without `RUSTFLAGS` target tuning uses the compiler's baseline target. The Docker
+  image builds its x86-64 payloads for `x86-64-v3` through cargo-sonic. A
+  compiler-vectorized loop needs inspection of the generated instructions for the particular build
+  before claiming a specific instruction set.
+- **Explicit SIMD.** The VM still uses library dispatch for simd-json, base64-simd, faster-hex,
+  and sha2; xxhash chooses when the binary is built. Outside the VM, the schemaful JSON emission
+  classifier in `nervix-simd-kernels` uses `fearless_simd` to select supported instructions at run
+  time, with a scalar fallback. The VM's own kernels do not use `std::arch` or `target_feature`.
 
 The [VM functions measurement report](https://github.com/nervix-io/nervix/blob/main/benches/reports/vm-functions-18.md)
 records what the measurements establish, and

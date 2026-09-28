@@ -336,6 +336,10 @@ halving is encoded again, because a batch transformation may write more bytes fo
 a candidate of `n` members takes at most `⌈log2(n)⌉ + 1` encodings. The bound covers the payload
 only: keys, headers and the framing a transport adds around the payload are outside it.
 
+Schemaful JSON rows use the same bounded writer as other codecs. Their columnar encoder stops at
+the first write over the limit; its string classifier and direct column writes do not change exact
+byte measurement, halving, or the per-record error policy.
+
 A record is rejected alone, through `ON MESSAGE ERROR` with operation `encode`, when its member value
 cannot be produced — its `ON EMITTING` transformation fails, or, without a batch transformation, its
 value is not one the format can write — and when a payload of it alone still exceeds `MAX SIZE`.
@@ -1017,6 +1021,12 @@ For HTTPS endpoints, mount a TLS resource and set `'tls_ca_file'` to the mounted
 ClickHouse requires the [batching clause](#batching). A larger flush is split into sequential
 inserts of at most `MAX MESSAGES` records, and each successful insert is an acknowledgment. For ClickHouse, Postgres, and
 MySQL, a failed multi-row insert is classified first as record-specific or infrastructure-wide.
+ClickHouse writes each `JSONEachRow` line directly from the mapped Arrow columns in `VALUES`
+order, using the same typed JSON column writer as schemaful JSON emission. Null mapped values are
+written as `null`, including null list elements. Column names are escaped once for the publish
+batch, and string values use the batch's escape classification.
+`F32` columns keep ClickHouse's JSON number formatting after widening to `F64`; schemaful JSON
+codecs format `F32` directly.
 Infrastructure failures retry with backpressure. A record-specific failure is isolated by
 re-executing the chunk one record at a time so healthy rows land and only poison rows follow `ON
 MESSAGE ERROR`. Isolation can reapply rows from the failed chunk; use the sink's idempotent write
