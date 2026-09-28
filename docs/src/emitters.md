@@ -983,14 +983,28 @@ scope in every request, takes successfully converted records in source order, an
 SIZE`, it is halved until each request fits or a singleton is rejected through `ON MESSAGE ERROR`.
 The byte limit measures the uncompressed protobuf request before optional gzip; HTTP and gRPC
 framing and headers are outside it. `FLUSH ... MAX BATCH SIZE` continues to measure the Arrow batch.
-Nervix stamps log `observed_time_unix_nano` at emission.
 
-Connection failures, HTTP `429` and `5xx`, and gRPC `UNAVAILABLE` or `RESOURCE_EXHAUSTED` retry with
-backpressure. `Retry-After` and gRPC `RetryInfo` can extend the declared retry delay. Bad IDs, enum
-strings, severity values, numeric ranges, or histogram shapes reject only the affected record
-through `ON MESSAGE ERROR`. HTTP `400` and gRPC `INVALID_ARGUMENT` reject every record in that
-request without retry. OTLP `partial_success` cannot be retried safely: Nervix acknowledges every
-record and logs a warning, so records rejected by the receiver in that response are lost.
+Nervix prepares each Export request once. It stamps log `observed_time_unix_nano` from the node's
+actual UTC clock when it prepares the request, and keeps the request's exact protobuf bytes, and
+the records they carry, until the receiver answers for it. A request whose outcome Nervix did not
+learn — the connection closed before the answer, the request timed out, or the receiver asked for a
+retry — is sent again with the same bytes: the same records in the same order, the same resource,
+scope and observed timestamps, compressed the same way. The retry follows the requests the receiver
+already answered, never sends them again, and never regroups the kept records with records that
+arrived later. A receiver therefore sees a duplicate only as a repeat of a request it may already
+hold.
+
+Connection failures, timeouts, lost responses, HTTP `429` and `5xx`, gRPC `RESOURCE_EXHAUSTED`, and
+the gRPC codes the OTLP specification lists as retryable — `CANCELLED`, `DEADLINE_EXCEEDED`,
+`ABORTED`, `OUT_OF_RANGE`, `UNAVAILABLE` and `DATA_LOSS` — retry with backpressure.
+`Retry-After` and gRPC `RetryInfo` can extend the declared retry delay. Bad IDs, enum strings,
+severity values, numeric ranges, or histogram shapes reject only the affected record through `ON
+MESSAGE ERROR`. HTTP `400` and gRPC `INVALID_ARGUMENT` reject every record in that request without
+retry, with one shared error reference. Any other HTTP status or gRPC code the receiver answers
+with means the endpoint cannot accept the export as configured, and the emitter's unresolved
+records follow `ON MESSAGE ERROR`. OTLP `partial_success` cannot be retried safely: Nervix
+acknowledges every record and logs a warning, so records rejected by the receiver in that response
+are lost.
 
 Nervix does not provision collectors, indexes, tenants, or vendor-side telemetry objects. The OTLP
 endpoint must already exist; an unreachable endpoint remains an initialization or publish error.
@@ -1396,7 +1410,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | Redis Pub/Sub | Retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
 | ZeroMQ | Retry after socket send acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; socket send does not establish durable receiver storage | None |
 | Sentry | Retry after an ambiguous HTTP result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; an accepted event can still be subject to Sentry service policy | None |
-| OTEL | Retry after an ambiguous Export result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; `partial_success` acknowledges the whole request, so receiver-rejected records in that response are lost | None |
+| OTEL | Retry after an ambiguous Export result, which resends the same request bytes; lost ACK; or attached sibling failure | Any failure after detached relay acceptance; `partial_success` acknowledges the whole request, so receiver-rejected records in that response are lost | None |
 | ClickHouse | Retry after an ambiguous insert result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a crash after insert but before acknowledgement can also leave an inserted batch that later retries | None |
 | Postgres | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |
 | MySQL | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |

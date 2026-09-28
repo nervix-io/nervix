@@ -213,6 +213,7 @@ aws-sdk-sqs = { workspace = true }
 aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 criterion = { workspace = true }
 cucumber = { workspace = true, features = ["libtest"] }
+flate2 = { workspace = true }
 h2 = { workspace = true }
 http = { workspace = true }
 httparse = { workspace = true }
@@ -227,6 +228,15 @@ nervix-client-core = { workspace = true }
 nervix-client-ffi = { workspace = true }
 nervix-test-environment = { workspace = true }
 nix = { workspace = true, features = ["signal"] }
+# The features the OTEL connector builds the crate with, so the scenarios decode the Export
+# requests it sends without compiling the crate a second time.
+opentelemetry-proto = { workspace = true, features = [
+  "gen-tonic",
+  "logs",
+  "metrics",
+  "trace",
+] }
+otel-prost = { workspace = true }
 playwright-rs = { workspace = true }
 pulsar = { workspace = true }
 rcgen = { workspace = true }

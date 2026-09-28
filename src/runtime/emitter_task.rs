@@ -134,6 +134,11 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     SinkRecordAnsweredTwice { record: usize },
     #[error("emitter sink left {unanswered} of {records} records unanswered")]
     UnansweredSinkRecords { unanswered: usize, records: usize },
+    #[error("emitter sink broke its preparation of batch {batch_index}: {violation}")]
+    RowPreparation {
+        batch_index: usize,
+        violation: RowPreparationViolation,
+    },
     #[error("fault injector failed emitter publish")]
     FaultInjected,
     #[error("emitter shutdown while stalled")]
@@ -177,6 +182,7 @@ impl EmitterRuntimeError {
             | Self::RowAlreadyPrepared { .. }
             | Self::UnknownSinkRecord { .. }
             | Self::SinkRecordAnsweredTwice { .. }
+            | Self::RowPreparation { .. }
             | Self::InvalidSinkConfig
             | Self::InvalidOtelResource { .. }
             | Self::InitializeSink

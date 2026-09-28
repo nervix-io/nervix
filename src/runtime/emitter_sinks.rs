@@ -10,7 +10,7 @@
 //!   encoded or mapped.
 
 use error_stack::ResultExt as _;
-use nervix_connector::{HttpRequestSink, RecordSink, RowSink, SinkStartResult};
+use nervix_connector::{HttpRequestSink, RecordSink, RowRequestSink, RowSink, SinkStartResult};
 use nervix_connector_clickhouse::{ClickHouseSink, ClickHouseSinkConfig};
 use nervix_connector_http::{HttpSink, HttpSinkConfig};
 use nervix_connector_iceberg::{IcebergCommitPolicy, IcebergSink, IcebergSinkConfig};
@@ -126,8 +126,8 @@ impl EmitterSinkContext {
 ///
 /// Each variant of an emitter's sink plan maps to its crate's constructor, and the connector that
 /// constructor opens is paired with what the host prepares its input with: a record sink with the
-/// codec its records are encoded by, a row sink with the projection that maps its columns, and an
-/// HTTP sink with the body its requests carry.
+/// codec its records are encoded by, a row sink or a row request sink with the projection that maps
+/// its columns, and an HTTP sink with the body its requests carry.
 pub(super) struct EmitterSinkStarter;
 
 impl EmitterSinkStarter {
@@ -359,7 +359,7 @@ impl EmitterSinkStarter {
                     scope: sink.scope.clone(),
                     mapped_schema: projection.mapped_schema().clone(),
                 };
-                Self::row(projection, OtelSink::new(config, context.sink_host()))?
+                Self::row_request(projection, OtelSink::new(config, context.sink_host()))?
             }
             EmitterSinkPlan::ClickHouse(sink) => {
                 let projection = Self::projection(MappedValuesProjectionInit {
@@ -562,6 +562,20 @@ impl EmitterSinkStarter {
     {
         let sink = started.change_context(EmitterRuntimeError::InitializeSink)?;
         let sink: Box<dyn EmitterSink> = Box::new(MappedRowSink::new(Box::new(sink), projection));
+        Ok(sink)
+    }
+
+    /// Pairs a row request sink with the projection whose mapped columns it prepares requests from.
+    fn row_request<T>(
+        projection: MappedValuesProjection,
+        started: SinkStartResult<T>,
+    ) -> EmitterRuntimeResult<Box<dyn EmitterSink>>
+    where
+        T: RowRequestSink + 'static,
+    {
+        let sink = started.change_context(EmitterRuntimeError::InitializeSink)?;
+        let sink: Box<dyn EmitterSink> =
+            Box::new(MappedRequestSink::new(Box::new(sink), projection));
         Ok(sink)
     }
 

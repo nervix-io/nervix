@@ -954,7 +954,13 @@ pub(crate) struct ConnectionSummary {
 }
 
 impl ConnectionSummary {
-    fn joined(&mut self, joined: Result<(), tokio::task::JoinError>) {
+    /// Counts a connection the accept loop started serving.
+    pub(crate) fn started(&mut self) {
+        self.served = checked_increment(self.served);
+    }
+
+    /// Counts how a connection's task ended once the accept loop joined it.
+    pub(crate) fn joined(&mut self, joined: Result<(), tokio::task::JoinError>) {
         match joined {
             Ok(()) => {}
             Err(error) if error.is_panic() => {
@@ -1009,7 +1015,7 @@ impl AcceptLoop {
                     next_connection = next_connection
                         .checked_add(1)
                         .assured("a receiver cannot accept 2^64 connections");
-                    summary.served = checked_increment(summary.served);
+                    summary.started();
                     connections.spawn(connection.serve(stream, self.acceptor.clone()));
                 }
             }

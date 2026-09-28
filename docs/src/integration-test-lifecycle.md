@@ -39,6 +39,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | CLI sessions | Child processes executing `nervix-cli`; a scenario reader retains at most 256 output lines | The scenario world, `tests/scenarios.rs` |
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
+| gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
 The OpenTelemetry Collector dependency exposes its stdout and stderr to scenario assertions. A
@@ -119,8 +120,9 @@ second module runs the operation, it is named after the owner.
 | The node startups of one cluster construction | `node_startup.rs`, run by `cluster.rs` | 84 seconds per node, shared by the whole construction | The node that ran out ends the construction |
 | A node a scenario stops itself | `cluster.rs` | The longest of five minutes, the configured shutdown timeout, and the configured drain phases | The task is aborted and joined, and the step fails |
 | Scenario cleanup of a whole cluster | `cluster_teardown.rs` | 60 seconds for every node together | Still-running tasks are aborted and joined and recorded as forced |
-| Stopping a scenario's HTTP receivers | `http_receiver.rs`, run by `tests/scenarios.rs` | 6 seconds for every receiver together: 5 for its connections, 1 for its accept loop | Still-running connections, then the accept loop, are aborted and joined and recorded as forced |
+| Stopping a scenario's HTTP and gRPC receivers | `http_receiver.rs` and `grpc_receiver.rs`, run by `tests/scenarios.rs` | 6 seconds for every receiver together: 5 for its connections, 1 for its accept loop | Still-running connections, then the accept loop, are aborted and joined and recorded as forced |
 | An HTTP receiver wait: captured requests or a recorded fault | `http_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
+| A gRPC receiver wait: captured calls | `grpc_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
 | A server process's readiness, exit, or log line | `server_process.rs` | 120, 120, and 60 seconds | The step fails, quoting the last 80 lines of the process log |
 | Convergence of a restarted real-process cluster | `server_process_cluster.rs` | 120 seconds, with each status request capped at 10 seconds | The step fails with the last status or typed request failure from every member |
 | A one-shot CLI command or a subscription output assertion | `tests/scenarios.rs` | 60 seconds for a command, 30 seconds for an expected subscription line | The step fails with the process result or retained output lines |
@@ -440,7 +442,8 @@ teardown diagnostics  every node's status at once within 10 s; the scenario's co
 stopping              abort CLI output readers and kill their child processes;
      |                drop HTTP load, held uploads, server processes and process clusters,
      |                and observers;
-     |                stop HTTP receivers within 6 s; close the browser and the session;
+     |                stop HTTP and gRPC receivers within 6 s; close the browser and the
+     |                session;
      |                stop the cluster within 60 s;
      |                release proxies, silent peers, permits, and fixture ports
 finished
@@ -500,8 +503,8 @@ finds a port, a fault, or a proxy taken.
 - CLI output readers are aborted and their `kill_on_drop` child processes are dropped before node
   teardown. Background HTTP load, held uploads, server processes and real-process clusters are
   also dropped first. Dropping any server child kills it and returns its ports.
-- Broker and syslog observers, HTTP receivers, the browser, and the session are closed before the
-  cluster stops.
+- Broker and syslog observers, HTTP and gRPC receivers, the browser, and the session are closed
+  before the cluster stops.
 - The TCP proxies and silent interconnect peers a scenario placed in front of its nodes are released
   once those nodes have ended.
 - The scenario's concurrency permits are released, and the ZeroMQ and syslog ports it drew for its
@@ -539,6 +542,7 @@ running the same suite, which is why a node startup retries a lost bind on fresh
 | In-process node | 7: gRPC, gRPC over HTTPS, HTTP, HTTPS, observability, web console, and interconnect | After its task has ended: at cluster cleanup, when a scenario stops every node, and when a failed startup attempt moves to fresh ports |
 | Scenario fixtures | 4: ZeroMQ ingest and emit, syslog ingest and emit | At the end of cleanup |
 | HTTP receiver | 1 per receiver, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
+| gRPC receiver | 1 per receiver, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
 | DNS authority | 1 UDP port per cluster addressed by names | When the cluster is dropped at the end of cleanup, after its nodes have stopped |
 | TCP forwarders | 1 port, shared by every forwarder a scenario stands in front of a dependency | At the end of cleanup, after the cluster has stopped |
 | Server process | 6 | When the process is dropped |
@@ -636,6 +640,37 @@ scenario cleanup forced: HTTP receiver <name>: <the same record>
 The second line appears only when a connection or the accept loop had to be aborted, or panicked.
 A receiver's port is drawn with the scenario's fixture ports and goes back with them at the end of
 cleanup, once the nodes that dialed it have ended.
+
+## gRPC Receivers
+
+A scenario about a node calling an external gRPC service, such as an OTLP/gRPC collector, starts an
+in-process receiver that serves HTTP/2 without TLS in its place. It reads each unary call to the end
+of its request and captures the method, the header fields, the compressed flag, and the one request
+message exactly as it arrived. It then answers the call with the next scripted answer: an empty
+response message with `grpc-status: 0`, a trailers-only status, no answer at all while the receiver
+closes the whole connection, or no answer until the client resets the call. Once the script is
+empty, calls are accepted. The receiver never interprets a message, so a scenario step decodes what
+it captured.
+
+An OTLP receiver is the protocol-neutral name a scenario uses for either transport:
+`Given OTLP receiver "<name>" is running for "<protocol>"` starts a gRPC receiver for `grpc` and an
+HTTP receiver for `http/protobuf`, and one script vocabulary — `accept`, `reject`, `unavailable`,
+`lose response`, `hold response` — maps to the answer each transport gives for it.
+
+A gRPC receiver has the HTTP receiver's bounds on its message, its captured calls, and its kept
+faults. A call whose length prefix already declares more than 16 MiB is refused as a fault before
+its message is read, and a request that is not exactly one gRPC message is a fault rather than a
+capture. Every await a connection or call makes also waits for the receiver's stop. The gRPC
+receivers of a scenario stop together with its HTTP receivers under the same 6-second budget, and
+each stop is recorded in the scenario log:
+
+```text
+gRPC receiver cleanup: <name>: stopped <n> connection(s) in <elapsed> of a 6s budget, <n> forced, <n> panicked; captured <n> call(s), recorded <n> fault(s)
+scenario cleanup forced: gRPC receiver <name>: <the same record>
+```
+
+A call that panics takes its connection with it, so the stop counts it among the panicked
+connections.
 
 ## DNS Authorities
 
@@ -895,7 +930,7 @@ Its limits:
 
 ## Qualification Evidence
 
-`just test-harness-liveness` runs the 56 focused regressions that hold this contract in about four
+`just test-harness-liveness` runs the 62 focused regressions that hold this contract in about four
 seconds. They drive stand-in session services on real loopback sockets and stand-in node tasks, most
 of them on a paused clock, and CI runs them before the scenario suite.
 
@@ -909,6 +944,7 @@ of them on a paused clock, and CI runs them before the scenario suite.
 | One cleanup budget per cluster, and truthful phases | `stuck_nodes_spend_one_cleanup_budget_in_a_cluster_of_one_and_of_three`, `a_single_node_cleanup_keeps_how_its_task_ended`, `a_panicking_node_is_the_only_cleanup_failure_a_three_node_cluster_reports`, `the_finished_phase_is_published_only_once_cleanup_has_completed`, `an_active_scenario_publishes_its_phase_and_the_age_of_that_phase` |
 | The port pool is bounded and gives ports back | `a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit`, `an_exhausted_draw_gives_back_the_ports_it_had_reserved`, `a_draw_the_operating_system_refuses_is_reported_as_its_own_failure`, `ports_drawn_from_the_operating_system_are_distinct_and_reserved`, `a_released_port_can_be_drawn_again` |
 | An HTTP receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_receiver_captures_requests_and_answers_its_script_in_order`, `a_lost_response_is_captured_and_the_connection_closes_without_an_answer`, `chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted`, `held_responses_and_stalled_bodies_end_within_the_stop_budget`, `requests_beyond_the_receiver_bounds_are_faults_not_captures`, `a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others`, `a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks`, `every_documented_script_form_parses_and_unknown_forms_are_refused` |
+| A gRPC receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_grpc_receiver_captures_calls_and_answers_its_script_in_order`, `a_lost_grpc_answer_is_captured_and_its_connection_closes_without_one`, `held_grpc_calls_end_when_the_client_resets_them_or_the_receiver_stops`, `a_request_that_is_not_one_bounded_message_is_a_fault_not_a_capture` |
 | The suite watchdog names what was running and ends the run | `a_run_that_finishes_inside_its_budget_keeps_what_it_produced`, `a_stalled_scenario_body_is_named_with_its_attempt_phase_and_nodes`, `a_stalled_teardown_diagnostic_is_named_by_the_phase_it_is_in`, `a_node_that_never_stops_is_named_at_the_end_of_the_cleanup_window`, `a_cluster_that_outlives_its_scenario_is_named_as_unclaimed`, `a_retried_scenario_publishes_which_attempt_is_running`, `the_suite_budget_is_injectable_and_defaults_to_the_suite_policy`, `a_timed_out_suite_is_reported_apart_from_a_passing_and_a_failing_one`, `a_failing_suite_ends_the_process_by_unwinding`, `a_dependency_stop_that_never_returns_is_abandoned_at_its_budget`, `a_dependency_stop_that_finishes_keeps_what_it_reported` |
 
 The high-parallelism qualification was recorded on 23 September 2026 for the change that landed as

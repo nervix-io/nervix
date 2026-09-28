@@ -96,8 +96,9 @@ task marks each member row prepared, and the one answer for the payload resolves
 row resolves once, so neither a repeated answer nor a later attempt resolves its acknowledgement
 share again. An HTTP emitter's prepared request is such a payload with exactly one member,
 retained by the same owner with its request fields and body bytes, so its answers follow the same
-rules. No lock guards this state; only the emitter task touches its buffer, and resolving a
-member is one operation on the lock-free ACK tree. A confirmed payload's members are acknowledged
+rules, and so is an OTEL emitter's Export request, retained with the protobuf bytes its connector
+prepared and the rows they carry. No lock guards this state; only the emitter task touches its
+buffer, and resolving a member is one operation on the lock-free ACK tree. A confirmed payload's members are acknowledged
 in the same step that releases the payload, while a rejected payload's members return to pending
 until their message errors are delivered, so an attempt its stop deadline cuts short leaves every
 member either resolved or still owned by the buffer.

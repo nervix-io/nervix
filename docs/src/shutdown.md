@@ -477,7 +477,8 @@ acknowledged source redelivers the record after the restart.
 An emitter reaches the sink completion point its `MODE` declares, and the drain waits for it. An
 emitter that cannot finish reports `emitter '<name>' did not drain before its configured deadline`
 and holds the drain until the timeout. A batching emitter's drain also writes every batch payload an
-earlier attempt left unanswered, with the bytes and members it was first written with, and the
+earlier attempt left unanswered, with the bytes and members it was first written with, as an OTEL
+emitter's drain sends every Export request it prepared and did not learn the outcome of, and the
 emitter buffer counts those members as work the node still holds until they resolve.
 
 Kafka is the only sink whose client-side queue shutdown drains explicitly: after its buffered
