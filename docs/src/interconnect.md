@@ -21,6 +21,11 @@ outcomes. This chapter owns the transport deadline and failure signal.
 failure classes reach their callers and public edges. This chapter owns their wire representation
 and transport failure semantics.
 
+Clients never use this transport. [Client Session Protocol](./client-session-protocol.md) owns the
+public client boundary: its listeners, authentication, FlatBuffers frames, request correlation,
+command dispositions, and client recovery. The interconnect carries only node-to-node traffic,
+including the subscription fan-out that feeds a client's Row frames.
+
 ## Simulation Boundary
 
 The transport also runs, unchanged, inside a seeded Turmoil network simulation. That simulation is a
@@ -89,6 +94,11 @@ Discovery also carries whether the advertised process incarnation has begun term
 belongs to the incarnation rather than the stable node identifier: it keeps the process available to
 finish existing ownership handoffs and consensus work, but removes it from new placement
 destinations. A restarted process has a new incarnation and does not inherit the advertisement.
+
+The failure detector retains dead process identities separately from the live peer view. Explicit
+Raft member removal uses the newest observed live or dead identity to fence the stopped process;
+dead identities alone never make a peer eligible for membership admission. Scheduling can retain an
+already established health target while gossip liveness lapses, as described below.
 
 Connections are directed. Both nodes in a pair build their own outbound connections because some
 operations, including relay acknowledgements and cluster events, travel back over the receiver's
@@ -203,9 +213,10 @@ applies only as far as the name server the configuration names applies it, for e
 their search lists and `ndots`, are reached through the `resolv.conf` those platforms provide.
 
 The node resolver also serves HTTP polling, Prometheus, Sentry, OTEL HTTP, Iceberg REST and
-object-store clients, and RabbitMQ sources and sinks. Other connectors and client libraries still
-resolve through their own drivers. The ledger in `tests/dns-resolution-ledger.md` records each
-boundary and its current owner.
+object-store clients, RabbitMQ sources and sinks, Syslog emission, WebSocket client ingestion,
+ClickHouse emission, and SQS sources and sinks. Other connectors and client libraries still resolve
+through their own drivers. The ledger in `tests/dns-resolution-ledger.md` records each boundary and
+its current owner.
 
 ## Peer Identity And Authentication
 
@@ -650,9 +661,22 @@ incarnations but does not replace application health checks. Gossip payloads rem
 management-event bound, so discovery cannot allocate an arbitrary wire message. A node that cannot
 take an exchange answers with a typed refusal rather than text: the message exceeds the gossip
 bound, the sending node could not be registered as an outbound peer, or its gossip receiver has
-shut down. A node that is shutting down closes its gossip transport before it stops gossip, so an
-exchange still waiting on a peer that stopped first ends at once instead of holding shutdown until
-its one-second deadline.
+shut down. Chitchat hands each outgoing datagram to a four-message queue for that destination. One
+worker per destination drives its interconnect requests in order, under the one-second request
+deadline; an unreachable peer therefore cannot hold the gossip loop while it receives from or sends
+to healthy peers. A full destination queue drops its newest datagram, and the next gossip round
+retries. Closing the transport cancels queued work and exchanges in flight.
+
+Each node's Chitchat live set is its own failure-detector estimate. An isolated peer can remain
+listed live until its missing heartbeats are observed, even after its links stop carrying requests;
+application probes provide the separate signal that eventually makes its work eligible for failover.
+
+Chitchat continues to select known dead peers for exchanges during its 24-hour dead-node retention
+period. When application health has retired one of those peers from the outbound pool, a gossip
+exchange reinstalls its known route before sending. The replacement connection still authenticates
+the peer's node identity and advertised endpoint. This lets a node with no configured bootstrap
+seed contact retained peers again after a partition heals; the returning exchange restores gossip
+membership, after which application health and Raft reconciliation use the current advertisements.
 
 Admission to consensus membership requires an available interconnect endpoint. A discovered node
 without one is not an admission candidate, so it is neither added as a learner nor promoted to
@@ -665,12 +689,13 @@ with a newer incarnation.
 A redirect to the leader names only the advertised endpoints discovery has established. A client
 redirected during an election that has not yet observed the new leader's client endpoint receives
 the leader identity without a redirect target rather than a guessed address, and retries until an
-endpoint appears.
+endpoint appears. [Leader Discovery, Redirect, And
+Reconnect](./client-session-protocol.md#leader-discovery-redirect-and-reconnect) defines how
+clients follow it.
 
-Terminal teardown closes the gossip exchange path before it asks the gossip loop to stop. The loop
-reads its stop request only between rounds, and a round exchanges with each selected peer in turn
-under a one-second request timeout. Closing the path first makes an exchange still waiting on a
-peer that is itself stopping fail at once, instead of holding teardown for the rest of the round.
+Terminal teardown closes the gossip exchange path before it asks the gossip loop to stop. Closing
+the path first cancels destination workers and their queued or in-flight requests, so a peer that is
+itself stopping cannot hold teardown until an exchange deadline.
 
 Session subscription interest also propagates through gossip. The key encoding is private to the
 cluster layer: whenever the live-node state watcher changes, each node rebuilds an immutable index
@@ -692,7 +717,9 @@ number of subscriptions from any number of sessions share one advertisement and 
 withdraws it. Each write of the advertisement reads the lease count while it holds the gossip lock
 that orders the writes, so the last write always matches the count: a release that finishes late
 cannot withdraw the interest of a subscription that attached after it. The count per relay is
-exported as `nervix_session_subscriptions`.
+exported as `nervix_session_subscriptions`. [Row
+Subscriptions](./client-session-protocol.md#row-subscriptions) defines what the subscriber's node
+does with the batches this fan-out delivers.
 
 Consensus separates traffic according to the progress it protects:
 
@@ -885,9 +912,11 @@ An established HTTP/2 connection and a successful transport `PING` show that byt
 do not show that the peer application can accept work. Nervix therefore probes application health
 through a typed management request with reserved liveness capacity.
 
-A peer becomes a health target and an outbound target only while its interconnect endpoint is
-available. One whose endpoint is unavailable is neither probed nor dialled, and its availability
-stays unknown until discovery publishes an endpoint for it.
+A peer becomes a health target and an outbound target once discovery publishes its interconnect
+endpoint. A target with no usable endpoint is neither probed nor dialled, and its availability stays
+unknown until discovery publishes one. A previously established target remains eligible for probes
+and outbound connections through a temporary Chitchat liveness loss. A different incarnation or
+advertised endpoint must establish a new target.
 
 Each health round has at most one probe in flight for each peer and at most 32 probes across the
 node. A probe has a one-second total deadline. Results are published as they complete, so a silent
@@ -906,11 +935,12 @@ Health observations distinguish:
   including a target whose advertised host does not resolve.
 - **Capacity exhausted:** the probe could not obtain its reserved local capacity.
 
-A missing, stale, or capacity-exhausted observation produces unknown availability. It
-does not mark a peer unavailable and does not extend a previous run of failures. Only continuous,
-fresh failures for the configured node-unavailability interval produce unavailable status; a healthy
-observation resets that run. Scheduling and runtime availability use this application result, while
-consensus membership continues to use the cluster topology established by gossip.
+A missing, stale, or capacity-exhausted observation produces unknown availability. It does not mark
+a peer unavailable and does not extend a previous run of failures. Only continuous, fresh failures
+for the configured node-unavailability interval produce unavailable status; a healthy observation
+resets that run. Scheduling and runtime availability retain a previously discovered incarnation
+through a temporary gossip loss until application health marks it unavailable. Consensus membership
+continues to use the cluster topology established by gossip.
 
 `SHOW CLUSTER STATUS` exposes the interconnect address, endpoint generation, observation age,
 observation outcome, and derived availability. Its `connected` status means the latest application
@@ -923,6 +953,13 @@ milliseconds and capped at five seconds. A peer removal, incarnation change, or 
 change retires the old target and cancels work tied to its slots. New operations use only the new
 target generation. A new DNS answer for the same advertised endpoint is not a target change: it
 leaves established connections in place and is used by the next connection attempt.
+
+Each established HTTP/2 connection sends a protocol ping every 15 seconds and waits at most ten
+seconds for its acknowledgement. The outbound and inbound ends both close a session that cannot
+answer, independently of the operating system's TCP retransmission timeout. Closing the outbound
+end starts its pool slot's bounded reconnect; closing the inbound end releases the per-peer class
+slot so that reconnect can be accepted. Ordinary request deadlines still apply to individual
+operations during the detection window.
 
 Interconnect certificate, key, and CA files are watched as one credential bundle. A candidate must
 be complete, valid, and identical in two consecutive reads before it replaces the active bundle, so

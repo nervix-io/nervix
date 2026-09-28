@@ -3,9 +3,9 @@
 //! Layer: edges.
 //!
 //! - **Owns.** Attaching the session to a domain's clock and detaching it, the typed outcomes of
-//!   both, and delivering every installation change of an attached clock as a frame on the
-//!   session's control lane until the session detaches, the domain leaves the serving node, or the
-//!   session ends.
+//!   both, and delivering installation changes and newest accepted ticks on the session's
+//!   control lane until the session detaches, the domain leaves the serving node, or the session
+//!   ends.
 //! - **Depends on.** The runtime's observer of installed domain clocks, the session's control lane,
 //!   and the client wire contract.
 //! - **Must not know.** Relay subscriptions or their lane, the session's transaction binding, how a
@@ -16,8 +16,8 @@
 //! clock it carries precedes every frame about the domain, and detach stops delivery before its
 //! reply is queued, so no frame about the domain follows that reply. Delivery reads the
 //! installation the serving node publishes each time it is replaced and sends a frame only when
-//! it differs from the one the client last received. A frame waits for room on the control lane,
-//! and changes published meanwhile are read afterwards as one newest installation.
+//! it differs from the one the client last received. It then sends the newest accepted tick of
+//! that installation. State frames wait for room; each tick holds one replaceable control slot.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -26,16 +26,16 @@ use meticulous::OptionExt as _;
 use nervix_client_wire::{
     DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachmentEndReason,
     DomainClockAttachmentEnded, DomainClockDetachDisposition, DomainClockDetachOutcome,
-    DomainClockObserved, EncodedFrame, ReplyBody, RequestId, ServerFrame,
+    DomainClockObserved, DomainClockTicked, EncodedFrame, ReplyBody, RequestId, ServerFrame,
 };
-use nervix_models::{DomainClockObservation, DomainName};
+use nervix_models::{DomainClockObservation, DomainClockTickObservation, DomainName};
 use nervix_recovery::Discarded as _;
 use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::{debug, warn};
 use triomphe::Arc;
 
-use super::{QueuedReply, SessionShared};
+use super::{QueuedReply, SessionShared, outbound::ReplaceableControlFrame};
 use crate::{
     runtime::DomainClockObserver,
     task_shutdown::{JoinOutputShutdown as _, JoinShutdown as _},
@@ -224,7 +224,8 @@ impl ClockAttachment {
             shared: shared.clone(),
             domain,
             observer,
-            delivered,
+            order: ClockDeliveryOrder::new(delivered),
+            pending_tick: None,
             stop: stop.clone(),
             ending: ending.clone(),
         };
@@ -271,48 +272,225 @@ struct ClockDelivery {
     shared: Arc<SessionShared>,
     domain: DomainName,
     observer: DomainClockObserver,
-    /// The clock the client last received, in the attach reply or a frame.
-    delivered: DomainClockObservation,
+    order: ClockDeliveryOrder,
+    pending_tick: Option<ReplaceableControlFrame>,
     stop: CancellationToken,
     /// Raised before the frame that ends the attachment is queued.
     ending: Arc<AtomicBool>,
+}
+
+/// The greatest tick queued by this delivery owner for one generation.
+struct DeliveredTick {
+    generation: u64,
+    id: u64,
+}
+
+/// The production delivery owner's state and tick choice. It decides from the observer's latest
+/// publication each time delivery has room to proceed, and records the newest tick selected for
+/// its replaceable slot.
+pub(crate) struct ClockDeliveryOrder {
+    /// The clock the client last received, in the attach reply or a frame.
+    delivered: DomainClockObservation,
+    delivered_tick: Option<DeliveredTick>,
+}
+
+pub(crate) enum NextClockFrame {
+    State(DomainClockObservation),
+    Tick(DomainClockTickObservation),
+    End,
+    Wait,
+}
+
+impl ClockDeliveryOrder {
+    pub(crate) fn new(delivered: DomainClockObservation) -> Self {
+        Self {
+            delivered,
+            delivered_tick: None,
+        }
+    }
+
+    pub(crate) fn next(&self, observer: &DomainClockObserver) -> NextClockFrame {
+        let Some(clock) = observer.current() else {
+            return NextClockFrame::End;
+        };
+        if clock != self.delivered {
+            return NextClockFrame::State(clock);
+        }
+        if let Some(tick) = observer.current_tick()
+            && self.newer_tick(&tick)
+        {
+            // Progress and installation have separate publications. A replacement can land
+            // between the first state read and the tick snapshot, so check the state again
+            // before selecting the tick for the control lane.
+            match observer.current() {
+                Some(current) if current != self.delivered => {
+                    return NextClockFrame::State(current);
+                }
+                None => return NextClockFrame::End,
+                Some(_) => {}
+            }
+            return NextClockFrame::Tick(tick);
+        }
+        NextClockFrame::Wait
+    }
+
+    pub(crate) fn state_queued(&mut self, clock: DomainClockObservation) {
+        if self.delivered.generation != clock.generation {
+            self.delivered_tick = None;
+        }
+        self.delivered = clock;
+    }
+
+    fn newer_tick(&self, tick: &DomainClockTickObservation) -> bool {
+        tick.generation == self.delivered.generation
+            && !self.delivered_tick.as_ref().is_some_and(|delivered| {
+                delivered.generation == tick.generation && delivered.id >= tick.tick_id
+            })
+    }
+
+    pub(crate) fn tick_queued(&mut self, tick: &DomainClockTickObservation) {
+        self.delivered_tick = Some(DeliveredTick {
+            generation: tick.generation,
+            id: tick.tick_id,
+        });
+    }
 }
 
 impl ClockDelivery {
     async fn run(mut self) -> DeliveryEnd {
         loop {
             tokio::task::consume_budget().await;
-            tokio::select! {
-                biased;
-                () = self.stop.cancelled() => return DeliveryEnd::Stopped,
-                () = self.shared.ended() => return DeliveryEnd::Stopped,
-                () = self.observer.changed() => {}
-            }
-            let Some(clock) = self.observer.current() else {
-                return self.end().await;
-            };
-            if clock == self.delivered {
-                continue;
-            }
-            let observed = DomainClockObserved {
-                domain: self.domain.clone(),
-                clock,
-            };
-            let frame = match observed.encode(self.shared.limits()) {
-                Ok(frame) => frame,
-                Err(error) => {
-                    warn!(
-                        domain = self.domain.as_str(),
-                        error = %error,
-                        "a domain clock observation does not fit a session frame"
-                    );
-                    continue;
-                }
-            };
-            if !self.send(frame).await {
+            if self.stop.is_cancelled() {
                 return DeliveryEnd::Stopped;
             }
-            self.delivered = observed.clock;
+            match self.order.next(&self.observer) {
+                NextClockFrame::End => return self.end().await,
+                NextClockFrame::State(clock) => {
+                    if let Some(pending) = self.pending_tick.take() {
+                        pending.withdraw();
+                    }
+                    let observed = DomainClockObserved {
+                        domain: self.domain.clone(),
+                        clock,
+                    };
+                    let frame = match observed.encode(self.shared.limits()) {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            warn!(
+                                domain = self.domain.as_str(),
+                                error = %error,
+                                "a domain clock observation does not fit a session frame"
+                            );
+                            if !self.wait_change().await {
+                                return DeliveryEnd::Stopped;
+                            }
+                            continue;
+                        }
+                    };
+                    if !self.send(frame).await {
+                        return DeliveryEnd::Stopped;
+                    }
+                    self.order.state_queued(observed.clock);
+                }
+                NextClockFrame::Tick(tick) => {
+                    if !self.send_tick(tick).await {
+                        return DeliveryEnd::Stopped;
+                    }
+                }
+                NextClockFrame::Wait => {
+                    if !self.wait_change().await {
+                        return DeliveryEnd::Stopped;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn wait_change(&mut self) -> bool {
+        tokio::select! {
+            biased;
+            () = self.stop.cancelled() => false,
+            () = self.shared.ended() => false,
+            () = self.observer.any_changed() => true,
+        }
+    }
+
+    fn encode_tick(&self, tick: &DomainClockTickObservation) -> Option<EncodedFrame<ServerFrame>> {
+        let event = DomainClockTicked {
+            domain: self.domain.clone(),
+            tick: tick.clone(),
+        };
+        match event.encode(self.shared.limits()) {
+            Ok(frame) => Some(frame),
+            Err(error) => {
+                warn!(
+                    domain = self.domain.as_str(),
+                    error = %error,
+                    "a domain clock tick does not fit a session frame"
+                );
+                None
+            }
+        }
+    }
+
+    /// Queues one replaceable tick slot. While the lane is full, new progress overwrites the
+    /// slot's contents. Once queued, later progress still replaces it until transport takes it.
+    async fn send_tick(&mut self, tick: DomainClockTickObservation) -> bool {
+        let Some(frame) = self.encode_tick(&tick) else {
+            return self.wait_change().await;
+        };
+        if let Some(slot) = &self.pending_tick {
+            match slot.replace(frame) {
+                Ok(()) => {
+                    self.order.tick_queued(&tick);
+                    return true;
+                }
+                Err(frame) => return self.queue_tick(frame, tick).await,
+            }
+        }
+        self.queue_tick(frame, tick).await
+    }
+
+    async fn queue_tick(
+        &mut self,
+        frame: EncodedFrame<ServerFrame>,
+        tick: DomainClockTickObservation,
+    ) -> bool {
+        let slot = ReplaceableControlFrame::new(frame);
+        let outbound = self.shared.delivery.outbound.clone();
+        let sending = outbound.send_replaceable(slot.clone());
+        tokio::pin!(sending);
+        self.order.tick_queued(&tick);
+        loop {
+            tokio::task::consume_budget().await;
+            tokio::select! {
+                biased;
+                () = self.stop.cancelled() => return false,
+                () = self.shared.ended() => return false,
+                sent = &mut sending => {
+                    if sent.is_err() {
+                        return false;
+                    }
+                    self.pending_tick = Some(slot);
+                    return true;
+                }
+                () = self.observer.any_changed() => {
+                    match self.order.next(&self.observer) {
+                        NextClockFrame::State(_) | NextClockFrame::End => {
+                            slot.withdraw();
+                            return true;
+                        }
+                        NextClockFrame::Tick(newer) => {
+                            if let Some(frame) = self.encode_tick(&newer)
+                                && slot.replace(frame).is_ok()
+                            {
+                                self.order.tick_queued(&newer);
+                            }
+                        }
+                        NextClockFrame::Wait => {}
+                    }
+                }
+            }
         }
     }
 

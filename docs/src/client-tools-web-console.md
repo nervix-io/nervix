@@ -56,8 +56,9 @@ domains, non-relay graph nodes, and relays across the current cluster graph.
 
 ## Creating Entities From Forms
 
-The top bar's **Create** menu opens keyboard-accessible forms for domains, users, and resource
-catalogs. The resource group in the sidebar also provides a contextual create action. A form keeps
+The top bar's **Create** menu opens keyboard-accessible forms for domains, users, resource
+catalogs, schemas, codecs, signaling protocols, clients, VHOSTs, endpoints, relays, branches, and
+subscriptions. The resource group in the sidebar also provides a contextual create action. A form keeps
 its unfinished draft when it closes, restores focus to the action that opened it, reports
 validation and server failures inline, and shows the canonical NSPL statement before submission.
 The domain form supports paced and unpaced clocks, period and skew for a paced clock, placement
@@ -115,6 +116,57 @@ the transaction is selectable, and a relay created while a transaction is attach
 like the other forms' creates. Changing the captured domain keeps the selected schema and branch
 visible but invalid until each is selected again. The preview is the canonical `CREATE RELAY`
 statement, which always states its capacity.
+
+A codec form selects one current wire format: a declared JSON, CBOR, or AVRO wire schema; the
+fixed SYSLOG format; a JAQ-native JSON, YAML, TOML, XML, or CBOR format; or Protobuf. The internal
+schema is an exact typed selection. Declared wire-schema choices are limited to the selected
+format, even when wire schemas of different formats share a name. JAQ-native and Protobuf codecs
+choose ingestion (decode), emitting (encode), or both, and may add an emitting-batch program after
+an emitting program. These are program editors: their contents remain jaq source in the current
+codec Model, including quotes and whitespace. RFC3339 field encoding rules can be added in order
+where the format supports them. The preview renders the complete codec Model as canonical NSPL.
+
+The Protobuf controls select an existing resource and one of its completed versions, including
+`LATEST`, then accept an optional `.proto` file and include root, additional compiler
+configuration entries, message type, and optional batch message type. The resource list includes
+catalogs staged earlier in the attached transaction; the version list offers completed uploads
+only. `LATEST` stays unresolved in the draft and submitted command, and is pinned when the server
+applies the statement. These controls never create a resource or upload a file as a side effect;
+provision and upload it explicitly through the resource workflow. Changing the resource or captured
+domain leaves an earlier version visible but requires selecting it again. A rejected program or
+configuration reports failure inline and keeps the draft editable.
+
+A signaling protocol form chooses JSON, YAML, TOML, XML, CBOR, RAW, or Protobuf. Protobuf uses the
+same resource, version, file, include, and compiler configuration controls and requires separate
+send and wait message types. The ordered handshake editor adds SEND and WAIT steps, moves or removes
+steps, and keeps each step's jaq programs in written order. WAIT steps can have multiple matchers,
+failure matchers, an optional capture when there is exactly one matcher, and ACCEPT DATA. The form
+also offers connection-wide ACCEPT DATA, failure matchers, and the handshake timeout. Its canonical
+preview and command preserve the order and raw program text. Both forms use the existing durable
+command dispatcher and retain rejected drafts, transaction positions, and reconnect handling.
+
+A client form offers every current transport as a typed selection. Connector `CONFIG` remains an
+ordered key/value editor whose keys and values are passed to the connector unchanged; the form
+does not provision external services, topics, buckets, tables, or other objects. Redis, Postgres,
+MySQL, and MongoDB clients require explicit minimum and maximum pool sizes. A client may mount an
+existing resource and a completed version. A WebSocket client may select a configured signaling
+protocol. Switching transports clears transport-specific configuration and signaling choices;
+changing the resource or captured domain invalidates its version selection. `LATEST` remains a
+request until the server applies the statement, when the stored binding becomes an exact version.
+Configuration rows can be marked secret, and common credential keys and URLs with passwords are
+treated as secret automatically. Secret inputs use password controls. The preview and the command
+line history mask those values, while the transmitted command keeps the actual values.
+
+A VHOST form accepts ordered hostnames and may bind TLS to an existing resource and completed
+version. A TLS VHOST installs its certificate in the HTTPS listener of every live node at command
+completion, including nodes that do not lead or run the domain's graph. The certificate bundle
+must already be uploaded; missing or invalid material follows the existing command failure path
+and leaves the draft editable. An endpoint form selects an existing VHOST, requires a path, and
+chooses HTTP or WEBSOCKETS. A WebSocket endpoint may also select a signaling protocol. VHOST and
+signaling lists are typed, searchable, paged, and scoped to the captured domain, including the
+attached transaction prefix. An upstream selection or domain change refreshes dependent choices;
+stale selections must be chosen again before submission. A completed VHOST or endpoint is usable
+immediately by later commands through the same session.
 
 ## The Execution Graph
 
@@ -209,8 +261,8 @@ predicate over the relay's record. While it is edited, the form shows its canoni
 refuses to submit text that is not an expression. Checking the fields, scopes, and types the
 predicate uses belongs to the server, which reports a failure such as a string compared with an
 integer field when the subscription is created. Delivery is `BLOCKING` or `DROPPING`, and batch
-sampling takes a rate from 0 through 1. The preview is the canonical `CREATE SUBSCRIPTION`
-statement the tab sends.
+sampling takes a rate from 0 through 1 that each selected row passes with that probability. The
+preview is the canonical `CREATE SUBSCRIPTION` statement the tab sends.
 
 Submitting opens the tab through the same subscription lifecycle as a `CREATE SUBSCRIPTION` typed in
 the REPL. The tab waits until the session can serve it, opens and becomes active once the server
@@ -244,7 +296,9 @@ The console sends a statement whether or not a domain is selected, and the serve
 it needs one: `SHOW CLUSTER STATUS` or `CREATE DOMAIN` runs with no domain selected, while a
 statement that acts on a domain fails with `no active domain selected`.
 
-The console session does not follow domain clocks. `ATTACH DOMAIN CLOCK` and `DETACH DOMAIN CLOCK`
+The console event log renders domain-clock state and tick frames, including the tick id, boundary,
+authority UTC observation, and serving node's logical reading, when the session receives them.
+The console session does not yet follow domain clocks. `ATTACH DOMAIN CLOCK` and `DETACH DOMAIN CLOCK`
 typed into the REPL reach the server as commands, which refuses them as session-local; follow a
 domain clock with the [command line client](client-tools-cli.md#session-and-transaction-statements)
 or the [Rust client library](client-library.md#following-a-domain-clock).
@@ -264,7 +318,8 @@ commit remains pending through `COMMITTING` until its exact terminal result. A
 second session can attach the same owner's transaction and take it over; the displaced console
 then gets an explicit takeover error. A clean console session close reverts an open transaction,
 while an accepted commit continues on the leader without the browser. See
-[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions).
+[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions) and
+[Client Session Protocol](client-session-protocol.md).
 
 `Tab` cycles through completions offered by the server for the current cursor position. `ArrowUp`
 and `ArrowDown` walk the session's command history, `Ctrl`/`Cmd` with `Enter` submits, and `clear`

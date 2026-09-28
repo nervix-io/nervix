@@ -290,7 +290,8 @@ prevents delayed or out-of-order responses from updating the wrong waiter. Recon
 redirect recover the same admitted command by execution reference; a side-effect-free inspection
 can instead be read again. [Rust Client Library](./client-library.md#inspecting-a-transaction),
 [Command Line Client](./client-tools-cli.md), and [NSPL Overview](./nspl-overview.md) own usage;
-client reconnection and correlated response handling remain with the Rust client contract.
+[Client Session Protocol](./client-session-protocol.md) owns client reconnection, correlated
+response handling, and the exact recovery of transaction requests.
 
 The web console uses the typed envelope directly. Its outline selects the whole transaction, an
 effective execution step, or one operation's contribution. The graph combines each step's before

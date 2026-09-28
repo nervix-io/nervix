@@ -9,12 +9,13 @@
 
 use ahash::{HashSet, HashSetExt};
 use error_stack::Report;
+use nervix_jaq::CompiledJaqProgram;
 use nervix_models::{
-    AvroType, CodecEncoding, CodecEncodingRule, CodecName, CodecWireFormat, CreateAvroWireSchema,
-    CreateCborWireSchema, CreateCodec, CreateJsonWireSchema, CreateLookup, CreateRelay,
-    CreateSchema, CreateWireSchema, DomainName, FieldName, JsonType, LookupName, Model, ModelIndex,
-    ModelKind, ModelName, ParseAsType, RelayName, ResolvedCodecWireFormat, WireSchemaLookup,
-    WireSchemaName,
+    AvroType, CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecName,
+    CodecWireFormat, CreateAvroWireSchema, CreateCborWireSchema, CreateCodec, CreateJsonWireSchema,
+    CreateLookup, CreateRelay, CreateSchema, CreateWireSchema, DomainName, FieldName, JsonType,
+    LookupName, Model, ModelIndex, ModelKind, ModelName, ParseAsType, RelayName,
+    ResolvedCodecWireFormat, WireSchemaLookup, WireSchemaName,
 };
 
 use crate::registry::{error::RegistryError, validation::schema::expect_schema_model};
@@ -291,28 +292,54 @@ pub(in crate::registry) fn ensure_codec_schema_compatibility(
         ResolvedCodecWireFormat::JaqNative {
             transformations, ..
         } => {
-            if transformations.has_any() {
-                Ok(())
-            } else {
+            if !transformations.has_any() {
                 Err(Report::new(RegistryError::InvalidModel {
                     domain: domain.as_str().to_string(),
                     identifier: identifier.as_str().to_string(),
                     reason: "JAQ-native codec must declare a JAQ transformation".to_string(),
                 }))
+            } else {
+                ensure_codec_jaq_programs(domain, identifier, transformations)
             }
         }
         ResolvedCodecWireFormat::Protobuf(config) => {
-            if config.transformations.has_any() {
-                Ok(())
-            } else {
+            if !config.transformations.has_any() {
                 Err(Report::new(RegistryError::InvalidModel {
                     domain: domain.as_str().to_string(),
                     identifier: identifier.as_str().to_string(),
                     reason: "protobuf codec must declare a JAQ transformation".to_string(),
                 }))
+            } else {
+                ensure_codec_jaq_programs(domain, identifier, &config.transformations)
             }
         }
     }
+}
+
+fn ensure_codec_jaq_programs(
+    domain: &DomainName,
+    identifier: &ModelName,
+    transformations: &CodecJaqTransformations,
+) -> Result<(), Report<RegistryError>> {
+    for (direction, program) in [
+        ("ingestion", transformations.on_ingestion.as_deref()),
+        ("emitting", transformations.on_emitting.as_deref()),
+        (
+            "emitting batch",
+            transformations.on_emitting_batch.as_deref(),
+        ),
+    ] {
+        if let Some(program) = program {
+            CompiledJaqProgram::compile(program).map_err(|error| {
+                error.change_context(RegistryError::InvalidCodecJaq {
+                    domain: domain.clone(),
+                    codec: identifier.clone(),
+                    direction,
+                })
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn ensure_syslog_field_contract(
@@ -585,6 +612,7 @@ fn parse_as_is_integer(ty: &ParseAsType) -> bool {
 mod tests {
     use std::fs;
 
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{EmitSink, SchemaField, SchemaName, WireSchemaField};
     use rstest::rstest;
 
@@ -654,6 +682,57 @@ mod tests {
                     avro_codec("event_codec", "event_wire", "event_schema"),
                 ],
             }
+        }
+    }
+
+    #[test]
+    fn codec_jaq_syntax_is_checked_before_model_commit_for_every_direction() {
+        let domain = DomainName::parse("example").assured("example is a valid domain");
+        let identifier =
+            ModelName::parse("event_codec").assured("event_codec is a valid model name");
+        let schema = CreateSchema {
+            name: named("event_schema"),
+            fields: Vec::new(),
+        };
+        for (direction, transformations) in [
+            (
+                "ingestion",
+                CodecJaqTransformations {
+                    on_ingestion: Some("[".to_string()),
+                    ..CodecJaqTransformations::default()
+                },
+            ),
+            (
+                "emitting",
+                CodecJaqTransformations {
+                    on_emitting: Some("[".to_string()),
+                    ..CodecJaqTransformations::default()
+                },
+            ),
+            (
+                "emitting batch",
+                CodecJaqTransformations {
+                    on_emitting: Some(".".to_string()),
+                    on_emitting_batch: Some("[".to_string()),
+                    ..CodecJaqTransformations::default()
+                },
+            ),
+        ] {
+            let error = ensure_codec_schema_compatibility(
+                &domain,
+                &identifier,
+                ResolvedCodecWireFormat::JaqNative {
+                    format: nervix_models::CodecJaqFormat::Json,
+                    transformations: &transformations,
+                },
+                &schema,
+                &[],
+            )
+            .err()
+            .verified("the malformed jaq program is rejected");
+            assert!(
+                matches!(error.current_context(), RegistryError::InvalidCodecJaq { direction: actual, .. } if *actual == direction)
+            );
         }
     }
 

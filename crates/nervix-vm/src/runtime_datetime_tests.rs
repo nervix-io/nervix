@@ -74,7 +74,9 @@ fn compile_error(source: &str, inputs: Vec<Field>, outputs: Vec<Field>) -> Strin
         [CompileBinding::writable("input", input_schema)],
     )
     .expect_err("the datetime program must be rejected")
+    .current_context()
     .message
+    .clone()
 }
 
 fn column<'a>(batch: &'a TypedBatch, name: &str) -> &'a TypedArray {

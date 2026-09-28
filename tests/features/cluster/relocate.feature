@@ -1566,6 +1566,14 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       - domain={{domain}} kind=junction name=abort_route owner=node-2
       """
+    When http payload is posted to node "node-1" with host "abort-{{test_id}}.example.com" path "/abort"
+      """
+      {"seq":2}
+      """
+    Then the observed broker receives a payload
+      """
+      "seq":2
+      """
 
   Scenario: Runtime nodes outside the unit keep their state through a relocation
     Given runtime replication is configured with replica count 0 and snapshot interval "10m"

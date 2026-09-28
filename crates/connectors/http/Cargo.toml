@@ -20,6 +20,7 @@ shuttle = [
 async-trait = { workspace = true }
 error-stack = { workspace = true }
 httparse = { workspace = true }
+httpdate = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }

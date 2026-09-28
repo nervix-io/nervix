@@ -41,7 +41,7 @@ pub(crate) use entity_gate::{
 };
 pub(crate) use entrypoint_plan::{
     BranchInstanceAckBoundary, EntrypointPlanError, EntrypointPlans, LoweredConstruction,
-    PlannedEntryRoute, PlannedRouteBranch,
+    LoweredFilter, PlannedEntryRoute, PlannedRouteBranch,
 };
 /// What the decisions layer exposes. Everything else this module and its submodules declare is
 /// `pub(in crate::registry)` or narrower, so the control plane reaches the registry only through

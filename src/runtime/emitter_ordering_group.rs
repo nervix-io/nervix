@@ -31,41 +31,23 @@ pub(super) enum CompiledOrderingGroup {
 impl CompiledOrderingGroup {
     /// Compiles the group `declared` against the emitter's input schema.
     pub(super) fn compile(
-        declared: &EmitterOrderingGroup,
+        declared: &EmitterOrderingGroupPlan,
         domain: &DomainName,
         emitter: &EmitterName,
         input: RuntimeVmSchema,
         context: RuntimeVmCompileContext<'_>,
     ) -> Result<Self, RuntimeError> {
         let expression = match declared {
-            EmitterOrderingGroup::FromBranch => return Ok(Self::FromBranch),
-            EmitterOrderingGroup::Expression(expression) => expression,
+            EmitterOrderingGroupPlan::FromBranch => return Ok(Self::FromBranch),
+            EmitterOrderingGroupPlan::Expression(program) => program,
         };
-        let field = FieldName::parse(ORDERING_GROUP_FIELD)
-            .assured("this is a constant literal that satisfies the identifier grammar");
         let output_schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
-            field.as_str(),
+            ORDERING_GROUP_FIELD,
             ArrowDataType::Utf8,
             false,
         )]));
-        let construction = RouteConstruction {
-            assignments: vec![Assignment {
-                target: nervix_models::AssignmentTarget::bare(field),
-                value: expression.clone(),
-            }],
-            ..RouteConstruction::default()
-        };
-        let parsed =
-            lower_transforming_route(&construction, input.schema.as_ref(), output_schema.as_ref())
-                .map_err(|reason| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "ordering group expression for emitter '{}' is invalid: {reason}",
-                        emitter.as_str()
-                    ),
-                })?;
         let error_sites =
-            compiled_message_error_sites(&parsed, &[MessageErrorOperation::Set], None).map_err(
+            compiled_message_error_sites(expression, &[MessageErrorOperation::Set], None).map_err(
                 |reason| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
                     reason: format!("{reason:#}"),
@@ -76,7 +58,7 @@ impl CompiledOrderingGroup {
                 domain,
                 identifier: &ModelName::from(emitter),
             },
-            parsed,
+            expression.clone(),
             RuntimeVmSchemaPair {
                 input: input.schema,
                 input_sensitivity: input.sensitivity,
@@ -397,10 +379,17 @@ mod tests {
         group: &str,
         input_schema: &Arc<CompiledSchema>,
     ) -> CompiledOrderingGroup {
+        let emitter = named("ordered_notifications");
+        let declared = EmitterOrderingGroupPlan::expression(
+            &emitter,
+            &expression(group),
+            input_schema.arrow_schema().as_ref(),
+        )
+        .expect("the ordering group expression must lower");
         CompiledOrderingGroup::compile(
-            &EmitterOrderingGroup::Expression(expression(group)),
+            &declared,
             &domain("default"),
-            &named("ordered_notifications"),
+            &emitter,
             RuntimeVmSchema {
                 schema: input_schema.arrow_schema(),
                 sensitivity: VmSchemaSensitivity::default(),

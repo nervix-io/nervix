@@ -7,10 +7,11 @@
 //!
 //! - **Owns.** The FlatBuffers schema of the ABI, its encoders, its verified decoders, the borrowed
 //!   views decoding produces, and the return codes that classify a rejected saved state.
-//! - **Depends on.** `flatbuffers`.
+//! - **Depends on.** `flatbuffers` and `error-stack`.
 //! - **Must not know.** Anything in Nervix, deliberately. Guests link this crate, so a Model or a
 //!   name type named here would pull the server's vocabulary into every guest.
 
+use error_stack::{Report, Result};
 use flatbuffers::{Allocator, FlatBufferBuilder, WIPOffset};
 use meticulous::{OptionExt as _, ResultExt as _};
 use thiserror::Error;
@@ -277,13 +278,12 @@ impl BranchInit {
 
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
         let message = verified_message(bytes)?;
-        let payload =
-            message
-                .payload_as_branch_init()
-                .ok_or_else(|| ProtocolError::UnexpectedPayload {
-                    expected: "branch init",
-                    actual: payload_name(message.payload_type()),
-                })?;
+        let payload = message.payload_as_branch_init().ok_or_else(|| {
+            Report::new(ProtocolError::UnexpectedPayload {
+                expected: "branch init",
+                actual: payload_name(message.payload_type()),
+            })
+        })?;
         decode_branch_init(payload)
     }
 }
@@ -323,10 +323,10 @@ impl<'a> EnvelopeRef<'a> {
         if let Some(output) = message.payload_as_output_envelope() {
             return Ok(Self::Output(OutputEnvelopeRef(output)));
         }
-        Err(ProtocolError::UnexpectedPayload {
+        Err(Report::new(ProtocolError::UnexpectedPayload {
             expected: "envelope",
             actual: payload_name(message.payload_type()),
-        })
+        }))
     }
 
     pub fn to_owned(self) -> Result<Envelope, ProtocolError> {
@@ -391,10 +391,10 @@ impl GuestSnapshot {
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
         let message = verified_message(bytes)?;
         let snapshot = message.payload_as_guest_snapshot().ok_or_else(|| {
-            ProtocolError::UnexpectedPayload {
+            Report::new(ProtocolError::UnexpectedPayload {
                 expected: "guest snapshot",
                 actual: payload_name(message.payload_type()),
-            }
+            })
         })?;
         Ok(Self {
             init_metadata: snapshot.init_metadata().bytes().to_vec(),
@@ -405,10 +405,10 @@ impl GuestSnapshot {
 
 fn verified_message(bytes: &[u8]) -> Result<wire::Message<'_>, ProtocolError> {
     let Some(prefix) = bytes.get(..4) else {
-        return Err(ProtocolError::LengthMismatch {
+        return Err(Report::new(ProtocolError::LengthMismatch {
             declared: 0,
             actual: bytes.len(),
-        });
+        }));
     };
     let declared = u32::from_le_bytes(
         prefix
@@ -422,12 +422,16 @@ fn verified_message(bytes: &[u8]) -> Result<wire::Message<'_>, ProtocolError> {
         .checked_sub(4)
         .verified("the let-else above returned unless the buffer holds a four-byte prefix");
     if declared != actual {
-        return Err(ProtocolError::LengthMismatch { declared, actual });
+        return Err(Report::new(ProtocolError::LengthMismatch {
+            declared,
+            actual,
+        }));
     }
     if !wire::message_size_prefixed_buffer_has_identifier(bytes) {
-        return Err(ProtocolError::InvalidIdentifier);
+        return Err(Report::new(ProtocolError::InvalidIdentifier));
     }
-    wire::size_prefixed_root_as_message(bytes).map_err(ProtocolError::InvalidFlatbuffer)
+    wire::size_prefixed_root_as_message(bytes)
+        .map_err(|source| Report::new(ProtocolError::InvalidFlatbuffer(source)))
 }
 
 /// Encodes and finishes an input envelope in the supplied FlatBuffer builder.
@@ -817,7 +821,7 @@ fn decode_processor_type(ty: wire::ProcessorType<'_>) -> Result<ProcessorType, P
         wire::ProcessorTypeKind::Array => {
             let element = ty
                 .element()
-                .ok_or(ProtocolError::MissingElementType { kind: "array" })?;
+                .ok_or_else(|| Report::new(ProtocolError::MissingElementType { kind: "array" }))?;
             ProcessorType::Array {
                 element: Box::new(decode_processor_type(element)?),
                 len: ty.array_len(),
@@ -826,16 +830,16 @@ fn decode_processor_type(ty: wire::ProcessorType<'_>) -> Result<ProcessorType, P
         wire::ProcessorTypeKind::Vec => {
             let element = ty
                 .element()
-                .ok_or(ProtocolError::MissingElementType { kind: "vec" })?;
+                .ok_or_else(|| Report::new(ProtocolError::MissingElementType { kind: "vec" }))?;
             ProcessorType::Vec {
                 element: Box::new(decode_processor_type(element)?),
             }
         }
         unknown => {
-            return Err(ProtocolError::UnknownEnum {
+            return Err(Report::new(ProtocolError::UnknownEnum {
                 kind: "processor type",
                 value: unknown.0,
-            });
+            }));
         }
     };
     Ok(scalar)
@@ -894,15 +898,17 @@ fn decode_routed_output(output: wire::RoutedOutput<'_>) -> Result<RoutedOutput, 
                     if column.column_index() == 0 {
                         Ok(OutputColumnRef::Uninitialized)
                     } else {
-                        Err(ProtocolError::InvalidUninitializedColumnIndex {
-                            column_index: column.column_index(),
-                        })
+                        Err(Report::new(
+                            ProtocolError::InvalidUninitializedColumnIndex {
+                                column_index: column.column_index(),
+                            },
+                        ))
                     }
                 }
-                unknown => Err(ProtocolError::UnknownEnum {
+                unknown => Err(Report::new(ProtocolError::UnknownEnum {
                     kind: "output column source",
                     value: unknown.0,
-                }),
+                })),
             })
             .collect::<Result<_, _>>()?,
         acks: decode_ack_sidecar(output.acks()),
@@ -1006,9 +1012,10 @@ mod tests {
         );
         let encoded = builder.finished_data().to_vec();
 
+        let error = Envelope::decode(&encoded).expect_err("column index must be zero");
         assert!(matches!(
-            Envelope::decode(&encoded),
-            Err(ProtocolError::InvalidUninitializedColumnIndex { column_index: 1 })
+            error.current_context(),
+            ProtocolError::InvalidUninitializedColumnIndex { column_index: 1 }
         ));
     }
 
@@ -1083,12 +1090,45 @@ mod tests {
     fn guest_snapshot_decoding_rejects_another_message() {
         let encoded = branch_init().encode();
 
+        let error = GuestSnapshot::decode(&encoded).expect_err("this is branch metadata");
         assert!(matches!(
-            GuestSnapshot::decode(&encoded),
-            Err(ProtocolError::UnexpectedPayload {
+            error.current_context(),
+            ProtocolError::UnexpectedPayload {
                 expected: "guest snapshot",
                 actual: "BranchInit",
-            })
+            }
+        ));
+    }
+
+    #[test]
+    fn branch_metadata_decoding_reports_the_actual_payload() {
+        let encoded = GuestSnapshot {
+            init_metadata: vec![],
+            application_state: vec![],
+        }
+        .encode();
+
+        let error = BranchInit::decode(&encoded).expect_err("a snapshot is not branch metadata");
+        assert!(matches!(
+            error.current_context(),
+            ProtocolError::UnexpectedPayload {
+                expected: "branch init",
+                actual: "GuestSnapshot",
+            }
+        ));
+    }
+
+    #[test]
+    fn envelope_decoding_reports_the_actual_payload() {
+        let encoded = branch_init().encode();
+
+        let error = EnvelopeRef::decode(&encoded).expect_err("branch metadata is not an envelope");
+        assert!(matches!(
+            error.current_context(),
+            ProtocolError::UnexpectedPayload {
+                expected: "envelope",
+                actual: "BranchInit",
+            }
         ));
     }
 
@@ -1151,9 +1191,10 @@ mod tests {
         }
         .encode();
         encoded[8..12].copy_from_slice(b"CBOR");
+        let error = EnvelopeRef::decode(&encoded).expect_err("the identifier is invalid");
         assert!(matches!(
-            EnvelopeRef::decode(&encoded),
-            Err(ProtocolError::InvalidIdentifier)
+            error.current_context(),
+            ProtocolError::InvalidIdentifier
         ));
     }
 }
