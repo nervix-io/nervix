@@ -329,6 +329,12 @@ batches and their retries retain the snapshot from acceptance, while external ob
 whose contract is actual UTC obtain that value at the shared source-host intake boundary or their
 connector boundary.
 
+An HTTP emitter's prepared method, target, headers, and optional body retain the execution
+snapshot of the admitted record through retries and an entity-pause drain. Changing the emitter
+does not re-evaluate an admitted request under the replacement. Attempt timeouts, retry backoff,
+an HTTP-date `Retry-After`, and shutdown or drain deadlines remain physical waits; a domain's
+`TIME RATE` does not shorten them.
+
 ## Admission Windows
 
 Paced ingestion obtains its execution time and admission window from one clock read. Given the

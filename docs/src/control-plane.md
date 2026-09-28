@@ -443,6 +443,14 @@ operator `PAUSE` or `RESUME` statement.
   eviction settings. Their consumers read that configuration when they are built, so the domain
   rebuilds around the new models rather than reconfiguring in place.
 
+For an HTTP emitter, the method and path expressions are part of its sink definition. Replacing
+them, the client reference, body selection, or retry mode takes `ENTITY_PAUSE`; a `FLUSH`-only
+alteration remains `DYNAMIC`. The gate keeps the admitted request with its original destination
+and prepared bytes until the old task drains. If it cannot drain, the mutation remains unapplied.
+A transaction that drops and recreates the same emitter evaluates its complete candidate as one
+model change and still drains the old emitter before replacement. Changes to a client's own
+definition use the configuration-entity `DOMAIN_PAUSE` above.
+
 An entity-paused model change also gates everything downstream of the affected model, so a
 dependent node cannot observe a half-applied change through its input relay.
 

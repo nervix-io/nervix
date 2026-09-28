@@ -291,6 +291,14 @@ source batch through the emitter's message error policy. Stop requests retain th
 deadline-bounded final flush and transport finish, and a stopped interaction performs its final
 drain before the loop exits.
 
+Terminal node or domain teardown is a different boundary from a successful stop request. After
+its drain budget ends, it cancels an emitter task even when the connector is waiting for an
+external answer. The host drops that task's prepared payloads and unresolved ACK guards without
+turning the cancellation into a delivered response or a record-specific message error. The
+source's acknowledgement and recovery contract then decides whether the record returns. An
+entity-pause swap uses the stop request instead and cannot install the replacement until its old
+task drains successfully.
+
 For a record sink using the emitter `BATCH` clause, the host selects rows from successive
 Arc-backed Arrow carriers released by one flush. It retains each carrier's source relay, exact
 branch key, execution time and original batch and row position. The host prepares members in

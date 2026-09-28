@@ -716,7 +716,7 @@ pub(super) fn emitter_unavailable_reason(
     }
 }
 
-async fn wait_for_emitter_work_cancel(work_cancel_rx: &mut watch::Receiver<bool>) {
+pub(super) async fn wait_for_emitter_work_cancel(work_cancel_rx: &mut watch::Receiver<bool>) {
     loop {
         tokio::task::consume_budget().await;
         if *work_cancel_rx.borrow() {
