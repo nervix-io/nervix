@@ -21409,7 +21409,7 @@ async fn then_generator_occurrences_preserve_branches(
         .checked_add(duration)
         .assured("scenario durations fit Tokio's monotonic instant range");
     let mut branches_by_timestamp = BTreeMap::<_, BTreeSet<String>>::new();
-    let mut latest_timestamp = None;
+    let mut latest_timestamp_by_branch = BTreeMap::<String, i64>::new();
     let mut observed = Vec::new();
 
     loop {
@@ -21489,19 +21489,21 @@ async fn then_generator_occurrences_preserve_branches(
         let timestamp = timestamp
             .timestamp_nanos_opt()
             .assured("generator scenario timestamps fit signed Unix nanoseconds");
-        if !branches_by_timestamp.contains_key(&timestamp) {
-            if let Some(latest_timestamp) = latest_timestamp.as_ref() {
-                assert!(
-                    &timestamp > latest_timestamp,
-                    "generator occurrence timestamps arrived out of order: {observed:?}, {payload}"
-                );
-            }
-            latest_timestamp = Some(timestamp);
+        if let Some(previous) = latest_timestamp_by_branch.insert(branch.to_string(), timestamp) {
+            assert!(
+                timestamp > previous,
+                "generator timestamps for branch '{branch}' did not increase: {observed:?}, \
+                 {payload}"
+            );
         }
-        branches_by_timestamp
+        let inserted = branches_by_timestamp
             .entry(timestamp)
             .or_default()
             .insert(branch.to_string());
+        assert!(
+            inserted,
+            "generator repeated an occurrence for branch '{branch}': {payload}"
+        );
         world.last_subscription_payload = Some(payload.clone());
         observed.push(payload);
     }

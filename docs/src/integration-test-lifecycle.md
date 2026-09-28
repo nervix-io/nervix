@@ -46,6 +46,15 @@ batching scenario reads the Collector's debug exporter output to check the numbe
 records in each received export request, using unique test markers to distinguish simultaneous
 scenarios sharing that container.
 
+The raw session fixture records domain-clock replies and frames in the order it reads them. A wait
+for a detach reply can queue ticks that arrived before the reply; the post-detach assertion checks
+the recorded wire order, clears those already queued frames, and waits for any new frame. An unread
+pre-reply tick therefore does not masquerade as delivery after detach.
+
+The generator cadence assertion groups equal logical timestamps across concrete branches and
+checks increasing timestamps within each branch. It allows records from separate branch tasks to
+arrive in either order, as their delivery has no shared ordering contract.
+
 `tests-deps` builds the CLI and NSPL formatter in the normal target directory. The full and focused
 client coverage recipes build a standalone instrumented CLI beside their instrumented server binary
 and place the normal NSPL formatter there. The scenario runner selects the covered CLI through
