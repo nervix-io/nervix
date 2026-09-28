@@ -197,6 +197,7 @@ mod domain_rebuild;
 mod emitter_batch_packing;
 mod emitter_buffer;
 mod emitter_encoding;
+mod emitter_http_requests;
 mod emitter_ordering_group;
 mod emitter_publishing;
 mod emitter_record_writes;
@@ -216,6 +217,7 @@ mod filter_map;
 mod force_flush;
 mod forced_recovery_decision;
 mod generator;
+mod http_request_fields;
 mod inferencer;
 mod inferencer_output;
 mod ingest_group;
@@ -327,11 +329,13 @@ use emitter_encoding::EncodedRecordSink;
 use emitter_ordering_group::{CompiledOrderingGroup, OrderingGroupError, OrderingGroups};
 use emitter_publishing::{
     EmitterPublishBatchOwner, EmitterPublishControl, EmitterPublishFailure, EmitterPublishResult,
-    EmitterSink, EmitterSinkState, RejectedEmitterRecord, await_emitter_confirmation,
-    emitter_unavailable_reason, finish_rejected_records, sink_publish_failure,
+    EmitterSink, EmitterSinkState, RejectedEmitterRecord, RejectedRecordInput,
+    await_emitter_confirmation, emitter_unavailable_reason, finish_rejected_records,
+    sink_publish_failure,
 };
 use emitter_record_writes::{
-    PreparedPayload, PreparedPayloads, PreparedWrite, RowAnswers, RowRecords,
+    EncodedPayload, PreparedHttpRequest, PreparedPayload, PreparedPayloads, PreparedWrite,
+    RowAnswers, RowRecords,
 };
 use emitter_retry::{
     EmitterAcknowledgements, EmitterRetryDeferral, EmitterRetrySchedule, RETRY_ACK_ALIVE_EACH,
@@ -364,16 +368,20 @@ use entrypoint_routes::{
 };
 pub(in crate::runtime) use events::RuntimeEvents;
 use filter_map::{
-    FilterMapBatchInputs, FilterMapOutcomeInputs, InferencerFilterMapTensors, VmUninitializedInput,
-    append_filter_map_nested_value, evaluate_filter_map_on_batch, evaluate_output_branch_program,
-    execute_filter_map_program_on_batch, expression_reads_sensitive_source,
-    plan_emitter_filter_map_batch, plan_filter_map_messages,
+    ExecutedFilterMap, FilterMapBatchInputs, FilterMapOutcomeInputs, InferencerFilterMapTensors,
+    VmUninitializedInput, append_filter_map_nested_value, evaluate_filter_map_on_batch,
+    evaluate_output_branch_program, execute_filter_map_program_on_batch,
+    expression_reads_sensitive_source, plan_emitter_filter_map_batch, plan_filter_map_messages,
 };
 use force_flush::{
     DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant,
     IngestorAckRootTrackers,
 };
 use generator::GeneratorTaskSpec;
+use http_request_fields::{
+    AcceptedHttpRequests, AdmittedHttpRequests, CompiledHttpRequestFields, HttpRequestFields,
+    HttpRequestInput, HttpRequestSchemas, SourceRecords,
+};
 use inferencer_output::flush_branch_inferencer_output;
 pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
@@ -416,8 +424,8 @@ use materialized_state::{
 use message_error::{
     MessageErrorCompileSchemas, MessageErrorFailure, MessageErrorHandling,
     MessageErrorSourceContext, SingleRecordFilterMapOutcome, captured_partial_output,
-    invalid_output_fields, planned_structured_message_error, structured_message_error,
-    vm_partial_output_row_to_runtime_batch,
+    finalized_partial_output, invalid_output_fields, planned_structured_message_error,
+    structured_message_error, vm_partial_output_row_to_runtime_batch,
 };
 use message_error_delivery::{
     MessageErrorDelivery, MessageErrorRouteKey, MessageErrorRouteRuntime, MessageErrorRouteTarget,
@@ -522,22 +530,23 @@ use test_fixtures::{
     with_inherit_all,
 };
 pub(in crate::runtime) use vm_compile::{
-    CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, KeyProjectionKind,
-    MaterializedFieldInterest, MaterializedLookupKeyMode, compile_emitter_filter_map_program,
-    compile_key_projection_program,
+    CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, EmitterRoute,
+    KeyProjectionKind, MaterializedFieldInterest, MaterializedLookupKeyMode,
+    compile_emitter_filter_map_program, compile_key_projection_program,
 };
 use vm_compile::{
-    CompiledMessageErrorSites, GeneratorSetProgramSchemas, OutputNamespaceInput, RouteProgram,
-    RuntimeCompileTarget, RuntimeFilterScope, RuntimeVmSchema, RuntimeVmSchemaPair,
-    bind_ingestor_filter_map_program, bind_output_branch_program,
+    CompiledMessageErrorSite, CompiledMessageErrorSites, GeneratorSetProgramSchemas,
+    OutputNamespaceInput, RouteProgram, RuntimeCompileTarget, RuntimeFilterScope, RuntimeVmSchema,
+    RuntimeVmSchemaPair, bind_ingestor_filter_map_program, bind_output_branch_program,
     bind_processor_output_filter_map_program, bind_scoped_filter_program,
-    compile_emitter_filter_map_part, compile_finalized_output_filter_program,
-    compile_generator_set_program, compile_message_error_set_program,
-    compile_processor_output_filter_map_program, compile_reorderer_program,
-    compile_scoped_filter_program, compile_wasm_output_filter_map_program,
-    compiled_message_error_sites, evaluate_constant_expression_vm,
-    referenced_materialized_stream_bindings, relay_schema_for_routing, relay_schema_for_runtime,
-    runtime_udf_compile_options, runtime_udf_signatures,
+    collect_expression_field_paths, compile_emitter_filter_map_part,
+    compile_finalized_output_filter_program, compile_generator_set_program,
+    compile_message_error_set_program, compile_processor_output_filter_map_program,
+    compile_reorderer_program, compile_scoped_filter_program,
+    compile_wasm_output_filter_map_program, compiled_message_error_sites,
+    evaluate_constant_expression_vm, referenced_materialized_stream_bindings,
+    relay_schema_for_routing, relay_schema_for_runtime, runtime_udf_compile_options,
+    runtime_udf_signatures,
 };
 use vm_input::{
     SharedBatchColumns, VmInputProjectionSources, compute_lookup_hash_map_columns,

@@ -78,6 +78,7 @@ Feature: Cluster peer name resolution
     When node "node-1" is stopped
     Then node "node-2" eventually reports a leader other than "node-1"
     And node "node-3" eventually reports a leader other than "node-1"
+    When the DNS fixture answers the name of node "node-2" with "name not found"
     When node "node-1" is started
     Then node "node-1" eventually observes a stable leader
     And node "node-2" eventually reports interconnect to "node-1" as "connected"

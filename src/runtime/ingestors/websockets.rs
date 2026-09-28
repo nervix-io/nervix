@@ -4,8 +4,8 @@
 //!
 //! - **Owns.** Composing a validated WebSocket connector plan, with the signaling protocol its
 //!   client names, with host-owned intake.
-//! - **Depends on.** The WebSocket connector, the connector source contract, and pre-resolved
-//!   runtime execution handles.
+//! - **Depends on.** The WebSocket connector, the connector source contract, the node resolver,
+//!   and pre-resolved runtime execution handles.
 //! - **Must not know.** WebSocket transport internals, NSPL parsing, registry validation, or
 //!   placement computation.
 
@@ -41,7 +41,12 @@ impl WebsocketsIngestorStartPlan {
             }
             None => None,
         };
-        let connector = WebsocketSourcePlan::new(resolved.entries, signaling_protocol)
+        let Some(dns) = runtime.dns() else {
+            return Err(
+                ingestor.start_failure("the node DNS resolver is not installed".to_string())
+            );
+        };
+        let connector = WebsocketSourcePlan::new(resolved.entries, signaling_protocol, dns.clone())
             .map_err(|error| ingestor.start_failure(error.to_string()))?;
         BrokerSourceStart {
             connector,

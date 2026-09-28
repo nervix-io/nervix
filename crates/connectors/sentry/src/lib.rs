@@ -35,6 +35,7 @@ const SENTRY_AUTH_HEADER: &str = "x-sentry-auth";
 const SENTRY_ENVELOPE_CONTENT_TYPE: &str = "application/x-sentry-envelope";
 const SENTRY_CLIENT_AGENT: &str = concat!("nervix/", env!("CARGO_PKG_VERSION"));
 const SENTRY_RATE_LIMITS_HEADER: &str = "x-sentry-rate-limits";
+const MAX_SENTRY_EVENT_BYTES: usize = 1_000_000;
 
 /// What one Sentry sink sends with: the entries naming its project DSN and HTTP client settings.
 pub struct SentrySinkConfig {
@@ -66,6 +67,8 @@ enum SentryEventError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("encoded Sentry event is {size} bytes; maximum is {maximum}")]
+    OversizedEvent { size: usize, maximum: usize },
     #[error("failed to serialize Sentry envelope header: {source}")]
     SerializeEnvelopeHeader {
         #[source]
@@ -211,6 +214,12 @@ impl SentrySink {
 
         let event = serde_json::to_vec(&event)
             .map_err(|source| Report::new(SentryEventError::SerializeEvent { source }))?;
+        if event.len() > MAX_SENTRY_EVENT_BYTES {
+            return Err(Report::new(SentryEventError::OversizedEvent {
+                size: event.len(),
+                maximum: MAX_SENTRY_EVENT_BYTES,
+            }));
+        }
         let envelope_header = serde_json::json!({ "event_id": event_id });
         let item_header = serde_json::json!({
             "type": "event",
@@ -339,6 +348,19 @@ mod tests {
             serde_json::from_slice(event_bytes).expect("event payload must be JSON");
 
         assert_eq!(event["timestamp"], "2010-05-06T07:08:09Z");
+    }
+
+    #[test]
+    fn envelope_rejects_an_event_above_sentrys_decompressed_limit() {
+        let payload = format!(r#"{{"message":"{}"}}"#, "x".repeat(1_000_000));
+        let result = SentrySink::encode_envelope(
+            payload.as_bytes(),
+            Timestamp::from_unix_nanos(946_684_800_000_000_000),
+        );
+        assert!(
+            result.is_err(),
+            "an oversized event must be rejected locally"
+        );
     }
 
     #[test]

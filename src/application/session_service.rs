@@ -55,6 +55,7 @@ use super::{
         CommandDiagnostic, CommandDisposition, CommandOrigin, CommandResponse, CommandResult,
     },
     completion::{ApplicationRevisionPhase, wait_for_application_revision},
+    configured_choices::{ConfiguredChoices, ConfiguredQuery},
     describe_output::placement_runtime_node_ref_suggestions,
     model_mutation::command_error,
     resource::{
@@ -776,6 +777,7 @@ struct CompletionPageBasis {
 struct ChoicePageBasis {
     revision: u64,
     query_digest: String,
+    content_digest: Option<String>,
 }
 
 impl ChoicePageBasis {
@@ -784,6 +786,10 @@ impl ChoicePageBasis {
         hasher.update(&[match request.target() {
             ChoiceTarget::DomainPace => 0,
             ChoiceTarget::PlacementPolicy => 1,
+            ChoiceTarget::Schema => 2,
+            ChoiceTarget::Branch => 3,
+            ChoiceTarget::Relay => 4,
+            ChoiceTarget::RelayField => 5,
         }]);
         hash_choice_text(&mut hasher, request.search());
         for dependency in request.dependencies() {
@@ -792,11 +798,18 @@ impl ChoicePageBasis {
         Self {
             revision,
             query_digest: hasher.finalize().to_hex().to_string(),
+            content_digest: None,
         }
+    }
+
+    fn with_content_digest(mut self, digest: String) -> Self {
+        self.content_digest = Some(digest);
+        self
     }
 
     fn page(&self, request: &ChoiceLookupRequest, candidates: Vec<Choice>) -> ChoiceOutcome {
         let mut candidate_hasher = blake3::Hasher::new();
+        hash_optional_choice_text(&mut candidate_hasher, self.content_digest.as_deref());
         for candidate in &candidates {
             hash_choice_value(&mut candidate_hasher, &candidate.value);
             hash_choice_text(&mut candidate_hasher, &candidate.presentation.label);
@@ -855,7 +868,7 @@ impl ChoicePageBasis {
     }
 }
 
-fn hash_choice_text(hasher: &mut blake3::Hasher, value: &str) {
+pub(in crate::application) fn hash_choice_text(hasher: &mut blake3::Hasher, value: &str) {
     let length =
         u64::try_from(value.len()).assured("choice text fits the bounded session transfer limit");
     hasher.update(&length.to_le_bytes());
@@ -908,6 +921,10 @@ fn hash_choice_value(hasher: &mut blake3::Hasher, value: &ChoiceValue) {
             hasher.update(&[4]);
             hash_choice_text(hasher, node.kind.as_str());
             hash_choice_text(hasher, node.identifier.as_str());
+        }
+        ChoiceValue::Field(field) => {
+            hasher.update(&[5]);
+            hash_choice_text(hasher, field.as_str());
         }
     }
 }
@@ -981,7 +998,12 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
             })
             .collect()
         }
-        ChoiceTarget::DomainPace | ChoiceTarget::PlacementPolicy => {
+        ChoiceTarget::DomainPace
+        | ChoiceTarget::PlacementPolicy
+        | ChoiceTarget::Schema
+        | ChoiceTarget::Branch
+        | ChoiceTarget::Relay
+        | ChoiceTarget::RelayField => {
             return Err(ChoiceStatus::MissingContext);
         }
     };
@@ -1184,11 +1206,21 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn process_choice(
         &self,
         request: ChoiceLookupRequest,
+        session: &SessionView,
     ) -> ChoiceOutcome {
         let revision = self.inner.consensus.current_revision().await;
         let basis = ChoicePageBasis::new(&request, revision);
-        let choices = match choices_for(&request) {
-            Ok(choices) => choices,
+        let resolved = match request.target() {
+            ChoiceTarget::DomainPace | ChoiceTarget::PlacementPolicy => {
+                choices_for(&request).map(|choices| (choices, None))
+            }
+            ChoiceTarget::Schema
+            | ChoiceTarget::Branch
+            | ChoiceTarget::Relay
+            | ChoiceTarget::RelayField => self.configured_choices_for(&request, session).await,
+        };
+        let (choices, content_digest) = match resolved {
+            Ok(resolved) => resolved,
             Err(status) => {
                 return ChoiceOutcome {
                     status,
@@ -1200,7 +1232,39 @@ impl SessionServiceImpl {
         if self.inner.consensus.current_revision().await != revision {
             return stale_choice_outcome();
         }
+        let basis = match content_digest {
+            Some(digest) => basis.with_content_digest(digest),
+            None => basis,
+        };
         basis.page(&request, choices)
+    }
+
+    /// Answers a question about the configuration of the domain `request` depends on, read with
+    /// the session's attached transaction prefix applied, so a model staged earlier in that
+    /// transaction is offered before commit.
+    async fn configured_choices_for(
+        &self,
+        request: &ChoiceLookupRequest,
+        session: &SessionView,
+    ) -> Result<(Vec<Choice>, Option<String>), ChoiceStatus> {
+        let Some(ConfiguredQuery { domain, question }) = ConfiguredQuery::of(request) else {
+            return Err(ChoiceStatus::MissingContext);
+        };
+        let domains = self.inner.consensus.current_domains().await;
+        if !domains.contains_key(domain) {
+            return Err(ChoiceStatus::MissingContext);
+        }
+        let queued = self
+            .queued_configuration(session.binding(), Some(domain))
+            .await
+            .map_err(|_| ChoiceStatus::StaleContext)?;
+        let models = self
+            .inner
+            .registry
+            .resulting_models(domain, &queued.models)
+            .map_err(|_| ChoiceStatus::LookupFailed)?;
+        let resolved = ConfiguredChoices::new(models).resolve(&question, request.search())?;
+        Ok((resolved.choices, Some(resolved.content_digest)))
     }
 
     /// The completions at the request's cursor, read against the session as `session` last left
@@ -1686,6 +1750,8 @@ pub(in crate::application) fn conflicting_reference(
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::{ModelKind, NodeRef};
+
     use super::{
         super::{
             subscription::SessionSubscriptions,
@@ -1773,6 +1839,57 @@ mod tests {
             ChoiceValue::PlacementPolicy(PlacementPolicy::SuggestSeparation)
         );
         assert!(second.page_cursor.is_none());
+
+        let schema_content_request = ChoiceLookupRequest::new(
+            ChoiceTarget::Schema,
+            vec![ChoiceSelection {
+                value: ChoiceValue::Domain(DomainName::parse("tenant").assured("valid domain")),
+            }],
+            String::new(),
+        )
+        .with_page(1, None)
+        .assured("one choice fits the bounded page size");
+        let schema_candidates = vec![
+            Choice {
+                value: ChoiceValue::Model(NodeRef::new(
+                    ModelKind::Schema,
+                    ModelName::parse("first").assured("valid schema name"),
+                )),
+                presentation: ChoicePresentation {
+                    label: "first".to_string(),
+                    detail: Some("1 fields".to_string()),
+                    group: Some("Schema".to_string()),
+                },
+            },
+            Choice {
+                value: ChoiceValue::Model(NodeRef::new(
+                    ModelKind::Schema,
+                    ModelName::parse("second").assured("valid schema name"),
+                )),
+                presentation: ChoicePresentation {
+                    label: "second".to_string(),
+                    detail: Some("1 fields".to_string()),
+                    group: Some("Schema".to_string()),
+                },
+            },
+        ];
+        let first = ChoicePageBasis::new(&schema_content_request, 42)
+            .with_content_digest("first schema shape".to_string())
+            .page(&schema_content_request, schema_candidates.clone());
+        let continued = ChoiceLookupRequest::new(
+            ChoiceTarget::Schema,
+            schema_content_request.dependencies().to_vec(),
+            String::new(),
+        )
+        .with_page(1, first.page_cursor)
+        .assured("one choice fits the bounded page size");
+        assert_eq!(
+            ChoicePageBasis::new(&continued, 42)
+                .with_content_digest("changed schema shape".to_string())
+                .page(&continued, schema_candidates)
+                .status,
+            ChoiceStatus::StaleContext
+        );
 
         let changed_dependency = request(DomainPaceChoice::Unpaced, "", Some(cursor.clone()));
         assert_eq!(

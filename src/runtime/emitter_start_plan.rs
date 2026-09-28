@@ -19,6 +19,7 @@
 use error_stack::Report;
 use nervix_connector::{
     AckConfirmation, BrokerPublishingMode, ParsedRetryPolicy, ResolvedClientConfig,
+    optional_client_config_value,
 };
 use nervix_connector_mongodb::MongoDbConflictAction;
 use nervix_connector_mqtt::MqttPublishingMode;
@@ -30,8 +31,8 @@ use nervix_connector_otel::{
 use nervix_connector_postgres::PostgresConflictAction;
 use nervix_connector_sqs::SqsPublishingMode;
 use nervix_models::{
-    ChannelName, CollectionName, EmitterBatchPolicy, Expression, QueueName, SqsFifoGroup,
-    SubjectName, TableName, TopicName,
+    ChannelName, CollectionName, EmitterBatchPolicy, Expression, HttpOrigin, Invocation, QueueName,
+    SqsFifoGroup, SubjectName, TableName, TopicName,
 };
 
 use super::*;
@@ -105,6 +106,8 @@ pub(super) enum EmitterStartPlanError {
     ZeroAckTimeout,
     #[error("{sink} emitter declares no BATCH MAX MESSAGES <n> MAX SIZE <bytes>")]
     BatchRequired { sink: &'static str },
+    #[error("HTTP emitter client '{client}' declares no http or https origin endpoint")]
+    InvalidHttpEndpoint { client: ClientName },
 }
 
 impl EmitterStartPlanError {
@@ -258,6 +261,25 @@ macro_rules! single_client_sink_plan {
             }
         }
     };
+}
+
+/// The request fields an HTTP emitter declares. The host evaluates them for each record its route
+/// keeps, in this order: the method, the path, and then every header write as it is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct HttpRequestFieldsPlan {
+    pub(super) method: Expression,
+    pub(super) path: Expression,
+    /// The emitter's `write_header` invocations, in written order.
+    pub(super) header_writes: Vec<Invocation>,
+}
+
+single_client_sink_plan! {
+    /// An HTTP sink: the origin its client sends every request to, and the request fields the host
+    /// evaluates for each record.
+    HttpSinkPlan {
+        origin: HttpOrigin,
+        request: HttpRequestFieldsPlan,
+    }
 }
 
 single_client_sink_plan! {
@@ -586,6 +608,7 @@ impl IcebergSinkPlan<DeclaredClientConfig> {
 /// The sink one emitter publishes to, with each connector's typed configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum EmitterSinkPlan<Config = ResolvedClientConfig> {
+    Http(HttpSinkPlan<Config>),
     Kafka(KafkaSinkPlan<Config>),
     Pulsar(PulsarSinkPlan<Config>),
     RabbitMq(RabbitMqSinkPlan<Config>),
@@ -611,6 +634,8 @@ impl<Config> EmitterSinkPlan<Config> {
     /// message.
     pub(super) fn batch(&self) -> Option<EmitterBatchPolicy> {
         match self {
+            // Every request carries one source record.
+            Self::Http(_) => None,
             Self::Kafka(plan) => plan.batch,
             Self::Pulsar(plan) => plan.batch,
             Self::RabbitMq(plan) => plan.batch,
@@ -634,7 +659,8 @@ impl<Config> EmitterSinkPlan<Config> {
     pub(super) fn ordering_group(&self) -> Option<&EmitterOrderingGroup> {
         match self {
             Self::Sqs(plan) => plan.ordering_group.as_ref(),
-            Self::Kafka(_)
+            Self::Http(_)
+            | Self::Kafka(_)
             | Self::Pulsar(_)
             | Self::RabbitMq(_)
             | Self::Redis(_)
@@ -655,6 +681,7 @@ impl<Config> EmitterSinkPlan<Config> {
     /// The transport this sink publishes over, as the emitter's diagnostics name it.
     pub(super) fn label(&self) -> &'static str {
         match self {
+            Self::Http(_) => "http",
             Self::Kafka(_) => "kafka",
             Self::Pulsar(_) => "pulsar",
             Self::RabbitMq(_) => "rabbitmq",
@@ -683,6 +710,7 @@ impl EmitterSinkPlan<DeclaredClientConfig> {
         ) -> Result<ResolvedClientConfig, Failure>,
     ) -> Result<EmitterSinkPlan, Failure> {
         let resolved = match self {
+            Self::Http(plan) => EmitterSinkPlan::Http(plan.resolve_clients(resolve)?),
             Self::Kafka(plan) => EmitterSinkPlan::Kafka(plan.resolve_clients(resolve)?),
             Self::Pulsar(plan) => EmitterSinkPlan::Pulsar(plan.resolve_clients(resolve)?),
             Self::RabbitMq(plan) => EmitterSinkPlan::RabbitMq(plan.resolve_clients(resolve)?),
@@ -739,6 +767,30 @@ impl EmitterStartPlan<DeclaredClientConfig> {
             }));
         };
         let sink_plan = match (sink, client) {
+            (
+                EmitSink::Http {
+                    client: expected,
+                    method,
+                    path,
+                },
+                Model::ClientHttp(client),
+            ) => {
+                Self::require_request_ack(sink, mode)?;
+                EmitterSinkPlan::Http(HttpSinkPlan {
+                    client: EmitterClientSpec::declared(
+                        expected,
+                        &client.name,
+                        client.mount.as_ref(),
+                        &client.config,
+                    )?,
+                    origin: Self::decide_http_origin(expected, &client.config)?,
+                    request: HttpRequestFieldsPlan {
+                        method: method.clone(),
+                        path: path.clone(),
+                        header_writes: emitter.construction.invocations.clone(),
+                    },
+                })
+            }
             (
                 EmitSink::Kafka {
                     client: expected,
@@ -1133,6 +1185,23 @@ impl EmitterStartPlan<DeclaredClientConfig> {
         }
     }
 
+    /// The origin an HTTP sink's client sends every request to: its `endpoint`, which the
+    /// registry accepted only as an `http` or `https` origin.
+    fn decide_http_origin(
+        client: &ClientName,
+        config: &[ClientConfigEntry],
+    ) -> Result<HttpOrigin, Report<EmitterStartPlanError>> {
+        let invalid = || {
+            Report::new(EmitterStartPlanError::InvalidHttpEndpoint {
+                client: client.clone(),
+            })
+        };
+        let Some(endpoint) = optional_client_config_value(config, "endpoint") else {
+            return Err(invalid());
+        };
+        HttpOrigin::parse(endpoint).map_err(|_| invalid())
+    }
+
     /// The object-store client an Iceberg sink stages data files through, which must be the
     /// client kind its storage backend names.
     fn decide_iceberg_storage(
@@ -1347,6 +1416,19 @@ mod tests {
         }]
     }
 
+    fn http_client_config(endpoint: &str) -> Vec<ClientConfigEntry> {
+        vec![
+            ClientConfigEntry {
+                key: "Endpoint".to_string(),
+                value: endpoint.to_string(),
+            },
+            ClientConfigEntry {
+                key: "timeout_ms".to_string(),
+                value: "5000".to_string(),
+            },
+        ]
+    }
+
     fn batch_policy() -> EmitterBatchPolicy {
         EmitterBatchPolicy {
             max_messages: BatchMessageLimit::try_from(100u32).expect("100 is a valid limit"),
@@ -1437,6 +1519,7 @@ mod tests {
 
     #[derive(Debug, Clone, Copy)]
     enum SinkKind {
+        Http,
         Kafka,
         Pulsar,
         RabbitMq,
@@ -1460,6 +1543,7 @@ mod tests {
     impl SinkKind {
         fn label(self) -> &'static str {
             match self {
+                Self::Http => "http",
                 Self::Kafka => "kafka",
                 Self::Pulsar => "pulsar",
                 Self::RabbitMq => "rabbitmq",
@@ -1482,6 +1566,20 @@ mod tests {
         fn case(self) -> SinkCase {
             let client = || named::<ClientName>("upstream");
             match self {
+                Self::Http => SinkCase {
+                    sink: EmitSink::Http {
+                        client: client(),
+                        method: expression("input.method"),
+                        path: expression("concat('/orders/', input.id)"),
+                    },
+                    mode: request_ack(),
+                    client: Model::ClientHttp(CreateClientHttp {
+                        name: client(),
+                        mount: client_mount(),
+                        config: http_client_config("https://orders.example.com:8443"),
+                    }),
+                    catalog_client: None,
+                },
                 Self::Kafka => SinkCase {
                     sink: EmitSink::Kafka {
                         client: client(),
@@ -1723,6 +1821,7 @@ mod tests {
     }
 
     #[rstest]
+    #[case::http(SinkKind::Http)]
     #[case::kafka(SinkKind::Kafka)]
     #[case::pulsar(SinkKind::Pulsar)]
     #[case::rabbitmq(SinkKind::RabbitMq)]
@@ -1833,6 +1932,92 @@ mod tests {
                 .expect("the database sink must be planned");
             assert_eq!(plan.sink.batch(), Some(batch_policy()), "{}", kind.label());
         }
+    }
+
+    #[test]
+    fn plans_an_http_sink_with_its_origin_and_request_fields_in_evaluation_order() {
+        let case = SinkKind::Http.case();
+        let mut emitter = case.emitter();
+        emitter.body = nervix_models::EmitterBody::WithoutBody;
+        emitter.construction = construction(
+            "INVOKE write_header('X-Tenant', input.tenant), write_header('X-Order', input.id)",
+        );
+
+        let plan = EmitterStartPlan::decide(
+            &emitter,
+            EmitterClientModels {
+                client: Some(&case.client),
+                catalog_client: None,
+            },
+        )
+        .expect("an HTTP sink with an HTTP client must be planned");
+
+        assert_eq!(plan.sink.batch(), None);
+        let EmitterSinkPlan::Http(sink) = plan.sink else {
+            panic!("an HTTP sink must be planned as HTTP");
+        };
+        assert_eq!(
+            sink.origin,
+            HttpOrigin::parse("https://orders.example.com:8443")
+                .expect("the fixture endpoint is an origin")
+        );
+        assert_eq!(sink.request.method, expression("input.method"));
+        assert_eq!(
+            sink.request.path,
+            expression("concat('/orders/', input.id)")
+        );
+        assert_eq!(sink.request.header_writes, emitter.construction.invocations);
+        assert_eq!(sink.client.name, named::<ClientName>("upstream"));
+    }
+
+    #[test]
+    fn an_http_client_without_an_origin_endpoint_is_not_planned() {
+        for config in [
+            Vec::new(),
+            http_client_config("https://orders.example.com/v1"),
+        ] {
+            let mut case = SinkKind::Http.case();
+            case.client = Model::ClientHttp(CreateClientHttp {
+                name: named("upstream"),
+                mount: None,
+                config,
+            });
+
+            let error = case
+                .decide()
+                .expect_err("an HTTP sink needs an origin endpoint");
+
+            assert_eq!(
+                *error.current_context(),
+                EmitterStartPlanError::InvalidHttpEndpoint {
+                    client: named("upstream"),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn an_http_sink_publishes_only_with_request_acknowledgement() {
+        let case = SinkKind::Http.case();
+        let mut emitter = case.emitter();
+        emitter.publishing_mode = no_ack();
+
+        let error = EmitterStartPlan::decide(
+            &emitter,
+            EmitterClientModels {
+                client: Some(&case.client),
+                catalog_client: None,
+            },
+        )
+        .expect_err("an HTTP sink cannot publish without acknowledgement");
+
+        assert_eq!(
+            *error.current_context(),
+            EmitterStartPlanError::UnsupportedPublishingMode {
+                mode: "NO_ACK",
+                sink: "HTTP",
+            }
+        );
     }
 
     #[test]

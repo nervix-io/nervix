@@ -332,12 +332,22 @@ against runtime schemas:
 | `DEDUPLICATE ON`, reorderer `BY`, and `CORRELATE WHERE` | Once when the installed typed processor revision is bound, then shared by every concrete branch |
 | Ingestor `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | Lowered once by the domain's entrypoint plans, then bound when the ingestor starts, before its source opens. Every source instance and ingest group shares the bound programs. |
 | Reingestor `FROM ... WHERE`, `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | Lowered once by the domain's entrypoint plans, then bound for each input relay before that input's task starts |
-| Emitter `FROM ... WHERE`, routes, HTTP `METHOD` and `PATH`, SQS `FIFO GROUP`, `VALUES`, and OpenTelemetry mappings | When the emitter task starts |
+| Emitter `FROM ... WHERE`, routes, HTTP request fields, SQS `FIFO GROUP`, `VALUES`, and OpenTelemetry mappings | When the emitter task starts |
 | Window aggregate argument and output programs, inferencer `INPUTS`, and inferencer output routes | Once when the installed typed processor revision is bound, then shared by every concrete branch |
 | Generator routes | Lowered into typed ordered route plans from the committed schedule, then compiled once when the domain's execution is built or the generator is swapped; each concrete branch task retains those compiled programs and the exact materialized source branch. |
 | Materialized-state `DEFAULT` | Compiled and executed in one step when the default binds |
 | `ON MESSAGE ERROR SEND TO ... SET` | Once for each error record it builds |
 | Subscription `WHERE` | When the subscription is created |
+
+An HTTP emitter's route compiles without its `write_header` invocations, which are request fields.
+The emitter compiles its `METHOD`, `PATH` and header writes as one more program: `METHOD` and `PATH`
+are assignments into an internal, write-only request namespace, so neither is an input of the
+program, and the header writes are its invocations. It reads `input` as the original source record
+and, with a codec, `output` and `message` as the finalized record; without a body `message` is the
+source record. It runs once for each admitted batch over only the rows the route kept, with the
+batch's execution snapshot and materialized state, so a filtered record evaluates no request field,
+and a volatile call such as `uuid_v4()` yields the value the retained request resends on every
+retry.
 
 ### The Runtime Bridge
 

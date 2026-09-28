@@ -6531,6 +6531,7 @@ dependencies = [
  "meticulous",
  "nervix-client-core",
  "nervix-models",
+ "serde_json",
  "strum 0.26.3",
  "tokio",
  "tokio-util",
@@ -6618,7 +6619,9 @@ dependencies = [
  "nervix-dns",
  "nervix-models",
  "reqwest 0.13.5",
+ "shuttle-tokio",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -6848,6 +6851,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -6938,7 +6942,9 @@ dependencies = [
  "error-stack",
  "meticulous",
  "nervix-connector",
+ "nervix-dns",
  "nervix-models",
+ "nervix-test-environment",
  "nonzero_ext",
  "rustls",
  "rustls-pki-types",
@@ -6961,16 +6967,20 @@ dependencies = [
  "humantime",
  "meticulous",
  "nervix-connector",
+ "nervix-dns",
  "nervix-jaq",
  "nervix-models",
+ "nervix-test-environment",
  "parking_lot",
  "prost 0.13.5",
  "prost-reflect",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "triomphe",
+ "url",
 ]
 
 [[package]]
@@ -7561,6 +7571,7 @@ dependencies = [
  "nervix-models",
  "nervix-nspl",
  "nervix-recovery",
+ "strum 0.26.3",
  "thiserror 2.0.21",
  "url",
  "uuid",
@@ -9061,8 +9072,7 @@ dependencies = [
 [[package]]
 name = "pulsar"
 version = "6.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a56d908fe26714fbd8dffbe6a69b39ea09fb28af14fdd8f971548d2906346b3"
+source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-max-message-size#37f70aa16d3a6cc0493d25e0ca73c0e7b0c07f80"
 dependencies = [
  "async-channel",
  "async-trait",

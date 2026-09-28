@@ -41,6 +41,11 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
+The OpenTelemetry Collector dependency exposes its stdout and stderr to scenario assertions. A
+batching scenario reads the Collector's debug exporter output to check the number and order of
+records in each received export request, using unique test markers to distinguish simultaneous
+scenarios sharing that container.
+
 `tests-deps` builds the CLI and NSPL formatter in the normal target directory. The full and focused
 client coverage recipes build a standalone instrumented CLI beside their instrumented server binary
 and place the normal NSPL formatter there. The scenario runner selects the covered CLI through
@@ -577,6 +582,12 @@ first time a scenario needs one and shared by every scenario of the run. The run
 it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse` sets, keeps them
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
+
+The Pulsar broker announces a `maxMessageSize` of 1 MiB rather than Pulsar's 5 MiB default, the
+same limit the MQTT and NATS brokers keep, so one scenario message can exceed each broker's limit.
+Its admin API serves the topic-level `maxMessageSize` policy a scenario sets on its own topic; the
+step waits up to 60 seconds for the broker to read the policy back, which shows that the policy
+applies to the next message.
 
 Harness Redis connections use an explicit ten-second budget for connection setup and each command
 response to tolerate scheduling delay under parallel load. The driver's one-second connection and 500ms

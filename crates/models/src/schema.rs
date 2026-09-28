@@ -3,7 +3,7 @@ use std::num::NonZeroU32;
 use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
-use strum::AsRefStr;
+use strum::{AsRefStr, EnumIter};
 use thiserror::Error;
 
 use crate::{FieldName, SchemaName, WireSchemaName};
@@ -337,6 +337,7 @@ where
     RkyvSerialize,
     RkyvDeserialize,
     AsRefStr,
+    EnumIter,
     Default,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
@@ -367,6 +368,7 @@ impl WireSchemaStrictness {
     RkyvSerialize,
     RkyvDeserialize,
     AsRefStr,
+    EnumIter,
 )]
 #[strum(serialize_all = "lowercase")]
 pub enum JsonType {
@@ -405,6 +407,7 @@ pub type CborType = JsonType;
     RkyvSerialize,
     RkyvDeserialize,
     AsRefStr,
+    EnumIter,
 )]
 #[strum(serialize_all = "lowercase")]
 pub enum AvroType {
@@ -459,6 +462,27 @@ pub enum ParseAsType {
 }
 
 impl ParseAsType {
+    /// Scalar choices for a structured schema editor. Collection types are built around one of
+    /// these values, so every nested level keeps its exact semantic type and declaration order.
+    pub fn scalar_variants() -> &'static [Self] {
+        &[
+            Self::U8,
+            Self::I8,
+            Self::U16,
+            Self::I16,
+            Self::U32,
+            Self::I32,
+            Self::U64,
+            Self::I64,
+            Self::Bool,
+            Self::String,
+            Self::Datetime,
+            Self::F32,
+            Self::F64,
+            Self::Bytes,
+        ]
+    }
+
     pub fn contains_bytes(&self) -> bool {
         match self {
             Self::Bytes => true,

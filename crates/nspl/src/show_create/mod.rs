@@ -5,10 +5,10 @@ use nervix_models::{ModelKind, ShowCreate};
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, boxed_choice, client_ref, codec_ref,
-        correlator_ref, deduplicator_ref, emitter_ref, endpoint_ref, generator_ref, inferencer_ref,
-        ingestor_ref, into_parse_error, junction_ref, kw, kw_phrase2, lex_input, lookup_ref,
-        placement_ref, reingestor_ref, relay_ref, reorderer_ref, schema_ref,
+        LexedInput, ParseError, ParseFromSourceError, boxed_choice, branch_ref, client_ref,
+        codec_ref, correlator_ref, deduplicator_ref, emitter_ref, endpoint_ref, generator_ref,
+        inferencer_ref, ingestor_ref, into_parse_error, junction_ref, kw, kw_phrase2, lex_input,
+        lookup_ref, placement_ref, reingestor_ref, relay_ref, reorderer_ref, schema_ref,
         signaling_protocol_ref, suggest_from, tok, udf_ref, vhost_ref, wasm_processor_ref,
         window_processor_ref, wire_avro_schema_ref, wire_cbor_schema_ref, wire_json_schema_ref,
     },
@@ -21,6 +21,12 @@ pub fn show_create_parser<'src>()
             .ignore_then(schema_ref())
             .map(|name| ShowCreate {
                 kind: ModelKind::Schema,
+                name: name.into(),
+            }),
+        kw(Identifier::Branch)
+            .ignore_then(branch_ref())
+            .map(|name| ShowCreate {
+                kind: ModelKind::Branch,
                 name: name.into(),
             }),
         kw(Identifier::Wire)
@@ -230,6 +236,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_and_completes_show_create_branch() {
+        let parsed = parse_show_create("SHOW CREATE BRANCH by_tenant;")
+            .expect("a named branch has a SHOW CREATE form");
+        assert_eq!(parsed.kind, ModelKind::Branch);
+        assert_eq!(parsed.name.as_str(), "by_tenant");
+        assert!(parse_show_create("SHOW CREATE BRANCH;").is_err());
+        let input = "SHOW CREATE BRANCH ";
+        assert_eq!(
+            suggest_show_create(input, input.len()),
+            vec!["ref:branch".to_string()]
+        );
+    }
+
+    #[test]
     fn parses_show_create_junction() {
         let tokens = to_tokens("SHOW CREATE JUNCTION merge;");
         let parsed = parse_show_create_tokens(&tokens).expect("parse should succeed");
@@ -361,6 +381,7 @@ mod tests {
         let input = "SHOW CREATE ";
         let suggestions = suggest_show_create(input, input.len());
         assert!(suggestions.contains(&"SCHEMA".to_string()));
+        assert!(suggestions.contains(&"BRANCH".to_string()));
         assert!(suggestions.contains(&"WIRE".to_string()));
         assert!(suggestions.contains(&"CODEC".to_string()));
         assert!(suggestions.contains(&"CLIENT".to_string()));

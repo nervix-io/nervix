@@ -8,6 +8,7 @@ every call, so a blocked wait never stops another Python thread from cancelling 
 
 import ctypes
 import gc
+import json
 import os
 import sys
 import threading
@@ -442,6 +443,78 @@ def check_retention(retained, reported, fields, key_fields):
     releaser.join()
 
 
+def profile_binding(event, fields, output_dir):
+    """Record raw host/FFI costs on a live Row event without changing the conformance report."""
+    count = event.row_count()
+    frame_bytes = len(event.frame())
+    samples = 1000
+
+    def measure(call):
+        for _ in range(20):
+            call()
+        values = []
+        for _ in range(samples):
+            started = time.perf_counter_ns()
+            call()
+            values.append(time.perf_counter_ns() - started)
+        return values
+
+    def retain_release():
+        retained = nx_event_retain(event.handle)
+        nx_event_release(retained)
+
+    fixed_index = next(index for index, field in enumerate(fields) if field["type"] == "I64")
+    fixed = (ctypes.c_int64 * count)()
+
+    def copy_fixed():
+        check(nx_event_column_fixed(
+            event.handle, PART_ROWS, fixed_index, fixed, ctypes.sizeof(fixed)
+        ))
+
+    text_index = next(index for index, field in enumerate(fields) if field["type"] == "STRING")
+    data_len = SIZE()
+    check(nx_event_column_varlen(
+        event.handle, PART_ROWS, text_index, None, 0, None, 0, ctypes.byref(data_len)
+    ))
+    offsets = (ctypes.c_uint64 * (count + 1))()
+    data = (ctypes.c_uint8 * data_len.value)()
+
+    def copy_text():
+        check(nx_event_column_varlen(
+            event.handle, PART_ROWS, text_index, offsets, count + 1,
+            data, data_len.value, ctypes.byref(data_len)
+        ))
+
+    measurements = {
+        "borrowed_frame_view": measure(event.frame),
+        "owned_frame_copy": measure(lambda: bytes(event.frame())),
+        "ffi_retain_release": measure(retain_release),
+        "ffi_fixed_column": measure(copy_fixed),
+        "ffi_varlen_column": measure(copy_text),
+    }
+    disposal = []
+    for _ in range(20):
+        started = time.perf_counter_ns()
+        owners = [event.retain() for _ in range(256)]
+        del owners
+        gc.collect()
+        disposal.append(time.perf_counter_ns() - started)
+    report = {
+        "schema_version": 1,
+        "runtime": sys.version,
+        "row_count": count,
+        "frame_bytes": frame_bytes,
+        "samples_per_stage": samples,
+        "samples_nanoseconds": measurements,
+        "gc_release_256_refs_nanoseconds": disposal,
+        "gc_thresholds": gc.get_threshold(),
+    }
+    os.makedirs(output_dir, exist_ok=True)
+    output = os.path.join(output_dir, f"python-{os.getpid()}.json")
+    with open(output, "w", encoding="utf-8") as target:
+        json.dump(report, target, indent=2)
+
+
 def check_cancellation(session):
     cancel = Cancel()
     outcome = {}
@@ -510,6 +583,9 @@ def main():
         # Keep a second reference and let the first go, so the rows must survive on it alone.
         retained.append(event.retain())
         del event
+
+    if output_dir := environment.get("NERVIX_CLIENT_WIRE_BINDING_PROFILE_DIR"):
+        profile_binding(retained[0], fields, output_dir)
 
     check_retention(retained, reported, fields, key_fields)
     check_cancellation(session)

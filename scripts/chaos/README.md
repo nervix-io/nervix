@@ -38,6 +38,33 @@ just chaos run ingestor-owner-crash --image nervix:debian
 just chaos run emitter-owner-crash --image nervix:debian
 ```
 
+Run finite process pauses against the observed leader and a distinct execution owner:
+
+```bash
+just chaos run pause-resume --image nervix:debian
+```
+
+The three-node pause command runs four cases: a one-second leader pause, a one-second execution-owner
+pause, a 75-second execution-owner pause, and a 75-second leader pause. Its Compose deployment
+explicitly configures a 250 ms Raft heartbeat, 10–12 second election window, and 15-second node
+unavailability timeout. The runner verifies these values in each selected container's Docker
+inspection. The short pause is below the configured election and application-health thresholds;
+the long pause exceeds them. Gossip uses an adaptive detector, so the short case also checks the
+observed leader and placement rather than assuming that those settings alone prevent failover.
+The long cases require peer-visible leader/placement failover and sink progress before unpause.
+
+Each case verifies that Pumba's dry run selected the exact observed container and that Docker
+inspection showed it paused and then running without a process restart. Docker pause and unpause
+events supply the actual interval; a short pause outside 0.8–2 seconds or a long pause outside
+15–100 seconds fails the experiment. Independent broker load, listener observation, peer-side
+public status and control canaries continue around the fault. Short pauses may end before the
+listener observer samples the outage; the runner records that limit and still requires the
+observed leader and owners to stay stable and every listener to recover. Recovery time is measured
+from the Docker unpause event, separately from the pause interval. Final Kafka ledgers require
+every accepted record with the correct content and branch, reporting identical replay duplicates
+separately. The run retains per-case Docker, public, broker, observer and Pumba evidence under
+`pauses/` plus `results/pause-progress.json`.
+
 The follower and execution-owner variants require three nodes. `--outage-seconds N` holds the
 selected node down for at least 5–120 seconds (default 8). The controller reads the leader and
 ingestor/emitter owners through the packaged CLI, selects the corresponding exact Compose node,
@@ -115,7 +142,9 @@ recovery check leaves the manifest and available evidence under that run directo
 All owned containers, networks, and volumes carry `io.nervix.chaos.run=<run-id>`. This label also
 gives Pumba scenarios an exact target selector; Nervix nodes additionally carry
 `io.nervix.chaos.target=true`. Normal exit, failure, timeout, and catchable signals preserve
-diagnostics and remove the labeled resources. If a controller is killed before its trap runs, use:
+diagnostics and remove the labeled resources. Pause cleanup first unpauses every run-owned paused
+container, including when Pumba fails or the controller receives a supported signal. If a
+controller is killed before its trap runs, use:
 
 ```bash
 just chaos cleanup --run-id <run-id>

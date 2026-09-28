@@ -39,12 +39,12 @@ use lapin::{
     tcp::TLSConfig,
     uri::{AMQPScheme, AMQPUri},
 };
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::ResultExt as _;
 use nervix_connector::{client_config_value, client_tls_paths, read_tls_file};
-use nervix_dns::{DnsLookupFailure, DnsResolver};
+use nervix_dns::{ConnectionBudget, DnsLookupFailure, DnsResolver};
 use nervix_models::ClientConfigEntry;
 use thiserror::Error;
-use tokio::time::{Instant, timeout};
+use tokio::time::timeout;
 use url::{Host, Url};
 
 /// How long one connection may spend resolving the broker host, reaching one of its addresses and,
@@ -120,13 +120,6 @@ enum BrokerTransport {
     Tls { ca_chain: Option<String> },
 }
 
-/// What remains of one connection's budget, which resolution, every address attempt and the TLS
-/// handshake spend together.
-struct ConnectDeadline {
-    started: Instant,
-    total: Duration,
-}
-
 impl RabbitMqBroker {
     /// The broker `entries` name. Reads the CA file an `amqps` client names: blocking I/O on a
     /// small local file, once for each connection.
@@ -200,7 +193,7 @@ impl RabbitMqBroker {
     }
 
     async fn connect_within(&self, budget: Duration) -> RabbitMqConnectResult<Connection> {
-        let deadline = ConnectDeadline::start(budget);
+        let deadline = ConnectionBudget::start(budget);
         let runtime = lapin::runtime::default_runtime().map_err(|error| {
             Report::new(RabbitMqConnectError::RuntimeUnavailable).attach_printable(error)
         })?;
@@ -211,7 +204,7 @@ impl RabbitMqBroker {
     }
 
     /// Every address the broker host resolves to now, within the connection budget.
-    async fn resolve(&self, deadline: &ConnectDeadline) -> RabbitMqConnectResult<Vec<SocketAddr>> {
+    async fn resolve(&self, deadline: &ConnectionBudget) -> RabbitMqConnectResult<Vec<SocketAddr>> {
         let host = self.host();
         let resolved = self
             .dns
@@ -235,19 +228,16 @@ impl RabbitMqBroker {
         &self,
         runtime: &TokioRuntime,
         addresses: &[SocketAddr],
-        deadline: &ConnectDeadline,
+        deadline: &ConnectionBudget,
     ) -> RabbitMqConnectResult<BrokerStream> {
         let mut report = Report::new(RabbitMqConnectError::Unreachable {
             host: self.host().to_string(),
         });
-        for (index, address) in addresses.iter().enumerate() {
+        for attempt in deadline.attempts(addresses) {
             tokio::task::consume_budget().await;
-            let untried = addresses
-                .len()
-                .checked_sub(index)
-                .verified("the index enumerates the addresses it is subtracted from");
-            let share = deadline.share(untried);
-            match timeout(share, AsyncTcpStream::connect(runtime, *address)).await {
+            let address = attempt.address;
+            let share = attempt.budget;
+            match timeout(share, AsyncTcpStream::connect(runtime, address)).await {
                 Ok(Ok(stream)) => return Ok(stream),
                 Ok(Err(error)) => {
                     report = report.attach_printable(format!("{address}: {error}"));
@@ -266,7 +256,7 @@ impl RabbitMqBroker {
     async fn secure(
         &self,
         stream: BrokerStream,
-        deadline: &ConnectDeadline,
+        deadline: &ConnectionBudget,
     ) -> RabbitMqConnectResult<BrokerStream> {
         let BrokerTransport::Tls { ca_chain } = &self.transport else {
             return Ok(stream);
@@ -323,32 +313,6 @@ impl RabbitMqBroker {
             })
             .attach_printable(error)
         })
-    }
-}
-
-impl ConnectDeadline {
-    fn start(total: Duration) -> Self {
-        Self {
-            started: Instant::now(),
-            total,
-        }
-    }
-
-    /// The time left before the deadline, or zero once it has passed.
-    fn remaining(&self) -> Duration {
-        match self.total.checked_sub(self.started.elapsed()) {
-            Some(remaining) => remaining,
-            None => Duration::ZERO,
-        }
-    }
-
-    /// An equal share of the remaining time for the next of `untried` addresses.
-    fn share(&self, untried: usize) -> Duration {
-        let untried = u32::try_from(untried)
-            .assured("a DNS answer fits in one message and holds far fewer than 2^32 addresses");
-        self.remaining()
-            .checked_div(untried)
-            .verified("the address about to be dialled is itself untried")
     }
 }
 

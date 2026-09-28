@@ -22,6 +22,19 @@ Branching is defined by a schema name on a named branch:
 - `CREATE BRANCH by_tenant_user SCHEMA tenant_user_branch TTL 5m` isolates each tenant/user pair
 - `MAX INSTANCES <n> EVICT LRU` can cap active concrete branch instances for that branch
 
+The web console's **Create** menu also has a branch form. Its schema picker searches internal
+schemas in the captured domain, including schemas staged earlier in the attached transaction; the
+form requires a TTL and accepts the optional positive LRU instance limit. Registry validation
+remains authoritative for whether the selected schema can serve as a branch key.
+`SHOW CREATE BRANCH <name>` returns the stored branch's canonical declaration.
+
+The same menu has a relay form. It selects the relay's schema and branch from server-backed lists
+of the captured domain, including models staged earlier in the attached transaction, and requires
+an explicit **UNBRANCHED** or **BRANCHED BY** choice. Capacity starts from the default relay buffer,
+and materialized state is none or `LAST BY TIMESTAMP`. `SHOW CREATE RELAY <name>` returns the
+stored relay's canonical declaration, which always states its capacity. See
+[Web Console](client-tools-web-console.md).
+
 Relays select an explicit branch or declare unbranched execution:
 
 ```nspl

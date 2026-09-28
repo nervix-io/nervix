@@ -188,9 +188,17 @@ relay. Do not use them to scan across branches.
   unknown is retried with the same bytes and members, so consumers deduplicating a retry see a
   whole repeated batch, never a regrouped one. Keep `MAX SIZE` below the destination's own message
   limit with room for the key, headers or attributes written around the payload: a batch message
-  over a limit the client can see (Kafka, MQTT, NATS, SQS) is rejected with every member as an
-  `external` `publish` error, while a larger message to Pulsar or RabbitMQ is retried; see
+  over a limit the client can see (Kafka, MQTT, NATS, Pulsar, SQS) is rejected with every member as
+  an `external` `publish` error, as is one a Pulsar topic's own `maxMessageSize` refuses under
+  `MODE ACK` and one whose body RabbitMQ refuses as larger than its `max_message_size`. RabbitMQ
+  counts the body alone, so a `MAX SIZE` no larger than `max_message_size` suffices there; see
   [Emitters](../../../docs/src/emitters.md#broker-and-message-emitters).
+  A batching OTEL emitter bounds each export request by the number of successfully mapped source
+  records and the exact uncompressed protobuf size, including resource and scope. An oversized
+  candidate is divided and an oversized singleton follows `ON MESSAGE ERROR`; without the clause,
+  OTEL keeps one export request per pending Arrow batch. A batching Sentry emitter places its
+  members inside one event in one envelope, and a `SYSLOG` codec places complete member messages
+  in one frame's JSON-array `MSG`.
   SQS `.fifo` queue names and `FIFO GROUP` appear together, and `FIFO GROUP FROM BRANCH` is used
   only with branched input.
 - Every MongoDB emitter maps integers that fit the BSON signed 64-bit range. A `U64` value above

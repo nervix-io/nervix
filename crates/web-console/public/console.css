@@ -2036,7 +2036,6 @@ button {
   backdrop-filter: blur(4px);
 }
 
-.subscribe-dialog,
 .branch-dialog,
 .resource-dialog {
   width: 460px;
@@ -2281,23 +2280,6 @@ button {
   font-size: 11px;
 }
 
-.schema-field-button {
-  width: 100%;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: inherit;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  letter-spacing: 0;
-  text-align: left;
-  text-transform: none;
-}
-
-.schema-field-button:hover span {
-  color: var(--cyan);
-}
-
 .schema-row span {
   color: #c8d8f0;
 }
@@ -2307,44 +2289,10 @@ button {
   font-style: normal;
 }
 
-.subscribe-block input {
-  width: 100%;
-  height: 32px;
-  padding: 0 12px;
-  border: 1px solid rgba(30, 58, 186, 0.3);
-  border-radius: 6px;
-  outline: 0;
-  background: rgba(6, 10, 23, 0.7);
-  color: #e0e8ff;
-  caret-color: var(--cyan);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-}
-
-.sample-options {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
-}
-
-.sample-options button,
 .subscribe-actions button {
   border-radius: 6px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
-}
-
-.sample-options button {
-  height: 30px;
-  border: 1px solid rgba(30, 58, 186, 0.2);
-  background: rgba(30, 58, 186, 0.08);
-  color: #4a5a8a;
-}
-
-.sample-options button.active {
-  border-color: rgba(6, 182, 212, 0.4);
-  background: rgba(6, 182, 212, 0.15);
-  color: var(--cyan);
 }
 
 .subscribe-actions {
@@ -2758,6 +2706,8 @@ button {
   top: 34px;
   right: 0;
   min-width: 240px;
+  max-height: min(70vh, 550px);
+  overflow-y: auto;
 }
 
 .create-menu button {
@@ -2918,6 +2868,130 @@ button {
   font-size: 10px;
   font-weight: 800;
   text-transform: uppercase;
+}
+
+.create-fields,
+.create-field-entry,
+.create-type-layers {
+  display: grid;
+  gap: 10px;
+}
+
+.create-field-entry {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.create-field-entry-head,
+.create-type-layer,
+.create-type-layer-add,
+.create-field-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.create-field-entry-head {
+  justify-content: space-between;
+  color: var(--text-c);
+  font-size: 11px;
+}
+
+.create-field-type {
+  min-width: 0;
+  margin: 0;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.create-field-type legend,
+.create-type-layers > span,
+.create-mode-options legend {
+  color: var(--text-d);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.create-type-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.create-field-actions button,
+.create-type-options button,
+.create-type-layer button,
+.create-type-layer-add button,
+.create-add-field {
+  min-height: 29px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-hi);
+  color: var(--text-c);
+  font: inherit;
+  font-size: 10px;
+}
+
+.create-type-options button.active {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  background: color-mix(in srgb, var(--cyan) 13%, var(--surface));
+}
+
+.create-type-layer .create-field {
+  flex: 1 1 100px;
+}
+
+.create-type-layer .create-array-length {
+  width: 100%;
+}
+
+.create-mode-options {
+  min-width: 0;
+  margin: 0;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.create-selected-schema,
+.create-selected-branch,
+.create-selected-relay,
+.create-filter-reading,
+.create-reference-invalid {
+  margin: 0;
+  font-size: 10px;
+}
+
+.create-filter-reading {
+  color: var(--text-d);
+  overflow-wrap: anywhere;
+}
+
+.create-reference-invalid,
+.create-filter-reading.invalid {
+  color: #fb7185;
+}
+
+.create-choice-buttons button em {
+  margin-left: 6px;
+  color: var(--purple);
+  font-style: normal;
+  font-weight: 600;
+}
+
+.create-field-actions button:disabled,
+.create-type-options button:disabled,
+.create-type-layer button:disabled,
+.create-type-layer-add button:disabled,
+.create-add-field:disabled {
+  opacity: 0.55;
+  cursor: wait;
 }
 
 .create-choice-buttons {

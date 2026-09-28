@@ -15,6 +15,9 @@ For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.htm
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
 completion status messages.
+The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
+schemas, branches, relays, and session subscriptions; use the same web-console chapter for their
+typed fields, reference lookup, and transaction behavior.
 
 ## Gather the configuration contract
 
@@ -300,13 +303,20 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   one of `ENCODE USING <codec>` or `WITHOUT BODY`. Do not add an ACK window, `ACK TIMEOUT`,
   `NO_ACK` or `BATCH`; see [Emitters](../../../docs/src/emitters.md#http-request-configuration)
   for client origin and timeout requirements, request-field types and sensitivity, bodyless
-  construction, and ALTER rules.
+  construction, and ALTER rules. Each record is one request: route `WHERE` filters before any
+  request field is evaluated, a failed method, path, header write or body encoding rejects the
+  record through `ON MESSAGE ERROR` before any part of its request is sent, and a retry resends the
+  prepared request unchanged. Declare
+  `Content-Type` and any idempotency key with `write_header`; see
+  [HTTP requests](../../../docs/src/emitters.md#http-requests).
 - Write a supported emitter's optional `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` after the complete
   sink clause and route construction, before `FLUSH`; it is required for ClickHouse, Postgres,
   MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a
   codec with `ON EMITTING BATCH`, and a batching protobuf codec needs `BATCH MESSAGE`. Compatible
   rows from successive Arrow carriers in one flush may share a payload, but rows from different
-  source relays or concrete branches cannot; see [Emitters](../../../docs/src/emitters.md#batching).
+  source relays or concrete branches cannot. For OTEL, the clause bounds each protobuf export
+  request by successful source-record count and uncompressed encoded size; see
+  [Emitters](../../../docs/src/emitters.md#batching).
   For SQS, use `FIFO GROUP FROM BRANCH|<string_expression>` exactly when the externally provisioned
   queue name ends in `.fifo`; `FROM BRANCH` requires branched input.
 - Give every client resource mount an explicit `MOUNT <resource> VERSION <u64>|LATEST` clause. Put
