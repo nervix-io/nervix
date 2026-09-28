@@ -319,7 +319,8 @@ Choose checks relevant to the configured graph:
   anything.
 - `LOOKUP <hash_map> KEY '<key>';` checks a loaded lookup.
 - `CREATE SUBSCRIPTION ...` checks live relay output without modifying the graph. A subscription
-  ends when its relay is redefined or removed; create it again to read the current definition.
+  ends when its relay is redefined or removed; create it again to read the current definition. In
+  the web console the tab turns ended and its resubscribe button does this under the same name.
 - `ATTACH DOMAIN CLOCK;` shows the active domain's `START` generation and clock state, including a
   paced domain's committed origin, UTC anchor, and rate, then reports each change until
   `DETACH DOMAIN CLOCK;`. Use it when paced ingestion rejects `TIMESTAMP AT` values: the mapping

@@ -221,8 +221,24 @@ draft stays editable. A name an open tab already uses fails before anything is s
 reconnect or leader change, the console restores each open tab once under its name; the form does
 not submit it again.
 
-Closing the tab ends the subscription. Subscriptions are read-only views: they cannot construct,
-inherit, or produce side effects. See [Sessions](sessions.md).
+The console restores its tabs before it attaches the session's transaction again, because a session
+that holds a transaction refuses subscriptions, so an open transaction does not keep a tab from
+coming back. A tab stays **restoring** until the server opens its subscription again. A restoration
+the server refuses leaves the tab **interrupted** with the reason, and the console tries it again
+every second while no transaction is attached; closing an interrupted tab stops that.
+
+When a relay is redefined or removed, the server ends the subscriptions that read it. Such a tab
+turns **ended**: it keeps the rows it showed together with the reason, receives nothing more, and
+is not restored after a reconnect, which would not change why it ended. Its **↻** button
+resubscribes it under the same name with the statement that first opened it. The tab shows
+**resubscribing** until the server answers, then becomes active again with the relay's current
+schema. A refusal, such as a relay that no longer exists, leaves the tab ended with the reason. An
+ended tab keeps its name until it is closed, so resubscribe it or close it before opening another
+subscription with that name.
+
+Closing the tab ends the subscription; closing an ended tab only removes it, because the server
+already ended its subscription. Subscriptions are read-only views: they cannot construct, inherit,
+or produce side effects. See [Sessions](sessions.md).
 
 ## The NSPL REPL
 
@@ -276,6 +292,25 @@ cursor, while preserving surrounding text. The list shows one bounded page at a 
 SUGGESTIONS** to fetch the next page. The console shows a message when the selected domain or
 transaction context is missing or stale, or when the candidate lookup fails. An empty list with
 no message means there are no matches.
+
+### Bounded Buffers
+
+The console holds a bounded amount of everything it keeps, however long it runs or however fast
+its session delivers, and says where it left something out:
+
+- The REPL and every subscription tab each keep their latest 256 lines, up to 256 KiB of text, and
+  a line longer than that is cut. The first line then says that earlier lines were omitted.
+- The command history behind `ArrowUp` and `ArrowDown` keeps the latest 256 commands, up to
+  256 KiB. Walking back to the oldest command kept says that earlier commands were omitted, and a
+  command larger than the whole history says that it cannot be recalled.
+- While the console connects or waits to reconnect, at most 64 requests of its controls wait for
+  the session, carrying at most 4 MiB of statements, completion input, and search text. Once
+  connected, at most 256 requests, carrying at most 16 MiB, are held or awaiting their reply. A
+  request past either bound is not sent, and the control that issued it shows why where its
+  outcome would have appeared: the REPL, a form, a tab, the resource dialog, or the inspector. A
+  completion request that is not sent reports a failed lookup rather than an empty list.
+- The execution graph and sidebar keep only the latest snapshot of the selected domain. Selecting
+  another domain replaces it with that domain's snapshot, which the server sends at once.
 
 ## Inspecting a transaction
 

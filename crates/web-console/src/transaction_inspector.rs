@@ -9,7 +9,6 @@
 
 use std::collections::BTreeMap;
 
-use futures_channel::mpsc::UnboundedSender;
 use leptos::{ev, prelude::*};
 use meticulous::OptionExt as _;
 use nervix_client_wire::InspectTransactionRequest;
@@ -27,7 +26,7 @@ use nervix_web_console::graph::{
     viewport::{Extent, GraphBounds, Viewport},
 };
 
-use crate::{ConsoleRequest, event_target_input};
+use crate::{ConsoleRequest, event_target_input, request_handoff::RequestSender};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct PreviewKey {
@@ -262,7 +261,7 @@ struct CanvasTransform {
 pub(super) fn TransactionInspector(
     inspector: InspectorSignals,
     transaction_status: RwSignal<Option<TransactionStatus>>,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     run_command: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let lookup_id = RwSignal::new(String::new());
@@ -302,10 +301,10 @@ pub(super) fn TransactionInspector(
             operation: None,
         });
         if let Some(tx) = request_tx.get() {
-            if tx.unbounded_send(request).is_err() {
+            if let Err(refusal) = tx.send(request) {
                 inspector
                     .error
-                    .set(Some("websocket command channel is closed".to_string()));
+                    .set(Some(refusal.current_context().to_string()));
             }
         } else {
             inspector

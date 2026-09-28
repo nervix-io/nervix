@@ -13,7 +13,6 @@
 use std::collections::BTreeMap;
 
 use error_stack::{Report, ResultExt as _};
-use futures_channel::mpsc::UnboundedSender;
 use leptos::{ev, prelude::*};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
@@ -31,7 +30,7 @@ use nervix_recovery::Discarded as _;
 use thiserror::Error;
 use wasm_bindgen::JsCast as _;
 
-use super::{ConsoleConnectionState, ConsoleRequest};
+use super::{ConsoleConnectionState, ConsoleRequest, request_handoff::RequestSender};
 
 mod relay_draft;
 mod relay_editor;
@@ -1083,7 +1082,7 @@ pub(crate) fn CreateMenu(
 fn request_choices(
     signals: CreateSignals,
     control: ChoiceControl,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     generation: u64,
     append: bool,
 ) {
@@ -1127,13 +1126,10 @@ fn request_choices(
         ));
         return;
     };
-    if request_tx
-        .unbounded_send(ConsoleRequest::Choice { request, context })
-        .is_err()
-    {
-        control_signals.load.set(ChoiceLoad::Failed(
-            "The session channel is closed".to_string(),
-        ));
+    if let Err(refusal) = request_tx.send(ConsoleRequest::Choice { request, context }) {
+        control_signals
+            .load
+            .set(ChoiceLoad::Failed(refusal.current_context().to_string()));
     }
 }
 
@@ -1181,7 +1177,7 @@ pub(crate) fn CreateDialog(
     active_domain: RwSignal<Option<DomainName>>,
     connection_state: RwSignal<ConsoleConnectionState>,
     session_generation: RwSignal<u64>,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     submit: impl Fn(CreateSubmission, u64, u64) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let name_input = NodeRef::<leptos::html::Input>::new();
@@ -1469,7 +1465,7 @@ fn ChoiceGroup(
     label: &'static str,
     control: ChoiceControl,
     signals: CreateSignals,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     session_generation: RwSignal<u64>,
     /// Shows each choice's detail beside its label, as a typed field shows its type.
     #[prop(optional)]
@@ -1637,7 +1633,6 @@ fn event_target_checked(event: &ev::Event) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use futures_channel::mpsc::unbounded;
     use leptos::prelude::{
         GetUntracked as _, Owner, RenderHtml as _, RwSignal, Set as _, Update as _,
     };
@@ -1653,7 +1648,7 @@ mod tests {
     };
 
     use super::{
-        super::ConsoleRequest,
+        super::{ConsoleRequest, request_handoff::request_handoff},
         ChoiceControl, ChoiceGroup, ChoiceGroupProps, ChoiceLoad, ChoiceRequestContext,
         CreateDialog, CreateDialogProps, CreateDispatch, CreateDraftError, CreateKind, CreateMenu,
         CreateMenuProps, CreateProgress, CreateSignals, CreateSubmission, DomainDraft,
@@ -2106,11 +2101,11 @@ mod tests {
             signals.open(CreateKind::Domain, None, "trigger");
             let pace = signals.choices.domain_pace;
             pace.search.set("wall".to_string());
-            let (sender, mut receiver) = unbounded();
+            let (sender, mut receiver) = request_handoff();
             let request_tx = RwSignal::new(Some(sender));
             request_choices(signals, ChoiceControl::DomainPace, request_tx, 8, false);
             let ConsoleRequest::Choice { request, context } = receiver
-                .try_recv()
+                .try_take()
                 .assured("the choice channel remains open")
             else {
                 panic!("the create dialog sends a typed choice request");
@@ -2127,7 +2122,7 @@ mod tests {
             });
             request_choices(signals, ChoiceControl::DomainPace, request_tx, 8, true);
             let ConsoleRequest::Choice { request, context } = receiver
-                .try_recv()
+                .try_take()
                 .assured("the choice channel remains open")
             else {
                 panic!("the create dialog sends a typed choice request");
@@ -2143,7 +2138,7 @@ mod tests {
                 false,
             );
             let ConsoleRequest::Choice { request, .. } = receiver
-                .try_recv()
+                .try_take()
                 .assured("the choice channel remains open")
             else {
                 panic!("the create dialog sends a typed choice request");
@@ -2157,7 +2152,7 @@ mod tests {
                 ChoiceLoad::Failed("The session is not available".to_string())
             );
 
-            let (closed_sender, closed_receiver) = unbounded();
+            let (closed_sender, closed_receiver) = request_handoff();
             drop(closed_receiver);
             request_choices(
                 signals,
@@ -2168,12 +2163,12 @@ mod tests {
             );
             assert_eq!(
                 pace.load.get_untracked(),
-                ChoiceLoad::Failed("The session channel is closed".to_string())
+                ChoiceLoad::Failed("websocket command channel is closed".to_string())
             );
 
             pace.load.set(ChoiceLoad::Empty);
             request_choices(signals, ChoiceControl::DomainPace, request_tx, 8, true);
-            assert!(receiver.try_recv().is_err());
+            assert!(receiver.try_take().is_none());
         });
     }
 
@@ -2353,7 +2348,7 @@ mod tests {
         Owner::new().with(|| {
             let signals = CreateSignals::new();
             let branch_schema = signals.choices.branch_schema;
-            let (sender, mut receiver) = unbounded();
+            let (sender, mut receiver) = request_handoff();
             let request_tx = RwSignal::new(Some(sender));
             signals.open(CreateKind::Branch, None, "trigger");
             request_choices(signals, ChoiceControl::BranchSchema, request_tx, 9, false);
@@ -2361,14 +2356,14 @@ mod tests {
                 branch_schema.load.get_untracked(),
                 ChoiceLoad::MissingPrerequisite("Select a domain before choosing a schema")
             );
-            assert!(receiver.try_recv().is_err());
+            assert!(receiver.try_take().is_none());
 
             let scope = domain("orders");
             signals.change_scope(Some(scope.clone()));
             branch_schema.search.set("tenant".to_string());
             request_choices(signals, ChoiceControl::BranchSchema, request_tx, 9, false);
             let ConsoleRequest::Choice { request, context } = receiver
-                .try_recv()
+                .try_take()
                 .assured("the schema picker requests a typed page")
             else {
                 panic!("the schema picker must send a choice request");
@@ -2385,7 +2380,7 @@ mod tests {
             });
             request_choices(signals, ChoiceControl::BranchSchema, request_tx, 9, true);
             let ConsoleRequest::Choice { request, context } = receiver
-                .try_recv()
+                .try_take()
                 .assured("a page cursor requests the next schema page")
             else {
                 panic!("the schema picker must send a choice request");
@@ -2395,7 +2390,7 @@ mod tests {
 
             branch_schema.load.set(ChoiceLoad::Empty);
             request_choices(signals, ChoiceControl::BranchSchema, request_tx, 9, true);
-            assert!(receiver.try_recv().is_err());
+            assert!(receiver.try_take().is_none());
         });
     }
 
@@ -2403,11 +2398,11 @@ mod tests {
     fn relay_and_subscription_controls_ask_typed_questions_of_the_captured_domain() {
         Owner::new().with(|| {
             let signals = CreateSignals::new();
-            let (sender, mut receiver) = unbounded();
+            let (sender, mut receiver) = request_handoff();
             let request_tx = RwSignal::new(Some(sender));
             let mut next_request = || {
                 let ConsoleRequest::Choice { request, context } = receiver
-                    .try_recv()
+                    .try_take()
                     .assured("the control sends a typed choice request")
                 else {
                     panic!("a control sends a choice request");
