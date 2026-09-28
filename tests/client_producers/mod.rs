@@ -540,6 +540,9 @@ async fn refused_open(
     refused_open_with(world, session, ingestor, fields, limits, expected).await;
 }
 
+/// Opens a producer that must be refused for `expected`. An ingestor that is not running on its
+/// scheduled node yet refuses every open as unavailable before its endpoint can check the open, so
+/// the step opens again until the endpoint decides.
 async fn refused_open_with(
     world: &mut ScenarioWorld,
     session: SessionRef,
@@ -548,19 +551,30 @@ async fn refused_open_with(
     limits: ClientProducerLimits,
     expected: String,
 ) {
-    let opened = open_producer(world, session, &ingestor, &fields, limits).await;
-    let Err(refused) = opened else {
-        panic!("a producer on ingestor '{ingestor}' opened although it must be refused");
-    };
-    assert_eq!(
-        refused.refusal.as_ref(),
-        expected,
-        "the open was refused for another reason: {refused:?}"
-    );
-    assert!(
-        !refused.message.is_empty(),
-        "a refused open says why: {refused:?}"
-    );
+    let deadline = Instant::now() + PRODUCER_EXPECTATION_TIMEOUT;
+    loop {
+        tokio::task::consume_budget().await;
+        let opened = open_producer(world, session.clone(), &ingestor, &fields, limits).await;
+        let Err(refused) = opened else {
+            panic!("a producer on ingestor '{ingestor}' opened although it must be refused");
+        };
+        let endpoint_starting = refused.refusal == ClientProducerRefusal::EndpointUnavailable
+            && expected != ClientProducerRefusal::EndpointUnavailable.as_ref();
+        if endpoint_starting && Instant::now() < deadline {
+            tokio::time::sleep(PRODUCER_POLL_INTERVAL).await;
+            continue;
+        }
+        assert_eq!(
+            refused.refusal.as_ref(),
+            expected,
+            "the open was refused for another reason: {refused:?}"
+        );
+        assert!(
+            !refused.message.is_empty(),
+            "a refused open says why: {refused:?}"
+        );
+        return;
+    }
 }
 
 #[given(expr = "WebSocket session {string} is connected to node {string}")]
@@ -813,14 +827,27 @@ async fn when_websocket_session_eventually_opens_producer(
     open_named_producer(world, within, session, producer, ingestor, fields, limits).await;
 }
 
+/// What a step submits: rows, which the Rust client checks against its producer's schema and
+/// encodes itself, or a body the scenario wrote.
+enum SubmittedBody {
+    Rows(RecordBatch),
+    Written(Bytes),
+}
+
 /// Submits `body` through `producer` under the name `batch`.
-async fn submit(world: &mut ScenarioWorld, producer: String, batch: String, body: Bytes) {
+async fn submit(world: &mut ScenarioWorld, producer: String, batch: String, body: SubmittedBody) {
     let submission = match world.scenario_producer(&producer) {
         ScenarioProducer::Native(native) => {
             let native = native.clone();
+            let body = match body {
+                SubmittedBody::Rows(rows) => native.batch(&rows).unwrap_or_else(|error| {
+                    panic!("the Rust client did not encode batch '{batch}': {error:?}")
+                }),
+                SubmittedBody::Written(body) => ProducerBatch::from_arrow_ipc(body),
+            };
             let (identified, id) = watch::channel(None);
             let wait = tokio::spawn(async move {
-                let submitted = native.submit(ProducerBatch::from_arrow_ipc(body)).await;
+                let submitted = native.submit(body).await;
                 let id = submitted.map_err(|error| error.to_string())?;
                 identified.send_replace(Some(id));
                 let outcome = native.rejoin(id).await.map_err(|error| error.to_string())?;
@@ -843,6 +870,10 @@ async fn submit(world: &mut ScenarioWorld, producer: String, batch: String, body
                 .sessions
                 .get_mut(&session)
                 .unwrap_or_else(|| panic!("WebSocket session '{session}' is not connected"));
+            let body = match body {
+                SubmittedBody::Rows(rows) => arrow_stream(&[rows]),
+                SubmittedBody::Written(body) => body,
+            };
             let request = ClientRequest::SubmitBatch(SubmitBatchRequest {
                 producer: producer_id,
                 batch: body,
@@ -881,7 +912,7 @@ async fn when_producer_submits_rows(
         .fields
         .clone();
     let rows = table_batch(&fields, step);
-    submit(world, producer, batch, arrow_stream(&[rows])).await;
+    submit(world, producer, batch, SubmittedBody::Rows(rows)).await;
 }
 
 #[when(expr = "producer {string} submits batch {string} that is {string}")]
@@ -897,7 +928,7 @@ async fn when_producer_submits_defective_batch(
         .fields
         .clone();
     let body = defective_body(&fields, &kind);
-    submit(world, producer, batch, body).await;
+    submit(world, producer, batch, SubmittedBody::Written(body)).await;
 }
 
 /// Waits for the terminal outcome of `batch`.
