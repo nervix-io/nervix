@@ -4,8 +4,8 @@
 //!
 //! - **Owns.** Composing the SQS connector plan with the declared acknowledgement policy and
 //!   host-owned intake.
-//! - **Depends on.** The connector source contract, the SQS connector, and pre-resolved runtime
-//!   execution handles.
+//! - **Depends on.** The connector source contract, the SQS connector, the node resolver, and
+//!   pre-resolved runtime execution handles.
 //! - **Must not know.** The SQS SDK, queue polling, NSPL parsing, registry validation, or
 //!   placement computation.
 
@@ -31,7 +31,12 @@ impl SqsIngestorStartPlan {
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .map_err(|error| ingestor.start_failure(error.to_string()))?;
-        let connector = SqsSourcePlan::connect(&resolved.entries, &queue)
+        let Some(dns) = runtime.dns() else {
+            return Err(
+                ingestor.start_failure("the node DNS resolver is not installed".to_string())
+            );
+        };
+        let connector = SqsSourcePlan::connect(&resolved.entries, &queue, dns.clone())
             .await
             .map_err(|error| ingestor.start_failure(format!("{error:#}")))?;
         BrokerSourceStart {

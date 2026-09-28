@@ -61,6 +61,12 @@ func choiceValue(kind session.ChoiceValue, table tableOf) (string, error) {
 		value := new(session.ResourceChoiceReference)
 		value.Init(table.Bytes, table.Pos)
 		return "resource:" + string(value.Resource()), nil
+	case session.ChoiceValueResourceVersionNumber:
+		value := new(session.ResourceVersionNumber)
+		value.Init(table.Bytes, table.Pos)
+		return fmt.Sprintf("resource-version:%d", value.Version()), nil
+	case session.ChoiceValueLatestResourceVersion:
+		return "resource-version:LATEST", nil
 	case session.ChoiceValueModelChoiceReference:
 		value := new(session.ModelChoiceReference)
 		value.Init(table.Bytes, table.Pos)
@@ -540,6 +546,14 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 			return nil, err
 		}
 		return []string{"EVENT DOMAIN_CLOCK domain=" + string(observed.Domain()), line}, nil
+	case session.ServerBodyDomainClockTicked:
+		ticked := new(session.DomainClockTicked)
+		if err := union(message.Body, ticked); err != nil {
+			return nil, err
+		}
+		return []string{fmt.Sprintf("EVENT DOMAIN_CLOCK_TICK domain=%s generation=%d id=%d boundary=%d authority_utc=%d serving_logical=%d",
+			ticked.Domain(), ticked.Generation(), ticked.TickId(), ticked.LogicalBoundaryUnixNanos(),
+			ticked.AuthorityUtcUnixNanos(), ticked.ServingLogicalUnixNanos())}, nil
 	case session.ServerBodyDomainClockAttachmentEnded:
 		ended := new(session.DomainClockAttachmentEnded)
 		if err := union(message.Body, ended); err != nil {

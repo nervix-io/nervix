@@ -36,6 +36,8 @@ CHOICE value=pace:Paced label=str:5041434544 detail=str:57616c6c20636c6f636b gro
 CHOICE value=placement:PreferColocation label=str:50524546455220434f4c4f434154494f4e detail=none group=str:506c6163656d656e74
 CHOICE value=domain:tenant label=str:74656e616e74 detail=none group=none
 CHOICE value=resource:bundle label=str:62756e646c65 detail=none group=none
+CHOICE value=resource-version:LATEST label=str:4c4154455354 detail=str:4869676865737420636f6d706c657465642076657273696f6e group=str:5265736f757263652076657273696f6e
+CHOICE value=resource-version:3 label=str:33 detail=str:436f6d706c657465642076657273696f6e group=str:5265736f757263652076657273696f6e
 CHOICE value=model:relay/orders label=str:6f7264657273 detail=str:52454c4159 group=str:4d6f64656c73
 CHOICE value=field:amount label=str:616d6f756e74 detail=str:493634204f5054494f4e414c group=str:52656c6179206669656c64
 FRAME server_command_backup.nxsm
@@ -87,6 +89,8 @@ REPLY 15 DOMAIN_CLOCK_DETACH not_attached domain=tenant message=str:746869732073
 FRAME server_domain_clock_stopped.nxsm
 EVENT DOMAIN_CLOCK domain=tenant
 CLOCK generation=0 state=stopped
+FRAME server_domain_clock_ticked.nxsm
+EVENT DOMAIN_CLOCK_TICK domain=tenant generation=7 id=42 boundary=1000 authority_utc=2000 serving_logical=3000
 FRAME server_domain_clock_uninstalled.nxsm
 EVENT DOMAIN_CLOCK domain=tenant
 CLOCK generation=7 state=uninstalled

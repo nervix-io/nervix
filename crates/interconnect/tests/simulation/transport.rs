@@ -664,6 +664,7 @@ enum NetworkFault {
     AsymmetricBeforeConnect,
     HeldExchange,
     PartitionedExchange,
+    AsymmetricEstablished,
 }
 
 impl NetworkFault {
@@ -673,6 +674,7 @@ impl NetworkFault {
             Self::AsymmetricBeforeConnect => "one-way partition before connect",
             Self::HeldExchange => "held authenticated exchange",
             Self::PartitionedExchange => "partitioned authenticated exchange",
+            Self::AsymmetricEstablished => "one-way loss after authenticated exchange",
         }
     }
 
@@ -692,7 +694,11 @@ impl NetworkFault {
             }
             Self::PartitionedExchange => {
                 "after one authenticated exchange, partition client and server past both \
-                 deadlines, repair, rebind the server's listener and retire the client pool"
+                 deadlines, then repair and recover without replacing either process"
+            }
+            Self::AsymmetricEstablished => {
+                "after one authenticated exchange, drop client-to-server packets past both \
+                 deadlines, then repair and recover without replacing either process"
             }
         }
     }
@@ -704,6 +710,7 @@ impl NetworkFault {
             Self::AsymmetricBeforeConnect => &[62],
             Self::HeldExchange => &[63],
             Self::PartitionedExchange => &[64],
+            Self::AsymmetricEstablished => &[65],
         }
     }
 
@@ -711,7 +718,7 @@ impl NetworkFault {
         match self {
             Self::PartitionBeforeConnect => simulation.partition("client", "server"),
             Self::AsymmetricBeforeConnect => simulation.partition_oneway("server", "client"),
-            Self::HeldExchange | Self::PartitionedExchange => {}
+            Self::HeldExchange | Self::PartitionedExchange | Self::AsymmetricEstablished => {}
         }
     }
 
@@ -722,6 +729,9 @@ impl NetworkFault {
             }
             Self::AsymmetricBeforeConnect => {
                 turmoil::repair_oneway("server", "client");
+            }
+            Self::AsymmetricEstablished => {
+                turmoil::repair_oneway("client", "server");
             }
             Self::HeldExchange => turmoil::release("client", "server"),
         }
@@ -778,6 +788,27 @@ async fn assert_liveness(transport: &Transport, peer: &ClusterNodeName) {
         .await
         .assured("the authenticated peer answers the liveness probe");
     assert_eq!(response.peer, *transport.node_id());
+}
+
+async fn wait_for_liveness_recovery(transport: &Transport, peer: &ClusterNodeName) {
+    let recovered = tokio::time::timeout(Duration::from_secs(55), async {
+        loop {
+            tokio::task::consume_budget().await;
+            match transport.request(peer, LivenessRequest).await {
+                Ok(response) => {
+                    assert_eq!(response.peer, *transport.node_id());
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await;
+    assert!(
+        recovered.is_ok(),
+        "the repaired peer did not respond within 55 simulated seconds: {:?}",
+        transport.snapshot()
+    );
 }
 
 async fn assert_liveness_timeout(transport: &Transport, peer: &ClusterNodeName) {
@@ -839,7 +870,9 @@ async fn bind_fault_server(credentials: Credentials, seed: u64) -> Transport {
 
 fn fault_config(seed: u64) -> SimulationConfig {
     let mut scenario_config = config(seed);
-    scenario_config.bounds.simulated_duration = Duration::from_secs(60);
+    scenario_config.bounds.simulated_duration = Duration::from_secs(85);
+    scenario_config.bounds.max_steps =
+        NonZeroUsize::new(100_000).assured("the extended fault step limit is nonzero");
     scenario_config
 }
 
@@ -851,8 +884,6 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
     let client_credentials = authority.issue("client");
     let (ready_tx, ready_rx) = watch::channel(false);
     let (done_tx, done_rx) = watch::channel(false);
-    let (restart_tx, restart_rx) = watch::channel(false);
-    let (restarted_tx, restarted_rx) = watch::channel(false);
     let (finished_tx, finished_rx) = watch::channel(0_usize);
     run.simulate(move |simulation| {
         let server_finished = finished_tx.clone();
@@ -860,24 +891,11 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
             let credentials = server_credentials.clone();
             let ready = ready_tx.clone();
             let mut done = done_rx.clone();
-            let mut restart = restart_rx.clone();
-            let restarted = restarted_tx.clone();
             let finished = server_finished.clone();
             async move {
                 let result = HostSupervisor::run(async move {
-                    let server = bind_fault_server(credentials.clone(), seed).await;
+                    let server = bind_fault_server(credentials, seed).await;
                     ready.send_replace(true);
-                    if let NetworkFault::PartitionedExchange = fault {
-                        wait_for(&mut restart).await;
-                        server.shutdown().await;
-                        let rebuilt = bind_fault_server(credentials, seed).await;
-                        restarted.send_replace(true);
-                        wait_for(&mut done).await;
-                        assert_bounded(&rebuilt);
-                        rebuilt.shutdown().await;
-                        assert_stopped(&rebuilt).await;
-                        return Ok::<(), io::Error>(());
-                    }
                     let completed = async {
                         while !*done.borrow() {
                             tokio::task::consume_budget().await;
@@ -886,7 +904,7 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
                                 .assured("the client remains alive during repair");
                         }
                     };
-                    tokio::time::timeout(Duration::from_secs(40), completed)
+                    tokio::time::timeout(Duration::from_secs(70), completed)
                         .await
                         .assured("the client completes before the server budget expires");
                     assert_bounded(&server);
@@ -906,8 +924,6 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
             let credentials = client_credentials.clone();
             let mut ready = ready_rx.clone();
             let done = done_tx.clone();
-            let restart = restart_tx.clone();
-            let mut restarted = restarted_rx.clone();
             let finished = client_finished.clone();
             let trace = client_trace.clone();
             async move {
@@ -951,7 +967,9 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
                             fault.repair();
                             trace.record("client", "link repaired");
                         }
-                        NetworkFault::HeldExchange | NetworkFault::PartitionedExchange => {
+                        NetworkFault::HeldExchange
+                        | NetworkFault::PartitionedExchange
+                        | NetworkFault::AsymmetricEstablished => {
                             wait_for_connection(&client, &peer).await;
                             assert_liveness(&client, &peer).await;
                             let first = client
@@ -960,10 +978,13 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
                                 .assured("the first authenticated request succeeds");
                             assert_eq!(first.rows, 3);
                             trace.record("client", "authenticated exchange completed");
-                            if let NetworkFault::HeldExchange = fault {
-                                turmoil::hold("client", "server");
-                            } else {
-                                turmoil::partition("client", "server");
+                            match fault {
+                                NetworkFault::HeldExchange => turmoil::hold("client", "server"),
+                                NetworkFault::PartitionedExchange => turmoil::partition("client", "server"),
+                                NetworkFault::AsymmetricEstablished => turmoil::partition_oneway("client", "server"),
+                                NetworkFault::PartitionBeforeConnect | NetworkFault::AsymmetricBeforeConnect => {
+                                    unreachable!("the initial-connect cases take the other arm")
+                                }
                             }
                             let started = turmoil::elapsed();
                             assert_liveness_timeout(&client, &peer).await;
@@ -982,21 +1003,10 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
                             trace.record("client", "request reached its two-second deadline");
                             fault.repair();
                             trace.record("client", "link repaired");
-                            if let NetworkFault::PartitionedExchange = fault {
-                                // Dropped TCP segments can leave an established HTTP/2 session
-                                // unusable. Close the listener and its sockets, then retire the
-                                // client pool through the public topology API.
-                                restart.send_replace(true);
-                                wait_for(&mut restarted).await;
-                                client.replace_outbound_targets(&Default::default());
-                                assert!(!client.is_connected_to(&peer));
-                                register_peer(&client, "server").await;
-                                trace.record("client", "listener rebound and pool reconnected");
-                            }
                         }
                     }
                     wait_for_connection(&client, &peer).await;
-                    assert_liveness(&client, &peer).await;
+                    wait_for_liveness_recovery(&client, &peer).await;
                     let response = client
                         .request(&peer, BatchRequest { ipc: arrow_batch() })
                         .await
@@ -1018,7 +1028,7 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
         });
         simulation.client("observer", async move {
             let mut finished = finished_rx;
-            tokio::time::timeout(Duration::from_secs(50), async {
+            tokio::time::timeout(Duration::from_secs(80), async {
                 while *finished.borrow() < 2 {
                     tokio::task::consume_budget().await;
                     finished.changed().await.assured("the fixture hosts remain alive");
@@ -1037,6 +1047,7 @@ fn network_disruption_respects_deadlines_and_repairs_authenticated_service() {
         NetworkFault::AsymmetricBeforeConnect,
         NetworkFault::HeldExchange,
         NetworkFault::PartitionedExchange,
+        NetworkFault::AsymmetricEstablished,
     ] {
         let scenario = Scenario {
             name: fault.name(),

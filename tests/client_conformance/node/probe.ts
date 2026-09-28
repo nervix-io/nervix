@@ -637,6 +637,14 @@ function choiceValue(source: wire.Choice | wire.ChoiceSelection): string {
       );
       return `resource:${value.resource()}`;
     }
+    case wire.ChoiceValue.ResourceVersionNumber: {
+      const value = member(
+        source.value(new wire.ResourceVersionNumber()) as wire.ResourceVersionNumber | null,
+      );
+      return `resource-version:${value.version().toString()}`;
+    }
+    case wire.ChoiceValue.LatestResourceVersion:
+      return 'resource-version:LATEST';
     case wire.ChoiceValue.ModelChoiceReference: {
       const value = member(
         source.value(new wire.ModelChoiceReference()) as wire.ModelChoiceReference | null,
@@ -957,6 +965,10 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
     case wire.ServerBody.DomainClockObserved: {
       const observed = member(message.body(new wire.DomainClockObserved()) as wire.DomainClockObserved | null);
       return [`EVENT DOMAIN_CLOCK domain=${observed.domain()}`, clockLine(member(observed.clock()))];
+    }
+    case wire.ServerBody.DomainClockTicked: {
+      const ticked = member(message.body(new wire.DomainClockTicked()) as wire.DomainClockTicked | null);
+      return [`EVENT DOMAIN_CLOCK_TICK domain=${ticked.domain()} generation=${ticked.generation()} id=${ticked.tickId()} boundary=${ticked.logicalBoundaryUnixNanos()} authority_utc=${ticked.authorityUtcUnixNanos()} serving_logical=${ticked.servingLogicalUnixNanos()}`];
     }
     case wire.ServerBody.DomainClockAttachmentEnded: {
       const ended = member(

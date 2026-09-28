@@ -53,6 +53,11 @@ The HTTPS listener runs on every live node, independent of Raft leadership and g
 like every other entity that binds a configured listening port. It presents the TLS VHOSTs of the
 runtime revision its node applied.
 
+Visual client-mount and VHOST-TLS forms select a resource and one of its completed versions through
+typed session choices. Their drafts may submit `LATEST`; neither form resolves it locally or
+creates resource content. The server applies the same version validation and pinning as the NSPL
+command path, so the rendered stored Model and every listener use a concrete version.
+
 ## Version Lifecycle
 
 ### Assignment
@@ -77,7 +82,9 @@ recorded under that identity, with the number already assigned; the same identit
 digest is rejected as a digest conflict. An upload admitted through the client protocol keeps
 installing when the uploading connection closes. The identity rules and client retries are covered
 in [Resources](./resources.md#lifecycle) and
-[Command Completion](./command-completion.md#lifecycle-and-ownership).
+[Command Completion](./command-completion.md#lifecycle-and-ownership), and the upload stream, its
+typed failures, and its recovery in
+[Resource Uploads](./client-session-protocol.md#resource-uploads).
 
 ### Installing One Copy
 
@@ -155,7 +162,9 @@ If an applying upload loses the task that was installing it, because leadership 
 upload's connection was aborted, the leader resumes it at its next reconciliation. An upload whose
 version was never published fails with
 `the admitted archive is unavailable before durable version installation`, because only the node
-that admitted it held the archive. A published version keeps waiting for the live set as above.
+that admitted it held the archive. A retry of the same upload identity that reaches the leader
+before that reconciliation carries the archive again, so it installs the version and completes the
+upload instead. A published version keeps waiting for the live set as above.
 
 A node that joins after completion does not change the outcome. Its reconciliation installs every
 published version it does not hold from a live node that holds it, and
@@ -211,6 +220,15 @@ clause. Omitting the clause is a parse error.
 | `WASM PROCESSOR` | The module file it names, compiled into machine code | When a node builds the execution of a running domain or replaces the processor; a node keeps the compiled module only while the schedule assigns the processor to it as owner or replica, and each branch instantiates it when it first needs its guest |
 | `HASH MAP` | The file it names, decoded line by line through its codec into an in-memory index | When a node builds the domain's execution: on every live node, whatever the schedule assigns, for running and stopped domains |
 | `CLIENT ... MOUNT` | The version's content directory, linked into a temporary mount root; the connector reads the files it names from there | Whenever the client is instantiated, such as by an ingestor or emitter when it starts, or once per node for a pooled client; each client instance keeps its mount root for its lifetime |
+
+Registry planning derives typed lookup and WASM resource inputs from each committed schedule. The
+lookup input carries the exact resource identity, version, file path, codec, and key field. The
+leader rejects a missing file during candidate binding validation. Running and stopped domain
+builds use the same pinned input; the loader reports invalid decoded content before publishing the
+new runtime. A WASM input carries the exact module resource identity, version, and file. Running
+builds and entity swaps prepare that
+module from the scheduled input before replacing execution. The guest-state generations remain in
+the same scheduled processor revision and are part of its prepared-plan identity.
 
 An HTTP emitter validates its referenced client's origin, attempt timeout and paired client
 certificate/key settings before its candidate graph activates. A TLS path rendered from `CLIENT
@@ -308,11 +326,11 @@ binding also replaces the guest state of every branch: a module discovered to be
 afterwards has already invalidated the state its predecessor saved. The compiled module the check
 produces is the one activation installs, so nothing is compiled twice.
 
-The remaining content that only a consumer can prove is proven when the nodes build the consumers
-from the committed models: the protobuf sources a codec or signaling protocol compiles, and every
-line of a hash-map file. A client mount only needs the version's directory; the connector
-reads the files it names when it uses them. A version that fails during activation fails the
-command after its models were committed, as described in
+The remaining content that only a consumer can prove is proven when nodes build the consumers
+from the committed schedule's typed plans: the protobuf sources a codec or signaling protocol
+compiles, and every line of a hash-map file. A client mount only needs the version's directory; the
+connector reads the files it names when it uses them. A version that fails during activation fails
+the command after its models were committed, as described in
 [Failure Semantics And Recovery](#failure-semantics-and-recovery). A stopped domain builds only its
 codecs and hash maps, so an unusable version bound by one of its other consumers surfaces when the
 domain starts.

@@ -1,3 +1,5 @@
+use error_stack::Result;
+
 use crate::{
     context::{BranchContext, GuestContext, TimeoutHandle},
     envelope::InputBatch,

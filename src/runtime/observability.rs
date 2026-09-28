@@ -139,10 +139,10 @@ impl Runtime {
     }
 }
 
-/// One instantiated lookup as this node sees it: the pinned model it was built from and how many
+/// One instantiated lookup as this node sees it: the pinned plan it was built from and how many
 /// entries that resource version produced.
 pub(crate) struct LocalLookupDescription {
-    pub(crate) model: CreateLookup,
+    pub(crate) plan: LookupResourcePlan,
     pub(crate) entry_count: usize,
 }
 
@@ -632,7 +632,7 @@ impl Runtime {
             ));
         };
         Ok(LocalLookupDescription {
-            model: lookup.model.clone(),
+            plan: lookup.plan.clone(),
             entry_count: lookup.entries.len(),
         })
     }
@@ -688,9 +688,7 @@ mod tests {
     use ahash::HashMap;
     use fjall::Database;
     use futures_util::FutureExt as _;
-    use nervix_models::{
-        ClusterNodeName, CreateLookup, IngestorName, ModelKind, ModelName, ParseAsType,
-    };
+    use nervix_models::{ClusterNodeName, IngestorName, ModelKind, ModelName, ParseAsType};
     use tempfile::tempdir;
     use tokio::time::Duration;
     use triomphe::Arc;
@@ -1080,13 +1078,12 @@ mod tests {
             )]])
             .expect("lookup test batch should build");
         let lookup_runtime = Arc::new(LookupRuntime {
-            model: CreateLookup {
+            plan: LookupResourcePlan {
                 name: lookup.clone(),
                 key_field: named("postal_code"),
-                resource: named("postal_codes"),
-                resource_version: 7,
+                resource: ResourceId::new(domain.clone(), named("postal_codes"), 7),
                 path: "postal_codes.jsonl".to_string(),
-                decode_using_codec: named("postal_code_codec"),
+                codec: named("postal_code_codec"),
             },
             schema,
             batch: Arc::new(batch),

@@ -724,6 +724,11 @@ Current built-in client transport kinds include:
 - `S3`
 - `GCS`
 - `AZURE_BLOB`
+- `CLICKHOUSE`
+- `POSTGRES`
+- `MYSQL`
+- `MONGODB`
+- `ICEBERG_REST`
 
 Resource management commands:
 

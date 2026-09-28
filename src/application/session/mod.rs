@@ -26,6 +26,8 @@
 
 pub(in crate::application) mod admission;
 mod clock_attachments;
+#[cfg(test)]
+pub(crate) use clock_attachments::{ClockDeliveryOrder, NextClockFrame};
 mod download;
 mod events;
 pub(in crate::application) mod grpc;

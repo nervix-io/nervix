@@ -1,12 +1,14 @@
 #  Rust Client Library
 
 The workspace includes `nervix-client-core`, a native Rust client library built on the same session
-gRPC API used by `nervix-cli`.
+gRPC API used by `nervix-cli`. It is the reference implementation of the [Client Implementation
+Manual](./client-implementation-manual.md), and [Client Session
+Protocol](./client-session-protocol.md) explains the protocol behavior it relies on.
 
 Capabilities:
 
 - `Client::connect(...)` and `Client::connect_with_options(...)`
-- `Client::execute(...)`
+- `Client::execute(...)`, and `Client::prepare_execution(...)` with `Client::execute_prepared(...)`
 - `Client::transaction_status()`, `Client::attach_transaction(...)` and
   `Client::inspect_transaction(...)`
 - `Client::list_domains()`, `Client::domain()` and `Client::set_domain(...)`
@@ -39,8 +41,18 @@ leader's endpoints when discovery knows them, `TransactionDetached`, `Transactio
 Each `execute` call creates one stable execution reference and retains it through leader redirects,
 transaction reattachment, and transport reconnects. A successful outcome means the command's
 administrative effect is usable on the current live-node set. If the caller cancels its future, the
-cluster still owns any already-admitted effect; submitting the same logical request requires
-retaining its execution identity at the protocol boundary.
+cluster still owns any already-admitted effect; the client sends no cancellation and discards the
+reply when it arrives. To submit the same logical request again, prepare it once with
+`prepare_execution`, which fixes its execution reference, domain, and upload identity, and pass the
+same `ExecutionHandle` to `execute_prepared` after an uncertain, cancelled, or timed-out attempt.
+
+Every call is bounded by `ConnectOptions`: `connect_timeout` for each connection attempt (10
+seconds by default), `request_timeout` for each request (120 seconds), and `retry_timeout` for the
+call with all of its retries and redirects (120 seconds). A call whose deadline passes before a
+command's outcome is known fails with `ClientError::UncertainCommand`, which names the execution
+reference. An `https://` server is verified only against `ca_certificate_pem`: the client loads no
+system roots, so a TLS connection needs the certificate authority that signed the server's
+certificate.
 
 Minimal example:
 
@@ -121,7 +133,9 @@ return the typed `DomainClockAttachOutcome` and `DomainClockDetachOutcome`, whos
 an attachment from each refusal.
 
 Once attached, `Client::domain_clock(&domain)` returns an `AttachedDomainClock` holding the newest
-clock the session received. It answers with the same vocabulary arithmetic the cluster runs,
+clock and accepted tick the session received. `latest_tick()` gives the tick id, logical boundary,
+authority UTC observation, and serving node's logical reading; `frontier()` gives that boundary.
+It answers with the same vocabulary arithmetic the cluster runs,
 `DomainClockState::logical_time_at` and `DomainAdmissionWindow::reached`, for a UTC instant the
 caller supplies:
 
@@ -135,6 +149,9 @@ client.execute("ATTACH DOMAIN CLOCK;").await?;
 let clock = client.domain_clock(&domain).expect("the session follows this clock");
 let now = Timestamp::now();
 let logical_now = clock.logical_time_at(now)?;
+if let Some(frontier) = clock.frontier() {
+    println!("latest accepted tick boundary: {frontier}");
+}
 if let Some(window) = clock.admission_window(now)? {
     // The newest center the ingestor has reached, admitted within SKEW on either side.
     let occurred_at = window.latest_center();
@@ -143,6 +160,7 @@ if let Some(window) = clock.admission_window(now)? {
 
 match client.next_domain_clock_event().await? {
     DomainClockEvent::Observed(observed) => println!("{}", observed.clock),
+    DomainClockEvent::Ticked(ticked) => println!("tick {}", ticked.tick.tick_id),
     DomainClockEvent::Ended(ended) => println!("ended because {}", ended.reason),
     DomainClockEvent::Interrupted(gap) => println!("{} is attached again", gap.domain),
 }
@@ -157,10 +175,11 @@ host whose UTC is offset from the cluster's receives answers shifted by that off
 the rate.
 
 `Client::next_domain_clock_event()` reports what the session receives after each attach reply:
-`Observed` with a changed clock, `Ended` when the server ended the attachment because the domain no
-longer exists on the serving node, and `Interrupted` when the session holding an attachment ended.
-Events are coalesced per domain, so a caller that reads late receives the newest clock of each
-domain rather than every change in between. After a reconnect, the client attaches every followed
+`Observed` with a changed clock, `Ticked` with the newest accepted progress, `Ended` when the server
+ended the attachment because the domain no longer exists on the serving node, and `Interrupted`
+when the session holding an attachment ended. Events are coalesced per domain: an unread state
+arrives before a tick of its generation, while older unread ticks are replaced by the newest one.
+After a reconnect, the client attaches every followed
 clock again on the new session before any other request, and the clock that attachment reports
 follows the interruption as an `Observed` event; changes in between are not reported. Waiting for
 the next event reopens a closed session when a followed clock waits for it. A detach, or an end,
@@ -209,16 +228,17 @@ transaction's activity timestamp.
 
 The client automatically attaches its active transaction after a leader redirect or transport
 reconnect before retrying a command. It retains each append's execution reference and expected
-position and only treats the exact recorded append as completion. A pending `COMMIT` remains
-pending while attached status is `Committing`; it completes from the exact retained terminal
-outcome rather than from a coincidental progress count. A recovered committed operation returns a successful
+position and only treats the exact recorded append as completion. A pending `COMMIT` waits for the
+outcome recorded under its own reference, repeating the commit after an interruption; it completes
+from that exact terminal outcome rather than from a coincidental progress count, and the call fails
+as uncertain if `retry_timeout` passes first. A recovered committed operation returns a successful
 `CommandOutcome` containing the retained aggregate quiesce output. A direct `COMMIT` outcome has no
 per-statement `statements`; its message contains only the maximum quiesce level actually executed.
-If a peer briefly has no leader address while an election converges, the client retries that
-bounded interval instead of returning the transient `NotLeader` outcome. An `OutcomeUnknown`
-outcome means the command was durably admitted and its result is not known yet, for example
+If a peer briefly has no leader address while an election converges, the client waits and retries
+within `retry_timeout` instead of returning the transient `NotLeader` outcome. An `OutcomeUnknown`
+outcome means the command may have been admitted and its result is not known yet, for example
 because leadership moved while it applied; the client retries it with the same execution reference
-for the same bounded interval, which recovers the recorded outcome.
+within the same deadline, which recovers the recorded outcome.
 
 An explicit attach by another session takes over the binding. Attach to a retained tombstone
 returns an unsuccessful command outcome whose transaction status names `Committed`, `Failed`,

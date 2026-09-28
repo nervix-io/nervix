@@ -21,9 +21,9 @@ steps. Three rules hold throughout.
 The harness is test code outside the layer order: it may name any layer, and no product code names
 it. It observes product behavior and never redefines it. Product deadlines stay with the chapters
 that own them: node shutdown with [Shutdown And Recovery](./shutdown.md), node-to-node communication
-with [Cluster Interconnect](./interconnect.md), and client requests, redirects, reconnects, and
-command identity with [Sessions](./sessions.md), the [Rust Client Library](./client-library.md), and
-[Command Completion](./command-completion.md).
+with [Cluster Interconnect](./interconnect.md), client requests, redirects, reconnects, and exact
+recovery with [Client Session Protocol](./client-session-protocol.md), and command identity and
+completion with [Command Completion](./command-completion.md).
 
 ## What Runs Where
 
@@ -611,6 +611,21 @@ receiver in its place, because only a receiver the harness controls can capture 
 and choose exactly how to answer: a status sequence, a delayed, held, or lost response, a stalled
 body, or malformed framing. A receiver can serve TLS with a certificate for chosen names and can
 require the client certificate it issued, whose files a node mounts as a resource.
+Its response script can generate exact and over-limit header counts and value sizes separately for
+an interim or final block. It timestamps a request when its complete body arrives, before its
+scripted response delay begins, so a scenario can assert the measured gap between two requests
+without racing a window in which nothing should happen.
+
+Three controls keep the remaining HTTP assertions free of timing races too. A `Retry-After` date
+is computed when its response head is written, the scripted delay after the current UTC and
+rounded up to a whole second, so the date always asks for at least that delay however late the
+request arrives. A response held until released stays unanswered, and so the attempt that sent it
+unresolved, until a scenario step releases it with a response of its own choice; only the client's
+own timeout or the receiver's stop ends it sooner, so a scenario can observe state that must hold
+while a request is unresolved without betting on how long a scripted delay lasts. A request for a
+target the scenario answered by target takes that answer instead of the next scripted response,
+which gives each request of independent branches or source relays its own outcome whatever order
+they arrive in.
 
 Everything a receiver holds is bounded, and exceeding a bound is recorded as a fault, not captured.
 
@@ -620,6 +635,9 @@ Everything a receiver holds is bounded, and exceeding a bound is recorded as a f
 | One request body | 16 MiB |
 | Captured requests | 4,096 per receiver |
 | Kept faults | 256 per receiver; later faults are counted but not kept |
+| One generated response header value | 128 KiB, enough to test both sides of the emitter's 64 KiB header limit |
+| Generated response headers per block | 512, enough to test both sides of the emitter's 128-field limit |
+| A scripted `Retry-After` date | One day ahead, far beyond any scenario's wait |
 
 Every await a receiver connection makes also waits for the receiver's stop, so a held response or
 a stalled body ends as soon as cleanup begins. The receivers of a scenario stop together in the

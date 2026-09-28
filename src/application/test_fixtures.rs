@@ -167,7 +167,7 @@ pub(in crate::application) fn test_tls_files(
 
 fn test_db_path() -> PathBuf {
     let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("nervix-session-test-{id}"))
+    std::env::temp_dir().join(format!("nervix-session-test-{}-{id}", std::process::id()))
 }
 
 pub(in crate::application) fn test_addr(base_port: u16) -> std::net::SocketAddr {
@@ -580,6 +580,7 @@ pub(in crate::application) async fn build_test_service(
             recovery_endpoints: Default::default(),
             interconnect: interconnect.clone(),
             node_unavailability_timeout: Duration::from_secs(10),
+            fault_injection: Default::default(),
         })
         .await
         .expect("cluster should start"),
