@@ -46,6 +46,12 @@ reported; this conversion does not turn them into report allocations per row.
 HTTP request-field compilation retains the VM report beneath the emitter's request-field context
 and attaches its safe message for diagnostics; an invalid request program never starts the sink.
 
+Resource planning checks the committed lookup key and codec, generator materialized source,
+output branch and route construction, and WASM guest-state generation before runtime binding.
+These failures name the owning node and relevant relay, codec, or field. A missing
+lookup file is rejected during candidate binding validation; malformed records remain a loader
+failure when the pinned file is decoded. Neither failure silently selects another resource version.
+
 Schemaful JSON parsing has one codec decode failure carrying the simd-json source. Malformed
 syntax, invalid UTF-8, and invalid escapes enter through that failure; object shape, missing or
 unexpected fields, nullability, exact wire types, integer ranges, datetime parsing, base64, and

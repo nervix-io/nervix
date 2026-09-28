@@ -590,7 +590,7 @@ pub(super) fn compile_lookup_hash_map_calls(
 #[cfg(test)]
 mod tests {
     use ahash::HashMap;
-    use nervix_models::{CreateLookup, CreateSchema, ModelName, ParseAsType};
+    use nervix_models::{CreateSchema, ModelName, ParseAsType};
     use triomphe::Arc;
 
     use super::*;
@@ -627,13 +627,12 @@ mod tests {
             ]])
             .expect("lookup fixture should build as Arrow");
         let lookup = Arc::new(LookupRuntime {
-            model: CreateLookup {
+            plan: LookupResourcePlan {
                 name: named("titles_by_normalized"),
                 key_field: named("normalized_title"),
-                resource: named("titles_data"),
-                resource_version: 1,
+                resource: ResourceId::new(domain("default"), named("titles_data"), 1),
                 path: "lookup.jsonl".to_string(),
-                decode_using_codec: named("title_lookup_codec"),
+                codec: named("title_lookup_codec"),
             },
             schema: lookup_schema,
             batch: Arc::new(lookup_batch),

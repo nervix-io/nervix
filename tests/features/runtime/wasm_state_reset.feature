@@ -3,6 +3,7 @@ Feature: Coordinated WASM processor state reset
   Records already completed before the reset remain completed, and records admitted afterwards
   can observe only the new lifetime.
 
+  @execution_resource_plan
   Scenario Outline: NSPL resets one WASM branch through the public command path
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

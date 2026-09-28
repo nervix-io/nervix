@@ -356,7 +356,6 @@ impl Runtime {
         let mut materialized_stream_specs = HashMap::new();
         let mut materialized_stream_owner_nodes = HashMap::new();
         let mut transports = HashMap::new();
-        let mut generator_specs = Vec::new();
         let mut lookup_specs = Vec::new();
         let mut relay_state_specs = Vec::new();
         let mut emitter_specs = Vec::new();
@@ -373,6 +372,12 @@ impl Runtime {
             .collect::<ModelIndex>();
         let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
             .map_err(|report| RuntimeError::activation_plan(domain, report))?;
+        let resource_plans =
+            ResourceExecutionPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
+                .map_err(|report| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to plan domain resources: {report:#}"),
+                })?;
         let entrypoints = Arc::new(
             EntrypointPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
                 .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
@@ -391,42 +396,20 @@ impl Runtime {
                 return Err(error);
             }
         }
-        for node in schedule.nodes.values() {
-            if let Model::WasmProcessor(processor) = node.config.as_ref() {
-                Box::pin(self.compile_wasm_processor_module(
-                    domain,
-                    &processor.name,
-                    &processor.resource,
-                    processor.resource_version,
-                    &processor.file,
-                ))
+        for wasm in resource_plans.wasm.values() {
+            Box::pin(self.prepare_wasm_module(&wasm.module))
                 .await
                 .map_err(|reason| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
                     reason: format!("{reason:#}"),
                 })?;
-            }
         }
-        let udf_executor = Box::pin(
-            self.compile_domain_udfs(
-                domain,
-                model_index
-                    .models()
-                    .filter_map(|model| {
-                        if let Model::Udf(udf) = model {
-                            Some(udf.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect(),
-            ),
-        )
-        .await
-        .map_err(|error| RuntimeError::CompileDomainUdfs {
-            domain: domain.as_str().to_string(),
-            report: error,
-        })?;
+        let udf_executor = Box::pin(self.compile_domain_udfs(domain, resource_plans.udfs.clone()))
+            .await
+            .map_err(|error| RuntimeError::CompileDomainUdfs {
+                domain: domain.as_str().to_string(),
+                report: error,
+            })?;
         let all_branched_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         let branch_relays = branch_relays_from_plans(&all_branched_specs, &entrypoints);
 
@@ -585,99 +568,41 @@ impl Runtime {
                     }
                 }
             }
-            match node.config.as_ref() {
-                Model::Generator(generator) if node.executes_on(local_node_id) => {
-                    let Some(source_schema) =
-                        relay_schemas.get(&generator.materialized_relay).cloned()
-                    else {
+            if let Model::Emitter(emitter) = node.config.as_ref() {
+                let mut inputs = Vec::with_capacity(emitter.from.relays().len());
+                for input_relay in emitter.from.relays() {
+                    let Some(relay) = relay_builders.get_mut(input_relay) else {
                         return Err(RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "missing generator materialized relay schema '{}'",
-                                generator.materialized_relay
-                            ),
+                            reason: format!("missing emitter input relay '{}'", input_relay),
                         });
                     };
-                    let source_branching = relay_branchings
-                        .get(&generator.materialized_relay)
-                        .cloned()
-                        .assured("the generator's validated source relay has branch routing");
-                    let source_branch_schema = RuntimeVmSchema::from_branching(&source_branching);
-                    let mut routes = Vec::new();
-                    for output in generator.output_routes.outputs() {
-                        let Some(output_schema) = relay_schemas.get(&output.relay).cloned() else {
-                            return Err(RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "missing generator output relay schema '{}'",
-                                    output.relay
-                                ),
-                            });
-                        };
-                        let program = compile_generator_set_program(
-                            domain,
-                            generator,
-                            output,
-                            GeneratorSetProgramSchemas {
-                                output: RuntimeVmSchema {
-                                    schema: output_schema.arrow_schema(),
-                                    sensitivity: output_schema.vm_sensitivity(),
-                                },
-                                source: RuntimeVmSchema {
-                                    schema: source_schema.arrow_schema(),
-                                    sensitivity: source_schema.vm_sensitivity(),
-                                },
-                                branch: source_branch_schema.clone(),
-                            },
-                            Some(&udf_executor),
-                        )?;
-                        routes.push((output.clone(), program, output_schema));
-                    }
-                    generator_specs.push((generator.clone(), source_branching, routes));
-                }
-                Model::Lookup(lookup) => {
-                    let Some(codec) = codecs.get(&lookup.decode_using_codec).cloned() else {
-                        return Err(RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "missing compiled codec '{}'",
-                                lookup.decode_using_codec.as_str()
-                            ),
-                        });
-                    };
-                    let runtime = Box::pin(self.load_lookup_runtime(domain, lookup.clone(), codec))
-                        .await
-                        .map_err(|error| RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: error.to_string(),
-                        })?;
-                    lookup_specs.push((lookup.name.clone(), Arc::new(runtime)));
-                }
-                Model::Emitter(emitter) => {
-                    let mut inputs = Vec::with_capacity(emitter.from.relays().len());
-                    for input_relay in emitter.from.relays() {
-                        let Some(relay) = relay_builders.get_mut(input_relay) else {
-                            return Err(RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "missing emitter input relay '{}'",
-                                    input_relay.as_str()
-                                ),
-                            });
-                        };
-                        if node.executes_on(local_node_id) {
-                            inputs.push((
-                                input_relay.clone(),
-                                relay.runtime_consumer_fan_in_for_mode(emitter.mode),
-                            ));
-                        }
-                    }
                     if node.executes_on(local_node_id) {
-                        emitter_specs.push((emitter.clone(), inputs));
+                        inputs.push((
+                            input_relay.clone(),
+                            relay.runtime_consumer_fan_in_for_mode(emitter.mode),
+                        ));
                     }
                 }
-                _ => {}
+                if node.executes_on(local_node_id) {
+                    emitter_specs.push((emitter.clone(), inputs));
+                }
             }
+        }
+        for lookup in resource_plans.lookups.values() {
+            let Some(codec) = codecs.get(&lookup.codec).cloned() else {
+                return Err(RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("missing compiled codec '{}'", lookup.codec),
+                });
+            };
+            let runtime = Box::pin(self.load_lookup_runtime(lookup.clone(), codec))
+                .await
+                .map_err(|error| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: error.to_string(),
+                })?;
+            lookup_specs.push((lookup.name.clone(), Arc::new(runtime)));
         }
         for plan in entrypoints.reingestors() {
             let identity = NodeRef::new(ModelKind::Reingestor, ModelName::from(&plan.name));
@@ -894,53 +819,25 @@ impl Runtime {
             udfs: Some(&udf_executor),
         };
 
-        for (generator, source_branching, route_specs) in generator_specs {
-            let source_schema = relay_schemas
-                .get(&generator.materialized_relay)
-                .cloned()
-                .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "missing generator materialized relay schema '{}'",
-                        generator.materialized_relay
-                    ),
-                })?;
-            let mut routes = Vec::with_capacity(route_specs.len());
-            for (output, program, output_schema) in route_specs {
-                let Some(output_registry) = relay_registries.get(&output.relay).cloned() else {
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!("missing generator output relay '{}'", output.relay),
-                    });
-                };
-                let Some(output_services) = relay_services.get(&output.relay).cloned() else {
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "missing generator output relay services '{}'",
-                            output.relay
-                        ),
-                    });
-                };
-                routes.push(GeneratorTaskRouteSpec::new(
-                    output,
-                    program,
-                    output_schema,
-                    output_registry,
-                    output_services,
-                ));
+        for generator in resource_plans.generators.values() {
+            if !generator.assignment.executes_on(Some(local_node_id)) {
+                continue;
             }
-            let entity = NodeRef {
-                kind: ModelKind::Generator,
-                identifier: ModelName::from(&generator.name),
-            };
+            let spec = GeneratorTaskSpec::bind(
+                domain,
+                generator,
+                &relay_registries,
+                &relay_services,
+                &udf_executor,
+            )
+            .map_err(|report| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!("generator binding failed: {report:#}"),
+            })?;
+            let entity = NodeRef::new(ModelKind::Generator, &generator.name);
             generator_tasks.insert(
                 entity,
-                self.spawn_generator_task(
-                    domain,
-                    &shutdown_tx,
-                    GeneratorTaskSpec::new(generator, source_schema, source_branching, routes),
-                )?,
+                self.spawn_generator_task(domain, &shutdown_tx, spec)?,
             );
         }
 
@@ -1060,29 +957,22 @@ impl Runtime {
                 reason: error.to_string(),
             }
         })?;
+        let mut lookups = HashMap::new();
+        let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
+            .map_err(|report| RuntimeError::activation_plan(domain, report))?;
+        let resource_plans =
+            ResourceExecutionPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
+                .map_err(|report| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to plan domain resources: {report:#}"),
+                })?;
         let udf_executor = self
-            .compile_domain_udfs(
-                domain,
-                schedule
-                    .nodes
-                    .values()
-                    .filter_map(|node| {
-                        if let Model::Udf(udf) = node.config.as_ref() {
-                            Some(udf.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect(),
-            )
+            .compile_domain_udfs(domain, resource_plans.udfs.clone())
             .await
             .map_err(|error| RuntimeError::CompileDomainUdfs {
                 domain: domain.as_str().to_string(),
                 report: error,
             })?;
-        let mut lookups = HashMap::new();
-        let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
-            .map_err(|report| RuntimeError::activation_plan(domain, report))?;
         let entrypoints = Arc::new(
             EntrypointPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
                 .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
@@ -1140,26 +1030,21 @@ impl Runtime {
             }
         }
 
-        for node in schedule.nodes.values() {
-            if let Model::Lookup(lookup) = node.config.as_ref() {
-                let Some(codec) = codecs.get(&lookup.decode_using_codec).cloned() else {
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "missing compiled codec '{}'",
-                            lookup.decode_using_codec.as_str()
-                        ),
-                    });
-                };
-                let runtime = self
-                    .load_lookup_runtime(domain, lookup.clone(), codec)
-                    .await
-                    .map_err(|error| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: error.to_string(),
-                    })?;
-                lookups.insert(lookup.name.clone(), Arc::new(runtime));
-            }
+        for lookup in resource_plans.lookups.values() {
+            let Some(codec) = codecs.get(&lookup.codec).cloned() else {
+                return Err(RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("missing compiled codec '{}'", lookup.codec),
+                });
+            };
+            let runtime = self
+                .load_lookup_runtime(lookup.clone(), codec)
+                .await
+                .map_err(|error| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: error.to_string(),
+                })?;
+            lookups.insert(lookup.name.clone(), Arc::new(runtime));
         }
 
         let graph = self.domain_graph_handle(domain).await;

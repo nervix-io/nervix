@@ -122,6 +122,38 @@ Feature: Resource-backed lookups
         DECODE USING malformed_entry_codec;
       """
 
+  @execution_resource_plan
+  Scenario: A missing lookup file fails its pinned binding before activation
+    Given a 1 node nervix cluster is started
+    And node "node-1" has resource directory "lookup_bundle_dir" containing
+      """
+      {
+        "present.jsonl": "{\"key\":\"one\",\"value\":\"first\"}\n"
+      }
+      """
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE DOMAIN {{domain}};
+      CREATE RESOURCE lookup_bundle;
+      UPLOAD RESOURCE lookup_bundle VERSION '{{lookup_bundle_dir}}';
+      CREATE SCHEMA lookup_entry ( key STRING, value STRING );
+      CREATE WIRE JSON SCHEMA lookup_wire MODE STRICT (
+        key string,
+        value string
+      );
+      CREATE CODEC lookup_codec
+        FROM WIRE JSON SCHEMA lookup_wire
+        TO SCHEMA lookup_entry;
+      """
+    When these NSPL commands fail with "resource file 'missing.jsonl' in 'lookup_bundle@1' for HASH MAP 'by_key'"
+      """
+      CREATE HASH MAP by_key
+        KEY key
+        FROM RESOURCE lookup_bundle VERSION 1
+        PATH 'missing.jsonl'
+        DECODE USING lookup_codec;
+      """
+
   Scenario Outline: Hash map lookups report a missing key clearly
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
