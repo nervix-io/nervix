@@ -765,9 +765,11 @@ These are three different claims, and the implementation makes them separately:
   compiler-vectorized loop needs inspection of the generated instructions for the particular build
   before claiming a specific instruction set.
 - **Explicit SIMD.** The VM still uses library dispatch for simd-json, base64-simd, faster-hex,
-  and sha2; xxhash chooses when the binary is built. Outside the VM, the schemaful JSON emission
-  classifier in `nervix-simd-kernels` uses `fearless_simd` to select supported instructions at run
-  time, with a scalar fallback. The VM's own kernels do not use `std::arch` or `target_feature`.
+  and sha2; xxhash chooses when the binary is built. Outside the VM, `nervix-simd-kernels` uses
+  `fearless_simd` to select supported instructions at run time, with a scalar fallback, for the
+  schemaful JSON emission classifier and for the delivery-latency fold, which reads a batch's
+  ingestion watermarks once to find its latest watermark and bucket every row's latency. The VM's
+  own kernels do not use `std::arch` or `target_feature`.
 
 The [VM functions measurement report](https://github.com/nervix-io/nervix/blob/main/benches/reports/vm-functions-18.md)
 records what the measurements establish, and

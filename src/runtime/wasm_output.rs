@@ -1130,10 +1130,9 @@ pub(super) async fn dispatch_wasm_output_route(
             return None;
         }
     };
-    let metadata = success_input_rows
-        .iter()
-        .map(|input_row| decoded.batch.metadata[*input_row].clone())
-        .collect::<Vec<_>>();
+    let metadata = decoded.batch.metadata.take(&success_input_rows).verified(
+        "the program selects rows of this batch, whose metadata has one entry for every row",
+    );
     let mut batch_acks = Vec::with_capacity(success_input_rows.len());
     for row in &success_input_rows {
         let Some(acks) = ack_queues[*row].pop_front() else {
@@ -1384,8 +1383,13 @@ pub(super) fn relay_batch_from_wasm_output(
     if batch.schema().as_ref() != schema.arrow_schema().as_ref() {
         return Err(Report::new(WasmOutputError::OutputSchemaMismatch));
     }
-    let batch = RelayRecordBatch::from_filtered_parts(key.clone(), batch, metadata, acks)
-        .change_context(WasmOutputError::OutputRelayBatch)?;
+    let batch = RelayRecordBatch::from_filtered_parts(
+        key.clone(),
+        batch,
+        RecordMetadataColumns::from_rows(metadata),
+        acks,
+    )
+    .change_context(WasmOutputError::OutputRelayBatch)?;
     Ok(WasmDecodedOutputBatch {
         batch,
         uninitialized_columns,
@@ -1883,11 +1887,21 @@ mod tests {
         )
         .expect("generated output must build a relay batch");
         assert_eq!(
-            generated.batch.metadata[0].ingested_at_low_watermark(),
+            generated
+                .batch
+                .metadata
+                .row(0)
+                .expect("the output has one row")
+                .ingested_at_low_watermark(),
             execution_now
         );
         assert_eq!(
-            generated.batch.metadata[0].ingested_at_high_watermark(),
+            generated
+                .batch
+                .metadata
+                .row(0)
+                .expect("the output has one row")
+                .ingested_at_high_watermark(),
             execution_now
         );
 
@@ -1922,11 +1936,21 @@ mod tests {
         )
         .expect("source-backed output must build a relay batch");
         assert_eq!(
-            forwarded.batch.metadata[0].ingested_at_low_watermark(),
+            forwarded
+                .batch
+                .metadata
+                .row(0)
+                .expect("the output has one row")
+                .ingested_at_low_watermark(),
             source_time
         );
         assert_eq!(
-            forwarded.batch.metadata[0].ingested_at_high_watermark(),
+            forwarded
+                .batch
+                .metadata
+                .row(0)
+                .expect("the output has one row")
+                .ingested_at_high_watermark(),
             source_time
         );
     }
