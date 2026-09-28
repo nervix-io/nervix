@@ -747,6 +747,8 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package."roto"]
 opt-level = 3
+[profile.dev.package."blake3"]
+opt-level = 3
 [profile.dev.package."cranelift-codegen"]
 opt-level = 3
 [profile.dev.package."cranelift-jit"]
