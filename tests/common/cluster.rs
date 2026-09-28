@@ -103,7 +103,8 @@ use super::{
     cluster_teardown::{CLUSTER_TEARDOWN_BUDGET, ClusterTeardown, TeardownNode},
     dependencies::{
         DependencyEndpoints, KAFKA_ADDR, MQTT_ADDR, NATS_ADDR, NATS_TLS_ADDR, PULSAR_ADDR,
-        PULSAR_TLS_ADDR, RABBITMQ_ADDR, REDIS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
+        PULSAR_ADMIN_ADDR, PULSAR_TLS_ADDR, RABBITMQ_ADDR, REDIS_ADDR, SQS_ENDPOINT,
+        SQS_TLS_ENDPOINT,
     },
     node_liveness::{
         NodeStartupError, NodeTaskTerminalOutcome, NodeTaskWaitOutcome, OwnedNodeTask,
@@ -1802,6 +1803,14 @@ impl Cluster {
 
     pub(crate) async fn publish_pulsar_tls(&self, topic: &str, payload: &str) -> io::Result<()> {
         publish_pulsar_tls(&self.dependencies, topic, payload).await
+    }
+
+    pub(crate) async fn limit_pulsar_topic_message_size(
+        &self,
+        topic: &str,
+        max_message_size: u32,
+    ) -> io::Result<()> {
+        limit_pulsar_topic_message_size(&self.dependencies, topic, max_message_size).await
     }
 
     pub(crate) async fn publish_kafka(&self, topic: &str, payload: &str) -> io::Result<()> {
@@ -4294,6 +4303,57 @@ async fn publish_pulsar_with_addr(
             "failed to publish pulsar message to topic '{topic}'"
         ))
     }))
+}
+
+/// Sets the `maxMessageSize` policy of an existing topic through the broker's admin API, and waits
+/// until the broker reads the policy back. The broker updates a loaded topic's policies before it
+/// serves them, so the read-back is the evidence that the next message is measured against it.
+async fn limit_pulsar_topic_message_size(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    max_message_size: u32,
+) -> io::Result<()> {
+    const POLICY_TIMEOUT: Duration = Duration::from_secs(60);
+    let admin = dependencies.get(PULSAR_ADMIN_ADDR)?;
+    let url = format!("{admin}/admin/v2/persistent/public/default/{topic}/maxMessageSize");
+    let client = reqwest::Client::new();
+    client
+        .post(&url)
+        .json(&max_message_size)
+        .send()
+        .await
+        .map_err(io::Error::other)?
+        .error_for_status()
+        .map_err(io::Error::other)?;
+
+    let expected = max_message_size.to_string();
+    let deadline = Instant::now() + POLICY_TIMEOUT;
+    loop {
+        tokio::task::consume_budget().await;
+        let observed = read_pulsar_admin_value(&client, &url).await;
+        if observed.trim() == expected {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "timed out waiting for Pulsar topic '{topic}' to report maxMessageSize \
+                 {expected}; last observation: {observed}"
+            )));
+        }
+        sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// The body the admin API answers `url` with, or what kept it from answering.
+async fn read_pulsar_admin_value(client: &reqwest::Client, url: &str) -> String {
+    let response = match client.get(url).send().await {
+        Ok(response) => response,
+        Err(error) => return format!("request failed: {error}"),
+    };
+    match response.text().await {
+        Ok(body) => body,
+        Err(error) => format!("unreadable response: {error}"),
+    }
 }
 
 async fn publish_kafka(

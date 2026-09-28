@@ -4,7 +4,8 @@ Feature: Batching across broker and message emitters
   the BATCH clause each record stays its own message. A batch message carries the key, headers and
   FIFO group its members share. An SQS request answers for each batch message it carries. A payload
   that fits MAX SIZE but not a limit the destination declares is rejected, with every member it
-  carries, before it is written.
+  carries, before it is written, and one a Pulsar topic refuses for its size is rejected the same
+  way once the broker answers.
 
   @emitter_batch_brokers
   Scenario Outline: Every broker publishing mode carries one batch in one external message
@@ -353,13 +354,99 @@ Feature: Batching across broker and message emitters
       """
 
     Examples:
-      | cluster_size | target         | client                                                                           | sink                                                                                                                 | limit_message                        |
-      | 1            | Kafka          | CREATE CLIENT sink TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' }; | KAFKA sink TOPIC limited_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s            | Message size too large               |
-      | 3            | Kafka          | CREATE CLIENT sink TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' }; | KAFKA sink TOPIC limited_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s                                    | Message size too large               |
-      | 3            | MQTT           | CREATE CLIENT sink TYPE MQTT CONFIG { 'addr' = '{{mqtt_addr}}' };                | MQTT sink TOPIC limited_{{test_id}} MODE QOS 0 RETRY POLICY BACKOFF 50ms MAX 1s                                      | maximum packet size of 1048576 bytes |
-      | 1            | MQTT           | CREATE CLIENT sink TYPE MQTT CONFIG { 'addr' = '{{mqtt_addr}}' };                | MQTT sink TOPIC limited_{{test_id}} MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s       | maximum packet size of 1048576 bytes |
-      | 1            | NATS           | CREATE CLIENT sink TYPE NATS CONFIG { 'addr' = '{{nats_addr}}' };                | NATS sink SUBJECT limited_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s                                   | max payload size exceeded            |
-      | 3            | NATS JetStream | CREATE CLIENT sink TYPE NATS CONFIG { 'addr' = '{{nats_addr}}' };                | NATS sink SUBJECT limited_{{test_id}} MODE JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s | max payload size exceeded            |
+      | cluster_size | target         | client                                                                           | sink                                                                                                                 | limit_message                         |
+      | 1            | Kafka          | CREATE CLIENT sink TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' }; | KAFKA sink TOPIC limited_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s            | Message size too large                |
+      | 3            | Kafka          | CREATE CLIENT sink TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' }; | KAFKA sink TOPIC limited_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s                                    | Message size too large                |
+      | 3            | MQTT           | CREATE CLIENT sink TYPE MQTT CONFIG { 'addr' = '{{mqtt_addr}}' };                | MQTT sink TOPIC limited_{{test_id}} MODE QOS 0 RETRY POLICY BACKOFF 50ms MAX 1s                                      | maximum packet size of 1048576 bytes  |
+      | 1            | MQTT           | CREATE CLIENT sink TYPE MQTT CONFIG { 'addr' = '{{mqtt_addr}}' };                | MQTT sink TOPIC limited_{{test_id}} MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s       | maximum packet size of 1048576 bytes  |
+      | 1            | NATS           | CREATE CLIENT sink TYPE NATS CONFIG { 'addr' = '{{nats_addr}}' };                | NATS sink SUBJECT limited_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s                                   | max payload size exceeded             |
+      | 3            | NATS JetStream | CREATE CLIENT sink TYPE NATS CONFIG { 'addr' = '{{nats_addr}}' };                | NATS sink SUBJECT limited_{{test_id}} MODE JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s | max payload size exceeded             |
+      | 1            | Pulsar         | CREATE CLIENT sink TYPE PULSAR CONFIG { 'addr' = '{{pulsar_addr}}' };            | PULSAR sink TOPIC limited_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s           | maximum message size of 1048576 bytes |
+      | 3            | Pulsar         | CREATE CLIENT sink TYPE PULSAR CONFIG { 'addr' = '{{pulsar_addr}}' };            | PULSAR sink TOPIC limited_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s                                   | maximum message size of 1048576 bytes |
+
+  @emitter_batch_brokers @emitter_batch_destination_limits
+  Scenario Outline: A Pulsar batch message larger than its topic allows is rejected with every member
+    Given the "Pulsar" emission target is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the "Pulsar" emission target "policed_{{test_id}}" is observed
+    And Pulsar topic "policed_{{test_id}}" accepts messages of at most 1000 bytes
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( seq I64, note STRING );
+      CREATE SCHEMA rejected_event (
+        seq I64,
+        error_reference STRING,
+        error_code STRING,
+        operation STRING,
+        error_message STRING
+      );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
+      CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
+      CREATE VHOST edge policed-{{test_id}}.example.com;
+      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR http_events
+        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        TO events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT sink TYPE PULSAR CONFIG { 'addr' = '{{pulsar_addr}}' };
+      CREATE EMITTER policed FROM events
+        TO PULSAR sink TOPIC policed_{{test_id}}
+          MODE <publishing_mode> RETRY POLICY BACKOFF 50ms MAX 1s
+          ENCODE USING event_codec
+        INHERIT ALL EXCEPT note
+        SET note = repeat(input.note, 200)
+        BATCH MAX MESSAGES 3 MAX SIZE 64KiB
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO rejected_events
+          SET seq = input.seq,
+              error_reference = error.reference,
+              error_code = error.code,
+              operation = error.operation,
+              error_message = error.message
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
+      START;
+      """
+    # Each of the first three records grows to about 420 bytes, so their message of about 1.3 KB
+    # fits MAX SIZE and the maximum the broker announces, but not the 1000 bytes the topic's policy
+    # allows. Only the broker applies that policy, so the message is written, and the broker's
+    # refusal rejects every member with one reference. The records after them still leave in their
+    # own message.
+    And http payload is posted to host "policed-{{test_id}}.example.com" path "/events"
+      """
+      [{"seq":1,"note":"xy"},{"seq":2,"note":"xy"},{"seq":3,"note":"xy"},{"seq":4,"note":""},{"seq":5,"note":""}]
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments that share one "error_reference"
+      """
+      "seq":1 | "error_code":"external" | "operation":"publish" | Exceed maximum message size
+      "seq":2 | "error_code":"external" | "operation":"publish" | Exceed maximum message size
+      "seq":3 | "error_code":"external" | "operation":"publish" | Exceed maximum message size
+      """
+    And within "30s" the observed broker receives exactly these payloads
+      """
+      [{"seq":4,"note":""},{"seq":5,"note":""}]
+      """
+
+    # Only a confirming mode waits for the broker's answer; NO_ACK completes when the producer
+    # accepts the message.
+    Examples:
+      | cluster_size | publishing_mode                    |
+      | 1            | ACK SEQUENTIAL ACK TIMEOUT 30s     |
+      | 3            | ACK PARALLEL MAX 2 ACK TIMEOUT 30s |
 
   @emitter_batch_brokers @emitter_batch_destination_limits
   Scenario Outline: An SQS batch message counts its attributes against the service limit

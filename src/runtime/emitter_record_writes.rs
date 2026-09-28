@@ -1,21 +1,24 @@
 //! The records one write hands a sink, and what the sink's answers for them resolve.
 //!
 //! Layer: data plane.
-//! - **Owns.** The identity a record sink answers for each record of a write under and the source
-//!   rows each record carries: one row, or every member of a batch payload the emitter retains
-//!   verbatim — bytes, envelope and members — until the sink answers for it. Checking a sink's
-//!   answers against the write they answer, and applying them: a delivered record delivers every
-//!   row it carries, a rejected one rejects each of them with the one error the sink gave it, and a
-//!   payload the sink left unanswered stays retained for the next attempt.
-//! - **Depends on.** The emitter's buffered batches and the state of their rows, the connector
-//!   contract's record identity and outcome, and the node's message-error delivery.
-//! - **Must not know.** How rows are encoded or packed into payloads, which connector writes them,
-//!   or when the emitter retries.
+//! - **Owns.** The identity a sink answers for each record of a write under and the source rows
+//!   each record carries: one row, every member of a batch payload, or the one row of a prepared
+//!   HTTP request, which the emitter retains verbatim — bytes, envelope or request fields, and
+//!   members — until the sink answers for it. Checking a sink's answers against the write they
+//!   answer, and applying them: a delivered record delivers every row it carries, a rejected one
+//!   rejects each of them with the one error the sink gave it, and a payload the sink left
+//!   unanswered stays retained for the next attempt.
+//! - **Depends on.** The emitter's buffered batches and the state of their rows, the request fields
+//!   an HTTP emitter admitted a row with, the connector contract's record identity, written values
+//!   and outcome, and the node's message-error delivery.
+//! - **Must not know.** How rows are encoded or packed into payloads, how request fields were
+//!   evaluated, which connector writes them, or when the emitter retries.
 
 use std::collections::BTreeMap;
 
 use nervix_connector::{
-    PerRecordOutcome, RejectedSinkRecord, SinkRecord, SinkRecordId, SinkRecordPosition,
+    PerRecordOutcome, RejectedSinkRecord, SinkHttpRequest, SinkRecord, SinkRecordId,
+    SinkRecordPosition,
 };
 
 use super::{emitter_batch_packing::BatchEnvelope, *};
@@ -210,39 +213,37 @@ impl RowRecords {
     }
 }
 
-/// A batch payload prepared for a record sink, retained with everything it is written with until
-/// the sink answers for it.
+/// What a prepared payload hands its sink on every attempt, prepared once and written unchanged.
+pub(super) trait PreparedContent {
+    /// The value one write hands the sink for the payload.
+    type Written;
+
+    /// The value the write hands the sink for this payload under `record`. The sink takes its own
+    /// copy, so the payload stays retained until an answer resolves it.
+    fn written(&self, record: SinkRecordId, occurred_at: Timestamp) -> Self::Written;
+}
+
+/// A batch payload for a record sink: the envelope every member shares and exactly the bytes the
+/// codec produced.
 #[derive(Debug)]
-pub(super) struct PreparedPayload {
-    /// The source rows the payload carries, in packing order. A payload always carries one.
-    pub(super) members: Vec<SinkRecordPosition>,
+pub(super) struct EncodedPayload {
     /// The key, headers and ordering group every member shares.
     pub(super) envelope: BatchEnvelope,
-    /// The execution time of the batch the first member came from, which the sink reports the
-    /// payload's rejection with. Each member's own replaces it when the rejection is routed.
-    pub(super) occurred_at: Timestamp,
     /// Exactly the bytes the codec produced. Every attempt writes these bytes, so a duplicate a
     /// retry produces is the payload the destination may already hold.
     pub(super) payload: Vec<u8>,
 }
 
-impl PreparedPayload {
-    fn first_member(&self) -> SinkRecordPosition {
-        *self
-            .members
-            .first()
-            .assured("packing builds a payload only from a candidate with at least one member")
-    }
+impl PreparedContent for EncodedPayload {
+    type Written = SinkRecord;
 
-    /// The record one write hands the sink for this payload. The sink takes its own copy of the
-    /// bytes, so the payload stays retained until an answer resolves it.
-    fn sink_record(&self, record: SinkRecordId) -> SinkRecord {
+    fn written(&self, record: SinkRecordId, occurred_at: Timestamp) -> SinkRecord {
         let sink_record = SinkRecord::new(
             record,
             self.envelope.key.clone(),
             self.payload.clone(),
             self.envelope.headers.clone(),
-            self.occurred_at,
+            occurred_at,
         );
         match &self.envelope.message_group {
             Some(message_group) => sink_record.with_message_group(message_group.clone()),
@@ -251,20 +252,80 @@ impl PreparedPayload {
     }
 }
 
-/// The batch payloads prepared for a record sink and not yet answered for, in packing order.
+/// An HTTP request for an HTTP sink: the request fields its one record was admitted with, and its
+/// body.
+#[derive(Debug)]
+pub(super) struct PreparedHttpRequest {
+    pub(super) fields: HttpRequestFields,
+    /// Exactly the bytes the codec produced, or nothing for an emitter declared `WITHOUT BODY`.
+    /// Every attempt sends these bytes, so the codec never runs again for a retry.
+    pub(super) body: Option<Vec<u8>>,
+}
+
+impl PreparedContent for PreparedHttpRequest {
+    type Written = SinkHttpRequest;
+
+    fn written(&self, record: SinkRecordId, occurred_at: Timestamp) -> SinkHttpRequest {
+        SinkHttpRequest {
+            id: record,
+            method: self.fields.method.clone(),
+            target: self.fields.target.clone(),
+            headers: self.fields.headers.clone(),
+            body: self.body.clone(),
+            occurred_at,
+        }
+    }
+}
+
+/// A payload prepared for a sink, retained with everything it is written with until the sink
+/// answers for it.
+#[derive(Debug)]
+pub(super) struct PreparedPayload<Content> {
+    /// The source rows the payload carries, in packing order. A payload always carries one.
+    pub(super) members: Vec<SinkRecordPosition>,
+    /// The execution time of the batch the first member came from, which the sink reports the
+    /// payload's rejection with. Each member's own replaces it when the rejection is routed.
+    pub(super) occurred_at: Timestamp,
+    /// What every attempt hands the sink for the payload.
+    pub(super) content: Content,
+}
+
+impl<Content: PreparedContent> PreparedPayload<Content> {
+    fn first_member(&self) -> SinkRecordPosition {
+        *self
+            .members
+            .first()
+            .assured("a payload is prepared only from a candidate with at least one member")
+    }
+
+    /// The value one write hands the sink for this payload.
+    fn written(&self, record: SinkRecordId) -> Content::Written {
+        self.content.written(record, self.occurred_at)
+    }
+}
+
+/// The payloads prepared for a sink and not yet answered for, in packing order.
 ///
 /// Payloads are keyed by their first member. No two payloads share a member, and every member of a
 /// payload follows the members of the payloads packed before it, so their first members order them
 /// the way they were packed. A retry therefore writes the retained payloads in their own order and
 /// before any payload packed after them.
-#[derive(Debug, Default)]
-pub(super) struct PreparedPayloads {
-    retained: BTreeMap<SinkRecordPosition, PreparedPayload>,
+#[derive(Debug)]
+pub(super) struct PreparedPayloads<Content> {
+    retained: BTreeMap<SinkRecordPosition, PreparedPayload<Content>>,
 }
 
-/// The records one write hands a sink for the retained payloads, and which payload each carries.
-pub(super) struct PreparedWrite {
-    pub(super) records: Vec<SinkRecord>,
+impl<Content> Default for PreparedPayloads<Content> {
+    fn default() -> Self {
+        Self {
+            retained: BTreeMap::new(),
+        }
+    }
+}
+
+/// The values one write hands a sink for the retained payloads, and which payload each carries.
+pub(super) struct PreparedWrite<Written> {
+    pub(super) records: Vec<Written>,
     pub(super) payloads: WrittenPayloads,
 }
 
@@ -273,7 +334,7 @@ pub(super) struct WrittenPayloads {
     first_members: Vec<SinkRecordPosition>,
 }
 
-impl PreparedPayloads {
+impl<Content: PreparedContent> PreparedPayloads<Content> {
     pub(super) fn is_empty(&self) -> bool {
         self.retained.is_empty()
     }
@@ -286,7 +347,7 @@ impl PreparedPayloads {
     /// member again while the payload waits for its answer.
     pub(super) fn retain(
         &mut self,
-        payload: PreparedPayload,
+        payload: PreparedPayload<Content>,
         batches: &mut [EmitterPublishBatch],
     ) -> EmitterRuntimeResult<()> {
         for member in &payload.members {
@@ -302,13 +363,13 @@ impl PreparedPayloads {
         Ok(())
     }
 
-    /// One record for every retained payload, in packing order, each carrying the bytes its
-    /// payload was prepared with.
-    pub(super) fn next_write(&self) -> PreparedWrite {
+    /// One record for every retained payload, in packing order, each carrying what its payload
+    /// was prepared with.
+    pub(super) fn next_write(&self) -> PreparedWrite<Content::Written> {
         let mut records = Vec::with_capacity(self.retained.len());
         let mut first_members = Vec::with_capacity(self.retained.len());
         for (first_member, payload) in &self.retained {
-            records.push(payload.sink_record(SinkRecordId::new(records.len())));
+            records.push(payload.written(SinkRecordId::new(records.len())));
             first_members.push(*first_member);
         }
         PreparedWrite {
@@ -374,7 +435,11 @@ impl PreparedPayloads {
 
     /// Takes the payload `record` carried out of the retained ones, now that the sink answered for
     /// it.
-    fn take(&mut self, payloads: &WrittenPayloads, record: SinkRecordId) -> PreparedPayload {
+    fn take(
+        &mut self,
+        payloads: &WrittenPayloads,
+        record: SinkRecordId,
+    ) -> PreparedPayload<Content> {
         let first_member = payloads
             .first_members
             .get(record.index())
@@ -426,20 +491,22 @@ mod tests {
         }
     }
 
-    fn payload(members: &[SinkRecordPosition], bytes: &str) -> PreparedPayload {
+    fn payload(members: &[SinkRecordPosition], bytes: &str) -> PreparedPayload<EncodedPayload> {
         PreparedPayload {
             members: members.to_vec(),
-            envelope: BatchEnvelope {
-                key: Some("key".to_string()),
-                headers: vec![("source".to_string(), "a".to_string())],
-                message_group: Some("group".to_string()),
-            },
             occurred_at: Timestamp::from_unix_nanos(1),
-            payload: bytes.as_bytes().to_vec(),
+            content: EncodedPayload {
+                envelope: BatchEnvelope {
+                    key: Some("key".to_string()),
+                    headers: vec![("source".to_string(), "a".to_string())],
+                    message_group: Some("group".to_string()),
+                },
+                payload: bytes.as_bytes().to_vec(),
+            },
         }
     }
 
-    fn written(write: &PreparedWrite) -> Vec<(usize, Vec<u8>)> {
+    fn written(write: &PreparedWrite<SinkRecord>) -> Vec<(usize, Vec<u8>)> {
         write
             .records
             .iter()
