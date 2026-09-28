@@ -1246,34 +1246,10 @@ fn App() -> impl IntoView {
         };
         send_subscription_start(signals, subscription_request_tx, tab_id, request, origin);
     };
-    let stop_subscription_session = web_console_session.clone();
-    let stop_subscription = move |tab_id: u64| {
-        let Some(request) = signals.begin_subscription_close(tab_id) else {
-            return;
-        };
-        let stop = ConsoleRequest::SubscriptionStop { tab_id, request };
-        let reason = match stop_subscription_session.request_tx.get_untracked() {
-            Some(request_tx) => match request_tx.send(stop) {
-                Ok(()) => return,
-                Err(refusal) => refusal.current_context().to_string(),
-            },
-            None => SESSION_UNAVAILABLE.to_string(),
-        };
-        restore_failed_unsubscribe(subscription_tabs, tab_id, reason);
-    };
-    let resubscribe_request_tx = web_console_session.request_tx;
-    let resubscribe = move |tab_id: u64| {
-        let Some(request) = signals.begin_resubscribe(tab_id) else {
-            return;
-        };
-        send_subscription_start(
-            signals,
-            resubscribe_request_tx,
-            tab_id,
-            request,
-            SubscriptionOrigin::Console,
-        );
-    };
+    let tab_request_tx = web_console_session.request_tx;
+    let stop_subscription =
+        move |tab_id: u64| close_subscription_tab(signals, tab_request_tx, tab_id);
+    let resubscribe = move |tab_id: u64| resubscribe_tab(signals, tab_request_tx, tab_id);
 
     let run_command = move |next_command: Option<String>| {
         suggestion_request_sequence.update(|sequence| {
@@ -1540,6 +1516,45 @@ fn App() -> impl IntoView {
             </main>
         </Show>
     }
+}
+
+/// Closes the tab `tab_id`, deleting its subscription when it still delivers. A deletion the
+/// console cannot hand over leaves the tab showing its stream, with the reason.
+fn close_subscription_tab(
+    signals: WebConsoleSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    tab_id: u64,
+) {
+    let Some(request) = signals.begin_subscription_close(tab_id) else {
+        return;
+    };
+    let stop = ConsoleRequest::SubscriptionStop { tab_id, request };
+    let reason = match request_tx.get_untracked() {
+        Some(request_tx) => match request_tx.send(stop) {
+            Ok(()) => return,
+            Err(refusal) => refusal.current_context().to_string(),
+        },
+        None => SESSION_UNAVAILABLE.to_string(),
+    };
+    restore_failed_unsubscribe(signals.subscription_tabs, tab_id, reason);
+}
+
+/// Opens the subscription of the ended tab `tab_id` again, under its name.
+fn resubscribe_tab(
+    signals: WebConsoleSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    tab_id: u64,
+) {
+    let Some(request) = signals.begin_resubscribe(tab_id) else {
+        return;
+    };
+    send_subscription_start(
+        signals,
+        request_tx,
+        tab_id,
+        request,
+        SubscriptionOrigin::Console,
+    );
 }
 
 /// Hands the start of the tab `tab_id`'s subscription to the session. A start the console cannot
@@ -8745,19 +8760,33 @@ mod tests {
     }
 
     #[test]
-    fn a_resubscription_the_console_cannot_hand_over_leaves_the_tab_ended() {
+    fn resubscribing_from_the_tab_sends_its_statement_or_leaves_it_ended_with_the_refusal() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Ended);
-            let request = signals
-                .begin_resubscribe(1)
-                .assured("an ended tab can be resubscribed");
-            send_subscription_start(
-                signals,
-                RwSignal::new(None),
-                1,
+            let (sender, mut receiver) = request_handoff();
+            let request_tx = RwSignal::new(Some(sender));
+            resubscribe_tab(signals, request_tx, 1);
+            let Some(ConsoleRequest::SubscriptionStart {
+                tab_id,
                 request,
-                SubscriptionOrigin::Console,
+                origin,
+            }) = receiver.try_take()
+            else {
+                panic!("resubscribing hands the tab's start to the session");
+            };
+            assert_eq!(tab_id, 1);
+            assert_eq!(request.statement, "CREATE SUBSCRIPTION live TO orders;");
+            assert_eq!(origin, SubscriptionOrigin::Console);
+            resubscribe_tab(signals, request_tx, 1);
+            resubscribe_tab(signals, request_tx, 7);
+            assert!(
+                receiver.try_take().is_none(),
+                "only an ended tab that exists is resubscribed"
             );
+        });
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Ended);
+            resubscribe_tab(signals, RwSignal::new(None), 1);
             signals.subscription_tabs.with_untracked(|tabs| {
                 assert!(matches!(&tabs[0].state, SubscriptionTabState::Ended));
                 assert!(
@@ -8767,6 +8796,129 @@ mod tests {
                         .contains(SESSION_UNAVAILABLE)
                 );
             });
+        });
+    }
+
+    #[test]
+    fn closing_an_open_tab_deletes_its_subscription_or_keeps_it_open_with_the_refusal() {
+        Owner::new().with(|| {
+            let stream = test_stream();
+            let signals = subscription_signals(SubscriptionTabState::Open(stream.clone()));
+            let (sender, mut receiver) = request_handoff();
+            close_subscription_tab(signals, RwSignal::new(Some(sender)), 1);
+            assert!(matches!(
+                receiver.try_take(),
+                Some(ConsoleRequest::SubscriptionStop { tab_id: 1, .. })
+            ));
+            assert!(signals.subscription_tabs.with_untracked(|tabs| {
+                matches!(&tabs[0].state, SubscriptionTabState::Closing(Some(_)))
+            }));
+        });
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Open(test_stream()));
+            close_subscription_tab(signals, RwSignal::new(None), 1);
+            signals.subscription_tabs.with_untracked(|tabs| {
+                assert!(matches!(&tabs[0].state, SubscriptionTabState::Open(_)));
+                assert!(
+                    tabs[0].lines.clone().into_lines()[0]
+                        .line
+                        .text
+                        .contains(SESSION_UNAVAILABLE)
+                );
+            });
+        });
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Ended);
+            let (sender, mut receiver) = request_handoff();
+            close_subscription_tab(signals, RwSignal::new(Some(sender)), 1);
+            assert!(signals.subscription_tabs.get_untracked().is_empty());
+            assert!(
+                receiver.try_take().is_none(),
+                "an ended tab closes without a deletion"
+            );
+        });
+    }
+
+    #[test]
+    fn a_subscription_start_reaches_the_session_or_fails_its_tab_with_the_refusal() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let request = SubscribeRequest {
+                domain: domain_name("tenant"),
+                statement: "CREATE SUBSCRIPTION live TO orders;".to_string(),
+                subscription_type: SubscriptionType::Row,
+            };
+            let (sender, mut receiver) = request_handoff();
+            send_subscription_start(
+                signals,
+                RwSignal::new(Some(sender.clone())),
+                1,
+                request.clone(),
+                SubscriptionOrigin::Console,
+            );
+            assert!(matches!(
+                receiver.try_take(),
+                Some(ConsoleRequest::SubscriptionStart { tab_id: 1, .. })
+            ));
+            assert!(signals.subscription_tabs.with_untracked(|tabs| {
+                matches!(&tabs[0].state, SubscriptionTabState::Pending)
+            }));
+
+            drop(receiver);
+            send_subscription_start(
+                signals,
+                RwSignal::new(Some(sender)),
+                1,
+                request,
+                SubscriptionOrigin::Console,
+            );
+            assert!(
+                signals.subscription_tabs.get_untracked().is_empty(),
+                "a new tab whose start was refused is removed"
+            );
+            assert_eq!(
+                signals.terminal_lines.get_untracked().into_lines()[0]
+                    .line
+                    .text,
+                "error: websocket command channel is closed"
+            );
+        });
+    }
+
+    #[test]
+    fn a_resource_description_the_console_cannot_hand_over_shows_why_in_its_dialog() {
+        Owner::new().with(|| {
+            let details = RwSignal::new(BTreeMap::<String, ResourceDetailView>::new());
+            let (sender, mut receiver) = request_handoff();
+            request_resource_describe(
+                RwSignal::new(Some(sender.clone())),
+                details,
+                "live".to_string(),
+                Some(domain_name("tenant")),
+            );
+            assert!(matches!(
+                receiver.try_take(),
+                Some(ConsoleRequest::Command {
+                    purpose: CommandPurpose::ResourceDescription { .. },
+                    ..
+                })
+            ));
+            assert!(details.get_untracked().is_empty());
+
+            drop(receiver);
+            request_resource_describe(
+                RwSignal::new(Some(sender)),
+                details,
+                "bundle".to_string(),
+                Some(domain_name("tenant")),
+            );
+            request_resource_describe(RwSignal::new(None), details, "other".to_string(), None);
+            let details = details.get_untracked();
+            assert_eq!(
+                details["bundle"].status,
+                "websocket command channel is closed"
+            );
+            assert_eq!(details["other"].status, SESSION_UNAVAILABLE);
         });
     }
 

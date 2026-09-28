@@ -1333,9 +1333,10 @@ The protocol makes a client's view of its own work explicit rather than inferred
 - **Subscriptions.** A client learns of its own losses from `SubscriptionDeliveryLost`,
   `SubscriptionRowsSkipped`, and `SubscriptionEnded`, and the Rust client reports a lost session as
   an interruption of each subscription. The web console shows each tab's state on the tab:
-  pending, active, interrupted, restoring, ended, resubscribing, or closing. Each node exports `nervix_session_subscriptions`, the number
-  of subscription leases it holds per relay, and `nervix_session_subscription_dropped_rows_total`,
-  the rows its `DROPPING` subscriptions discarded, both labeled by `domain` and `relay`; see
+  pending, active, interrupted, restoring, ended, resubscribing, or closing. Each node exports
+  `nervix_session_subscriptions`, the number of subscription leases it holds per relay, and
+  `nervix_session_subscription_dropped_rows_total`, the rows its `DROPPING` subscriptions discarded,
+  both labeled by `domain` and `relay`; see
   [Metrics And Observability](./metrics-and-observability.md#raw-metrics). Skipped rows are reported
   only to the client.
 - **Leadership.** `LeadershipObserved` tells every session which node leads and where to reach it,
