@@ -1007,6 +1007,29 @@ placement_stable() {
     fi
 }
 
+# A quorum that can still communicate must commit: its canary is acknowledged and its nodes then
+# apply past the boundary recorded at isolation. Both outcomes are recorded as findings, so the
+# fault is still held, healed and verified after a failed commit.
+majority_commits() {
+    local case_dir="$1"
+    local name="$2"
+    local host="$3"
+    local redirect_possible="$4"
+    shift 4
+    local majority=("$@")
+    partition_canary "${name}" "${host}" "${case_dir}" "${partition_majority_commit_bound}" during \
+        "${redirect_possible}"
+    if [[ "$(canary_outcome "${case_dir}" "${name}")" != acknowledged ]]; then
+        partition_finding "${case_dir}" "a quorum that could communicate did not acknowledge a control command through ${host} within ${partition_majority_commit_bound}s"
+        return 0
+    fi
+    sample_statuses "${case_dir}" isolated-majority "${majority[@]}"
+    jq -s -e --slurpfile boundary "${case_dir}/isolation-boundary.json" \
+        '[.[] | select(.sample == "isolated-majority") | .last_applied] | max > $boundary[0].applied_boundary' \
+        "${case_dir}/samples.ndjson" >/dev/null \
+        || partition_finding "${case_dir}" 'the majority acknowledged a command without applying past the isolation boundary'
+}
+
 majority_host_other_than() {
     local excluded="$1"
     local leader_file="$2"
@@ -1118,15 +1141,8 @@ partition_case_follower() {
     local majority_leader_host
     majority_leader_host="$(majority_host_other_than "${isolated}" "${case_dir}/survivor-leader.txt")" \
         || partition_fail product 'the majority named the isolated follower as its leader'
-    partition_canary "chaos_partition_${ordinal}_majority" "${majority_leader_host}" "${case_dir}" \
-        "${partition_majority_commit_bound}" during false
-    [[ "$(canary_outcome "${case_dir}" "chaos_partition_${ordinal}_majority")" == acknowledged ]] \
-        || partition_fail product 'the connected majority did not acknowledge a control command'
-    sample_statuses "${case_dir}" isolated-majority "${survivors[@]}"
-    jq -s -e --slurpfile boundary "${case_dir}/isolation-boundary.json" \
-        '[.[] | select(.sample == "isolated-majority") | .last_applied] | max > $boundary[0].applied_boundary' \
-        "${case_dir}/samples.ndjson" >/dev/null \
-        || partition_finding "${case_dir}" 'the majority acknowledged a command without applying past the isolation boundary'
+    majority_commits "${case_dir}" "chaos_partition_${ordinal}_majority" "${majority_leader_host}" false \
+        "${survivors[@]}"
     partition_canary "chaos_partition_${ordinal}_minority" "${isolated}" "${case_dir}" \
         "${partition_minority_attempt_bound}" during true
     failover_ms=null
@@ -1194,15 +1210,8 @@ partition_case_leader() {
     local majority_leader_host
     majority_leader_host="$(majority_host_other_than "${isolated}" "${case_dir}/survivor-leader.txt")" \
         || partition_fail product 'the majority still named the isolated node as its leader'
-    partition_canary "chaos_partition_${ordinal}_majority" "${majority_leader_host}" "${case_dir}" \
-        "${partition_majority_commit_bound}" during false
-    [[ "$(canary_outcome "${case_dir}" "chaos_partition_${ordinal}_majority")" == acknowledged ]] \
-        || partition_fail product 'the newly elected majority did not acknowledge a control command'
-    sample_statuses "${case_dir}" isolated-majority "${survivors[@]}"
-    jq -s -e --slurpfile boundary "${case_dir}/isolation-boundary.json" \
-        '[.[] | select(.sample == "isolated-majority") | .last_applied] | max > $boundary[0].applied_boundary' \
-        "${case_dir}/samples.ndjson" >/dev/null \
-        || partition_finding "${case_dir}" 'the new majority acknowledged a command without applying past the isolation boundary'
+    majority_commits "${case_dir}" "chaos_partition_${ordinal}_majority" "${majority_leader_host}" false \
+        "${survivors[@]}"
     failover_ms=null
     if wait_for 'the majority moved the former leader work to connected nodes' "${partition_failover_bound}" \
         surviving_owners_ready "${isolated}" "${case_dir}" "${majority_leader_host}"; then
@@ -1274,10 +1283,8 @@ partition_case_asymmetric() {
         quorum_leader_agreed "${case_dir}/quorum" \
         || partition_fail product 'no quorum-backed leader while one link lost packets in one direction'
     jq -c '. + {sample: "quorum"}' "${case_dir}"/quorum/status-*.json >>"${case_dir}/samples.ndjson"
-    partition_canary "chaos_partition_${ordinal}_majority" "${bystander}" "${case_dir}" \
-        "${partition_majority_commit_bound}" during true
-    [[ "$(canary_outcome "${case_dir}" "chaos_partition_${ordinal}_majority")" == acknowledged ]] \
-        || partition_fail product 'the fully connected majority did not acknowledge a control command'
+    majority_commits "${case_dir}" "chaos_partition_${ordinal}_majority" "${bystander}" true \
+        "${node_hosts[@]}"
     partition_canary "chaos_partition_${ordinal}_receiver" "${receiver}" "${case_dir}" \
         "${partition_minority_attempt_bound}" during true
     consumer_group_snapshot "${case_dir}/consumer-group-isolated.json"

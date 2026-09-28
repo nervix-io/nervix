@@ -181,13 +181,13 @@ was: only the isolated node, or either end of the one-way link, may lose its wor
 also SIGKILLs and explicitly restarts the isolated follower inside the partition, requires the same
 container, volume and address, and re-measures the unchanged isolation and its public status route.
 
-A violation that leaves the experiment meaningful, such as an unexpected acknowledgement, an
-applied entry past the isolation boundary, a failover away from a healthy node, or a missing
-effect, is recorded in `results/partition-findings.ndjson`, and the run continues through healing,
-recovery and the final ledger so it keeps every violation it can observe. It then exits nonzero with
-the findings listed. Failures that make later steps meaningless, such as an ineffective or
-unremovable fault, no majority leader, or no convergence after healing, stop the run at once after
-recording every node's own status.
+A violation that leaves the experiment meaningful, such as a quorum that does not commit, an
+unexpected acknowledgement, an applied entry past the isolation boundary, a failover away from a
+healthy node, or a missing effect, is recorded in `results/partition-findings.ndjson`, and the run
+continues through healing, recovery and the final ledger so it keeps every violation it can observe.
+It then exits nonzero with the findings listed. Failures that make later steps meaningless, such as
+an ineffective or unremovable fault, no majority leader, or no convergence after healing, stop the
+run at once after recording every node's own status.
 
 After healing, all nodes must agree on a caught-up leader with every peer connected and no warnings
 within 150 seconds. Kafka membership must converge on the scheduled ingestor owner within 90
