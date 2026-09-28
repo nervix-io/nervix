@@ -114,6 +114,7 @@ fn command_outcome(
         inspection: None,
         wasm_state: None,
         resource: None,
+        backup: None,
     }))
 }
 

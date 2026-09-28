@@ -1243,6 +1243,11 @@ impl ClusterHandle {
         self.events.subscribe()
     }
 
+    /// The identifier every node of this cluster was configured with.
+    pub async fn cluster_id(&self) -> String {
+        self.chitchat.lock().await.cluster_id().to_string()
+    }
+
     pub async fn local_node_identity(&self) -> ClusterNodeIdentity {
         let chitchat = self.chitchat.lock().await;
         let identity = chitchat.self_chitchat_id();

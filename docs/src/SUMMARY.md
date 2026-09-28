@@ -50,6 +50,7 @@
     - [Roto Language Reference](./roto-language-reference.md)
   - [Lookups](./lookups.md)
   - [Sessions](./sessions.md)
+  - [Backup And Restore](./backup-and-restore.md)
   - [Rust Client Library](./client-library.md)
   - [Examples](./examples.md)
 - [Rust WASM Guest SDK](./wasm-guest-sdk.md)

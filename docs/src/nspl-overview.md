@@ -754,6 +754,18 @@ to one completed version. The resource itself is unchanged. Every selected repla
 before any model is written; a no-op selection succeeds without a write. Resource descriptions
 list all bound usages, while a version-qualified description lists only usages pinned there.
 
+Backup commands, which read and write archive files on the client's machine:
+
+```nspl,ignore
+BACKUP CLUSTER TO '<file>' [WITHOUT RESOURCES];
+BACKUP DOMAIN [<name>] TO '<file>' [WITHOUT RESOURCES];
+DESCRIBE BACKUP '<file>' [FORMAT TEXT | JSON];
+```
+
+`BACKUP` is admitted and run by the leader like other persistent commands, and the client
+downloads the archive it assembles. `DESCRIBE BACKUP` runs in `nervix-cli` without a server. See
+[Backup And Restore](backup-and-restore.md).
+
 Session-only commands:
 
 ```nspl,ignore

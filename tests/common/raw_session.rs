@@ -5,8 +5,9 @@
 //! - **Owns.** One native gRPC exchange per test session: request identities, reply routing and
 //!   transfer reassembly, the subscriptions the session opened and the display text of their rows,
 //!   every frame about a subscription outside the lifetime its replies and events announced, the
-//!   notices it received, the domain clock replies and frames it read in their arrival order, and
-//!   raw frames a scenario sends to probe the server's refusals.
+//!   notices it received, the domain clock replies and frames it read in their arrival order, raw
+//!   frames a scenario sends to probe the server's refusals, and backup downloads a scenario shapes
+//!   itself.
 //! - **Depends on.** The client wire contract and its gRPC codec, the NSPL client statement parser
 //!   to route subscription statements, and the shared TLS and credential fixtures.
 //! - **Must not know.** Server internals; everything it observes arrives through the public
@@ -27,15 +28,17 @@ use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 use bytes::{BufMut as _, Bytes};
 use nervix_client_wire::{
     AttachDisposition, AttachDomainClockRequest, AttachOutcome, AttachTransactionRequest,
+    BackupArchiveStart, BackupDownloadFailed, BackupDownloadMessage, BackupDownloadRequest,
     CancelRequest, ClientMessage, ClientRequest, CommandDisposition, CommandOutcome,
     CommandRequest, DetachDomainClockRequest, Diagnostic, DomainClockAttachmentEnded,
-    DomainClockObserved, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, RequestId, RowSchema,
-    ServerEvent, ServerFrame, ServerMessage, SessionEndReason, SessionLimits, SubscribeDisposition,
-    SubscribeRequest, SubscriptionEnded, SubscriptionHandle, SubscriptionType, TransferAssembly,
-    UnsubscribeDisposition, UnsubscribeRequest, UploadChunk, UploadReply, UploadStart,
-    VerifiedFrame,
+    DomainClockObserved, LeaderRedirect, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, RequestId,
+    RowSchema, ServerEvent, ServerFrame, ServerMessage, SessionEndReason, SessionLimits,
+    SubscribeDisposition, SubscribeRequest, SubscriptionEnded, SubscriptionHandle,
+    SubscriptionType, TransferAssembly, UnsubscribeDisposition, UnsubscribeRequest, UploadChunk,
+    UploadReply, UploadStart, VerifiedFrame,
     grpc::{
-        ClientExchangeCodec, ClientUploadCodec, EXCHANGE_PATH, FrameDecoder, UPLOAD_RESOURCE_PATH,
+        ClientBackupDownloadCodec, ClientExchangeCodec, ClientUploadCodec, DOWNLOAD_BACKUP_PATH,
+        EXCHANGE_PATH, FrameDecoder, UPLOAD_RESOURCE_PATH,
     },
 };
 use nervix_models::{
@@ -346,6 +349,105 @@ pub(crate) async fn send_upload(server: &str, upload: TestUpload<'_>) -> io::Res
     UploadReply::decode(response.get_ref()).map_err(io::Error::other)
 }
 
+/// How a backup download a scenario shapes itself ended.
+#[derive(Debug)]
+pub(crate) enum TestDownloadEnd {
+    /// Every frame arrived: the archive's start, and every byte after it.
+    Complete {
+        start: BackupArchiveStart,
+        bytes: Vec<u8>,
+    },
+    /// The scenario stopped reading and dropped the call, as a client that loses its connection
+    /// does.
+    Abandoned,
+    /// The node refused the download.
+    Refused(BackupDownloadFailed),
+    /// The node sent the download to the leader.
+    Redirected(LeaderRedirect),
+    /// The call itself failed with this status.
+    Status(Box<Status>),
+}
+
+/// A backup download a scenario shapes itself.
+pub(crate) struct TestDownload<'a> {
+    pub(crate) reference: &'a CommandExecutionReference,
+    /// The `authorization` metadata the call presents, or none.
+    pub(crate) authorization: Option<&'a str>,
+    /// Stops reading and drops the call once this many chunks arrived.
+    pub(crate) abandon_after_chunks: Option<usize>,
+}
+
+/// How long a download waits for each of its frames.
+const DOWNLOAD_FRAME_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Downloads the archive of a backup from `server`, as `download` shapes the call.
+pub(crate) async fn download_backup(
+    server: &str,
+    download: TestDownload<'_>,
+) -> io::Result<TestDownloadEnd> {
+    let limits = SessionLimits::DEFAULT;
+    let channel = session_channel(server).await?;
+    let mut client = tonic::client::Grpc::new(channel)
+        .max_decoding_message_size(limits.frame_bytes())
+        .max_encoding_message_size(limits.frame_bytes());
+    client.ready().await.map_err(io::Error::other)?;
+    let frame = BackupDownloadRequest {
+        execution_reference: download.reference.clone(),
+    }
+    .encode(&limits)
+    .map_err(io::Error::other)?;
+    let request = match download.authorization {
+        Some(authorization) => authorized_as(frame, authorization)?,
+        None => Request::new(frame),
+    };
+    let response = client
+        .server_streaming(
+            request,
+            http::uri::PathAndQuery::from_static(DOWNLOAD_BACKUP_PATH),
+            ClientBackupDownloadCodec::new(limits),
+        )
+        .await;
+    let mut frames = match response {
+        Ok(response) => response.into_inner(),
+        Err(status) => return Ok(TestDownloadEnd::Status(Box::new(status))),
+    };
+    let mut start = None;
+    let mut bytes = Vec::new();
+    let mut chunks = 0_usize;
+    loop {
+        tokio::task::consume_budget().await;
+        let next = tokio::time::timeout(DOWNLOAD_FRAME_TIMEOUT, frames.message())
+            .await
+            .map_err(|_| io::Error::other("a download frame did not arrive within a minute"))?;
+        let frame = match next {
+            Ok(Some(frame)) => frame,
+            Ok(None) => return Err(io::Error::other("the download ended before its last frame")),
+            Err(status) => return Ok(TestDownloadEnd::Status(Box::new(status))),
+        };
+        match BackupDownloadMessage::decode(&frame).map_err(io::Error::other)? {
+            BackupDownloadMessage::Start(started) => start = Some(started),
+            BackupDownloadMessage::Chunk(chunk) => {
+                bytes.extend_from_slice(chunk.bytes());
+                chunks += 1;
+                if download.abandon_after_chunks == Some(chunks) {
+                    drop(frames);
+                    return Ok(TestDownloadEnd::Abandoned);
+                }
+            }
+            BackupDownloadMessage::Complete => {
+                let Some(start) = start else {
+                    return Err(io::Error::other("the download completed without its start"));
+                };
+                return Ok(TestDownloadEnd::Complete { start, bytes });
+            }
+            BackupDownloadMessage::Failed(failed) => return Ok(TestDownloadEnd::Refused(failed)),
+            BackupDownloadMessage::NotLeader(redirect) => {
+                return Ok(TestDownloadEnd::Redirected(redirect));
+            }
+        }
+    }
+}
+
 /// A command outcome for a subscription statement the session sent as its own request.
 fn subscription_outcome(
     execution_reference: CommandExecutionReference,
@@ -372,6 +474,7 @@ fn subscription_outcome(
         inspection: None,
         wasm_state: None,
         resource: None,
+        backup: None,
     }
 }
 

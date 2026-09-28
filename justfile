@@ -488,19 +488,26 @@ test-coverage: tests-deps
 coverage-report-workspace:
     cargo llvm-cov report --workspace --lcov --output-path lcov.info
 
-# Measure changed server lines against its unit tests and selected Cucumber features while iterating.
-# The full `test-coverage` recipe remains the CI gate for workspace coverage and CRAP.
+# Measure changed server and CLI lines against the server's unit tests and selected Cucumber
+# features while iterating. The scenarios run the public CLI, so it is built instrumented and handed
+# to them exactly as `test-coverage` does. That recipe remains the CI gate for workspace coverage
+# and CRAP.
 test-coverage-feature +features: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov clean --workspace
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
     for feature in {{ features }}; do
         cargo llvm-cov --no-report --features testing --package nervix-server \
             --test scenarios -- --input "${feature}" --concurrency 1
     done
-    cargo llvm-cov report --lcov --output-path lcov.info
+    cargo llvm-cov report --package nervix-cli --package nervix-server --lcov \
+        --output-path lcov.info
 
 # Measure browser and CLI binary tests together with their public session scenarios.
 test-coverage-clients: tests-deps

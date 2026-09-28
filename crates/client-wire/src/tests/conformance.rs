@@ -8,13 +8,14 @@
 //! is held to the frames Rust writes. Setting `NERVIX_UPDATE_CLIENT_WIRE_CORPUS=1` rewrites the
 //! corpus instead of checking it; `just update-client-wire-corpus` does that.
 
-use std::{fmt::Write as _, fs, path::PathBuf};
+use std::{fmt::Write as _, fs, num::NonZeroU64, path::PathBuf};
 
 use bytes::Bytes;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    DomainClockObservation, DomainClockObservedState, ModelKind, ModelName, NodeRef, ParseAsType,
-    PlacementPolicy, SchemaField,
+    ArchiveDigest, BackupArchiveSummary, BackupDomainSummary, BackupResources,
+    CommandExecutionReference, DomainClockObservation, DomainClockObservedState, ModelKind,
+    ModelName, NodeRef, ParseAsType, PlacementPolicy, SchemaField, Timestamp,
 };
 
 use super::{
@@ -25,8 +26,10 @@ use super::{
     },
 };
 use crate::{
-    CellView, CellsView, Choice, ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceValue,
-    ClientFrame, ClientMessage, ClientRequest, CommandDisposition, DomainClockAttachDisposition,
+    BackupArchiveStart, BackupDownloadFailed, BackupDownloadFailure, BackupDownloadFrame,
+    BackupDownloadMessage, BackupDownloadRequest, BackupDownloadRequestFrame, CellView, CellsView,
+    Choice, ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceValue, ClientFrame,
+    ClientMessage, ClientRequest, CommandDisposition, CommandOutcome, DomainClockAttachDisposition,
     DomainClockAttachOutcome, DomainClockAttachmentEndReason, DomainClockAttachmentEnded,
     DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainPaceChoice,
     LeaderRedirect, Reply, ReplyBody, ReplyDelivery, RequestRejected, RequestRejection,
@@ -120,7 +123,78 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
     }
     .encode(&limits())
     .assured("a corpus clock frame fits the default limits");
+    let download = |frame: crate::EncodedFrame<BackupDownloadFrame>| frame.into_bytes();
+    let backup = CommandOutcome {
+        backup: Some(Box::new(backup_archive())),
+        ..command_outcome(CommandDisposition::Completed {
+            already_existed: false,
+        })
+    };
     vec![
+        (
+            "backup_download_chunk.nxbd",
+            download(
+                BackupDownloadMessage::encode_chunk(&[0x00, 0x7f, 0x80, 0xff], &limits())
+                    .assured("a corpus chunk fits the default limits"),
+            ),
+        ),
+        (
+            "backup_download_complete.nxbd",
+            download(
+                BackupDownloadMessage::encode_complete(&limits())
+                    .assured("a corpus completion fits the default limits"),
+            ),
+        ),
+        (
+            "backup_download_failed.nxbd",
+            download(
+                BackupDownloadMessage::encode_failed(
+                    &BackupDownloadFailed {
+                        failure: BackupDownloadFailure::NotRetained,
+                        message: "no archive is retained under this reference".to_string(),
+                    },
+                    &limits(),
+                )
+                .assured("a corpus refusal fits the default limits"),
+            ),
+        ),
+        (
+            "backup_download_redirect.nxbd",
+            download(
+                BackupDownloadMessage::encode_redirect(
+                    &LeaderRedirect {
+                        leader: Some(leader()),
+                    },
+                    &limits(),
+                )
+                .assured("a corpus redirect fits the default limits"),
+            ),
+        ),
+        (
+            "backup_download_request.nxbq",
+            BackupDownloadRequest {
+                execution_reference: CommandExecutionReference::parse(
+                    "0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44",
+                )
+                .assured("the corpus reference is a UUID"),
+            }
+            .encode(&limits())
+            .assured("a corpus download request fits the default limits")
+            .into_bytes(),
+        ),
+        (
+            "backup_download_start.nxbd",
+            download(
+                BackupDownloadMessage::encode_start(
+                    &BackupArchiveStart {
+                        total_bytes: NonZeroU64::MAX,
+                        digest: ArchiveDigest::from_bytes([0xa5; 32]),
+                    },
+                    &limits(),
+                )
+                .assured("a corpus start fits the default limits"),
+            ),
+        ),
         ("client_attach_domain_clock.nxcm", client(15)),
         ("client_cancel.nxcm", client(13)),
         ("client_choice.nxcm", client(14)),
@@ -193,6 +267,10 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                     page_cursor: Some("choice-page-two".to_string()),
                 }),
             ),
+        ),
+        (
+            "server_command_backup.nxsm",
+            reply(6, ReplyBody::Command(Box::new(backup))),
         ),
         (
             "server_command_failed.nxsm",
@@ -329,6 +407,33 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             ),
         ),
     ]
+}
+
+/// A backup summary at the edges of every field's range: the largest archive, the earliest and
+/// latest instants, a present zero user count, and domains in ascending order.
+fn backup_archive() -> BackupArchiveSummary {
+    BackupArchiveSummary {
+        total_bytes: NonZeroU64::MAX,
+        digest: ArchiveDigest::from_bytes([0x5a; 32]),
+        captured_at: Timestamp::from_unix_nanos(i64::MIN),
+        retained_until: Timestamp::from_unix_nanos(i64::MAX),
+        resources: BackupResources::Omitted,
+        users: Some(0),
+        domains: vec![
+            BackupDomainSummary {
+                domain: name("analytics"),
+                revision: u64::MAX,
+                sections: 0,
+                section_bytes: u64::MAX,
+            },
+            BackupDomainSummary {
+                domain: name("tenant"),
+                revision: 1,
+                sections: 7,
+                section_bytes: 4096,
+            },
+        ],
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -508,6 +613,30 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                             lines.push(format!("UNKNOWN cause={cause:?}"));
                         }
                         _ => {}
+                    }
+                    if let Some(archive) = &outcome.backup {
+                        let users = match archive.users {
+                            Some(users) => users.to_string(),
+                            None => "none".to_string(),
+                        };
+                        lines.push(format!(
+                            "BACKUP total_bytes={} digest={} captured_at={} retained_until={} \
+                             resources={:?} users={users}",
+                            archive.total_bytes,
+                            hex(archive.digest.as_bytes()),
+                            archive.captured_at.unix_nanos(),
+                            archive.retained_until.unix_nanos(),
+                            archive.resources
+                        ));
+                        for domain in &archive.domains {
+                            lines.push(format!(
+                                "BACKUP_DOMAIN domain={} revision={} sections={} section_bytes={}",
+                                domain.domain.as_str(),
+                                domain.revision,
+                                domain.sections,
+                                domain.section_bytes
+                            ));
+                        }
                     }
                 }
                 ReplyBody::Rejected(rejected) => {
@@ -758,12 +887,68 @@ fn render_client(message: &ClientMessage, lines: &mut Vec<String>) {
     }
 }
 
+fn render_download_request(request: &BackupDownloadRequest, lines: &mut Vec<String>) {
+    lines.push(format!(
+        "REQUEST DOWNLOAD_BACKUP reference={}",
+        request.execution_reference.as_str()
+    ));
+}
+
+fn render_download(message: &BackupDownloadMessage, lines: &mut Vec<String>) {
+    match message {
+        BackupDownloadMessage::Start(start) => lines.push(format!(
+            "DOWNLOAD START total_bytes={} digest={}",
+            start.total_bytes,
+            hex(start.digest.as_bytes())
+        )),
+        BackupDownloadMessage::Chunk(chunk) => {
+            lines.push(format!("DOWNLOAD CHUNK bytes={}", hex(chunk.bytes())));
+        }
+        BackupDownloadMessage::Complete => lines.push("DOWNLOAD COMPLETE".to_string()),
+        BackupDownloadMessage::Failed(failed) => lines.push(format!(
+            "DOWNLOAD FAILED failure={:?} message={}",
+            failed.failure,
+            text(&failed.message)
+        )),
+        BackupDownloadMessage::NotLeader(LeaderRedirect {
+            leader: Some(leader),
+        }) => {
+            let uri = |uri: &Option<url::Url>| match uri {
+                Some(uri) => uri.as_str().to_string(),
+                None => "none".to_string(),
+            };
+            lines.push(format!(
+                "DOWNLOAD LEADER node={} grpc={} console={}",
+                leader.node.as_str(),
+                uri(&leader.grpc_uri),
+                uri(&leader.web_console_uri)
+            ));
+        }
+        BackupDownloadMessage::NotLeader(LeaderRedirect { leader: None }) => {
+            lines.push("DOWNLOAD LEADER none".to_string());
+        }
+    }
+}
+
 /// The report of the frames as they are checked in.
 fn report_of(frames: &[(&'static str, Bytes)]) -> String {
     let mut lines = Vec::new();
     for (file, bytes) in frames {
         lines.push(format!("FRAME {file}"));
-        if file.ends_with(".nxcm") {
+        if file.ends_with(".nxbq") {
+            let frame =
+                VerifiedFrame::<BackupDownloadRequestFrame>::verify(bytes.clone(), &limits())
+                    .assured("a corpus download request verifies");
+            let request =
+                BackupDownloadRequest::decode(&frame).assured("a corpus download request decodes");
+            render_download_request(&request, &mut lines);
+        } else if file.ends_with(".nxbd") {
+            let frame = VerifiedFrame::<BackupDownloadFrame>::verify(bytes.clone(), &limits())
+                .assured("a corpus download frame verifies");
+            let message =
+                BackupDownloadMessage::decode(&frame).assured("a corpus download frame decodes");
+            render_download(&message, &mut lines);
+        } else if file.ends_with(".nxcm") {
             let frame = VerifiedFrame::<ClientFrame>::verify(bytes.clone(), &limits())
                 .assured("a corpus client frame verifies");
             let message = ClientMessage::decode(&frame).assured("a corpus client frame decodes");

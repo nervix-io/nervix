@@ -1048,6 +1048,16 @@ fn App() -> impl IntoView {
                         .update(|lines| lines.push(TermLine::error("no active domain selected")));
                 }
             }
+        } else if let Ok(
+            ClientStatement::DescribeBackup(_) | ClientStatement::Server(Statement::Backup(_)),
+        ) = parse_client_statement(&command)
+        {
+            terminal_lines.update(|lines| {
+                lines.push(TermLine::error(
+                    "BACKUP and DESCRIBE BACKUP write and read archive files on the client's \
+                     machine; run them with nervix-cli",
+                ));
+            });
         } else if let Ok(ClientStatement::DeleteSubscription(delete)) =
             parse_client_statement(&command)
         {
@@ -9291,6 +9301,7 @@ mod tests {
             inspection: None,
             wasm_state: None,
             resource: None,
+            backup: None,
         }
     }
 

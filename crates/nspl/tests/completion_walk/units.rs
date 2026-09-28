@@ -256,6 +256,7 @@ fn every_registered_filler_lexes() {
         "duration_literal",
         "hostname",
         "iceberg_location",
+        "local_path",
         "message_count",
         "node_id",
         "number_literal",

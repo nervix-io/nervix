@@ -496,6 +496,9 @@ use scheduled_node::{
 };
 pub(in crate::runtime) use shared_clients::{SharedClientError, SharedClientLease};
 use snapshot_staging::{SnapshotStaging, SnapshotStagingLimits};
+pub(crate) use snapshot_staging::{
+    SnapshotStagingError, StagedArtifact, StagedArtifactReader, StagedSnapshotWriter,
+};
 use state_replication::{
     ActivatedRuntimeStateHandoff, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
     DEFAULT_STATE_SNAPSHOT_INTERVAL, PendingStateCheckpointAnnouncement, PendingStateReplicaSync,

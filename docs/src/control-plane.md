@@ -112,9 +112,9 @@ that bind the named resource.
 
 Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time. `CREATE DOMAIN`
 and `CREATE USER` are rejected too: neither belongs to a domain, so neither is transaction content.
-Session subscriptions, `UPLOAD RESOURCE`, and node scheduling or membership operations (`CORDON`,
-`UNCORDON`, `DRAIN`, `DROP NODE`, and `RELOCATE`) are also immediate, non-transaction content. Run those
-statements outside `BEGIN`/`COMMIT`.
+Session subscriptions, `UPLOAD RESOURCE`, `BACKUP`, and node scheduling or membership operations
+(`CORDON`, `UNCORDON`, `DRAIN`, `DROP NODE`, and `RELOCATE`) are also immediate, non-transaction
+content. Run those statements outside `BEGIN`/`COMMIT`.
 
 Queue admission is not a blind append. The leader replays the replicated transaction prefix into a
 side-effect-free ordered plan, then checks the new statement against that plan. The planner uses one

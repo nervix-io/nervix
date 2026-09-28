@@ -516,6 +516,7 @@ mod tests {
             inspection: None,
             wasm_state: None,
             resource: None,
+            backup: None,
         }
     }
 

@@ -49,6 +49,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("hostname", "nx-host"),
     ("hostname_label", "nx"),
     ("iceberg_location", "'s3://nx/table'"),
+    ("local_path", "'./nx/path'"),
     ("jaq_capture", "'{captured: .}'"),
     ("jaq_matcher", "'. == null'"),
     ("jaq_program", "'.'"),

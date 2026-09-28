@@ -700,6 +700,9 @@ impl SessionServiceImpl {
                 .await
             }
             CommandExecutionEffect::Statement { source, statement } => match *statement {
+                Statement::Backup(backup) => {
+                    return Box::pin(self.execute_backup(execution, backup)).await;
+                }
                 Statement::Relocate(relocation) => {
                     let Some(domain) = execution.domain() else {
                         return command_error("durable relocation lost its domain".to_string());
@@ -985,6 +988,7 @@ fn durable_command_result(result: &CommandResult) -> CommandExecutionResult {
             .collect(),
         transaction: result.transaction.as_ref().map(durable_transaction_status),
         transaction_admission: result.transaction_admission.clone(),
+        backup: result.backup.as_deref().cloned(),
     }
 }
 
@@ -1041,6 +1045,7 @@ fn command_result(result: CommandExecutionResult) -> CommandResult {
             .collect(),
         transaction,
         transaction_admission: result.transaction_admission,
+        backup: result.backup.map(Box::new),
         ..CommandResult::new(disposition, result.message)
     }
 }

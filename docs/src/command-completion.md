@@ -101,6 +101,14 @@ every selected usage observes the new pinned version. A validation or activation
 report a partially rebound set. [Resource Versions And Bindings](./resource-versions.md#rebinding)
 defines the rebinding contract.
 
+`BACKUP` uses the same durable execution reference and retained outcome. Its success means the
+archive was assembled from one applied revision, verified, and retained on the leader under that
+reference, and its outcome carries the archive's size, digest, and per-domain revisions. The
+execution reference is also the key the client downloads the archive by. Retrying the reference
+returns the recorded outcome, and the client downloads the archive again while it is retained,
+which lasts until a download collects it or the reference's retry validity ends. See
+[Backup And Restore](./backup-and-restore.md#downloading-the-archive).
+
 `RESET WASM PROCESSOR ... STATE` uses the same durable execution reference and retained outcome.
 The ordered transaction records the reset as an effect even though it changes no Model. Success
 waits for the selected guest-state generation to be durable and its replacement execution usable.

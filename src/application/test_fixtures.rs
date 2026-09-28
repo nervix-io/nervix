@@ -296,6 +296,7 @@ fn test_session_service(
             ownership_handoff_operations: tokio::sync::Mutex::new(()),
             resource_upload_executions: DashMap::with_hasher(RandomState::new()),
             resource_replication_executions: DashMap::with_hasher(RandomState::new()),
+            retained_backups: Default::default(),
         }),
     }
 }
