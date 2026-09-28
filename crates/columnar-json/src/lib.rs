@@ -16,8 +16,9 @@ use arrow_array::{
 use arrow_schema::DataType;
 use base64_simd::AsOut as _;
 use chrono::DateTime;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_simd_kernels::{EscapeOffsetError, JsonEscapeClassification};
+use nervix_simd_kernels::JsonEscapeClassification;
 use thiserror::Error;
 
 /// What a top-level JSON object does with a null field.
@@ -76,12 +77,8 @@ pub enum JsonColumnError {
     ColumnCount { fields: usize, columns: usize },
     #[error("JSON column '{column}' has unsupported Arrow type {data_type}")]
     Unsupported { column: String, data_type: DataType },
-    #[error("JSON string column '{column}' has invalid Arrow offsets: {source}")]
-    StringOffsets {
-        column: String,
-        #[source]
-        source: EscapeOffsetError,
-    },
+    #[error("JSON string column '{column}' has invalid Arrow offsets")]
+    StringOffsets { column: String },
 }
 
 /// A selected row cannot be written as a JSON object.
@@ -108,10 +105,10 @@ pub enum JsonWriteError {
     },
 }
 
-impl From<io::Error> for JsonWriteError {
-    fn from(source: io::Error) -> Self {
-        Self::Write { source }
-    }
+macro_rules! write_json_bytes {
+    ($write:expr) => {
+        $write.map_err(|source| Report::new(JsonWriteError::Write { source }))?
+    };
 }
 
 /// The columns of one batch, downcast and classified once before any row is encoded.
@@ -154,9 +151,12 @@ enum JsonColumn<'a> {
     },
 }
 
+#[derive(Debug, Error)]
 enum ColumnBuildError {
+    #[error("unsupported Arrow type {0}")]
     Unsupported(DataType),
-    StringOffsets(EscapeOffsetError),
+    #[error("invalid Arrow string offsets")]
+    StringOffsets,
 }
 
 impl<'a> JsonColumns<'a> {
@@ -164,24 +164,26 @@ impl<'a> JsonColumns<'a> {
         batch: &'a RecordBatch,
         specs: &'a [JsonColumnSpec],
         nested_nulls: NestedNulls,
-    ) -> Result<Self, JsonColumnError> {
+    ) -> error_stack::Result<Self, JsonColumnError> {
         if specs.len() != batch.num_columns() {
-            return Err(JsonColumnError::ColumnCount {
+            return Err(Report::new(JsonColumnError::ColumnCount {
                 fields: specs.len(),
                 columns: batch.num_columns(),
-            });
+            }));
         }
         let mut fields = Vec::with_capacity(specs.len());
         for (spec, array) in specs.iter().zip(batch.columns()) {
-            let column = JsonColumn::new(array.as_ref()).map_err(|error| match error {
-                ColumnBuildError::Unsupported(data_type) => JsonColumnError::Unsupported {
-                    column: spec.name.clone(),
-                    data_type,
-                },
-                ColumnBuildError::StringOffsets(source) => JsonColumnError::StringOffsets {
-                    column: spec.name.clone(),
-                    source,
-                },
+            let column = JsonColumn::new(array.as_ref()).map_err(|report| {
+                let context = match report.current_context() {
+                    ColumnBuildError::Unsupported(data_type) => JsonColumnError::Unsupported {
+                        column: spec.name.clone(),
+                        data_type: data_type.clone(),
+                    },
+                    ColumnBuildError::StringOffsets => JsonColumnError::StringOffsets {
+                        column: spec.name.clone(),
+                    },
+                };
+                report.change_context(context)
             })?;
             fields.push(JsonField { spec, column });
         }
@@ -198,14 +200,14 @@ impl<'a> JsonColumns<'a> {
         &self,
         row: usize,
         output: &mut W,
-    ) -> Result<(), JsonWriteError> {
+    ) -> error_stack::Result<(), JsonWriteError> {
         if row >= self.rows {
-            return Err(JsonWriteError::RowOutOfBounds {
+            return Err(Report::new(JsonWriteError::RowOutOfBounds {
                 row,
                 rows: self.rows,
-            });
+            }));
         }
-        output.write_all(b"{")?;
+        write_json_bytes!(output.write_all(b"{"));
         let mut first = true;
         for field in &self.fields {
             let is_null = field.column.is_null(row);
@@ -213,22 +215,22 @@ impl<'a> JsonColumns<'a> {
                 match field.spec.nulls {
                     FieldNulls::Omit => continue,
                     FieldNulls::Reject => {
-                        return Err(JsonWriteError::RequiredNull {
+                        return Err(Report::new(JsonWriteError::RequiredNull {
                             field: field.spec.name.clone(),
                             row,
-                        });
+                        }));
                     }
                     FieldNulls::Write => {}
                 }
             }
             if !first {
-                output.write_all(b",")?;
+                write_json_bytes!(output.write_all(b","));
             }
             first = false;
-            output.write_all(&field.spec.quoted_key)?;
-            output.write_all(b":")?;
+            write_json_bytes!(output.write_all(&field.spec.quoted_key));
+            write_json_bytes!(output.write_all(b":"));
             if is_null {
-                output.write_all(b"null")?;
+                write_json_bytes!(output.write_all(b"null"));
             } else {
                 field.column.write_value(
                     row,
@@ -239,13 +241,13 @@ impl<'a> JsonColumns<'a> {
                 )?;
             }
         }
-        output.write_all(b"}")?;
+        write_json_bytes!(output.write_all(b"}"));
         Ok(())
     }
 }
 
 impl<'a> JsonColumn<'a> {
-    fn new(array: &'a dyn Array) -> Result<Self, ColumnBuildError> {
+    fn new(array: &'a dyn Array) -> error_stack::Result<Self, ColumnBuildError> {
         macro_rules! downcast {
             ($ty:ty, $variant:ident) => {
                 if let Some(values) = array.as_any().downcast_ref::<$ty>() {
@@ -269,7 +271,7 @@ impl<'a> JsonColumn<'a> {
         if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
             let escapes =
                 JsonEscapeClassification::new(values.value_data(), values.value_offsets())
-                    .map_err(ColumnBuildError::StringOffsets)?;
+                    .change_context(ColumnBuildError::StringOffsets)?;
             return Ok(Self::String { values, escapes });
         }
         if let Some(offsets) = array.as_any().downcast_ref::<ListArray>() {
@@ -286,7 +288,9 @@ impl<'a> JsonColumn<'a> {
                 elements: Box::new(elements),
             });
         }
-        Err(ColumnBuildError::Unsupported(array.data_type().clone()))
+        Err(Report::new(ColumnBuildError::Unsupported(
+            array.data_type().clone(),
+        )))
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -317,15 +321,15 @@ impl<'a> JsonColumn<'a> {
         nested_nulls: NestedNulls,
         float32_encoding: Float32Encoding,
         output: &mut W,
-    ) -> Result<(), JsonWriteError> {
+    ) -> error_stack::Result<(), JsonWriteError> {
         if self.is_null(row) {
             match nested_nulls {
-                NestedNulls::Write => output.write_all(b"null")?,
+                NestedNulls::Write => write_json_bytes!(output.write_all(b"null")),
                 NestedNulls::Reject => {
-                    return Err(JsonWriteError::RequiredNull {
+                    return Err(Report::new(JsonWriteError::RequiredNull {
                         field: field.to_string(),
                         row,
-                    });
+                    }));
                 }
             }
             return Ok(());
@@ -334,7 +338,7 @@ impl<'a> JsonColumn<'a> {
         macro_rules! write_integer {
             ($values:expr) => {{
                 let mut buffer = itoa::Buffer::new();
-                output.write_all(buffer.format($values.value(row)).as_bytes())?;
+                write_json_bytes!(output.write_all(buffer.format($values.value(row)).as_bytes()));
             }};
         }
         macro_rules! write_float {
@@ -342,15 +346,19 @@ impl<'a> JsonColumn<'a> {
                 let value = $values.value(row);
                 if value.is_finite() {
                     let mut buffer = ryu::Buffer::new();
-                    output.write_all(buffer.format(value).as_bytes())?;
+                    write_json_bytes!(output.write_all(buffer.format(value).as_bytes()));
                 } else {
-                    output.write_all(b"null")?;
+                    write_json_bytes!(output.write_all(b"null"));
                 }
             }};
         }
         match self {
             Self::Bool(values) => {
-                output.write_all(if values.value(row) { b"true" } else { b"false" })?
+                write_json_bytes!(output.write_all(if values.value(row) {
+                    b"true"
+                } else {
+                    b"false"
+                }));
             }
             Self::U8(values) => write_integer!(values),
             Self::I8(values) => write_integer!(values),
@@ -363,16 +371,17 @@ impl<'a> JsonColumn<'a> {
             Self::F32(values) => {
                 let value = values.value(row);
                 if !value.is_finite() {
-                    output.write_all(b"null")?;
+                    write_json_bytes!(output.write_all(b"null"));
                 } else {
                     match float32_encoding {
                         Float32Encoding::Native => {
                             let mut buffer = ryu::Buffer::new();
-                            output.write_all(buffer.format(value).as_bytes())?;
+                            write_json_bytes!(output.write_all(buffer.format(value).as_bytes()));
                         }
                         Float32Encoding::WidenedF64 => {
-                            serde_json::to_writer(&mut *output, &f64::from(value))
-                                .map_err(|source| JsonWriteError::NumberWrite { source })?;
+                            serde_json::to_writer(&mut *output, &f64::from(value)).map_err(
+                                |source| Report::new(JsonWriteError::NumberWrite { source }),
+                            )?;
                         }
                     }
                 }
@@ -382,21 +391,21 @@ impl<'a> JsonColumn<'a> {
                 let value = values.value(row);
                 if escapes.row_needs_escape(row) {
                     serde_json::to_writer(&mut *output, value)
-                        .map_err(|source| JsonWriteError::StringEscape { source })?;
+                        .map_err(|source| Report::new(JsonWriteError::StringEscape { source }))?;
                 } else {
-                    output.write_all(b"\"")?;
-                    output.write_all(value.as_bytes())?;
-                    output.write_all(b"\"")?;
+                    write_json_bytes!(output.write_all(b"\""));
+                    write_json_bytes!(output.write_all(value.as_bytes()));
+                    write_json_bytes!(output.write_all(b"\""));
                 }
             }
             Self::Bytes(values) => {
-                output.write_all(b"\"")?;
+                write_json_bytes!(output.write_all(b"\""));
                 Self::write_base64(values.value(row), output)?;
-                output.write_all(b"\"")?;
+                write_json_bytes!(output.write_all(b"\""));
             }
             Self::Datetime(values) => {
                 let value = DateTime::from_timestamp_nanos(values.value(row)).fixed_offset();
-                write!(output, "\"{}\"", value.format("%+"))?;
+                write_json_bytes!(write!(output, "\"{}\"", value.format("%+")));
             }
             Self::List { offsets, elements } => {
                 let bounds = offsets.value_offsets();
@@ -441,26 +450,29 @@ impl<'a> JsonColumn<'a> {
         nested_nulls: NestedNulls,
         float32_encoding: Float32Encoding,
         output: &mut W,
-    ) -> Result<(), JsonWriteError> {
-        output.write_all(b"[")?;
+    ) -> error_stack::Result<(), JsonWriteError> {
+        write_json_bytes!(output.write_all(b"["));
         for (index, row) in rows.enumerate() {
             if index != 0 {
-                output.write_all(b",")?;
+                write_json_bytes!(output.write_all(b","));
             }
             elements.write_value(row, field, nested_nulls, float32_encoding, output)?;
         }
-        output.write_all(b"]")?;
+        write_json_bytes!(output.write_all(b"]"));
         Ok(())
     }
 
-    fn write_base64<W: io::Write>(bytes: &[u8], output: &mut W) -> Result<(), JsonWriteError> {
+    fn write_base64<W: io::Write>(
+        bytes: &[u8],
+        output: &mut W,
+    ) -> error_stack::Result<(), JsonWriteError> {
         // 768 source bytes produce exactly 1024 output bytes without intermediate padding.
         let mut scratch = [0_u8; 1024];
         for chunk in bytes.chunks(768) {
             let encoded_len = chunk.len().div_ceil(3) * 4;
             let encoded =
                 base64_simd::STANDARD.encode_as_str(chunk, scratch[..encoded_len].as_out());
-            output.write_all(encoded.as_bytes())?;
+            write_json_bytes!(output.write_all(encoded.as_bytes()));
         }
         Ok(())
     }
@@ -677,7 +689,10 @@ mod tests {
             Ok(()) => panic!("schemaful list elements cannot be null"),
             Err(error) => error,
         };
-        assert!(matches!(error, JsonWriteError::RequiredNull { .. }));
+        assert!(matches!(
+            error.current_context(),
+            JsonWriteError::RequiredNull { .. }
+        ));
     }
 
     #[test]
@@ -722,20 +737,31 @@ mod tests {
         let specs = [JsonColumnSpec::new("text", FieldNulls::Reject)];
         let columns = JsonColumns::new(&null_batch, &specs, NestedNulls::Reject)
             .assured("string column is supported");
+        let outside = columns
+            .write_row(1, &mut Vec::new())
+            .err()
+            .assured("row one is outside a one-row batch");
         assert!(matches!(
-            columns.write_row(1, &mut Vec::new()),
-            Err(JsonWriteError::RowOutOfBounds { .. })
+            outside.current_context(),
+            JsonWriteError::RowOutOfBounds { .. }
         ));
+        let null = columns
+            .write_row(0, &mut Vec::new())
+            .err()
+            .assured("required field is null in the test row");
         assert!(matches!(
-            columns.write_row(0, &mut Vec::new()),
-            Err(JsonWriteError::RequiredNull { .. })
+            null.current_context(),
+            JsonWriteError::RequiredNull { .. }
         ));
 
         let unsupported = batch(vec![("value", Arc::new(arrow_array::NullArray::new(1)))]);
         let specs = [JsonColumnSpec::new("value", FieldNulls::Reject)];
+        let unsupported = JsonColumns::new(&unsupported, &specs, NestedNulls::Reject)
+            .err()
+            .assured("null is unsupported for JSON columns");
         assert!(matches!(
-            JsonColumns::new(&unsupported, &specs, NestedNulls::Reject),
-            Err(JsonColumnError::Unsupported { .. })
+            unsupported.current_context(),
+            JsonColumnError::Unsupported { .. }
         ));
     }
 }

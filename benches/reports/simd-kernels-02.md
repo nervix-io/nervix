@@ -2,8 +2,10 @@
 
 ## Reproduce
 
-Baseline `835b5f7c62e7618741ee5aec7150ba6dec347b0b`; candidate is this change. The
-candidate `Cargo.lock` blob is `a04beb718bdf5e62797c3c33aee7ebc7fe6abe75`. Measurements
+Baseline `835b5f7c62e7618741ee5aec7150ba6dec347b0b`; the measured candidate was the working
+tree that became commit `7b820504`, with `Cargo.lock` blob
+`a04beb718bdf5e62797c3c33aee7ebc7fe6abe75`. It preceded the merge from `main` and the
+subsequent change to error reporting on failure paths. Measurements
 were made on 2026-09-28 UTC on a 32-logical-CPU Intel Core i9-14900HX, x86-64 Linux, with rustc
 1.98.0, LLVM 22.1.8, Arrow 58.4.0, and Criterion 0.5.1. Other worktrees were building and
 testing on the same host, so small timing differences require caution.
@@ -75,6 +77,6 @@ quotes, controls, Unicode, and length boundaries and preserve exact byte measure
 The Kafka emission feature passed 13 scenarios and 148 steps, including the new one- and
 three-node outline named “Kafka JSON emission preserves exact bytes for escaped and clean
 columns.” It checks exact broker bytes for clean and escaped strings, sensitive field exclusion,
-an omitted optional null, datetime, and bytes. The LLVM coverage run passed 1,314 server tests,
+an omitted optional null, datetime, and bytes. The post-merge LLVM coverage run passed 1,321 server tests,
 six column writer tests, six ClickHouse tests, and three kernel tests. Its changed Rust lines
-covered 688 of 707 executable lines (97.3%). `just validate` and `just ratchet` passed.
+covered 715 of 735 executable lines (97.3%). `just validate` and `just ratchet` passed.

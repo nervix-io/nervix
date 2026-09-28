@@ -8,6 +8,7 @@
 
 use std::sync::OnceLock;
 
+use error_stack::Report;
 use fearless_simd::{Level, dispatch, prelude::*};
 use thiserror::Error;
 
@@ -44,12 +45,16 @@ pub enum EscapeOffsetError {
 impl JsonEscapeClassification {
     /// Classifies one contiguous string-values buffer and summarizes its rows from offsets.
     /// Runtime CPU detection is cached once for the process.
-    pub fn new(bytes: &[u8], offsets: &[i32]) -> Result<Self, EscapeOffsetError> {
+    pub fn new(bytes: &[u8], offsets: &[i32]) -> error_stack::Result<Self, EscapeOffsetError> {
         let level = *LEVEL.get_or_init(Level::new);
         Self::with_level(level, bytes, offsets)
     }
 
-    fn with_level(level: Level, bytes: &[u8], offsets: &[i32]) -> Result<Self, EscapeOffsetError> {
+    fn with_level(
+        level: Level,
+        bytes: &[u8],
+        offsets: &[i32],
+    ) -> error_stack::Result<Self, EscapeOffsetError> {
         let offsets = Self::check_offsets(offsets, bytes.len())?;
         let byte_masks = dispatch!(level, simd => Self::classify_bytes(simd, bytes));
         let row_masks = Self::summarize_rows(&offsets, &byte_masks);
@@ -59,33 +64,36 @@ impl JsonEscapeClassification {
         })
     }
 
-    fn check_offsets(offsets: &[i32], bytes: usize) -> Result<Vec<usize>, EscapeOffsetError> {
+    fn check_offsets(
+        offsets: &[i32],
+        bytes: usize,
+    ) -> error_stack::Result<Vec<usize>, EscapeOffsetError> {
         if offsets.is_empty() {
-            return Err(EscapeOffsetError::Empty);
+            return Err(Report::new(EscapeOffsetError::Empty));
         }
         let mut previous = offsets[0];
         let mut positions = Vec::with_capacity(offsets.len());
         for (index, &offset) in offsets.iter().enumerate() {
             let Ok(position) = usize::try_from(offset) else {
-                return Err(EscapeOffsetError::Invalid {
+                return Err(Report::new(EscapeOffsetError::Invalid {
                     index,
                     offset,
                     bytes,
-                });
+                }));
             };
             if position > bytes {
-                return Err(EscapeOffsetError::Invalid {
+                return Err(Report::new(EscapeOffsetError::Invalid {
                     index,
                     offset,
                     bytes,
-                });
+                }));
             }
             if offset < previous {
-                return Err(EscapeOffsetError::Descending {
+                return Err(Report::new(EscapeOffsetError::Descending {
                     index,
                     previous,
                     offset,
-                });
+                }));
             }
             previous = offset;
             positions.push(position);

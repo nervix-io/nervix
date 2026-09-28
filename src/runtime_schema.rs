@@ -49,7 +49,7 @@ use arrow_select::{
 use base64_simd::AsOut as _;
 use bytes::Bytes;
 use chrono::{DateTime, FixedOffset};
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto;
 use nervix_bounded_write::{BoundedWrite, BoundedWriter};
@@ -393,12 +393,8 @@ pub enum CodecError {
         #[source]
         source: serde_json::Error,
     },
-    #[error("failed to encode json payload for codec '{codec}': {source}")]
-    ColumnarJsonEncode {
-        codec: String,
-        #[source]
-        source: nervix_columnar_json::JsonWriteError,
-    },
+    #[error("failed to encode json payload for codec '{codec}'")]
+    ColumnarJsonEncode { codec: String },
     #[error("failed to parse cbor payload for codec '{codec}': {reason}")]
     CborDecode { codec: String, reason: String },
     #[error("failed to encode cbor payload for codec '{codec}': {reason}")]
@@ -876,12 +872,11 @@ impl CompiledCodecBatchEncoder<'_> {
                 let columns = self.json_columns.as_ref().assured(
                     "a JSON batch encoder is prepared with typed JSON columns at construction",
                 );
-                columns.write_row(row_index, output).map_err(|source| {
-                    Report::new(CodecError::ColumnarJsonEncode {
+                columns.write_row(row_index, output).change_context(
+                    CodecError::ColumnarJsonEncode {
                         codec: codec.to_string(),
-                        source,
-                    })
-                })?;
+                    },
+                )?;
             }
             CompiledWireSchema::Cbor(_) => {
                 ciborium::into_writer(&row, &mut *output).map_err(|source| {

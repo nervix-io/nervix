@@ -13,6 +13,7 @@ arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 base64-simd = { workspace = true }
 chrono = { workspace = true }
+error-stack = { workspace = true }
 itoa = { workspace = true }
 meticulous = { workspace = true }
 nervix-simd-kernels = { workspace = true }

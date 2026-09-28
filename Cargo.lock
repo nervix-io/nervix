@@ -6574,6 +6574,7 @@ dependencies = [
  "base64-simd",
  "chrono",
  "criterion 0.5.1",
+ "error-stack",
  "itoa",
  "meticulous",
  "nervix-simd-kernels",
@@ -7461,6 +7462,7 @@ dependencies = [
 name = "nervix-simd-kernels"
 version = "0.1.0-dev"
 dependencies = [
+ "error-stack",
  "fastrand",
  "fearless_simd",
  "meticulous",

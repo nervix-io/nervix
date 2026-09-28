@@ -197,10 +197,7 @@ impl RowSink for ClickHouseSink {
         let columns = match JsonColumns::new(rows.batch, &specs, NestedNulls::Write) {
             Ok(columns) => columns,
             Err(error) => {
-                outcome.fail(
-                    Report::new(SinkPublishError::Publish { sink: CLICKHOUSE })
-                        .attach_printable(error.to_string()),
-                );
+                outcome.fail(error.change_context(SinkPublishError::Publish { sink: CLICKHOUSE }));
                 return outcome;
             }
         };
@@ -222,10 +219,8 @@ impl RowSink for ClickHouseSink {
             for row in chunk_rows {
                 let mut encoded = Vec::with_capacity(previous_row_bytes);
                 if let Err(error) = columns.write_row(*row, &mut encoded) {
-                    outcome.fail(
-                        Report::new(SinkPublishError::Publish { sink: CLICKHOUSE })
-                            .attach_printable(error.to_string()),
-                    );
+                    outcome
+                        .fail(error.change_context(SinkPublishError::Publish { sink: CLICKHOUSE }));
                     return outcome;
                 }
                 previous_row_bytes = encoded.len();
