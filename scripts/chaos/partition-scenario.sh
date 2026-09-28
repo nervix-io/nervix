@@ -867,8 +867,11 @@ begin_partition_case() {
     output_before_fault="$(topic_end_offset chaos_output)"
     [[ "${source_before_fault}" =~ ^[0-9]+$ && "${output_before_fault}" =~ ^[0-9]+$ ]] \
         || partition_fail setup 'broker offsets were unavailable before the partition'
-    # The role must not move between selection and installation.
-    observe_partition_roles "${case_dir}/immediately-before" \
+    # The role must not move between selection and installation. Nodes are read one after another
+    # while the cluster keeps committing, so one read can see a moving log index; wait briefly for
+    # a settled read rather than mistaking that for an unavailable role.
+    wait_for 'settled public roles immediately before the partition' 30 \
+        observe_partition_roles "${case_dir}/immediately-before" \
         || partition_fail injection 'public roles were unavailable immediately before the partition'
     jq -e --slurpfile before "${case_dir}/before/role.json" '. == $before[0]' \
         "${case_dir}/immediately-before/role.json" >/dev/null \
