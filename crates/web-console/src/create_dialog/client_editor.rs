@@ -6,11 +6,10 @@
 //! - **Depends on.** Client browser drafts and the shared typed choice component.
 //! - **Must not know.** Connector drivers, external credentials, or runtime startup.
 
-use futures_channel::mpsc::UnboundedSender;
 use leptos::prelude::*;
 
 use super::{
-    ChoiceControl, ChoiceGroup, ConsoleRequest, CreateSignals,
+    ChoiceControl, ChoiceGroup, CreateSignals, RequestSender,
     client_draft::{ClientConfigDraft, ClientTransport},
     event_target_checked, event_target_value,
 };
@@ -19,7 +18,7 @@ use super::{
 pub(super) fn ClientEditor(
     signals: CreateSignals,
     name_input: NodeRef<leptos::html::Input>,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     session_generation: RwSignal<u64>,
 ) -> impl IntoView {
     let pending = move || signals.progress.get().is_pending();

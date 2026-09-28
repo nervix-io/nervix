@@ -6,11 +6,10 @@
 //! - **Depends on.** The signaling browser draft and shared resource choices.
 //! - **Must not know.** WebSocket frames, handshake execution, or registry internals.
 
-use futures_channel::mpsc::UnboundedSender;
 use leptos::prelude::*;
 
 use super::{
-    ConsoleRequest, CreateSignals, event_target_checked, event_target_textarea_value,
+    CreateSignals, RequestSender, event_target_checked, event_target_textarea_value,
     event_target_value,
     resource_binding_editor::{ResourceBindingEditor, ResourceBindingForm},
     signaling_draft::{
@@ -207,7 +206,7 @@ fn SignalingStepEditor(signals: CreateSignals, index: usize) -> impl IntoView {
 pub(super) fn SignalingEditor(
     signals: CreateSignals,
     name_input: NodeRef<leptos::html::Input>,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     session_generation: RwSignal<u64>,
 ) -> impl IntoView {
     let pending = move || signals.progress.get().is_pending();

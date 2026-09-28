@@ -9,7 +9,6 @@
 
 use std::collections::BTreeMap;
 
-use futures_channel::mpsc::UnboundedSender;
 use leptos::{ev, prelude::*};
 use meticulous::OptionExt as _;
 use nervix_client_wire::InspectTransactionRequest;
@@ -27,7 +26,7 @@ use nervix_web_console::graph::{
     viewport::{Extent, GraphBounds, Viewport},
 };
 
-use crate::{ConsoleRequest, event_target_input};
+use crate::{ConsoleRequest, event_target_input, request_handoff::RequestSender};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct PreviewKey {
@@ -192,7 +191,12 @@ impl InspectorSignals {
         self.latest_order.set(Some(order));
         self.error.set(None);
         self.stale_preview.set(false);
-        self.open.set(true);
+        // Setting a signal notifies its readers even when the value is unchanged, and the request
+        // effect reads `open`: reopening an open inspector would request the report this reply
+        // just answered, again and again.
+        if !self.open.get_untracked() {
+            self.open.set(true);
+        }
 
         if let Some(status) = attached
             && status.lifecycle().is_active()
@@ -262,7 +266,7 @@ struct CanvasTransform {
 pub(super) fn TransactionInspector(
     inspector: InspectorSignals,
     transaction_status: RwSignal<Option<TransactionStatus>>,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     run_command: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let lookup_id = RwSignal::new(String::new());
@@ -302,10 +306,10 @@ pub(super) fn TransactionInspector(
             operation: None,
         });
         if let Some(tx) = request_tx.get() {
-            if tx.unbounded_send(request).is_err() {
+            if let Err(refusal) = tx.send(request) {
                 inspector
                     .error
-                    .set(Some("websocket command channel is closed".to_string()));
+                    .set(Some(refusal.current_context().to_string()));
             }
         } else {
             inspector
@@ -1283,6 +1287,57 @@ mod tests {
                 })
             );
             assert!(inspector.open.get_untracked());
+        });
+    }
+
+    #[test]
+    fn an_accepted_report_is_not_requested_again_until_something_changes() {
+        super::super::initialize_test_executor();
+        Owner::new().with(|| {
+            let inspector = InspectorSignals::new();
+            let inspected = configured_inspection();
+            let status = RwSignal::new(Some(inspected.transaction.clone()));
+            let (sender, mut receiver) = crate::request_handoff::request_handoff();
+            inspector.open_attached();
+            let props = TransactionInspectorProps::builder()
+                .inspector(inspector)
+                .transaction_status(status)
+                .request_tx(RwSignal::new(Some(sender)))
+                .run_command(|_| {})
+                .build();
+            let _view = TransactionInspector(props);
+            any_spawner::Executor::poll_local();
+            assert!(
+                matches!(
+                    receiver.try_take(),
+                    Some(ConsoleRequest::InspectTransaction(_))
+                ),
+                "opening the inspector requests its report"
+            );
+            assert!(receiver.try_take().is_none());
+
+            inspector.requested(1);
+            inspector.accept(
+                inspected.clone(),
+                1,
+                Some(&TransactionInspectionTarget::Attached),
+                Some(&inspected.transaction),
+            );
+            any_spawner::Executor::poll_local();
+            assert!(
+                receiver.try_take().is_none(),
+                "the report a reply delivered is not requested again"
+            );
+
+            inspector.refresh();
+            any_spawner::Executor::poll_local();
+            assert!(
+                matches!(
+                    receiver.try_take(),
+                    Some(ConsoleRequest::InspectTransaction(_))
+                ),
+                "a refresh requests the report again"
+            );
         });
     }
 
