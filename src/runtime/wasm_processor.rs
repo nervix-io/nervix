@@ -697,17 +697,16 @@ impl Runtime {
     /// so a batch discovered to be unusable after publication has already invalidated the saved
     /// state of the binding it replaced. Compiling first keeps the previous model and its guest
     /// state the current ones, and the module this check compiles is the one activation installs.
-    pub(crate) async fn prepare_candidate_wasm_module(
+    pub(crate) async fn prepare_wasm_module(
         &self,
-        domain: &DomainName,
-        processor: &CreateWasmProcessor,
+        plan: &WasmModulePlan,
     ) -> error_stack::Result<(), WasmInstanceError> {
         self.compile_wasm_processor_module(
-            domain,
-            &processor.name,
-            &processor.resource,
-            processor.resource_version,
-            &processor.file,
+            &plan.resource.domain,
+            &plan.processor,
+            &plan.resource.identifier,
+            plan.resource.version,
+            &plan.file,
         )
         .await?;
         Ok(())
@@ -722,24 +721,11 @@ impl Runtime {
         schedule: &ClusterSchedule,
     ) {
         let mut assigned = HashSet::default();
-        for domain in schedule.domains.values() {
-            for node in domain.nodes.values() {
-                let Some(processor) = node.wasm_processor() else {
-                    continue;
-                };
-                if !node.is_assigned_to(local_node_id) {
-                    continue;
-                }
-                let resource = ResourceId::new(
-                    domain.domain.clone(),
-                    processor.resource.clone(),
-                    processor.resource_version,
-                );
-                assigned.insert(WasmModuleFile {
-                    resource,
-                    file: processor.file.clone(),
-                });
-            }
+        for module in WasmModulePlan::assigned_in_cluster(schedule, local_node_id) {
+            assigned.insert(WasmModuleFile {
+                resource: module.resource,
+                file: module.file,
+            });
         }
         self.inner
             .compiled_wasm_modules

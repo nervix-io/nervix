@@ -356,7 +356,7 @@ pub(super) struct RuntimeVmSchemaPair {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledDomainUdfs {
-    pub(super) models: Vec<CreateUdf>,
+    pub(super) programs: Vec<UdfProgram>,
     pub(super) executor: UdfExecutor,
 }
 
@@ -1884,8 +1884,9 @@ pub(super) struct GeneratorSetProgramSchemas {
 
 pub(super) fn compile_generator_set_program(
     domain: &DomainName,
-    generator: &CreateGenerator,
-    output: &ProcessorOutput,
+    generator: &GeneratorName,
+    source_relay: &RelayName,
+    route: &GeneratorRoutePlan,
     schemas: GeneratorSetProgramSchemas,
     udfs: Option<&UdfExecutor>,
 ) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
@@ -1894,16 +1895,9 @@ pub(super) fn compile_generator_set_program(
         source: source_schema,
         branch: branch_schema,
     } = schemas;
-    let parsed = lower_set_only_route(&output.construction, output_schema.schema.as_ref())
-        .map_err(|reason| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "generator '{}' output '{}' is invalid: {reason}",
-                generator.name, output.relay
-            ),
-        })?;
+    let parsed = &route.program;
     let error_sites = compiled_message_error_sites(
-        &parsed,
+        parsed,
         &vec![MessageErrorOperation::Set; parsed.inner.set.len()],
         Some(MessageErrorOperation::RouteWhere),
     )
@@ -1914,11 +1908,8 @@ pub(super) fn compile_generator_set_program(
     let mut bindings = vec![
         VmCompileBinding::writable("output", output_schema.schema.clone())
             .with_sensitivity(output_schema.sensitivity.clone()),
-        VmCompileBinding::readonly(
-            format!("relay_state.{}", generator.materialized_relay),
-            source_schema.schema,
-        )
-        .with_sensitivity(source_schema.sensitivity),
+        VmCompileBinding::readonly(format!("relay_state.{source_relay}"), source_schema.schema)
+            .with_sensitivity(source_schema.sensitivity),
     ];
     if let Some(branch_schema) = branch_schema {
         bindings.push(
@@ -1927,7 +1918,7 @@ pub(super) fn compile_generator_set_program(
         );
     }
     let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
+        parsed,
         output_schema.schema,
         output_schema.sensitivity.clone(),
         bindings,
@@ -1943,7 +1934,7 @@ pub(super) fn compile_generator_set_program(
         domain: domain.as_str().to_string(),
         reason: format!(
             "generator '{}' output '{}' compile failed: {}",
-            generator.name, output.relay, error.message
+            generator, route.relay, error.message
         ),
     })?;
     Ok(CompiledProgramWithMaterializedInterest {

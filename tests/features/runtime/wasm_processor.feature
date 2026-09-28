@@ -1006,6 +1006,7 @@ Feature: WASM processor runtime behavior
       | 1            | 0             |
       | 3            | 0             |
 
+  @execution_resource_plan
   Scenario Outline: WASM processor restores guest state after cluster restart
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And the production sticky scheduler is configured
@@ -2003,6 +2004,7 @@ Feature: WASM processor runtime behavior
       | 1            | 0             |
       | 3            | 0             |
 
+  @execution_resource_plan
   Scenario Outline: Invalid WASM processor module prevents runtime startup
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

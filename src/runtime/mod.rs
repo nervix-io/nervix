@@ -68,23 +68,22 @@ use nervix_models::{
     AckMode, Assignment, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClickHouseValueMapping,
     ClientConfigEntry, ClientName, ClientPoolBounds, ClientResourceMount, ClusterNodeIncarnation,
     ClusterNodeName, ClusterSchedule, CodecName, CommandExecutionReference, CoordinationIdentity,
-    CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateEmitter, CreateGenerator, CreateLookup,
-    CreateRelay, CreateUdf, CreateWasmProcessor, DomainClockAuthority, DomainConfig, DomainName,
-    DomainNodeRef, DomainSchedule, DomainState, EmitSink, EmitterAckWindow, EmitterName,
-    EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
-    FlushPolicy, GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend,
-    IcebergValueMapping, InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode,
-    IngestQuiesceOverflow, IngestTimestampSource, IngestorName, KafkaPartitionSchedule,
-    Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
-    MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName,
-    MongoDbValueMapping, MySqlValueMapping, NodeRef, OtelValueMapping, OwnershipStateComponent,
-    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
-    PostgresValueMapping, ProcessorOutput, RelayName, RemoteAckOutcome, RemoteAckRegistration,
-    RemoteAckResolution, RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName,
-    RetryPolicy, RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes,
-    SchemaFingerprint, SignalingProtocolName, SignalingWireFormat, StructuredMessageError,
-    SubscriptionName, Timestamp, WasmCheckpointInspection, WasmRejectedStatePolicy,
-    WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
+    CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateEmitter, CreateRelay,
+    DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef, DomainSchedule, DomainState,
+    EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName, EndpointType,
+    ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName,
+    IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
+    InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestTimestampSource,
+    IngestorName, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
+    MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
+    ModelIndex, ModelKind, ModelName, MongoDbValueMapping, MySqlValueMapping, NodeRef,
+    OtelValueMapping, OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
+    OwnershipStateResetCause, ParseAsType, PostgresValueMapping, ProcessorOutput, RelayName,
+    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
+    ResolvedBranching, ResourceId, ResourceName, RetryPolicy, RouteConstruction, ScheduledModel,
+    ScheduledNode, ScheduledNodes, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
+    StructuredMessageError, SubscriptionName, Timestamp, WasmCheckpointInspection,
+    WasmRejectedStatePolicy, WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
 };
 #[cfg(test)]
 use nervix_models::{
@@ -96,7 +95,7 @@ use nervix_models::{
 #[cfg(test)]
 use nervix_models::{CreateIngestor, CreateReingestor, IngestSource, OutputBranch};
 use nervix_recovery::{Discarded as _, NoReceiver as _};
-use nervix_roto::UdfExecutor;
+use nervix_roto::{UdfExecutor, UdfProgram};
 #[cfg(test)]
 use nervix_vm::SPAWN_BLOCKING_ROW_THRESHOLD as VM_SPAWN_BLOCKING_ROW_THRESHOLD;
 use nervix_vm::{
@@ -113,7 +112,7 @@ use nervix_vm::{
     execute_program_with_selection_in_context,
     infer_set_expr_types_for_bindings_with_udfs as infer_vm_set_expr_types_for_bindings_with_udfs,
     lower_finalized_output_filter, lower_generated_route, lower_route_construction,
-    lower_set_only_route, lower_transforming_route,
+    lower_transforming_route,
     program::{
         CaseArm, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal,
         Span as VmSpan, SpannedExpr,
@@ -158,15 +157,16 @@ use crate::{
         ActiveGraph, BranchInstanceAckBoundary, BranchedNodeSpecs, BranchedProcessorNodeSpec,
         BranchedProcessorOperationSpec, BranchedProcessorOutputSpec, BranchedProcessorOutputsSpec,
         BranchedProcessorSpec, DomainActivationPlan, DomainActivationPlanError,
-        EndpointIngestorStartPlan, EntrypointPlanError, EntrypointPlans, HttpIngestorStartPlan,
-        IngestorSpec, IngestorStartPlan, KafkaDomainOffsetPlacement, KafkaIngestorStartPlan,
-        KafkaOffsetPlan, LoweredConstruction, MqttIngestorStartPlan, NatsIngestorStartPlan,
-        PlannedCodec, PlannedCodecWireFormat, PlannedEntryRoute, PlannedRouteBranch,
-        PlannedSignalingProtocol, PrometheusIngestorStartPlan, PulsarIngestorStartPlan,
-        RabbitMqIngestorStartPlan, RedisPubSubIngestorStartPlan, ReingestorInputPlan,
-        ReingestorPlan, RuntimeChanges, ScheduleDelta, SourceStartPlan, SqsIngestorStartPlan,
-        SyslogIngestorStartPlan, WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan,
-        branched_node_specs_from_scheduled_nodes,
+        EndpointIngestorStartPlan, EntrypointPlanError, EntrypointPlans, GeneratorExecutionPlan,
+        GeneratorRoutePlan, HttpIngestorStartPlan, IngestorSpec, IngestorStartPlan,
+        KafkaDomainOffsetPlacement, KafkaIngestorStartPlan, KafkaOffsetPlan, LookupResourcePlan,
+        LoweredConstruction, MqttIngestorStartPlan, NatsIngestorStartPlan, PlannedCodec,
+        PlannedCodecWireFormat, PlannedEntryRoute, PlannedRouteBranch, PlannedSignalingProtocol,
+        PrometheusIngestorStartPlan, PulsarIngestorStartPlan, RabbitMqIngestorStartPlan,
+        RedisPubSubIngestorStartPlan, ReingestorInputPlan, ReingestorPlan, ResourceExecutionPlans,
+        RuntimeChanges, ScheduleDelta, SourceStartPlan, SqsIngestorStartPlan,
+        SyslogIngestorStartPlan, WasmModulePlan, WebsocketsIngestorStartPlan,
+        ZeroMqIngestorStartPlan, branched_node_specs_from_scheduled_nodes,
     },
     resource::ResourceStore,
     runtime_ack::{
@@ -373,7 +373,7 @@ use force_flush::{
     DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant,
     IngestorAckRootTrackers,
 };
-use generator::{GeneratorTaskRouteSpec, GeneratorTaskSpec};
+use generator::GeneratorTaskSpec;
 use inferencer_output::flush_branch_inferencer_output;
 pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{

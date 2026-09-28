@@ -212,6 +212,15 @@ clause. Omitting the clause is a parse error.
 | `HASH MAP` | The file it names, decoded line by line through its codec into an in-memory index | When a node builds the domain's execution: on every live node, whatever the schedule assigns, for running and stopped domains |
 | `CLIENT ... MOUNT` | The version's content directory, linked into a temporary mount root; the connector reads the files it names from there | Whenever the client is instantiated, such as by an ingestor or emitter when it starts, or once per node for a pooled client; each client instance keeps its mount root for its lifetime |
 
+Registry planning derives typed lookup and WASM resource inputs from each committed schedule. The
+lookup input carries the exact resource identity, version, file path, codec, and key field. The
+leader rejects a missing file during candidate binding validation. Running and stopped domain
+builds use the same pinned input; the loader reports invalid decoded content before publishing the
+new runtime. A WASM input carries the exact module resource identity, version, and file. Running
+builds and entity swaps prepare that
+module from the scheduled input before replacing execution. The guest-state generations remain in
+the same scheduled processor revision and are part of its prepared-plan identity.
+
 An HTTP emitter validates its referenced client's origin, attempt timeout and paired client
 certificate/key settings before its candidate graph activates. A TLS path rendered from `CLIENT
 ... MOUNT` still names the pinned version in the client Model; validation does not fetch a newer
@@ -308,11 +317,11 @@ binding also replaces the guest state of every branch: a module discovered to be
 afterwards has already invalidated the state its predecessor saved. The compiled module the check
 produces is the one activation installs, so nothing is compiled twice.
 
-The remaining content that only a consumer can prove is proven when the nodes build the consumers
-from the committed models: the protobuf sources a codec or signaling protocol compiles, and every
-line of a hash-map file. A client mount only needs the version's directory; the connector
-reads the files it names when it uses them. A version that fails during activation fails the
-command after its models were committed, as described in
+The remaining content that only a consumer can prove is proven when nodes build the consumers
+from the committed schedule's typed plans: the protobuf sources a codec or signaling protocol
+compiles, and every line of a hash-map file. A client mount only needs the version's directory; the
+connector reads the files it names when it uses them. A version that fails during activation fails
+the command after its models were committed, as described in
 [Failure Semantics And Recovery](#failure-semantics-and-recovery). A stopped domain builds only its
 codecs and hash maps, so an unusable version bound by one of its other consumers surfaces when the
 domain starts.
