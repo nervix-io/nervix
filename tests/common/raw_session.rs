@@ -29,11 +29,11 @@ use nervix_client_wire::{
     AttachDisposition, AttachDomainClockRequest, AttachOutcome, AttachTransactionRequest,
     CancelRequest, ClientMessage, ClientRequest, CommandDisposition, CommandOutcome,
     CommandRequest, DetachDomainClockRequest, Diagnostic, DomainClockAttachmentEnded,
-    DomainClockObserved, DomainClockTicked, NoticeLevel, OutcomeOrigin, Reply, ReplyBody,
-    RequestId, RowSchema, ServerEvent, ServerFrame, ServerMessage, SessionEndReason, SessionLimits,
-    SubscribeDisposition, SubscribeRequest, SubscriptionEnded, SubscriptionHandle,
-    SubscriptionType, TransferAssembly, UnsubscribeDisposition, UnsubscribeRequest, UploadChunk,
-    UploadReply, UploadStart, VerifiedFrame,
+    DomainClockDetachDisposition, DomainClockObserved, DomainClockTicked, NoticeLevel,
+    OutcomeOrigin, Reply, ReplyBody, RequestId, RowSchema, ServerEvent, ServerFrame, ServerMessage,
+    SessionEndReason, SessionLimits, SubscribeDisposition, SubscribeRequest, SubscriptionEnded,
+    SubscriptionHandle, SubscriptionType, TransferAssembly, UnsubscribeDisposition,
+    UnsubscribeRequest, UploadChunk, UploadReply, UploadStart, VerifiedFrame,
     grpc::{
         ClientExchangeCodec, ClientUploadCodec, EXCHANGE_PATH, FrameDecoder, UPLOAD_RESOURCE_PATH,
     },
@@ -523,7 +523,16 @@ impl TestSession {
                     self.closed_subscriptions.insert(handle.clone());
                 }
             }
-            ReplyBody::DomainClockAttach(_) | ReplyBody::DomainClockDetach(_) => {
+            ReplyBody::DomainClockAttach(_) => {
+                self.clock_log.push(TestClockLogEntry::Reply(request_id));
+            }
+            ReplyBody::DomainClockDetach(outcome) => {
+                if let DomainClockDetachDisposition::Detached(domain) = &outcome.disposition {
+                    // Frames read before this reply can still be waiting for a scenario step.
+                    // Detachment discards them; clock_log keeps their wire-order evidence.
+                    self.pending_clock_frames
+                        .retain(|frame| frame.domain() != domain);
+                }
                 self.clock_log.push(TestClockLogEntry::Reply(request_id));
             }
             _ => {}

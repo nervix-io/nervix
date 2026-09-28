@@ -52,6 +52,12 @@ and place the normal NSPL formatter there. The scenario runner selects the cover
 `NERVIX_TEST_CLI_PATH`, so its one-shot completion and command paths contribute to the same LCOV
 report as the CLI's binary unit tests and the server's public scenarios.
 
+The raw session fixture records domain clock replies and frames in wire order even when a step has
+not consumed a frame yet. A successful detach discards unread frames for that domain from the
+step queue after recording them, so a later step checks delivery after the detach reply rather
+than mistaking an earlier tick for a new one. The wire-order log remains available to assert the
+reply fence directly.
+
 The number of scenarios that run at once is the number of CPUs times the concurrency factor, set by
 `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default. Cucumber's
 `--concurrency` sets an absolute number instead. The CI `tests` job sets the factor to `2`, which is
@@ -802,6 +808,11 @@ The job's limit remains the emergency guard outside the budget rather than the m
 wedged run. A job the limit cancels is killed wherever its scenarios are: the logs it uploads end
 mid-scenario, with no summary and no record of what each scenario was doing. The limit and the
 harness's copy of it change together.
+
+The separate `checks` job has a 45-minute limit for `just validate-ci`. Run 36468029660 reached
+its former 30-minute limit while the final documentation dependency checks were still compiling,
+after the main workspace check had finished without an error. This limit gives the remaining
+validation commands time to complete on the four-CPU runner; it does not skip a check.
 
 ## How Failure Reaches CI Output
 
