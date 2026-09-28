@@ -174,9 +174,10 @@ An upload is a separate call with its own frames; see [Resource Uploads](#resour
 ## Structured Choice Lookups
 
 - **Q-1.** A client that sends `ChoiceLookupRequest` MUST use the target's typed dependencies:
-  domain for internal schema, branch, relay, VHOST, signaling protocol, JSON/CBOR/AVRO wire
+  domain for internal schema, branch, relay, codec, VHOST, signaling protocol, JSON/CBOR/AVRO wire
   schema, or resource choices;
-  domain followed by a relay `Model` reference for relay fields; and domain followed by a
+  domain followed by a relay `Model` reference for relay fields; domain followed by a codec
+  `Model` reference for the fields of its output schema; and domain followed by a
   `Resource` reference for completed resource versions. It MUST use the distinct wire-schema
   targets when a form requires an exact format.
 - **Q-2.** A client MUST use the returned `ChoiceValue`, rather than its presentation label, for
