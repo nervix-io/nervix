@@ -359,10 +359,12 @@ its session delivers, and says where it left something out:
   command larger than the whole history says that it cannot be recalled.
 - While the console connects or waits to reconnect, at most 64 requests of its controls wait for
   the session, carrying at most 4 MiB of statements, completion input, and search text. Once
-  connected, at most 256 requests, carrying at most 16 MiB, are held or awaiting their reply. A
-  request past either bound is not sent, and the control that issued it shows why where its
-  outcome would have appeared: the REPL, a form, a tab, the resource dialog, or the inspector. A
-  completion request that is not sent reports a failed lookup rather than an empty list.
+  connected, at most 256 requests, carrying at most 16 MiB, are held or awaiting their reply. At
+  most 64 of them are in flight, the most the server admits for one session; the rest wait in the
+  order they were issued and go out as earlier replies arrive. A request past either bound is not
+  sent, and the control that issued it shows why where its outcome would have appeared: the REPL,
+  a form, a tab, the resource dialog, or the inspector. A completion request that is not sent
+  reports a failed lookup rather than an empty list.
 - The execution graph and sidebar keep only the latest snapshot of the selected domain. Selecting
   another domain replaces it with that domain's snapshot, which the server sends at once.
 

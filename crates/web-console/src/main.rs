@@ -23,13 +23,13 @@ use nervix_client_wire::{
     ChoiceLookupRequest, ClientMessage, ClientRequest, ClusterObserved, CommandDisposition,
     CommandOutcome, CommandRequest, Diagnostic, DomainEntity, DomainInfo, DomainSelection,
     DomainSnapshotObserved, InspectTransactionRequest, InspectionOutcome, LeaderRedirect,
-    Leadership, NoticeLevel, ReplyBody, RequestCancelled, RequestId, RowBatchView, RowSchema,
-    SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage, ServerNotice, SessionEndReason,
-    SessionLimits, StatementDisposition, StatementOutcome, SubscribeDisposition, SubscribeOutcome,
-    SubscribeRequest, SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRows,
-    SubscriptionType, SuggestRequest, Suggestion as WireSuggestion, SuggestionKind,
-    SuggestionStatus, TextEdit, TransferAssembly, TransferPart, UnsubscribeDisposition,
-    UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame,
+    Leadership, MAX_IN_FLIGHT_REQUESTS, NoticeLevel, ReplyBody, RequestCancelled, RequestId,
+    RowBatchView, RowSchema, SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage,
+    ServerNotice, SessionEndReason, SessionLimits, StatementDisposition, StatementOutcome,
+    SubscribeDisposition, SubscribeOutcome, SubscribeRequest, SubscriptionEnded,
+    SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionType, SuggestRequest,
+    Suggestion as WireSuggestion, SuggestionKind, SuggestionStatus, TextEdit, TransferAssembly,
+    TransferPart, UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame,
     websocket::{ClientWebSocketCodec, WebSocketData},
 };
 use nervix_dataflow_graph::{
@@ -658,7 +658,7 @@ impl SessionRequests {
 
     /// Takes a request one of the console's controls issued. It is refused when the session
     /// already keeps as many requests outstanding, or as much of their text, as it holds. An
-    /// ordered request then waits while the session is not ready; anything else is sent at once.
+    /// ordered request then waits until it can go out in its place; anything else is sent at once.
     fn accept(&mut self, issued: IssuedRequest) -> Admission {
         if let Err(report) = self.outstanding().admits(issued.request.text_bytes()) {
             return Admission::Refused(Box::new(RefusedRequest {
@@ -666,11 +666,26 @@ impl SessionRequests {
                 refusal: *report.current_context(),
             }));
         }
-        if issued.request.is_ordered() && !self.is_ready() {
+        if issued.request.is_ordered() && !self.can_send_ordered() {
             self.held.insert(issued.order, issued.request);
             return Admission::Held;
         }
         Admission::Sent(self.dispatch(issued))
+    }
+
+    /// Whether an ordered request can go out at once: the session is ready, nothing issued before
+    /// it still waits, and the server admits another request in flight. Beyond
+    /// `MAX_IN_FLIGHT_REQUESTS` the server would refuse the request rather than queue it, so the
+    /// console holds it until an earlier reply frees a place.
+    fn can_send_ordered(&self) -> bool {
+        self.is_ready() && self.held.is_empty() && self.has_room_in_flight()
+    }
+
+    /// Whether the server admits another request in flight on this connection. The console
+    /// counts a request until its reply arrives, and the server stops counting it once the reply
+    /// is queued, so the console never counts fewer than the server does.
+    fn has_room_in_flight(&self) -> bool {
+        self.in_flight.len() < MAX_IN_FLIGHT_REQUESTS
     }
 
     /// The requests the session keeps outstanding: held, or sent and awaiting their reply.
@@ -728,14 +743,17 @@ impl SessionRequests {
         message
     }
 
-    /// Dispatches the held requests in the order they were issued, once the session is ready.
+    /// Dispatches the held requests in the order they were issued, once the session is ready and
+    /// while the server admits them in flight. The rest keep waiting for earlier replies.
     fn release_held(&mut self) -> Vec<ClientMessage> {
+        let mut messages = Vec::new();
         if !self.is_ready() {
-            return Vec::new();
+            return messages;
         }
-        let held = std::mem::take(&mut self.held);
-        let mut messages = Vec::with_capacity(held.len());
-        for (order, request) in held {
+        while self.has_room_in_flight() {
+            let Some((order, request)) = self.held.pop_first() else {
+                break;
+            };
             messages.push(self.dispatch(IssuedRequest { order, request }));
         }
         messages
@@ -2029,12 +2047,12 @@ async fn serve_connection(
             }
             () = retry_delay.as_mut() => {
                 retry_delay = Box::pin(wait_for_browser_delay(SUBSCRIPTION_RETRY_DELAY).fuse());
-                // A tab whose restoration was refused is tried again while the session is ready
-                // and holds no transaction, which would refuse it again.
+                // A tab whose restoration was refused is tried again while the session is ready,
+                // has room for it in flight, and holds no transaction, which would refuse it again.
                 let transaction_active = signals
                     .transaction_status
                     .with_untracked(|status| transaction_is_active(status.as_ref()));
-                if requests.is_ready() && !transaction_active {
+                if requests.can_send_ordered() && !transaction_active {
                     for request in signals.begin_restorations() {
                         let issued = requests.issue(request);
                         let message = requests.dispatch(issued);
@@ -9068,11 +9086,11 @@ mod tests {
             let signals = subscription_signals(SubscriptionTabState::Pending);
             let mut requests = SessionRequests::new();
             requests.confirm_leader();
-            let mut sent_ids = Vec::new();
             for _ in 0..MAX_OUTSTANDING_REQUESTS {
                 let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
-                sent_ids.push(sent(requests.accept(issued)).request_id);
+                assert!(!matches!(requests.accept(issued), Admission::Refused(_)));
             }
+            assert_eq!(requests.in_flight.len(), MAX_IN_FLIGHT_REQUESTS);
 
             let issued = requests.issue(repl_command("LIST DOMAINS;"));
             let Admission::Refused(refused) = requests.accept(issued) else {
@@ -9107,10 +9125,54 @@ mod tests {
                 "a refused completion request is not shown as having no matches"
             );
 
-            assert!(requests.answer(sent_ids[0]).is_some());
+            let first = *requests
+                .in_flight
+                .keys()
+                .next()
+                .assured("the session has requests in flight");
+            assert!(requests.answer(first).is_some());
+            assert_eq!(
+                requests.release_held().len(),
+                1,
+                "a reply frees a place for the next held request"
+            );
             let issued = requests.issue(repl_command("LIST DOMAINS;"));
-            assert!(matches!(requests.accept(issued), Admission::Sent(_)));
+            assert!(
+                matches!(requests.accept(issued), Admission::Held),
+                "a request issued later waits behind the held ones"
+            );
         });
+    }
+
+    #[test]
+    fn ordered_requests_beyond_the_in_flight_limit_wait_in_order_for_earlier_replies() {
+        let mut requests = SessionRequests::new();
+        requests.confirm_leader();
+        let mut sent_ids = Vec::new();
+        for index in 0..MAX_IN_FLIGHT_REQUESTS {
+            let issued = requests.issue(repl_command(&format!("SHOW {index};")));
+            sent_ids.push(sent(requests.accept(issued)).request_id);
+        }
+        for query in ["first to wait", "second to wait"] {
+            let issued = requests.issue(repl_command(query));
+            assert!(
+                matches!(requests.accept(issued), Admission::Held),
+                "the server admits no more requests in flight"
+            );
+        }
+        assert!(requests.release_held().is_empty());
+
+        assert!(requests.answer(sent_ids[0]).is_some());
+        assert_eq!(
+            sent_queries(&requests.release_held()),
+            vec!["first to wait"]
+        );
+        assert!(requests.answer(sent_ids[1]).is_some());
+        assert_eq!(
+            sent_queries(&requests.release_held()),
+            vec!["second to wait"]
+        );
+        assert_eq!(requests.in_flight.len(), MAX_IN_FLIGHT_REQUESTS);
     }
 
     #[test]

@@ -41,6 +41,24 @@ Feature: Web console NSPL REPL
     Then selector ".terminal" contains "SHOW CLUSTER STATUS;"
     And selector ".terminal .term-line" has at most 256 elements
 
+  @client_wire24
+  Scenario: Web console refuses a command past its outstanding requests and recovers once they complete
+    Given a 1 node nervix cluster is started
+    Then the current leader node is saved as placeholder "leader"
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    Given command response delivery on node "{{leader}}" pauses after execution
+    When selector ".prompt-row input" is filled with "SHOW CLUSTER STATUS;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the command response delivery pause on node "{{leader}}" is reached
+    When the web console submits "SHOW CLUSTER STATUS;" 256 times
+    Then selector ".terminal" contains "256 requests are already outstanding in the console's session; this one was not sent"
+    When the command response delivery pause on node "{{leader}}" is released
+    Then selector ".terminal" contains "[schedule]"
+    When selector ".prompt-row input" is filled with "LIST DOMAINS;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "no domains registered"
+
   @client_wire13
   Scenario: Web console preserves several pending commands across a leader change
     Given a 3 node nervix cluster is started
