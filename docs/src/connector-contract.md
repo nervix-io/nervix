@@ -290,9 +290,28 @@ reads. When a flush releases a row, the
 host encodes its body and retains the request, as a prepared payload with that one member, in the
 same buffer that retains batch payloads. Every attempt hands the connector the retained requests
 unchanged, ahead of any request prepared after them, so a retry repeats the request the destination
-may already hold. The HTTP connector sends them one at a time, waits for each response's headers,
-and never follows a redirect; complete `2xx` headers deliver the request, and any other answer or a
-failed exchange ends the attempt with that request and every later one unresolved.
+may already hold. One connector publish call awaits at most one request across the emitter
+execution's served sources and branches. It sends them in their handed-over order, each on a
+fresh HTTP/1.1 connection using the node resolver and the shared rustls trust and client-identity
+configuration. The connection closes after final headers; no unread body can be reused. Its one
+physical `timeout_ms` spans DNS, connect, TLS, send, interim headers and complete final headers.
+The connector sends no startup probe, follows no redirect, stores no response cookie, answers no
+authentication challenge with another request, and has no independent retry policy. The host
+alone schedules another application attempt.
+
+The transport generates `Host`, `Connection: close` and, for a present body,
+`Content-Length`. It does not add `Accept-Encoding` or `Content-Type`. Application header writes
+can supply `Accept`, content type, authorization and cookie values. Without an application
+`Accept`, the transport adds `Accept: */*`.
+
+Each interim and final response header block is checked for at most 128 fields and 64 KiB of name
+and value bytes; invalid final framing fails before the status is classified. Complete valid final
+`2xx` headers deliver one request, without awaiting or interpreting its body. `408`, `425`, `429`,
+`5xx`, `401`, `403`, `407` and transport or header failures end the attempt with the current and
+later requests unresolved; the authentication statuses retain a distinct infrastructure reason.
+Other `3xx`/`4xx` and `101` reject their one request with a structured external message error,
+then publication continues with the next request. The host applies delivered and rejected
+members, branches and acknowledgements and keeps unresolved prepared bytes for retry.
 
 For a sink that stages writes, the lifecycle exposes a domain or physical commit deadline,
 staged-message count, pending ACKs, and a commit operation. The host includes that deadline in

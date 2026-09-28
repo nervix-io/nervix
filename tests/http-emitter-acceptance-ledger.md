@@ -107,6 +107,8 @@ records its bounds and its cleanup.
 | `Then HTTP receiver "<name>" request <i> is` | Compares one captured request: request line, the named headers exactly, and the exact body. |
 | `Then HTTP receiver "<name>" captured one request that is` | Finds the one captured request with the docstring's request line, wherever it arrived, and compares it the same way, for requests of independent branches or relays. |
 | `Then HTTP receiver "<name>" request <i> repeats request <j>` | Compares two captures byte for byte: request line, every header field in arrival order, and body. |
+| `Then HTTP receiver "<name>" request <i> arrived at least "<duration>" after request <j>` | Measures the two capture times to prove an attempt timeout, retry backoff, or sequential request wait without a silence window. |
+| `Then HTTP receiver "<name>" request <i> has no header "<header>"` | Checks that the transport did not add an undeclared request header. |
 | `Then HTTP receiver "<name>" request <i> carries header "<header>" and a body containing "<text>"` | Checks a generated header and body that cannot be named in advance. |
 | `Then HTTP receiver "<name>" has captured exactly <n> requests` | Counts the captures when the step runs, after the expected requests arrived and every request that must never be sent would have preceded them. |
 | `Then HTTP receiver "<name>" eventually records a failed TLS handshake` | Waits up to 60 seconds for a client to fail its handshake. |
@@ -122,6 +124,9 @@ Script lines cover every receiver behavior the specification's criteria depend o
 | `; interim <status>` | An interim response before the final one |
 | `; stall body` | Complete successful headers, then a body that never finishes |
 | `; extra headers <n>` | More response header fields than any bound, for excessive-header failures |
+| `; header value bytes <n>` | A generated final field value of exactly `n` bytes, for the 64 KiB boundary |
+| `; interim extra headers <n>` | Generated fields in the interim block, independent of the final fields |
+| `; interim header value bytes <n>` | A generated interim field value of exactly `n` bytes |
 | `lose response` | The request is read in full and the connection closes without an answer: an applied request whose response is lost |
 | `hold response` | The request is read in full and never answered: a physical timeout |
 | `raw <bytes>` | Arbitrary bytes with `\r`, `\n` and `\\` escapes, for malformed framing and invalid statuses |
@@ -165,6 +170,25 @@ every case now runs in the ordinary suite under `@http_emitter_requests`, and th
 excludes an expected-failure tag.
 
 ## Acceptance matrix
+
+### HTTP Emitter 05 transport qualification
+
+`tests/features/runtime/http_emitter_responses.feature` covers terminal and retryable statuses,
+complete `200`, `202`, and `204` headers, stalled bodies, exact and exceeded interim/final field
+counts and value-byte limits, and malformed final framing. Its 58 one- and three-node cases pass.
+`tests/features/runtime/http_emitter_transport.feature` covers mounted mutual TLS, untrusted and
+wrong-host TLS handshakes, physical timeout and lost-response retries, a manually supplied
+`Accept`, startup without a probe, and one awaiting request across two source relays. Its 12
+one- and three-node cases pass. The status-`400` response case was red against the HTTP Emitter 04
+sink because it retried the refusal instead of routing its message error, then green after the
+connector change.
+
+The sink uses a bounded HTTP/1.1 exchange per request. This permits inspecting every interim
+header block before the final one, while the existing HTTP polling source keeps its shared
+reqwest client. The sink uses the shared node DNS resolver and rustls TLS configuration, adds
+`Accept: */*` only when the application has not supplied `Accept`, and sends no default
+`Accept-Encoding` or `Content-Type`. The connector has no separate retry mechanism; the host
+retains the prepared request and owns every resend.
 
 Every criterion runs through NSPL against the HTTP receiver on one and three nodes unless its row
 names a topology. The owning task adds the criterion's scenarios red, turns them green, and keeps

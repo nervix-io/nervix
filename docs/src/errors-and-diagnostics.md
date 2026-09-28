@@ -245,6 +245,16 @@ its original source record and the materialized state its batch was admitted wit
 completes, so every rejection of it after admission gives the handler the same input, state and
 attempted codec record that a request-field failure does.
 
+An HTTP endpoint's complete final `2xx` headers deliver the record. Other `3xx`/`4xx` statuses,
+except `401`, `403`, `407`, `408`, `425` and `429`, reject only their record with code `external`
+and operation `publish`; `101` has the same outcome. The rejection message includes the numeric
+status but no evaluated destination, headers or body. The exception statuses and `5xx` keep the
+request pending as infrastructure failures; `401`, `403` and `407` name authentication or
+authorization in their typed cause. DNS, connection, TLS, timeout, malformed or oversized response
+headers, invalid final framing and loss before complete final headers are infrastructure failures
+as well. The connector reports them without a request URL or sensitive response value. The emitter
+host owns their retry schedule and keeps the prepared request and ACK lease while they are pending.
+
 `ON MESSAGE ERROR` belongs to the route and handles record-specific work. Ingestor and emitter
 `ON GENERAL ERROR` handles node-wide source and sink failures. A WASM processor's node-wide `ON
 GLOBAL ERROR` handles guest failures outside an individual message route. Error delivery preserves
