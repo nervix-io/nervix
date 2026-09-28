@@ -2619,6 +2619,18 @@ impl Observer {
             .collect()
     }
 
+    /// The membership already recovered from durable state, available before Raft publishes its
+    /// initial metrics. Startup uses these endpoints to find surviving peers after a restart.
+    pub fn stored_membership_nodes(&self) -> BTreeMap<ClusterNodeName, String> {
+        let state = self.inner.store.inner.state();
+        state
+            .last_membership
+            .membership()
+            .nodes()
+            .map(|(node_id, node)| (node_id.clone(), node.addr.clone()))
+            .collect()
+    }
+
     pub async fn membership_voter_ids(&self) -> BTreeSet<ClusterNodeName> {
         let metrics = self.inner.raft.metrics().borrow_watched().clone();
         metrics.membership_config.membership().voter_ids().collect()
