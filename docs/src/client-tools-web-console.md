@@ -112,6 +112,34 @@ like the other forms' creates. Changing the captured domain keeps the selected s
 visible but invalid until each is selected again. The preview is the canonical `CREATE RELAY`
 statement, which always states its capacity.
 
+A codec form selects one current wire format: a declared JSON, CBOR, or AVRO wire schema; the
+fixed SYSLOG format; a JAQ-native JSON, YAML, TOML, XML, or CBOR format; or Protobuf. The internal
+schema is an exact typed selection. Declared wire-schema choices are limited to the selected
+format, even when wire schemas of different formats share a name. JAQ-native and Protobuf codecs
+choose ingestion (decode), emitting (encode), or both, and may add an emitting-batch program after
+an emitting program. These are program editors: their contents remain jaq source in the current
+codec Model, including quotes and whitespace. RFC3339 field encoding rules can be added in order
+where the format supports them. The preview renders the complete codec Model as canonical NSPL.
+
+The Protobuf controls select an existing resource and one of its completed versions, including
+`LATEST`, then accept an optional `.proto` file and include root, additional compiler
+configuration entries, message type, and optional batch message type. The resource list includes
+catalogs staged earlier in the attached transaction; the version list offers completed uploads
+only. `LATEST` stays unresolved in the draft and submitted command, and is pinned when the server
+applies the statement. These controls never create a resource or upload a file as a side effect;
+provision and upload it explicitly through the resource workflow. Changing the resource or captured
+domain leaves an earlier version visible but requires selecting it again. A rejected program or
+configuration reports failure inline and keeps the draft editable.
+
+A signaling protocol form chooses JSON, YAML, TOML, XML, CBOR, RAW, or Protobuf. Protobuf uses the
+same resource, version, file, include, and compiler configuration controls and requires separate
+send and wait message types. The ordered handshake editor adds SEND and WAIT steps, moves or removes
+steps, and keeps each step's jaq programs in written order. WAIT steps can have multiple matchers,
+failure matchers, an optional capture when there is exactly one matcher, and ACCEPT DATA. The form
+also offers connection-wide ACCEPT DATA, failure matchers, and the handshake timeout. Its canonical
+preview and command preserve the order and raw program text. Both forms use the existing durable
+command dispatcher and retain rejected drafts, transaction positions, and reconnect handling.
+
 ## The Execution Graph
 
 ![The execution graph for the quickstart pipeline](images/console-graph.png)

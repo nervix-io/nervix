@@ -35,6 +35,11 @@ Values a caller acts on belong in typed fields; display formatting happens when 
 reported. `anyhow` remains at integration and tooling boundaries whose caller has no domain choice
 to make, such as a foreign callback that only accepts a general error.
 
+Codec jaq transformations are compiled during registry validation for every declared direction.
+A syntax error names the codec, domain, and direction and rejects the transaction before the model
+is committed. The browser keeps the draft editable so the program can be corrected and submitted
+under the same name.
+
 Schemaful JSON parsing has one codec decode failure carrying the simd-json source. Malformed
 syntax, invalid UTF-8, and invalid escapes enter through that failure; object shape, missing or
 unexpected fields, nullability, exact wire types, integer ranges, datetime parsing, base64, and

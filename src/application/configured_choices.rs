@@ -10,13 +10,17 @@
 //! - **Must not know.** How the configuration snapshot was read or queued, sessions, transports,
 //!   or paging.
 
+use std::collections::BTreeSet;
+
+use meticulous::ResultExt as _;
 use nervix_client_wire::{
     Choice, ChoiceLookupRequest, ChoicePresentation, ChoiceSelection, ChoiceStatus, ChoiceTarget,
     ChoiceValue,
 };
 use nervix_models::{
     CanonicalNsplError, CreateBranch, CreateRelay, CreateSchema, DomainName, Model, ModelIndex,
-    ModelKind, NodeRef, RelayBranching, RequestedResourceVersion, SchemaField,
+    ModelKind, NodeRef, RelayBranching, RequestedResourceVersion, ResourceName,
+    ResourceVersionStatus, SchemaField,
 };
 
 use super::session_service::hash_choice_text;
@@ -27,6 +31,11 @@ pub(in crate::application) enum ConfiguredQuestion {
     Schemas,
     Branches,
     Relays,
+    WireJsonSchemas,
+    WireCborSchemas,
+    WireAvroSchemas,
+    Resources,
+    CompletedResourceVersions(ResourceName),
     /// The fields of the records the named relay carries.
     RelayFields(NodeRef),
 }
@@ -46,6 +55,13 @@ impl<'a> ConfiguredQuery<'a> {
             ChoiceTarget::Schema => ConfiguredQuestion::Schemas,
             ChoiceTarget::Branch => ConfiguredQuestion::Branches,
             ChoiceTarget::Relay => ConfiguredQuestion::Relays,
+            ChoiceTarget::WireJsonSchema => ConfiguredQuestion::WireJsonSchemas,
+            ChoiceTarget::WireCborSchema => ConfiguredQuestion::WireCborSchemas,
+            ChoiceTarget::WireAvroSchema => ConfiguredQuestion::WireAvroSchemas,
+            ChoiceTarget::Resource => ConfiguredQuestion::Resources,
+            ChoiceTarget::CompletedResourceVersion => {
+                return Self::resource_versions(request.dependencies());
+            }
             ChoiceTarget::RelayField => return Self::relay_fields(request.dependencies()),
             ChoiceTarget::DomainPace | ChoiceTarget::PlacementPolicy => return None,
         };
@@ -58,6 +74,24 @@ impl<'a> ConfiguredQuery<'a> {
             return None;
         };
         Some(Self { domain, question })
+    }
+
+    fn resource_versions(dependencies: &'a [ChoiceSelection]) -> Option<Self> {
+        let [
+            ChoiceSelection {
+                value: ChoiceValue::Domain(domain),
+            },
+            ChoiceSelection {
+                value: ChoiceValue::Resource(resource),
+            },
+        ] = dependencies
+        else {
+            return None;
+        };
+        Some(Self {
+            domain,
+            question: ConfiguredQuestion::CompletedResourceVersions(resource.clone()),
+        })
     }
 
     fn relay_fields(dependencies: &'a [ChoiceSelection]) -> Option<Self> {
@@ -95,12 +129,30 @@ pub(in crate::application) struct ResolvedChoices {
 /// requesting session's attached transaction prefix applied.
 pub(in crate::application) struct ConfiguredChoices {
     models: ModelIndex<RequestedResourceVersion>,
+    resources: ResourceVersionStatus,
+    queued_resources: BTreeSet<ResourceName>,
+    domain: DomainName,
 }
 
 impl ConfiguredChoices {
-    pub(in crate::application) fn new(models: Vec<Model<RequestedResourceVersion>>) -> Self {
+    pub(in crate::application) fn new(
+        domain: DomainName,
+        models: Vec<Model<RequestedResourceVersion>>,
+        resources: ResourceVersionStatus,
+        queued_resources: Vec<String>,
+    ) -> Self {
         Self {
             models: models.into_iter().collect(),
+            resources,
+            queued_resources: queued_resources
+                .into_iter()
+                .map(|name| {
+                    ResourceName::parse(&name).assured(
+                        "queued resource suggestions are rendered from typed ResourceName values",
+                    )
+                })
+                .collect(),
+            domain,
         }
     }
 
@@ -117,8 +169,15 @@ impl ConfiguredChoices {
         match question {
             ConfiguredQuestion::Schemas
             | ConfiguredQuestion::Branches
-            | ConfiguredQuestion::Relays => self.models(question, &search),
+            | ConfiguredQuestion::Relays
+            | ConfiguredQuestion::WireJsonSchemas
+            | ConfiguredQuestion::WireCborSchemas
+            | ConfiguredQuestion::WireAvroSchemas => self.models(question, &search),
             ConfiguredQuestion::RelayFields(relay) => self.relay_fields(relay, &search),
+            ConfiguredQuestion::Resources => self.resources(&search),
+            ConfiguredQuestion::CompletedResourceVersions(resource) => {
+                self.completed_versions(resource, &search)
+            }
         }
     }
 
@@ -138,6 +197,33 @@ impl ConfiguredChoices {
                     ModelCandidate::branch(branch)?
                 }
                 (ConfiguredQuestion::Relays, Model::Relay(relay)) => ModelCandidate::relay(relay)?,
+                (ConfiguredQuestion::WireJsonSchemas, Model::WireJsonSchema(schema)) => {
+                    ModelCandidate::new(
+                        NodeRef::new(ModelKind::WireJsonSchema, &schema.name),
+                        format!("{} fields", schema.fields.len()),
+                        "Wire JSON schema",
+                        Model::<RequestedResourceVersion>::WireJsonSchema(schema.clone())
+                            .to_canonical_nspl(),
+                    )?
+                }
+                (ConfiguredQuestion::WireCborSchemas, Model::WireCborSchema(schema)) => {
+                    ModelCandidate::new(
+                        NodeRef::new(ModelKind::WireCborSchema, &schema.name),
+                        format!("{} fields", schema.fields.len()),
+                        "Wire CBOR schema",
+                        Model::<RequestedResourceVersion>::WireCborSchema(schema.clone())
+                            .to_canonical_nspl(),
+                    )?
+                }
+                (ConfiguredQuestion::WireAvroSchemas, Model::WireAvroSchema(schema)) => {
+                    ModelCandidate::new(
+                        NodeRef::new(ModelKind::WireAvroSchema, &schema.name),
+                        format!("{} fields", schema.fields.len()),
+                        "Wire AVRO schema",
+                        Model::<RequestedResourceVersion>::WireAvroSchema(schema.clone())
+                            .to_canonical_nspl(),
+                    )?
+                }
                 _ => continue,
             };
             if candidate.matches(search) {
@@ -155,6 +241,106 @@ impl ConfiguredChoices {
         for candidate in candidates {
             hash_choice_text(&mut digest, &candidate.definition);
             choices.push(candidate.choice);
+        }
+        Ok(ResolvedChoices {
+            choices,
+            content_digest: digest.finalize().to_hex().to_string(),
+        })
+    }
+
+    fn resources(&self, search: &str) -> Result<ResolvedChoices, ChoiceStatus> {
+        let mut names = BTreeSet::new();
+        for counter in &self.resources.next_version_by_resource {
+            if counter.domain == self.domain {
+                names.insert(counter.identifier.clone());
+            }
+        }
+        for queued in &self.queued_resources {
+            names.insert(queued.clone());
+        }
+        let mut choices = Vec::new();
+        let mut digest = blake3::Hasher::new();
+        for name in names {
+            if !name.as_str().to_lowercase().contains(search) {
+                continue;
+            }
+            hash_choice_text(&mut digest, name.as_str());
+            let completed_versions = self
+                .resources
+                .uploads
+                .completed_versions_of(&self.domain, &name)
+                .count();
+            hash_choice_text(&mut digest, &completed_versions.to_string());
+            choices.push(Choice {
+                value: ChoiceValue::Resource(name.clone()),
+                presentation: ChoicePresentation {
+                    label: name.to_string(),
+                    detail: Some(format!("{completed_versions} completed versions")),
+                    group: Some("Resource".to_string()),
+                },
+            });
+        }
+        Ok(ResolvedChoices {
+            choices,
+            content_digest: digest.finalize().to_hex().to_string(),
+        })
+    }
+
+    fn completed_versions(
+        &self,
+        resource: &ResourceName,
+        search: &str,
+    ) -> Result<ResolvedChoices, ChoiceStatus> {
+        let in_catalog = self
+            .resources
+            .next_version_by_resource
+            .binary_search_by(|counter| {
+                counter
+                    .domain
+                    .cmp(&self.domain)
+                    .then(counter.identifier.cmp(resource))
+            })
+            .is_ok();
+        let staged = self.queued_resources.contains(resource);
+        if !in_catalog && !staged {
+            return Err(ChoiceStatus::MissingContext);
+        }
+        let versions = self
+            .resources
+            .uploads
+            .completed_versions_of(&self.domain, resource)
+            .map(|id| id.version)
+            .collect::<Vec<_>>();
+        let mut choices = Vec::new();
+        if !versions.is_empty() && "latest".contains(search) {
+            choices.push(Choice {
+                value: ChoiceValue::ResourceVersion(RequestedResourceVersion::Latest),
+                presentation: ChoicePresentation {
+                    label: "LATEST".to_string(),
+                    detail: Some(
+                        "Highest completed version when the statement is applied".to_string(),
+                    ),
+                    group: Some("Resource version".to_string()),
+                },
+            });
+        }
+        for version in versions {
+            if !version.to_string().contains(search) {
+                continue;
+            }
+            choices.push(Choice {
+                value: ChoiceValue::ResourceVersion(RequestedResourceVersion::Number(version)),
+                presentation: ChoicePresentation {
+                    label: version.to_string(),
+                    detail: Some("Completed version".to_string()),
+                    group: Some("Resource version".to_string()),
+                },
+            });
+        }
+        let mut digest = blake3::Hasher::new();
+        hash_choice_text(&mut digest, resource.as_str());
+        for choice in &choices {
+            hash_choice_text(&mut digest, &choice.presentation.label);
         }
         Ok(ResolvedChoices {
             choices,
@@ -295,10 +481,15 @@ mod tests {
         ChoiceLookupRequest, ChoiceSelection, ChoiceStatus, ChoiceTarget, ChoiceValue,
     };
     use nervix_models::{
-        BranchEviction, BranchName, CreateBranch, CreateRelay, CreateSchema, DomainName, FieldName,
-        MaterializedRelayState, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayBranching,
-        RelayName, RequestedResourceVersion, SchemaField, SchemaName,
+        AvroType, BranchEviction, BranchName, CreateBranch, CreateRelay, CreateSchema,
+        CreateWireSchema, DomainName, FieldName, JsonType, MaterializedRelayState, Model,
+        ModelKind, ModelName, NodeRef, ParseAsType, RelayBranching, RelayName,
+        RequestedResourceVersion, ResourceName, ResourceUpload, ResourceUploadIdentity,
+        ResourceUploadKey, ResourceUploadState, ResourceUploads, ResourceVersionCounter,
+        ResourceVersionStatus, SchemaField, SchemaName, UserName, WireSchemaField, WireSchemaName,
+        WireSchemaStrictness,
     };
+    use sorted_vec::SortedVec;
 
     use super::{ConfiguredChoices, ConfiguredQuery, ConfiguredQuestion};
 
@@ -344,40 +535,45 @@ mod tests {
 
     fn configuration() -> ConfiguredChoices {
         let tenant = BranchName::parse("by_tenant").assured("the test branch name is valid");
-        ConfiguredChoices::new(vec![
-            schema(
-                "tenant_key",
-                vec![field("tenant", ParseAsType::String, false, false)],
-            ),
-            schema(
-                "order_record",
-                vec![
-                    field("tenant", ParseAsType::String, false, false),
-                    field("amount", ParseAsType::I64, true, true),
-                    field("placed_at", ParseAsType::Datetime, false, false),
-                ],
-            ),
-            branch("by_tenant", None),
-            branch(
-                "bounded_tenants",
-                Some(BranchEviction::Lru {
-                    max_instances: NonZeroU64::new(3).assured("three is nonzero"),
-                }),
-            ),
-            relay(
-                "orders",
-                "order_record",
-                RelayBranching::branched_by(tenant),
-                Some(MaterializedRelayState::LastByTimestamp),
-            ),
-            relay("audit", "order_record", RelayBranching::unbranched(), None),
-            relay(
-                "dangling",
-                "missing_record",
-                RelayBranching::unbranched(),
-                None,
-            ),
-        ])
+        ConfiguredChoices::new(
+            domain(),
+            vec![
+                schema(
+                    "tenant_key",
+                    vec![field("tenant", ParseAsType::String, false, false)],
+                ),
+                schema(
+                    "order_record",
+                    vec![
+                        field("tenant", ParseAsType::String, false, false),
+                        field("amount", ParseAsType::I64, true, true),
+                        field("placed_at", ParseAsType::Datetime, false, false),
+                    ],
+                ),
+                branch("by_tenant", None),
+                branch(
+                    "bounded_tenants",
+                    Some(BranchEviction::Lru {
+                        max_instances: NonZeroU64::new(3).assured("three is nonzero"),
+                    }),
+                ),
+                relay(
+                    "orders",
+                    "order_record",
+                    RelayBranching::branched_by(tenant),
+                    Some(MaterializedRelayState::LastByTimestamp),
+                ),
+                relay("audit", "order_record", RelayBranching::unbranched(), None),
+                relay(
+                    "dangling",
+                    "missing_record",
+                    RelayBranching::unbranched(),
+                    None,
+                ),
+            ],
+            ResourceVersionStatus::default(),
+            Vec::new(),
+        )
     }
 
     fn domain() -> DomainName {
@@ -558,10 +754,15 @@ mod tests {
     #[test]
     fn the_content_digest_follows_the_definitions_behind_the_choices() {
         let digest = |models: Vec<Model<RequestedResourceVersion>>, question| {
-            ConfiguredChoices::new(models)
-                .resolve(&question, "")
-                .assured("the test configuration resolves")
-                .content_digest
+            ConfiguredChoices::new(
+                domain(),
+                models,
+                ResourceVersionStatus::default(),
+                Vec::new(),
+            )
+            .resolve(&question, "")
+            .assured("the test configuration resolves")
+            .content_digest
         };
         let definitions = |ty| {
             vec![
@@ -581,6 +782,179 @@ mod tests {
         assert_ne!(
             digest(definitions(ParseAsType::I64), ConfiguredQuestion::Schemas),
             digest(definitions(ParseAsType::U64), ConfiguredQuestion::Schemas)
+        );
+    }
+
+    #[test]
+    fn exact_wire_schema_queries_do_not_mix_same_named_formats() {
+        let name = WireSchemaName::parse("payload_wire").assured("valid wire schema name");
+        let models = vec![
+            Model::WireJsonSchema(CreateWireSchema {
+                name: name.clone(),
+                strictness: WireSchemaStrictness::Strict,
+                fields: vec![WireSchemaField {
+                    name: FieldName::parse("message").assured("valid field"),
+                    ty: JsonType::String,
+                    optional: false,
+                }],
+            }),
+            Model::WireCborSchema(CreateWireSchema {
+                name: name.clone(),
+                strictness: WireSchemaStrictness::Loose,
+                fields: vec![WireSchemaField {
+                    name: FieldName::parse("message").assured("valid field"),
+                    ty: JsonType::String,
+                    optional: false,
+                }],
+            }),
+            Model::WireAvroSchema(CreateWireSchema {
+                name,
+                strictness: WireSchemaStrictness::Strict,
+                fields: vec![WireSchemaField {
+                    name: FieldName::parse("message").assured("valid field"),
+                    ty: AvroType::String,
+                    optional: false,
+                }],
+            }),
+        ];
+        let resolver = ConfiguredChoices::new(
+            domain(),
+            models,
+            ResourceVersionStatus::default(),
+            Vec::new(),
+        );
+        for (target, question, kind) in [
+            (
+                ChoiceTarget::WireJsonSchema,
+                ConfiguredQuestion::WireJsonSchemas,
+                ModelKind::WireJsonSchema,
+            ),
+            (
+                ChoiceTarget::WireCborSchema,
+                ConfiguredQuestion::WireCborSchemas,
+                ModelKind::WireCborSchema,
+            ),
+            (
+                ChoiceTarget::WireAvroSchema,
+                ConfiguredQuestion::WireAvroSchemas,
+                ModelKind::WireAvroSchema,
+            ),
+        ] {
+            let request = ChoiceLookupRequest::new(
+                target,
+                vec![ChoiceSelection {
+                    value: ChoiceValue::Domain(domain()),
+                }],
+                String::new(),
+            );
+            assert_eq!(
+                ConfiguredQuery::of(&request)
+                    .assured("domain query")
+                    .question,
+                question
+            );
+            let choices = resolver
+                .resolve(&question, "PAYLOAD")
+                .assured("wire schema resolves")
+                .choices;
+            assert_eq!(choices.len(), 1);
+            assert_eq!(
+                choices[0].value,
+                ChoiceValue::Model(NodeRef::new(
+                    kind,
+                    ModelName::parse("payload_wire").assured("valid model name")
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn resource_choices_include_staged_catalogs_but_only_completed_versions() {
+        let resource = ResourceName::parse("proto_bundle").assured("valid resource");
+        let key = |identity: &str| {
+            ResourceUploadKey::new(
+                UserName::parse("operator").assured("valid user"),
+                domain(),
+                resource.clone(),
+                ResourceUploadIdentity::parse(identity).assured("valid upload identity"),
+            )
+        };
+        let resources = ResourceVersionStatus {
+            next_version_by_resource: SortedVec::from_unsorted(vec![ResourceVersionCounter {
+                domain: domain(),
+                identifier: resource.clone(),
+                next_version: 4,
+            }]),
+            uploads: ResourceUploads::try_from_uploads([
+                ResourceUpload {
+                    key: key("completed"),
+                    version: 1,
+                    state: ResourceUploadState::Completed {
+                        root_checksum: "one".to_string(),
+                        outcome_revision: 1,
+                    },
+                },
+                ResourceUpload {
+                    key: key("applying"),
+                    version: 2,
+                    state: ResourceUploadState::Applying {
+                        root_checksum: "two".to_string(),
+                    },
+                },
+                ResourceUpload {
+                    key: key("failed"),
+                    version: 3,
+                    state: ResourceUploadState::Failed {
+                        root_checksum: "three".to_string(),
+                        outcome_revision: 2,
+                        reason: "failed".to_string(),
+                    },
+                },
+            ])
+            .assured("upload identities are unique"),
+            ..ResourceVersionStatus::default()
+        };
+        let resolver = ConfiguredChoices::new(
+            domain(),
+            Vec::new(),
+            resources,
+            vec!["staged_bundle".to_string()],
+        );
+        let names = resolver
+            .resolve(&ConfiguredQuestion::Resources, "bundle")
+            .assured("resource query resolves")
+            .choices
+            .into_iter()
+            .map(|choice| choice.presentation.label)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["proto_bundle", "staged_bundle"]);
+        let versions = resolver
+            .resolve(
+                &ConfiguredQuestion::CompletedResourceVersions(resource.clone()),
+                "",
+            )
+            .assured("completed version query resolves")
+            .choices;
+        assert_eq!(
+            versions
+                .iter()
+                .map(|choice| &choice.value)
+                .collect::<Vec<_>>(),
+            [
+                &ChoiceValue::ResourceVersion(RequestedResourceVersion::Latest),
+                &ChoiceValue::ResourceVersion(RequestedResourceVersion::Number(1)),
+            ]
+        );
+        assert_eq!(
+            resolver
+                .resolve(
+                    &ConfiguredQuestion::CompletedResourceVersions(resource),
+                    "2"
+                )
+                .assured("unfinished version is filtered")
+                .choices
+                .len(),
+            0
         );
     }
 }
