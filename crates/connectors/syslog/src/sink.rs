@@ -2,14 +2,17 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The Syslog sender a client's transport configures, its UDP, TCP and TLS writers,
-//!   RFC 6587 stream framing, and the payload limits each transport enforces.
+//! - **Owns.** The Syslog sender a client's transport configures, DNS-backed UDP, TCP and TLS
+//!   connections, RFC 6587 stream framing, and the payload limits each transport enforces.
 //! - **Depends on.** The connector contract, this crate's shared client configuration,
-//!   `error-stack`, Tokio, `rustls` and `tokio-rustls`.
+//!   the node resolver, `error-stack`, Tokio, `rustls` and `tokio-rustls`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use error_stack::Report;
@@ -17,12 +20,14 @@ use nervix_connector::{
     PerRecordOutcome, RecordSink, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult,
     SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
 };
+use nervix_dns::{ConnectionBudget, DnsResolver};
 use nervix_models::ClientConfigEntry;
 use rustls_pki_types::ServerName;
 use thiserror::Error;
 use tokio::{
     io::AsyncWriteExt,
-    net::{TcpStream, UdpSocket, lookup_host},
+    net::{TcpStream, UdpSocket},
+    time::timeout,
 };
 use tokio_rustls::{TlsConnector, client::TlsStream};
 
@@ -31,10 +36,12 @@ use crate::config::{
 };
 
 const SYSLOG: &str = "syslog";
+const CONNECT_BUDGET: Duration = Duration::from_secs(30);
 
 /// What one Syslog sink sends through: the entries its client declares its transport with.
 pub struct SyslogSinkConfig {
     pub config: Vec<ClientConfigEntry>,
+    pub dns: DnsResolver,
 }
 
 pub struct SyslogSink {
@@ -60,9 +67,12 @@ enum SyslogPayloadError {
 
 impl SyslogSink {
     pub async fn new(config: SyslogSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
-        let config = Self::client_config(&config.config)?;
-        let sender = Self::connect(&config).await?;
-        Ok(Self { config, sender })
+        let client = Self::client_config(&config.config)?;
+        let sender = Self::connect(&client, &config.dns).await?;
+        Ok(Self {
+            config: client,
+            sender,
+        })
     }
 
     /// Checks that `config` declares a usable Syslog transport, loading its TLS material when the
@@ -81,36 +91,79 @@ impl SyslogSink {
         SyslogClientConfig::parse(config, SyslogDirection::Emit).map_err(Self::config_error)
     }
 
-    async fn connect(config: &SyslogClientConfig) -> SinkStartResult<SyslogSender> {
+    async fn connect(
+        config: &SyslogClientConfig,
+        dns: &DnsResolver,
+    ) -> SinkStartResult<SyslogSender> {
+        let budget = ConnectionBudget::start(CONNECT_BUDGET);
+        let addresses = dns
+            .resolve(&config.server_name, config.port, budget.remaining())
+            .await
+            .map_err(|error| {
+                let reason = error.current_context().to_string();
+                error
+                    .change_context(SinkStartError::Initialize { sink: SYSLOG })
+                    .attach_printable(reason)
+            })?;
         match config.protocol {
             SyslogProtocol::Udp => {
-                let destination = resolve_first(&config.addr).await?;
-                let local = SocketAddr::new(
-                    match destination.ip() {
-                        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-                    },
-                    0,
-                );
-                let socket = UdpSocket::bind(local).await.map_err(Self::start_error)?;
-                socket
-                    .connect(destination)
-                    .await
-                    .map_err(Self::start_error)?;
-                Ok(SyslogSender::Udp(socket))
+                let mut report = Report::new(SinkStartError::Initialize { sink: SYSLOG });
+                for attempt in budget.attempts(&addresses) {
+                    tokio::task::consume_budget().await;
+                    let local = SocketAddr::new(
+                        match attempt.address.ip() {
+                            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                        },
+                        0,
+                    );
+                    let connected = timeout(attempt.budget, async {
+                        let socket = UdpSocket::bind(local).await?;
+                        socket.connect(attempt.address).await?;
+                        Ok::<UdpSocket, std::io::Error>(socket)
+                    })
+                    .await;
+                    match connected {
+                        Ok(Ok(socket)) => return Ok(SyslogSender::Udp(socket)),
+                        Ok(Err(error)) => {
+                            report =
+                                report.attach_printable(format!("{}: {error}", attempt.address));
+                        }
+                        Err(_) => {
+                            report = report.attach_printable(format!(
+                                "{}: no UDP setup within {:?}",
+                                attempt.address, attempt.budget
+                            ));
+                        }
+                    }
+                }
+                Err(report)
             }
             SyslogProtocol::Tcp => {
-                let stream = TcpStream::connect(&config.addr)
-                    .await
-                    .map_err(Self::start_error)?;
-                stream.set_nodelay(true).map_err(Self::start_error)?;
-                Ok(SyslogSender::Tcp(stream))
+                let mut report = Report::new(SinkStartError::Initialize { sink: SYSLOG });
+                for attempt in budget.attempts(&addresses) {
+                    tokio::task::consume_budget().await;
+                    let stream = timeout(attempt.budget, TcpStream::connect(attempt.address)).await;
+                    match stream {
+                        Ok(Ok(stream)) => {
+                            stream.set_nodelay(true).map_err(Self::start_error)?;
+                            return Ok(SyslogSender::Tcp(stream));
+                        }
+                        Ok(Err(error)) => {
+                            report =
+                                report.attach_printable(format!("{}: {error}", attempt.address));
+                        }
+                        Err(_) => {
+                            report = report.attach_printable(format!(
+                                "{}: no connection within {:?}",
+                                attempt.address, attempt.budget
+                            ));
+                        }
+                    }
+                }
+                Err(report)
             }
             SyslogProtocol::Tls => {
-                let stream = TcpStream::connect(&config.addr)
-                    .await
-                    .map_err(Self::start_error)?;
-                stream.set_nodelay(true).map_err(Self::start_error)?;
                 let server_name =
                     ServerName::try_from(config.server_name.clone()).map_err(|error| {
                         Self::config_error(format!(
@@ -120,11 +173,30 @@ impl SyslogSink {
                     })?;
                 let connector =
                     TlsConnector::from(config.tls_client_config().map_err(Self::config_error)?);
-                let stream = connector
-                    .connect(server_name, stream)
-                    .await
-                    .map_err(Self::start_error)?;
-                Ok(SyslogSender::Tls(Box::new(stream)))
+                let mut report = Report::new(SinkStartError::Initialize { sink: SYSLOG });
+                for attempt in budget.attempts(&addresses) {
+                    tokio::task::consume_budget().await;
+                    let connected = timeout(attempt.budget, async {
+                        let stream = TcpStream::connect(attempt.address).await?;
+                        stream.set_nodelay(true)?;
+                        connector.connect(server_name.clone(), stream).await
+                    })
+                    .await;
+                    match connected {
+                        Ok(Ok(stream)) => return Ok(SyslogSender::Tls(Box::new(stream))),
+                        Ok(Err(error)) => {
+                            report =
+                                report.attach_printable(format!("{}: {error}", attempt.address));
+                        }
+                        Err(_) => {
+                            report = report.attach_printable(format!(
+                                "{}: no TLS connection within {:?}",
+                                attempt.address, attempt.budget
+                            ));
+                        }
+                    }
+                }
+                Err(report)
             }
         }
     }
@@ -212,16 +284,6 @@ impl RecordSink for SyslogSink {
     }
 }
 
-async fn resolve_first(addr: &str) -> SinkStartResult<SocketAddr> {
-    lookup_host(addr)
-        .await
-        .map_err(SyslogSink::start_error)?
-        .next()
-        .ok_or_else(|| {
-            SyslogSink::start_error(format!("Syslog addr '{addr}' resolved to no addresses"))
-        })
-}
-
 async fn write_stream_frame(
     stream: &mut (impl tokio::io::AsyncWrite + Unpin),
     framing: SyslogFraming,
@@ -255,6 +317,12 @@ async fn write_stream_frame(
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv6Addr;
+
+    use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_dns::{DnsConfiguration, NameServers};
+    use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
+    use tempfile::TempDir;
     use tokio::io::AsyncReadExt as _;
 
     use super::*;
@@ -299,6 +367,176 @@ mod tests {
             config,
             sender: SyslogSender::Udp(sender),
         }
+    }
+
+    struct DnsFixture {
+        authority: DnsAuthority,
+        resolver: DnsResolver,
+        _files: TempDir,
+    }
+
+    impl DnsFixture {
+        async fn start(hosts: &str) -> Self {
+            let authority = DnsAuthority::start_on_loopback()
+                .await
+                .assured("a loopback UDP port is available");
+            let files = tempfile::tempdir().assured("a temporary directory can be created");
+            let resolver_configuration = files.path().join("resolv.conf");
+            let hosts_file = files.path().join("hosts");
+            std::fs::write(
+                &resolver_configuration,
+                "options ndots:1 timeout:1 attempts:1\n",
+            )
+            .assured("the fixture resolver configuration can be written");
+            std::fs::write(&hosts_file, hosts).assured("the fixture hosts file can be written");
+            let resolver = DnsResolver::load(DnsConfiguration {
+                resolver_configuration,
+                hosts_file,
+                name_servers: NameServers::Explicit(vec![authority.address()]),
+            })
+            .await
+            .assured("the fixture resolver configuration is valid");
+            Self {
+                authority,
+                resolver,
+                _files: files,
+            }
+        }
+    }
+
+    fn endpoint_config(protocol: &str, addr: &str) -> SyslogClientConfig {
+        SyslogClientConfig::parse(
+            &[
+                ClientConfigEntry {
+                    key: "protocol".to_string(),
+                    value: protocol.to_string(),
+                },
+                ClientConfigEntry {
+                    key: "addr".to_string(),
+                    value: addr.to_string(),
+                },
+            ],
+            SyslogDirection::Emit,
+        )
+        .assured("the test endpoint is a valid Syslog client")
+    }
+
+    #[tokio::test]
+    async fn tcp_tries_dns_answers_in_order_and_writes_to_the_reachable_address() {
+        let fixture = DnsFixture::start("").await;
+        let listener = tokio::net::TcpListener::bind("127.0.7.2:0")
+            .await
+            .assured("a loopback TCP port is available");
+        let port = listener
+            .local_addr()
+            .assured("a bound listener has a local address")
+            .port();
+        fixture.authority.set(
+            "syslog.nervix.test",
+            DnsAnswer::Addresses {
+                addresses: vec![
+                    "127.0.7.1".parse().assured("literal IPv4 address"),
+                    "127.0.7.2".parse().assured("literal IPv4 address"),
+                ],
+                ttl: Duration::from_secs(1),
+            },
+        );
+        let config = endpoint_config("tcp", &format!("syslog.nervix.test:{port}"));
+        let SyslogSender::Tcp(mut sender) = SyslogSink::connect(&config, &fixture.resolver)
+            .await
+            .assured("the second DNS answer has a listener")
+        else {
+            panic!("the TCP configuration must open a TCP stream");
+        };
+        write_stream_frame(&mut sender, SyslogFraming::OctetCounting, b"hello")
+            .await
+            .assured("the connected Syslog stream accepts the frame");
+        let (mut received, _) = listener
+            .accept()
+            .await
+            .assured("the second address was dialled");
+        let mut frame = [0_u8; 7];
+        received
+            .read_exact(&mut frame)
+            .await
+            .assured("the entire Syslog frame arrives");
+        assert_eq!(&frame, b"5 hello");
+    }
+
+    #[tokio::test]
+    async fn udp_literal_ipv6_uses_an_ipv6_socket() {
+        let fixture = DnsFixture::start("").await;
+        let receiver = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0))
+            .await
+            .assured("the IPv6 loopback address is available");
+        let address = receiver.local_addr().assured("the UDP receiver is bound");
+        let config = endpoint_config("udp", &address.to_string());
+        let SyslogSender::Udp(sender) = SyslogSink::connect(&config, &fixture.resolver)
+            .await
+            .assured("the literal IPv6 address can be connected")
+        else {
+            panic!("the UDP configuration must open a UDP socket");
+        };
+        assert!(
+            sender
+                .local_addr()
+                .assured("the UDP sender is bound")
+                .is_ipv6()
+        );
+        sender
+            .send(b"ipv6")
+            .await
+            .assured("the UDP payload can be sent");
+        let mut payload = [0_u8; 4];
+        let count = receiver
+            .recv(&mut payload)
+            .await
+            .assured("the receiver gets the payload");
+        assert_eq!(count, payload.len());
+        assert_eq!(&payload, b"ipv6");
+    }
+
+    #[tokio::test]
+    async fn tcp_uses_the_hosts_file_before_dns() {
+        let fixture = DnsFixture::start("127.0.7.2 listed.nervix.test\n").await;
+        let listener = tokio::net::TcpListener::bind("127.0.7.2:0")
+            .await
+            .assured("a loopback TCP port is available");
+        let port = listener
+            .local_addr()
+            .assured("the listener is bound")
+            .port();
+        let config = endpoint_config("tcp", &format!("listed.nervix.test:{port}"));
+        let sender = SyslogSink::connect(&config, &fixture.resolver)
+            .await
+            .assured("the hosts-file address has a listener");
+        assert!(matches!(sender, SyslogSender::Tcp(_)));
+        listener
+            .accept()
+            .await
+            .assured("the hosts-file address was dialled");
+        assert_eq!(fixture.authority.questions_for("listed.nervix.test"), 0);
+    }
+
+    #[tokio::test]
+    async fn missing_name_is_an_initialization_failure_with_the_dns_cause() {
+        let fixture = DnsFixture::start("").await;
+        fixture.authority.set(
+            "missing.nervix.test",
+            DnsAnswer::NameNotFound {
+                negative_ttl: Duration::from_secs(1),
+            },
+        );
+        let config = endpoint_config("tcp", "missing.nervix.test:6514");
+        let failure = SyslogSink::connect(&config, &fixture.resolver)
+            .await
+            .err()
+            .assured("the fixture name has no address");
+        assert!(matches!(
+            failure.current_context(),
+            SinkStartError::Initialize { sink: SYSLOG }
+        ));
+        assert!(format!("{failure:?}").contains("the name does not exist"));
     }
 
     #[tokio::test]

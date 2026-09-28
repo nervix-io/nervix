@@ -189,6 +189,9 @@ the node restarts.
 The terminating node then stops new intake on **every** one of its ingestors, including endpoint and
 Syslog ingestors that serve on every node and ingestors whose scheduled owner did not move. Its
 generators stop producing. Intake never reopens: there is no resume path out of a shutdown drain.
+If a broker-style source is still resuming, the host cancels that pending resume when shutdown
+arrives, drops its DNS, socket and handshake work, and closes the source before exiting. A quiesce
+change also cancels an in-progress resume so the next loop turn observes the new intake state.
 
 This intake stop ignores `ON QUIESCE`. That clause governs what an external source experiences
 during a resumable hold — a model alteration, a domain pause, or memory-pressure shedding — where

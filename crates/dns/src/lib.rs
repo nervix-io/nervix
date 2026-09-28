@@ -46,6 +46,7 @@ use tokio::{sync::Semaphore, time::timeout};
 use triomphe::Arc;
 
 mod configuration;
+mod dial;
 mod hosts;
 mod lookup;
 mod reqwest;
@@ -54,6 +55,7 @@ pub use configuration::{
     DnsConfiguration, DnsConfigurationError, NameServers, SYSTEM_HOSTS_FILE,
     SYSTEM_RESOLVER_CONFIGURATION,
 };
+pub use dial::{AddressAttempt, ConnectionBudget};
 pub use lookup::{DnsLookupError, DnsLookupFailure};
 
 use crate::{configuration::LoadedConfiguration, hosts::HostsTable};

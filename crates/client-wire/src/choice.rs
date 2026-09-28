@@ -24,11 +24,13 @@ use crate::{
 pub enum ChoiceTarget {
     DomainPace,
     PlacementPolicy,
+    Schema,
 }
 
 wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
     DomainPace,
     PlacementPolicy,
+    Schema,
 });
 
 /// Whether a domain clock advances with wall time.

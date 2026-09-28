@@ -1,5 +1,6 @@
 pub(crate) mod client_conformance;
 pub(crate) mod client_wire_baseline;
+pub(crate) mod client_wire_tls_cost;
 pub(crate) mod cluster;
 pub(crate) mod cluster_teardown;
 pub(crate) mod dependencies;

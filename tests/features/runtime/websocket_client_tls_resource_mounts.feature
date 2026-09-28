@@ -2,7 +2,9 @@ Feature: Websocket client TLS resource mounts
   Scenario Outline: Websocket client keeps its pinned TLS mount through upload and restart
     Given the HTTP mock server is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
+    And the WebSocket mock endpoints are published under fixture DNS
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -40,7 +42,7 @@ Feature: Websocket client TLS resource mounts
         TYPE WEBSOCKETS
         MOUNT dev_tls VERSION 1
         CONFIG {
-          'endpoint' = '{{mock_wss_addr}}/ws/{{test_id}}',
+          'endpoint' = '{{mock_wss_dns_addr}}/ws/{{test_id}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
         CREATE INGESTOR ws_notifications
@@ -61,6 +63,7 @@ Feature: Websocket client TLS resource mounts
       {"user_id":42}
       """
     And the last relay subscription payload contains key fragment '{"user_id":42}'
+    And the DNS fixture eventually receives a question for "websocket.nervix.test"
     When these NSPL commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE dev_tls VERSION "{{dev_tls_v2}}";

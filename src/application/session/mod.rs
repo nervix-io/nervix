@@ -702,7 +702,8 @@ async fn serve_concurrent(
             ReplyBody::Suggest(outcome)
         }
         ConcurrentRequest::Choice(choice) => {
-            ReplyBody::Choice(service.process_choice(choice).await)
+            let view = shared.view.read().clone();
+            ReplyBody::Choice(service.process_choice(choice, &view).await)
         }
         ConcurrentRequest::ListDomains => {
             let domains = service.domain_infos().await;
