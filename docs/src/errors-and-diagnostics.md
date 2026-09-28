@@ -408,6 +408,13 @@ reports a stopped or uninstalled clock, or a projection outside the timestamp ra
 `DomainClockReadError`. See
 [Domain Clock Attachment](./sessions.md#domain-clock-attachment).
 
+The shared C binding converts a clock-event wait's `error_stack::Report<ClientError>` at its
+reporting boundary. It classifies the typed current context as an `NX_ERROR_*` kind and retains
+the report's contextual message. A cancelled or expired wait returns `NX_ERROR_CANCELLED` or
+`NX_ERROR_DEADLINE` without writing an event handle. Clock accessors return `NX_ERROR_TYPE` when
+the event kind or installation state lacks a requested field and leave outputs untouched;
+generation, state, and end-reason accessors require a non-null output pointer.
+
 If a paced clock cannot convert one period through its rate, the authority can still emit its
 already-due first tick. Scheduling a later tick then reports a rate-conversion or cadence error and
 stops production. A next-boundary overflow reports its own clock arithmetic error. None of these

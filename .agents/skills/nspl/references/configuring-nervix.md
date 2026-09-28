@@ -326,6 +326,9 @@ Choose checks relevant to the configured graph:
   paced domain's committed origin, UTC anchor, and rate, then reports each state change and newest
   accepted tick until `DETACH DOMAIN CLOCK;`. Use it when paced ingestion rejects `TIMESTAMP AT`
   values: the mapping and tick frontier show which logical centers the admission window has reached.
+  A host using the shared C binding executes attach and detach through `nx_session_execute` and
+  reads later states and ticks with `nx_session_next_clock_event`; the binding does not expose the
+  initial state from the attach reply as a typed outcome.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.
 - `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
   expiry outcomes.

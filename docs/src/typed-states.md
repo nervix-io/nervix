@@ -150,6 +150,14 @@ FlatBuffers encoding preserves these optional fields and typed variants across t
 [Client Session Protocol](./client-session-protocol.md#verification-before-reading) defines how a
 receiver keeps an absent optional value distinct from a present zero.
 
+The shared C binding gives clock observations their own `nx_clock_event_kind` and installations
+their own `nx_clock_state`. Only `NX_CLOCK_PACED` has a mapping for
+`nx_clock_event_paced`; tick and end-reason accessors likewise require their corresponding event
+kinds. An interruption carries a domain but no invented generation or end reason. A mismatched
+accessor returns `NX_ERROR_TYPE` without changing its outputs, so absence cannot look like a
+zero generation or timestamp. The paced and tick accessors allow omitted output pointers for
+fields a host does not need.
+
 Completion replies likewise carry a `SuggestionStatus` variant for ready, missing, stale, or failed
 context and an optional continuation. The server resolves typed semantic references from one
 committed configuration read with the requesting session's ordered transaction prefix applied;

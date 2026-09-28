@@ -1,5 +1,7 @@
 //! A domain clock event a host holds: `nx_clock_event`, and the typed fields each kind reports.
 //!
+//! Layer: edges.
+//!
 //! - **Owns.** The clock event kinds, clock states and end reasons the header names, the shared
 //!   ownership a host retains and releases, and reading an event's domain, generation, state,
 //!   committed mapping, tick and end reason.
