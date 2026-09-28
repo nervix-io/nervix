@@ -3,6 +3,7 @@ use std::{ops::Range, sync::Arc};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
+use error_stack::{Report, Result, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_wasm_protocol::{
     AckSidecar, Envelope, EnvelopeRef, OutputColumnRef, ProcessorType, ProtocolError, RoutedOutput,
@@ -28,11 +29,14 @@ impl InputBatch {
     /// the Arrow IPC stream eagerly.
     pub(crate) fn from_envelope_bytes(bytes: Vec<u8>) -> Result<Self, GuestError> {
         let (arrow, acks) = {
-            let EnvelopeRef::Input(input) = EnvelopeRef::decode(&bytes)? else {
-                return Err(GuestError::Protocol(ProtocolError::UnexpectedPayload {
+            let EnvelopeRef::Input(input) =
+                EnvelopeRef::decode(&bytes).change_context(GuestError::Protocol)?
+            else {
+                return Err(Report::new(ProtocolError::UnexpectedPayload {
                     expected: "input envelope",
                     actual: "output envelope",
-                }));
+                })
+                .change_context(GuestError::Protocol));
             };
             let arrow_ipc = input.arrow_ipc_batch();
             let start = arrow_ipc
@@ -45,8 +49,11 @@ impl InputBatch {
                 .assured("the subslice ends inside the envelope bytes");
             (start..end, input.acks())
         };
-        let reader = StreamReader::try_new(&bytes[arrow.clone()], None)?;
-        let batches = reader.collect::<Result<Vec<_>, _>>()?;
+        let reader = StreamReader::try_new(&bytes[arrow.clone()], None)
+            .map_err(|source| Report::new(GuestError::ArrowIpc(source)))?;
+        let batches = reader
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|source| Report::new(GuestError::ArrowIpc(source)))?;
         Ok(Self {
             bytes,
             arrow,
@@ -134,12 +141,18 @@ impl OutputEnvelope {
                 .into_iter()
                 .map(|(array, _)| array)
                 .collect::<Vec<_>>();
-            let batch = RecordBatch::try_new(schema.clone(), arrays)?;
+            let batch = RecordBatch::try_new(schema.clone(), arrays)
+                .map_err(|source| Report::new(GuestError::ArrowIpc(source)))?;
             let mut ipc = Vec::new();
             {
-                let mut writer = StreamWriter::try_new(&mut ipc, &schema)?;
-                writer.write(&batch)?;
-                writer.finish()?;
+                let mut writer = StreamWriter::try_new(&mut ipc, &schema)
+                    .map_err(|source| Report::new(GuestError::ArrowIpc(source)))?;
+                writer
+                    .write(&batch)
+                    .map_err(|source| Report::new(GuestError::ArrowIpc(source)))?;
+                writer
+                    .finish()
+                    .map_err(|source| Report::new(GuestError::ArrowIpc(source)))?;
             }
             ipc
         };
@@ -177,7 +190,7 @@ impl ProcessorTypeArrow for ProcessorType {
             Self::F64 => DataType::Float64,
             Self::Array { element, len } => DataType::FixedSizeList(
                 Arc::new(Field::new("item", element.arrow_data_type()?, false)),
-                i32::try_from(*len).map_err(|_| GuestError::InvalidSize)?,
+                i32::try_from(*len).map_err(|_| Report::new(GuestError::InvalidSize))?,
             ),
             Self::Vec { element } => DataType::List(Arc::new(Field::new(
                 "item",
@@ -268,9 +281,12 @@ mod tests {
         }
         .encode();
 
+        let error = InputBatch::from_envelope_bytes(encoded)
+            .expect_err("an output envelope is not guest input");
+        assert!(matches!(error.current_context(), GuestError::Protocol));
         assert!(matches!(
-            InputBatch::from_envelope_bytes(encoded),
-            Err(GuestError::Protocol(_))
+            error.downcast_ref::<ProtocolError>(),
+            Some(ProtocolError::UnexpectedPayload { .. })
         ));
     }
 
@@ -318,7 +334,7 @@ mod tests {
         assert!(reader.schema().field(0).name().is_empty());
         assert!(!reader.schema().field(0).is_nullable());
         let batches = reader
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<std::result::Result<Vec<_>, _>>()
             .expect("generated batch must decode");
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_rows(), 1);

@@ -53,6 +53,11 @@ The HTTPS listener runs on every live node, independent of Raft leadership and g
 like every other entity that binds a configured listening port. It presents the TLS VHOSTs of the
 runtime revision its node applied.
 
+Visual client-mount and VHOST-TLS forms select a resource and one of its completed versions through
+typed session choices. Their drafts may submit `LATEST`; neither form resolves it locally or
+creates resource content. The server applies the same version validation and pinning as the NSPL
+command path, so the rendered stored Model and every listener use a concrete version.
+
 ## Version Lifecycle
 
 ### Assignment

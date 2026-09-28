@@ -9,6 +9,7 @@
 //! ([`OutputEnvelope`]), and the branch configuration ([`BranchContext`]).
 //!
 //! ```ignore
+//! use error_stack::Result;
 //! use nervix_wasm_sdk::{BranchContext, GuestContext, GuestError, InputBatch, Processor};
 //!
 //! struct Passthrough;
@@ -35,7 +36,7 @@
 //!
 //! - **Owns.** The complete guest half of the ABI: the reusable linear-memory buffer, envelope
 //!   encoding and decoding, the emit queue, error latching, panic conversion and snapshot plumbing.
-//! - **Depends on.** `nervix-wasm-protocol` and Arrow.
+//! - **Depends on.** `nervix-wasm-protocol`, Arrow, and `error-stack`.
 //! - **Must not know.** The host, the server, the Models or NSPL. It is compiled into user guests
 //!   and ships on its own.
 

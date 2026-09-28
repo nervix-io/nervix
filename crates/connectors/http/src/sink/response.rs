@@ -1,12 +1,16 @@
 //! Bounded HTTP/1.1 response heads for the outbound HTTP sink.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Reading and validating each interim and final header block and classifying a
-//!   complete final status.
-//! - **Depends on.** Tokio streams, the HTTP/1.1 parser and typed connector errors.
+//! - **Owns.** Reading and validating each interim and final header block, classifying a
+//!   complete final status, and reading the one `Retry-After` value a final head states.
+//! - **Depends on.** Tokio streams, the HTTP/1.1 parser, the HTTP-date grammar, the vocabulary
+//!   timestamp and typed connector errors.
 //! - **Must not know.** Emitter buffers, acknowledgements or retry cadence.
 
+use std::time::{Duration, UNIX_EPOCH};
+
 use error_stack::Report;
+use nervix_models::Timestamp;
 use thiserror::Error;
 use tokio::io::AsyncRead;
 
@@ -40,6 +44,66 @@ pub(super) enum Disposition {
     RetryableFailure,
 }
 
+/// A complete, valid final response head: its status and the one `Retry-After` value it states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct FinalResponse {
+    status: FinalStatus,
+    retry_after: Option<RetryAfter>,
+}
+
+/// The one `Retry-After` value a final head states, in either form RFC 9110 defines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryAfter {
+    /// `delay-seconds`: whole seconds, measured physically from the response's arrival.
+    Seconds(u64),
+    /// `HTTP-date`: an instant, compared with actual UTC when the response arrives.
+    Date(Timestamp),
+}
+
+impl FinalResponse {
+    pub(super) fn status(self) -> FinalStatus {
+        self.status
+    }
+
+    /// The delay this response asks for before the next attempt, measured from `received_at`, the
+    /// actual UTC when it arrived.
+    ///
+    /// Seconds ask for exactly that many, and a date for the time until it, which is none for a
+    /// date already past. A head stating no single valid `Retry-After` asks for no delay, and so
+    /// does one whose delay would end outside the instants a timestamp represents.
+    pub(super) fn retry_delay(self, received_at: Timestamp) -> Option<Duration> {
+        match self.retry_after? {
+            RetryAfter::Seconds(seconds) => {
+                let delay = Duration::from_secs(seconds);
+                if received_at.checked_add(delay).is_err() {
+                    return None;
+                }
+                Some(delay)
+            }
+            // A date already past asks for no wait beyond the host's own backoff.
+            RetryAfter::Date(at) => Some(at.duration_since(received_at).unwrap_or(Duration::ZERO)),
+        }
+    }
+}
+
+impl RetryAfter {
+    /// Reads the value of one `Retry-After` field: `1*DIGIT` seconds, or an IMF-fixdate, RFC 850
+    /// or asctime date. Anything else, and a number or date no timestamp represents, is `None`.
+    fn parse(value: &[u8]) -> Option<Self> {
+        let text = std::str::from_utf8(value).ok()?;
+        let text = text.trim_matches([' ', '\t']);
+        if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) {
+            let seconds = text.parse::<u64>().ok()?;
+            return Some(Self::Seconds(seconds));
+        }
+        let date = httpdate::parse_http_date(text).ok()?;
+        // The grammar admits dates from 1970 through 9999; a timestamp ends in 2262.
+        let since_epoch = date.duration_since(UNIX_EPOCH).ok()?;
+        let unix_nanos = i64::try_from(since_epoch.as_nanos()).ok()?;
+        Some(Self::Date(Timestamp::from_unix_nanos(unix_nanos)))
+    }
+}
+
 impl FinalStatus {
     pub(super) fn code(self) -> u16 {
         self.0
@@ -58,11 +122,13 @@ impl FinalStatus {
 struct ParsedBlock {
     length: usize,
     status: u16,
+    retry_after: Option<RetryAfter>,
 }
 
 /// Reads through complete final headers. Any body bytes received with their terminating CRLF are
-/// discarded with the stream; the body is neither parsed nor awaited.
-pub(super) async fn read_final_headers<S>(stream: &mut S) -> ResponseHeadResult<FinalStatus>
+/// discarded with the stream; the body is neither parsed nor awaited. Only the final head's
+/// `Retry-After` counts; an interim head's is read with its block and dropped with it.
+pub(super) async fn read_final_headers<S>(stream: &mut S) -> ResponseHeadResult<FinalResponse>
 where
     S: AsyncRead + Unpin + ?Sized,
 {
@@ -72,7 +138,10 @@ where
         if let Some(block) = ParsedBlock::parse(&pending)? {
             pending.drain(..block.length);
             if block.status == 101 || block.status >= 200 {
-                return Ok(FinalStatus(block.status));
+                return Ok(FinalResponse {
+                    status: FinalStatus(block.status),
+                    retry_after: block.retry_after,
+                });
             }
             continue;
         }
@@ -109,7 +178,25 @@ impl ParsedBlock {
         }
         Self::validate_line_endings(&bytes[..length])?;
         Self::validate_fields(status, response.headers)?;
-        Ok(Some(Self { length, status }))
+        let retry_after = Self::retry_after(response.headers);
+        Ok(Some(Self {
+            length,
+            status,
+            retry_after,
+        }))
+    }
+
+    /// The one `Retry-After` value `fields` state. Two such fields state none, however valid
+    /// either one is. The scan is bounded by the 128 fields one parsed block can hold.
+    fn retry_after(fields: &[httparse::Header<'_>]) -> Option<RetryAfter> {
+        let mut values = fields
+            .iter()
+            .filter(|field| field.name.eq_ignore_ascii_case("retry-after"));
+        let value = values.next()?;
+        if values.next().is_some() {
+            return None;
+        }
+        RetryAfter::parse(value.value)
     }
 
     fn validate_line_endings(bytes: &[u8]) -> ResponseHeadResult<()> {
@@ -238,6 +325,114 @@ mod tests {
         }
     }
 
+    /// The RFC 9110 example instant, `Sun, 06 Nov 1994 08:49:37 GMT`.
+    const EXAMPLE_DATE_SECONDS: i64 = 784_111_777;
+
+    fn unix_seconds(seconds: i64) -> Timestamp {
+        Timestamp::from_unix_nanos(seconds * 1_000_000_000)
+    }
+
+    fn final_response(head: &[u8]) -> FinalResponse {
+        let block = parsed(head);
+        FinalResponse {
+            status: FinalStatus(block.status),
+            retry_after: block.retry_after,
+        }
+    }
+
+    fn retry_delay(retry_after: &str, received_at: Timestamp) -> Option<Duration> {
+        let head =
+            format!("HTTP/1.1 503 Service Unavailable\r\nRetry-After: {retry_after}\r\n\r\n");
+        final_response(head.as_bytes()).retry_delay(received_at)
+    }
+
+    #[test]
+    fn retry_after_states_whole_seconds_or_one_http_date_in_any_of_its_forms() {
+        let received_at = unix_seconds(EXAMPLE_DATE_SECONDS - 30);
+        assert_eq!(
+            retry_delay("120", received_at),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(retry_delay("0", received_at), Some(Duration::ZERO));
+        assert_eq!(
+            retry_delay("007", received_at),
+            Some(Duration::from_secs(7))
+        );
+        for date in [
+            "Sun, 06 Nov 1994 08:49:37 GMT",
+            "Sunday, 06-Nov-94 08:49:37 GMT",
+            "Sun Nov  6 08:49:37 1994",
+        ] {
+            assert_eq!(
+                retry_delay(date, received_at),
+                Some(Duration::from_secs(30)),
+                "{date}"
+            );
+        }
+        let later = unix_seconds(EXAMPLE_DATE_SECONDS + 5);
+        assert_eq!(
+            retry_delay("Sun, 06 Nov 1994 08:49:37 GMT", later),
+            Some(Duration::ZERO),
+            "a date already past asks for no wait"
+        );
+    }
+
+    #[test]
+    fn a_repeated_malformed_or_unrepresentable_retry_after_states_no_delay() {
+        let received_at = unix_seconds(EXAMPLE_DATE_SECONDS);
+        for malformed in [
+            "",
+            "3600.5",
+            "-1",
+            "+5",
+            "5 s",
+            "1e3",
+            "Sun, 06 Nov 1994 08:49:37 UTC",
+            "Mon, 06 Nov 1994 08:49:37 GMT",
+            "Sun, 06 Nov 1994 08:49:37 GMT, 5",
+        ] {
+            assert_eq!(retry_delay(malformed, received_at), None, "{malformed:?}");
+        }
+        for unrepresentable in [
+            "99999999999999999999999",
+            "18446744073709551615",
+            "Fri, 31 Dec 9999 23:59:59 GMT",
+        ] {
+            assert_eq!(
+                retry_delay(unrepresentable, received_at),
+                None,
+                "{unrepresentable}"
+            );
+        }
+        let repeated = final_response(
+            b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 5\r\nretry-after: 5\r\n\r\n",
+        );
+        assert_eq!(repeated.retry_delay(received_at), None);
+        let absent = final_response(b"HTTP/1.1 503 Service Unavailable\r\n\r\n");
+        assert_eq!(absent.retry_delay(received_at), None);
+    }
+
+    #[tokio::test]
+    async fn only_the_final_head_states_its_retry_after() {
+        let (mut client, mut server) = tokio::io::duplex(256);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt as _;
+            let head = b"HTTP/1.1 103 Early Hints\r\nRetry-After: 60\r\n\r\nHTTP/1.1 503 Service \
+                         Unavailable\r\nContent-Length: 0\r\n\r\n";
+            if let Err(error) = server.write_all(head).await {
+                panic!("the in-memory server must write its response: {error}");
+            }
+        });
+        let Ok(response) = read_final_headers(&mut client).await else {
+            panic!("a valid interim block precedes a valid final head");
+        };
+        assert_eq!(response.status(), FinalStatus(503));
+        assert_eq!(
+            response.retry_delay(unix_seconds(EXAMPLE_DATE_SECONDS)),
+            None
+        );
+    }
+
     #[test]
     fn every_header_block_accepts_the_exact_field_limits() {
         let mut fields = Vec::new();
@@ -312,7 +507,10 @@ mod tests {
             }
         });
         let result = read_final_headers(&mut client).await;
-        assert_eq!(result.ok(), Some(FinalStatus(204)));
+        let Ok(response) = result else {
+            panic!("an interim block within the bounds precedes a valid final head");
+        };
+        assert_eq!(response.status(), FinalStatus(204));
 
         let mut oversized = b"HTTP/1.1 103 Early Hints\r\nx-fill: ".to_vec();
         oversized.extend(std::iter::repeat_n(b'x', MAX_HEADER_BYTES));

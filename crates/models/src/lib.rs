@@ -57,7 +57,7 @@ pub use domain_clock::{
     DomainAdmissionWindow, DomainClockAdvancement, DomainClockAuthority,
     DomainClockAuthorityRevision, DomainClockBoundary, DomainClockError, DomainClockObservation,
     DomainClockObservedState, DomainClockPeriod, DomainClockProgress, DomainClockSkew,
-    DomainClockState, DomainTimeRate, PacedDomainClock,
+    DomainClockState, DomainClockTickObservation, DomainTimeRate, PacedDomainClock,
 };
 pub use emitter_batch::{
     BatchMessageLimit, ByteSizeUnit, EmitterBatchLimitError, EmitterBatchPolicy,

@@ -60,7 +60,7 @@ Unsolicited `ServerMessage` bodies carry no request identity:
 | `DomainSnapshotObserved`, `ClusterObserved` | The selected domain's live graph and entities, and the cluster summary, after `SelectDomainRequest` |
 | `ServerNotice` | Text for display at `Info`, `Warning`, or `Error` |
 | `SubscriptionRows`, `SubscriptionDeliveryLost`, `SubscriptionRowsSkipped`, `SubscriptionEnded` | Frames of one subscription generation |
-| `DomainClockObserved`, `DomainClockAttachmentEnded` | Frames of one domain clock attachment |
+| `DomainClockObserved`, `DomainClockTicked`, `DomainClockAttachmentEnded` | State, accepted tick progress, and end frames of one domain clock attachment |
 | `SessionEnding` | The last frame of a session the server ends |
 
 An upload is a separate call with its own frames; see [Resource Uploads](#resource-uploads).
@@ -171,6 +171,20 @@ An upload is a separate call with its own frames; see [Resource Uploads](#resour
   exactly as a cancellation after admission: the effect may happen, and a command's outcome is
   recovered by its execution reference.
 
+## Structured Choice Lookups
+
+- **Q-1.** A client that sends `ChoiceLookupRequest` MUST use the target's typed dependencies:
+  domain for internal schema, branch, relay, VHOST, signaling protocol, JSON/CBOR/AVRO wire
+  schema, or resource choices;
+  domain followed by a relay `Model` reference for relay fields; and domain followed by a
+  `Resource` reference for completed resource versions. It MUST use the distinct wire-schema
+  targets when a form requires an exact format.
+- **Q-2.** A client MUST use the returned `ChoiceValue`, rather than its presentation label, for
+  selection. For completed resource versions it MUST handle `ResourceVersionNumber` and
+  `LatestResourceVersion` as distinct values. It MUST NOT offer a version absent from the result as
+  a completed upload. It MUST treat `MissingContext`, `StaleContext`, and `LookupFailed` as distinct
+  outcomes, and MUST restart a paged lookup after `StaleContext` rather than reuse its cursor.
+
 ## Routing Statements
 
 A client that accepts NSPL text sends some statements as requests of their own rather than as
@@ -215,8 +229,8 @@ use.
 - **E-4.** A client SHOULD stop repeating a reference well before the retry validity, 15 minutes by
   default, has passed since the reference was created, and its clock SHOULD stay within five minutes
   of the cluster's. A repetition after the record was reclaimed is refused with
-  `ExecutionReferenceExpired`, or with `RequestFailed` whose message says the reference has expired.
-  A client MUST NOT present either as the outcome of the original command.
+  `ExecutionReferenceExpired`. A client MUST NOT present that refusal as the outcome of the
+  original command, and MUST decide from the disposition rather than the message text.
 - **E-5.** A client MUST check that the `execution_reference` of a `CommandOutcome` equals its
   request's reference, and MUST treat a mismatch as a protocol violation.
 - **E-6.** A client MUST act on each disposition as this table requires:
@@ -387,17 +401,25 @@ payload, infinity, and nullable and sensitive branch key fields.
   handle every disposition: `DomainClockAttached` with the clock, `DomainClockAlreadyAttached`,
   `DomainNotFound`, and `RequestFailed` for an attach; `DomainClockDetached`,
   `DomainClockNotAttached`, and `RequestFailed` for a detach.
-- **K-2.** A client MUST apply the clock in the attach reply before any `DomainClockObserved` for
-  the domain, MUST ignore frames about a domain it does not follow, and MUST treat
-  `DomainClockAttachmentEnded` as the last frame about the attachment.
-- **K-3.** A client MUST treat each `DomainClockObserved` as the newest clock, replacing the
-  previous one, and MUST NOT expect a frame for every intermediate change.
-- **K-4.** A client MUST read timestamps as signed 64-bit nanoseconds, period and skew as unsigned
-  64-bit nanoseconds, and the time rate as a positive finite double. [Domains And
-  Time](./domains-and-time.md#following-a-domain-clock) defines the projection a client computes
-  from a paced clock.
+- **K-2.** A client MUST apply the clock in the attach reply before any state or tick frame for
+  that domain. The attach reply's state, or a later `DomainClockObserved` for a changed generation,
+  MUST be applied before a `DomainClockTicked` of that generation. It MUST ignore frames about a
+  domain it does not follow and MUST treat
+  `DomainClockAttachmentEnded` as the last frame about that attachment.
+- **K-3.** A client MUST treat each `DomainClockObserved` as the newest installed clock and clear
+  an older generation's tick or any tick when the clock is not paced. It MUST retain only the newest
+  accepted `DomainClockTicked` per domain and generation, ignoring a tick id that does not advance.
+  State changes and tick ids can be coalesced, so it MUST NOT expect every intermediate state or
+  tick. It MUST discard unread ticks when it detaches or loses the session.
+- **K-4.** A client MUST read the tick generation and id as nonzero unsigned 64-bit integers; its
+  logical boundary, authority UTC observation, and serving-node logical reading are signed 64-bit
+  Unix nanoseconds. Period and skew are unsigned 64-bit nanoseconds, and the time rate is a positive
+  finite double. The serving-node reading anchors the tick when the client's UTC differs from the
+  cluster's. [Domains And Time](./domains-and-time.md#following-a-domain-clock) defines the
+  projection a client computes from a paced clock.
 - **K-5.** After it loses a session, a client that follows clocks MUST attach them again, and MUST
-  NOT assume it saw the changes made in between.
+  NOT assume it saw the changes or ticks made in between. It MUST clear the old tick frontier until
+  the new attachment reports accepted progress.
 
 ## Resource Uploads
 
@@ -511,8 +533,9 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | C-1 to C-7 | `request_identities_start_at_one_and_are_never_reused`, `response_reordering_cannot_take_another_requests_waiter`, `a_reply_no_request_waits_for_is_dropped`, `saturated_event_consumer_cannot_block_a_command_reply`, and `replies_reach_their_requests_in_whatever_order_they_arrive` in `nervix-client-core`; `untracked_domain_push_cannot_discard_a_pending_websocket_request` in the console |
 | C-8 | `A malformed request is refused with a typed rejection and the session keeps serving` in `session_protocol.feature`; `a_rejected_request_surfaces_as_a_typed_error` |
 | C-9, C-10 | `A long command leaves the session responsive and a waiter cancelled before admission admits nothing` and `Cancelling a durably admitted command ends only the wait for it` in `session_protocol.feature`; `cancelling_a_command_releases_its_pending_reply` |
+| Q-1, Q-2 | `configured_choices` unit tests for exact wire-schema, resource, version, VHOST, signaling, and dependency choices; `typed_choices_and_lookup_states_round_trip` in `nervix-client-wire`; `A resource-backed codec selects a completed version and file explicitly` and `A codec can choose a wire schema staged earlier in its transaction` in `visual_create_codec.feature`; `WebSocket client and endpoint select an existing signaling protocol` in `visual_create_client_endpoint.feature`; Go and Node.js corpus probes in `client_conformance.feature` |
 | L-1 to L-3 | `use_domain_is_served_by_the_client`, `list_domains_is_served_from_a_domain_list_request`, `execute_rejects_mixed_client_local_multi_statement_request`, `execute_rejects_client_local_command_during_transaction`, and `a_create_subscription_statement_is_sent_as_a_subscribe_request`; `Implicit multi-command requests are rejected` in `nspl_transactions.feature` |
-| E-1 to E-5 | In `client_wire_failures.feature`: `A command lost after durable admission is recovered by its request identity`, `A reclaimed command identity stays expired after a durable restart`, `A command identity outside its retry window starts no effect`, `A full command history refuses new identities and keeps every retained result`, `Concurrent exact BEGIN retries join one durable execution`, and `Reusing a durable transaction identity with different content fails semantically`; `a_command_reply_for_another_execution_cannot_claim_success` |
+| E-1 to E-5 | In `client_wire_failures.feature`: `A command lost after durable admission is recovered by its request identity`, `A reclaimed command identity stays expired after a durable restart`, `A race across leaders recovers a typed execution reference conflict`, `A command identity outside its retry window starts no effect`, `A full command history refuses new identities and keeps every retained result`, `Concurrent exact BEGIN retries join one durable execution`, and `Reusing a durable transaction identity with different content fails semantically`; `a_command_reply_for_another_execution_cannot_claim_success` |
 | E-6 to E-8 | `Leadership lost after durable admission leaves an unknown outcome that a retry recovers` in `session_protocol.feature`; `an_unknown_outcome_is_recovered_with_the_same_execution_reference` and `replies_ask_for_the_routing_their_disposition_needs` |
 | D-1 to D-5 | `A redirect names no endpoint for a leader that discovery cannot reach` in `session_protocol.feature`; `The Rust client reconnects through its original seed after the leader stops` in `client_wire_failures.feature`; `a_command_redirect_keeps_its_execution_reference`, `a_command_waits_for_an_election_and_is_sent_again_with_its_reference`, and `a_closed_session_recovers_through_a_configured_seed` |
 | X-1 to X-3 | In `client_wire_failures.feature`: `A command missing from a committed transaction cannot report aggregate success`, `Replaying a BEGIN whose response was lost returns the original transaction`, `Replaying an accepted <append_kind> append does not preflight or append it again`, and the two exact transaction batch retries; `lost_begin_append_and_commit_replies_retry_the_exact_request` and `concurrent_commands_capture_transaction_position_in_send_order` |
@@ -522,7 +545,7 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | S-1 to S-6 | Every scenario of `session_subscription_lifecycle.feature` and `session_subscription_options.feature`; `Published interest starts, reopens, and stops remote subscription fan-out` in `subscription_interest.feature`; `a_subscription_type_must_be_selected_and_supported` |
 | S-7, S-8 | `A reconnected native client restores acknowledged subscriptions` and `A native client keeps a subscription active while it receives a row that fills most of a frame` in `client_wire_failures.feature`; `Subscription restoration and typed transaction inspection survive the same leader loss` in `client_wire_qualification.feature`; `deleting_while_creation_is_in_flight_drains_its_late_success_before_name_reuse`, `cancelling_an_in_flight_restore_cleans_up_its_late_success`, `one_subscription_overflow_preserves_other_subscription_events`, `each_subscription_retains_a_frame_of_the_frame_limit_and_overflows_alone_past_it`, `a_subscription_past_the_exchange_allowance_overflows_without_evicting_full_subscriptions`, and `a_row_frame_filled_to_the_frame_limit_reaches_an_active_subscription` |
 | R-1 to R-5 | `A <runtime> client round-trips an operation, typed rows, an error and a closure` in `client_conformance.feature` for every runtime; `a_batch_round_trips_every_cell_kind_at_its_bounds`, `cells_must_follow_their_fields`, `branch_identity_must_match_the_schema`, and `lists_must_follow_their_element_type_and_length`; `a_batch_that_does_not_conform_to_its_schema_is_a_protocol_failure` in the binding |
-| K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; both scenarios of `domain_clock_attachment.feature`; `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock` |
+| K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; the state, tick, and client pacing outlines in `domain_clock_attachment.feature`; the owner-loss case in `domain_clock_contract.feature`; `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock`, `ticks_coalesce_per_domain_and_follow_their_generations_state`, and the `server_domain_clock_ticked.nxsm` conformance frame |
 | U-1 to U-5 | `An upload stream the protocol does not allow is refused with a typed failure and admits nothing` in `session_protocol.feature`; in `resource_describe.feature`, `An incomplete upload does not admit content or consume its identity`, `Upload retry reports one assigned version`, `Upload retry after leader change reports the assigned version`, and `An uncertain upload completes once across installation and leader change`; `a_lost_upload_reply_retries_with_the_same_identity_and_archive` and `malformed_upload_replies_are_rejected_by_their_correlations` |
 | B-1 to B-7 | The binding tests of `nervix-client-ffi`, such as `retained_references_keep_the_frame_until_the_last_one_is_released`, `string_and_bytes_columns_are_copied_with_offsets_and_borrowed_per_cell`, and `a_token_bounds_a_call_by_cancellation_and_by_deadline`; the C, C++, Python, Java, and Ruby cases of `client_conformance.feature` |
 

@@ -334,6 +334,7 @@ pub(super) async fn attach_loopback_cluster(
         recovery_endpoints: Default::default(),
         interconnect: interconnect.clone(),
         node_unavailability_timeout: Duration::from_secs(10),
+        fault_injection: Default::default(),
     })
     .await
     .expect("a loopback cluster of one node should start");
@@ -1010,7 +1011,7 @@ pub(super) fn install_test_domain_execution(
             placement_tasks: HashMap::default(),
             relay_state_tasks: HashMap::default(),
             relay_owner_tasks: HashMap::default(),
-            clients: HashMap::default(),
+            emitter_plans: Arc::new(EmitterExecutionPlans::default()),
             tasks: Vec::new(),
         },
     );

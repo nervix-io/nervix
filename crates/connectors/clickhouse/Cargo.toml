@@ -29,6 +29,7 @@ hyper-util = { workspace = true, features = [
 meticulous = { workspace = true }
 nervix-columnar-json = { workspace = true }
 nervix-connector = { workspace = true }
+nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 shuttle-tokio = { workspace = true, features = [
   "macros",
@@ -43,3 +44,11 @@ tracing = { workspace = true }
 [dev-dependencies]
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
+nervix-test-environment = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = [
+  "io-util",
+  "macros",
+  "net",
+  "rt-multi-thread",
+] }

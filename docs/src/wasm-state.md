@@ -119,6 +119,14 @@ emit reads after a callback share that callback's budget. See [Execution
 Limits](./wasm-processor-guests.md#execution-limits) and [Execution-Time
 Snapshots](./domain-clock.md#execution-time-snapshots).
 
+The FlatBuffers protocol decoder, Rust guest SDK callbacks, and Wasmtime host return typed
+`error-stack` reports within their Rust layers. The guest SDK preserves protocol and application
+causes through snapshot decoding and restore, then renders a reason at the ABI boundary. The host
+keeps the typed call cause beneath the failed guest operation, including its export and execution
+limit classification. Rendering does not change the ABI return codes, the global-error latch, or
+the rejection verdicts; the same restore reason reaches the host, and a failed callback still
+reaches the checkpoint and ACK decisions described below.
+
 A zero-length save means the guest has no state: the next instance is initialized without a
 `nervix_load_state` call. The Rust SDK wraps every save in a `GuestSnapshot` envelope that also
 carries the branch configuration, so empty application state is still restored as state, and a
