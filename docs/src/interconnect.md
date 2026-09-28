@@ -84,6 +84,10 @@ belongs to the incarnation rather than the stable node identifier: it keeps the 
 finish existing ownership handoffs and consensus work, but removes it from new placement
 destinations. A restarted process has a new incarnation and does not inherit the advertisement.
 
+The failure detector retains dead process identities separately from the live peer view. Explicit
+Raft member removal uses the newest observed live or dead identity to fence the stopped process;
+dead identities never make a peer eligible for admission, transport, or placement.
+
 Connections are directed. Both nodes in a pair build their own outbound connections because some
 operations, including relay acknowledgements and cluster events, travel back over the receiver's
 outbound management connection. A single connection never changes traffic class after it has been

@@ -1296,15 +1296,20 @@ impl ClusterHandle {
         let live_nodes = current_live_nodes(&chitchat);
         let live_node_ids = live_nodes.keys().cloned().collect::<BTreeSet<_>>();
 
-        let dead_node_ids = chitchat
+        let dead_node_identities = chitchat
             .dead_nodes()
-            .filter_map(|node_id| ClusterNodeName::parse(&node_id.node_id).ok())
-            .filter(|node_id| !live_node_ids.contains(node_id))
+            .filter_map(cluster_node_identity)
             .collect::<BTreeSet<_>>();
+        let dead_node_ids = dead_node_identities
+            .iter()
+            .map(|identity| identity.node_id().clone())
+            .filter(|node_id| !live_node_ids.contains(node_id))
+            .collect();
 
         GossipState {
             live_nodes: live_nodes.into_values().collect(),
             dead_node_ids,
+            dead_node_identities,
         }
     }
 

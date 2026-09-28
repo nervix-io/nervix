@@ -773,6 +773,7 @@ impl GossipNode {
 pub struct GossipState {
     pub live_nodes: Vec<GossipNode>,
     pub dead_node_ids: BTreeSet<ClusterNodeName>,
+    pub dead_node_identities: BTreeSet<ClusterNodeIdentity>,
 }
 
 impl GossipState {
@@ -822,6 +823,25 @@ impl GossipState {
 
     pub fn latest_nodes_by_id(&self) -> BTreeMap<ClusterNodeName, GossipNode> {
         self.latest_nodes(self.live_nodes.iter())
+    }
+
+    /// The newest observed process for an explicit removal, including an incarnation that
+    /// Chitchat has marked dead and therefore no longer includes in `live_nodes`.
+    pub fn latest_observed_identity(
+        &self,
+        node_id: &ClusterNodeName,
+    ) -> Option<ClusterNodeIdentity> {
+        self.live_nodes
+            .iter()
+            .filter(|node| &node.node_id == node_id)
+            .map(GossipNode::identity)
+            .chain(
+                self.dead_node_identities
+                    .iter()
+                    .filter(|identity| identity.node_id() == node_id)
+                    .cloned(),
+            )
+            .max_by_key(ClusterNodeIdentity::incarnation)
     }
 
     fn latest_nodes<'a>(
@@ -3546,11 +3566,9 @@ impl Administrator {
         if !availability.dead_node_ids.contains(node_id) {
             return Err(ConsensusError::RemoveLiveNode(node_id.to_string()));
         }
-        let mut latest_nodes = availability.latest_nodes_by_id();
-        let Some(node) = latest_nodes.remove(node_id) else {
+        let Some(observed_identity) = availability.latest_observed_identity(node_id) else {
             return Err(ConsensusError::NodeIncarnationUnknown(node_id.to_string()));
         };
-        let observed_identity = node.identity();
         if &observed_identity != identity {
             return Err(ConsensusError::NodeIncarnationChanged {
                 expected: identity.clone(),
@@ -5973,6 +5991,7 @@ mod tests {
             dead_node_ids: [ClusterNodeName::parse("node-3").expect("valid node name")]
                 .into_iter()
                 .collect(),
+            dead_node_identities: BTreeSet::new(),
         };
 
         assert_eq!(
@@ -5984,6 +6003,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn explicit_removal_identifies_a_dead_process_after_it_leaves_live_gossip() {
+        let stopped = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let newest_dead = node_identity("node-2", 3);
+        let mut state = GossipState {
+            live_nodes: vec![undiscovered_node("node-1", 1)],
+            dead_node_ids: BTreeSet::from([stopped.clone()]),
+            dead_node_identities: BTreeSet::from([node_identity("node-2", 2), newest_dead.clone()]),
+        };
+
+        assert_eq!(state.latest_observed_identity(&stopped), Some(newest_dead));
+        assert!(!state.live_node_ids().contains(&stopped));
+
+        state.live_nodes.push(undiscovered_node("node-2", 4));
+        assert_eq!(
+            state.latest_observed_identity(&stopped),
+            Some(node_identity("node-2", 4))
+        );
+    }
+
     /// A voter gossip has neither heard from nor declared dead is unobserved: it may still be
     /// starting. A live voter and a dead one are both observed.
     #[test]
@@ -5992,6 +6031,7 @@ mod tests {
         let state = GossipState {
             live_nodes: vec![undiscovered_node("node-1", 1)],
             dead_node_ids: BTreeSet::from([node("node-2")]),
+            dead_node_identities: BTreeSet::new(),
         };
         let voters = [node("node-1"), node("node-2"), node("node-3")];
 
@@ -6012,6 +6052,7 @@ mod tests {
             dead_node_ids: BTreeSet::from([
                 ClusterNodeName::parse("node-2").expect("valid node name")
             ]),
+            dead_node_identities: BTreeSet::new(),
         };
 
         assert_eq!(
@@ -6033,6 +6074,7 @@ mod tests {
                 gossip_node("node-2", 20, false),
             ],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
 
         assert_eq!(
@@ -6070,6 +6112,7 @@ mod tests {
                 ..undiscovered_node("node-2", 2)
             }],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
@@ -6101,6 +6144,7 @@ mod tests {
         let gossip = GossipState {
             live_nodes: vec![undiscovered_node("node-2", 2)],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
@@ -6125,6 +6169,7 @@ mod tests {
                 ..undiscovered_node("node-2", 2)
             }],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
@@ -6159,6 +6204,7 @@ mod tests {
                 ..undiscovered_node("node-2", 3)
             }],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
@@ -6194,6 +6240,7 @@ mod tests {
                 ..undiscovered_node("node-2", 2)
             }],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
