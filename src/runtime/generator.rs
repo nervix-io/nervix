@@ -28,7 +28,8 @@ pub(super) enum GeneratorError {
 }
 
 pub(super) struct GeneratorTaskSpec {
-    pub(super) generator: CreateGenerator,
+    pub(super) name: GeneratorName,
+    pub(super) each: nervix_models::DomainClockPeriod,
     pub(super) source_relay: RelayName,
     pub(super) source_branching: ResolvedBranching,
     pub(super) context_projection: GeneratorContextProjection,
@@ -36,13 +37,10 @@ pub(super) struct GeneratorTaskSpec {
 }
 
 impl GeneratorTaskSpec {
-    pub(super) fn new(
-        generator: CreateGenerator,
-        source_schema: Arc<CompiledSchema>,
-        source_branching: ResolvedBranching,
-        routes: Vec<GeneratorTaskRouteSpec>,
-    ) -> Self {
-        let source_relay = generator.materialized_relay.clone();
+    pub(super) fn new(plan: &GeneratorExecutionPlan, routes: Vec<GeneratorTaskRouteSpec>) -> Self {
+        let source_relay = plan.source_relay.clone();
+        let source_schema = &plan.source_schema;
+        let source_branching = plan.source_branching.clone();
         let source_branch_schema = RuntimeVmSchema::from_branching(&source_branching);
         let context_projection = GeneratorContextProjection::new(
             &source_relay,
@@ -52,12 +50,64 @@ impl GeneratorTaskSpec {
                 .map(|schema| schema.schema.as_ref()),
         );
         Self {
-            generator,
+            name: plan.name.clone(),
+            each: plan.each,
             source_relay,
             source_branching,
             context_projection,
             routes,
         }
+    }
+
+    pub(super) fn bind(
+        domain: &DomainName,
+        plan: &GeneratorExecutionPlan,
+        registries: &HashMap<RelayName, RelayRegistry>,
+        services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
+        udfs: &UdfExecutor,
+    ) -> error_stack::Result<Self, RuntimeError> {
+        let source_branch_schema = RuntimeVmSchema::from_branching(&plan.source_branching);
+        let mut routes = Vec::with_capacity(plan.routes.len());
+        for route in &plan.routes {
+            let Some(output_registry) = registries.get(&route.relay).cloned() else {
+                return Err(Report::new(RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("missing generator output relay '{}'", route.relay),
+                }));
+            };
+            let Some(output_services) = services.get(&route.relay).cloned() else {
+                return Err(Report::new(RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("missing generator output relay services '{}'", route.relay),
+                }));
+            };
+            let program = compile_generator_set_program(
+                domain,
+                &plan.name,
+                &plan.source_relay,
+                route,
+                GeneratorSetProgramSchemas {
+                    output: RuntimeVmSchema {
+                        schema: route.output_schema.arrow_schema(),
+                        sensitivity: route.output_schema.vm_sensitivity(),
+                    },
+                    source: RuntimeVmSchema {
+                        schema: plan.source_schema.arrow_schema(),
+                        sensitivity: plan.source_schema.vm_sensitivity(),
+                    },
+                    branch: source_branch_schema.clone(),
+                },
+                Some(udfs),
+            )
+            .map_err(Report::new)?;
+            routes.push(GeneratorTaskRouteSpec::new(
+                route,
+                program,
+                output_registry,
+                output_services,
+            ));
+        }
+        Ok(Self::new(plan, routes))
     }
 }
 
@@ -149,7 +199,9 @@ impl GeneratorContextProjection {
 }
 
 pub(super) struct GeneratorTaskRouteSpec {
-    pub(super) output: ProcessorOutput,
+    pub(super) relay: RelayName,
+    pub(super) flush_policy: FlushPolicy,
+    pub(super) message_error_policy: MessageErrorPolicy,
     pub(super) program: CompiledProgramWithMaterializedInterest,
     pub(super) input_projection: GeneratorRouteInputProjection,
     pub(super) output_schema: Arc<CompiledSchema>,
@@ -159,18 +211,19 @@ pub(super) struct GeneratorTaskRouteSpec {
 
 impl GeneratorTaskRouteSpec {
     pub(super) fn new(
-        output: ProcessorOutput,
+        route: &GeneratorRoutePlan,
         program: CompiledProgramWithMaterializedInterest,
-        output_schema: Arc<CompiledSchema>,
         output_registry: RelayRegistry,
         output_services: Arc<RelayBoundaryServices>,
     ) -> Self {
         let input_projection = GeneratorRouteInputProjection::new(&program.compiled.input_schema);
         Self {
-            output,
+            relay: route.relay.clone(),
+            flush_policy: route.flush_policy.clone(),
+            message_error_policy: route.message_error_policy.clone(),
             program,
             input_projection,
-            output_schema,
+            output_schema: route.output_schema.clone(),
             output_registry,
             output_services,
         }
@@ -422,7 +475,7 @@ impl Runtime {
                     runtime: self,
                     domain,
                     generator,
-                    output_relay: &route.output.relay,
+                    output_relay: &route.relay,
                     output_schema: &route.output_schema,
                     output_registry: &route.output_registry,
                     output_services: &route.output_services,
@@ -441,45 +494,37 @@ impl Runtime {
         spec: GeneratorTaskSpec,
     ) -> Result<JoinHandle<()>, RuntimeError> {
         let GeneratorTaskSpec {
-            generator,
+            name,
+            each,
             source_relay,
             source_branching,
             context_projection,
             routes,
         } = spec;
         let cadence = self
-            .bind_domain_cadence(domain, generator.each, DomainCadenceStart::Immediate)
+            .bind_domain_cadence(domain, each, DomainCadenceStart::Immediate)
             .map_err(|error| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
                     "generator '{}' could not bind its cadence: {error}",
-                    generator.name.as_str(),
+                    name.as_str(),
                 ),
             })?;
         let domain_clock = cadence.clock().clone();
         let routes = routes
             .into_iter()
             .map(|route| {
-                let policy = route.output.flush_policy.as_ref().ok_or_else(|| {
-                    RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "generator '{}' output '{}' has no flush policy",
-                            generator.name, route.output.relay
-                        ),
-                    }
-                })?;
                 let flush_policy = Self::parse_runtime_node_flush_policy(
                     domain,
                     "generator",
-                    &generator.name,
-                    policy,
+                    &name,
+                    &route.flush_policy,
                 )?;
                 Ok((route, flush_policy))
             })
             .collect::<Result<Vec<_>, RuntimeError>>()?;
         let task_domain = domain.clone();
-        let task_generator = generator.name.clone();
+        let task_generator = name.clone();
         let source_gate = self
             .inner
             .relay_boundary_fanouts
@@ -499,7 +544,7 @@ impl Runtime {
             });
         };
         let quiesce_counters =
-            self.node_quiesce_counters(domain, NodeRef::new(ModelKind::Generator, &generator.name));
+            self.node_quiesce_counters(domain, NodeRef::new(ModelKind::Generator, &name));
         let mut shutdown_rx = shutdown_tx.subscribe();
         let mut domain_status_rx = self.inner.domain_status_changed.subscribe();
         let mut local_intake_rx = self.inner.local_intake.subscribe();
@@ -750,7 +795,7 @@ impl Runtime {
                                                 "failed to prepare generator '{}' route '{}' \
                                                  input in domain '{}' branch '{}': {error:#}",
                                                 task_generator.as_str(),
-                                                route.output.relay.as_str(),
+                                                route.relay.as_str(),
                                                 task_domain.as_str(),
                                                 branch_key_display(&branch_key),
                                             ));
@@ -779,7 +824,7 @@ impl Runtime {
                                                          '{}': {error}",
                                                         task_generator.as_str(),
                                                         task_domain.as_str(),
-                                                        route.output.relay.as_str(),
+                                                        route.relay.as_str(),
                                                     );
                                                     task_events.report_error(reason.clone());
                                                     acks.no_ack(reason);
@@ -803,7 +848,7 @@ impl Runtime {
                                                          start route '{}' flush deadline: {error}",
                                                         task_generator.as_str(),
                                                         task_domain.as_str(),
-                                                        route.output.relay.as_str(),
+                                                        route.relay.as_str(),
                                                     );
                                                     task_events.report_error(reason.clone());
                                                     failure_acks.no_ack(reason);
@@ -820,7 +865,7 @@ impl Runtime {
                                                         runtime: &runtime,
                                                         domain: &task_domain,
                                                         generator: &task_generator,
-                                                        output_relay: &route.output.relay,
+                                                        output_relay: &route.relay,
                                                         output_schema: &route.output_schema,
                                                         output_registry: &route.output_registry,
                                                         output_services: &route.output_services,
@@ -870,8 +915,8 @@ impl Runtime {
                                                         domain: &task_domain,
                                                         node_kind: ModelKind::Generator,
                                                         node: &ModelName::from(&task_generator),
-                                                        source_route: Some(&route.output.relay),
-                                                        policy: &route.output.message_error_policy,
+                                                        source_route: Some(&route.relay),
+                                                        policy: &route.message_error_policy,
                                                         message: RelayMessage {
                                                             key: branch_key.clone(),
                                                             record: RuntimeRow::new(
@@ -899,7 +944,7 @@ impl Runtime {
                                                 "failed to execute generator '{}' route '{}' in \
                                                  domain '{}' branch '{}': {error:#}",
                                                 task_generator.as_str(),
-                                                route.output.relay.as_str(),
+                                                route.relay.as_str(),
                                                 task_domain.as_str(),
                                                 branch_key_display(&branch_key),
                                             ));
@@ -938,7 +983,7 @@ impl Runtime {
                                      flush deadline: {error}",
                                     task_generator.as_str(),
                                     task_domain.as_str(),
-                                    route.output.relay.as_str(),
+                                    route.relay.as_str(),
                                 ));
                                 false
                             }
@@ -954,7 +999,7 @@ impl Runtime {
                                     runtime: &runtime,
                                     domain: &task_domain,
                                     generator: &task_generator,
-                                    output_relay: &route.output.relay,
+                                    output_relay: &route.relay,
                                     output_schema: &route.output_schema,
                                     output_registry: &route.output_registry,
                                     output_services: &route.output_services,
@@ -1047,13 +1092,27 @@ mod tests {
     use std::sync::Arc as StdArc;
 
     use nervix_models::{
-        CreateGenerator, CreateSchema, MessageErrorPolicy, ParseAsType, ProcessorOutput,
-        ProcessorOutputs, SchemaField, Timestamp,
+        CreateSchema, MessageErrorPolicy, ParseAsType, ProcessorOutput, SchemaField, Timestamp,
     };
     use nonzero_ext::nonzero;
     use ordered_float::OrderedFloat;
 
     use super::*;
+
+    fn planned_route(output: ProcessorOutput, schema: Arc<CompiledSchema>) -> GeneratorRoutePlan {
+        let program =
+            nervix_vm::lower_set_only_route(&output.construction, schema.arrow_schema().as_ref())
+                .assured("the fixture declares a valid set-only route");
+        GeneratorRoutePlan {
+            relay: output.relay,
+            program,
+            flush_policy: output
+                .flush_policy
+                .assured("the fixture declares an explicit flush policy"),
+            message_error_policy: output.message_error_policy,
+            output_schema: schema,
+        }
+    }
     use crate::runtime_schema::RuntimeValue;
 
     #[test]
@@ -1136,20 +1195,13 @@ mod tests {
             message_error_policy: MessageErrorPolicy::Log,
             branch: None,
         };
-        let generator = CreateGenerator {
-            name: named("synth_notifications"),
-            materialized_relay: named("notifications"),
-            branched_by: processor_branched_by("generated_notifications", &["tenant"]),
-            each: "100ms"
-                .parse()
-                .assured("the fixture cadence is a positive duration"),
-            output_routes: ProcessorOutputs::new(vec![output.clone()]),
-        };
+        let route = planned_route(output, output_schema.clone());
 
         let program = compile_generator_set_program(
             &domain("default"),
-            &generator,
-            &output,
+            &named("synth_notifications"),
+            &named("notifications"),
+            &route,
             GeneratorSetProgramSchemas {
                 output: RuntimeVmSchema {
                     schema: output_schema.arrow_schema(),
@@ -1258,20 +1310,13 @@ mod tests {
             message_error_policy: MessageErrorPolicy::Log,
             branch: None,
         };
-        let generator = CreateGenerator {
-            name: named("synth_notifications"),
-            materialized_relay: named("notifications"),
-            branched_by: processor_branched_by("generated_notifications", &["tenant"]),
-            each: "100ms"
-                .parse()
-                .assured("the fixture cadence is a positive duration"),
-            output_routes: ProcessorOutputs::new(vec![output.clone()]),
-        };
+        let route = planned_route(output, output_schema.clone());
 
         let error = compile_generator_set_program(
             &domain("default"),
-            &generator,
-            &output,
+            &named("synth_notifications"),
+            &named("notifications"),
+            &route,
             GeneratorSetProgramSchemas {
                 output: RuntimeVmSchema {
                     schema: output_schema.arrow_schema(),

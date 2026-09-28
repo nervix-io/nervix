@@ -21,6 +21,11 @@ outcomes. This chapter owns the transport deadline and failure signal.
 failure classes reach their callers and public edges. This chapter owns their wire representation
 and transport failure semantics.
 
+Clients never use this transport. [Client Session Protocol](./client-session-protocol.md) owns the
+public client boundary: its listeners, authentication, FlatBuffers frames, request correlation,
+command dispositions, and client recovery. The interconnect carries only node-to-node traffic,
+including the subscription fan-out that feeds a client's Row frames.
+
 ## Simulation Boundary
 
 The transport also runs, unchanged, inside a seeded Turmoil network simulation. That simulation is a
@@ -89,6 +94,10 @@ Discovery also carries whether the advertised process incarnation has begun term
 belongs to the incarnation rather than the stable node identifier: it keeps the process available to
 finish existing ownership handoffs and consensus work, but removes it from new placement
 destinations. A restarted process has a new incarnation and does not inherit the advertisement.
+
+The failure detector retains dead process identities separately from the live peer view. Explicit
+Raft member removal uses the newest observed live or dead identity to fence the stopped process;
+dead identities never make a peer eligible for admission, transport, or placement.
 
 Connections are directed. Both nodes in a pair build their own outbound connections because some
 operations, including relay acknowledgements and cluster events, travel back over the receiver's
@@ -645,7 +654,9 @@ with a newer incarnation.
 A redirect to the leader names only the advertised endpoints discovery has established. A client
 redirected during an election that has not yet observed the new leader's client endpoint receives
 the leader identity without a redirect target rather than a guessed address, and retries until an
-endpoint appears.
+endpoint appears. [Leader Discovery, Redirect, And
+Reconnect](./client-session-protocol.md#leader-discovery-redirect-and-reconnect) defines how
+clients follow it.
 
 Terminal teardown closes the gossip exchange path before it asks the gossip loop to stop. The loop
 reads its stop request only between rounds, and a round exchanges with each selected peer in turn
@@ -672,7 +683,9 @@ number of subscriptions from any number of sessions share one advertisement and 
 withdraws it. Each write of the advertisement reads the lease count while it holds the gossip lock
 that orders the writes, so the last write always matches the count: a release that finishes late
 cannot withdraw the interest of a subscription that attached after it. The count per relay is
-exported as `nervix_session_subscriptions`.
+exported as `nervix_session_subscriptions`. [Row
+Subscriptions](./client-session-protocol.md#row-subscriptions) defines what the subscriber's node
+does with the batches this fan-out delivers.
 
 Consensus separates traffic according to the progress it protects:
 

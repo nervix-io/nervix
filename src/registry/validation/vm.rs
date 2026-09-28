@@ -21,9 +21,13 @@ pub(in crate::registry) fn udf_compile_options(
     models: &ModelIndex,
     mut options: CompileOptions,
 ) -> CompileOptions {
-    options.udf_signatures = udf_signatures_for(models.models().filter_map(|model| match model {
-        Model::Udf(udf) => Some(udf),
-        _ => None,
-    }));
+    let programs = models
+        .models()
+        .filter_map(|model| match model {
+            Model::Udf(udf) => Some(crate::registry::udf_program(udf)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    options.udf_signatures = udf_signatures_for(programs.iter());
     options
 }

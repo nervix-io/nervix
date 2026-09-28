@@ -272,13 +272,13 @@ The session edge runs one delivery task per attached domain against its observer
 carries the observation read when the observer was created, and the task starts only once that
 reply is queued, remembering the observation the reply carried. It first sends any accepted tick
 of that generation, if one exists. On each wake it reads the newest installation and queues a
-state frame on the session's control lane only when the observation differs
-from the one the client last received. Replacing an installation with an equal one publishes
+state frame on the session's control lane only when the observation differs from the one the client
+last received. Replacing an installation with an equal one publishes
 nothing. An authority move within a generation or the alteration pause leaves the installation
 unchanged, though newly accepted progress still wakes delivery. A state frame waits for room on the
 control lane; changes published meanwhile collapse into the newest installation read after it is
-queued. Before each tick delivery re-reads the installation and sends a
-changed state frame first. A tick's control-lane slot can be replaced until transport takes it,
+queued. Before each tick delivery, the task re-reads the installation and sends a changed state
+frame first. A tick's control-lane slot can be replaced until transport takes it,
 including while the lane is full. Each attached domain therefore has at most one pending tick and
 slow clients see the newest accepted id instead of a backlog.
 
@@ -288,7 +288,9 @@ that reply. When the observer reports the domain missing, the task marks the att
 queues the end frame with reason `DomainRemoved`, and ends. Because the mark precedes the frame, a
 request the client sends after reading the frame finds the attachment ending: an attach replaces it
 and a detach reports it not attached. The end of the session stops every delivery task without a
-frame. See [Domain Clock Attachment](./sessions.md#domain-clock-attachment) for the public contract.
+frame. See [Domain Clock Attachment](./sessions.md#domain-clock-attachment) for the public contract
+and [Client Session Protocol](./client-session-protocol.md#domain-clock-attachment) for how the
+attachment travels in the protocol.
 
 ## Execution-Time Snapshots
 

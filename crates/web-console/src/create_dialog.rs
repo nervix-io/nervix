@@ -155,6 +155,8 @@ enum ChoiceLoad {
         page_cursor: Option<String>,
     },
     Empty,
+    MissingPrerequisite(&'static str),
+    StaleContext,
     Failed(String),
 }
 
@@ -826,6 +828,8 @@ impl CreateSignals {
                         ChoiceLoad::Waiting
                         | ChoiceLoad::Loading
                         | ChoiceLoad::Empty
+                        | ChoiceLoad::MissingPrerequisite(_)
+                        | ChoiceLoad::StaleContext
                         | ChoiceLoad::Failed(_) => Vec::new(),
                     }
                 } else {
@@ -837,14 +841,10 @@ impl CreateSignals {
                     page_cursor: outcome.page_cursor,
                 });
             }
-            ChoiceStatus::MissingContext => target.set(ChoiceLoad::Failed(
-                "Choose the fields this control depends on".to_string(),
+            ChoiceStatus::MissingContext => target.set(ChoiceLoad::MissingPrerequisite(
+                "Choose the fields this control depends on",
             )),
-            ChoiceStatus::StaleContext => {
-                target.set(ChoiceLoad::Failed(
-                    "The form context changed; retry".to_string(),
-                ));
-            }
+            ChoiceStatus::StaleContext => target.set(ChoiceLoad::StaleContext),
             ChoiceStatus::LookupFailed => {
                 target.set(ChoiceLoad::Failed(
                     "Choices could not be loaded".to_string(),
@@ -1093,7 +1093,7 @@ fn request_choices(
         Err(reason) => {
             control_signals
                 .load
-                .set(ChoiceLoad::Failed(reason.to_string()));
+                .set(ChoiceLoad::MissingPrerequisite(reason));
             return;
         }
     };
@@ -1140,9 +1140,12 @@ fn request_choices(
 fn page_cursor(load: RwSignal<ChoiceLoad>) -> Option<String> {
     match load.get_untracked() {
         ChoiceLoad::Ready { page_cursor, .. } => page_cursor,
-        ChoiceLoad::Waiting | ChoiceLoad::Loading | ChoiceLoad::Empty | ChoiceLoad::Failed(_) => {
-            None
-        }
+        ChoiceLoad::Waiting
+        | ChoiceLoad::Loading
+        | ChoiceLoad::Empty
+        | ChoiceLoad::MissingPrerequisite(_)
+        | ChoiceLoad::StaleContext
+        | ChoiceLoad::Failed(_) => None,
     }
 }
 
@@ -1495,6 +1498,18 @@ fn ChoiceGroup(
             <Show when=move || load.get() == ChoiceLoad::Empty fallback=|| ()>
                 <p class="create-choice-state">"No choices"</p>
             </Show>
+            <Show when=move || matches!(load.get(), ChoiceLoad::MissingPrerequisite(_)) fallback=|| ()>
+                <p class="create-choice-state create-choice-missing">{move || match load.get() {
+                    ChoiceLoad::MissingPrerequisite(reason) => reason,
+                    _ => "",
+                }}</p>
+            </Show>
+            <Show when=move || load.get() == ChoiceLoad::StaleContext fallback=|| ()>
+                <div class="create-choice-recovery">
+                    <p class="create-choice-state create-choice-stale">"The form context changed. Refresh choices."</p>
+                    <button class="create-choice-retry" type="button" on:click=move |_| request_choices(signals, control, request_tx, session_generation.get_untracked(), false)>"Retry"</button>
+                </div>
+            </Show>
             <Show when=move || matches!(load.get(), ChoiceLoad::Failed(_)) fallback=|| ()>
                 <p class="create-choice-state choice-failed" role="alert">{move || match load.get() {
                     ChoiceLoad::Failed(reason) => reason,
@@ -1505,7 +1520,12 @@ fn ChoiceGroup(
                 <For
                     each=move || match load.get() {
                         ChoiceLoad::Ready { choices, .. } => choices,
-                        ChoiceLoad::Waiting | ChoiceLoad::Loading | ChoiceLoad::Empty | ChoiceLoad::Failed(_) => Vec::new(),
+                        ChoiceLoad::Waiting
+                        | ChoiceLoad::Loading
+                        | ChoiceLoad::Empty
+                        | ChoiceLoad::MissingPrerequisite(_)
+                        | ChoiceLoad::StaleContext
+                        | ChoiceLoad::Failed(_) => Vec::new(),
                     }
                     key=|choice| choice.presentation.label.clone()
                     children=move |choice| {
@@ -1634,10 +1654,10 @@ mod tests {
 
     use super::{
         super::ConsoleRequest,
-        ChoiceControl, ChoiceLoad, ChoiceRequestContext, CreateDialog, CreateDialogProps,
-        CreateDispatch, CreateDraftError, CreateKind, CreateMenu, CreateMenuProps, CreateProgress,
-        CreateSignals, CreateSubmission, DomainDraft, ResourceDraft, SelectedReference, UserDraft,
-        open_form_controls, request_choices,
+        ChoiceControl, ChoiceGroup, ChoiceGroupProps, ChoiceLoad, ChoiceRequestContext,
+        CreateDialog, CreateDialogProps, CreateDispatch, CreateDraftError, CreateKind, CreateMenu,
+        CreateMenuProps, CreateProgress, CreateSignals, CreateSubmission, DomainDraft,
+        ResourceDraft, SelectedReference, UserDraft, open_form_controls, request_choices,
         schema_draft::{SchemaFieldDraft, SchemaTypeDraft, WireFieldDraft, WireFieldType},
         select_choice, selected_choice,
     };
@@ -1909,7 +1929,7 @@ mod tests {
     }
 
     #[test]
-    fn choice_outcomes_cover_empty_append_and_each_failure_state() {
+    fn choice_outcomes_keep_missing_stale_and_failed_states_distinct() {
         Owner::new().with(|| {
             let signals = CreateSignals::new();
             signals.open(CreateKind::Domain, None, "trigger");
@@ -1963,22 +1983,19 @@ mod tests {
                 ChoiceLoad::Ready { choices, page_cursor: None } if choices.len() == 2
             ));
 
-            for (status, message) in [
+            for (status, expected) in [
                 (
                     ChoiceStatus::MissingContext,
-                    "Choose the fields this control depends on",
+                    ChoiceLoad::MissingPrerequisite("Choose the fields this control depends on"),
                 ),
+                (ChoiceStatus::StaleContext, ChoiceLoad::StaleContext),
                 (
-                    ChoiceStatus::StaleContext,
-                    "The form context changed; retry",
+                    ChoiceStatus::LookupFailed,
+                    ChoiceLoad::Failed("Choices could not be loaded".to_string()),
                 ),
-                (ChoiceStatus::LookupFailed, "Choices could not be loaded"),
             ] {
                 signals.apply_choice(context, 3, outcome(status, Vec::new(), None));
-                assert_eq!(
-                    pace.get_untracked(),
-                    ChoiceLoad::Failed(message.to_string())
-                );
+                assert_eq!(pace.get_untracked(), expected);
             }
             signals.fail_choice(context, 3, "transport ended".to_string());
             assert_eq!(
@@ -1990,6 +2007,49 @@ mod tests {
                 pace.get_untracked(),
                 ChoiceLoad::Failed("transport ended".to_string())
             );
+        });
+    }
+
+    #[test]
+    fn choice_states_render_hints_and_failures_with_their_own_presentation() {
+        super::super::initialize_test_executor();
+        Owner::new().with(|| {
+            let signals = CreateSignals::new();
+            let load = signals.choices.domain_pace.load;
+            let request_tx = RwSignal::new(None);
+            let session_generation = RwSignal::new(1);
+            let render = || {
+                ChoiceGroup(
+                    ChoiceGroupProps::builder()
+                        .class_name("create-pace-options")
+                        .label("Pace")
+                        .control(ChoiceControl::DomainPace)
+                        .signals(signals)
+                        .request_tx(request_tx)
+                        .session_generation(session_generation)
+                        .build(),
+                )
+                .to_html()
+            };
+
+            load.set(ChoiceLoad::MissingPrerequisite("Choose a domain"));
+            let missing = render();
+            assert!(missing.contains("create-choice-missing"));
+            assert!(missing.contains("Choose a domain"));
+
+            load.set(ChoiceLoad::StaleContext);
+            let stale = render();
+            assert!(stale.contains("create-choice-stale"));
+            assert!(stale.contains("create-choice-retry"));
+            assert!(stale.contains("The form context changed"));
+
+            load.set(ChoiceLoad::Failed(
+                "Choices could not be loaded".to_string(),
+            ));
+            let failed = render();
+            assert!(failed.contains("choice-failed"));
+            assert!(failed.contains("role=\"alert\""));
+            assert!(failed.contains("Choices could not be loaded"));
         });
     }
 
@@ -2299,7 +2359,7 @@ mod tests {
             request_choices(signals, ChoiceControl::BranchSchema, request_tx, 9, false);
             assert_eq!(
                 branch_schema.load.get_untracked(),
-                ChoiceLoad::Failed("Select a domain before choosing a schema".to_string())
+                ChoiceLoad::MissingPrerequisite("Select a domain before choosing a schema")
             );
             assert!(receiver.try_recv().is_err());
 
@@ -2377,7 +2437,7 @@ mod tests {
                 request_choices(signals, control, request_tx, 2, false);
                 assert_eq!(
                     signals.choices.of(control).load.get_untracked(),
-                    ChoiceLoad::Failed(reason.to_string())
+                    ChoiceLoad::MissingPrerequisite(reason)
                 );
             }
 
@@ -2392,7 +2452,7 @@ mod tests {
             );
             assert_eq!(
                 signals.choices.subscription_field.load.get_untracked(),
-                ChoiceLoad::Failed("Select a relay to list the fields of its records".to_string())
+                ChoiceLoad::MissingPrerequisite("Select a relay to list the fields of its records")
             );
             for (control, target) in [
                 (ChoiceControl::RelaySchema, ChoiceTarget::Schema),

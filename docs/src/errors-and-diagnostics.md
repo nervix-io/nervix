@@ -4,6 +4,9 @@ Nervix gives a failure its meaning at the boundary that can decide what went wro
 travels through the graph as a semantic error and an `error-stack` report. A public edge renders a
 diagnostic only after it has made the decision the error permits. Ordinary control outcomes, such
 as waiting for materialized state or following a new leader, remain distinct from failures.
+The web console applies the same distinction to structured choice lookups: an absent form
+prerequisite shows a neutral hint, and stale context offers a fresh request. A failed lookup,
+closed session channel, or unreadable reply appears as an alert.
 
 This chapter owns the error and diagnostic model across layers. [Typed States And Validation
 Boundaries](./typed-states.md) explains how missing values and semantic states are represented;
@@ -34,6 +37,23 @@ report. It does not format a cause into a string and then classify that text as 
 Values a caller acts on belong in typed fields; display formatting happens when the result is
 reported. `anyhow` remains at integration and tooling boundaries whose caller has no domain choice
 to make, such as a foreign callback that only accepts a general error.
+
+The expression VM returns reports for compile, batch, and runtime failures. `CompileError` keeps
+its typed diagnostic code, stable code spelling, operation span, and safe message; validation adds
+the model and route context without losing that cause. Roto setup returns `UdfError` reports and
+Roto's VM injector returns runtime reports, so a failing Arrow operation can remain in the chain.
+Jaq returns `JaqProgramError` or `JaqFormatError` reports for compilation, evaluation, and format
+conversion. A codec or runtime caller retains that report under its operation context. VM row
+errors remain typed values in the batch outcome and are formatted only when a message error is
+reported; this conversion does not turn them into report allocations per row.
+HTTP request-field compilation retains the VM report beneath the emitter's request-field context
+and attaches its safe message for diagnostics; an invalid request program never starts the sink.
+
+Resource planning checks the committed lookup key and codec, generator materialized source,
+output branch and route construction, and WASM guest-state generation before runtime binding.
+These failures name the owning node and relevant relay, codec, or field. A missing
+lookup file is rejected during candidate binding validation; malformed records remain a loader
+failure when the pinned file is decoded. Neither failure silently selects another resource version.
 
 Schemaful JSON parsing has one codec decode failure carrying the simd-json source. Malformed
 syntax, invalid UTF-8, and invalid escapes enter through that failure; object shape, missing or
@@ -89,7 +109,10 @@ conversion. Canonical NSPL rendering refuses only a value the language has no sp
 infinite `F64` literal, which the error carries, or a codec declaration its wire format cannot
 express, such as encoding rules on `SYSLOG` or a JAQ-transformed format without a program, which the
 error names by codec. The execution-graph description keeps the JSON encoder's or decoder's error
-beneath its own when the public wire form cannot be written or read. Registry planning keeps an
+beneath its own when the public wire form cannot be written or read. It keeps a typed columnar
+JSON writer error beneath a named codec encode failure. Unsupported columns and invalid string
+offsets fail batch preparation with the codec name. Required nulls identify their field and row;
+write failures retain their source without quoting a payload value. Registry planning keeps an
 alteration's report beneath its invalid-model refusal of the named Model, and the refusal quotes the
 rejection's message, so a failed `ALTER` shows the same reason the vocabulary gave. `SHOW CREATE`
 answers a Model canonical NSPL cannot spell with a fixed diagnostic.
@@ -304,8 +327,11 @@ sequenceDiagram
 
 At the public edge, the session maps a typed validation or execution result to a command
 disposition, message, and diagnostics; a transaction's admitted and retained outcomes stay
-distinct from a new execution. `DESCRIBE TRANSACTION` and `SHOW TRANSACTIONS` read beside an
-attached transaction only as separate requests; combining either read with another statement
+distinct from a new execution. [Command
+Dispositions](./client-session-protocol.md#command-dispositions) defines each disposition, the phase
+that produces it, and what a client may conclude from it, and typed request rejections are covered
+in [Rejections](./client-session-protocol.md#rejections). `DESCRIBE TRANSACTION` and
+`SHOW TRANSACTIONS` read beside an attached transaction only as separate requests; combining either read with another statement
 returns a session planning diagnostic before anything enters the queue. An incomplete impact
 report carries its planning diagnostics and cannot supply a commit preview. A stale preview is a
 recoverable command disposition that applies no effects and tells the client to refresh its

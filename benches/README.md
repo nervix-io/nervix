@@ -165,6 +165,17 @@ hands the decision back to the 50 ms interval and the batches grow:
 
 ## Comparing two local builds (A/B)
 
+### JSON emission from Arrow columns
+
+`just bench-json-encode` measures a 1,024-row Arrow batch with integer, clean UTF-8, and
+mixed escaped and clean string columns. Its columnar case includes the once-per-batch escape
+classification; the serde case serializes the same values from a direct Rust row struct. The
+serde case is a reference cost for this fixture, not the former server codec path. Run
+`just bench-json-encode --test` to check both benchmark bodies, and use
+`just benchmark-ab origin/main 3 kafka-filter-map --partitions 1` for end-to-end server evidence.
+The full measurements and generated-instruction inspection are in
+[SIMD kernels 02](reports/simd-kernels-02.md).
+
 ### Expression VM function workbench
 
 `just bench-vm` runs the existing Criterion VM harness. Its `execute_program_batch_size` group

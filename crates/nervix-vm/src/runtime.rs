@@ -330,7 +330,7 @@ impl RegisterBank {
         &mut self,
         operands: &[RegisterRef],
         narrowing: &Narrowing,
-    ) -> Result<(), RuntimeError> {
+    ) -> error_stack::Result<(), RuntimeError> {
         for operand in operands {
             if self.narrowed.contains_key(operand) {
                 continue;
@@ -375,7 +375,7 @@ macro_rules! impl_register_bank {
                 &mut self,
                 inputs: &[InputBinding],
                 batch: &TypedBatch,
-            ) -> Result<(), RuntimeError> {
+            ) -> error_stack::Result<(), RuntimeError> {
                 for input in inputs {
                     self.set(input.reg, batch.column(input.column_index).clone(), Shape::Column)?;
                 }
@@ -403,16 +403,16 @@ macro_rules! impl_register_bank {
             fn register<A: RegisterArray>(
                 &self,
                 reg: RegisterRef,
-            ) -> Result<&Register<A>, RuntimeError> {
+            ) -> error_stack::Result<&Register<A>, RuntimeError> {
                 self.ensure_type(reg, A::TYPE, A::LABEL)?;
                 A::slot(self.bank(reg.space), reg.index)
-                    .ok_or(RuntimeError::MissingRegister { reg })
+                    .ok_or_else(|| Report::new(RuntimeError::MissingRegister { reg }))
             }
 
             /// The register as a column of the current row count. While an instruction narrowed
             /// to the rows its arm selects runs, a column operand reads as its narrowed copy and a
             /// scalar operand as a column repeating it over those rows.
-            fn column<A: RegisterArray>(&self, reg: RegisterRef) -> Result<&A, RuntimeError> {
+            fn column<A: RegisterArray>(&self, reg: RegisterRef) -> error_stack::Result<&A, RuntimeError> {
                 let register = self.register::<A>(reg)?;
                 let narrowed = match self.narrowed.get(&reg) {
                     None => return Ok(register.column(self.rows)),
@@ -424,10 +424,10 @@ macro_rules! impl_register_bank {
                         value.broadcast(self.rows).into_typed()
                     }),
                 };
-                A::from_typed(narrowed).ok_or(RuntimeError::InvalidRegisterType {
+                A::from_typed(narrowed).ok_or_else(|| Report::new(RuntimeError::InvalidRegisterType {
                     reg,
                     expected: A::LABEL,
-                })
+                }))
             }
 
             /// The register as a kernel operand, which keeps a scalar a scalar. While an
@@ -436,12 +436,12 @@ macro_rules! impl_register_bank {
             fn operand<A: RegisterArray>(
                 &self,
                 reg: RegisterRef,
-            ) -> Result<Operand<'_, A>, RuntimeError> {
+            ) -> error_stack::Result<Operand<'_, A>, RuntimeError> {
                 if let Some(NarrowedRegister::Column(array)) = self.narrowed.get(&reg) {
-                    let array = A::from_typed(array).ok_or(RuntimeError::InvalidRegisterType {
+                    let array = A::from_typed(array).ok_or_else(|| Report::new(RuntimeError::InvalidRegisterType {
                         reg,
                         expected: A::LABEL,
-                    })?;
+                    }))?;
                     return Ok(Operand::Column(array));
                 }
                 Ok(self.register::<A>(reg)?.operand(self.rows))
@@ -451,10 +451,10 @@ macro_rules! impl_register_bank {
                 &mut self,
                 reg: RegisterRef,
                 value: Register<A>,
-            ) -> Result<(), RuntimeError> {
+            ) -> error_stack::Result<(), RuntimeError> {
                 self.ensure_type(reg, A::TYPE, A::LABEL)?;
                 let slot = A::slot_mut(self.bank_mut(reg.space), reg.index)
-                    .ok_or(RuntimeError::MissingRegister { reg })?;
+                    .ok_or_else(|| Report::new(RuntimeError::MissingRegister { reg }))?;
                 *slot = Some(value);
                 Ok(())
             }
@@ -475,7 +475,7 @@ macro_rules! impl_register_bank {
             }
 
             /// Copies `src` into `dst`, shape included.
-            fn copy(&mut self, dst: RegisterRef, src: RegisterRef) -> Result<(), RuntimeError> {
+            fn copy(&mut self, dst: RegisterRef, src: RegisterRef) -> error_stack::Result<(), RuntimeError> {
                 self.uninitialized.remove(&dst);
                 match src.ty {
                     $(RegisterType::$Variant => {
@@ -497,7 +497,7 @@ macro_rules! impl_register_bank {
             fn any_operand(
                 &self,
                 reg: RegisterRef,
-            ) -> Result<Operand<'_, dyn Array>, RuntimeError> {
+            ) -> error_stack::Result<Operand<'_, dyn Array>, RuntimeError> {
                 match reg.ty {
                     $(RegisterType::$Variant => Ok(self.operand::<$Array>(reg)?.erased()),)+
                     RegisterType::Datetime => {
@@ -514,7 +514,7 @@ macro_rules! impl_register_bank {
                 reg: RegisterRef,
                 value: TypedArray,
                 shape: Shape,
-            ) -> Result<(), RuntimeError> {
+            ) -> error_stack::Result<(), RuntimeError> {
                 self.uninitialized.remove(&reg);
                 match value {
                     $(TypedArray::$Variant(array) => {
@@ -536,7 +536,7 @@ macro_rules! impl_register_bank {
                 }
             }
 
-            fn output_array(&self, reg: RegisterRef) -> Result<TypedArray, RuntimeError> {
+            fn output_array(&self, reg: RegisterRef) -> error_stack::Result<TypedArray, RuntimeError> {
                 if let Some(data_type) = self.uninitialized.get(&reg) {
                     return Ok(TypedArray::uninitialized(
                         data_type.clone(),
@@ -547,7 +547,7 @@ macro_rules! impl_register_bank {
             }
 
             /// The register as a column of the current row count.
-            fn read_array(&self, reg: RegisterRef) -> Result<TypedArray, RuntimeError> {
+            fn read_array(&self, reg: RegisterRef) -> error_stack::Result<TypedArray, RuntimeError> {
                 match reg.ty {
                     $(RegisterType::$Variant => {
                         Ok(TypedArray::$Variant(self.column::<$Array>(reg)?.clone()))
@@ -566,14 +566,14 @@ macro_rules! impl_register_bank {
                 reg: RegisterRef,
                 expected: RegisterType,
                 label: &'static str,
-            ) -> Result<(), RuntimeError> {
+            ) -> error_stack::Result<(), RuntimeError> {
                 if reg.ty == expected {
                     Ok(())
                 } else {
-                    Err(RuntimeError::InvalidRegisterType {
+                    Err(Report::new(RuntimeError::InvalidRegisterType {
                         reg,
                         expected: label,
-                    })
+                    }))
                 }
             }
         }
@@ -694,7 +694,7 @@ pub trait FunctionInjector: Send + Sync + fmt::Debug {
         span: Span,
         now: Timestamp,
         prior_error_rows: RowErrorMask<'_>,
-    ) -> Result<InjectedResult, RuntimeError>;
+    ) -> error_stack::Result<InjectedResult, RuntimeError>;
 }
 
 /// The answer to one call out of the VM.
@@ -745,7 +745,7 @@ pub async fn execute_predicate_in_context(
     predicate: &CompiledPredicate,
     batch: &TypedBatch,
     context: &ExecutionContext,
-) -> Result<PredicateExecutionResult, Report<RuntimeError>> {
+) -> error_stack::Result<PredicateExecutionResult, RuntimeError> {
     let result =
         execute_program_with_selection_in_context(predicate.program(), batch, context).await?;
     Ok(PredicateExecutionResult {
@@ -758,7 +758,7 @@ pub async fn execute_program_with_selection_in_context(
     program: &triomphe::Arc<CompiledProgram>,
     batch: &TypedBatch,
     context: &ExecutionContext,
-) -> Result<ExecutionResult, RuntimeError> {
+) -> error_stack::Result<ExecutionResult, RuntimeError> {
     if batch.row_count() <= SPAWN_BLOCKING_ROW_THRESHOLD
         && !program_requires_spawn_blocking(program, context)
     {
@@ -772,8 +772,10 @@ pub async fn execute_program_with_selection_in_context(
         execute_program_with_selection_in_context_sync(&program, &batch, &context)
     })
     .await
-    .map_err(|error| RuntimeError::BlockingExecutionFailed {
-        message: error.to_string(),
+    .map_err(|error| {
+        Report::new(RuntimeError::BlockingExecutionFailed {
+            message: error.to_string(),
+        })
     })?
 }
 
@@ -803,7 +805,7 @@ mod test_execution {
     pub(super) fn execute_program_sync(
         program: &CompiledProgram,
         batch: &TypedBatch,
-    ) -> Result<TypedBatch, RuntimeError> {
+    ) -> error_stack::Result<TypedBatch, RuntimeError> {
         let context = ExecutionContext::new(Timestamp::from_unix_nanos(0));
         execute_program_in_context_sync(program, batch, &context).map(|result| result.batch)
     }
@@ -812,14 +814,14 @@ mod test_execution {
         program: &CompiledProgram,
         batch: &TypedBatch,
         context: &ExecutionContext,
-    ) -> Result<ExecutionResult, RuntimeError> {
+    ) -> error_stack::Result<ExecutionResult, RuntimeError> {
         execute_program_with_selection_in_context_sync(program, batch, context)
     }
 
     pub(super) fn execute_program_with_selection_sync(
         program: &CompiledProgram,
         batch: &TypedBatch,
-    ) -> Result<ExecutionResult, RuntimeError> {
+    ) -> error_stack::Result<ExecutionResult, RuntimeError> {
         let context = ExecutionContext::new(Timestamp::from_unix_nanos(0));
         execute_program_with_selection_in_context_sync(program, batch, &context)
     }
@@ -834,9 +836,9 @@ fn execute_program_with_selection_in_context_sync(
     program: &CompiledProgram,
     batch: &TypedBatch,
     context: &ExecutionContext,
-) -> Result<ExecutionResult, RuntimeError> {
+) -> error_stack::Result<ExecutionResult, RuntimeError> {
     if batch.schema().as_ref() != program.input_schema.as_ref() {
-        return Err(RuntimeError::SchemaMismatch);
+        return Err(Report::new(RuntimeError::SchemaMismatch));
     }
 
     let mut registers = RegisterBank::new(&program.layouts, batch.row_count());
@@ -1113,7 +1115,7 @@ impl Instruction {
         rows: &ArmRows,
         row_errors: &mut RowErrors,
         injectors: Injectors<'_>,
-    ) -> Result<(), RuntimeError> {
+    ) -> error_stack::Result<(), RuntimeError> {
         let row_count = registers.rows;
         match &self.kind {
             InstructionKind::Move { dst, input } => registers.copy(*dst, *input),
@@ -1285,10 +1287,10 @@ impl Instruction {
                     Operand::Column(answers) => (json_answer(answers, *index), Shape::Column),
                 };
                 let Some(answer) = answer else {
-                    return Err(RuntimeError::InvalidRegisterType {
+                    return Err(Report::new(RuntimeError::InvalidRegisterType {
                         reg: *input,
                         expected: "the answers of a JSON scan",
-                    });
+                    }));
                 };
                 registers.set(*dst, array_ref_to_typed_array(answer)?, shape)
             }
@@ -1306,7 +1308,7 @@ impl Instruction {
         prior_error_rows: RowErrorMask<'_>,
         output_type: &DataType,
         injectors: Injectors<'_>,
-    ) -> Result<InjectedResult, RuntimeError> {
+    ) -> error_stack::Result<InjectedResult, RuntimeError> {
         let inject = |injector: &triomphe::Arc<Box<dyn FunctionInjector>>| {
             injector.inject_with_context(
                 function,
@@ -1319,8 +1321,11 @@ impl Instruction {
         };
         let injected = if let Some(injector) = injectors.context.injector.as_ref() {
             match inject(injector) {
-                Err(RuntimeError::MissingFunctionInjector { .. })
-                    if injectors.program.is_some() =>
+                Err(error)
+                    if matches!(
+                        error.current_context(),
+                        RuntimeError::MissingFunctionInjector { .. }
+                    ) && injectors.program.is_some() =>
                 {
                     inject(injectors.program.verified(
                         "the match guard above requires the program's injector to be present",
@@ -1331,27 +1336,27 @@ impl Instruction {
         } else if let Some(injector) = injectors.program {
             inject(injector)?
         } else {
-            return Err(RuntimeError::MissingFunctionInjector {
+            return Err(Report::new(RuntimeError::MissingFunctionInjector {
                 function: function.as_str().to_string(),
-            });
+            }));
         };
         let row_count = selection.len();
         if injected.output.data_type() != *output_type || injected.output.len() != row_count {
-            return Err(RuntimeError::InvalidInjectedResult {
+            return Err(Report::new(RuntimeError::InvalidInjectedResult {
                 function: function.as_str().to_string(),
                 expected_type: output_type.clone(),
                 actual_type: injected.output.data_type(),
                 expected_rows: row_count,
                 actual_rows: injected.output.len(),
-            });
+            }));
         }
         for (row, _) in &injected.side_errors {
             if *row >= row_count {
-                return Err(RuntimeError::InvalidInjectedSideError {
+                return Err(Report::new(RuntimeError::InvalidInjectedSideError {
                     function: function.as_str().to_string(),
                     row: *row,
                     row_count,
-                });
+                }));
             }
         }
         Ok(injected)
@@ -1395,8 +1400,12 @@ impl Instruction {
         volatile: bool,
         rows: &ArmRows,
         row_errors: &mut RowErrors,
-        compute: impl FnOnce(&RegisterBank, Extent, &mut RowErrors) -> Result<TypedArray, RuntimeError>,
-    ) -> Result<(), RuntimeError> {
+        compute: impl FnOnce(
+            &RegisterBank,
+            Extent,
+            &mut RowErrors,
+        ) -> error_stack::Result<TypedArray, RuntimeError>,
+    ) -> error_stack::Result<(), RuntimeError> {
         /// The rows whose errors a computation over the whole batch keeps.
         enum Kept<'a> {
             Every,
@@ -1505,7 +1514,7 @@ impl Instruction {
         input: RegisterRef,
         fallback: &AssignmentFallback,
         row_errors: &RowErrors,
-    ) -> Result<(), RuntimeError> {
+    ) -> error_stack::Result<(), RuntimeError> {
         let Some(failed) = row_errors.rows_failed_within(self.span) else {
             return registers.copy(dst, input);
         };
@@ -1537,7 +1546,7 @@ impl Instruction {
         input: RegisterRef,
         op: UnaryOp,
         row_errors: &mut RowErrors,
-    ) -> Result<TypedArray, RuntimeError> {
+    ) -> error_stack::Result<TypedArray, RuntimeError> {
         let value = registers.read_array(input)?;
         if let Some(output) = unary_kernel(op, &value, row_errors, self.span) {
             return Ok(output);
@@ -1546,10 +1555,10 @@ impl Instruction {
             UnaryOp::Neg => "numeric array",
             UnaryOp::Not => "BooleanArray",
         };
-        Err(RuntimeError::InvalidRegisterType {
+        Err(Report::new(RuntimeError::InvalidRegisterType {
             reg: input,
             expected,
-        })
+        }))
     }
 
     fn execute_binary(
@@ -1559,7 +1568,7 @@ impl Instruction {
         right: RegisterRef,
         op: BinaryOp,
         row_errors: &mut RowErrors,
-    ) -> Result<TypedArray, RuntimeError> {
+    ) -> error_stack::Result<TypedArray, RuntimeError> {
         if let BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom = op {
             let left_operand = registers.any_operand(left)?;
             let right_operand = registers.any_operand(right)?;
@@ -1668,10 +1677,10 @@ impl Instruction {
                 | RegisterType::Float32
                 | RegisterType::Float64,
                 None,
-            ) => Err(RuntimeError::InvalidRegisterType {
+            ) => Err(Report::new(RuntimeError::InvalidRegisterType {
                 reg: left,
                 expected: "BooleanArray",
-            }),
+            })),
             (RegisterType::Boolean, _) => execute_binary_bool(registers, left, right, op),
             (RegisterType::Utf8, _) => Ok(TypedArray::Boolean(compare_with_arrow_ord(
                 &registers.operand::<StringArray>(left)?,
@@ -1691,10 +1700,10 @@ impl Instruction {
                 op,
                 "datetime comparison",
             )?)),
-            (RegisterType::Generic, _) => Err(RuntimeError::InvalidRegisterType {
+            (RegisterType::Generic, _) => Err(Report::new(RuntimeError::InvalidRegisterType {
                 reg: left,
                 expected: "scalar array",
-            }),
+            })),
         }
     }
 }
@@ -1899,15 +1908,15 @@ pub(crate) fn cast_constant(
     Ok(cast)
 }
 
-fn arrow_kernel_error(context: &str, error: ArrowError) -> RuntimeError {
-    RuntimeError::InvalidBatch {
+fn arrow_kernel_error(context: &str, error: ArrowError) -> Report<RuntimeError> {
+    Report::new(RuntimeError::InvalidBatch {
         message: format!("{context}: {error}"),
-    }
+    })
 }
 
 macro_rules! define_array_ref_to_typed_array {
     ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {
-        fn array_ref_to_typed_array(array: ArrayRef) -> Result<TypedArray, RuntimeError> {
+        fn array_ref_to_typed_array(array: ArrayRef) -> error_stack::Result<TypedArray, RuntimeError> {
             match array.data_type() {
                 $($data_type => Ok(TypedArray::$Variant(
                     array
@@ -2001,7 +2010,7 @@ fn json_answer(answers: &ArrayRef, index: usize) -> Option<ArrayRef> {
 fn execute_coalesce(
     registers: &RegisterBank,
     inputs: &[RegisterRef],
-) -> Result<TypedArray, RuntimeError> {
+) -> error_stack::Result<TypedArray, RuntimeError> {
     let first = inputs
         .first()
         .verified("the compiler rejects a coalesce with fewer than one argument");
@@ -2030,7 +2039,7 @@ fn execute_select(
     registers: &RegisterBank,
     arms: &[SelectArm],
     otherwise: RegisterRef,
-) -> Result<TypedArray, RuntimeError> {
+) -> error_stack::Result<TypedArray, RuntimeError> {
     let mut selected: Option<ArrayRef> = None;
     for arm in arms.iter().rev() {
         let mask = registers.column::<BooleanArray>(arm.mask)?;
@@ -2077,7 +2086,7 @@ fn write_literal(
     registers: &mut RegisterBank,
     dst: RegisterRef,
     value: &ScalarValue,
-) -> Result<(), RuntimeError> {
+) -> error_stack::Result<(), RuntimeError> {
     let scalar = match value {
         ScalarValue::Int64(value) => TypedArray::Int64(Int64Array::from_value(*value, 1)),
         ScalarValue::Float64(value) => TypedArray::Float64(Float64Array::from_value(*value, 1)),
@@ -2093,7 +2102,7 @@ fn write_null_literal(
     registers: &mut RegisterBank,
     dst: RegisterRef,
     data_type: &DataType,
-) -> Result<(), RuntimeError> {
+) -> error_stack::Result<(), RuntimeError> {
     let scalar = array_ref_to_typed_array(new_null_array(data_type, 1))?;
     registers.set(dst, scalar, Shape::Scalar)
 }
@@ -2109,7 +2118,7 @@ fn execute_binary_bool(
     left: RegisterRef,
     right: RegisterRef,
     op: BinaryOp,
-) -> Result<TypedArray, RuntimeError> {
+) -> error_stack::Result<TypedArray, RuntimeError> {
     let output = match op {
         // The Kleene kernels take two columns, so a scalar operand is read as a column here.
         BinaryOp::And => and_kleene(
@@ -2133,10 +2142,10 @@ fn execute_binary_bool(
         )
         .map_err(|error| arrow_kernel_error("boolean neq kernel failed", error))?,
         _ => {
-            return Err(RuntimeError::InvalidRegisterType {
+            return Err(Report::new(RuntimeError::InvalidRegisterType {
                 reg: RegisterRef::new(RegisterSpace::Temp, RegisterType::Boolean, 0),
                 expected: "Boolean logical/comparison operator",
-            });
+            }));
         }
     };
     Ok(TypedArray::Boolean(output))
@@ -2147,7 +2156,7 @@ fn compare_with_arrow_ord(
     right: &dyn Datum,
     op: BinaryOp,
     context: &str,
-) -> Result<BooleanArray, RuntimeError> {
+) -> error_stack::Result<BooleanArray, RuntimeError> {
     match op {
         BinaryOp::Eq => eq(left, right)
             .map_err(|error| arrow_kernel_error(&format!("{context} eq kernel failed"), error)),
@@ -2162,14 +2171,14 @@ fn compare_with_arrow_ord(
         BinaryOp::LtEq => lt_eq(left, right)
             .map_err(|error| arrow_kernel_error(&format!("{context} lte kernel failed"), error)),
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
-            Err(RuntimeError::InvalidBatch {
+            Err(Report::new(RuntimeError::InvalidBatch {
                 message: format!("{context} comparison helper received arithmetic operator {op:?}"),
-            })
+            }))
         }
         BinaryOp::And | BinaryOp::Or | BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom => {
-            Err(RuntimeError::InvalidBatch {
+            Err(Report::new(RuntimeError::InvalidBatch {
                 message: format!("{context} comparison helper received boolean operator {op:?}"),
-            })
+            }))
         }
     }
 }
@@ -2181,7 +2190,7 @@ fn compare_with_arrow_ord(
 fn execute_nullif(
     left: &TypedArray,
     right: Operand<'_, dyn Array>,
-) -> Result<TypedArray, RuntimeError> {
+) -> error_stack::Result<TypedArray, RuntimeError> {
     let float_predicate = match left {
         TypedArray::Float32(values) => right
             .downcast::<Float32Array>()
@@ -2212,7 +2221,7 @@ fn execute_builtin(
     row_errors: &mut RowErrors,
     span: Span,
     context: &ExecutionContext,
-) -> Result<TypedArray, RuntimeError> {
+) -> error_stack::Result<TypedArray, RuntimeError> {
     // Each kernel reads its operands in the shape it can use. A kernel with a scalar form reads a
     // text operand or a count as it is, so a literal argument stays one value; a kernel that walks
     // the batch reads a column, which expands a scalar once per batch.
@@ -2228,12 +2237,12 @@ fn execute_builtin(
         let operand = registers.any_operand(inputs[index])?;
         match CountOperand::of(operand) {
             Some(count) => Ok(count),
-            None => Err(RuntimeError::InvalidBatch {
+            None => Err(Report::new(RuntimeError::InvalidBatch {
                 message: format!(
                     "builtin {lowering:?} requires an integer count, found {:?}",
                     operand.array().data_type()
                 ),
-            }),
+            })),
         }
     };
     let row_count = extent.values();
@@ -2278,7 +2287,7 @@ fn execute_builtin(
         BuiltinLowering::Ceil => execute_rounding(&column(0)?, Rounding::Ceil, row_errors, span),
         BuiltinLowering::Concat => {
             if let TypedArray::Generic(_) = column(0)? {
-                return Ok(execute_list_concat(&columns()?)?);
+                return execute_list_concat(&columns()?);
             }
             let mut parts = Vec::with_capacity(inputs.len());
             for index in 0..inputs.len() {
@@ -2305,40 +2314,42 @@ fn execute_builtin(
             row_errors,
             span,
         )))),
-        BuiltinLowering::Join => Ok(TypedArray::Utf8(
-            text_search::join(
-                &column(0)?,
-                text(1)?,
-                extent.rows_per_value(),
-                row_errors,
-                span,
-            )
-            .map_err(RuntimeError::text_search_kernel)?,
-        )),
-        BuiltinLowering::Like => Ok(TypedArray::Boolean(
-            text_search::wildcard_match(text(0)?, text(1)?, row_count, false, row_errors, span)
-                .map_err(RuntimeError::text_search_kernel)?,
-        )),
-        BuiltinLowering::ILike => Ok(TypedArray::Boolean(
-            text_search::wildcard_match(text(0)?, text(1)?, row_count, true, row_errors, span)
-                .map_err(RuntimeError::text_search_kernel)?,
-        )),
+        BuiltinLowering::Join => Ok(TypedArray::Utf8(text_search::join(
+            &column(0)?,
+            text(1)?,
+            extent.rows_per_value(),
+            row_errors,
+            span,
+        )?)),
+        BuiltinLowering::Like => Ok(TypedArray::Boolean(text_search::wildcard_match(
+            text(0)?,
+            text(1)?,
+            row_count,
+            false,
+            row_errors,
+            span,
+        )?)),
+        BuiltinLowering::ILike => Ok(TypedArray::Boolean(text_search::wildcard_match(
+            text(0)?,
+            text(1)?,
+            row_count,
+            true,
+            row_errors,
+            span,
+        )?)),
         BuiltinLowering::ContainsAny(call) => {
             let lists = if let text_search::ContainsAnyCall::Dynamic = call {
                 Some(column(1)?)
             } else {
                 None
             };
-            Ok(TypedArray::Boolean(
-                text_search::contains_any(
-                    call,
-                    as_utf8(&column(0)?)?,
-                    lists.as_ref(),
-                    row_errors,
-                    span,
-                )
-                .map_err(RuntimeError::text_search_kernel)?,
-            ))
+            Ok(TypedArray::Boolean(text_search::contains_any(
+                call,
+                as_utf8(&column(0)?)?,
+                lists.as_ref(),
+                row_errors,
+                span,
+            )?))
         }
         BuiltinLowering::NormalizeNfc => Ok(TypedArray::Utf8(text_search::normalize_nfc(
             as_utf8(&column(0)?)?,
@@ -2751,10 +2762,10 @@ fn execute_builtin(
                     Err(unsupported_builtin_inputs(lowering, &values))
                 }
                 DatetimeExecution::FormattedTooLarge { longest } => {
-                    Err(RuntimeError::FormattedDatetimesTooLarge {
+                    Err(Report::new(RuntimeError::FormattedDatetimesTooLarge {
                         rows: row_count,
                         longest,
-                    })
+                    }))
                 }
             }
         }
@@ -2763,11 +2774,14 @@ fn execute_builtin(
 
 /// The error for a builtin whose input columns have types its signature rejects. Compilation
 /// checks every call against its signature, so this reports a program and a batch that disagree.
-fn unsupported_builtin_inputs(lowering: &BuiltinLowering, inputs: &[TypedArray]) -> RuntimeError {
+fn unsupported_builtin_inputs(
+    lowering: &BuiltinLowering,
+    inputs: &[TypedArray],
+) -> Report<RuntimeError> {
     let input_types = inputs.iter().map(TypedArray::data_type).collect::<Vec<_>>();
-    RuntimeError::InvalidBatch {
+    Report::new(RuntimeError::InvalidBatch {
         message: format!("builtin {lowering:?} does not accept inputs of types {input_types:?}"),
-    }
+    })
 }
 
 /// What executing a datetime builtin over one batch produced.
@@ -2900,6 +2914,20 @@ enum ListItem<'a> {
     Nth(CountOperand<'a>),
 }
 
+fn collection_backing_mismatch(data_type: &DataType) -> Report<RuntimeError> {
+    Report::new(RuntimeError::CollectionBackingMismatch {
+        data_type: data_type.clone(),
+    })
+}
+
+fn collection_arrow_error(operation: &'static str, source: ArrowError) -> Report<RuntimeError> {
+    Report::new(RuntimeError::CollectionArrow { operation, source })
+}
+
+fn collection_too_large(operation: &'static str, limit: CollectionLimit) -> Report<RuntimeError> {
+    Report::new(RuntimeError::CollectionTooLarge { operation, limit })
+}
+
 #[derive(Clone, Copy)]
 enum ListConstruction {
     Fixed,
@@ -2919,19 +2947,14 @@ impl ListConstruction {
         row_count: usize,
     ) -> error_stack::Result<TypedArray, RuntimeError> {
         let DataType::List(field) = data_type else {
-            return Err(RuntimeError::CollectionExpectedList {
+            return Err(Report::new(RuntimeError::CollectionExpectedList {
                 actual: data_type.clone(),
-            }
-            .into());
+            }));
         };
         let values = new_empty_array(field.data_type());
         let offsets = OffsetBuffer::from_lengths(std::iter::repeat_n(0, row_count));
-        let output = ListArray::try_new(field.clone(), offsets, values, None).map_err(|error| {
-            RuntimeError::CollectionArrow {
-                operation: "empty VEC construction",
-                source: error,
-            }
-        })?;
+        let output = ListArray::try_new(field.clone(), offsets, values, None)
+            .map_err(|error| collection_arrow_error("empty VEC construction", error))?;
         Ok(TypedArray::Generic(StdArc::new(output)))
     }
 
@@ -2943,42 +2966,35 @@ impl ListConstruction {
         row_count: usize,
     ) -> error_stack::Result<TypedArray, RuntimeError> {
         let Some(first) = columns.first() else {
-            return Err(RuntimeError::CollectionMissingArguments {
+            return Err(Report::new(RuntimeError::CollectionMissingArguments {
                 operation: self.operation(),
-            }
-            .into());
+            }));
         };
         let child_type = first.data_type();
         let mut sources = Vec::with_capacity(columns.len());
         for column in columns {
             if column.data_type() != child_type {
-                return Err(RuntimeError::CollectionTypeMismatch {
+                return Err(Report::new(RuntimeError::CollectionTypeMismatch {
                     operation: self.operation(),
                     expected: child_type.clone(),
                     actual: column.data_type(),
-                }
-                .into());
+                }));
             }
             if column.len() != row_count {
-                return Err(RuntimeError::CollectionLengthMismatch {
+                return Err(Report::new(RuntimeError::CollectionLengthMismatch {
                     operation: self.operation(),
                     expected: row_count,
                     actual: column.len(),
-                }
-                .into());
+                }));
             }
             sources.push(column.as_array());
         }
         let item_count = row_count.checked_mul(columns.len()).ok_or_else(|| {
-            RuntimeError::CollectionTooLarge {
-                operation: self.operation(),
-                limit: CollectionLimit::AddressableLength,
-            }
+            collection_too_large(self.operation(), CollectionLimit::AddressableLength)
         })?;
         if matches!(self, Self::Variable) {
-            i32::try_from(item_count).map_err(|_| RuntimeError::CollectionTooLarge {
-                operation: self.operation(),
-                limit: CollectionLimit::VectorOffsets,
+            i32::try_from(item_count).map_err(|_| {
+                collection_too_large(self.operation(), CollectionLimit::VectorOffsets)
             })?;
         }
         let mut indices = Vec::with_capacity(item_count);
@@ -2994,10 +3010,8 @@ impl ListConstruction {
         let child = if columns.len() == 1 {
             first.to_array_ref()
         } else {
-            interleave(&sources, &indices).map_err(|error| RuntimeError::CollectionArrow {
-                operation: "list construction interleave",
-                source: error,
-            })?
+            interleave(&sources, &indices)
+                .map_err(|error| collection_arrow_error("list construction interleave", error))?
         };
         let nulls = validity
             .iter()
@@ -3006,18 +3020,12 @@ impl ListConstruction {
         let field = StdArc::new(Field::new("item", child_type.clone(), false));
         let output: ArrayRef = match self {
             Self::Fixed => {
-                let width =
-                    i32::try_from(columns.len()).map_err(|_| RuntimeError::CollectionTooLarge {
-                        operation: self.operation(),
-                        limit: CollectionLimit::FixedWidth,
-                    })?;
+                let width = i32::try_from(columns.len()).map_err(|_| {
+                    collection_too_large(self.operation(), CollectionLimit::FixedWidth)
+                })?;
                 StdArc::new(
-                    FixedSizeListArray::try_new(field, width, child, nulls).map_err(|error| {
-                        RuntimeError::CollectionArrow {
-                            operation: "ARRAY construction",
-                            source: error,
-                        }
-                    })?,
+                    FixedSizeListArray::try_new(field, width, child, nulls)
+                        .map_err(|error| collection_arrow_error("ARRAY construction", error))?,
                 )
             }
             Self::Variable => {
@@ -3032,15 +3040,11 @@ impl ListConstruction {
                         .nulls(None)
                         .build()
                         .map(make_array)
-                        .map_err(|error| RuntimeError::CollectionArrow {
-                            operation: "VEC null-element replacement",
-                            source: error,
+                        .map_err(|error| {
+                            collection_arrow_error("VEC null-element replacement", error)
                         })?;
                     zip(&mask, &child, &Scalar::new(empty)).map_err(|error| {
-                        RuntimeError::CollectionArrow {
-                            operation: "VEC null-element replacement",
-                            source: error,
-                        }
+                        collection_arrow_error("VEC null-element replacement", error)
                     })?
                 } else {
                     child
@@ -3048,12 +3052,8 @@ impl ListConstruction {
                 let offsets =
                     OffsetBuffer::from_lengths(std::iter::repeat_n(columns.len(), row_count));
                 StdArc::new(
-                    ListArray::try_new(field, offsets, child, nulls).map_err(|error| {
-                        RuntimeError::CollectionArrow {
-                            operation: "VEC construction",
-                            source: error,
-                        }
-                    })?,
+                    ListArray::try_new(field, offsets, child, nulls)
+                        .map_err(|error| collection_arrow_error("VEC construction", error))?,
                 )
             }
         };
@@ -3070,32 +3070,24 @@ enum ListColumn<'a> {
 impl<'a> ListColumn<'a> {
     fn from_typed(input: &'a TypedArray) -> error_stack::Result<Self, RuntimeError> {
         let TypedArray::Generic(array) = input else {
-            return Err(RuntimeError::CollectionExpectedList {
+            return Err(Report::new(RuntimeError::CollectionExpectedList {
                 actual: input.data_type(),
-            }
-            .into());
+            }));
         };
         match array.data_type() {
             DataType::List(_) => match array.as_any().downcast_ref::<ListArray>() {
                 Some(array) => Ok(Self::Variable(array)),
-                None => Err(RuntimeError::CollectionBackingMismatch {
-                    data_type: array.data_type().clone(),
-                }
-                .into()),
+                None => Err(collection_backing_mismatch(array.data_type())),
             },
             DataType::FixedSizeList(_, _) => {
                 match array.as_any().downcast_ref::<FixedSizeListArray>() {
                     Some(array) => Ok(Self::Fixed(array)),
-                    None => Err(RuntimeError::CollectionBackingMismatch {
-                        data_type: array.data_type().clone(),
-                    }
-                    .into()),
+                    None => Err(collection_backing_mismatch(array.data_type())),
                 }
             }
-            other => Err(RuntimeError::CollectionExpectedList {
+            other => Err(Report::new(RuntimeError::CollectionExpectedList {
                 actual: other.clone(),
-            }
-            .into()),
+            })),
         }
     }
 
@@ -3137,20 +3129,18 @@ impl<'a> ListColumn<'a> {
         operation: &'static str,
     ) -> error_stack::Result<(), RuntimeError> {
         if column.data_type() != *self.element_data_type() {
-            return Err(RuntimeError::CollectionTypeMismatch {
+            return Err(Report::new(RuntimeError::CollectionTypeMismatch {
                 operation,
                 expected: self.element_data_type().clone(),
                 actual: column.data_type(),
-            }
-            .into());
+            }));
         }
         if column.len() != self.len() {
-            return Err(RuntimeError::CollectionLengthMismatch {
+            return Err(Report::new(RuntimeError::CollectionLengthMismatch {
                 operation,
                 expected: self.len(),
                 actual: column.len(),
-            }
-            .into());
+            }));
         }
         Ok(())
     }
@@ -3161,20 +3151,18 @@ impl<'a> ListColumn<'a> {
         operation: &'static str,
     ) -> error_stack::Result<(), RuntimeError> {
         if other.element_data_type() != self.element_data_type() {
-            return Err(RuntimeError::CollectionTypeMismatch {
+            return Err(Report::new(RuntimeError::CollectionTypeMismatch {
                 operation,
                 expected: self.element_data_type().clone(),
                 actual: other.element_data_type().clone(),
-            }
-            .into());
+            }));
         }
         if other.len() != self.len() {
-            return Err(RuntimeError::CollectionLengthMismatch {
+            return Err(Report::new(RuntimeError::CollectionLengthMismatch {
                 operation,
                 expected: self.len(),
                 actual: other.len(),
-            }
-            .into());
+            }));
         }
         Ok(())
     }
@@ -3236,10 +3224,8 @@ impl<'a> ListColumn<'a> {
         }
         let segment = self.values().slice(range.start, range.len());
         let scalar = Scalar::new(needle);
-        let equal = eq(&segment, &scalar).map_err(|error| RuntimeError::CollectionArrow {
-            operation: "list contains comparison",
-            source: error,
-        })?;
+        let equal = eq(&segment, &scalar)
+            .map_err(|error| collection_arrow_error("list contains comparison", error))?;
         Ok(equal.iter().any(|value| value == Some(true)))
     }
 
@@ -3375,22 +3361,16 @@ fn execute_list_slice(
         for index in first..last {
             selected.push(u64::try_from(index).assured("an Arrow child index fits a u64"));
         }
-        let next = i32::try_from(selected.len()).map_err(|_| RuntimeError::CollectionTooLarge {
-            operation: "slice",
-            limit: CollectionLimit::VectorOffsets,
-        })?;
+        let next = i32::try_from(selected.len())
+            .map_err(|_| collection_too_large("slice", CollectionLimit::VectorOffsets))?;
         offsets.push(next);
     }
     if identity && let ListColumn::Variable(_) = list {
         return Ok(input.clone());
     }
     let indices = UInt64Array::from_iter_values(selected);
-    let child = take(list.values().as_ref(), &indices, None).map_err(|error| {
-        RuntimeError::CollectionArrow {
-            operation: "list slice take",
-            source: error,
-        }
-    })?;
+    let child = take(list.values().as_ref(), &indices, None)
+        .map_err(|error| collection_arrow_error("list slice take", error))?;
     let field = StdArc::new(Field::new("item", list.element_data_type().clone(), false));
     let nulls = validity
         .iter()
@@ -3402,10 +3382,7 @@ fn execute_list_slice(
         child,
         nulls,
     )
-    .map_err(|error| RuntimeError::CollectionArrow {
-        operation: "list slice construction",
-        source: error,
-    })?;
+    .map_err(|error| collection_arrow_error("list slice construction", error))?;
     Ok(TypedArray::Generic(StdArc::new(result)))
 }
 
@@ -3417,23 +3394,20 @@ fn execute_list_concat(inputs: &[TypedArray]) -> error_stack::Result<TypedArray,
     for input in inputs {
         lists.push(ListColumn::from_typed(input)?);
     }
-    let first = *lists
-        .first()
-        .ok_or(RuntimeError::CollectionMissingArguments {
+    let first = *lists.first().ok_or_else(|| {
+        Report::new(RuntimeError::CollectionMissingArguments {
             operation: "concat",
-        })?;
+        })
+    })?;
     let mut fixed_width = Some(0_i32);
     for list in &lists {
         first.require_compatible(*list, "concat")?;
         fixed_width = match (fixed_width, list) {
-            (Some(total), ListColumn::Fixed(array)) => {
-                Some(total.checked_add(array.value_length()).ok_or_else(|| {
-                    RuntimeError::CollectionTooLarge {
-                        operation: "concat",
-                        limit: CollectionLimit::FixedWidth,
-                    }
-                })?)
-            }
+            (Some(total), ListColumn::Fixed(array)) => Some(
+                total
+                    .checked_add(array.value_length())
+                    .ok_or_else(|| collection_too_large("concat", CollectionLimit::FixedWidth))?,
+            ),
             _ => None,
         };
     }
@@ -3457,18 +3431,13 @@ fn execute_list_concat(inputs: &[TypedArray]) -> error_stack::Result<TypedArray,
                 selected.push((child_index, index));
             }
         }
-        offsets.push(i32::try_from(selected.len()).map_err(|_| {
-            RuntimeError::CollectionTooLarge {
-                operation: "concat",
-                limit: CollectionLimit::VectorOffsets,
-            }
-        })?);
+        offsets.push(
+            i32::try_from(selected.len())
+                .map_err(|_| collection_too_large("concat", CollectionLimit::VectorOffsets))?,
+        );
     }
-    let child =
-        interleave(&children, &selected).map_err(|error| RuntimeError::CollectionArrow {
-            operation: "list concat interleave",
-            source: error,
-        })?;
+    let child = interleave(&children, &selected)
+        .map_err(|error| collection_arrow_error("list concat interleave", error))?;
     let field = StdArc::new(Field::new("item", first.element_data_type().clone(), false));
     let nulls = validity
         .iter()
@@ -3476,12 +3445,8 @@ fn execute_list_concat(inputs: &[TypedArray]) -> error_stack::Result<TypedArray,
         .then(|| NullBuffer::from(validity));
     let output: ArrayRef = match fixed_width {
         Some(width) => StdArc::new(
-            FixedSizeListArray::try_new(field, width, child, nulls).map_err(|error| {
-                RuntimeError::CollectionArrow {
-                    operation: "ARRAY concat",
-                    source: error,
-                }
-            })?,
+            FixedSizeListArray::try_new(field, width, child, nulls)
+                .map_err(|error| collection_arrow_error("ARRAY concat", error))?,
         ),
         None => StdArc::new(
             ListArray::try_new(
@@ -3490,10 +3455,7 @@ fn execute_list_concat(inputs: &[TypedArray]) -> error_stack::Result<TypedArray,
                 child,
                 nulls,
             )
-            .map_err(|error| RuntimeError::CollectionArrow {
-                operation: "VEC concat",
-                source: error,
-            })?,
+            .map_err(|error| collection_arrow_error("VEC concat", error))?,
         ),
     };
     Ok(TypedArray::Generic(output))
@@ -3542,31 +3504,15 @@ impl ListExtremum {
                     .assured("a lane below the fixed width lies inside its child row");
                 u64::try_from(index).assured("an Arrow child index fits u64")
             }));
-            let candidate = take(values.as_ref(), &candidate_indices, None).map_err(|error| {
-                RuntimeError::CollectionArrow {
-                    operation: "fixed extremum lane take",
-                    source: error,
-                }
-            })?;
-            let previous = take(values.as_ref(), &best_indices, None).map_err(|error| {
-                RuntimeError::CollectionArrow {
-                    operation: "fixed extremum best take",
-                    source: error,
-                }
-            })?;
-            let comparison = self.compare(&candidate, &previous).map_err(|error| {
-                RuntimeError::CollectionArrow {
-                    operation: "fixed extremum comparison",
-                    source: error,
-                }
-            })?;
-            let selected =
-                zip(&comparison, &candidate_indices, &best_indices).map_err(|error| {
-                    RuntimeError::CollectionArrow {
-                        operation: "fixed extremum selection",
-                        source: error,
-                    }
-                })?;
+            let candidate = take(values.as_ref(), &candidate_indices, None)
+                .map_err(|error| collection_arrow_error("fixed extremum lane take", error))?;
+            let previous = take(values.as_ref(), &best_indices, None)
+                .map_err(|error| collection_arrow_error("fixed extremum best take", error))?;
+            let comparison = self
+                .compare(&candidate, &previous)
+                .map_err(|error| collection_arrow_error("fixed extremum comparison", error))?;
+            let selected = zip(&comparison, &candidate_indices, &best_indices)
+                .map_err(|error| collection_arrow_error("fixed extremum selection", error))?;
             best_indices = selected
                 .as_any()
                 .downcast_ref::<UInt64Array>()
@@ -3574,13 +3520,9 @@ impl ListExtremum {
                 .clone();
         }
         let best_indices = UInt64Array::new(best_indices.values().clone(), list.nulls().cloned());
-        let output = take(values.as_ref(), &best_indices, None).map_err(|error| {
-            RuntimeError::CollectionArrow {
-                operation: "fixed extremum output take",
-                source: error,
-            }
-        })?;
-        Ok(array_ref_to_typed_array(output)?)
+        let output = take(values.as_ref(), &best_indices, None)
+            .map_err(|error| collection_arrow_error("fixed extremum output take", error))?;
+        array_ref_to_typed_array(output)
     }
 }
 
@@ -3609,12 +3551,9 @@ fn execute_list_extremum(
             if let Some(current) = best {
                 let candidate = list.values().slice(index, 1);
                 let previous = list.values().slice(current, 1);
-                let comparison = operation.compare(&candidate, &previous).map_err(|error| {
-                    RuntimeError::CollectionArrow {
-                        operation: "list extremum comparison",
-                        source: error,
-                    }
-                })?;
+                let comparison = operation
+                    .compare(&candidate, &previous)
+                    .map_err(|error| collection_arrow_error("list extremum comparison", error))?;
                 if comparison.value(0) {
                     best = Some(index);
                 }
@@ -3631,11 +3570,8 @@ fn execute_list_extremum(
         &indices,
         Some(TakeOptions { check_bounds: true }),
     )
-    .map_err(|error| RuntimeError::CollectionArrow {
-        operation: "list extremum take",
-        source: error,
-    })?;
-    Ok(array_ref_to_typed_array(output)?)
+    .map_err(|error| collection_arrow_error("list extremum take", error))?;
+    array_ref_to_typed_array(output)
 }
 
 fn execute_list_mean_numeric<T>(
@@ -3651,9 +3587,7 @@ where
         .values()
         .as_any()
         .downcast_ref::<PrimitiveArray<T>>()
-        .ok_or_else(|| RuntimeError::CollectionBackingMismatch {
-            data_type: list.element_data_type().clone(),
-        })?;
+        .ok_or_else(|| collection_backing_mismatch(list.element_data_type()))?;
     let mut output = Vec::with_capacity(list.len());
     for row in 0..list.len() {
         if list.is_null(row) {
@@ -3733,11 +3667,10 @@ fn execute_list_mean(
         DataType::Float64 => {
             execute_list_mean_numeric::<Float64Type>(list, |value| value, row_errors, span)
         }
-        other => Err(RuntimeError::CollectionNonNumericElement {
+        other => Err(Report::new(RuntimeError::CollectionNonNumericElement {
             operation: "mean",
             actual: other.clone(),
-        }
-        .into()),
+        })),
     }?;
     Ok(TypedArray::Float64(output))
 }
@@ -3756,16 +3689,12 @@ where
         .values()
         .as_any()
         .downcast_ref::<PrimitiveArray<T>>()
-        .ok_or_else(|| RuntimeError::CollectionBackingMismatch {
-            data_type: left.element_data_type().clone(),
-        })?;
+        .ok_or_else(|| collection_backing_mismatch(left.element_data_type()))?;
     let right_values = right
         .values()
         .as_any()
         .downcast_ref::<PrimitiveArray<T>>()
-        .ok_or_else(|| RuntimeError::CollectionBackingMismatch {
-            data_type: right.element_data_type().clone(),
-        })?;
+        .ok_or_else(|| collection_backing_mismatch(right.element_data_type()))?;
     let mut output = Vec::with_capacity(left.len());
     for row in 0..left.len() {
         let Some((left_range, right_range)) = left.aligned_ranges(right, row, row_errors, span)
@@ -3821,16 +3750,12 @@ where
         .values()
         .as_any()
         .downcast_ref::<PrimitiveArray<T>>()
-        .ok_or_else(|| RuntimeError::CollectionBackingMismatch {
-            data_type: left.element_data_type().clone(),
-        })?;
+        .ok_or_else(|| collection_backing_mismatch(left.element_data_type()))?;
     let right_values = right
         .values()
         .as_any()
         .downcast_ref::<PrimitiveArray<T>>()
-        .ok_or_else(|| RuntimeError::CollectionBackingMismatch {
-            data_type: right.element_data_type().clone(),
-        })?;
+        .ok_or_else(|| collection_backing_mismatch(right.element_data_type()))?;
     let mut output = Vec::with_capacity(left.len());
     for row in 0..left.len() {
         let Some((left_range, right_range)) = left.aligned_ranges(right, row, row_errors, span)
@@ -3875,12 +3800,8 @@ where
     T: ArrowNumericType,
     T::Native: CheckedFloat,
 {
-    let products = arrow_mul(left.values(), right.values()).map_err(|error| {
-        RuntimeError::CollectionArrow {
-            operation: "fixed dot child multiplication",
-            source: error,
-        }
-    })?;
+    let products = arrow_mul(left.values(), right.values())
+        .map_err(|error| collection_arrow_error("fixed dot child multiplication", error))?;
     let products = products
         .as_any()
         .downcast_ref::<PrimitiveArray<T>>()
@@ -3954,11 +3875,10 @@ fn execute_list_dot(
             .map(TypedArray::Float32),
         DataType::Float64 => execute_list_dot_float::<Float64Type>(left, right, row_errors, span)
             .map(TypedArray::Float64),
-        other => Err(RuntimeError::CollectionNonNumericElement {
+        other => Err(Report::new(RuntimeError::CollectionNonNumericElement {
             operation: "dot",
             actual: other.clone(),
-        }
-        .into()),
+        })),
     }
 }
 
@@ -3976,16 +3896,12 @@ where
         .values()
         .as_any()
         .downcast_ref::<PrimitiveArray<T>>()
-        .ok_or_else(|| RuntimeError::CollectionBackingMismatch {
-            data_type: left.element_data_type().clone(),
-        })?;
+        .ok_or_else(|| collection_backing_mismatch(left.element_data_type()))?;
     let right_values = right
         .values()
         .as_any()
         .downcast_ref::<PrimitiveArray<T>>()
-        .ok_or_else(|| RuntimeError::CollectionBackingMismatch {
-            data_type: right.element_data_type().clone(),
-        })?;
+        .ok_or_else(|| collection_backing_mismatch(right.element_data_type()))?;
     let mut output = Vec::with_capacity(left.len());
     for row in 0..left.len() {
         let Some((left_range, right_range)) = left.aligned_ranges(right, row, row_errors, span)
@@ -4072,16 +3988,15 @@ fn execute_list_distance(
             row_errors,
             span,
         ),
-        other => Err(RuntimeError::CollectionNonNumericElement {
+        other => Err(Report::new(RuntimeError::CollectionNonNumericElement {
             operation: "distance",
             actual: other.clone(),
-        }
-        .into()),
+        })),
     }?;
     Ok(TypedArray::Float64(output))
 }
 
-fn execute_list_count(input: &TypedArray) -> Result<Int64Array, RuntimeError> {
+fn execute_list_count(input: &TypedArray) -> error_stack::Result<Int64Array, RuntimeError> {
     let list = ListColumn::from_typed(input)?;
     let lengths = (0..list.len())
         .map(|row| {
@@ -4101,7 +4016,7 @@ fn execute_list_sum_for_primitive<T>(
     is_finite: fn(T::Native) -> bool,
     row_errors: &mut RowErrors,
     span: Span,
-) -> Result<PrimitiveArray<T>, RuntimeError>
+) -> error_stack::Result<PrimitiveArray<T>, RuntimeError>
 where
     T: ArrowNumericType,
 {
@@ -4109,8 +4024,10 @@ where
         .values()
         .as_any()
         .downcast_ref::<PrimitiveArray<T>>()
-        .ok_or_else(|| RuntimeError::InvalidBatch {
-            message: format!("list values are not backed by {:?}", T::DATA_TYPE),
+        .ok_or_else(|| {
+            Report::new(RuntimeError::InvalidBatch {
+                message: format!("list values are not backed by {:?}", T::DATA_TYPE),
+            })
         })?;
     let mut builder = PrimitiveBuilder::<T>::with_capacity(list.len());
     for row in 0..list.len() {
@@ -4156,7 +4073,7 @@ fn execute_list_sum(
     input: &TypedArray,
     row_errors: &mut RowErrors,
     span: Span,
-) -> Result<TypedArray, RuntimeError> {
+) -> error_stack::Result<TypedArray, RuntimeError> {
     let list = ListColumn::from_typed(input)?;
     // Every integer value is finite, so an integer sum can only fail by overflowing.
     match list.element_data_type() {
@@ -4200,13 +4117,16 @@ fn execute_list_sum(
             execute_list_sum_for_primitive::<Float64Type>(list, f64::is_finite, row_errors, span)
                 .map(TypedArray::Float64)
         }
-        other => Err(RuntimeError::InvalidBatch {
+        other => Err(Report::new(RuntimeError::InvalidBatch {
             message: format!("sum requires numeric ARRAY or VEC elements, found {other:?}"),
-        }),
+        })),
     }
 }
 
-fn execute_list_item(input: &TypedArray, item: ListItem<'_>) -> Result<TypedArray, RuntimeError> {
+fn execute_list_item(
+    input: &TypedArray,
+    item: ListItem<'_>,
+) -> error_stack::Result<TypedArray, RuntimeError> {
     let list = ListColumn::from_typed(input)?;
     match list.element_data_type() {
         DataType::UInt8
@@ -4224,9 +4144,9 @@ fn execute_list_item(input: &TypedArray, item: ListItem<'_>) -> Result<TypedArra
         DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some(tz))
             if tz.as_ref() == "+00:00" || tz.as_ref() == "UTC" => {}
         other => {
-            return Err(RuntimeError::InvalidBatch {
+            return Err(Report::new(RuntimeError::InvalidBatch {
                 message: format!("list item function does not support element type {other:?}"),
-            });
+            }));
         }
     }
 
@@ -4434,9 +4354,11 @@ fn execute_uuid_v7(
     StringArray::from_iter_values((0..row_count).map(|_| Uuid::new_v7(timestamp).to_string()))
 }
 
-fn as_utf8(value: &TypedArray) -> Result<&StringArray, RuntimeError> {
-    value.as_utf8().ok_or(RuntimeError::InvalidBatch {
-        message: format!("builtin expected Utf8 input, found {:?}", value.data_type()),
+fn as_utf8(value: &TypedArray) -> error_stack::Result<&StringArray, RuntimeError> {
+    value.as_utf8().ok_or_else(|| {
+        Report::new(RuntimeError::InvalidBatch {
+            message: format!("builtin expected Utf8 input, found {:?}", value.data_type()),
+        })
     })
 }
 
@@ -4526,7 +4448,7 @@ fn execute_abs_typed(
     input: &TypedArray,
     row_errors: &mut RowErrors,
     span: Span,
-) -> Result<TypedArray, RuntimeError> {
+) -> error_stack::Result<TypedArray, RuntimeError> {
     match input {
         // An unsigned integer is its own absolute value.
         TypedArray::UInt8(_)
@@ -4556,9 +4478,9 @@ fn execute_abs_typed(
         | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
         | TypedArray::Generic(_)
-        | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
+        | TypedArray::Uninitialized { .. } => Err(Report::new(RuntimeError::InvalidBatch {
             message: format!("abs requires numeric input, found {:?}", input.data_type()),
-        }),
+        })),
     }
 }
 
@@ -4599,14 +4521,14 @@ fn execute_math(
     function: MathFunction,
     row_errors: &mut RowErrors,
     span: Span,
-) -> Result<TypedArray, RuntimeError> {
+) -> error_stack::Result<TypedArray, RuntimeError> {
     let Some(operand) = F64Operand::from_typed(input) else {
-        return Err(RuntimeError::InvalidBatch {
+        return Err(Report::new(RuntimeError::InvalidBatch {
             message: format!(
                 "numeric builtin requires numeric input, found {:?}",
                 input.data_type()
             ),
-        });
+        }));
     };
     let checked = function.evaluate(&operand);
     row_errors.push_failures(checked.failed.lanes(), span, |_| function.failure());
@@ -4619,17 +4541,17 @@ fn execute_binary_math(
     function: BinaryMathFunction,
     row_errors: &mut RowErrors,
     span: Span,
-) -> Result<TypedArray, RuntimeError> {
+) -> error_stack::Result<TypedArray, RuntimeError> {
     let (Some(left_operand), Some(right_operand)) =
         (F64Operand::from_typed(left), F64Operand::from_typed(right))
     else {
-        return Err(RuntimeError::InvalidBatch {
+        return Err(Report::new(RuntimeError::InvalidBatch {
             message: format!(
                 "numeric builtin requires numeric inputs, found {:?} and {:?}",
                 left.data_type(),
                 right.data_type()
             ),
-        });
+        }));
     };
     let checked = function.evaluate(&left_operand, &right_operand);
     row_errors.push_failures(checked.failed.lanes(), span, |_| function.failure());
@@ -4641,7 +4563,7 @@ fn execute_rounding(
     rounding: Rounding,
     row_errors: &mut RowErrors,
     span: Span,
-) -> Result<TypedArray, RuntimeError> {
+) -> error_stack::Result<TypedArray, RuntimeError> {
     match input {
         // An integer is already integral, so every rounding returns it unchanged.
         TypedArray::UInt8(_)
@@ -4663,12 +4585,12 @@ fn execute_rounding(
         | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
         | TypedArray::Generic(_)
-        | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
+        | TypedArray::Uninitialized { .. } => Err(Report::new(RuntimeError::InvalidBatch {
             message: format!(
                 "rounding builtin requires numeric input, found {:?}",
                 input.data_type()
             ),
-        }),
+        })),
     }
 }
 
@@ -5234,15 +5156,15 @@ fn execute_log(
     values: &[TypedArray],
     row_errors: &mut RowErrors,
     span: Span,
-) -> Result<TypedArray, RuntimeError> {
+) -> error_stack::Result<TypedArray, RuntimeError> {
     match values {
         [value] => execute_math(value, MathFunction::Log10, row_errors, span),
         [base, value] => {
             execute_binary_math(base, value, BinaryMathFunction::Log, row_errors, span)
         }
-        _ => Err(RuntimeError::InvalidBatch {
+        _ => Err(Report::new(RuntimeError::InvalidBatch {
             message: format!("log requires one or two arguments, found {}", values.len()),
-        }),
+        })),
     }
 }
 
@@ -5259,7 +5181,7 @@ fn execute_regexp(
     inputs: &[RegisterRef],
     row_errors: &mut RowErrors,
     span: Span,
-) -> Result<TypedArray, RuntimeError> {
+) -> error_stack::Result<TypedArray, RuntimeError> {
     let text = registers.column::<StringArray>(inputs[0])?;
     let patterns = match &call.pattern {
         PatternSource::Constant(constant) => {
@@ -5302,8 +5224,10 @@ fn execute_regexp(
                 PatternSource::Argument(_) => 2,
             };
             let group = registers.any_operand(inputs[group_input])?;
-            let group = CountOperand::of(group).ok_or_else(|| RuntimeError::InvalidBatch {
-                message: "regexp_extract requires an integer group index".to_string(),
+            let group = CountOperand::of(group).ok_or_else(|| {
+                Report::new(RuntimeError::InvalidBatch {
+                    message: "regexp_extract requires an integer group index".to_string(),
+                })
             })?;
             TypedArray::Utf8(execute_regexp_extract(
                 text,
@@ -5627,7 +5551,7 @@ fn execute_substr(
     builder.finish()
 }
 
-fn execute_to_hex(input: &TypedArray) -> Result<StringArray, RuntimeError> {
+fn execute_to_hex(input: &TypedArray) -> error_stack::Result<StringArray, RuntimeError> {
     let output = match input {
         TypedArray::UInt8(array) => execute_to_hex_values(array.len(), |row| {
             (!array.is_null(row)).then(|| u64::from(array.value(row)))
@@ -5661,12 +5585,12 @@ fn execute_to_hex(input: &TypedArray) -> Result<StringArray, RuntimeError> {
         | TypedArray::Datetime(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => {
-            return Err(RuntimeError::InvalidBatch {
+            return Err(Report::new(RuntimeError::InvalidBatch {
                 message: format!(
                     "to_hex requires integer input, found {:?}",
                     input.data_type()
                 ),
-            });
+            }));
         }
     };
     Ok(output)
@@ -5819,7 +5743,7 @@ fn cast_typed_array(
     on_failure: CastFailure,
     row_errors: &mut RowErrors,
     span: Span,
-) -> Result<TypedArray, RuntimeError> {
+) -> error_stack::Result<TypedArray, RuntimeError> {
     if input.data_type() == target.data_type() {
         return Ok(input);
     }
@@ -5927,7 +5851,7 @@ fn filter_columns(
     columns: &[TypedArray],
     predicate: &BooleanArray,
     selected_count: usize,
-) -> Result<Vec<TypedArray>, RuntimeError> {
+) -> error_stack::Result<Vec<TypedArray>, RuntimeError> {
     let filter = FilterBuilder::new(predicate).optimize().build();
     columns
         .iter()
@@ -5998,7 +5922,7 @@ mod tests {
             _span: Span,
             _now: Timestamp,
             _prior_error_rows: RowErrorMask<'_>,
-        ) -> Result<InjectedResult, RuntimeError> {
+        ) -> error_stack::Result<InjectedResult, RuntimeError> {
             assert_eq!(*function, FunctionName::ReadHeader);
             let [TypedArray::Utf8(names)] = arguments else {
                 panic!("read_header must receive one Utf8 array");
@@ -6032,14 +5956,16 @@ mod tests {
             span: Span,
             now: Timestamp,
             prior_error_rows: RowErrorMask<'_>,
-        ) -> Result<InjectedResult, RuntimeError> {
+        ) -> error_stack::Result<InjectedResult, RuntimeError> {
             self.release
                 .lock()
                 .expect("release receiver lock must be available")
                 .recv_timeout(Duration::from_secs(1))
-                .map_err(|error| RuntimeError::InjectedFunctionFailed {
-                    function: function.as_str().to_string(),
-                    message: format!("blocking injector was not released: {error}"),
+                .map_err(|error| {
+                    Report::new(RuntimeError::InjectedFunctionFailed {
+                        function: function.as_str().to_string(),
+                        message: format!("blocking injector was not released: {error}"),
+                    })
                 })?;
             TestHeaderInjector.inject_with_context(
                 function,
@@ -6100,6 +6026,252 @@ mod tests {
             [CompileBinding::writable("input", input_schema)],
         )
         .expect("program must compile")
+    }
+
+    #[derive(Debug)]
+    struct FixedInjector(InjectedResult);
+
+    impl FunctionInjector for FixedInjector {
+        fn inject_with_context(
+            &self,
+            _function: &FunctionName,
+            _arguments: &[TypedArray],
+            _rows: &RowSelection,
+            _span: Span,
+            _now: Timestamp,
+            _prior_error_rows: RowErrorMask<'_>,
+        ) -> error_stack::Result<InjectedResult, RuntimeError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct MissingInjector;
+
+    impl FunctionInjector for MissingInjector {
+        fn inject_with_context(
+            &self,
+            function: &FunctionName,
+            _arguments: &[TypedArray],
+            _rows: &RowSelection,
+            _span: Span,
+            _now: Timestamp,
+            _prior_error_rows: RowErrorMask<'_>,
+        ) -> error_stack::Result<InjectedResult, RuntimeError> {
+            Err(Report::new(RuntimeError::MissingFunctionInjector {
+                function: function.as_str().to_string(),
+            }))
+        }
+    }
+
+    #[test]
+    fn injected_function_reports_contract_failures_and_falls_back_to_program_injector() {
+        let instruction = Instruction {
+            kind: InstructionKind::Inject {
+                dst: RegisterRef::new(RegisterSpace::Output, RegisterType::Utf8, 0),
+                function: FunctionName::ReadHeader,
+                inputs: vec![],
+                output_type: DataType::Utf8,
+            },
+            span: (3..7).into(),
+            selection: None,
+        };
+        let function = FunctionName::ReadHeader;
+        let selection = RowSelection::All(2);
+        let now = Timestamp::from_unix_nanos(123);
+        let context = ExecutionContext::new(now);
+        let invoke =
+            |context: &ExecutionContext,
+             program: Option<&triomphe::Arc<Box<dyn FunctionInjector>>>| {
+                instruction.call_injected_function(
+                    &function,
+                    &[],
+                    &selection,
+                    RowErrorMask::none(2),
+                    &DataType::Utf8,
+                    Injectors { context, program },
+                )
+            };
+        let missing = invoke(&context, None).expect_err("no injector can answer the call");
+        assert!(matches!(
+            missing.current_context(),
+            RuntimeError::MissingFunctionInjector { function } if function == "read_header"
+        ));
+
+        let short: triomphe::Arc<Box<dyn FunctionInjector>> =
+            triomphe::Arc::new(Box::new(FixedInjector(InjectedResult::success(
+                TypedArray::Utf8(StringArray::from(vec!["one"])),
+            ))));
+        let invalid_output = invoke(&context, Some(&short))
+            .expect_err("the injected output must cover both selected rows");
+        assert!(matches!(
+            invalid_output.current_context(),
+            RuntimeError::InvalidInjectedResult { function, expected_rows: 2, actual_rows: 1, .. }
+                if function == "read_header"
+        ));
+
+        let bad_side_error: triomphe::Arc<Box<dyn FunctionInjector>> =
+            triomphe::Arc::new(Box::new(FixedInjector(InjectedResult {
+                output: TypedArray::Utf8(StringArray::from(vec!["one", "two"])),
+                side_errors: vec![(
+                    2,
+                    SideError {
+                        reason: SideErrorReason::Injected {
+                            code: ErrorCode::InvalidArgument,
+                            message: "invalid header".to_string(),
+                        },
+                        span: instruction.span,
+                    },
+                )],
+            })));
+        let invalid_error = invoke(&context, Some(&bad_side_error))
+            .expect_err("a side error must refer to a selected row");
+        assert!(matches!(
+            invalid_error.current_context(),
+            RuntimeError::InvalidInjectedSideError { function, row: 2, row_count: 2 }
+                if function == "read_header"
+        ));
+
+        let context = ExecutionContext {
+            now,
+            injector: Some(triomphe::Arc::new(Box::new(MissingInjector))),
+        };
+        let program: triomphe::Arc<Box<dyn FunctionInjector>> =
+            triomphe::Arc::new(Box::new(FixedInjector(InjectedResult::success(
+                TypedArray::Utf8(StringArray::from(vec!["one", "two"])),
+            ))));
+        let answer = invoke(&context, Some(&program))
+            .assured("the program injector answers a function absent from the context injector");
+        assert_eq!(answer.output.len(), 2);
+    }
+
+    #[test]
+    fn collection_contract_errors_keep_the_operation_and_type() {
+        let span = (0..1).into();
+        let arrow = collection_arrow_error(
+            "VEC concat",
+            ArrowError::ComputeError("child arrays cannot interleave".to_string()),
+        );
+        assert!(matches!(
+            arrow.current_context(),
+            RuntimeError::CollectionArrow { operation: "VEC concat", source }
+                if source.to_string().contains("child arrays cannot interleave")
+        ));
+        let capacity = collection_too_large("concat", CollectionLimit::VectorOffsets);
+        assert!(matches!(
+            capacity.current_context(),
+            RuntimeError::CollectionTooLarge {
+                operation: "concat",
+                limit: CollectionLimit::VectorOffsets
+            }
+        ));
+        let backing = collection_backing_mismatch(&DataType::Utf8);
+        assert!(matches!(
+            backing.current_context(),
+            RuntimeError::CollectionBackingMismatch {
+                data_type: DataType::Utf8
+            }
+        ));
+        let empty = ListConstruction::empty_vector(&DataType::Utf8, 2)
+            .expect_err("an empty vector still requires a vector type");
+        assert!(matches!(
+            empty.current_context(),
+            RuntimeError::CollectionExpectedList {
+                actual: DataType::Utf8
+            }
+        ));
+        let missing = ListConstruction::Variable
+            .construct(&[], 2)
+            .expect_err("a vector constructor needs an element type");
+        assert!(matches!(
+            missing.current_context(),
+            RuntimeError::CollectionMissingArguments { operation: "vec" }
+        ));
+        let string = TypedArray::Utf8(StringArray::from(vec!["a", "b"]));
+        let number = TypedArray::Int64(Int64Array::from(vec![1, 2]));
+        let wrong_type = ListConstruction::Variable
+            .construct(&[string.clone(), number.clone()], 2)
+            .expect_err("one vector cannot mix element types");
+        assert!(matches!(
+            wrong_type.current_context(),
+            RuntimeError::CollectionTypeMismatch {
+                operation: "vec",
+                ..
+            }
+        ));
+        let wrong_length = ListConstruction::Variable
+            .construct(
+                &[
+                    string.clone(),
+                    TypedArray::Utf8(StringArray::from(vec!["c"])),
+                ],
+                2,
+            )
+            .expect_err("every source column must cover the batch");
+        assert!(matches!(
+            wrong_length.current_context(),
+            RuntimeError::CollectionLengthMismatch {
+                operation: "vec",
+                ..
+            }
+        ));
+        let not_list = ListColumn::from_typed(&string)
+            .err()
+            .assured("a scalar STRING column is not a list");
+        assert!(matches!(
+            not_list.current_context(),
+            RuntimeError::CollectionExpectedList {
+                actual: DataType::Utf8
+            }
+        ));
+        let no_concat = execute_list_concat(&[]).expect_err("concat needs a list argument");
+        assert!(matches!(
+            no_concat.current_context(),
+            RuntimeError::CollectionMissingArguments {
+                operation: "concat"
+            }
+        ));
+
+        let strings = ListConstruction::Variable
+            .construct(std::slice::from_ref(&string), 2)
+            .assured("the two-row STRING vector has valid Arrow offsets");
+        let integers = ListConstruction::Variable
+            .construct(&[number], 2)
+            .assured("the two-row I64 vector has valid Arrow offsets");
+        let string_list = ListColumn::from_typed(&strings)
+            .assured("the vector constructor returns a list-backed column");
+        let integer_list = ListColumn::from_typed(&integers)
+            .assured("the vector constructor returns a list-backed column");
+        assert!(matches!(
+            string_list.require_element_column(&TypedArray::Int64(Int64Array::from(vec![1, 2])), "contains"),
+            Err(report) if matches!(report.current_context(), RuntimeError::CollectionTypeMismatch { operation: "contains", .. })
+        ));
+        assert!(matches!(
+            string_list.require_element_column(&TypedArray::Utf8(StringArray::from(vec!["a"])), "contains"),
+            Err(report) if matches!(report.current_context(), RuntimeError::CollectionLengthMismatch { operation: "contains", .. })
+        ));
+        assert!(matches!(
+            string_list.require_compatible(integer_list, "dot"),
+            Err(report) if matches!(report.current_context(), RuntimeError::CollectionTypeMismatch { operation: "dot", .. })
+        ));
+
+        let mut row_errors = RowErrors::new(2);
+        for report in [
+            execute_list_mean(&strings, &mut row_errors, span)
+                .expect_err("mean requires numeric elements"),
+            execute_list_dot(&strings, &strings, &mut row_errors, span)
+                .expect_err("dot requires numeric elements"),
+            execute_list_distance(&strings, &strings, &mut row_errors, span)
+                .expect_err("distance requires numeric elements"),
+        ] {
+            assert!(matches!(
+                report.current_context(),
+                RuntimeError::CollectionNonNumericElement {
+                    actual: DataType::Utf8,
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]
@@ -6572,13 +6744,14 @@ mod tests {
             let Err(error) = compiled else {
                 panic!("`{program}` selects a nested element and must be rejected");
             };
-            assert_eq!(error.code, "unsupported_function");
+            assert_eq!(error.current_context().code(), "unsupported_function");
             assert!(
                 error
+                    .current_context()
                     .message
                     .contains("requires ARRAY or VEC elements of a scalar type"),
                 "unexpected rejection for `{program}`: {}",
-                error.message
+                error.current_context().message
             );
         }
     }
@@ -8911,7 +9084,7 @@ mod tests {
 
         let error = execute_program_sync(&program, &batch).expect_err("execution must fail");
 
-        match error {
+        match error.current_context() {
             RuntimeError::InvalidBatch { message } => {
                 assert!(message.contains("Utf8 input"));
                 assert!(message.contains("Float64"));
@@ -8984,10 +9157,10 @@ mod tests {
 
         let error = execute_program_sync(&program, &batch).expect_err("execution must fail");
 
-        match error {
+        match error.current_context() {
             RuntimeError::InvalidRegisterType { reg, expected } => {
-                assert_eq!(reg, utf8_output);
-                assert_eq!(expected, "Int64Array");
+                assert_eq!(*reg, utf8_output);
+                assert_eq!(*expected, "Int64Array");
             }
             other => panic!("expected invalid register type, got {other:?}"),
         }

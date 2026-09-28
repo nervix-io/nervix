@@ -43,10 +43,20 @@ Five rules hold throughout:
 | Vocabulary | Expression Models in `nervix-models` | `Expression`, `RouteConstruction`, `Assignment`, `Invocation`, and `JsonPath`. A builtin name is a validated `BuiltinFunctionName` identifier, not a closed set, and a UDF name is a `UdfName`. |
 | Language | `nervix-nspl` | Parsing a call as a generic `name(args)` or `udf::name(args)` into those Models. The grammar has no function-name table; completion emits a typed builtin or UDF expectation at a call position. |
 | Engines and infrastructure | `nervix-vm` | Lowering Models into VM programs, the semantic catalog of every operator, cast, and builtin, type and sensitivity checking, compilation into instructions over typed registers, every kernel, and window aggregate lowering and route compilation. |
-| Engines and infrastructure | `nervix-roto` | Compiling a `CREATE UDF`, and the `FunctionInjector` that answers the VM's UDF calls over Arrow arrays under a watchdog. |
-| Decisions | Registry validation | Compiling every expression it can check with the same compiler the runtime uses when a statement is applied, so a statement is rejected with exactly the error execution would report. |
+| Engines and infrastructure | `nervix-roto` | Compiling a typed UDF program, and the `FunctionInjector` that answers the VM's UDF calls over Arrow arrays under a watchdog. |
+| Decisions | Registry validation and resource planning | Compiling every expression it can check with the same compiler the runtime uses when a statement is applied, then selecting scheduled UDF programs and lowering generator routes against their exact output schemas. |
 | Data plane | Runtime plan binding and hosts | Binding runtime programs against installed schemas once per typed node revision, projecting carrier batches into VM input, supplying the execution context and injectors, turning row errors into structured message errors, and owning branch-local window accumulators. |
 | Control plane | Subscriptions | Compiling a session subscription's `WHERE` into a read-only predicate when the subscription is created. |
+
+The VM compiler, batch constructors, runtime, and `FunctionInjector` return `error-stack`
+reports with their semantic `CompileError` or `RuntimeError` context. A compile error retains a
+typed code, its existing stable code spelling through `code()`, the operation span, and a safe
+message. Registry validation adds the owning model and route while retaining the VM report.
+Runtime plan binding likewise adds its operation above the original VM report. Roto UDF setup
+returns `UdfError` reports; its injected calls return VM runtime reports, retaining an underlying
+Arrow failure when one caused the call to fail. Jaq compilation, evaluation, and format conversion
+return their own typed reports to the codec or signaling caller. These reports are batch or setup
+failures; selected-row execution and `SideError` values remain the row-failure channel.
 
 For ordinary expression completion, the session resolver asks `FunctionName` for the VM's sorted
 builtin spellings, including datetime names and accepted aliases. That list excludes injected
@@ -334,7 +344,7 @@ against runtime schemas:
 | Reingestor `FROM ... WHERE`, `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | Lowered once by the domain's entrypoint plans, then bound for each input relay before that input's task starts |
 | Emitter `FROM ... WHERE`, routes, HTTP request fields, SQS `FIFO GROUP`, `VALUES`, and OpenTelemetry mappings | When the emitter task starts |
 | Window aggregate argument and output programs, inferencer `INPUTS`, and inferencer output routes | Once when the installed typed processor revision is bound, then shared by every concrete branch |
-| Generator routes | When the domain's execution is built |
+| Generator routes | Lowered into typed ordered route plans from the committed schedule, then compiled once when the domain's execution is built or the generator is swapped; each concrete branch task retains those compiled programs and the exact materialized source branch. |
 | Materialized-state `DEFAULT` | Compiled and executed in one step when the default binds |
 | `ON MESSAGE ERROR SEND TO ... SET` | Once for each error record it builds |
 | Subscription `WHERE` | When the subscription is created |
@@ -760,13 +770,14 @@ These are three different claims, and the implementation makes them separately:
   executes this way, including the irregular ones.
 - **Compiler vectorization.** A buffer loop is written so that LLVM *can* widen it to the vector
   instructions of the CPU the binary targets, and its result is the same whether or not it does.
-  The repository sets no `target-cpu`, so an x86-64 build targets the baseline instruction set.
-  No kernel names an instruction set or an intrinsic. Neither the benchmark report nor this chapter
-  claims that a particular loop is vectorized, because that needs target-specific inspection of the
-  generated instructions, which has not been done.
-- **Explicit SIMD.** Only third-party libraries use explicit SIMD, and they choose instructions at
-  run time: simd-json, base64-simd, faster-hex, and sha2. xxhash chooses when the binary is built.
-  Nervix's own code contains no `std::arch`, `target_feature`, or runtime feature detection.
+  A local build without `RUSTFLAGS` target tuning uses the compiler's baseline target. The Docker
+  image builds its x86-64 payloads for `x86-64-v3` through cargo-sonic. A
+  compiler-vectorized loop needs inspection of the generated instructions for the particular build
+  before claiming a specific instruction set.
+- **Explicit SIMD.** The VM still uses library dispatch for simd-json, base64-simd, faster-hex,
+  and sha2; xxhash chooses when the binary is built. Outside the VM, the schemaful JSON emission
+  classifier in `nervix-simd-kernels` uses `fearless_simd` to select supported instructions at run
+  time, with a scalar fallback. The VM's own kernels do not use `std::arch` or `target_feature`.
 
 The [VM functions measurement report](https://github.com/nervix-io/nervix/blob/main/benches/reports/vm-functions-18.md)
 records what the measurements establish, and

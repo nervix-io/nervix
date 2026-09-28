@@ -692,15 +692,28 @@ coverage-turmoil output:
     cargo llvm-cov report --no-default-ignore-filename-regex \
         --lcov --output-path {{ quote(output) }}
 
-# Run every Criterion suite. Extra arguments are forwarded to Criterion, so CI can use
-# `just bench --test` to execute each benchmark body once without recording runner timings.
+# Run every Criterion suite with the release profile. Extra arguments are forwarded to Criterion.
 # The server benches link the console the server serves, so the console is built first rather than
 # left to whatever ran before them.
 bench *args: build-web-console
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
     cargo bench --package nervix-server --bench wasm_checkpoint --features benchmarks -- {{ args }}
+    cargo bench --package nervix-columnar-json --bench json_encode -- {{ args }}
     cargo bench --package nervix-vm --bench vm -- {{ args }}
+
+# Exercise every Criterion body once without spending CI's smoke-test budget on release codegen.
+bench-smoke: build-web-console
+    cargo bench --profile dev --package nervix-server --bench relay_interaction --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-server --bench subscription_row_encoding --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-server --bench wasm_checkpoint --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
+    cargo bench --profile dev --package nervix-vm --bench vm -- --test
+
+# Measure one batch of schemaful JSON rows, including the escape classification made once per
+# Arrow batch. The suite compares the column writer against serde's per-row reference encoding.
+bench-json-encode *args:
+    cargo bench --package nervix-columnar-json --bench json_encode -- {{ args }}
 
 # Measure direct Arrow-to-Row subscription encoding. The suite reports encoded bytes before
 # Criterion measures CPU; its unit probe measures allocations.

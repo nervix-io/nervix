@@ -498,11 +498,11 @@ impl Runtime {
 
     pub(crate) async fn prepare_domain_udfs(
         &self,
-        mut models: Vec<CreateUdf>,
-    ) -> Result<CompiledDomainUdfs, nervix_roto::UdfError> {
-        models.sort_by(|left, right| left.name.cmp(&right.name));
-        let executor = UdfExecutor::compile(models.clone()).await?;
-        Ok(CompiledDomainUdfs { models, executor })
+        mut programs: Vec<UdfProgram>,
+    ) -> error_stack::Result<CompiledDomainUdfs, nervix_roto::UdfError> {
+        programs.sort_by(|left, right| left.name.cmp(&right.name));
+        let executor = UdfExecutor::compile(programs.clone()).await?;
+        Ok(CompiledDomainUdfs { programs, executor })
     }
 
     pub(crate) fn install_prepared_domain_udfs(
@@ -518,16 +518,16 @@ impl Runtime {
     pub(super) async fn compile_domain_udfs(
         &self,
         domain: &DomainName,
-        models: Vec<CreateUdf>,
-    ) -> Result<UdfExecutor, nervix_roto::UdfError> {
-        let mut sorted_models = models;
-        sorted_models.sort_by(|left, right| left.name.cmp(&right.name));
+        programs: Vec<UdfProgram>,
+    ) -> error_stack::Result<UdfExecutor, nervix_roto::UdfError> {
+        let mut sorted_programs = programs;
+        sorted_programs.sort_by(|left, right| left.name.cmp(&right.name));
         if let Some(cached) = self.inner.compiled_domain_udfs.get(domain)
-            && cached.models == sorted_models
+            && cached.programs == sorted_programs
         {
             return Ok(cached.executor.clone());
         }
-        let prepared = self.prepare_domain_udfs(sorted_models).await?;
+        let prepared = self.prepare_domain_udfs(sorted_programs).await?;
         let executor = prepared.executor.clone();
         self.install_prepared_domain_udfs(domain, prepared);
         Ok(executor)

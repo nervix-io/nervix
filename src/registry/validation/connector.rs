@@ -313,10 +313,11 @@ pub(in crate::registry) fn validate_direct_values_sensitivity(
     let udf_signatures = udf_compile_options(models, CompileOptions::default()).udf_signatures;
     let inferred = infer_set_expr_types_for_bindings_with_udfs(&program, bindings, udf_signatures)
         .map_err(|error| {
-            Report::new(RegistryError::InvalidModel {
+            let message = error.current_context().message.clone();
+            error.change_context(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
-                reason: format!("emitter VALUES type inference failed: {}", error.message),
+                reason: format!("emitter VALUES type inference failed: {}", message),
             })
         })?;
     for (index, field) in inferred.iter().enumerate() {
@@ -601,12 +602,13 @@ pub(in crate::registry) fn validate_sqs_fifo_group_expression(
         ),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
                 "SQS FIFO GROUP expression requires an exact non-sensitive STRING value: {}",
-                error.message
+                message
             ),
         })
     })?;
@@ -715,12 +717,13 @@ pub(in crate::registry) fn validate_http_request_expressions(
         ),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
                 "HTTP METHOD and PATH require exact non-sensitive STRING values: {}",
-                error.message
+                message
             ),
         })
     })?;
@@ -1163,10 +1166,11 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
         ),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP compile failed: {}", error.message),
+            reason: format!("FILTER-MAP compile failed: {}", message),
         })
     })?;
 
@@ -1343,10 +1347,11 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
         ),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP compile failed: {}", error.message),
+            reason: format!("FILTER-MAP compile failed: {}", message),
         })
     })?;
 
@@ -1833,6 +1838,96 @@ mod tests {
             .assured("leak_sensitive(input.secret) is a valid expression");
         validate_direct_values_sensitivity(&domain, &identifier, &models, &emitter, &input_schema)
             .assured("explicit leakage permits the direct VALUES mapping");
+    }
+
+    #[test]
+    fn direct_values_type_failure_keeps_the_vm_compile_cause() {
+        let domain: DomainName = named("default");
+        let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out")
+        else {
+            panic!("the emitter fixture constructs an emitter model");
+        };
+        let identifier = ModelName::from(&emitter.name);
+        let input_schema = CreateSchema {
+            name: named("event"),
+            fields: vec![SchemaField {
+                name: named("value"),
+                ty: ParseAsType::I64,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let mapping = nervix_models::ClickHouseValueMapping {
+            column: "external_value".to_string(),
+            expression: nervix_nspl::parse_expression("input.missing")
+                .expect("a missing field is still a valid expression"),
+        };
+        *emitter.sink = EmitSink::Postgres {
+            client: named("database"),
+            table: named("events"),
+            values: vec![mapping],
+            conflict_action: nervix_models::PostgresConflictAction::None,
+        };
+        let error = validate_direct_values_sensitivity(
+            &domain,
+            &identifier,
+            &ModelIndex::new(),
+            &emitter,
+            &input_schema,
+        )
+        .expect_err("an unknown source field must fail VALUES type inference");
+        assert!(matches!(
+            error.current_context(),
+            RegistryError::InvalidModel { domain, identifier, reason }
+                if domain == "default"
+                    && identifier == "emit"
+                    && reason.contains("emitter VALUES type inference failed")
+        ));
+        assert!(error.contains::<nervix_vm::CompileError>());
+    }
+
+    #[test]
+    fn http_request_type_failure_keeps_the_vm_compile_cause() {
+        let domain: DomainName = named("default");
+        let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out")
+        else {
+            panic!("the emitter fixture constructs an emitter model");
+        };
+        let identifier = ModelName::from(&emitter.name);
+        emitter.body = nervix_models::EmitterBody::WithoutBody;
+        *emitter.sink = EmitSink::Http {
+            client: named("api"),
+            method: nervix_nspl::parse_expression("input.value")
+                .expect("a field reference is a valid expression"),
+            path: nervix_nspl::parse_expression("'/events'")
+                .expect("a string literal is a valid expression"),
+        };
+        let schema = CreateSchema {
+            name: named("event"),
+            fields: vec![SchemaField {
+                name: named("value"),
+                ty: ParseAsType::I64,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let error = validate_http_request_expressions(
+            &domain,
+            &identifier,
+            &ModelIndex::new(),
+            &emitter,
+            &schema,
+            &schema,
+        )
+        .expect_err("HTTP METHOD must be an exact STRING");
+        assert!(matches!(
+            error.current_context(),
+            RegistryError::InvalidModel { domain, identifier, reason }
+                if domain == "default"
+                    && identifier == "emit"
+                    && reason.contains("HTTP METHOD and PATH require exact non-sensitive STRING")
+        ));
+        assert!(error.contains::<nervix_vm::CompileError>());
     }
 
     #[test]

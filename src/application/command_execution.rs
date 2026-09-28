@@ -549,8 +549,7 @@ impl SessionServiceImpl {
                 statement: Statement::DropNode(drop),
             } => {
                 let availability = self.inner.cluster.availability_state().await;
-                let mut latest_nodes = availability.latest_nodes_by_id();
-                let Some(node) = latest_nodes.remove(&drop.node_id) else {
+                let Some(identity) = availability.latest_observed_identity(&drop.node_id) else {
                     return Err(Box::new(command_error(format!(
                         "cannot identify the current incarnation of raft member '{}'",
                         drop.node_id
@@ -558,7 +557,7 @@ impl SessionServiceImpl {
                 };
                 let membership = self.inner.consensus.membership_nodes().await;
                 CommandExecutionEffect::DropNode {
-                    identity: node.identity(),
+                    identity,
                     member_at_admission: membership.contains_key(&drop.node_id),
                 }
             }
