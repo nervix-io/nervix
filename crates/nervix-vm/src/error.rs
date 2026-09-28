@@ -581,12 +581,66 @@ impl<'a> RowErrorMask<'a> {
     }
 }
 
+/// The semantic reason expression compilation failed. Each variant retains its stable diagnostic
+/// code independently of the human-readable detail and source span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum CompileErrorCode {
+    DuplicateNamespace,
+    InternalNamespaceNotWritable,
+    InvalidArgument,
+    InvalidCase,
+    InvalidCondition,
+    InvalidFilter,
+    InvalidFunctionArity,
+    InvalidIpNetwork,
+    InvalidPredicateBinding,
+    InvalidSetElement,
+    InvalidSideEffectCall,
+    MissingOutputNamespace,
+    MissingPredicateBinding,
+    MissingPredicateInputNamespace,
+    MissingSet,
+    NonConstantSetElement,
+    NullForRequiredField,
+    NullSetElement,
+    NullableHeaderArgument,
+    SensitiveLeak,
+    TypeMismatch,
+    UnknownFunction,
+    UnknownIdentifier,
+    UnknownSensitiveField,
+    UnknownSet,
+    UnsupportedAssignmentTarget,
+    UnsupportedBinary,
+    UnsupportedCast,
+    UnsupportedFunction,
+    UnsupportedFunctionContext,
+    UnsupportedIdentifier,
+    UnsupportedInvocation,
+    UnsupportedInvokeContext,
+    UnsupportedMembership,
+    UnsupportedPassthrough,
+    UnsupportedRange,
+    UnsupportedType,
+    UnsupportedUnary,
+    UninitializedRequiredField,
+    UntypedNull,
+    WrongStream,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{code}: {message} at {span}")]
 pub struct CompileError {
-    pub code: &'static str,
+    pub code: CompileErrorCode,
     pub message: String,
     pub span: Span,
+}
+
+impl CompileError {
+    pub fn code(&self) -> &'static str {
+        self.code.into()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -634,14 +688,6 @@ pub enum RuntimeError {
         operation: &'static str,
         #[source]
         source: ArrowError,
-    },
-    #[error("text search kernel failed: {report}")]
-    TextSearchKernel {
-        report: Box<error_stack::Report<RuntimeError>>,
-    },
-    #[error("collection kernel failed: {report}")]
-    CollectionKernel {
-        report: Box<error_stack::Report<RuntimeError>>,
     },
     #[error("required output column '{column}' is uninitialized")]
     UninitializedRequiredColumn { column: String },
@@ -698,22 +744,6 @@ pub enum CollectionLimit {
     FixedWidth,
     #[strum(to_string = "the VEC offset range")]
     VectorOffsets,
-}
-
-impl From<error_stack::Report<RuntimeError>> for RuntimeError {
-    fn from(report: error_stack::Report<RuntimeError>) -> Self {
-        Self::CollectionKernel {
-            report: Box::new(report),
-        }
-    }
-}
-
-impl RuntimeError {
-    pub(crate) fn text_search_kernel(report: error_stack::Report<Self>) -> Self {
-        Self::TextSearchKernel {
-            report: Box::new(report),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -26,6 +26,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
 name = "arrow-array"
 version = "58.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -186,6 +192,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
+name = "error-stack"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe413319145d1063f080f27556fd30b1d70b01e2ba10c2a6e40d4be982ffc5d1"
+dependencies = [
+ "anyhow",
+ "rustc_version",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -341,6 +357,7 @@ version = "0.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
+ "error-stack",
  "nervix-wasm-sdk",
 ]
 
@@ -348,6 +365,7 @@ dependencies = [
 name = "nervix-wasm-protocol"
 version = "0.1.0-dev"
 dependencies = [
+ "error-stack",
  "flatbuffers",
  "flatc-rust",
  "meticulous",
@@ -361,6 +379,7 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
+ "error-stack",
  "meticulous",
  "nervix-wasm-protocol",
  "thiserror",

@@ -17,7 +17,7 @@ use crate::{
     },
     domain_clock::{
         DomainClockAttachOutcome, DomainClockAttachmentEnded, DomainClockDetachOutcome,
-        DomainClockObserved,
+        DomainClockObserved, DomainClockTicked,
     },
     event::{LeadershipObserved, ServerNotice, SessionEnding},
     frame::{EncodedFrame, ServerFrame, VerifiedFrame},
@@ -203,6 +203,7 @@ pub enum ServerEvent {
     SubscriptionEnded(SubscriptionEnded),
     SessionEnding(SessionEnding),
     DomainClockObserved(DomainClockObserved),
+    DomainClockTicked(DomainClockTicked),
     DomainClockAttachmentEnded(DomainClockAttachmentEnded),
 }
 
@@ -287,6 +288,12 @@ impl ServerMessage {
                 ServerEvent::DomainClockObserved(DomainClockObserved::decode(
                     decoder,
                     server_member(message.body_as_domain_clock_observed()),
+                )?)
+            }
+            wire::ServerBody::DomainClockTicked => {
+                ServerEvent::DomainClockTicked(DomainClockTicked::decode(
+                    decoder,
+                    server_member(message.body_as_domain_clock_ticked()),
                 )?)
             }
             wire::ServerBody::DomainClockAttachmentEnded => {

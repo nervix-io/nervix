@@ -590,7 +590,7 @@ Feature: WASM processor runtime behavior
     Then within "10s" the active session observes a server error
     And the last server error contains
       """
-      wasm processor 'restoring_guest' application state restoration failed (branch {"tenant":"alpha"}, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1)
+      wasm processor 'restoring_guest' application state restoration failed (branch {"tenant":"alpha"}, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1): wasm guest rejected the application state in its saved snapshot: guest refuses its saved counters
       """
     And within "10s" the relay subscription receives payloads containing all fragments
       """

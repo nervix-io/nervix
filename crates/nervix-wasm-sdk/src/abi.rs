@@ -7,6 +7,7 @@
 
 use std::{cell::UnsafeCell, ops::Range, panic::AssertUnwindSafe};
 
+use error_stack::{FrameKind, Report, Result, ResultExt as _};
 use nervix_wasm_protocol::BranchInit;
 
 use crate::{
@@ -93,12 +94,14 @@ impl RuntimeCore {
     }
 
     fn buffer_range(&self, ptr: i32, size: i32) -> Result<Range<usize>, GuestError> {
-        let ptr = usize::try_from(ptr).map_err(|_| GuestError::OutOfBounds)?;
-        let size = usize::try_from(size).map_err(|_| GuestError::InvalidSize)?;
-        let end = ptr.checked_add(size).ok_or(GuestError::OutOfBounds)?;
+        let ptr = usize::try_from(ptr).map_err(|_| Report::new(GuestError::OutOfBounds))?;
+        let size = usize::try_from(size).map_err(|_| Report::new(GuestError::InvalidSize))?;
+        let end = ptr
+            .checked_add(size)
+            .ok_or_else(|| Report::new(GuestError::OutOfBounds))?;
         let base = self.buffer.as_ptr().addr();
         if ptr < base || end > base + self.buffer.len() {
-            return Err(GuestError::OutOfBounds);
+            return Err(Report::new(GuestError::OutOfBounds));
         }
         Ok(ptr - base..end - base)
     }
@@ -109,7 +112,7 @@ impl RuntimeCore {
 
     fn guest_context(&mut self) -> Result<GuestContext<'_>, GuestError> {
         let Some(branch) = &self.branch else {
-            return Err(GuestError::NotInitialized);
+            return Err(Report::new(GuestError::NotInitialized));
         };
         Ok(GuestContext {
             branch,
@@ -130,11 +133,30 @@ impl RuntimeCore {
     ///
     /// The reason goes on the global-error channel, but nothing is latched: the host discards an
     /// instance whose restore failed, so there is no later callback for a latch to refuse.
-    fn reject_saved_state(&mut self, rejected: &RejectedSnapshot) -> i32 {
+    fn reject_saved_state(&mut self, rejected: &Report<RejectedSnapshot>) -> i32 {
+        let skip_application_context = matches!(
+            rejected.current_context(),
+            RejectedSnapshot::ApplicationState
+        );
+        let mut reason = String::new();
+        let mut first_context = true;
+        for frame in rejected.frames() {
+            let FrameKind::Context(context) = frame.kind() else {
+                continue;
+            };
+            if first_context && skip_application_context {
+                first_context = false;
+                continue;
+            }
+            if !reason.is_empty() {
+                reason.push_str(": ");
+            }
+            reason.push_str(&context.to_string());
+            first_context = false;
+        }
         self.global_error.clear();
-        self.global_error
-            .extend_from_slice(rejected.to_string().as_bytes());
-        rejected.verdict().code()
+        self.global_error.extend_from_slice(reason.as_bytes());
+        rejected.current_context().verdict().code()
     }
 
     /// Clears guest-owned state while keeping the reusable buffer allocation.
@@ -210,11 +232,11 @@ fn guarded(
             }
             match f(core) {
                 Ok(code) => code,
-                Err(GuestError::Failed { reason }) => {
-                    core.enter_error_state(&reason);
+                Err(error) if matches!(error.current_context(), GuestError::Failed { .. }) => {
+                    core.enter_error_state(&format!("{error:#}"));
                     ERR_ERROR_STATE
                 }
-                Err(error) => error.abi_code(),
+                Err(error) => error.current_context().abi_code(),
             }
         })
     }));
@@ -288,7 +310,9 @@ pub fn clear_global_error() -> i32 {
 pub fn init<P: Processor>(slot: &InstanceSlot<P>, ptr: i32, size: i32) -> i32 {
     guarded(true, |core| {
         let metadata = core.read_buffer(ptr, size)?;
-        let branch = BranchContext::from(BranchInit::decode(&metadata)?);
+        let branch = BranchContext::from(
+            BranchInit::decode(&metadata).change_context(GuestError::Protocol)?,
+        );
         let instance = P::create(&branch)?;
         core.branch = Some(branch);
         slot.with(|slot| *slot = Some(instance));
@@ -303,13 +327,13 @@ pub fn current_domain_time_nanos() -> i64 {
 pub fn process_batch<P: Processor>(slot: &InstanceSlot<P>, ptr: i32, size: i32) -> i32 {
     guarded(true, |core| {
         if core.branch.is_none() {
-            return Err(GuestError::NotInitialized);
+            return Err(Report::new(GuestError::NotInitialized));
         }
         let input = InputBatch::from_envelope_bytes(core.read_buffer(ptr, size)?)?;
         let mut ctx = core.guest_context()?;
         slot.with(|instance| {
             let Some(instance) = instance.as_mut() else {
-                return Err(GuestError::NotInitialized);
+                return Err(Report::new(GuestError::NotInitialized));
             };
             instance.process_batch(&mut ctx, input)
         })?;
@@ -322,7 +346,7 @@ pub fn on_timeout<P: Processor>(slot: &InstanceSlot<P>, handle: i64) -> i32 {
         let mut ctx = core.guest_context()?;
         slot.with(|instance| {
             let Some(instance) = instance.as_mut() else {
-                return Err(GuestError::NotInitialized);
+                return Err(Report::new(GuestError::NotInitialized));
             };
             instance.on_timeout(&mut ctx, TimeoutHandle::new(handle))
         })?;
@@ -333,12 +357,12 @@ pub fn on_timeout<P: Processor>(slot: &InstanceSlot<P>, handle: i64) -> i32 {
 pub fn flush<P: Processor>(slot: &InstanceSlot<P>) -> i32 {
     guarded(true, |core| {
         if core.branch.is_none() {
-            return Err(GuestError::NotInitialized);
+            return Err(Report::new(GuestError::NotInitialized));
         }
         let mut ctx = core.guest_context()?;
         slot.with(|instance| {
             let Some(instance) = instance.as_mut() else {
-                return Err(GuestError::NotInitialized);
+                return Err(Report::new(GuestError::NotInitialized));
             };
             instance.flush(&mut ctx)
         })?;
@@ -354,7 +378,7 @@ pub fn read_emit() -> i32 {
         let envelope = core.pending_emit.remove(0);
         core.buffer.clear();
         core.buffer.extend_from_slice(&envelope);
-        i32::try_from(core.buffer.len()).map_err(|_| GuestError::InvalidSize)
+        i32::try_from(core.buffer.len()).map_err(|_| Report::new(GuestError::InvalidSize))
     })
 }
 
@@ -367,16 +391,16 @@ pub fn read_emit() -> i32 {
 pub fn dump_state<P: Processor>(slot: &InstanceSlot<P>) -> i32 {
     guarded(false, |core| {
         let Some(branch) = &core.branch else {
-            return Err(GuestError::NotInitialized);
+            return Err(Report::new(GuestError::NotInitialized));
         };
         let application_state = slot.with(|instance| {
             let Some(instance) = instance.as_ref() else {
-                return Err(GuestError::NotInitialized);
+                return Err(Report::new(GuestError::NotInitialized));
             };
             instance.save_state()
         })?;
         core.buffer = branch.encode_snapshot(application_state);
-        i32::try_from(core.buffer.len()).map_err(|_| GuestError::InvalidSize)
+        i32::try_from(core.buffer.len()).map_err(|_| Report::new(GuestError::InvalidSize))
     })
 }
 
@@ -392,7 +416,7 @@ pub fn load_state<P: Processor>(slot: &InstanceSlot<P>, ptr: i32, size: i32) -> 
     guarded(false, |core| {
         let saved = core.read_buffer(ptr, size)?;
         let Some(branch) = &core.branch else {
-            return Err(GuestError::NotInitialized);
+            return Err(Report::new(GuestError::NotInitialized));
         };
         match branch.restore_snapshot::<P>(&saved) {
             Ok(restored) => {
@@ -408,4 +432,77 @@ pub fn reset_state<P: Processor>(slot: &InstanceSlot<P>) -> i32 {
     CORE.with(RuntimeCore::reset);
     slot.with(|slot| *slot = None);
     SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use nervix_wasm_protocol::{ProtocolError, SavedStateRejection};
+
+    use super::*;
+
+    #[test]
+    fn rejected_snapshot_reports_its_protocol_cause_without_latching() {
+        let rejected = Report::new(ProtocolError::InvalidIdentifier)
+            .change_context(RejectedSnapshot::UndecodableEnvelope);
+        let mut core = RuntimeCore::new();
+
+        let code = core.reject_saved_state(&rejected);
+
+        assert_eq!(code, SavedStateRejection::SnapshotEnvelope.code());
+        assert_eq!(
+            String::from_utf8(core.global_error).expect("the rejection reason is text"),
+            format!(
+                "saved state is not a guest snapshot envelope: {}",
+                ProtocolError::InvalidIdentifier
+            )
+        );
+        assert!(core.error_state.is_none());
+    }
+
+    #[test]
+    fn application_rejection_keeps_the_processor_reason_as_its_abi_text() {
+        let rejected = GuestError::failed("saved count must be exactly 8 bytes")
+            .change_context(RejectedSnapshot::ApplicationState);
+        let mut core = RuntimeCore::new();
+
+        let code = core.reject_saved_state(&rejected);
+
+        assert_eq!(code, SavedStateRejection::ApplicationState.code());
+        assert_eq!(
+            String::from_utf8(core.global_error).expect("the rejection reason is text"),
+            "saved count must be exactly 8 bytes"
+        );
+        assert!(core.error_state.is_none());
+    }
+
+    #[test]
+    fn callback_report_is_rendered_and_latched_only_at_the_abi_boundary() {
+        CORE.with(RuntimeCore::reset);
+        let code = guarded(true, |_| {
+            Err(
+                Report::new(ProtocolError::InvalidIdentifier).change_context(GuestError::Failed {
+                    reason: "callback rejected its input".to_string(),
+                }),
+            )
+        });
+
+        assert_eq!(code, ERR_ERROR_STATE);
+        let reason = CORE.with(|core| {
+            String::from_utf8(core.global_error.clone()).expect("the global error is text")
+        });
+        assert_eq!(
+            reason,
+            format!(
+                "callback rejected its input: {}",
+                ProtocolError::InvalidIdentifier
+            )
+        );
+
+        CORE.with(|core| core.global_error.clear());
+        assert_eq!(guarded(true, |_| Ok(SUCCESS)), ERR_ERROR_STATE);
+        CORE.with(|core| {
+            assert_eq!(core.global_error, reason.as_bytes());
+            core.reset();
+        });
+    }
 }

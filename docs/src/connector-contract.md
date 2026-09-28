@@ -86,6 +86,55 @@ Lapin thread, and a failed handshake ends that thread and closes the socket. An 
 connection is not closed because its host's answer changed or expired; the next connection uses
 the new answer.
 
+### DNS for ClickHouse and SQS
+
+Composition passes the node resolver into every ClickHouse sink configuration and into every SQS
+source plan and sink configuration. Both connectors keep their driver's HTTP client and hand the
+resolver to it at the driver's own DNS hook, so every new connection resolves its host again while
+the request URL, its authority, the TLS server name and the signing inputs remain what the client
+configured. `nervix-dns` implements both hooks on the node resolver: Hyper's resolver service for
+`hyper-util`'s `HttpConnector`, and Smithy's `ResolveDns`.
+
+A ClickHouse client builds `HttpConnector` over the node resolver in both of its forms. Without TLS
+entries it is the plain HTTP client the driver would build for itself in this build, which has no
+driver TLS feature: an `https` address fails its request, and the connector keeps the driver's
+60-second TCP keepalive and 2-second pool idle timeout. With `tls_ca_file` or client identity
+entries the same connector is wrapped in the AWS-LC rustls configuration those entries build,
+trusting the bundled WebPKI roots, the platform's native roots and the configured CA, and serving
+`http` or `https` addresses. Hyper
+dials a literal IPv4 or IPv6 host without asking the resolver, tries a name's answers in order, and
+applies the URL's port or its scheme's default. The connector's `timeout_ms` bounds the send and the
+response of an insert, and the connection and its lookup run inside that response wait.
+
+An SQS client installs a Smithy HTTP client whose connector resolves through the node resolver
+with `build_with_resolver`. Without `tls_ca_file` the client is the SDK's default HTTPS client with
+that resolver: AWS-LC, the platform's native roots, and a proxy taken from `HTTP_PROXY`,
+`HTTPS_PROXY` and `NO_PROXY`, whose host the node resolver resolves while the proxy resolves the
+service. With `tls_ca_file` it trusts that CA alone and uses no proxy, as before. The SDK signs each
+request with SigV4 for the configured endpoint before the connector resolves its host, so the
+signature, the `Host` header and the certificate check all name that host, whichever address
+accepted the connection. The SDK's default 3.1-second connect timeout, and the operation and
+attempt timeouts a sink's `timeout_ms` sets, include the lookup. The client names static
+credentials and its region, so `aws-config` never consults the default credential or region chains
+that could reach IMDS, ECS, STS or SSO over HTTP. It still builds its SSO token chain, which SQS
+never asks for a token because it signs with SigV4; the loader receives the same HTTP client, so
+that chain would use the node resolver too.
+
+Both hooks give a lookup at most 30 seconds, like the Reqwest hooks; the client's own deadline
+cancels it sooner, and a lookup cut short that way fails as that deadline's timeout rather than as a
+lookup failure. A lookup failure reaches the connector as a cause of the driver's connection
+error, where the connector finds the typed `DnsLookupError` and keeps it as the context beneath its
+existing failure: a ClickHouse publish failure, an SQS sink start or publish failure, and an SQS
+source open, read or acknowledgement failure. The report's message names the host and the lookup
+failure. Any other failure to reach the service, including a certificate that does not name the
+configured host, is described by every cause of the driver's connection error, which describes the
+connection and never a record; a service's own response keeps its existing description. None of
+these failures rejects a record or acknowledges input. The host retries each on its declared
+backoff. An SQS sink keeps the SDK's own retries disabled, while an SQS source keeps the SDK's
+standard retry mode, which makes up to three attempts at a request whose connection failed, lookup
+failures included, before the source reports the failure. Pooled connections stay open when their
+host's answer changes or expires; the next connection resolves again.
+
 ```mermaid
 sequenceDiagram
     participant NSPL as NSPL and Models
@@ -177,6 +226,16 @@ sequenceDiagram
 
 ## Sink boundary
 
+Each domain revision decides one typed emitter execution plan per scheduled emitter before
+publishing the domain execution. The plan resolves its sink clients and codec, retains its ordered
+source relay edges and lowered source predicates, and lowers its route, HTTP request fields, SQS
+ordering group and row sink mappings. It also converts OTEL resource literals and the Iceberg
+commit cadence and size into connector values. Initial startup, reassignment and an entity swap
+use that same plan. A swap publishes new source and remote consumer edges from the new plan; it
+does not reconstruct the emitter from a Model in the host. The host resolves resource mounts and
+binds the lowered VM programs to installed schemas and UDFs when it starts the task. A retry
+reopens the sink with the same typed configuration.
+
 The host prepares one batch for one of three sink contracts. A **record sink** receives
 codec-encoded keys, payloads, headers, optional ordering groups, timestamps, and the identity the
 host assigned each record of the write. A **row sink** receives host-projected Arrow columns,
@@ -189,13 +248,18 @@ mapping errors before calling a row sink. It retains the ACKs of the source rows
 mapped row or request carries, so no runtime ACK map enters the connector. Each publish is one call
 per batch, never a virtual call per row.
 
+The host compiles a row sink's `VALUES` projection before opening that sink. A failed VM
+inference or compilation retains its typed VM report under the domain and emitter context, then
+the sink-initialization context. The emitter follows its existing initialization retry policy;
+the connector never receives a partially compiled mapping.
+
 The ClickHouse row sink uses the shared columnar JSON writer for `JSONEachRow`. It prepares typed
 column readers and string escape masks once for a mapped batch, then writes each selected row in
 mapping order without building per-row JSON values. It keeps the host's bounded chunks, request
 cadence, and per-record outcomes.
 
 An ordering group exists only where the sink plan declares one; today that is the SQS
-`FIFO GROUP`. The host compiles the declaration, evaluates it once per filtered source batch, and
+`FIFO GROUP`. The host binds the lowered declaration, evaluates it once per filtered source batch, and
 carries the result beside the batch: the batch's branch key for `FROM BRANCH`, or a string column
 for an expression, whose null rows keep the reason they have no group. It selects that column
 through the rows the emitter's route keeps, so each record keeps the group of its own input row. A
@@ -212,10 +276,12 @@ the attempt without a retry. A record left unanswered without a reported failure
 unresolved, and the host retries it, because nothing says that record was not written. The host
 applies the answers to the corresponding ACK roots and error policy. The emitter task owns its buffer, maximum batch size, flush cadence,
 retry schedule, fault injection, stop deadline, and metrics. The connector owns the external
-operation and its completion point. A receiver-requested delay can extend, but cannot shorten,
-the host's retry backoff. `finish` lets a transport empty a client-side queue within the remaining
-stop deadline; Kafka uses it. A sink may keep its client after a publish failure when reopening it
-would discard staged work or a persistent session.
+operation and its completion point. A receiver-requested delay, which a connector attaches to the
+attempt's failure, can extend, but cannot shorten, the host's retry backoff; the backoff sequence
+advances as it would without it. The host ignores a delay whose end its monotonic clock cannot
+represent, so the backoff alone decides that wait. `finish` lets a transport empty a client-side
+queue within the remaining stop deadline; Kafka uses it. A sink may keep its client after a
+publish failure when reopening it would discard staged work or a persistent session.
 
 The task loop keeps the connector state, buffer, retry schedule, backoff, and reconnect decision in
 one mutable owner. Force flushes, cadence or retry wakes, and input-triggered publishes all apply one
@@ -293,8 +359,9 @@ evaluated in written order. It validates each row's method, then its target on t
 origin, then each header write, rejects a row at the first field that fails, and buffers the rest
 with the fields they were admitted with, beside their Arrow rows, together with their original
 source records and the batch's materialized state, which the message error of a later rejection
-reads. When a flush releases a row, the
-host encodes its body and retains the request, as a prepared payload with that one member, in the
+reads. The request-field program must compile before the sink starts; a compile failure keeps the
+VM cause beneath the host's emitter context. When a flush releases a row, the host encodes its body
+and retains the request, as a prepared payload with that one member, in the
 same buffer that retains batch payloads. Every attempt hands the connector the retained requests
 unchanged, ahead of any request prepared after them, so a retry repeats the request the destination
 may already hold. One connector publish call awaits at most one request across the emitter
@@ -319,6 +386,16 @@ later requests unresolved; the authentication statuses retain a distinct infrast
 Other `3xx`/`4xx` and `101` reject their one request with a structured external message error,
 then publication continues with the next request. The host applies delivered and rejected
 members, branches and acknowledgements and keeps unresolved prepared bytes for retry.
+
+When the final head of a retryable or authentication status carries exactly one `Retry-After`
+field, the connector reads it as RFC 9110 `delay-seconds`, whole digits only, or as an HTTP date
+in IMF-fixdate, RFC 850 or asctime form. It compares a date with actual UTC, read through the
+contract's physical-time owner as the response arrives, and a date already past asks for no delay.
+It attaches the resulting delay to the attempt's failure as the receiver-requested delay. Two such
+fields, any other text, a number beyond 64 bits, a date after 2262, or a delay that would end after
+2262 attach nothing, and neither does an interim head or a delivered or rejected request. The host
+waits for the longer of this delay and its backoff on its monotonic clock, so the domain's
+`TIME RATE` never shortens it.
 
 For a sink that stages writes, the lifecycle exposes a domain or physical commit deadline,
 staged-message count, pending ACKs, and a commit operation. The host includes that deadline in
@@ -404,7 +481,8 @@ sequenceDiagram
 ## Failure and observation
 
 An ingestor opens all source instances before registration, so a failed source start leaves no
-running ingestor. A sink initialization failure is reported as an emitter initialization error;
+running ingestor. An invalid emitter declaration or expression fails planning before its new
+execution plan is published. A sink initialization failure is reported as an emitter initialization error;
 the emitter remains unavailable and retries opening on its configured backoff. Invalid settings
 and missing external topics, queues, tables, namespaces, or other required entities surface as
 start errors: Nervix does not create them as a side effect. During execution, read and publish

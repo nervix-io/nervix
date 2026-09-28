@@ -2,6 +2,7 @@
 //! with the clock in each installation state, and a malformed clock is refused.
 
 use flatbuffers::{FlatBufferBuilder, UnionWIPOffset, WIPOffset};
+use nervix_models::{DomainClockTickObservation, Timestamp};
 
 use super::{
     fixtures::{
@@ -12,7 +13,8 @@ use super::{
 use crate::{
     DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachmentEndReason,
     DomainClockAttachmentEnded, DomainClockDetachDisposition, DomainClockDetachOutcome,
-    DomainClockObserved, Reply, ReplyBody, ServerEvent, ServerMessage, WireDecodeError, wire,
+    DomainClockObserved, DomainClockTicked, Reply, ReplyBody, ServerEvent, ServerMessage,
+    WireDecodeError, wire,
 };
 
 fn reply(body: ReplyBody) -> Reply {
@@ -88,6 +90,27 @@ fn clock_frames_round_trip_with_the_clock_in_every_state() {
         panic!("an end frame decodes as an attachment end");
     };
     assert_eq!(decoded, ended);
+}
+
+#[test]
+fn tick_frame_round_trips_with_every_progress_field() {
+    let ticked = DomainClockTicked {
+        domain: name("simulation"),
+        tick: DomainClockTickObservation {
+            generation: 7,
+            tick_id: 42,
+            logical_boundary: Timestamp::from_unix_nanos(1_000),
+            authority_utc: Timestamp::from_unix_nanos(2_000),
+            serving_logical: Timestamp::from_unix_nanos(3_000),
+        },
+    };
+    let frame = ticked
+        .encode(&limits())
+        .unwrap_or_else(|error| panic!("a tick frame fits the default limits: {error}"));
+    let ServerEvent::DomainClockTicked(decoded) = decode_event(frame) else {
+        panic!("a tick frame decodes as a tick");
+    };
+    assert_eq!(decoded, ticked);
 }
 
 /// A hand-built clock frame whose state `write_state` writes.

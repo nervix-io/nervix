@@ -172,3 +172,77 @@ Feature: Altering emitters
       | cluster_size |
       | 1            |
       | 3            |
+
+  @domain_pause_emitter_source_swap
+  Scenario Outline: An emitter source and client swap replaces its relay edge and resumes flow
+    Given entity gate deadline is configured as "5s"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY outgoing SCHEMA event UNBRANCHED;
+      CREATE RELAY replacement SCHEMA event UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}-alter-emitter-swap.example.com;
+      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR event_source
+        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        TO replacement INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT sink_a TYPE ZEROMQ CONFIG {
+        'addr' = '{{zeromq_emit_addr}}',
+        'bind' = 'false'
+      };
+      CREATE CLIENT sink_b TYPE ZEROMQ CONFIG {
+        'addr' = '{{zeromq_emit_addr}}',
+        'bind' = 'false'
+      };
+      CREATE EMITTER event_sink FROM outgoing
+        TO ZEROMQ sink_a MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}-alter-emitter-swap.example.com" path "/events"
+      """
+      {"seq":1}
+      """
+    Then the observed broker receives a payload
+      """
+      "seq":1
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      ALTER EMITTER event_sink
+        ADD FROM replacement,
+        DROP FROM outgoing,
+        SET CLIENT sink_b,
+        SET DETACHED;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DOMAIN_PAUSE
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}-alter-emitter-swap.example.com" path "/events"
+      """
+      {"seq":2}
+      """
+    Then the observed broker receives a payload
+      """
+      "seq":2
+      """
+    And the observed broker does not receive a payload within "300ms"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

@@ -159,6 +159,9 @@ tick by direct arithmetic. If scheduling delay spans several periods, it emits o
 due boundary and continues with the first future boundary. It never loops through or queues every
 missed tick. A newly assigned authority can consequently reconstruct the current frontier without
 persisting the previous producer's counter.
+After an actual emission, the authority waits at least one period divided by the rate in physical
+time before emitting another tick. This keeps consecutive observations spaced correctly when tick
+1 was delayed after `START`; a late next boundary is coalesced to the newest due id as usual.
 
 Each progress report carries the lifecycle generation, authority revision, full authority
 identity, tick id, logical boundary, authority UTC observation, and period. The authority applies
@@ -189,8 +192,12 @@ nonzero tick id. A report is newer only when its tick id advances and its author
 does not precede the retained one. Duplicate, reordered, delayed, and superseded reports are
 ignored.
 
-The receiver retains only the newest accepted tick observation. It does not use the report's
-logical timestamp, UTC timestamp, or period to replace the installed mapping. The unit response
+The receiver publishes the newest accepted tick id, logical boundary, and authority UTC observation
+through a per-domain watch. The compare and replacement are serialized by the watch so concurrent
+deliveries cannot replace newer progress with an older report. Generation changes and stops clear
+it with `send_replace`; a late observer subscribes before reading and sees the current value at
+once. Progress does not use the report's logical timestamp, UTC timestamp, or period to replace the
+installed mapping. The unit response
 therefore means that the receiver evaluated the report against its current fence; it does not mean
 that the report established time. Progress can never create a missing domain.
 
@@ -240,15 +247,14 @@ Removing a domain marks the shared lifecycle missing before node-local state is 
 
 ## Session Observation
 
-A session attached with `ATTACH DOMAIN CLOCK` observes the installation its serving node publishes.
-It binds no capability, takes no execution snapshot, reads no tick progress, and adds no
-interconnect traffic: every node serves attachments from its own installation, which it derives
-from the same committed revision as every other node.
+A session attached with `ATTACH DOMAIN CLOCK` observes the installation and accepted tick progress
+its serving node publishes. Its observer takes a clock snapshot for the serving node's logical
+reading when building a tick frame. Attachment adds no interconnect traffic: every node serves it
+from its own installation and accepted progress.
 
-The runtime exposes an observer of one domain's lifecycle. The observer subscribes to the
-lifecycle's change notification before it reads the published installation, so a replacement
-published after any read wakes it. It maps each installation to the public observed clock, a
-vocabulary model shared by the server and the Rust client:
+The runtime exposes an observer of one domain's lifecycle and progress watch. It subscribes to
+both notifications before its first read, so a later installation or tick wakes it. It maps each
+installation to the public observed clock, a vocabulary model shared by the server and Rust client:
 
 | Installation | Observed clock |
 | --- | --- |
@@ -258,16 +264,23 @@ vocabulary model shared by the server and the Rust client:
 | Installed unpaced | Unpaced, with its generation |
 | Installed paced | Paced, with its generation, period, skew, and committed mapping |
 
+The observer retains the progress watch sender while the attachment lives. Removing the domain
+therefore closes neither wait before the lifecycle publishes missing and wakes delivery to send the
+attachment-end frame.
+
 The session edge runs one delivery task per attached domain against its observer. The attach reply
 carries the observation read when the observer was created, and the task starts only once that
-reply is queued, remembering the observation the reply carried. On each wake it reads the newest
-installation and queues a frame on the session's control lane only when the observation differs
-from the one the client last received. Replacing an installation with an equal one publishes
-nothing, and neither an authority move within a generation nor the alteration pause changes the
-installation, so none of them wakes delivery. A frame waits for room on the control lane rather than
-buffering: changes published meanwhile collapse into the newest installation read after it is
-queued. A slow client therefore holds back at most one frame per attached domain and never receives
-an older observation after a newer one.
+reply is queued, remembering the observation the reply carried. It first sends any accepted tick
+of that generation, if one exists. On each wake it reads the newest installation and queues a
+state frame on the session's control lane only when the observation differs from the one the client
+last received. Replacing an installation with an equal one publishes
+nothing. An authority move within a generation or the alteration pause leaves the installation
+unchanged, though newly accepted progress still wakes delivery. A state frame waits for room on the
+control lane; changes published meanwhile collapse into the newest installation read after it is
+queued. Before each tick delivery, the task re-reads the installation and sends a changed state
+frame first. A tick's control-lane slot can be replaced until transport takes it,
+including while the lane is full. Each attached domain therefore has at most one pending tick and
+slow clients see the newest accepted id instead of a backlog.
 
 Attach and detach run on the session's ordered lane, in order with its commands. Detach stops the
 delivery task and waits for it to end before queueing its reply, so no frame about the domain follows
@@ -275,7 +288,9 @@ that reply. When the observer reports the domain missing, the task marks the att
 queues the end frame with reason `DomainRemoved`, and ends. Because the mark precedes the frame, a
 request the client sends after reading the frame finds the attachment ending: an attach replaces it
 and a detach reports it not attached. The end of the session stops every delivery task without a
-frame. See [Domain Clock Attachment](./sessions.md#domain-clock-attachment) for the public contract.
+frame. See [Domain Clock Attachment](./sessions.md#domain-clock-attachment) for the public contract
+and [Client Session Protocol](./client-session-protocol.md#domain-clock-attachment) for how the
+attachment travels in the protocol.
 
 ## Execution-Time Snapshots
 
@@ -379,7 +394,7 @@ The architecture keeps four time classes distinct:
 | Domain logical time | Expressions, explicit domain cadence, collection and flush cadence, TTL, retention, window completion, and guest-requested timeouts |
 | Preserved source time | External event timestamps, broker metadata, and window membership inputs |
 | Physical monotonic time | Network deadlines, retry and backoff, acknowledgements, cancellation, shutdown, drain, state checkpoint deadlines, safety timeouts, and physical batching minima |
-| Actual UTC | Paced projection input, unpaced domain reads, administrative records, security validity, and explicitly external observation fields |
+| Actual UTC | Paced projection input, unpaced domain reads, administrative records, security validity, explicitly external observation fields, and the comparison of a server-supplied HTTP date, such as `Retry-After`, with the present |
 
 Logical deadlines and physical deadlines are different types and cannot be interchanged. Actual
 UTC enters the data plane through a dedicated boundary, and expression engines cannot read it

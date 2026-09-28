@@ -19,8 +19,8 @@ use nervix_execution::sync::ArcSwap;
 use nervix_models::DomainTick;
 use nervix_models::{
     DomainAdmissionWindow, DomainClockAuthority, DomainClockObservation, DomainClockObservedState,
-    DomainClockPeriod, DomainClockProgress, DomainClockSkew, DomainClockState, DomainName,
-    DomainPace, DomainState, PacedDomainClock, Timestamp,
+    DomainClockPeriod, DomainClockProgress, DomainClockSkew, DomainClockState,
+    DomainClockTickObservation, DomainName, DomainPace, DomainState, PacedDomainClock, Timestamp,
 };
 #[cfg(test)]
 use nervix_wasm::WasmExecutionContext;
@@ -397,9 +397,14 @@ impl DomainClockLifecycle {
     ///
     /// The observer subscribes to the lifecycle notification before its first read, so a
     /// replacement published after that read always wakes it.
-    fn observe(&self) -> DomainClockObserver {
+    fn observe(
+        &self,
+        progress_owner: watch::Sender<Option<ObservedDomainTick>>,
+    ) -> DomainClockObserver {
         DomainClockObserver {
             changes: self.inner.changes.subscribe(),
+            progress: progress_owner.subscribe(),
+            _progress_owner: progress_owner,
             inner: self.inner.clone(),
         }
     }
@@ -469,14 +474,17 @@ impl DomainClockLifecycle {
 
 /// Follows the installation one domain clock publishes on this node, for a client attachment.
 ///
-/// It reads the publication bound handles read and wakes on the notification logical waiters wake
-/// on, so it takes no lock and holds nothing a publication waits for. It never reads the clock
-/// itself: an observation is the installed generation and its committed mapping, not a projected
-/// time.
+/// It reads the publication bound handles read and subscribes to installation and progress
+/// notifications before its first read. An installation observation is the generation and
+/// committed mapping; a tick observation adds a snapshot of this node's logical reading.
 #[derive(Debug)]
 pub(crate) struct DomainClockObserver {
     inner: Arc<DomainClockInner>,
     changes: watch::Receiver<()>,
+    progress: watch::Receiver<Option<ObservedDomainTick>>,
+    /// Keeps the notification channel open after the runtime removes this domain entry; the
+    /// lifecycle's missing publication then wakes delivery to end the attachment.
+    _progress_owner: watch::Sender<Option<ObservedDomainTick>>,
 }
 
 impl DomainClockObserver {
@@ -489,11 +497,51 @@ impl DomainClockObserver {
     /// Resolves once the published installation has been replaced since the observer was created
     /// or last woke. Several replacements between two waits wake it once, so a caller that reads
     /// [`Self::current`] afterwards sees the newest.
+    #[cfg(test)]
     pub(crate) async fn changed(&mut self) {
         self.changes
             .changed()
             .await
             .assured("the observer holds the lifecycle that owns the notification sender");
+    }
+
+    /// The newest accepted tick of the installed paced generation, with a fresh reading from
+    /// this node. A concurrent installation change makes the snapshot unavailable here; the
+    /// delivery owner re-reads the installation before sending any tick.
+    pub(crate) fn current_tick(&self) -> Option<DomainClockTickObservation> {
+        let tick = self.progress.borrow().clone()?;
+        let clock = self.current()?;
+        if tick.generation != clock.generation
+            || !matches!(clock.state, DomainClockObservedState::Paced(_))
+        {
+            return None;
+        }
+        let bound = DomainClock {
+            inner: self.inner.clone(),
+            generation: tick.generation,
+        };
+        let Ok(snapshot) = bound.snapshot() else {
+            return None;
+        };
+        Some(DomainClockTickObservation {
+            generation: tick.generation,
+            tick_id: tick.tick_id,
+            logical_boundary: tick.logical_boundary,
+            authority_utc: tick.authority_utc,
+            serving_logical: snapshot.now(),
+        })
+    }
+
+    /// Wakes on either an installation or accepted progress change.
+    pub(crate) async fn any_changed(&mut self) {
+        tokio::select! {
+            changed = self.changes.changed() => {
+                changed.assured("the observer holds the clock lifecycle sender");
+            }
+            changed = self.progress.changed() => {
+                changed.assured("the observer holds the runtime progress sender");
+            }
+        }
     }
 }
 
@@ -989,16 +1037,24 @@ impl Runtime {
             return Ok(());
         }
 
-        let mut observed = entry.progress.lock();
-        if observed.as_ref().is_some_and(|observed| {
-            observed.tick_id >= progress.tick.tick_id
-                || observed.wall_clock > progress.tick.wall_clock
-        }) {
-            return Ok(());
-        }
-        *observed = Some(ObservedDomainTick {
-            tick_id: progress.tick.tick_id,
-            wall_clock: progress.tick.wall_clock,
+        // The watch serializes the compare and replacement so concurrent progress deliveries
+        // cannot publish an older tick after a newer one. It stores the value even with no
+        // subscribers, which lets a late attachment read the accepted frontier immediately.
+        entry.progress.send_if_modified(|observed| {
+            if observed.as_ref().is_some_and(|observed| {
+                observed.generation == progress.generation
+                    && (observed.tick_id >= progress.tick.tick_id
+                        || observed.authority_utc > progress.tick.wall_clock)
+            }) {
+                return false;
+            }
+            *observed = Some(ObservedDomainTick {
+                generation: progress.generation,
+                tick_id: progress.tick.tick_id,
+                logical_boundary: progress.tick.logical_timestamp,
+                authority_utc: progress.tick.wall_clock,
+            });
+            true
         });
         Ok(())
     }
@@ -1061,7 +1117,7 @@ impl Runtime {
     /// `None` when this node holds no such domain.
     pub(crate) fn observe_domain_clock(&self, domain: &DomainName) -> Option<DomainClockObserver> {
         let entry = self.inner.domains.get(domain)?;
-        Some(entry.clock.observe())
+        Some(entry.clock.observe(entry.progress.clone()))
     }
 
     pub(crate) fn current_paced_domain_time(
@@ -1094,6 +1150,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        application::{ClockDeliveryOrder, NextClockFrame},
         runtime::{
             RuntimeValue, domain, named, paced_domain_state, test_domain_clock,
             test_domain_clock_authority, unpaced_domain_state,
@@ -1183,8 +1240,26 @@ mod tests {
             .domains
             .get(&domain_id)
             .expect("the fixture domain remains installed");
-        let progress = observed.progress.lock();
+        let progress = observed.progress.borrow();
         assert_eq!(progress.as_ref().map(|tick| tick.tick_id), Some(3));
+        drop(progress);
+        drop(observed);
+
+        // A session attached after progress was accepted reads that frontier immediately,
+        // without waiting for a subsequent watch notification.
+        let observer = runtime
+            .observe_domain_clock(&domain_id)
+            .assured("the fixture domain remains installed");
+        let initial = observer
+            .current()
+            .assured("the fixture clock remains installed");
+        let NextClockFrame::Tick(tick) = ClockDeliveryOrder::new(initial).next(&observer) else {
+            panic!("a late attachment must select the retained tick first");
+        };
+        assert_eq!(tick.generation, 4);
+        assert_eq!(tick.tick_id, 3);
+        assert_eq!(tick.logical_boundary, Timestamp::from_unix_nanos(3));
+        assert!(tick.serving_logical >= tick.logical_boundary);
     }
 
     #[test]
@@ -1266,7 +1341,7 @@ mod tests {
 
         runtime.sync_domains(&BTreeMap::new());
         observer
-            .changed()
+            .any_changed()
             .now_or_never()
             .expect("removing the domain wakes its observer");
         assert_eq!(observer.current(), None);
@@ -1275,6 +1350,8 @@ mod tests {
 
     #[test]
     fn a_paced_generation_without_an_authority_is_observed_uninstalled() {
+        use futures_util::FutureExt as _;
+
         let runtime = Runtime::new();
         let domain_id = domain("unowned");
         let mut state = paced_domain_state("unowned");
@@ -1284,13 +1361,19 @@ mod tests {
             Timestamp::from_unix_nanos(0),
             DomainTimeRate::ONE,
         ));
-        runtime.sync_committed_domains(
-            &BTreeMap::from([(domain_id.clone(), state)]),
-            &BTreeMap::new(),
-        );
-        let observer = runtime
+        let domains = BTreeMap::from([(domain_id.clone(), state)]);
+        let assigned = BTreeMap::from([(domain_id.clone(), test_domain_clock_authority())]);
+        runtime.sync_committed_domains(&domains, &assigned);
+        let mut observer = runtime
             .observe_domain_clock(&domain_id)
             .expect("the synchronized domain is observable");
+        let installed = observer.current().expect("the assigned clock is installed");
+
+        runtime.sync_committed_domains(&domains, &BTreeMap::new());
+        observer
+            .changed()
+            .now_or_never()
+            .expect("unassignment wakes the observer");
         assert_eq!(
             observer.current(),
             Some(DomainClockObservation {
@@ -1298,6 +1381,13 @@ mod tests {
                 state: DomainClockObservedState::Uninstalled,
             })
         );
+
+        runtime.sync_committed_domains(&domains, &assigned);
+        observer
+            .changed()
+            .now_or_never()
+            .expect("reassignment wakes the observer");
+        assert_eq!(observer.current(), Some(installed));
     }
 
     #[test]
@@ -1386,7 +1476,7 @@ mod tests {
             .domains
             .get(&domain_id)
             .expect("the restarted domain remains installed");
-        assert!(observed.progress.lock().is_none());
+        assert!(observed.progress.borrow().is_none());
         let installed = observed.clock.inner.published.load();
         assert!(matches!(
             &installed.installation,
@@ -1448,7 +1538,7 @@ mod tests {
             .get(&domain_id)
             .expect("the later generation remains installed");
         assert!(
-            observed.progress.lock().is_none(),
+            observed.progress.borrow().is_none(),
             "progress retained from the skipped STOP belongs to the previous generation"
         );
         drop(observed);
@@ -1461,7 +1551,7 @@ mod tests {
             .get(&domain_id)
             .expect("the later generation remains installed");
         assert_eq!(
-            observed.progress.lock().as_ref().map(|tick| tick.tick_id),
+            observed.progress.borrow().as_ref().map(|tick| tick.tick_id),
             Some(1)
         );
     }
@@ -1510,7 +1600,7 @@ mod tests {
             .domains
             .get(&domain_id)
             .expect("the domain remains installed");
-        let progress = observed.progress.lock();
+        let progress = observed.progress.borrow();
         assert_eq!(progress.as_ref().map(|tick| tick.tick_id), Some(final_tick));
     }
 
@@ -2184,12 +2274,15 @@ mod tests {
 
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_lifecycle_tests {
+    use std::collections::BTreeMap;
+
     use nervix_models::DomainTimeRate;
     use parking_lot::Mutex;
     use shuttle::thread;
 
     use super::*;
     use crate::{
+        application::{ClockDeliveryOrder, NextClockFrame},
         runtime::{domain, paced_domain_state, test_domain_clock_authority},
         shuttle_test::{check_pct, check_random},
     };
@@ -2259,6 +2352,138 @@ mod shuttle_lifecycle_tests {
             &test_domain_clock_authority(),
         );
         lifecycle
+    }
+
+    /// Invariant: the production attachment order sends a generation's state before its tick,
+    /// and no tick older than one already delivered is delivered. The observer and delivery
+    /// owner are the same types used by the session task; the harness supplies the transport's
+    /// instantaneous queue completion and explores concurrent progress and generation changes.
+    #[test]
+    fn shuttle_delivery_sends_state_before_ticks_without_regressing_progress() {
+        check_random(
+            race_attachment_delivery_with_progress_and_generation,
+            RANDOM_ITERATIONS,
+        );
+        check_pct(
+            race_attachment_delivery_with_progress_and_generation,
+            PCT_ITERATIONS,
+            PCT_DEPTH,
+        );
+    }
+
+    fn race_attachment_delivery_with_progress_and_generation() {
+        let runtime = Runtime::new();
+        let name = domain(MODEL_DOMAIN);
+        let mut state = paced_domain_state(MODEL_DOMAIN);
+        state.start_version = 1;
+        state.clock = Some(DomainClockState::new(
+            Timestamp::from_unix_nanos(0),
+            Timestamp::from_unix_nanos(0),
+            DomainTimeRate::ONE,
+        ));
+        let mut domains = BTreeMap::new();
+        domains.insert(name.clone(), state.clone());
+        runtime.sync_domains(&domains);
+        let observer = runtime
+            .observe_domain_clock(&name)
+            .assured("the model synchronized the domain before observing it");
+        let initial = observer
+            .current()
+            .assured("the model retains the domain for its attachment");
+        let mut delivery = ClockDeliveryOrder::new(initial);
+
+        let publishing = runtime.clone();
+        let published_name = name.clone();
+        let publisher = thread::spawn(move || {
+            publish_model_tick(&publishing, &published_name, 1, 1);
+            thread::yield_now();
+            publish_model_tick(&publishing, &published_name, 1, 2);
+            publishing.sync_committed_domains(&domains, &BTreeMap::new());
+            thread::yield_now();
+            publishing.sync_committed_domains(
+                &domains,
+                &BTreeMap::from([(published_name.clone(), test_domain_clock_authority())]),
+            );
+            thread::yield_now();
+            publish_model_tick(&publishing, &published_name, 1, 3);
+            state.start_version = 2;
+            domains.insert(published_name.clone(), state);
+            publishing.sync_domains(&domains);
+            thread::yield_now();
+            publish_model_tick(&publishing, &published_name, 2, 1);
+            publish_model_tick(&publishing, &published_name, 2, 3);
+        });
+
+        let mut delivered_generation = 1;
+        let mut last_id = 0;
+        for _ in 0..8 {
+            take_model_delivery(
+                &mut delivery,
+                &observer,
+                &mut delivered_generation,
+                &mut last_id,
+            );
+            thread::yield_now();
+        }
+        publisher.join().assured(PANICS_END_THE_SCHEDULE);
+        for _ in 0..3 {
+            take_model_delivery(
+                &mut delivery,
+                &observer,
+                &mut delivered_generation,
+                &mut last_id,
+            );
+        }
+        assert_eq!(delivered_generation, 2);
+        assert_eq!(last_id, 3);
+    }
+
+    fn publish_model_tick(runtime: &Runtime, domain: &DomainName, generation: u64, id: u64) {
+        let authority = test_domain_clock_authority();
+        let owner = authority.owner().assured("the model authority is assigned");
+        let progress = DomainClockProgress {
+            generation,
+            authority_revision: authority.revision(),
+            authority: owner.clone(),
+            tick: DomainTick {
+                tick_id: id,
+                logical_timestamp: Timestamp::from_unix_nanos(
+                    i64::try_from(id).assured("the model ids fit in timestamps"),
+                ),
+                wall_clock: Timestamp::from_unix_nanos(
+                    i64::try_from(id).assured("the model ids fit in timestamps"),
+                ),
+                period: "1s".parse().assured("one second is a positive period"),
+            },
+        };
+        runtime
+            .handle_domain_clock_progress(domain, owner.node_id(), &progress)
+            .assured("the model domain remains installed");
+    }
+
+    fn take_model_delivery(
+        delivery: &mut ClockDeliveryOrder,
+        observer: &DomainClockObserver,
+        delivered_generation: &mut u64,
+        last_id: &mut u64,
+    ) {
+        match delivery.next(observer) {
+            NextClockFrame::State(clock) => {
+                if *delivered_generation != clock.generation {
+                    *last_id = 0;
+                }
+                *delivered_generation = clock.generation;
+                delivery.state_queued(clock);
+            }
+            NextClockFrame::Tick(tick) => {
+                assert_eq!(tick.generation, *delivered_generation);
+                assert!(tick.tick_id > *last_id);
+                *last_id = tick.tick_id;
+                delivery.tick_queued(&tick);
+            }
+            NextClockFrame::Wait => {}
+            NextClockFrame::End => panic!("the model does not remove its domain"),
+        }
     }
 
     /// The latest time returned by a read that has finished.
