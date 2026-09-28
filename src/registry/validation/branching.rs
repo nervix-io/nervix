@@ -270,10 +270,11 @@ pub(in crate::registry) fn ensure_output_branch(
         ),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("branch SET compile failed: {}", error.message),
+            reason: format!("branch SET compile failed: {}", message),
         })
     })?;
     Ok(())

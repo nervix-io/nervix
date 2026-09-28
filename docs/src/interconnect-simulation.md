@@ -257,9 +257,10 @@ network or host event, and a scenario's claim is limited to the abstraction it u
 The model has consequences that every scenario respects:
 
 - Simulated TCP does not retransmit. A message dropped by a partition is lost for good, so after a
-  repair an established HTTP/2 session can be unusable. The partitioned-exchange scenario therefore
-  shuts its listener down, rebinds it, and retires the client pool before reconnecting. No scenario
-  infers kernel retransmission timing or packet-loss recovery.
+  repair an established HTTP/2 session can be unusable. The established-exchange scenarios require
+  both peers' protocol pings to retire unusable sessions and allow reconnection without restarting
+  either host or manually replacing a pool. No scenario infers kernel retransmission timing or
+  packet-loss recovery.
 - Holding and one-way partitions cannot be combined on one link, so scenarios use them separately.
 - Turmoil 0.7.2 has no disconnect control. TCP closure is exercised by shutting a listener down or
   crashing a host.
@@ -510,10 +511,11 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | bounded CPU worker | `bounded_cpu_job_runs_on_the_simulated_scheduler` | 1–12 | 1 s / 200 / 3 s | Every CPU and memory class runs its job on the scheduler thread, and every queue and reservation returns to zero |
 | typed Arrow exchange | `transport::production_transport_exchanges_typed_arrow_batch_over_simulated_tcp` | 49 | 30 s / 50,000 / 90 s | After a listener rebind, production TLS, HTTP/2, typed envelopes, and Arrow IPC carry a typed request and a relay payload |
 | multiple authenticated peers | `transport::multiple_peers_and_invalid_authentication_use_production_transport_contract` | 57 | 30 s / 50,000 / 90 s | One client resolves and exchanges with two peers, and a dial under a DNS identity the certificate does not name is rejected |
-| partition before connect | `transport::network_disruption_respects_deadlines_and_repairs_authenticated_service` | 61 | 60 s / 50,000 / 90 s | Setup fails and liveness times out through twelve seconds of partition; repair restores authenticated service |
-| one-way partition before connect | The same | 62 | 60 s / 50,000 / 90 s | The same, with only server-to-client messages dropped |
-| held authenticated exchange | The same | 63 | 60 s / 50,000 / 90 s | A one-second liveness probe and a two-second request expire while held; release restores service |
-| partitioned authenticated exchange | The same | 64 | 60 s / 50,000 / 90 s | Both deadlines expire; after repair, a rebound listener and a retired pool reconnect |
+| partition before connect | `transport::network_disruption_respects_deadlines_and_repairs_authenticated_service` | 61 | 85 s / 100,000 / 90 s | Setup fails and liveness times out through twelve seconds of partition; repair restores authenticated service |
+| one-way partition before connect | The same | 62 | 85 s / 100,000 / 90 s | The same, with only server-to-client messages dropped |
+| held authenticated exchange | The same | 63 | 85 s / 100,000 / 90 s | A one-second liveness probe and a two-second request expire while held; release restores service |
+| partitioned authenticated exchange | The same | 64 | 85 s / 100,000 / 90 s | Both deadlines expire; after repair, protocol pings replace the stalled sessions without a restart or pool reset |
+| one-way loss after authenticated exchange | The same | 65 | 85 s / 100,000 / 90 s | Client-to-server packets are lost after authentication; repair restores service without a restart or pool reset |
 | relay response lost after admission | `transport::relay::relay_reconciliation_and_cancellation_survive_lost_replies` | 71 | 60 s / 50,000 / 90 s | A retry to the same receiver process returns the admitted outcome and ACK without a second enqueue, and a late cancellation returns admitted |
 | relay cancellation before grant | The same | 72 | 60 s / 50,000 / 90 s | A cancellation that reaches the receiver first fences the delivery |
 | relay cancellation while reply is lost | The same | 73 | 60 s / 50,000 / 90 s | Cancellation wins the admission fence while the body reply is lost |
@@ -549,12 +551,14 @@ handshake.
 
 The two setup partitions stay in place for twelve seconds of simulated time, so bounded reconnect
 behavior is observable: setup failures are counted, liveness times out, and no connection appears.
-The two established-link faults first complete an authenticated exchange, then expire a one-second
+The established-link faults first complete an authenticated exchange, then expire a one-second
 liveness probe and a two-second typed request, and require at least three seconds of simulated time
 to have passed. Transport readiness and authenticated liveness are checked before each disruption;
-after each repair, the client reconnects, passes liveness, and completes another exchange. Snapshots
-bound open connections, pending requests, reconnect failures, and simulated sockets throughout, and
-the transport's connection counts are checked after shutdown.
+after each repair, the client reconnects, passes liveness, and completes another exchange. The
+symmetric and one-way partitions keep both processes and their listeners running; protocol ping
+deadlines close the unusable sessions on both ends so inbound slot limits do not prevent recovery.
+Snapshots bound open connections, pending requests, reconnect failures, and simulated sockets
+throughout, and the transport's connection counts are checked after shutdown.
 
 ### Relay Reconciliation And Cancellation
 

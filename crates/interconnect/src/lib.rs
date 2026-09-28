@@ -460,6 +460,8 @@ pub struct ClientProducersDescribeEnvelope {
     pub forwarded_producers: u64,
     pub outstanding_batches: u64,
     pub outstanding_bytes: u64,
+    /// Batches holding a slot of the ingestor's acknowledgement window.
+    pub admitted_batches: u64,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

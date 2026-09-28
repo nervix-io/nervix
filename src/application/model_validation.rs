@@ -389,7 +389,9 @@ impl SessionServiceImpl {
                     // previous binding and its saved state are still the current ones.
                     self.inner
                         .runtime
-                        .prepare_candidate_wasm_module(domain, processor)
+                        .prepare_wasm_module(&crate::registry::WasmModulePlan::from_model(
+                            domain, processor,
+                        ))
                         .await
                         .change_context(ModelBindingValidationError::WasmProcessor {
                             domain: domain.clone(),
@@ -425,7 +427,7 @@ impl SessionServiceImpl {
             .candidate_models_of_kind(ModelKind::Udf)
             .into_iter()
             .filter_map(|model| match model {
-                Model::Udf(udf) => Some(udf.clone()),
+                Model::Udf(udf) => Some(crate::registry::udf_program(udf)),
                 _ => None,
             })
             .collect::<Vec<_>>();

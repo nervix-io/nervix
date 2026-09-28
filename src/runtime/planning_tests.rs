@@ -9,7 +9,7 @@ use std::num::NonZeroU32;
 use nervix_models::{
     BranchSelection, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
     CreateDeduplicator, CreateInferencer, CreateJunction, CreateSchema, CreateWasmProcessor,
-    CreateWindowProcessor, InferencerTensorDeclaration, InferencerTensorDimension,
+    CreateWindowProcessor, EmitSink, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
     InferencerTensorSchema, ParseAsType, ProcessorOutputs, RelayBranching, SchemaField,
     WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound, ZeroMqIngestMode,

@@ -34,8 +34,8 @@ use nervix_models::{
 use nervix_recovery::Discarded as _;
 use parking_lot::Mutex;
 use prometheus::{
-    Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGaugeVec,
-    Opts, Registry, TextEncoder,
+    Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, Opts, Registry, TextEncoder,
     core::{Collector, Desc},
     proto::{MetricFamily, MetricType},
 };
@@ -70,6 +70,7 @@ const CLIENT_INGESTOR_PRODUCERS: &str = "client_ingestor_producers";
 const CLIENT_INGESTOR_FORWARDED_PRODUCERS: &str = "client_ingestor_forwarded_producers";
 const CLIENT_INGESTOR_OUTSTANDING_BATCHES: &str = "client_ingestor_outstanding_batches";
 const CLIENT_INGESTOR_OUTSTANDING_BYTES: &str = "client_ingestor_outstanding_bytes";
+const CLIENT_INGESTOR_ADMITTED_BATCHES: &str = "client_ingestor_admitted_batches";
 const CLIENT_INGESTOR_SUBMISSIONS_TOTAL: &str = "client_ingestor_submissions_total";
 const SESSION_SUBSCRIPTION_DROPPED_ROWS_TOTAL: &str = "session_subscription_dropped_rows_total";
 const JEMALLOC_SUBSYSTEM: &str = "jemalloc";
@@ -1365,6 +1366,7 @@ struct PrometheusMetrics {
     client_ingestor_forwarded_producers: IntGaugeVec,
     client_ingestor_outstanding_batches: IntGaugeVec,
     client_ingestor_outstanding_bytes: IntGaugeVec,
+    client_ingestor_admitted_batches: IntGaugeVec,
     client_ingestor_submissions_total: IntCounterVec,
 }
 
@@ -1718,6 +1720,19 @@ impl PrometheusMetrics {
             "the metric name, help text and label names are constants that satisfy Prometheus \
              naming rules",
         );
+        let client_ingestor_admitted_batches = IntGaugeVec::new(
+            Opts::new(
+                CLIENT_INGESTOR_ADMITTED_BATCHES,
+                "Batches of a client ingestor holding a slot of its acknowledgement window: being \
+                 admitted, or admitted and awaiting their acknowledgement.",
+            )
+            .namespace("nervix"),
+            CLIENT_INGESTOR_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
         let client_ingestor_submissions_total = IntCounterVec::new(
             Opts::new(
                 CLIENT_INGESTOR_SUBMISSIONS_TOTAL,
@@ -1730,13 +1745,15 @@ impl PrometheusMetrics {
             "the metric name, help text and label names are constants that satisfy Prometheus \
              naming rules",
         );
-        for collector in [
-            Box::new(client_ingestor_producers.clone()) as Box<dyn prometheus::core::Collector>,
+        let client_ingestor_collectors: [Box<dyn prometheus::core::Collector>; 6] = [
+            Box::new(client_ingestor_producers.clone()),
             Box::new(client_ingestor_forwarded_producers.clone()),
             Box::new(client_ingestor_outstanding_batches.clone()),
             Box::new(client_ingestor_outstanding_bytes.clone()),
+            Box::new(client_ingestor_admitted_batches.clone()),
             Box::new(client_ingestor_submissions_total.clone()),
-        ] {
+        ];
+        for collector in client_ingestor_collectors {
             registry.register(collector).assured(
                 "this registry is built here and each metric is registered once under a distinct \
                  name",
@@ -1779,6 +1796,7 @@ impl PrometheusMetrics {
             client_ingestor_forwarded_producers,
             client_ingestor_outstanding_batches,
             client_ingestor_outstanding_bytes,
+            client_ingestor_admitted_batches,
             client_ingestor_submissions_total,
         }
     }
@@ -2636,77 +2654,35 @@ impl RuntimeMetrics {
             );
     }
 
-    /// Records how many producers a client ingestor this node executes has attached, and the
-    /// batches and bytes they have outstanding.
-    pub(crate) fn set_client_ingestor_producers(
+    /// The series of one client ingestor this node executes. Its gauges are resolved once, so its
+    /// endpoint sets them without looking their labels up again.
+    pub(crate) fn client_ingestor_series(
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
-        gauges: crate::runtime::ClientIngestorGauges,
-    ) {
+    ) -> ClientIngestorSeries {
         let labels = [domain.as_str(), ingestor.as_str()];
         let prometheus = &self.series.prometheus;
-        prometheus
-            .client_ingestor_producers
-            .with_label_values(&labels)
-            .set(
-                i64::try_from(gauges.producers)
-                    .assured("every attached producer occupies memory, so the count fits in i64"),
-            );
-        prometheus
-            .client_ingestor_forwarded_producers
-            .with_label_values(&labels)
-            .set(
-                i64::try_from(gauges.forwarded_producers)
-                    .assured("every attached producer occupies memory, so the count fits in i64"),
-            );
-        prometheus
-            .client_ingestor_outstanding_batches
-            .with_label_values(&labels)
-            .set(
-                i64::try_from(gauges.outstanding_batches)
-                    .assured("every outstanding batch occupies memory, so the count fits in i64"),
-            );
-        prometheus
-            .client_ingestor_outstanding_bytes
-            .with_label_values(&labels)
-            .set(i64::try_from(gauges.outstanding_bytes).assured(
-                "outstanding bytes are held in memory within the node's producer budget, so they \
-                 fit in i64",
-            ));
-    }
-
-    /// Counts one batch a client ingestor answered with `outcome`.
-    pub(crate) fn record_client_submission_outcome(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-        outcome: &nervix_models::ClientSubmissionOutcome,
-    ) {
-        self.series
-            .prometheus
-            .client_ingestor_submissions_total
-            .with_label_values(&[
-                domain.as_str(),
-                ingestor.as_str(),
-                outcome.class_label(),
-                outcome.cause_label(),
-            ])
-            .inc();
-    }
-
-    /// Counts one batch a client ingestor refused before admission.
-    pub(crate) fn record_client_submission_refusal(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-        refusal: nervix_models::ClientSubmissionRefusal,
-    ) {
-        self.record_client_submission_outcome(
-            domain,
-            ingestor,
-            &nervix_models::ClientSubmissionOutcome::NotAdmitted(refusal),
-        );
+        ClientIngestorSeries {
+            producers: prometheus
+                .client_ingestor_producers
+                .with_label_values(&labels),
+            forwarded_producers: prometheus
+                .client_ingestor_forwarded_producers
+                .with_label_values(&labels),
+            outstanding_batches: prometheus
+                .client_ingestor_outstanding_batches
+                .with_label_values(&labels),
+            outstanding_bytes: prometheus
+                .client_ingestor_outstanding_bytes
+                .with_label_values(&labels),
+            admitted_batches: prometheus
+                .client_ingestor_admitted_batches
+                .with_label_values(&labels),
+            submissions: prometheus.client_ingestor_submissions_total.clone(),
+            domain: domain.clone(),
+            ingestor: ingestor.clone(),
+        }
     }
 
     /// Records rows a dropping session subscription to `relay` discarded.
@@ -4357,6 +4333,58 @@ fn format_number(value: f64) -> String {
         .to_string()
 }
 
+
+/// The series of one client ingestor on this node: its attached producers, the batches and bytes
+/// they have outstanding, the batches holding a slot of its acknowledgement window, and the
+/// batches it answered.
+pub(crate) struct ClientIngestorSeries {
+    producers: IntGauge,
+    forwarded_producers: IntGauge,
+    outstanding_batches: IntGauge,
+    outstanding_bytes: IntGauge,
+    admitted_batches: IntGauge,
+    /// Answered batches, whose outcome and cause labels vary per batch.
+    submissions: IntCounterVec,
+    domain: DomainName,
+    ingestor: IngestorName,
+}
+
+impl ClientIngestorSeries {
+    /// Counts one batch the ingestor answered with `outcome`.
+    pub(crate) fn count(&self, outcome: &nervix_models::ClientSubmissionOutcome) {
+        self.submissions
+            .with_label_values(&[
+                self.domain.as_str(),
+                self.ingestor.as_str(),
+                outcome.class_label(),
+                outcome.cause_label(),
+            ])
+            .inc();
+    }
+
+    pub(crate) fn set(&self, gauges: crate::runtime::ClientIngestorGauges) {
+        self.producers.set(
+            i64::try_from(gauges.producers)
+                .assured("every attached producer occupies memory, so the count fits in i64"),
+        );
+        self.forwarded_producers.set(
+            i64::try_from(gauges.forwarded_producers)
+                .assured("every attached producer occupies memory, so the count fits in i64"),
+        );
+        self.outstanding_batches.set(
+            i64::try_from(gauges.outstanding_batches)
+                .assured("every outstanding batch occupies memory, so the count fits in i64"),
+        );
+        self.outstanding_bytes.set(i64::try_from(gauges.outstanding_bytes).assured(
+            "outstanding bytes are held in memory within the node's producer budget, so they fit \
+             in i64",
+        ));
+        self.admitted_batches.set(
+            i64::try_from(gauges.admitted_batches)
+                .assured("every admitted batch holds its ACK root in memory, so the count fits in i64"),
+        );
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

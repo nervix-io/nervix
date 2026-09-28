@@ -116,12 +116,14 @@ The shared variables are:
   duplicate on this path.
 - `RETRY POLICY BACKOFF <duration> MAX <duration>` is required by every mode. Infrastructure retry
   delays begin at `BACKOFF`, double on each attempt, and cap at `MAX`. A server-requested delay,
-  such as an HTTP rate-limit interval, can extend an individual delay. Retries continue with
-  backpressure until the external system recovers or an operator repairs its provisioning.
+  such as an HTTP rate-limit interval, can extend an individual delay; one the node's monotonic
+  clock cannot schedule extends nothing. Retries continue with backpressure until the external
+  system recovers or an operator repairs its provisioning.
 
-Request/response sinks—SQS, Sentry, OTEL, the databases, and Iceberg—do not take `ACK TIMEOUT`;
-their client request timeout bounds the response. SQS, Sentry, OTEL, and ClickHouse clients expose
-that bound as the optional `timeout_ms` CONFIG key. For every sink, Nervix accounts for records individually
+Request/response sinks—SQS, Sentry, OTEL, HTTP, the databases, and Iceberg—do not take
+`ACK TIMEOUT`; their client request timeout bounds the response. SQS, Sentry, OTEL, and ClickHouse
+clients expose that bound as the optional `timeout_ms` CONFIG key, and a client an HTTP emitter
+uses must declare it. For every sink, Nervix accounts for records individually
 wherever the transport exposes individual results: delivered records acknowledge upstream,
 definitively invalid records follow `ON MESSAGE ERROR`, and a retry resends only records that are
 neither delivered nor rejected. An ambiguous or infrastructure-wide failure is never used to
@@ -259,6 +261,45 @@ are never followed, `304` is not delivery, and `409` never implies an earlier de
 diagnostics include the numeric status but no evaluated URL, header value, request body or response
 body.
 
+#### HTTP retries and acknowledgements
+
+A flush sends its requests in order and stops at the first one whose outcome is unresolved. That
+request and every request prepared after it stay retained, and records admitted while they wait
+queue behind them. A delivered request completes exactly its own record, and a rejected one resolves
+its record through `ON MESSAGE ERROR`; neither is sent again, even when its flush held other records
+that are retried. The retry resends the unresolved requests exactly as they were first sent, ahead
+of any request prepared later.
+
+Retries wait on the declared physical backoff: the first waits `BACKOFF`, each later one twice the
+previous wait up to `MAX`, and a flush that completes resets the wait to `BACKOFF`. There is no
+attempt limit; retrying continues until the request resolves or the emitter stops. A retryable
+status (`408`, `425`, `429`, `500`–`599`, `401`, `403` or `407`) whose final headers carry exactly
+one valid `Retry-After` field asks for a delay of its own: whole seconds, or an HTTP date in
+IMF-fixdate, RFC 850 or asctime form, compared with actual UTC when the response arrives. A date
+already past asks for no delay. The next attempt waits for the longer of that delay and the
+backoff, even beyond `MAX`, and the backoff sequence itself continues unchanged. A `Retry-After`
+that is missing, repeated in more than one field, malformed, such as fractional seconds, or
+unrepresentable, such as a delay ending after the year 2262, asks for nothing. `Retry-After` never
+turns a delivery or a rejection into a retry.
+
+The request timeout, the backoff and a `Retry-After` delay are physical. `TIME RATE` scales the
+emitter's `COLLECT FOR` and `FLUSH EACH` cadences and the domain time its expressions read, but
+never these waits, and `FLUSH IMMEDIATE` keeps its physical batching window.
+
+An `ATTACHED` emitter keeps the upstream acknowledgement of every unresolved request alive until
+the request resolves: a delivery acknowledges it, and a rejection leaves it to the emitter's
+message error policy. A `DETACHED` emitter acknowledges upstream at relay fan-out, yet still
+retries, keeps later work waiting behind an unresolved request, and routes rejections. Prepared
+requests and retry state live in memory only.
+
+An endpoint can apply a request whose outcome Nervix never learns: the response is lost, the
+connection fails, or the attempt times out after the endpoint acted. The retry then sends the same
+request again, so the endpoint can receive it twice. Nervix generates no idempotency key and does
+not interpret an endpoint's deduplication protocol. An endpoint that must recognize duplicates
+should receive a stable key taken from the record, such as
+`write_header('Idempotency-Key', input.event_id)`. A value generated during evaluation, such as
+`uuid_v4()`, stays the same across these retries but not across an upstream redelivery.
+
 `ALTER EMITTER ... SET TO HTTP` restates the complete method, path, mode and body selection.
 `SET CLIENT` changes the referenced client, `SET MODE` changes the retry policy, and `SET ENCODE
 USING` selects a codec body. `DROP ENCODE` is invalid for HTTP; use a complete `SET TO HTTP ...
@@ -364,6 +405,10 @@ first half is re-encoded under the same limit and the rest returns to the front 
 halving is encoded again, because a batch transformation may write more bytes for fewer members, so
 a candidate of `n` members takes at most `⌈log2(n)⌉ + 1` encodings. The bound covers the payload
 only: keys, headers and the framing a transport adds around the payload are outside it.
+
+Schemaful JSON rows use the same bounded writer as other codecs. Their columnar encoder stops at
+the first write over the limit; its string classifier and direct column writes do not change exact
+byte measurement, halving, or the per-record error policy.
 
 A record is rejected alone, through `ON MESSAGE ERROR` with operation `encode`, when its member value
 cannot be produced — its `ON EMITTING` transformation fails, or, without a batch transformation, its
@@ -829,6 +874,16 @@ Set the SQS client's optional `timeout_ms` CONFIG key to bound both the complete
 and its single SDK attempt. Nervix disables the AWS SDK's internal retries, so a timeout returns to
 the emitter and the mode's declared `RETRY POLICY` owns all retry pacing.
 
+The client resolves the host of its `endpoint` through the node's asynchronous resolver each time it
+opens a connection, and tries the answers in order; a literal IPv4 or IPv6 address is dialled as
+written. Every request is still signed for the configured host, and over HTTPS the service
+certificate must name that host, whichever address accepted the connection. The lookup counts
+against the SDK's 3.1-second connect timeout and against `timeout_ms`. Without `tls_ca_file` the
+client trusts the platform's native roots and follows the `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`
+environment variables; with it, the client trusts that CA alone and connects directly. A missing
+name, a silent name server or an unreachable answer fails the queue lookup or the send, which the
+emitter retries on its `RETRY POLICY`; nothing is acknowledged until SQS answers.
+
 For FIFO queues, one batch request contains at most one record from each message group. A partial
 batch failure therefore cannot deliver a later record from a group ahead of the failed record;
 other groups may still make progress independently.
@@ -1059,9 +1114,24 @@ bounds both sending an insert body and waiting for ClickHouse to finish the inse
 result.
 For HTTPS endpoints, mount a TLS resource and set `'tls_ca_file'` to the mounted CA path.
 
+The client resolves the host in `addr` through the node's asynchronous resolver for each new
+connection and tries the answers in order; a literal IPv4 or IPv6 address is dialled as written.
+Every request keeps `addr` as its authority, and over HTTPS the server certificate must name that
+host, whichever address accepted the connection. The connection, lookup included, is made while the
+insert waits for its result, so `timeout_ms` bounds it too. A missing name, a silent name server or
+an unreachable answer fails the insert, which the emitter retries on its `RETRY POLICY`; nothing is
+acknowledged until ClickHouse returns the insert's result. A pooled connection stays in use when its
+host's answer changes, and the next connection resolves again.
+
 ClickHouse requires the [batching clause](#batching). A larger flush is split into sequential
 inserts of at most `MAX MESSAGES` records, and each successful insert is an acknowledgment. For ClickHouse, Postgres, and
 MySQL, a failed multi-row insert is classified first as record-specific or infrastructure-wide.
+ClickHouse writes each `JSONEachRow` line directly from the mapped Arrow columns in `VALUES`
+order, using the same typed JSON column writer as schemaful JSON emission. Null mapped values are
+written as `null`, including null list elements. Column names are escaped once for the publish
+batch, and string values use the batch's escape classification.
+`F32` columns keep ClickHouse's JSON number formatting after widening to `F64`; schemaful JSON
+codecs format `F32` directly.
 Infrastructure failures retry with backpressure. A record-specific failure is isolated by
 re-executing the chunk one record at a time so healthy rows land and only poison rows follow `ON
 MESSAGE ERROR`. Isolation can reapply rows from the failed chunk; use the sink's idempotent write
@@ -1425,6 +1495,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | ZeroMQ | Retry after socket send acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; socket send does not establish durable receiver storage | None |
 | Sentry | Retry after an ambiguous HTTP result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; an accepted event can still be subject to Sentry service policy | None |
 | OTEL | Retry after an ambiguous Export result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; `partial_success` acknowledges the whole request, so receiver-rejected records in that response are lost | None |
+| HTTP | Retry after a lost response, failed connection, or timeout following an endpoint that applied the request; a lost ACK or attached sibling failure | Any failure after detached relay acceptance; a `2xx` delivers on its headers, so an endpoint that later fails its own processing loses the record | None; the endpoint can deduplicate by a stable key the emitter writes with `write_header` |
 | ClickHouse | Retry after an ambiguous insert result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a crash after insert but before acknowledgement can also leave an inserted batch that later retries | None |
 | Postgres | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |
 | MySQL | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |

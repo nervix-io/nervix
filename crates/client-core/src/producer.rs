@@ -19,11 +19,12 @@
 //! loses an outcome or the batch: [`Producer::pending_submissions`] lists it, and a producer whose
 //! application stops reading outcomes stops being granted credit for new batches.
 
-use std::{collections::BTreeMap, fmt, num::NonZeroU64, sync::Arc as StdArc, time::Duration};
+use std::{fmt, num::NonZeroU64, time::Duration};
 
 use ahash::HashMap;
 use arch_into::ArchInto as _;
 use bytes::Bytes;
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     ClientMessage, ClientRequest, CloseIngestorRequest, OpenIngestorDisposition,
@@ -39,14 +40,18 @@ use nervix_models::{
 use nervix_recovery::Discarded as _;
 use parking_lot::Mutex as SyncMutex;
 use thiserror::Error;
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, oneshot, watch};
+use tokio::sync::{oneshot, watch};
 use triomphe::Arc;
 
 use crate::{
-    client::Client,
+    client::{Client, RecoveryMode, SessionRecovery},
     error::{ClientError, RequestKind},
     exchange::{ExchangeRequests, SESSION_LIMITS},
 };
+
+mod slots;
+
+use slots::SubmissionSlots;
 
 /// The identity of one submission within its producer. It stays the same when a batch the server
 /// refused temporarily is sent again.
@@ -167,8 +172,8 @@ pub enum ProducerError {
     #[error("the batch has {rows} rows, more than the {limit} one batch may carry")]
     TooManyRows { rows: usize, limit: u32 },
     #[cfg(feature = "arrow")]
-    #[error("the batch could not be encoded as an Arrow IPC stream: {0}")]
-    Encode(String),
+    #[error("the batch could not be encoded as an Arrow IPC stream")]
+    Encode,
 }
 
 /// One batch, as the canonical Arrow IPC stream the server accepts.
@@ -333,39 +338,9 @@ struct ProducerInner {
     generation: Arc<()>,
     registry: ProducerRegistry,
     signals: Arc<ProducerSignals>,
-    /// The granted batches. A submission holds one permit until its outcome is observed. Tokio's
-    /// owned permits take the standard `Arc`.
-    batches: StdArc<Semaphore>,
-    /// The granted bytes. A submission holds its size until its outcome is observed.
-    bytes: StdArc<Semaphore>,
-    submissions: SyncMutex<Submissions>,
-    /// Woken whenever a submission resolves.
-    resolved: Notify,
-}
-
-#[derive(Default)]
-struct Submissions {
-    next: u64,
-    slots: BTreeMap<SubmissionId, Slot>,
-}
-
-enum Slot {
-    /// The batch waits to be sent, or for its outcome.
-    Pending,
-    /// The outcome, holding the credit the batch took until the application observes it.
-    Resolved {
-        outcome: ProducerOutcome,
-        _credit: Credit,
-    },
-    /// The application released the submission before it resolved; its outcome is dropped when
-    /// it arrives.
-    Released,
-}
-
-/// The credit one submission holds.
-struct Credit {
-    _batch: OwnedSemaphorePermit,
-    _bytes: OwnedSemaphorePermit,
+    /// Every submission from the moment the producer takes it until its outcome is taken, and
+    /// the credit each holds.
+    slots: SubmissionSlots,
 }
 
 /// What became of one attempt to send a batch.
@@ -383,7 +358,9 @@ impl Client {
     /// The producer is bound to `domain` and to this session's current exchange: a later `USE`
     /// does not move it, and it ends with the exchange. `expected_fields` must be exactly the
     /// ingestor's input schema, including each field's optionality and sensitivity. A refusal is
-    /// [`ClientError::ProducerRefused`], and leaves nothing attached.
+    /// [`ClientError::ProducerRefused`], and leaves nothing attached. An exchange that was lost is
+    /// reopened first, and an open the lost exchange interrupted is sent again on the next one: a
+    /// producer that exchange may have attached ended with it.
     pub async fn open_ingestor(
         &self,
         domain: DomainName,
@@ -391,17 +368,54 @@ impl Client {
         expected_fields: Vec<SchemaField>,
         limits: ClientProducerLimits,
     ) -> error_stack::Result<Producer, ClientError> {
-        let (exchange, generation) = {
-            let exchange = self.inner.exchange.lock().await;
-            (exchange.requests(), exchange.generation.clone())
-        };
-        let registry = self.inner.events.sinks.producers.clone();
         let request = ClientRequest::OpenIngestor(OpenIngestorRequest {
             domain: domain.clone(),
             ingestor: ingestor.clone(),
             expected_fields,
             limits,
         });
+        let opened = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
+            for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+                tokio::task::consume_budget().await;
+                let attempt = self
+                    .open_on_current_exchange(request.clone(), &domain, &ingestor)
+                    .await;
+                let report = match attempt {
+                    Ok(producer) => return Ok(producer),
+                    Err(report) => report,
+                };
+                if !report.current_context().retryable_session_failure() {
+                    return Err(report);
+                }
+                match self.recover_session(RecoveryMode::IfClosed).await? {
+                    SessionRecovery::Ready => {}
+                    SessionRecovery::Unavailable => return Err(report),
+                }
+            }
+            // Only a session that closed again on the last attempt leaves the loop.
+            Err(Report::new(ClientError::SessionClosed))
+        })
+        .await;
+        match opened {
+            Ok(result) => result,
+            Err(_) => Err(Report::new(ClientError::RetryDeadline)),
+        }
+    }
+
+    /// Sends one open on the current exchange and waits for its answer.
+    async fn open_on_current_exchange(
+        &self,
+        request: ClientRequest,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+    ) -> error_stack::Result<Producer, ClientError> {
+        let (exchange, generation) = {
+            let exchange = self.inner.exchange.lock().await;
+            (exchange.requests(), exchange.generation.clone())
+        };
+        let registry = self.inner.events.sinks.producers.clone();
+        let domain = domain.clone();
+        let ingestor = ingestor.clone();
         let (answer, answered) = oneshot::channel();
         // The open runs in a task of its own, so a caller that stops waiting leaves behind a task
         // that closes a producer the server opens anyway.
@@ -423,9 +437,9 @@ impl Client {
             }
         });
         let Ok(opened) = answered.await else {
-            return Err(error_stack::Report::new(ClientError::SessionClosed));
+            return Err(Report::new(ClientError::SessionClosed));
         };
-        opened.map_err(error_stack::Report::new)
+        opened
     }
 }
 
@@ -441,9 +455,9 @@ async fn request_on_exchange(
     exchange: &ExchangeRequests,
     request: ClientRequest,
     kind: RequestKind,
-) -> Result<Answered, ClientError> {
+) -> error_stack::Result<Answered, ClientError> {
     let Some(mut registered) = exchange.register() else {
-        return Err(exchange.pending.lock().failure());
+        return Err(Report::new(exchange.pending.lock().failure()));
     };
     let request_id = registered.request_id;
     let message = ClientMessage {
@@ -452,16 +466,18 @@ async fn request_on_exchange(
     };
     let frame = message
         .encode(&SESSION_LIMITS)
-        .map_err(|report| ClientError::EncodeRequest {
-            request: kind,
-            source: report.current_context().clone(),
+        .map_err(|report| {
+            Report::new(ClientError::EncodeRequest {
+                request: kind,
+                source: report.current_context().clone(),
+            })
         })?;
     if exchange.frames.send(frame).await.is_err() {
-        return Err(exchange.pending.lock().failure());
+        return Err(Report::new(exchange.pending.lock().failure()));
     }
     match registered.receive().await {
         Some(body) => Ok(Answered { request_id, body }),
-        None => Err(ClientError::RequestInterrupted { request: kind }),
+        None => Err(Report::new(ClientError::RequestInterrupted { request: kind })),
     }
 }
 
@@ -474,32 +490,35 @@ impl ProducerInner {
         exchange: Arc<ExchangeRequests>,
         generation: Arc<()>,
         registry: ProducerRegistry,
-    ) -> Result<Producer, ClientError> {
+    ) -> error_stack::Result<Producer, ClientError> {
         let Answered { request_id, body } = sent;
         let ReplyBody::OpenIngestor(outcome) = body else {
-            return Err(ClientError::unexpected_reply(RequestKind::OpenIngestor, body));
+            return Err(Report::new(ClientError::unexpected_reply(
+                RequestKind::OpenIngestor,
+                body,
+            )));
         };
         let opened = match outcome.disposition {
             OpenIngestorDisposition::Opened(opened) => opened,
             OpenIngestorDisposition::Refused(refusal) => {
-                return Err(ClientError::ProducerRefused {
+                return Err(Report::new(ClientError::ProducerRefused {
                     refusal,
                     message: outcome.message,
-                });
+                }));
             }
         };
         let id = ProducerId::opened_by(request_id);
         let Some(signals) = registry.signals(&generation, id) else {
             // The exchange ended between the reply and this read, which ended the producer too.
-            return Err(ClientError::SessionClosed);
+            return Err(Report::new(ClientError::SessionClosed));
         };
         let description = opened.description;
         let batches: usize = description.grant.batches.get().arch_into();
         // A grant beyond what one producer may ask for is not an answer to this open.
         if description.grant.bytes.get() > CLIENT_PRODUCER_SESSION_BYTES {
-            return Err(ClientError::UnexpectedReply {
+            return Err(Report::new(ClientError::UnexpectedReply {
                 request: RequestKind::OpenIngestor,
-            });
+            }));
         }
         let bytes = usize::try_from(description.grant.bytes.get())
             .verified("the granted bytes are within the session budget, checked above");
@@ -507,15 +526,12 @@ impl ProducerInner {
             id,
             domain,
             ingestor,
-            batches: StdArc::new(Semaphore::new(batches)),
-            bytes: StdArc::new(Semaphore::new(bytes)),
+            slots: SubmissionSlots::new(batches, bytes),
             description,
             exchange,
             generation,
             registry,
             signals,
-            submissions: SyncMutex::new(Submissions::default()),
-            resolved: Notify::new(),
         };
         Ok(Producer {
             inner: Arc::new(inner),
@@ -626,43 +642,6 @@ impl ProducerInner {
             backoff = next_backoff(backoff, policy.retry_max_backoff);
         }
     }
-
-    fn resolve(&self, id: SubmissionId, outcome: ProducerOutcome, credit: Credit) {
-        let mut submissions = self.submissions.lock();
-        let Some(slot) = submissions.slots.get_mut(&id) else {
-            return;
-        };
-        match slot {
-            Slot::Pending => {
-                *slot = Slot::Resolved {
-                    outcome,
-                    _credit: credit,
-                };
-            }
-            // Dropping the outcome and its credit is what releasing it before it resolved meant.
-            Slot::Released => {
-                submissions.slots.remove(&id);
-            }
-            Slot::Resolved { .. } => {}
-        }
-        drop(submissions);
-        self.resolved.notify_waiters();
-    }
-
-    /// Takes a resolved submission's outcome, which returns its credit.
-    fn take_resolved(&self, id: SubmissionId) -> Result<Option<ProducerOutcome>, ProducerError> {
-        let mut submissions = self.submissions.lock();
-        match submissions.slots.get(&id) {
-            None | Some(Slot::Released) => Err(ProducerError::UnknownSubmission(id)),
-            Some(Slot::Pending) => Ok(None),
-            Some(Slot::Resolved { .. }) => {
-                let Some(Slot::Resolved { outcome, .. }) = submissions.slots.remove(&id) else {
-                    return Err(ProducerError::UnknownSubmission(id));
-                };
-                Ok(Some(outcome))
-            }
-        }
-    }
 }
 
 /// The delay after `current` that the retry policy allows: twice as long, up to `maximum`.
@@ -709,121 +688,85 @@ impl Producer {
     /// busy, is sent again after the declared backoff. Cancelling the wait leaves the submission
     /// with the producer, which [`Producer::pending_submissions`] lists and
     /// [`Producer::rejoin`] resumes.
-    pub async fn send(&self, batch: ProducerBatch) -> Result<ProducerOutcome, ProducerError> {
+    pub async fn send(
+        &self,
+        batch: ProducerBatch,
+    ) -> error_stack::Result<ProducerOutcome, ProducerError> {
         let id = self.submit(batch).await?;
         self.rejoin(id).await
     }
 
     /// Waits for credit and submits one batch, returning its identity once the producer holds it.
     /// Its outcome is observed through [`Producer::rejoin`].
-    pub async fn submit(&self, batch: ProducerBatch) -> Result<SubmissionId, ProducerError> {
+    pub async fn submit(
+        &self,
+        batch: ProducerBatch,
+    ) -> error_stack::Result<SubmissionId, ProducerError> {
         let ProducerBatch { ipc } = batch;
         if ipc.is_empty() {
-            return Err(ProducerError::EmptyBatch);
+            return Err(Report::new(ProducerError::EmptyBatch));
         }
         let limit = self.inner.description.grant.max_batch_bytes.get();
         let size: u64 = ipc.len().arch_into();
         if size > limit {
-            return Err(ProducerError::BatchTooLarge {
+            return Err(Report::new(ProducerError::BatchTooLarge {
                 size: ipc.len(),
                 limit,
-            });
+            }));
         }
         if let Some(ended) = self.inner.end() {
-            return Err(ProducerError::Ended(ended));
+            return Err(Report::new(ProducerError::Ended(ended)));
         }
         let bytes = u32::try_from(ipc.len()).assured(
             "a batch within the granted bytes, which one session's budget bounds, fits u32",
         );
         let credit = {
             let mut end = self.inner.signals.end.subscribe();
-            let acquire = async {
-                let batch = self.inner.batches.clone().acquire_owned().await;
-                let bytes = self.inner.bytes.clone().acquire_many_owned(bytes).await;
-                (batch, bytes)
-            };
             tokio::select! {
-                acquired = acquire => match acquired {
-                    (Ok(batch), Ok(bytes)) => Credit { _batch: batch, _bytes: bytes },
-                    _ => {
+                acquired = self.inner.slots.credit(bytes) => {
+                    let Some(credit) = acquired else {
                         let ended = self.inner.end().unwrap_or(ProducerEnd::Closed);
-                        return Err(ProducerError::Ended(ended));
-                    }
-                },
+                        return Err(Report::new(ProducerError::Ended(ended)));
+                    };
+                    credit
+                }
                 changed = end.changed() => {
                     changed.assured("the producer holds the sender of its end");
                     let ended = self.inner.end().unwrap_or(ProducerEnd::Closed);
-                    return Err(ProducerError::Ended(ended));
+                    return Err(Report::new(ProducerError::Ended(ended)));
                 }
             }
         };
-        let id = {
-            let mut submissions = self.inner.submissions.lock();
-            submissions.next = submissions
-                .next
-                .checked_add(1)
-                .assured("a producer submits fewer than u64::MAX batches");
-            let id = SubmissionId(
-                NonZeroU64::new(submissions.next).verified("the counter was advanced above"),
-            );
-            submissions.slots.insert(id, Slot::Pending);
-            id
-        };
+        let id = self.inner.slots.hold();
         let inner = self.inner.clone();
         tokio::spawn(async move {
             let outcome = inner.deliver(ipc).await;
-            inner.resolve(id, outcome, credit);
+            inner.slots.resolve(id, outcome, credit);
         });
         Ok(id)
     }
 
     /// Waits for a submission's terminal outcome and takes it, which returns its credit.
-    pub async fn rejoin(&self, id: SubmissionId) -> Result<ProducerOutcome, ProducerError> {
-        loop {
-            tokio::task::consume_budget().await;
-            let resolved = self.inner.resolved.notified();
-            let mut resolved = std::pin::pin!(resolved);
-            resolved.as_mut().enable();
-            if let Some(outcome) = self.inner.take_resolved(id)? {
-                return Ok(outcome);
-            }
-            resolved.await;
-        }
+    pub async fn rejoin(
+        &self,
+        id: SubmissionId,
+    ) -> error_stack::Result<ProducerOutcome, ProducerError> {
+        self.inner.slots.rejoin(id).await
     }
 
     /// Every submission the producer holds, in submission order, with the outcome of each that has
     /// one.
     pub fn pending_submissions(&self) -> Vec<PendingSubmission> {
-        let submissions = self.inner.submissions.lock();
-        let mut pending = Vec::with_capacity(submissions.slots.len());
-        for (id, slot) in &submissions.slots {
-            let outcome = match slot {
-                Slot::Pending => None,
-                Slot::Resolved { outcome, .. } => Some(outcome.clone()),
-                Slot::Released => continue,
-            };
-            pending.push(PendingSubmission { id: *id, outcome });
-        }
-        pending
+        self.inner.slots.pending()
     }
 
     /// Lets go of a submission. A resolved one returns its outcome and its credit now; an unresolved
     /// one returns its credit once its outcome arrives, and nobody observes that outcome.
-    pub fn release(&self, id: SubmissionId) -> Result<Option<ProducerOutcome>, ProducerError> {
-        let mut submissions = self.inner.submissions.lock();
-        match submissions.slots.get(&id) {
-            None | Some(Slot::Released) => Err(ProducerError::UnknownSubmission(id)),
-            Some(Slot::Pending) => {
-                submissions.slots.insert(id, Slot::Released);
-                Ok(None)
-            }
-            Some(Slot::Resolved { .. }) => {
-                let Some(Slot::Resolved { outcome, .. }) = submissions.slots.remove(&id) else {
-                    return Err(ProducerError::UnknownSubmission(id));
-                };
-                Ok(Some(outcome))
-            }
-        }
+    pub fn release(
+        &self,
+        id: SubmissionId,
+    ) -> error_stack::Result<Option<ProducerOutcome>, ProducerError> {
+        self.inner.slots.release(id)
     }
 
     /// Stops admission for the producer and waits until the server released it. Every batch the
@@ -833,13 +776,12 @@ impl Producer {
         let request = ClientRequest::CloseIngestor(CloseIngestorRequest {
             producer: self.inner.id,
         });
-        let answered = request_on_exchange(&self.inner.exchange, request, RequestKind::CloseIngestor)
-            .await
-            .map_err(error_stack::Report::new)?;
+        let answered =
+            request_on_exchange(&self.inner.exchange, request, RequestKind::CloseIngestor).await?;
         self.inner.stop();
         match answered.body {
             ReplyBody::CloseIngestor(_) => Ok(()),
-            other => Err(error_stack::Report::new(ClientError::unexpected_reply(
+            other => Err(Report::new(ClientError::unexpected_reply(
                 RequestKind::CloseIngestor,
                 other,
             ))),
@@ -851,8 +793,7 @@ impl ProducerInner {
     /// Ends the producer on the client: credit waits stop, and the registry stops following it.
     fn stop(&self) {
         self.registry.closed(&self.generation, self.id);
-        self.batches.close();
-        self.bytes.close();
+        self.slots.close();
     }
 }
 
@@ -882,7 +823,9 @@ mod arrow_batch {
 
     use arrow_array::RecordBatch;
     use arrow_ipc::writer::StreamWriter;
+    use arrow_schema::Schema;
     use bytes::Bytes;
+    use error_stack::Report;
     use nervix_models::SchemaField;
 
     use super::{Producer, ProducerBatch, ProducerError};
@@ -890,18 +833,18 @@ mod arrow_batch {
     impl ProducerBatch {
         /// Writes `batch` as one canonical Arrow IPC stream: its schema, the batch and the
         /// end-of-stream marker, uncompressed.
-        pub fn from_record_batch(batch: &RecordBatch) -> Result<Self, ProducerError> {
+        pub fn from_record_batch(batch: &RecordBatch) -> error_stack::Result<Self, ProducerError> {
             let mut writer = StreamWriter::try_new(Vec::new(), batch.schema_ref())
-                .map_err(|error| ProducerError::Encode(error.to_string()))?;
+                .map_err(|error| Report::new(ProducerError::Encode).attach_printable(error))?;
             writer
                 .write(batch)
-                .map_err(|error| ProducerError::Encode(error.to_string()))?;
+                .map_err(|error| Report::new(ProducerError::Encode).attach_printable(error))?;
             writer
                 .finish()
-                .map_err(|error| ProducerError::Encode(error.to_string()))?;
+                .map_err(|error| Report::new(ProducerError::Encode).attach_printable(error))?;
             let bytes = writer
                 .into_inner()
-                .map_err(|error| ProducerError::Encode(error.to_string()))?;
+                .map_err(|error| Report::new(ProducerError::Encode).attach_printable(error))?;
             Ok(Self {
                 ipc: Bytes::from(bytes),
             })
@@ -909,12 +852,18 @@ mod arrow_batch {
     }
 
     impl Producer {
+        /// The Arrow schema every batch of this producer carries: the ingestor's input schema in
+        /// declared order, without metadata.
+        pub fn arrow_schema(&self) -> Schema {
+            SchemaField::arrow_schema(&self.description().fields)
+        }
+
         /// Checks `batch` against the producer's schema and row limit and writes it as the
         /// canonical stream, without sending it.
-        pub fn batch(&self, batch: &RecordBatch) -> Result<ProducerBatch, ProducerError> {
-            let expected = SchemaField::arrow_schema(&self.description().fields);
+        pub fn batch(&self, batch: &RecordBatch) -> error_stack::Result<ProducerBatch, ProducerError> {
+            let expected = self.arrow_schema();
             if batch.schema_ref().as_ref() != &expected {
-                return Err(ProducerError::SchemaMismatch);
+                return Err(Report::new(ProducerError::SchemaMismatch));
             }
             let limit = self.description().grant.max_batch_rows.get();
             let rows = batch.num_rows();
@@ -923,7 +872,7 @@ mod arrow_batch {
                 Err(_) => false,
             };
             if !within {
-                return Err(ProducerError::TooManyRows { rows, limit });
+                return Err(Report::new(ProducerError::TooManyRows { rows, limit }));
             }
             ProducerBatch::from_record_batch(batch)
         }

@@ -1228,6 +1228,16 @@ fn format_domain_clock_event(event: &DomainClockEvent) -> String {
             "[events] domain clock [{}]: {}",
             observed.domain, observed.clock
         ),
+        DomainClockEvent::Ticked(ticked) => format!(
+            "[events] domain clock [{}] tick: generation {}, id {}, boundary {}, authority UTC \
+             {}, node logical {}",
+            ticked.domain,
+            ticked.tick.generation,
+            ticked.tick.tick_id,
+            ticked.tick.logical_boundary.to_rfc3339(),
+            ticked.tick.authority_utc.to_rfc3339(),
+            ticked.tick.serving_logical.to_rfc3339(),
+        ),
         DomainClockEvent::Ended(ended) => format!(
             "[events] domain clock [{}] notice: the attachment ended because {}",
             ended.domain, ended.reason
@@ -2252,6 +2262,22 @@ mod tests {
         assert_eq!(
             format_domain_clock_event(&observed),
             "[events] domain clock [sim]: generation 4, unpaced"
+        );
+        let ticked = DomainClockEvent::Ticked(nervix_client_core::DomainClockTicked {
+            domain: domain.clone(),
+            tick: nervix_client_core::DomainClockTickObservation {
+                generation: 5,
+                tick_id: 12,
+                logical_boundary: nervix_client_core::Timestamp::from_unix_nanos(1_000),
+                authority_utc: nervix_client_core::Timestamp::from_unix_nanos(2_000),
+                serving_logical: nervix_client_core::Timestamp::from_unix_nanos(3_000),
+            },
+        });
+        assert_eq!(
+            format_domain_clock_event(&ticked),
+            "[events] domain clock [sim] tick: generation 5, id 12, boundary \
+             1970-01-01T00:00:00.000001Z, authority UTC 1970-01-01T00:00:00.000002Z, node logical \
+             1970-01-01T00:00:00.000003Z"
         );
         let ended = DomainClockEvent::Ended(nervix_client_core::DomainClockAttachmentEnded {
             domain: domain.clone(),

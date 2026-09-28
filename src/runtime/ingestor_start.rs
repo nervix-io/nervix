@@ -102,8 +102,8 @@ impl Runtime {
                 ScheduledIngestorStart::Complete => break,
             }
         }
-        // Every ingestor this node should run is running now, so a client ingestor endpoint whose
-        // ingestor is not ended its producers for good.
+        // Every ingestor this node should run is running now, so the endpoint of a client ingestor
+        // that is not running here ends its producers for good.
         let dispatcher = self.inner.remote_dispatcher.load();
         if let Some(dispatcher) = dispatcher.as_deref() {
             self.reconcile_client_ingestor_endpoints(dispatcher.local_node_id())
@@ -227,42 +227,15 @@ impl Runtime {
         Ok(())
     }
 
-    /// The codec a transport ingestor decodes its payloads with, as the staged routing revision
-    /// installed it.
-    pub(in crate::runtime) fn ingestor_codec(
-        &self,
-        ingestor: &IngestorSpec,
-        codec: &CodecName,
-    ) -> Result<Arc<CompiledCodec>, RuntimeError> {
-        let domain = &ingestor.domain;
-        let routing = match self.inner.executions.get(domain) {
-            Some(execution) => execution.routing.staged(),
-            None => {
-                return Err(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "domain execution is unavailable while starting ingestor '{}'",
-                        ingestor.name.as_str()
-                    ),
-                });
-            }
-        };
-        let Some(codec) = routing.codecs.get(codec).cloned() else {
-            return Err(RuntimeError::CodecNotInstantiated {
-                domain: domain.as_str().to_string(),
-                codec: codec.as_str().to_string(),
-            });
-        };
-        Ok(codec)
-    }
-
     /// Binds what every execution of `ingestor` dispatches through: its compiled node filter and
-    /// routes over its input schema, and the branched entrypoints its routes feed.
+    /// routes over its input schema, and the branched entrypoints its routes feed. The input
+    /// schema is what a transport's codec decodes its payloads into, as the staged routing
+    /// revision installed that codec, or the schema a client source's batches carry.
     pub(in crate::runtime) async fn ingestor_dependencies(
         &self,
         ingestor: &IngestorSpec,
-        input_schema: &CompiledSchema,
-    ) -> Result<IngestorDependencies, RuntimeError> {
+        input: &IngestorInputPlan,
+    ) -> Result<BoundIngestor, RuntimeError> {
         let domain = &ingestor.domain;
         let routing = match self.inner.executions.get(domain) {
             Some(execution) => execution.routing.staged(),
@@ -276,8 +249,24 @@ impl Runtime {
                 });
             }
         };
+        let input = match input {
+            IngestorInputPlan::Transport(transport) => {
+                let Some(codec) = routing.codecs.get(&transport.codec).cloned() else {
+                    return Err(RuntimeError::CodecNotInstantiated {
+                        domain: domain.as_str().to_string(),
+                        codec: transport.codec.as_str().to_string(),
+                    });
+                };
+                BoundIngestorInput::Transport {
+                    codec,
+                    source: transport.source.clone(),
+                }
+            }
+            IngestorInputPlan::Client(plan) => BoundIngestorInput::Client(plan.clone()),
+        };
+        let input_schema = input.schema();
         let programs = ExecutionBuildDeps::from_routing(domain, &routing)
-            .bind_ingestor(ingestor, input_schema)
+            .bind_ingestor(ingestor, &input_schema)
             .map_err(|report| RuntimeError::entrypoint_binding(domain, report))?;
         let relays = RelayRuntimeHandles {
             registries: &routing.relay_registries,
@@ -299,34 +288,32 @@ impl Runtime {
             physical_node_id,
             "received",
         );
-        Ok(IngestorDependencies {
-            output_routes: programs.routes,
-            filter_where: programs.filter_where,
-            branched_templates,
-            metrics,
+        Ok(BoundIngestor {
+            input,
+            dependencies: IngestorDependencies {
+                output_routes: programs.routes,
+                filter_where: programs.filter_where,
+                branched_templates,
+                metrics,
+            },
         })
     }
 
     pub(in crate::runtime) async fn load_lookup_runtime(
         &self,
-        domain: &DomainName,
-        lookup: CreateLookup,
+        lookup: LookupResourcePlan,
         codec: Arc<CompiledCodec>,
     ) -> LookupRuntimeResult<LookupRuntime> {
+        let domain = &lookup.resource.domain;
         let Some(resource_store) = self.inner.resource_store.load_full() else {
             return Err(Report::new(LookupRuntimeError::ResourceStoreUnavailable));
         };
-        let resource_id = ResourceId::new(
-            domain.clone(),
-            lookup.resource.clone(),
-            lookup.resource_version,
-        );
         let path = resource_store
-            .resolve_content_path(&resource_id, &lookup.path)
+            .resolve_content_path(&lookup.resource, &lookup.path)
             .change_context(LookupRuntimeError::ResolveContentPath {
                 domain: domain.clone(),
                 lookup: lookup.name.clone(),
-                resource: lookup.resource.clone(),
+                resource: lookup.resource.identifier.clone(),
                 path: lookup.path.clone(),
             })?;
         let file = tokio::fs::File::open(&path).await.map_err(|source| {
@@ -407,7 +394,7 @@ impl Runtime {
             "received",
         );
         Ok(LookupRuntime {
-            model: lookup,
+            plan: lookup,
             schema,
             batch: Arc::new(batch),
             entries: Arc::new(entries),

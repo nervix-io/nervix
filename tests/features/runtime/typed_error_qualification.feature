@@ -1,4 +1,27 @@
 Feature: Typed error qualification through public streams
+  Scenario Outline: VM compile failures retain the owning model and specific function cause
+    Given a <cluster_size> node nervix cluster is started
+    When these NSPL commands fail with "model 'transform' in domain '{{domain}}' is invalid: FILTER-MAP compile failed: unknown function 'missing_transform' with arity 1"
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA function_input (value STRING);
+      CREATE SCHEMA function_output (result STRING);
+      CREATE RELAY function_inputs SCHEMA function_input UNBRANCHED;
+      CREATE RELAY function_outputs SCHEMA function_output UNBRANCHED;
+      CREATE JUNCTION transform
+        FROM function_inputs
+        UNBRANCHED
+        TO function_outputs
+          SET result = missing_transform(input.value)
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Parse diagnostics locate the unexpected token in the client source
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands

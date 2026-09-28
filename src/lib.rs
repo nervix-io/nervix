@@ -45,6 +45,8 @@ compile_error!(
 pub mod application;
 pub mod cluster;
 mod domain_clock_authority;
+mod emitter_execution_plan;
+mod emitter_start_plan;
 #[cfg(feature = "testing")]
 mod fault_injection;
 pub mod memory_pressure;
@@ -79,4 +81,14 @@ pub type ConfiguredFaultInjection = fault_injection::FaultInjection;
 #[doc(hidden)]
 pub struct ConfiguredFaultInjection {
     _marker: (),
+}
+
+#[cfg(not(feature = "testing"))]
+impl ConfiguredFaultInjection {
+    pub(crate) const fn gossip_send_delay(
+        &self,
+        _destination: &nervix_models::ClusterNodeName,
+    ) -> Option<std::time::Duration> {
+        None
+    }
 }

@@ -11,6 +11,7 @@
 //!   answers; it decides nothing about where the result goes.
 
 use std::{
+    cell::Cell,
     fmt,
     io::{self, Cursor, Write as _},
     num::{NonZeroU32, NonZeroUsize},
@@ -48,11 +49,12 @@ use arrow_select::{
 use base64_simd::AsOut as _;
 use bytes::Bytes;
 use chrono::{DateTime, FixedOffset};
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto;
 use nervix_bounded_write::{BoundedWrite, BoundedWriter};
-use nervix_jaq::{CompiledJaqProgram, JaqNativeFormat};
+use nervix_columnar_json::{FieldNulls, JsonColumnSpec, JsonColumns, NestedNulls};
+use nervix_jaq::{CompiledJaqProgram, JaqFormatError, JaqNativeFormat, JaqProgramError};
 use nervix_models::{
     AvroType, CodecEncodingRule, CodecJaqTransformations, CodecName, CreateCodec, CreateSchema,
     CreateWireSchema, JsonType, ModelName, ParseAsType, PayloadSizeLimit,
@@ -111,6 +113,8 @@ pub struct CompiledCodec {
 pub(crate) struct CompiledCodecBatchEncoder<'a> {
     codec: &'a CompiledCodec,
     batch: &'a RuntimeRecordBatch,
+    json_columns: Option<JsonColumns<'a>>,
+    previous_row_bytes: Cell<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +146,7 @@ struct CompiledJsonWireSchema {
     strictness: WireSchemaStrictness,
     fields: HashMap<String, CompiledJsonWireField>,
     decode_fields: Vec<CompiledJsonDecodeField>,
+    encode_fields: Vec<JsonColumnSpec>,
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +198,7 @@ impl CompiledJaqTransformations {
                         .map_err(|error| CodecError::InvalidJaqTransformation {
                             codec: codec.as_str().to_string(),
                             reason: error.to_string(),
+                            report: error,
                         })
                 })
                 .transpose()
@@ -390,12 +396,8 @@ pub enum CodecError {
         #[source]
         source: serde_json::Error,
     },
-    #[error("failed to encode json payload for codec '{codec}': {source}")]
-    SimdJsonEncode {
-        codec: String,
-        #[source]
-        source: simd_json::Error,
-    },
+    #[error("failed to encode json payload for codec '{codec}'")]
+    ColumnarJsonEncode { codec: String },
     #[error("failed to parse cbor payload for codec '{codec}': {reason}")]
     CborDecode { codec: String, reason: String },
     #[error("failed to encode cbor payload for codec '{codec}': {reason}")]
@@ -417,12 +419,14 @@ pub enum CodecError {
         codec: String,
         format: &'static str,
         reason: String,
+        report: error_stack::Report<JaqFormatError>,
     },
     #[error("failed to encode {format} payload for codec '{codec}': {reason}")]
     JaqNativeEncode {
         codec: String,
         format: &'static str,
         reason: String,
+        report: error_stack::Report<JaqFormatError>,
     },
     #[error("failed to write the encoded payload for codec '{codec}': {source}")]
     PayloadWrite {
@@ -432,6 +436,12 @@ pub enum CodecError {
     },
     #[error("failed to parse protobuf payload for codec '{codec}': {reason}")]
     ProtobufDecode { codec: String, reason: String },
+    #[error("failed to parse protobuf payload for codec '{codec}': {reason}")]
+    ProtobufJaqInput {
+        codec: String,
+        reason: String,
+        report: error_stack::Report<JaqProgramError>,
+    },
     #[error("failed to encode protobuf payload for codec '{codec}': {reason}")]
     ProtobufEncode { codec: String, reason: String },
     #[error("failed to parse syslog payload for codec '{codec}': {reason}")]
@@ -441,7 +451,11 @@ pub enum CodecError {
     #[error("codec '{codec}' expected an object")]
     ExpectedObject { codec: String },
     #[error("codec '{codec}' has invalid jaq transformation: {reason}")]
-    InvalidJaqTransformation { codec: String, reason: String },
+    InvalidJaqTransformation {
+        codec: String,
+        reason: String,
+        report: error_stack::Report<JaqProgramError>,
+    },
     #[error(
         "protobuf codec '{codec}' declares no BATCH MESSAGE, which a batching emitter publishes in"
     )]
@@ -456,9 +470,18 @@ pub enum CodecError {
         message: String,
     },
     #[error("codec '{codec}' jaq transformation failed: {reason}")]
-    JaqTransform { codec: String, reason: String },
+    JaqTransform {
+        codec: String,
+        reason: String,
+        report: error_stack::Report<JaqProgramError>,
+    },
     #[error("codec '{codec}' ON INGESTION program evaluation failed")]
-    JaqIngestionEvaluation { codec: String },
+    JaqIngestionEvaluation {
+        codec: String,
+        /// The evaluator may quote input values, so the typed report is retained for trace-level
+        /// diagnosis but excluded from the public error's display and source chain.
+        report: error_stack::Report<JaqProgramError>,
+    },
     #[error("{cause} ({position})")]
     Unfold {
         position: UnfoldPosition,
@@ -771,7 +794,27 @@ impl CompiledCodec {
                 codec: self.name.as_str().to_string(),
                 reason: reason.to_string(),
             })?;
-        Ok(CompiledCodecBatchEncoder { codec: self, batch })
+        let json_columns = match &self.wire_schema {
+            CompiledWireSchema::Json(wire_schema) => {
+                let columns = JsonColumns::new(
+                    &batch.batch,
+                    &wire_schema.encode_fields,
+                    NestedNulls::Reject,
+                )
+                .map_err(|reason| CodecError::InvalidCodec {
+                    codec: self.name.as_str().to_string(),
+                    reason: reason.to_string(),
+                })?;
+                Some(columns)
+            }
+            _ => None,
+        };
+        Ok(CompiledCodecBatchEncoder {
+            codec: self,
+            batch,
+            json_columns,
+            previous_row_bytes: Cell::new(0),
+        })
     }
 }
 
@@ -783,7 +826,14 @@ impl CompiledCodecBatchEncoder<'_> {
         payload: &mut Vec<u8>,
     ) -> error_stack::Result<(), CodecError> {
         payload.clear();
-        self.write_row(row_index, payload)
+        self.write_row(row_index, payload)?;
+        self.previous_row_bytes.set(payload.len());
+        Ok(())
+    }
+
+    /// Allocates the next row's output from the last encoded row's observed byte length.
+    pub(crate) fn next_payload(&self) -> Vec<u8> {
+        Vec::with_capacity(self.previous_row_bytes.get())
     }
 
     /// Encodes row `row_index` under `limit`, abandoning the encoding at the first write that
@@ -841,12 +891,14 @@ impl CompiledCodecBatchEncoder<'_> {
         let row = ArrowCodecRow::new(self.codec, self.batch, row_index);
         match &self.codec.wire_schema {
             CompiledWireSchema::Json(_) => {
-                simd_json::to_writer(&mut *output, &row).map_err(|source| {
-                    Report::new(CodecError::SimdJsonEncode {
+                let columns = self.json_columns.as_ref().assured(
+                    "a JSON batch encoder is prepared with typed JSON columns at construction",
+                );
+                columns.write_row(row_index, output).change_context(
+                    CodecError::ColumnarJsonEncode {
                         codec: codec.to_string(),
-                        source,
-                    })
-                })?;
+                    },
+                )?;
             }
             CompiledWireSchema::Cbor(_) => {
                 ciborium::into_writer(&row, &mut *output).map_err(|source| {
@@ -884,6 +936,7 @@ impl CompiledCodecBatchEncoder<'_> {
                             codec: codec.to_string(),
                             format: native.format.name(),
                             reason: error.to_string(),
+                            report: error,
                         })
                     })?;
             }
@@ -2109,12 +2162,8 @@ pub enum RuntimeSchemaError {
         #[source]
         source: ArrowError,
     },
-    #[error("failed to {operation}: {source}")]
-    VmOperation {
-        operation: RuntimeVmOperation,
-        #[source]
-        source: nervix_vm::RuntimeError,
-    },
+    #[error("failed to {operation}")]
+    VmOperation { operation: RuntimeVmOperation },
     #[error("failed to {operation} for field '{field}'")]
     VmProjection {
         operation: RuntimeVmOperation,
@@ -2752,10 +2801,23 @@ fn compile_json_wire_schema(
             wire: fields.get(&field.name).copied(),
         })
         .collect();
+    let encode_fields = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            let nulls = if field.optional {
+                FieldNulls::Omit
+            } else {
+                FieldNulls::Reject
+            };
+            JsonColumnSpec::new(&field.name, nulls)
+        })
+        .collect();
     CompiledJsonWireSchema {
         strictness: schema_def.strictness,
         fields,
         decode_fields,
+        encode_fields,
     }
 }
 
@@ -3593,6 +3655,7 @@ fn run_jaq_transformation(
         .map_err(|error| CodecError::JaqTransform {
             codec: codec.name.as_str().to_string(),
             reason: error.to_string(),
+            report: error,
         })
 }
 
@@ -6362,7 +6425,11 @@ mod tests {
         }
 
         assert_eq!(payloads.len(), records.len());
-        for (payload, expected_user_id) in payloads.iter().zip([42, 7]) {
+        for (row_index, (payload, expected_user_id)) in payloads.iter().zip([42, 7]).enumerate() {
+            let reference =
+                serde_json::to_vec(&ArrowCodecRow::new(&compiled_codec, &batch, row_index))
+                    .assured("the reference Arrow row has valid JSON fields");
+            assert_eq!(*payload, reference);
             let decoded =
                 decode_one(&compiled_codec, payload).expect("columnar JSON payload should decode");
             assert_eq!(
@@ -7107,6 +7174,16 @@ mod tests {
         }
 
         let batch = decoded;
+        let encoder = compiled_codec
+            .batch_encoder(&batch)
+            .assured("the decoded primitive arrays match the JSON codec");
+        let mut encoded = Vec::new();
+        encoder
+            .encode_row_into(0, &mut encoded)
+            .assured("the primitive arrays encode from their Arrow columns");
+        let reference = serde_json::to_vec(&ArrowCodecRow::new(&compiled_codec, &batch, 0))
+            .assured("the primitive arrays serialize through the reference row view");
+        assert_eq!(encoded, reference);
         for field in compiled_schema.fields() {
             assert_eq!(
                 single_batch_value(&batch, &field.name),

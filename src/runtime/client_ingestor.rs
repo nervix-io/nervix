@@ -27,6 +27,14 @@
 //! routes. The window bounds how many admitted batches may await their acknowledgement across
 //! every producer, so attaching another producer never widens it.
 
+// Producers opening through different sessions and links reserve from one node budget while ended
+// attachments return what they held, so the budget is Shuttle's atomic under the Shuttle feature: a
+// check needs a scheduling point at every read and compare-and-swap to explore racing reservations.
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::AtomicU64 as BudgetBytes;
+#[cfg(not(feature = "shuttle"))]
+use std::sync::atomic::AtomicU64 as BudgetBytes;
+
 use bytes::Bytes;
 use indexmap::IndexMap;
 use nervix_connector::physical_time::actual_utc_now;
@@ -67,9 +75,17 @@ impl ClientSubmissionId {
 /// attachment ends, so a full budget refuses the open rather than stalling an opened producer.
 ///
 /// This is a handle: every clone reserves from the same node budget.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct ClientProducerBudget {
-    reserved: Arc<AtomicU64>,
+    reserved: Arc<BudgetBytes>,
+}
+
+impl Default for ClientProducerBudget {
+    fn default() -> Self {
+        Self {
+            reserved: Arc::new(BudgetBytes::new(0)),
+        }
+    }
 }
 
 impl ClientProducerBudget {
@@ -249,6 +265,7 @@ pub(in crate::runtime) struct PublishedClientGauges {
     forwarded_producers: AtomicU64,
     outstanding_batches: AtomicU64,
     outstanding_bytes: AtomicU64,
+    admitted_batches: AtomicU64,
 }
 
 impl PublishedClientGauges {
@@ -260,6 +277,8 @@ impl PublishedClientGauges {
             .store(gauges.outstanding_batches, Ordering::Release);
         self.outstanding_bytes
             .store(gauges.outstanding_bytes, Ordering::Release);
+        self.admitted_batches
+            .store(gauges.admitted_batches, Ordering::Release);
     }
 
     fn snapshot(&self) -> ClientIngestorGauges {
@@ -268,6 +287,7 @@ impl PublishedClientGauges {
             forwarded_producers: self.forwarded_producers.load(Ordering::Acquire),
             outstanding_batches: self.outstanding_batches.load(Ordering::Acquire),
             outstanding_bytes: self.outstanding_bytes.load(Ordering::Acquire),
+            admitted_batches: self.admitted_batches.load(Ordering::Acquire),
         }
     }
 }
@@ -435,12 +455,15 @@ impl Attachment {
             .assured("both counts are bounded by the attachment's granted batches")
     }
 
+    /// Answers one batch, counting its outcome once.
     fn answer(
         &mut self,
+        series: &ClientIngestorSeries,
         submission: ClientSubmissionId,
         outcome: ClientSubmissionOutcome,
         detail: Option<String>,
     ) {
+        series.count(&outcome);
         let event = ClientProducerEvent::Outcome {
             submission,
             outcome,
@@ -451,7 +474,7 @@ impl Attachment {
     }
 
     /// Refuses every batch still queued, in the order the producer sent them.
-    fn refuse_queued(&mut self, refusal: ClientSubmissionRefusal) {
+    fn refuse_queued(&mut self, series: &ClientIngestorSeries, refusal: ClientSubmissionRefusal) {
         while let Some(queued) = self.queue.pop_front() {
             let bytes: u64 = queued.body.len().arch_into();
             self.held_bytes = self
@@ -459,6 +482,7 @@ impl Attachment {
                 .checked_sub(bytes)
                 .verified("a queued batch's bytes were added when it was queued");
             self.answer(
+                series,
                 queued.submission,
                 ClientSubmissionOutcome::NotAdmitted(refusal),
                 None,
@@ -468,11 +492,12 @@ impl Attachment {
 
     /// Ends the attachment: every queued batch is refused, every outstanding one's outcome is
     /// unknown, and the reason is the last event.
-    fn end(mut self, reason: ClientProducerEndReason) {
-        self.refuse_queued(ClientSubmissionRefusal::ProducerEnded);
+    fn end(mut self, series: &ClientIngestorSeries, reason: ClientProducerEndReason) {
+        self.refuse_queued(series, ClientSubmissionRefusal::ProducerEnded);
         let outstanding = std::mem::take(&mut self.outstanding);
         for submission in outstanding.into_keys() {
             self.answer(
+                series,
                 submission,
                 ClientSubmissionOutcome::OutcomeUnknown(ClientOutcomeUncertainty::Interrupted),
                 None,
@@ -515,8 +540,10 @@ struct Endpoint {
     in_worker: Option<WorkerBatch>,
     /// Cancelled when this task ends, which stops every acknowledgement watcher it started.
     ended: CancellationToken,
-    metrics: RuntimeMetrics,
+    series: ClientIngestorSeries,
     gauges: Arc<PublishedClientGauges>,
+    /// The counts last published, so a command that changes none of them publishes nothing.
+    published: ClientIngestorGauges,
 }
 
 impl Runtime {
@@ -730,8 +757,9 @@ impl Runtime {
             window_used: 0,
             in_worker: None,
             ended: CancellationToken::new(),
-            metrics: self.inner.metrics.clone(),
+            series: self.inner.metrics.client_ingestor_series(domain, ingestor),
             gauges: gauges.clone(),
+            published: ClientIngestorGauges::default(),
         };
         tokio::spawn(endpoint.run());
         self.inner.client_ingestors.insert(
@@ -900,6 +928,7 @@ impl Endpoint {
                 }
             }
             self.pump();
+            self.publish_gauges();
         }
         // Every command sender is gone: the node is shutting down and ended no producer itself.
         self.end(ClientProducerEndReason::ShuttingDown);
@@ -974,7 +1003,6 @@ impl Endpoint {
                 forwarded: reservation,
             },
         );
-        self.record_producers();
         debug!(
             domain = self.domain.as_str(),
             ingestor = self.ingestor.as_str(),
@@ -1003,6 +1031,7 @@ impl Endpoint {
         let bytes: u64 = body.len().arch_into();
         if entry.closing {
             entry.answer(
+                &self.series,
                 submission,
                 ClientSubmissionOutcome::NotAdmitted(ClientSubmissionRefusal::ProducerEnded),
                 None,
@@ -1016,6 +1045,7 @@ impl Endpoint {
         };
         if !batches_fit || !bytes_fit {
             entry.answer(
+                &self.series,
                 submission,
                 ClientSubmissionOutcome::NotAdmitted(ClientSubmissionRefusal::CreditExceeded),
                 Some("the batch exceeds the producer's granted credit".to_string()),
@@ -1024,9 +1054,12 @@ impl Endpoint {
             return;
         }
         if let Some(refusal) = self.intake.refusal() {
-            self.metrics
-                .record_client_submission_refusal(&self.domain, &self.ingestor, refusal);
-            entry.answer(submission, ClientSubmissionOutcome::NotAdmitted(refusal), None);
+            entry.answer(
+                &self.series,
+                submission,
+                ClientSubmissionOutcome::NotAdmitted(refusal),
+                None,
+            );
             return;
         }
         entry.held_bytes = entry
@@ -1041,7 +1074,7 @@ impl Endpoint {
             // The attachment already ended, which closed its outcomes.
             return;
         };
-        entry.refuse_queued(ClientSubmissionRefusal::ProducerEnded);
+        entry.refuse_queued(&self.series, ClientSubmissionRefusal::ProducerEnded);
         entry.closing = true;
         self.release_if_closed(attachment);
     }
@@ -1065,7 +1098,6 @@ impl Endpoint {
             attachment = %attachment,
             "a closed producer was released"
         );
-        self.record_producers();
     }
 
     fn detach(&mut self, attachment: ClientAttachmentId) {
@@ -1076,7 +1108,6 @@ impl Endpoint {
                 attachment = %attachment,
                 "a producer detached from a client ingestor"
             );
-            self.record_producers();
         }
     }
 
@@ -1139,7 +1170,7 @@ impl Endpoint {
         let refusal = intake.refusal();
         for entry in self.attachments.values_mut() {
             if let Some(refusal) = refusal {
-                entry.refuse_queued(refusal);
+                entry.refuse_queued(&self.series, refusal);
             }
             entry.admission.send_if_modified(|current| {
                 let changed = *current != admission;
@@ -1177,8 +1208,6 @@ impl Endpoint {
                     .window_used
                     .checked_sub(1)
                     .verified("a batch the worker refused held one slot of the window");
-                self.metrics
-                    .record_client_submission_refusal(&self.domain, &self.ingestor, refusal);
                 self.answer_outstanding(
                     attachment,
                     submission,
@@ -1200,8 +1229,6 @@ impl Endpoint {
             .window_used
             .checked_sub(1)
             .verified("an admitted batch holds one slot of the window until it is resolved");
-        self.metrics
-            .record_client_submission_outcome(&self.domain, &self.ingestor, &outcome);
         self.answer_outstanding(attachment, submission, outcome, detail);
     }
 
@@ -1223,7 +1250,7 @@ impl Endpoint {
             .held_bytes
             .checked_sub(bytes)
             .verified("an outstanding batch's bytes were added when it was queued");
-        entry.answer(submission, outcome, detail);
+        entry.answer(&self.series, submission, outcome, detail);
         self.release_if_closed(attachment);
     }
 
@@ -1340,8 +1367,7 @@ impl Endpoint {
             // The worker still reports the batch; its report finds the attachment gone.
             debug!("an ended producer had a batch with the admission worker");
         }
-        entry.end(reason);
-        self.record_producers();
+        entry.end(&self.series, reason);
     }
 
     fn end(&mut self, reason: ClientProducerEndReason) {
@@ -1357,13 +1383,19 @@ impl Endpoint {
             );
         }
         for (_, entry) in attachments {
-            entry.end(reason);
+            entry.end(&self.series, reason);
         }
-        self.record_producers();
+        self.window_used = 0;
+        self.in_worker = None;
+        self.publish_gauges();
     }
 
-    fn record_producers(&self) {
-        let mut gauges = ClientIngestorGauges::default();
+    /// Publishes the endpoint's counts for `DESCRIBE` and metrics when a command changed them.
+    fn publish_gauges(&mut self) {
+        let mut gauges = ClientIngestorGauges {
+            admitted_batches: self.window_used.arch_into(),
+            ..ClientIngestorGauges::default()
+        };
         for entry in self.attachments.values() {
             let batches: u64 = entry.held_batches().arch_into();
             gauges.producers = gauges
@@ -1385,9 +1417,12 @@ impl Endpoint {
                 .checked_add(entry.held_bytes)
                 .assured("every counted byte is held in memory");
         }
+        if gauges == self.published {
+            return;
+        }
+        self.published = gauges;
         self.gauges.publish(gauges);
-        self.metrics
-            .set_client_ingestor_producers(&self.domain, &self.ingestor, gauges);
+        self.series.set(gauges);
     }
 }
 
@@ -1402,6 +1437,10 @@ pub(crate) struct ClientIngestorGauges {
     pub(crate) outstanding_batches: u64,
     /// The Arrow IPC bytes of those batches.
     pub(crate) outstanding_bytes: u64,
+    /// Batches holding a slot of the acknowledgement window: being admitted, or admitted and
+    /// awaiting their acknowledgement. Every producer shares the window, so this never exceeds
+    /// its size however many producers are attached.
+    pub(crate) admitted_batches: u64,
 }
 
 /// How one admitted batch's acknowledgement resolved, and what its producer is told about it.
@@ -1563,18 +1602,15 @@ impl ClientIntake {
                 };
             }
         };
-        // The fence against a quiesce that engaged while the batch was validated. The root is
-        // tracked before the decision is read, so either the drain that follows a quiesce counts
-        // this root and waits for it, or this read observes the quiesce and the batch is refused
-        // with its root resolved before anything was dispatched under it.
-        let (root, completion) = self.trackers.tracked_root();
-        if let Some(refusal) = self.quiesce.client_intake_state().refusal() {
-            root.ack_success();
-            return AdmissionResult::Refused {
-                refusal,
-                detail: None,
-            };
-        }
+        let (root, completion) = match self.quiesce.track_client_batch(&self.trackers) {
+            Ok(tracked) => tracked,
+            Err(refusal) => {
+                return AdmissionResult::Refused {
+                    refusal,
+                    detail: None,
+                };
+            }
+        };
         let dispatched = self
             .runtime
             .dispatch_client_batch(ClientBatchDispatch {
@@ -1610,6 +1646,24 @@ impl ClientIntake {
 }
 
 impl IngestorQuiesceControl {
+    /// Tracks the ACK root of a validated client batch and then decides whether it may be
+    /// dispatched: the fence against a quiesce that engaged while the batch was validated.
+    ///
+    /// The root is tracked before the decision is read, so either the drain that follows a
+    /// quiesce counts this root and waits for it, or this read observes the quiesce and the batch
+    /// is refused with its root resolved before anything was dispatched under it.
+    pub(in crate::runtime) fn track_client_batch(
+        &self,
+        trackers: &IngestorAckRootTrackers,
+    ) -> Result<(AckSet, AckCompletion), ClientSubmissionRefusal> {
+        let (root, completion) = trackers.tracked_root();
+        if let Some(refusal) = self.client_intake_state().refusal() {
+            root.ack_success();
+            return Err(refusal);
+        }
+        Ok((root, completion))
+    }
+
     /// Whether a client source admits a batch under the current publication. An ownership
     /// handoff or a shutdown stops intake for good on this execution; every other hold is a
     /// suspension that the release ends.
@@ -1631,3 +1685,7 @@ impl IngestorQuiesceControl {
 #[cfg(test)]
 #[path = "client_ingestor_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "client_ingestor_shuttle_tests.rs"]
+mod shuttle_tests;

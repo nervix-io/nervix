@@ -95,6 +95,17 @@ change. [Data Plane](./data-plane.md) explains the runtime work these gates prot
 that normally contribute each level. An ingestor's `ON QUIESCE` mode controls its external-source
 behavior under a hold; it is distinct from the step's quiesce level.
 
+A [client ingestor](./ingestors.md#client-ingestors) under a hold suspends admission: its producers
+are told admission is suspended, batches that were queued but not admitted are refused as
+`suspended`, and batches that arrive during the hold are refused the same way. The drain waits for
+the acknowledgement roots of the batches admitted before the hold, which the admission fence
+guarantees it counts: a batch either has its root tracked before the hold is observed, or is refused
+with nothing dispatched. Whether producers survive the step is decided by the ingestor's endpoint
+contract, not by the quiesce level: an alteration that keeps the contract reopens admission with
+every producer attached once the step is applied, one that changes it ends them as
+`endpoint changed`, and a failed drain releases the hold and reopens admission with the previous
+execution and every producer still attached.
+
 The report keeps separate effect sets for configuration creation/change/drop, resource catalog and
 version bindings, domain lifecycle, ownership moves, activations and deactivations, rebuilds,
 state resets, force flushes, and affected topology. An HTTPS `VHOST` version refresh can therefore
@@ -290,7 +301,8 @@ prevents delayed or out-of-order responses from updating the wrong waiter. Recon
 redirect recover the same admitted command by execution reference; a side-effect-free inspection
 can instead be read again. [Rust Client Library](./client-library.md#inspecting-a-transaction),
 [Command Line Client](./client-tools-cli.md), and [NSPL Overview](./nspl-overview.md) own usage;
-client reconnection and correlated response handling remain with the Rust client contract.
+[Client Session Protocol](./client-session-protocol.md) owns client reconnection, correlated
+response handling, and the exact recovery of transaction requests.
 
 The web console uses the typed envelope directly. Its outline selects the whole transaction, an
 effective execution step, or one operation's contribution. The graph combines each step's before

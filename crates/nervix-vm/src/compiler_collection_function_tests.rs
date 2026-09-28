@@ -28,7 +28,7 @@ fn source_schema() -> Arc<Schema> {
 fn compile_assignment(
     expression: &str,
     result_type: DataType,
-) -> Result<CompiledProgram, CompileError> {
+) -> error_stack::Result<CompiledProgram, CompileError> {
     let program = parse_program(&format!("SET result = {expression}"))
         .verified("each case is syntactically valid NSPL");
     let input = source_schema();
@@ -87,6 +87,10 @@ fn collection_calls_reject_implicit_element_casts_and_invalid_indices() {
     for (expression, code) in rejected {
         let error = compile_assignment(expression, DataType::Int64)
             .expect_err("collection operands outside their signatures must be refused");
-        assert_eq!(error.code, code, "{expression}: {error}");
+        assert_eq!(
+            error.current_context().code(),
+            code,
+            "{expression}: {error}"
+        );
     }
 }

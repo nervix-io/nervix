@@ -67,6 +67,7 @@ pub(in crate::application) fn runtime_ingestor_describe_to_envelope(
                 forwarded_producers: gauges.forwarded_producers,
                 outstanding_batches: gauges.outstanding_batches,
                 outstanding_bytes: gauges.outstanding_bytes,
+                admitted_batches: gauges.admitted_batches,
             }
         }),
         metrics,
@@ -106,6 +107,7 @@ pub(in crate::application) fn runtime_ingestor_describe_from_envelope(
                     forwarded_producers: producers.forwarded_producers,
                     outstanding_batches: producers.outstanding_batches,
                     outstanding_bytes: producers.outstanding_bytes,
+                    admitted_batches: producers.admitted_batches,
                 }
             }),
         },
@@ -390,8 +392,12 @@ pub(in crate::application) fn format_ingestor_listing_line(
             None => crate::runtime::ClientIngestorGauges::default(),
         };
         line.push_str(&format!(
-            " admission={admission} producers={} outstanding_batches={} outstanding_bytes={}",
-            gauges.producers, gauges.outstanding_batches, gauges.outstanding_bytes
+            " admission={admission} producers={} outstanding_batches={} outstanding_bytes={} \
+             admitted_batches={}",
+            gauges.producers,
+            gauges.outstanding_batches,
+            gauges.outstanding_bytes,
+            gauges.admitted_batches
         ));
     }
     line
@@ -414,6 +420,7 @@ fn format_client_producer_lines(summary: &RuntimeIngestorDescribe) -> Vec<String
         format!("forwarded producers: {}", gauges.forwarded_producers),
         format!("outstanding batches: {}", gauges.outstanding_batches),
         format!("outstanding bytes: {}", gauges.outstanding_bytes),
+        format!("admitted batches: {}", gauges.admitted_batches),
     ]
 }
 

@@ -68,7 +68,7 @@ pub use domain::{
 pub use domain_clock::{
     DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachmentEndReason,
     DomainClockAttachmentEnded, DomainClockDetachDisposition, DomainClockDetachOutcome,
-    DomainClockObserved,
+    DomainClockObserved, DomainClockTicked,
 };
 pub use event::{
     Leadership, LeadershipObserved, NoticeLevel, ServerNotice, SessionEndReason, SessionEnding,

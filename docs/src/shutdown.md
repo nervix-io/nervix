@@ -168,16 +168,19 @@ nothing was cordoned and nothing is cleared.
 Stop admission closes the node's public surface. It stops accepting on the session gRPC, connector,
 observability, and console listeners and closes the client connections those listeners had accepted.
 
-Closing a connection cancels the requests it carries. A session first tells its client that the
-server is shutting down, then ends. The ending follows the replies already queued for the client
-and is the last frame of the session, but the session does not wait for the client to read it:
-a session whose client reads nothing ends just as promptly, and its subscriptions stop and release
+Closing a connection cancels the requests it carries. A console session is told that the server
+is shutting down, after the replies already queued for its client, and that ending is its last
+frame. A native gRPC session's connection is cut when admission closes, so its client sees the
+stream fail as it would after any transport loss. Neither waits for the client to read anything: a
+session whose client reads nothing ends just as promptly, and its subscriptions stop and release
 the relays they held. Every request the session had not yet admitted is cancelled before admission
 and never begins an effect, so the client can send it again, with the same execution reference, to
 another node. A session stream or a resource upload waiting on its client ends at once, so no
 client can hold the drain or the process open. An authenticated upload held open
 at any point of its progress — before its first message, between chunks, or trickling chunks
-indefinitely — is cancelled this way and does not delay the exit.
+indefinitely — is cancelled this way and does not delay the exit. [Node Stop And Restart As A
+Client Observes Them](./client-session-protocol.md#node-stop-and-restart-as-a-client-observes-them)
+describes what a client sees at each ending and what it recovers.
 
 Work that a session command had already admitted is not cancelled here. Its session stops waiting
 for it, and no reply follows for it, but its effect keeps running. A transaction commit in progress
@@ -203,6 +206,14 @@ Each source host retains the quiesce publication it observed before awaiting dis
 change wait compares against that publication after registering the waiter, so a shutdown or
 ownership-handoff engagement during dispatch is observed on the next loop turn even when the
 notification arrived before the wait began.
+
+A [client ingestor](./ingestors.md#client-ingestors) stops intake the same way: from the moment
+intake stops, a batch that arrives or waits unadmitted is refused as `draining`, which its producer
+must not send again to this execution, while admitted batches continue through their routes. Closing
+the node's sessions detaches the producers they held; their admitted batches still drain. Producers
+another node forwards here stay attached through the drain and learn every outcome it decides.
+Terminal teardown then ends every producer still attached with `shutting down`, reporting each batch
+whose acknowledgement is still unresolved as of unknown outcome with cause `interrupted`.
 
 A raw quiesce buffer is not part of the drain. Payloads that a `BUFFER` mode retained during an
 earlier hold are outside runtime graph work: a shutdown does not replay them, and they are discarded
@@ -462,6 +473,7 @@ What that contract is depends on the source, and three groups differ sharply:
 | Kafka, Pulsar, RabbitMQ, SQS, and MQTT in an `ACK` mode | The offset is committed, the broker acknowledged, or the message deleted only after the record is acknowledged through the graph | Redelivered after the restart |
 | HTTP polling, Prometheus | None; the poller re-reads its source each cadence | Read again by a later poll |
 | NATS, Redis Pub/Sub, ZeroMQ, WebSocket clients, HTTP endpoints, Syslog | None exists; these sources offer no acknowledged mode | Lost, with nothing to redeliver it |
+| Client ingestors | The producer receives each batch's outcome once its acknowledgement root resolves | Reported to its producer as of unknown outcome, or not at all when the producer's session ended first; the application decides whether to submit it again |
 
 The last row is the one to plan around. Those sources have no acknowledged delivery mode at all, so
 a record admitted from them and not yet emitted is lost both by a drain that runs out of time and by
@@ -573,6 +585,7 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | WASM guest-state checkpoints | Every checkpoint that released an acknowledgement is already synchronized | Reopen at the newest checkpoint on the node's storage, which covers every acknowledged input |
 | External source offsets and sink commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
 | Relay batches, queued payload attempts, suspended work, ACK guards, ACK tokens, ACK maps, handoff payloads, gate leases, clock progress | The drain tries to resolve them before its deadline | Volatile; lost |
+| Client producers, their credit and queued batches, producer links | Ended as `shutting down` after the drain, or detached with their sessions | Volatile; lost with the process, and every forwarded producer of the node ends as `owner lost` |
 
 Durability is not uniform across those rows, and the difference is operationally visible:
 
@@ -714,7 +727,11 @@ outcome, so `outcome=Completed` distinguishes a finished phase from an abandoned
 Existing metric families move during shutdown without naming it. Interconnect stream resets count
 `reason="shutdown"`. The ingestor quiesce families change as intake stops, but they carry no cause
 label, so a shutdown hold is not distinguishable there from another hold. Live branch instances fall
-without incrementing the eviction counter, because a stopping node is not evicting branches. See
+without incrementing the eviction counter, because a stopping node is not evicting branches. A
+client ingestor's endpoint logs `ended the producers of a client ingestor` at `info` with the count
+and reason `shutting down`, its gauges fall to zero, and the batches it answered while draining are
+counted under `nervix_client_ingestor_submissions_total` as `draining` refusals or as the outcomes
+their roots resolved to. See
 [Metrics And Observability](./metrics-and-observability.md).
 
 The health endpoints do not describe shutdown. `/livez` answers while the process is alive, and

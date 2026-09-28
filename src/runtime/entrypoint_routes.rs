@@ -616,7 +616,7 @@ mod tests {
 
         let bound = surfaces
             .deps(&domain)
-            .bind_ingestor(&plan.ingestor, &fixture.codec())
+            .bind_ingestor(&plan.ingestor, &fixture.codec().schema())
             .assured("the planned ingestor binds");
 
         assert!(bound.filter_where.is_some());
@@ -636,7 +636,7 @@ mod tests {
 
         let error = surfaces
             .deps(&domain)
-            .bind_ingestor(&plan.ingestor, &fixture.codec())
+            .bind_ingestor(&plan.ingestor, &fixture.codec().schema())
             .err()
             .assured("a route relay the node lacks must not bind");
 
@@ -659,7 +659,7 @@ mod tests {
 
         let error = surfaces
             .deps(&domain)
-            .bind_ingestor(&plan.ingestor, &fixture.codec())
+            .bind_ingestor(&plan.ingestor, &fixture.codec().schema())
             .err()
             .assured("a branch key the relay lacks must not bind");
 
@@ -684,7 +684,7 @@ mod tests {
 
         let error = surfaces
             .deps(&domain)
-            .bind_ingestor(&plan.ingestor, &fixture.codec())
+            .bind_ingestor(&plan.ingestor, &fixture.codec().schema())
             .err()
             .assured("a route that does not compile must not bind");
 

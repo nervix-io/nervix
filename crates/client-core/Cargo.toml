@@ -10,10 +10,11 @@ workspace = true
 
 [features]
 # Encode Arrow record batches as the canonical stream a producer submits.
-arrow = ["dep:arrow-array", "dep:arrow-ipc", "nervix-models/arrow"]
+arrow = ["dep:arrow-array", "dep:arrow-ipc", "dep:arrow-schema", "nervix-models/arrow"]
 autocomplete = []
 default = []
 shuttle = [
+  "dep:shuttle",
   "dep:shuttle-tokio",
   "dep:shuttle-tokio-stream",
   "shuttle-tokio/shuttle",
@@ -25,6 +26,7 @@ ahash = { workspace = true }
 arch-into = { workspace = true }
 arrow-array = { workspace = true, optional = true }
 arrow-ipc = { workspace = true, optional = true }
+arrow-schema = { workspace = true, optional = true }
 async-tar = { workspace = true, features = ["runtime-tokio"] }
 base64 = { workspace = true }
 bytes = { workspace = true }
@@ -37,6 +39,7 @@ nervix-nspl = { workspace = true, features = ["client"] }
 nervix-recovery = { workspace = true }
 parking_lot = { workspace = true }
 rustls = { workspace = true }
+shuttle = { workspace = true, optional = true }
 shuttle-tokio = { workspace = true, features = [
   "fs",
   "io-util",

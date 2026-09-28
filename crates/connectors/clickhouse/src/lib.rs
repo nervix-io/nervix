@@ -2,13 +2,22 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** ClickHouse client and TLS configuration, the `JSONEachRow` encoding of each mapped
-//!   row, insert chunking into single rows after a rejected write, and insert-error
-//!   classification.
-//! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio
-//!   and the `clickhouse` driver.
+//! - **Owns.** ClickHouse client and TLS configuration, the HTTP connector every connection of the
+//!   client is made through, the `JSONEachRow` encoding of each mapped row, insert chunking into
+//!   single rows after a rejected write, and insert-error classification.
+//! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio,
+//!   the node resolver, and the `clickhouse` driver with its Hyper client.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
+//!
+//! # Connections
+//!
+//! The client makes every connection through Hyper's `HttpConnector` with the node resolver as its
+//! DNS service, so each new connection resolves the host of `addr` again, tries the answers in
+//! order, and dials a literal address as written. The request keeps `addr` as its URL and
+//! authority, and a TLS client verifies the server certificate against that host whichever address
+//! accepted the connection. The insert's request timeout covers the connection, lookup included,
+//! because the driver makes it while the insert waits for its result.
 
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
@@ -16,33 +25,35 @@ extern crate shuttle_tokio as tokio;
 use std::time::Duration;
 
 use ::clickhouse::{Client as ClickHouseClient, error::Error as ClickHouseError};
-use arrow_array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
-    Int64Array, ListArray, RecordBatch, StringArray, TimestampNanosecondArray, UInt8Array,
-    UInt16Array, UInt32Array, UInt64Array,
-};
-use arrow_schema::DataType;
-use chrono::DateTime;
 use error_stack::Report;
 use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
     rt::TokioExecutor as HyperTokioExecutor,
 };
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::ResultExt as _;
+use nervix_columnar_json::{FieldNulls, Float32Encoding, JsonColumnSpec, JsonColumns, NestedNulls};
 use nervix_connector::{
     MappedSinkRows, PerRecordOutcome, RejectedSinkRecord, RowSink, RustlsClientConfigSource,
     SinkHost, SinkLifecycle, SinkPublishError, SinkRecordPosition, SinkStartError, SinkStartResult,
     client_config_value, optional_client_config_value,
 };
+use nervix_dns::{DnsLookupError, DnsResolver};
 use nervix_models::{ClientConfigEntry, TableName};
 use tracing::trace;
 
 const CLICKHOUSE: &str = "clickhouse";
+/// The TCP keepalive of every connection, the driver's own default.
+const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
+/// How long an idle pooled connection may be reused, the driver's own default. ClickHouse closes an
+/// idle HTTP connection after three seconds, so the client stops reusing one a second earlier.
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What one ClickHouse emitter inserts through, from its typed sink plan.
 pub struct ClickHouseSinkConfig {
     pub config: Vec<ClientConfigEntry>,
     pub table: TableName,
+    /// The node resolver every connection of the client resolves the host of `addr` through.
+    pub dns: DnsResolver,
 }
 
 /// The ClickHouse sink, which encodes each mapped row as one `JSONEachRow` line.
@@ -90,212 +101,55 @@ impl ClickHouseWriteError {
         }
     }
 
-    fn into_report(self) -> Report<SinkPublishError> {
-        let reason = match self.record_error_name() {
-            Some(name) => format!("ClickHouse insert request failed with {name}"),
-            None => "ClickHouse insert request failed".to_string(),
+    /// The failed lookup of the ClickHouse host, when resolving it is what failed the request.
+    fn lookup_failure(&self) -> Option<&DnsLookupError> {
+        let ClickHouseError::Network(error) = &self.0 else {
+            return None;
         };
-        Report::new(SinkPublishError::Publish { sink: CLICKHOUSE }).attach_printable(reason)
-    }
-}
-
-/// A mapped column this sink cannot write as JSON, named with the exact type it carries.
-#[derive(Debug, thiserror::Error)]
-#[error("ClickHouse VALUES column '{column}' has unsupported exact type {data_type}")]
-struct UnsupportedMappedColumn {
-    column: String,
-    data_type: DataType,
-}
-
-/// The mapped columns of one batch, downcast once so every row reads from the column that holds it.
-///
-/// Each target column is quoted once here rather than once per row, and the line is written in
-/// mapping order so the same mapping always produces the same bytes.
-struct MappedJsonColumns<'a> {
-    columns: Vec<MappedJsonField<'a>>,
-}
-
-/// One target column of the insert: its quoted JSON key and the Arrow column its values come from.
-struct MappedJsonField<'a> {
-    key: String,
-    values: MappedJsonColumn<'a>,
-}
-
-impl<'a> MappedJsonColumns<'a> {
-    fn new(
-        batch: &'a RecordBatch,
-        target_columns: &[String],
-    ) -> Result<Self, UnsupportedMappedColumn> {
-        let mut columns = Vec::with_capacity(target_columns.len());
-        for (index, column) in target_columns.iter().enumerate() {
-            let array = batch.column(index);
-            let values = MappedJsonColumn::new(array).ok_or_else(|| UnsupportedMappedColumn {
-                column: column.clone(),
-                data_type: array.data_type().clone(),
-            })?;
-            columns.push(MappedJsonField {
-                key: serde_json::Value::String(column.clone()).to_string(),
-                values,
-            });
-        }
-        Ok(Self { columns })
+        DnsLookupError::find_in(error.as_ref())
     }
 
-    /// One `JSONEachRow` line, read column by column at the row the host selected.
-    fn row_line(&self, row: usize) -> String {
-        let mut line = String::from("{");
-        for (index, field) in self.columns.iter().enumerate() {
-            if index != 0 {
-                line.push(',');
-            }
-            line.push_str(&field.key);
-            line.push(':');
-            line.push_str(&field.values.value(row).to_string());
+    /// A request that never reached ClickHouse, described by the error and every cause under it.
+    ///
+    /// Those causes describe the connection, never a row, and carry no credentials. A response from
+    /// ClickHouse is not described this way, because its text can repeat values of the rows.
+    fn transport_failure(&self) -> Option<String> {
+        let ClickHouseError::Network(error) = &self.0 else {
+            return None;
+        };
+        let mut description = error.to_string();
+        let mut cause = error.source();
+        while let Some(current) = cause {
+            description.push_str(": ");
+            description.push_str(&current.to_string());
+            cause = current.source();
         }
-        line.push('}');
-        line
-    }
-}
-
-/// One mapped column, held as the typed Arrow array it arrived in.
-enum MappedJsonColumn<'a> {
-    Bool(&'a BooleanArray),
-    U8(&'a UInt8Array),
-    I8(&'a Int8Array),
-    U16(&'a UInt16Array),
-    I16(&'a Int16Array),
-    U32(&'a UInt32Array),
-    I32(&'a Int32Array),
-    U64(&'a UInt64Array),
-    I64(&'a Int64Array),
-    F32(&'a Float32Array),
-    F64(&'a Float64Array),
-    String(&'a StringArray),
-    Datetime(&'a TimestampNanosecondArray),
-    List {
-        offsets: &'a ListArray,
-        elements: Box<MappedJsonColumn<'a>>,
-    },
-}
-
-impl<'a> MappedJsonColumn<'a> {
-    fn new(array: &'a ArrayRef) -> Option<Self> {
-        let array = array.as_ref();
-        if let Some(values) = array.as_any().downcast_ref::<BooleanArray>() {
-            return Some(Self::Bool(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<UInt8Array>() {
-            return Some(Self::U8(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<Int8Array>() {
-            return Some(Self::I8(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<UInt16Array>() {
-            return Some(Self::U16(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<Int16Array>() {
-            return Some(Self::I16(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<UInt32Array>() {
-            return Some(Self::U32(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<Int32Array>() {
-            return Some(Self::I32(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<UInt64Array>() {
-            return Some(Self::U64(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
-            return Some(Self::I64(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<Float32Array>() {
-            return Some(Self::F32(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
-            return Some(Self::F64(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
-            return Some(Self::String(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
-            return Some(Self::Datetime(values));
-        }
-        let values = array.as_any().downcast_ref::<ListArray>()?;
-        let elements = Self::new(values.values())?;
-        Some(Self::List {
-            offsets: values,
-            elements: Box::new(elements),
-        })
+        Some(description)
     }
 
-    fn value(&self, row: usize) -> serde_json::Value {
-        if self.is_null(row) {
-            return serde_json::Value::Null;
+    fn into_report(self) -> Report<SinkPublishError> {
+        let publish = SinkPublishError::Publish { sink: CLICKHOUSE };
+        if let Some(lookup) = self.lookup_failure() {
+            let reason = format!("ClickHouse insert request failed: {lookup}");
+            return Report::new(lookup.clone())
+                .change_context(publish)
+                .attach_printable(reason);
         }
-        match self {
-            Self::Bool(values) => serde_json::Value::from(values.value(row)),
-            Self::U8(values) => serde_json::Value::from(values.value(row)),
-            Self::I8(values) => serde_json::Value::from(values.value(row)),
-            Self::U16(values) => serde_json::Value::from(values.value(row)),
-            Self::I16(values) => serde_json::Value::from(values.value(row)),
-            Self::U32(values) => serde_json::Value::from(values.value(row)),
-            Self::I32(values) => serde_json::Value::from(values.value(row)),
-            Self::U64(values) => serde_json::Value::from(values.value(row)),
-            Self::I64(values) => serde_json::Value::from(values.value(row)),
-            Self::F32(values) => serde_json::Value::from(values.value(row)),
-            Self::F64(values) => serde_json::Value::from(values.value(row)),
-            Self::String(values) => serde_json::Value::from(values.value(row)),
-            Self::Datetime(values) => serde_json::Value::from(
-                DateTime::from_timestamp_nanos(values.value(row))
-                    .fixed_offset()
-                    .to_rfc3339(),
-            ),
-            Self::List { offsets, elements } => {
-                let offsets = offsets.value_offsets();
-                let non_negative = "Arrow builds list offsets as non-negative element positions";
-                let start = usize::try_from(offsets[row]).assured(non_negative);
-                let end = usize::try_from(
-                    offsets[row.checked_add(1).assured(
-                        "a list array holds one offset more than it holds rows, so the position \
-                         after the last row is addressable",
-                    )],
-                )
-                .assured(non_negative);
-                let mut items = Vec::with_capacity(end.checked_sub(start).assured(
-                    "Arrow list offsets increase, so a row ends no earlier than it starts",
-                ));
-                for element in start..end {
-                    items.push(elements.value(element));
-                }
-                serde_json::Value::Array(items)
-            }
-        }
-    }
-
-    fn is_null(&self, row: usize) -> bool {
-        match self {
-            Self::Bool(values) => values.is_null(row),
-            Self::U8(values) => values.is_null(row),
-            Self::I8(values) => values.is_null(row),
-            Self::U16(values) => values.is_null(row),
-            Self::I16(values) => values.is_null(row),
-            Self::U32(values) => values.is_null(row),
-            Self::I32(values) => values.is_null(row),
-            Self::U64(values) => values.is_null(row),
-            Self::I64(values) => values.is_null(row),
-            Self::F32(values) => values.is_null(row),
-            Self::F64(values) => values.is_null(row),
-            Self::String(values) => values.is_null(row),
-            Self::Datetime(values) => values.is_null(row),
-            Self::List { offsets, .. } => offsets.is_null(row),
-        }
+        let reason = if let Some(name) = self.record_error_name() {
+            format!("ClickHouse insert request failed with {name}")
+        } else if let Some(transport) = self.transport_failure() {
+            format!("ClickHouse insert request failed: {transport}")
+        } else {
+            "ClickHouse insert request failed".to_string()
+        };
+        Report::new(publish).attach_printable(reason)
     }
 }
 
 impl ClickHouseSink {
     pub fn new(config: ClickHouseSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
-        let ClickHouseSinkConfig { config, table } = config;
-        let (client, request_timeout) = Self::client_from_config(&config)?;
+        let ClickHouseSinkConfig { config, table, dns } = config;
+        let (client, request_timeout) = Self::client_from_config(&config, dns)?;
         Ok(Self {
             client,
             request_timeout,
@@ -303,8 +157,14 @@ impl ClickHouseSink {
         })
     }
 
+    /// The client `config` describes, whose every connection resolves through `dns`, and the
+    /// request timeout of its inserts.
+    ///
+    /// Without TLS entries the client speaks plain HTTP only, as the driver's own default client
+    /// does in a build without its TLS features; an `https` address needs the TLS entries.
     pub fn client_from_config(
         config: &[ClientConfigEntry],
+        dns: DnsResolver,
     ) -> SinkStartResult<(ClickHouseClient, Option<Duration>)> {
         let invalid = || Report::new(SinkStartError::InvalidConfiguration { sink: CLICKHOUSE });
         let addr = client_config_value(config, "addr", "ClickHouse")
@@ -324,23 +184,23 @@ impl ClickHouseSink {
         let tls_config = RustlsClientConfigSource::new(config)
             .build()
             .map_err(|error| invalid().attach_printable(error.to_string()))?;
-        let mut client = if let Some(tls_config) = tls_config {
-            let mut connector = HttpConnector::new();
-            connector.set_keepalive(Some(Duration::from_secs(60)));
-            connector.enforce_http(false);
-            let connector = hyper_rustls::HttpsConnectorBuilder::new()
-                .with_tls_config((*tls_config).clone())
-                .https_or_http()
-                .enable_http1()
-                .wrap_connector(connector);
-            let http_client = HyperClient::builder(HyperTokioExecutor::new())
-                .pool_idle_timeout(Duration::from_secs(2))
-                .build(connector);
-            ClickHouseClient::with_http_client(http_client)
-        } else {
-            ClickHouseClient::default()
-        }
-        .with_url(addr);
+        let mut connector = HttpConnector::new_with_resolver(dns);
+        connector.set_keepalive(Some(TCP_KEEPALIVE));
+        let mut pool = HyperClient::builder(HyperTokioExecutor::new());
+        pool.pool_idle_timeout(POOL_IDLE_TIMEOUT);
+        let client = match tls_config {
+            Some(tls_config) => {
+                connector.enforce_http(false);
+                let connector = hyper_rustls::HttpsConnectorBuilder::new()
+                    .with_tls_config((*tls_config).clone())
+                    .https_or_http()
+                    .enable_http1()
+                    .wrap_connector(connector);
+                ClickHouseClient::with_http_client(pool.build(connector))
+            }
+            None => ClickHouseClient::with_http_client(pool.build(connector)),
+        };
+        let mut client = client.with_url(addr);
         if let Some(user) = optional_client_config_value(config, "user") {
             client = client.with_user(user);
         }
@@ -385,16 +245,22 @@ impl SinkLifecycle for ClickHouseSink {}
 impl RowSink for ClickHouseSink {
     async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
         let mut outcome = PerRecordOutcome::with_capacity(rows.selected_rows.len());
-        let columns = match MappedJsonColumns::new(rows.batch, rows.target_columns) {
+        let specs = rows
+            .target_columns
+            .iter()
+            .map(|name| {
+                JsonColumnSpec::new(name, FieldNulls::Write)
+                    .with_float32_encoding(Float32Encoding::WidenedF64)
+            })
+            .collect::<Vec<_>>();
+        let columns = match JsonColumns::new(rows.batch, &specs, NestedNulls::Write) {
             Ok(columns) => columns,
             Err(error) => {
-                outcome.fail(
-                    Report::new(SinkPublishError::Publish { sink: CLICKHOUSE })
-                        .attach_printable(error.to_string()),
-                );
+                outcome.fail(error.change_context(SinkPublishError::Publish { sink: CLICKHOUSE }));
                 return outcome;
             }
         };
+        let mut previous_row_bytes = 0;
         for chunk in rows.selected_row_chunks {
             tokio::task::consume_budget().await;
             let Some(chunk_rows) = rows.selected_rows.get(chunk.clone()) else {
@@ -408,10 +274,21 @@ impl RowSink for ClickHouseSink {
                 );
                 return outcome;
             };
-            let lines = chunk_rows
-                .iter()
-                .map(|row| columns.row_line(*row))
-                .collect::<Vec<_>>();
+            let mut lines = Vec::with_capacity(chunk_rows.len());
+            for row in chunk_rows {
+                let mut encoded = Vec::with_capacity(previous_row_bytes);
+                if let Err(error) = columns.write_row(*row, &mut encoded) {
+                    outcome
+                        .fail(error.change_context(SinkPublishError::Publish { sink: CLICKHOUSE }));
+                    return outcome;
+                }
+                previous_row_bytes = encoded.len();
+                lines.push(
+                    String::from_utf8(encoded).assured(
+                        "Arrow strings are UTF-8 and the JSON writer adds only ASCII syntax",
+                    ),
+                );
+            }
             let chunk_lines = lines.iter().map(String::as_str).collect::<Vec<_>>();
             match Self::publish_json_lines(
                 &self.client,
@@ -488,12 +365,19 @@ impl RowSink for ClickHouseSink {
 }
 
 #[cfg(test)]
+mod connection_tests;
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc as StdArc;
 
-    use arrow_schema::{Field, Schema, TimeUnit};
+    use arrow_array::{
+        Float32Array, Int64Array, ListArray, RecordBatch, StringArray, TimestampNanosecondArray,
+    };
+    use arrow_schema::{DataType, Field, Schema, TimeUnit};
 
     use super::*;
+    use crate::connection_tests::Fixture;
 
     fn client_config(addr: impl Into<String>, timeout_ms: &str) -> Vec<ClientConfigEntry> {
         vec![
@@ -550,6 +434,7 @@ mod tests {
             Field::new("id", DataType::Int64, true),
             Field::new("name", DataType::Utf8, true),
             Field::new("at", DataType::Timestamp(TimeUnit::Nanosecond, None), true),
+            Field::new("ratio", DataType::Float32, true),
             Field::new(
                 "tags",
                 DataType::List(StdArc::new(Field::new("item", DataType::Int32, true))),
@@ -569,6 +454,7 @@ mod tests {
                     Some(1_700_000_000_123_456_789),
                     None,
                 ])),
+                StdArc::new(Float32Array::from(vec![Some(1.2), None])),
                 StdArc::new(tags),
             ],
         )
@@ -577,27 +463,46 @@ mod tests {
             "id".to_string(),
             "name".to_string(),
             "at".to_string(),
+            "ratio".to_string(),
             "tags".to_string(),
         ];
 
-        let mapped = MappedJsonColumns::new(&batch, &columns).expect("columns should be mapped");
+        let specs = columns
+            .iter()
+            .map(|name| {
+                JsonColumnSpec::new(name, FieldNulls::Write)
+                    .with_float32_encoding(Float32Encoding::WidenedF64)
+            })
+            .collect::<Vec<_>>();
+        let mapped = JsonColumns::new(&batch, &specs, NestedNulls::Write)
+            .assured("the test columns have supported Arrow types");
+
+        let mut first = Vec::new();
+        mapped
+            .write_row(0, &mut first)
+            .assured("the first test row is valid JSON");
+        let mut second = Vec::new();
+        mapped
+            .write_row(1, &mut second)
+            .assured("the second test row is valid JSON");
 
         assert_eq!(
-            mapped.row_line(0),
-            r#"{"id":7,"name":"first","at":"2023-11-14T22:13:20.123456789+00:00","tags":[1,2]}"#
+            first,
+            br#"{"id":7,"name":"first","at":"2023-11-14T22:13:20.123456789+00:00","ratio":1.2000000476837158,"tags":[1,2]}"#
         );
         assert_eq!(
-            mapped.row_line(1),
-            r#"{"id":null,"name":"second","at":null,"tags":[]}"#
+            second,
+            br#"{"id":null,"name":"second","at":null,"ratio":null,"tags":[]}"#
         );
     }
 
-    #[test]
-    fn client_rejects_an_invalid_request_timeout() {
-        let error = match ClickHouseSink::client_from_config(&client_config(
-            "http://127.0.0.1:8123",
-            "later",
-        )) {
+    #[tokio::test]
+    async fn client_rejects_an_invalid_request_timeout() {
+        let fixture = Fixture::start().await;
+        let error = match ClickHouseSink::client_from_config(
+            &client_config("http://127.0.0.1:8123", "later"),
+            fixture.dns(),
+        ) {
             Ok(_) => panic!("invalid ClickHouse timeout should fail client initialization"),
             Err(error) => error,
         };
@@ -608,17 +513,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn client_parses_the_request_timeout() {
-        let (_, request_timeout) =
-            ClickHouseSink::client_from_config(&client_config("http://127.0.0.1:8123", "275"))
-                .expect("ClickHouse client config should be valid");
+    #[tokio::test]
+    async fn client_parses_the_request_timeout() {
+        let fixture = Fixture::start().await;
+        let (_, request_timeout) = ClickHouseSink::client_from_config(
+            &client_config("http://127.0.0.1:8123", "275"),
+            fixture.dns(),
+        )
+        .expect("ClickHouse client config should be valid");
 
         assert_eq!(request_timeout, Some(Duration::from_millis(275)));
     }
 
     #[tokio::test]
     async fn configured_timeout_bounds_clickhouse_insert_completion() {
+        let fixture = Fixture::start().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test listener should bind");
@@ -629,7 +538,7 @@ mod tests {
                 .expect("test listener should have an address")
         );
         let (client, request_timeout) =
-            ClickHouseSink::client_from_config(&client_config(addr, "30"))
+            ClickHouseSink::client_from_config(&client_config(addr, "30"), fixture.dns())
                 .expect("ClickHouse client config should be valid");
 
         let result = tokio::time::timeout(
@@ -651,18 +560,22 @@ mod tests {
         );
     }
 
-    #[test]
-    fn clickhouse_client_config_validates_tls_ca_file() {
-        let error = match ClickHouseSink::client_from_config(&[
-            ClientConfigEntry {
-                key: "addr".to_string(),
-                value: "https://127.0.0.1:8124".to_string(),
-            },
-            ClientConfigEntry {
-                key: "tls_ca_file".to_string(),
-                value: "/tmp/nervix-missing-clickhouse-ca.pem".to_string(),
-            },
-        ]) {
+    #[tokio::test]
+    async fn clickhouse_client_config_validates_tls_ca_file() {
+        let fixture = Fixture::start().await;
+        let error = match ClickHouseSink::client_from_config(
+            &[
+                ClientConfigEntry {
+                    key: "addr".to_string(),
+                    value: "https://127.0.0.1:8124".to_string(),
+                },
+                ClientConfigEntry {
+                    key: "tls_ca_file".to_string(),
+                    value: "/tmp/nervix-missing-clickhouse-ca.pem".to_string(),
+                },
+            ],
+            fixture.dns(),
+        ) {
             Ok(_) => panic!("missing ClickHouse TLS CA should fail"),
             Err(error) => error,
         };

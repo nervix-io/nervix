@@ -88,6 +88,8 @@ struct FaultInjectionState {
     startup_consensus_faults: DashMap<ClusterNodeName, StartupConsensusFault, RandomState>,
     bulk_executions: DashMap<ClusterNodeName, NodeBulkExecution, RandomState>,
     failed_health_responders: DashMap<ClusterNodeName, (), RandomState>,
+    /// A blocked peer drops gossip requests until the scenario restores its links.
+    blocked_gossip_nodes: DashMap<ClusterNodeName, Duration, RandomState>,
     /// Application health handlers clone a pause so it remains alive after its map guard drops.
     health_response_pauses: DashMap<HealthResponsePauseKey, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -224,6 +226,7 @@ struct EntityScheduleSwapFailureKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
     Admission(ClusterNodeName),
+    ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
     RelocationPublication(DomainName),
     ResponseDelivery(ClusterNodeName),
@@ -295,6 +298,7 @@ impl Default for FaultInjection {
                 startup_consensus_faults: DashMap::default(),
                 bulk_executions: DashMap::default(),
                 failed_health_responders: DashMap::default(),
+                blocked_gossip_nodes: DashMap::default(),
                 health_response_pauses: DashMap::default(),
                 command_pauses: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
@@ -765,6 +769,30 @@ impl FaultInjection {
             .insert(responding_node, ());
     }
 
+    pub fn block_gossip_for_node(&self, node: ClusterNodeName, send_delay: Duration) {
+        self.inner.blocked_gossip_nodes.insert(node, send_delay);
+    }
+
+    pub fn restore_gossip_for_node(&self, node: &ClusterNodeName) {
+        self.inner.blocked_gossip_nodes.remove(node);
+    }
+
+    pub(crate) fn gossip_exchange_is_blocked(
+        &self,
+        sending_node: &ClusterNodeName,
+        receiving_node: &ClusterNodeName,
+    ) -> bool {
+        self.inner.blocked_gossip_nodes.contains_key(sending_node)
+            || self.inner.blocked_gossip_nodes.contains_key(receiving_node)
+    }
+
+    pub(crate) fn gossip_send_delay(&self, destination: &ClusterNodeName) -> Option<Duration> {
+        self.inner
+            .blocked_gossip_nodes
+            .get(destination)
+            .map(|delay| *delay.value())
+    }
+
     pub async fn wait_for_health_response_pause(
         &self,
         probing_node: &ClusterNodeName,
@@ -802,6 +830,20 @@ impl FaultInjection {
 
     pub fn release_command_admission_pause(&self, node_id: &ClusterNodeName) {
         self.release_command_pause(&CommandPausePoint::Admission(node_id.clone()));
+    }
+
+    /// Holds a command after its leader-local reference lookup and before its replicated proposal.
+    pub fn pause_command_reference_lookup_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::ReferenceLookup(node_id));
+    }
+
+    pub async fn wait_for_command_reference_lookup_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::ReferenceLookup(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_command_reference_lookup_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::ReferenceLookup(node_id.clone()));
     }
 
     /// Holds the next persistent command after its applying record is committed and before its
@@ -1417,6 +1459,11 @@ impl FaultInjection {
 
     pub(crate) async fn pause_command_admission_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::Admission(node_id.clone()))
+            .await;
+    }
+
+    pub(crate) async fn pause_command_reference_lookup_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::ReferenceLookup(node_id.clone()))
             .await;
     }
 

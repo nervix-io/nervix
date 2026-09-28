@@ -1,14 +1,15 @@
-//! A domain clock as one node has it installed, in the form a client observes it.
+//! A domain clock and its accepted tick as one node presents them to an attached client.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** The observed START generation and installation state of a domain clock, and the
-//!   text a client displays for them.
+//! - **Owns.** The observed START generation and installation state of a domain clock, accepted
+//!   tick progress, and the text a client displays for the state.
 //! - **Depends on.** Validated clock periods, skews, mappings and timestamps.
 //! - **Must not know.** How a node installs, publishes or delivers the clock, or any transport.
 
 use std::fmt;
 
 use super::{DomainClockPeriod, DomainClockSkew, DomainClockState};
+use crate::Timestamp;
 
 /// A domain clock as one node has it installed: the START generation it belongs to and the state
 /// of that generation's installation.
@@ -21,6 +22,17 @@ pub struct DomainClockObservation {
     /// The number of `START`s the domain has committed; zero before its first.
     pub generation: u64,
     pub state: DomainClockObservedState,
+}
+
+/// Progress accepted by the serving node for one paced clock generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainClockTickObservation {
+    pub generation: u64,
+    pub tick_id: u64,
+    pub logical_boundary: Timestamp,
+    pub authority_utc: Timestamp,
+    /// The serving node's logical reading when it built the frame.
+    pub serving_logical: Timestamp,
 }
 
 /// The installation state of one domain clock generation.

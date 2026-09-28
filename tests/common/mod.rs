@@ -10,6 +10,7 @@ pub(crate) mod node_startup;
 pub(crate) mod peer_addressing;
 pub(crate) mod phase_deadline;
 pub(crate) mod port_pool;
+pub(crate) mod producer_session;
 pub(crate) mod raw_session;
 pub(crate) mod redis_client;
 pub(crate) mod scenario_phase;

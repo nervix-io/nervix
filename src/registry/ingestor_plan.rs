@@ -10,7 +10,10 @@
 //! - **Must not know.** Tokio, locks, shared maps, connector I/O, node-local resources, or task
 //!   spawning.
 
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    time::Duration,
+};
 
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
@@ -423,27 +426,17 @@ impl ClientIngestorStartPlan {
                 schema: client.schema.clone(),
             }));
         };
-        let duration = |clause: &'static str, value: &str| {
-            let invalid = || {
-                Report::new(EntrypointPlanError::InvalidClientDuration {
-                    ingestor: ingestor.name.clone(),
-                    clause,
-                    value: value.to_string(),
-                })
-            };
-            let Ok(parsed) = humantime::parse_duration(value) else {
-                return Err(invalid());
-            };
-            if parsed.is_zero() {
-                return Err(invalid());
-            }
-            Ok(parsed)
-        };
+        let name = &ingestor.name;
+        let mode = &client.mode;
         let policy = ClientProducerPolicy {
-            window: client.mode.window,
-            ack_timeout: duration("ACK TIMEOUT", &client.mode.ack_timeout)?,
-            retry_backoff: duration("RETRY POLICY BACKOFF", &client.mode.retry_policy.backoff)?,
-            retry_max_backoff: duration("RETRY POLICY MAX", &client.mode.retry_policy.max_backoff)?,
+            window: mode.window,
+            ack_timeout: Self::duration(name, "ACK TIMEOUT", &mode.ack_timeout)?,
+            retry_backoff: Self::duration(name, "RETRY POLICY BACKOFF", &mode.retry_policy.backoff)?,
+            retry_max_backoff: Self::duration(
+                name,
+                "RETRY POLICY MAX",
+                &mode.retry_policy.max_backoff,
+            )?,
         };
         let contract = client_endpoint_contract(ingestor, schema_model, activation)?;
         Ok(Self {
@@ -453,6 +446,29 @@ impl ClientIngestorStartPlan {
             policy,
             contract,
         })
+    }
+}
+
+impl ClientIngestorStartPlan {
+    /// One policy duration of a client source. Validation admitted only positive durations, so a
+    /// value that does not read as one here is a model the registry did not validate.
+    fn duration(
+        ingestor: &IngestorName,
+        clause: &'static str,
+        value: &str,
+    ) -> Result<Duration, Report<EntrypointPlanError>> {
+        let invalid = EntrypointPlanError::InvalidClientDuration {
+            ingestor: ingestor.clone(),
+            clause,
+            value: value.to_string(),
+        };
+        let Ok(parsed) = humantime::parse_duration(value) else {
+            return Err(Report::new(invalid));
+        };
+        if parsed.is_zero() {
+            return Err(Report::new(invalid));
+        }
+        Ok(parsed)
     }
 }
 
@@ -782,7 +798,7 @@ impl SourceStartPlan {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::{OptionExt as _, ResultExt as _};
+    use meticulous::ResultExt as _;
     use nervix_models::{
         ClientPoolBounds, CreateClientHttp, CreateClientKafka, CreateClientMqtt, CreateClientNats,
         CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
@@ -842,6 +858,14 @@ mod tests {
         plans
             .ingestor(&named::<IngestorName>("source"))
             .assured("the fixture schedules the ingestor named source")
+    }
+
+    /// The transport input of a fixture ingestor, which always reads a transport.
+    fn transport_plan(plan: &IngestorStartPlan) -> &TransportInputPlan {
+        let IngestorInputPlan::Transport(transport) = &plan.input else {
+            panic!("the fixture ingestor reads a transport, planned as {:?}", plan.input);
+        };
+        transport
     }
 
     fn cadence() -> nervix_models::DomainClockPeriod {
@@ -1218,19 +1242,24 @@ mod tests {
             .assured("a matching source and ingestor produce a plan");
         let plan = start_plan(&plans);
 
-        assert_eq!(plan.source, expected_plan);
+        let transport = transport_plan(plan);
+        assert_eq!(transport.source, expected_plan);
+        assert_eq!(transport.codec, named("json"));
         assert_eq!(plan.ingestor.name, named("source"));
         assert_eq!(plan.ingestor.routes[0].relay, named("events"));
         assert_eq!(
-            plan.ingestor.declared_source.transport(),
+            plan.ingestor.declared_input.source_kind(),
             declared.transport_kind()
         );
         assert_eq!(plan.ingestor.reads_headers(), reads_headers);
         assert_eq!(
-            plan.ingestor.declared_source.quiesce_mode(),
+            plan.ingestor.declared_input.quiesce_mode(),
             declared.quiesce()
         );
-        assert_eq!(plan.acknowledgement(), declared.acknowledgement());
+        assert_eq!(
+            plan.transport_acknowledgement(),
+            Some(declared.acknowledgement())
+        );
         assert!(!plan.keeps_domain_offsets());
     }
 
@@ -1264,7 +1293,7 @@ mod tests {
             primary_node: Some(named("node-a")),
         });
         assert!(matches!(
-            &plan.source,
+            &transport_plan(plan).source,
             SourceStartPlan::Kafka(source) if source.offsets == domain_offsets
         ));
         assert!(plan.keeps_domain_offsets());
@@ -1282,12 +1311,12 @@ mod tests {
         assert!(
             !plan
                 .ingestor
-                .declared_source
+                .declared_input
                 .supports_quiesce(&IngestQuiesceMode::Suspend)
         );
         assert!(
             plan.ingestor
-                .declared_source
+                .declared_input
                 .supports_quiesce(&IngestQuiesceMode::Drop)
         );
     }
@@ -1315,23 +1344,12 @@ mod tests {
         #[case] case: SourceCase,
         #[case] different: Model,
     ) {
-        let ingestor = CreateIngestor {
-            name: named("source"),
-            output_routes: ProcessorOutputs::single(named("events")),
-            input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
-                source: case.source.clone(),
-                codec: named("json"),
-            }),
-            timestamp_source: None,
-            general_error_policy: GeneralErrorPolicy::Log,
-            filter_where: None,
-        };
-
         let error = SourceStartPlan::decide(
-            &ingestor,
+            &named("source"),
+            &case.source,
             &different,
             &nervix_models::ScheduledNode::new(
-                ingestor_model(case.source),
+                ingestor_model(case.source.clone()),
                 nervix_models::SchemaFingerprint::from_digest([1; 32]),
             ),
         )

@@ -28,7 +28,8 @@ CREATE IF NOT EXISTS INGESTOR kafka_notifications
 Every ingestor defines:
 
 - the destination relay or relays
-- the codec used for decoding
+- the codec used for decoding, or for a [client ingestor](#client-ingestors) the schema its
+  batches carry
 - a route-local outgoing branch declaration
 - a flush policy for every destination relay
 - a message error policy for every destination relay
@@ -73,7 +74,7 @@ flush policy.
 Source acknowledgement is per payload. An acknowledged delivery mode acknowledges a payload once
 every record decoded from it has been acknowledged on every route it reached, and a negative
 acknowledgement of any of those records negatively acknowledges the payload.
-`ACK PARALLEL MAX <n>` windows count payloads.
+`ACK PARALLEL MAX <n>` windows count payloads. A client ingestor's payload is one submitted batch.
 
 Timestamp selection and admission use one domain execution snapshot when the source group is
 delivered. `TIMESTAMP NOW` records that snapshot. `TIMESTAMP AT <field>` and connector-owned event
@@ -159,6 +160,7 @@ Only modes that the source can honor are accepted or offered by completion:
 | ZeroMQ | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP` |
 | HTTP polling, Prometheus | `SUSPEND`, `BUFFER ... ON OVERFLOW ...` |
 | Endpoint | `REJECT RETRY AFTER ...`, `BUFFER MAX SIZE ...` |
+| Client | `SUSPEND` |
 
 The mode is consulted for resumable model-alteration `ENTITY_PAUSE` holds, `DOMAIN_PAUSE` batches,
 and memory-pressure shedding. `STOP` and `DROP INGESTOR` terminate the source session. Unexpected
@@ -409,6 +411,172 @@ CREATE IF NOT EXISTS CLIENT http_tls
   };
 ```
 
+## Client Ingestors
+
+A client ingestor admits typed batches that applications submit through a Nervix session instead of
+reading an external system. There is no `CREATE CLIENT`, codec, transport header, or `NO_ACK` mode:
+a submitted batch already carries the ingestor's input schema, and every batch is acknowledged.
+
+```nspl
+CREATE SCHEMA order_in (
+  region STRING, order_id STRING, amount I64, card STRING SENSITIVE
+);
+CREATE SCHEMA region_key (region STRING);
+CREATE BRANCH by_region SCHEMA region_key TTL 5m;
+
+CREATE INGESTOR orders_in
+  FROM CLIENT SCHEMA order_in
+    MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+    ON QUIESCE SUSPEND
+  TIMESTAMP NOW
+  TO orders_by_region
+    INHERIT region, order_id, card
+    SET amount_cents = input.amount * 100
+    BRANCHED BY by_region SET region = message.region
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+```nspl,ignore
+FROM CLIENT SCHEMA <schema>
+  MODE ACK SEQUENTIAL | ACK PARALLEL MAX <n>
+  ACK TIMEOUT <duration>
+  RETRY POLICY BACKOFF <duration> MAX <duration>
+  ON QUIESCE SUSPEND
+```
+
+Every clause is required and there are no defaults:
+
+- `SCHEMA` names the input schema. A batch must carry exactly its fields, in order, with their
+  types and optionality, and a producer must declare exactly those fields, including which are
+  `SENSITIVE`, before it may submit anything.
+- `ACK SEQUENTIAL` admits one batch at a time; `ACK PARALLEL MAX <n>` lets at most `n` admitted
+  batches await their acknowledgement. The window belongs to the ingestor's one execution and every
+  producer shares it, so opening more producers never widens it. Producers with queued batches take
+  the window in turn.
+- `ACK TIMEOUT` bounds how long an admitted batch may make no acknowledgement progress. When it
+  passes, the batch is reported as failed with `ack_timeout`; its admitted work is not cancelled
+  and may still complete. Downstream work that reports it is alive keeps the batch from timing
+  out.
+- `RETRY POLICY BACKOFF <duration> MAX <duration>` is the physical backoff a producer applies
+  before sending again a batch that was refused only temporarily. It starts at `BACKOFF` and
+  doubles up to `MAX`, which must not be shorter than `BACKOFF`. Producers are told it when they
+  open.
+- `ON QUIESCE SUSPEND` is the only quiesce mode. Admission stops for the hold: producers are told
+  that admission is suspended, queued batches that were not admitted yet are refused as
+  `suspended`, and the producer keeps them to send again once admission reopens.
+
+Timestamp selection, `FILTER WHERE`, route construction, `WHERE`, branch construction, route
+`FLUSH`, `ON MESSAGE ERROR`, and `ON GENERAL ERROR` behave as for every ingestor; `message` and
+`input` read the submitted row. Client batches carry no transport headers or metadata, so
+`read_header`, `read_headers`, and `metadata.*` are unavailable. The ingestor executes on its one
+scheduled cluster node, and a producer may connect through any live node, which forwards its
+batches to that node.
+
+`ALTER INGESTOR ... SET FROM CLIENT SCHEMA ...` replaces the complete source body, and
+`SET QUIESCE SUSPEND` restates the only quiesce mode. `SHOW CREATE INGESTOR` renders the whole
+`FROM CLIENT` clause.
+
+### Submitted Batches
+
+A batch is one canonical Arrow IPC stream: the schema message, exactly one record batch, and the
+end-of-stream marker. It is uncompressed and has no dictionary or extension encodings, and its
+Arrow schema is exactly the input schema in Nervix's Arrow representation of each type, with no
+field metadata. A batch carries at most 65,536 rows and at most the bytes one submission may carry,
+which is the smaller of the producer's granted bytes and what one session frame holds. The node
+that executes the ingestor validates the whole batch, its structure, bounds, and every column,
+before any row is admitted; a batch that fails is refused whole and has no effect on the graph.
+Nothing is coerced, cast, or partially admitted.
+
+### Outcomes
+
+One batch is one source acknowledgement unit. It has exactly one terminal outcome:
+
+| Outcome | Meaning | Cause |
+| --- | --- | --- |
+| not admitted | No row entered the graph. | `invalid batch: <defect>`, `suspended`, `busy`, `draining`, `producer ended`, `credit exceeded` |
+| completed | Every route and acknowledging sink its rows reached confirmed them under the graph's rules. | — |
+| processing failed | The batch was admitted and its acknowledgement failed. Some of its effects may have happened. | `ack_timeout`, `rejected` |
+| unknown outcome | The batch may have been admitted and processed, but no terminal result can be established. | `interrupted`, `owner_lost`; a client whose session ended adds `session_lost` |
+
+Transport receipt is never an outcome. A batch completes under the normal acknowledgement rules: a
+row a filter drops, or one an `ON MESSAGE ERROR` policy handles, is resolved; a detached boundary
+resolves where it detaches; and an acknowledging sink resolves its rows at its own success
+boundary, such as the complete response headers of an HTTP emitter. The defects of an invalid batch
+are `malformed`, `unexpected message`, `compressed`, `schema mismatch`, `not one batch`,
+`too many rows`, `too large`, and `invalid data`.
+
+Only `suspended` and `busy` are temporary: sending the same batch again on the same producer may
+succeed, and the Rust client does so on the declared backoff. Every other outcome is final for that
+attempt. Nervix never replays a batch that failed or whose outcome is unknown; replaying it is the
+application's decision, and it may duplicate the batch's effects. The application therefore keeps
+its replayable source data until a batch completes.
+
+### Producers
+
+A producer is opened on a session with an explicit domain and ingestor, the fields it expects, and
+the credit it asks for: how many batches and how many bytes it may have outstanding. The open is
+answered with the input schema, the domain's START generation, the identity of the endpoint
+contract, the attachment, the policy above, the granted credit, and whether admission is open now.
+A later `USE` does not move a producer. An open is refused, with nothing left attached, when the
+domain does not exist or is stopped, the ingestor does not exist, reads a transport, or is not
+running on its scheduled node, the expected fields differ, the credit is larger than one producer
+may ask for, the session or node has no room left, or the session holds a transaction.
+
+| Limit | Value |
+| --- | --- |
+| Producers per session | 32 |
+| Outstanding bytes per session | 32 MiB |
+| Outstanding bytes per node, including batches retained for forwarded producers | 128 MiB |
+| Batches one producer may ask to have outstanding | 1,024 |
+| Rows per batch | 65,536 |
+
+A batch holds its share of the credit from the moment it is sent until its outcome is observed. A
+batch sent beyond the credit is refused as `credit exceeded` without reaching the graph, and the
+producer is ended as a protocol violation; the batches it already submitted still receive their
+outcomes.
+
+A producer stays attached while the ingestor's endpoint contract holds. The contract is the
+ingestor as producers see it — its input schema, mode, timestamp, filter, routes, error policies,
+and the branch declarations its routes construct — without the routes' `FLUSH` cadence. The server
+ends a producer, as the last event about it, with one of these reasons:
+
+| Reason | When |
+| --- | --- |
+| `endpoint changed` | An alteration changed the endpoint contract, or made the ingestor read a transport. |
+| `endpoint removed` | The ingestor or its domain was dropped. |
+| `domain stopped` | The domain stopped, or a new `START` replaced the generation the producer attached under. |
+| `relocated` | A planned ownership handoff moved the ingestor to another node. |
+| `shutting down` | The serving node, or the node that executes the ingestor, is shutting down. |
+| `owner lost` | The node that executes the ingestor, or the connection to it, was lost. |
+| `protocol violated` | The producer sent a batch beyond its credit. |
+
+An ended producer's queued batches are refused as `producer ended`, and its admitted batches whose
+acknowledgement is unresolved have an unknown outcome. A new producer can be opened as soon as the
+ingestor runs again. An alteration that keeps the contract, such as one that changes only a route's
+`FLUSH`, suspends admission for its hold and reopens it afterwards with every producer attached. A
+planned ownership handoff stops intake for good on the former owner: batches that arrive are
+refused as `draining`, admitted ones complete there, and its producers end as `relocated` once the
+new owner is committed.
+
+### Observing Client Ingestors
+
+`SHOW INGESTORS` lists every ingestor of the domain with its source, its codec or schema, the node
+that executes it, and its state. A client ingestor adds whether it admits batches, its attached
+producers, the batches and bytes they have outstanding, and the batches holding a slot of its
+window:
+
+```text
+orders_in source=CLIENT schema=order_in owner=node-2 status=running admission=open producers=2 outstanding_batches=3 outstanding_bytes=2412 admitted_batches=2
+```
+
+`DESCRIBE INGESTOR` renders `source: CLIENT`, `schema:`, `mode:`, `owner:`, `admission:`,
+`producers:`, `forwarded producers:`, `outstanding batches:`, `outstanding bytes:`, and
+`admitted batches:`. The node that executes the ingestor also exports the same counts and every
+answered batch as metrics; see
+[Metrics And Observability](metrics-and-observability.md#client-ingestors).
+
 ## Supported Ingestor Types
 
 ### HTTP Client Polling
@@ -638,6 +806,17 @@ ON QUIESCE SUSPEND
 Suspension stops polling. Messages remain only for the queue's configured retention period. An
 already received message remains invisible until its visibility timeout and may then be redelivered
 as a duplicate; the ingestor resumes by polling past anything the service expired.
+
+The source resolves the host of its client's `endpoint` through the node's asynchronous resolver
+each time it opens a connection, and tries the answers in order. Every request is still signed for
+the configured host, and over HTTPS the service certificate must name that host. Without
+`tls_ca_file` the client trusts the platform's native roots and follows the `HTTP_PROXY`,
+`HTTPS_PROXY` and `NO_PROXY` environment variables; with it, the client trusts that CA alone and
+connects directly. A missing name, a silent name server or an unreachable answer fails opening the
+queue, a poll, or a deletion. The AWS SDK's standard retry mode makes up to three attempts at each
+such request; after that the failure is a transient source failure that `DESCRIBE INGESTOR` shows
+and the source retries on its `RETRY POLICY`. A message is deleted only once it is acknowledged, so a
+lookup failure never removes one from the queue.
 
 ### Prometheus
 

@@ -24,6 +24,8 @@ mod events;
 mod exchange;
 mod outcome;
 mod producer;
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_test;
 mod subscriptions;
 mod upload;
 
@@ -43,19 +45,20 @@ pub use nervix_client_wire::{
     Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection, ChoiceStatus,
     ChoiceTarget, ChoiceValue, CommandDisposition, Diagnostic, DomainClockAttachDisposition,
     DomainClockAttachOutcome, DomainClockAttachmentEndReason, DomainClockAttachmentEnded,
-    DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainInfo,
-    DomainPaceChoice, ExecutionReferenceConflict, LeaderEndpoints, LeaderRedirect, Leadership,
-    NoticeLevel, OutcomeOrigin, RowConformanceError, RowSchema, SourceSpan, StatementDisposition,
-    StatementOutcome, SubscriptionDeliveryLost, SubscriptionEnded, SubscriptionHandle,
-    SubscriptionOpened, SubscriptionRows, SubscriptionRowsSkipped, SuggestionKind,
-    SuggestionStatus, TextEdit, UnknownOutcomeCause, UploadFailure,
+    DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked,
+    DomainInfo, DomainPaceChoice, ExecutionReferenceConflict, LeaderEndpoints, LeaderRedirect,
+    Leadership, NoticeLevel, OutcomeOrigin, RowConformanceError, RowSchema, SourceSpan,
+    StatementDisposition, StatementOutcome, SubscriptionDeliveryLost, SubscriptionEnded,
+    SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionRowsSkipped,
+    SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause, UploadFailure,
 };
 pub use nervix_models::{
     CommandExecutionReference, DomainAdmissionWindow, DomainClockObservation,
-    DomainClockObservedState, DomainName, ImpactPlanningBasis, PacedDomainClock,
-    ResourceUploadIdentity, SubscriptionDeliveryBehavior, Timestamp, TransactionImpactReport,
-    TransactionInspection, TransactionLifecycle, TransactionOperationAdmission,
-    TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
+    DomainClockObservedState, DomainClockTickObservation, DomainName, ImpactPlanningBasis,
+    PacedDomainClock, ResourceUploadIdentity, SubscriptionDeliveryBehavior, Timestamp,
+    TransactionImpactReport, TransactionInspection, TransactionLifecycle,
+    TransactionOperationAdmission, TransactionOperationNumber, TransactionPosition,
+    TransactionPreviewIdentity, TransactionStatus,
 };
 pub use nervix_client_wire::ProducerId;
 pub use nervix_models::{

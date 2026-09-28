@@ -45,17 +45,18 @@ impl Runtime {
             });
         }
 
-        let transport = match input {
-            IngestorInputPlan::Transport(transport) => transport,
-            IngestorInputPlan::Client(client) => {
-                let dependencies = self.ingestor_dependencies(ingestor, &client.schema).await?;
-                self.host_client_source(ingestor, client, quiesce, dependencies);
+        let BoundIngestor {
+            input,
+            dependencies,
+        } = self.ingestor_dependencies(ingestor, input).await?;
+        let (codec, source) = match input {
+            BoundIngestorInput::Transport { codec, source } => (codec, source),
+            BoundIngestorInput::Client(plan) => {
+                self.host_client_source(ingestor, &plan, quiesce, dependencies);
                 return Ok(());
             }
         };
-        let codec = self.ingestor_codec(ingestor, &transport.codec)?;
-        let dependencies = self.ingestor_dependencies(ingestor, &codec.schema()).await?;
-        let source = match transport.source.clone() {
+        let source = match source {
             SourceStartPlan::Http(plan) => plan.compose(self, ingestor).await?,
             SourceStartPlan::Kafka(plan) => plan.compose(self, ingestor).await?,
             SourceStartPlan::Pulsar(plan) => plan.compose(self, ingestor).await?,
@@ -77,7 +78,7 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::RabbitMqIngestMode;
+    use nervix_models::{CreateClientSqs, RabbitMqIngestMode, SqsIngestMode};
 
     use super::*;
 
@@ -138,6 +139,26 @@ mod tests {
                     quiesce: IngestQuiesceMode::Suspend,
                 },
                 Model::ClientRabbitMq(CreateClientRabbitMq {
+                    name: client_name.clone(),
+                    mount: None,
+                    config: Vec::new(),
+                }),
+            ),
+            (
+                IngestSource::Sqs {
+                    client: client_name.clone(),
+                    queue: named("events"),
+                    instances: NonZeroU64::MIN,
+                    mode: SqsIngestMode::AckSequential {
+                        timeout: "5s".to_string(),
+                        retry_policy: nervix_models::RetryPolicy {
+                            backoff: "100ms".to_string(),
+                            max_backoff: "1s".to_string(),
+                        },
+                    },
+                    quiesce: IngestQuiesceMode::Suspend,
+                },
+                Model::ClientSqs(CreateClientSqs {
                     name: client_name.clone(),
                     mount: None,
                     config: Vec::new(),
@@ -204,12 +225,16 @@ mod tests {
             let plan = plans
                 .ingestor(&named("source"))
                 .assured("the fixture schedules the ingestor named source");
-            let result = match plan.source.clone() {
+            let IngestorInputPlan::Transport(transport) = &plan.input else {
+                panic!("the fixture ingestor reads a transport");
+            };
+            let result = match transport.source.clone() {
                 SourceStartPlan::Http(source) => source.compose(&runtime, &plan.ingestor).await,
                 SourceStartPlan::Prometheus(source) => {
                     source.compose(&runtime, &plan.ingestor).await
                 }
                 SourceStartPlan::RabbitMq(source) => source.compose(&runtime, &plan.ingestor).await,
+                SourceStartPlan::Sqs(source) => source.compose(&runtime, &plan.ingestor).await,
                 _ => panic!("the fixture only includes sources that resolve names"),
             };
             let Err(RuntimeError::StartIngestor {

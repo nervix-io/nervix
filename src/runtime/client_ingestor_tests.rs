@@ -1,11 +1,15 @@
-//! The endpoint of a client ingestor: opens are checked against the installed execution, every
-//! producer shares the execution's one acknowledgement window in turn, every batch has exactly one
-//! outcome, and closes, lifecycle changes and credit violations end producers with the outcome and
-//! reason that apply.
+//! Client ingestor endpoint tests.
+//!
+//! Test harness outside the product layer order.
+//! - **Owns.** Assertions that opens are checked against the installed execution, that every
+//!   producer shares the execution's one acknowledgement window in turn, that every batch has
+//!   exactly one outcome, and that closes, lifecycle changes and credit violations end producers
+//!   with the outcome and reason that apply.
+//! - **Depends on.** The endpoint task, its admission-worker protocol, and ACK roots.
+//! - **Must not know.** Sessions, the interconnect, or the graph behind the admission worker.
 
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
-use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckWindow, ClientEndpointContract, ClientProducerAdmission, ClientProducerEndReason,
     ClientProducerLimits, ClientProducerPolicy, ClientProducerRefusal, ClientSubmissionOutcome,
@@ -56,14 +60,20 @@ fn submission(id: u64) -> ClientSubmissionId {
 struct Fixture {
     commands: mpsc::UnboundedSender<EndpointCommand>,
     jobs: mpsc::Receiver<AdmissionJob>,
+    gauges: Arc<PublishedClientGauges>,
 }
 
 impl Fixture {
     fn start() -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
+        let domain = DomainName::parse("tenant").assured("a literal domain name");
+        let ingestor = IngestorName::parse("orders_in").assured("a literal ingestor name");
+        let metrics = RuntimeMetrics::default();
+        let gauges = Arc::new(PublishedClientGauges::default());
         let endpoint = Endpoint {
-            domain: DomainName::parse("tenant").assured("a literal domain name"),
-            ingestor: IngestorName::parse("orders_in").assured("a literal ingestor name"),
+            series: metrics.client_ingestor_series(&domain, &ingestor),
+            domain,
+            ingestor,
             commands: receiver,
             reports: commands.downgrade(),
             execution: None,
@@ -73,12 +83,36 @@ impl Fixture {
             window_used: 0,
             in_worker: None,
             ended: CancellationToken::new(),
-            metrics: RuntimeMetrics::default(),
-            gauges: Arc::new(PublishedClientGauges::default()),
+            gauges: gauges.clone(),
+            published: ClientIngestorGauges::default(),
         };
         tokio::spawn(endpoint.run());
         let (_, jobs) = mpsc::channel(1);
-        Self { commands, jobs }
+        Self {
+            commands,
+            jobs,
+            gauges,
+        }
+    }
+
+    /// The counts the endpoint published once every command sent so far was handled.
+    async fn settled_gauges(&self) -> ClientIngestorGauges {
+        // An attach is answered only after every command sent before it was handled, and the
+        // gauges are published after each command.
+        let (reply, attached) = oneshot::channel();
+        self.send(EndpointCommand::Attach(AttachCommand {
+            expected_fields: fields(&["unmatched"]),
+            limits: limits(1, 1),
+            max_batch_bytes: NonZeroU64::MIN,
+            reservation: None,
+            reply,
+        }));
+        let refused = timeout(WAIT, attached)
+            .await
+            .assured("the endpoint answers an open within the test's wait")
+            .assured("the endpoint answers every open it receives");
+        assert!(refused.is_err(), "an open expecting other fields is refused");
+        self.gauges.snapshot()
     }
 
     /// Installs an execution admitting `window` batches at once, and opens its intake.
@@ -249,6 +283,17 @@ async fn producers_take_the_one_window_in_turn() {
             .is_err(),
         "a second batch waits for the window"
     );
+    // Two producers hold three batches between them, and one slot of the window is all they use.
+    assert_eq!(
+        fixture.settled_gauges().await,
+        ClientIngestorGauges {
+            producers: 2,
+            forwarded_producers: 0,
+            outstanding_batches: 3,
+            outstanding_bytes: 15,
+            admitted_batches: 1,
+        }
+    );
     root.ack_success();
     assert_eq!(first.outcome().await, (1, ClientSubmissionOutcome::Completed));
 
@@ -265,6 +310,14 @@ async fn producers_take_the_one_window_in_turn() {
     assert_eq!(
         outcome,
         ClientSubmissionOutcome::ProcessingFailed(ClientProcessingFailure::Rejected)
+    );
+    assert_eq!(
+        fixture.settled_gauges().await,
+        ClientIngestorGauges {
+            producers: 2,
+            ..ClientIngestorGauges::default()
+        },
+        "every answered batch leaves the counts"
     );
 }
 
@@ -524,4 +577,45 @@ fn a_detail_is_cut_to_its_bound_at_a_character_boundary() {
     assert!(bounded.len() <= MAX_OUTCOME_DETAIL_BYTES);
     assert!(bounded.chars().all(|character| character == 'é'));
     assert_eq!(bounded_detail("short".to_string()), "short");
+}
+
+#[test]
+fn a_batch_validated_under_a_hold_is_refused_with_its_root_resolved() {
+    let metrics = RuntimeMetrics::default();
+    let domain = DomainName::parse("tenant").assured("a literal domain name");
+    let ingestor = IngestorName::parse("orders_in").assured("a literal ingestor name");
+    let metric_labels = metrics.register_ingestor_quiesce(&domain, &ingestor, None);
+    let control = IngestorQuiesceControl::new(IngestQuiesceMode::Suspend, metrics, metric_labels);
+    let trackers = IngestorAckRootTrackers::detached();
+
+    let (root, _completion) = control
+        .track_client_batch(&trackers)
+        .assured("an open control admits the batch");
+    assert_eq!(
+        trackers.ingestor_outstanding(),
+        1,
+        "an admitted batch's root is tracked before it is dispatched"
+    );
+    root.ack_success();
+    assert_eq!(trackers.ingestor_outstanding(), 0);
+
+    control.engage(IngestorQuiesceCause::EntityHold);
+    let refused = control
+        .track_client_batch(&trackers)
+        .err()
+        .assured("an engaged hold refuses the batch");
+    assert_eq!(refused, ClientSubmissionRefusal::Suspended);
+    assert_eq!(
+        trackers.ingestor_outstanding(),
+        0,
+        "a refused batch leaves no root for a drain to wait for"
+    );
+
+    control.release(IngestorQuiesceCause::EntityHold);
+    control.engage(IngestorQuiesceCause::OwnershipHandoff);
+    let refused = control
+        .track_client_batch(&trackers)
+        .err()
+        .assured("an ownership handoff refuses the batch for good");
+    assert_eq!(refused, ClientSubmissionRefusal::Draining);
 }

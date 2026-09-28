@@ -4,13 +4,18 @@
 //!
 //! Dispatcher tests hand real frames, encoded by the wire contract, to an exchange's reader.
 //! Loopback tests play the server by hand: they read the frames a client sends and complete the
-//! waiters those requests registered. The `session` tests run the client against an in-process
-//! gRPC server.
+//! waiters those requests registered; the `producers` tests drive producers that way. The
+//! `session` tests run the client against an in-process gRPC server.
 
 // A Shuttle build replaces the client's synchronization with models that only run inside a
 // Shuttle test, so the tests over a real connection drive the production build only.
 #[cfg(not(feature = "shuttle"))]
 mod session;
+
+// The producer tests poll the client's own state against the wall clock, which a Shuttle build's
+// models do not keep outside a Shuttle test.
+#[cfg(not(feature = "shuttle"))]
+mod producers;
 
 use std::{
     num::{NonZeroU64, NonZeroUsize},

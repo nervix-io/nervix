@@ -226,6 +226,34 @@ impl<T> IngestGroupFailure<T> {
     }
 }
 
+/// One ingestor's input as this node binds it, and what every execution of the ingestor dispatches
+/// through.
+pub(super) struct BoundIngestor {
+    pub(super) input: BoundIngestorInput,
+    pub(super) dependencies: IngestorDependencies,
+}
+
+/// What an ingestor reads, bound on this node.
+pub(super) enum BoundIngestorInput {
+    /// A transport: the codec that decodes its payloads, and the plan of its source.
+    Transport {
+        codec: Arc<CompiledCodec>,
+        source: SourceStartPlan,
+    },
+    /// Batches producers submit, which already carry the plan's schema.
+    Client(ClientIngestorStartPlan),
+}
+
+impl BoundIngestorInput {
+    /// The schema the ingestor's filter and routes read.
+    pub(super) fn schema(&self) -> Arc<CompiledSchema> {
+        match self {
+            Self::Transport { codec, .. } => codec.schema(),
+            Self::Client(plan) => plan.schema.clone(),
+        }
+    }
+}
+
 /// What every execution of one ingestor dispatches through, whatever input it reads.
 pub(super) struct IngestorDependencies {
     pub(super) output_routes: Arc<BoundIngestorRoutes>,

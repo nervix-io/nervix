@@ -915,7 +915,10 @@ mod tests {
                 _ => None,
             })
             .expect("full graph must contain ing");
-        ingestor.source = IngestSource::Syslog {
+        let nervix_models::IngestorInput::Transport(transport) = &mut ingestor.input else {
+            panic!("the full graph's ingestor reads a transport");
+        };
+        transport.source = IngestSource::Syslog {
             client: named("syslog_listener"),
             quiesce: nervix_models::IngestQuiesceMode::Suspend,
         };

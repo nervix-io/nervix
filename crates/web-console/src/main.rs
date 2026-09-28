@@ -2039,6 +2039,20 @@ fn apply_event(
             signals.terminal_lines.update(|lines| lines.push(line));
             SessionStep::Continue
         }
+        ServerEvent::DomainClockTicked(ticked) => {
+            let line = TermLine::info(format!(
+                "domain clock [{}] tick: generation {}, id {}, boundary {}, authority UTC {}, \
+                 node logical {}",
+                ticked.domain,
+                ticked.tick.generation,
+                ticked.tick.tick_id,
+                ticked.tick.logical_boundary.to_rfc3339(),
+                ticked.tick.authority_utc.to_rfc3339(),
+                ticked.tick.serving_logical.to_rfc3339(),
+            ));
+            signals.terminal_lines.update(|lines| lines.push(line));
+            SessionStep::Continue
+        }
         ServerEvent::DomainClockAttachmentEnded(ended) => {
             let line = TermLine::error(format!(
                 "domain clock [{}]: the attachment ended because {}",
@@ -6908,18 +6922,18 @@ mod tests {
     use leptos::prelude::Owner;
     use nervix_client_wire::{
         DomainClockAttachmentEndReason, DomainClockAttachmentEnded, DomainClockObserved,
-        DomainList, DomainsObserved, OutcomeOrigin, Reply, SourceSpan,
+        DomainClockTicked, DomainList, DomainsObserved, OutcomeOrigin, Reply, SourceSpan,
     };
     use nervix_dataflow_graph::{
         DataflowBranchStatistics, DataflowEdge, DataflowNode, DataflowProcessorKind,
     };
     use nervix_models::{
         ClusterNodeName, DomainClockObservation, DomainClockObservedState, DomainClockPeriod,
-        DomainClockSkew, ImpactPlanningBasis, ImpactReportCompleteness, ModelName, NodeRef,
-        ResourceName, Timestamp, TransactionImpactReport, TransactionInspection,
-        TransactionInspectionRejection, TransactionInspectionTarget, TransactionLifecycle,
-        TransactionOperationAdmission, TransactionOperationNumber, TransactionPosition,
-        TransactionPreviewIdentity, TransactionStatus,
+        DomainClockSkew, DomainClockTickObservation, ImpactPlanningBasis, ImpactReportCompleteness,
+        ModelName, NodeRef, ResourceName, Timestamp, TransactionImpactReport,
+        TransactionInspection, TransactionInspectionRejection, TransactionInspectionTarget,
+        TransactionLifecycle, TransactionOperationAdmission, TransactionOperationNumber,
+        TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
     };
 
     use super::*;
@@ -7665,6 +7679,34 @@ mod tests {
                     "error: domain clock [tenant]: the attachment ended because the domain no \
                      longer exists on the serving node",
                 ]
+            );
+        });
+    }
+
+    #[test]
+    fn domain_clock_tick_is_written_to_the_event_log() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let state = RwSignal::new(ConsoleConnectionState::Connected);
+            let mut requests = SessionRequests::new();
+            let ticked = ServerEvent::DomainClockTicked(DomainClockTicked {
+                domain: DomainName::parse("tenant").assured("the test domain name is valid"),
+                tick: DomainClockTickObservation {
+                    generation: 2,
+                    tick_id: 12,
+                    logical_boundary: Timestamp::from_unix_nanos(1_000),
+                    authority_utc: Timestamp::from_unix_nanos(2_000),
+                    serving_logical: Timestamp::from_unix_nanos(3_000),
+                },
+            });
+            let step = apply_event(signals, state, &mut requests, ticked);
+            assert!(matches!(step, SessionStep::Continue));
+            let lines = signals.terminal_lines.get_untracked().into_lines();
+            assert_eq!(
+                lines[0].line.text,
+                "domain clock [tenant] tick: generation 2, id 12, boundary \
+                 1970-01-01T00:00:00.000001Z, authority UTC 1970-01-01T00:00:00.000002Z, node \
+                 logical 1970-01-01T00:00:00.000003Z"
             );
         });
     }
@@ -9266,12 +9308,27 @@ mod tests {
         let target = match control {
             ChoiceControl::DomainPace => nervix_client_wire::ChoiceTarget::DomainPace,
             ChoiceControl::PlacementPolicy => nervix_client_wire::ChoiceTarget::PlacementPolicy,
-            ChoiceControl::BranchSchema | ChoiceControl::RelaySchema => {
-                nervix_client_wire::ChoiceTarget::Schema
-            }
+            ChoiceControl::BranchSchema
+            | ChoiceControl::RelaySchema
+            | ChoiceControl::CodecSchema => nervix_client_wire::ChoiceTarget::Schema,
             ChoiceControl::RelayBranch => nervix_client_wire::ChoiceTarget::Branch,
             ChoiceControl::SubscriptionRelay => nervix_client_wire::ChoiceTarget::Relay,
             ChoiceControl::SubscriptionField => nervix_client_wire::ChoiceTarget::RelayField,
+            ChoiceControl::CodecWireSchema => nervix_client_wire::ChoiceTarget::WireJsonSchema,
+            ChoiceControl::CodecResource
+            | ChoiceControl::SignalingResource
+            | ChoiceControl::ClientResource
+            | ChoiceControl::VhostResource => nervix_client_wire::ChoiceTarget::Resource,
+            ChoiceControl::CodecVersion
+            | ChoiceControl::SignalingVersion
+            | ChoiceControl::ClientVersion
+            | ChoiceControl::VhostVersion => {
+                nervix_client_wire::ChoiceTarget::CompletedResourceVersion
+            }
+            ChoiceControl::ClientSignaling | ChoiceControl::EndpointSignaling => {
+                nervix_client_wire::ChoiceTarget::SignalingProtocol
+            }
+            ChoiceControl::EndpointVhost => nervix_client_wire::ChoiceTarget::Vhost,
         };
         ConsoleRequest::Choice {
             request: ChoiceLookupRequest::new(target, Vec::new(), String::new()),

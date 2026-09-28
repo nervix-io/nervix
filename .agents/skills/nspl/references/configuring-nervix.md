@@ -30,6 +30,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Resources, uploads, mounts, and TLS files | `Resources` |
 | Syslog wire schema, codec fields, UDP/TCP/TLS framing, clients, sources, and sinks | `Common` → `Syslog` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
+| Typed batches applications publish through client sessions, producer outcomes, and limits | `Ingestors` → `Client Ingestors`, and `Sessions` → `Producers` |
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
 | Timed generation from materialized state | `NSPL Overview` and `Examples` |
 | Sink transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
@@ -58,7 +59,7 @@ Capture these decisions before choosing syntax:
 | Input contract | What sample payload and wire format arrive? Which fields are optional or sensitive? |
 | Runtime record | What exact internal type and nullability does each field have? |
 | Isolation | Which fields form the branch key? How long should inactive branches live? Is an instance cap required? |
-| Source | Which connector/client, external entity, offset policy, delivery mode, ordering, timestamp source, and headers are required? |
+| Source | Which connector/client, external entity, offset policy, delivery mode, ordering, timestamp source, and headers are required? Or does an application publish typed batches through a client ingestor, and with which acknowledgement window, ACK timeout, and retry backoff? |
 | Processing | Which records are filtered, transformed, deduplicated, reordered, aggregated, correlated, inferred, enriched, or handled by a trusted Roto UDF? |
 | State | Which relays are materialized? Should missing state wait, skip, or use a typed default? |
 | Output | Which connector/sink, publishing mode, confirmation window/timeout, retry pacing, payload shape, codec or direct mapping, headers, and sensitivity leaks are required? |
@@ -122,6 +123,7 @@ inputs. Keep placeholders obvious and list provisioning that must happen outside
 | Desired behavior | NSPL graph element |
 | --- | --- |
 | Decode an external feed and construct initial branches | `INGESTOR` |
+| Accept typed batches an application publishes and construct initial branches | `INGESTOR ... FROM CLIENT SCHEMA` |
 | Filter, transform, or fan out records without changing branch identity | `JUNCTION` |
 | Suppress repeated keys for a time bound | `DEDUPLICATOR` |
 | Order records by expressions within a time bound | `REORDERER` |
@@ -234,10 +236,16 @@ relay. Do not use them to scan across branches.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default.
-- Every ingestor source ends with its documented `ON QUIESCE` body immediately before `DECODE
-  USING`, with a positive `MAX SIZE`, explicit non-endpoint overflow policy, or endpoint `RETRY
-  AFTER` wherever that mode requires it. MQTT `SUSPEND` also declares `SESSION PERSISTENT QOS 1`.
-  Do not mix mode bodies between source types or infer a default.
+- Every transport ingestor source ends with its documented `ON QUIESCE` body immediately before
+  `DECODE USING`, with a positive `MAX SIZE`, explicit non-endpoint overflow policy, or endpoint
+  `RETRY AFTER` wherever that mode requires it. MQTT `SUSPEND` also declares `SESSION PERSISTENT
+  QOS 1`. Do not mix mode bodies between source types or infer a default.
+- Every client ingestor declares `FROM CLIENT SCHEMA <schema> MODE ACK SEQUENTIAL|ACK PARALLEL MAX
+  <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE SUSPEND` and nothing else as its
+  source: no `CREATE CLIENT`, codec, `DECODE USING`, headers, or `NO_ACK`. The schema is the exact
+  contract producers declare, including optionality and sensitivity, and a paced domain requires
+  its timestamp source. Changing its schema, mode, timestamp, filter, routes other than `FLUSH`, or
+  branch declarations ends attached producers.
 - HTTP `EVERY`, Prometheus `EVERY`, and generator `EACH` use domain-logical cadence. HTTP and
   generators run once immediately; Prometheus first runs after one interval. Keep later work on
   the original schedule, coalesce missed periods without a catch-up burst, query Prometheus at the
@@ -249,6 +257,8 @@ relay. Do not use them to scan across branches.
 - Every custom WASM guest is built for the current ABI, accepts
   `nervix_process_batch(ptr, size)`, validates that exact range against its reusable buffer, and
   declares positive `MAX FUEL` then `MAX MEMORY` limits immediately after `FILE`. Its
+  Rust `nervix-wasm-sdk` `Processor` callbacks return `error_stack::Result<_, GuestError>`;
+  follow the `Rust WASM Guest SDK` chapter for the callback contract. Its
   `nervix_dump_state` saves only durable computation state, never buffered input, ACK tokens,
   pending output, timeout handles, or latched error state, and reports a failed save with a
   negative code, after which Nervix keeps the state saved last. Its `nervix_load_state` rejects
@@ -301,7 +311,9 @@ Choose checks relevant to the configured graph:
   `DESCRIBE RELAY <relay> WHERE (...);` is owner-authoritative for concrete branch state.
 - `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement.
 - `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
-  `DESCRIBE EMITTER` inspect runtime state and edge metrics.
+  `DESCRIBE EMITTER` inspect runtime state and edge metrics. `SHOW INGESTORS;` lists every ingestor
+  with its owner and state, and a client ingestor's admission, producers, outstanding batches and
+  bytes, and admitted batches.
 - The observability server's `/metrics` endpoint reports raw graph-edge counters and histograms,
   including batch-size resolution for tuning collection and flush boundaries. Read `Metrics And
   Observability` for the current histogram buckets. The endpoint also reports
@@ -321,9 +333,9 @@ Choose checks relevant to the configured graph:
 - `CREATE SUBSCRIPTION ...` checks live relay output without modifying the graph. A subscription
   ends when its relay is redefined or removed; create it again to read the current definition.
 - `ATTACH DOMAIN CLOCK;` shows the active domain's `START` generation and clock state, including a
-  paced domain's committed origin, UTC anchor, and rate, then reports each change until
-  `DETACH DOMAIN CLOCK;`. Use it when paced ingestion rejects `TIMESTAMP AT` values: the mapping
-  determines which logical tick centers the admission window has reached.
+  paced domain's committed origin, UTC anchor, and rate, then reports each state change and newest
+  accepted tick until `DETACH DOMAIN CLOCK;`. Use it when paced ingestion rejects `TIMESTAMP AT`
+  values: the mapping and tick frontier show which logical centers the admission window has reached.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.
 - `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
   expiry outcomes.

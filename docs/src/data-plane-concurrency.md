@@ -55,10 +55,12 @@ writer.
 | Active graph | The runtime lifecycle publishes one optional graph for each domain on a node as a control-plane observation surface for sessions and inspection. Installation replaces the complete graph, and stop or removal publishes absence. | Control-plane readers see one complete graph or no active graph. Processor tasks never read it. |
 | Domain routing snapshot | Each domain retains one stable publication handle across execution rebuilds. Schedule application stages and replaces the relay services, schemas, branch declarations, materialized-state ownership, lookups, UDFs, codecs, signaling protocols, and the complete map of bound processor plans together. Each plan carries a typed identity and prepared VM and WASM artifacts for one installed node revision. | A task sees the old routing revision or the new routing revision, never a mixture of their fields. Long-lived tasks use a local pointer cache instead of returning to the domain execution registry per batch. Existing processor branches compare typed plan identities between batches; new branches resolve their template from the same published map. |
 | Ingestor and reingestor programs | Schedule application installs the domain's decision-layer entrypoint plans beside its schedule. An ingestor start binds its node filter and routes against the staged routing revision into one immutable route set before its source opens. A reingestor start prepares the branched entrypoints of its routes and binds each input's source filter, its node filter and its routes before any entrypoint or input task starts. A running relay registers the consumer of a swapped-in input only after that. | Every source instance, endpoint request and ingest group of one ingestor shares the same bound route allocation, and a reingestor input task owns its bound programs. Neither compiles a program on the hot path nor returns to the domain execution registry per batch. A reingestor start that fails leaves no entrypoint, task or registered consumer behind, so a relay never refuses attached delivery for a consumer that has no receiver. |
+| Emitter execution plans | Schedule application decides the domain's typed sink and ordered source edges with lowered expressions from one schedule revision, then installs those plans beside that revision. Startup, swaps and relocation bind a selected plan to local mounts, schemas and UDFs; relay inputs are registered during those transitions. Remote consumer edges come from the same plans. | An emitter task owns its bound programs and sink configuration for its lifetime. Per-batch work does not read the schedule or client Models; sink retries reuse the typed configuration. A dynamic flush change sends only its new flush policy to the running task. |
 | Node identity and remote dispatcher | The node runtime publishes this once after cluster join, when the authenticated interconnect and process incarnation are known. Relay boundaries created afterwards retain the same dispatcher handle. | Readers borrow the stable node identity, incarnation, transport, admission service, and ACK registry without a write-once lock or repeated name allocation. |
 | Relay owner state | Each relay boundary publishes its scheduled owner, installed owner buffer, remote runtime-consumer set, and immutable branch-reset gate set. Schedule and relay lifecycle operations replace these values at their cutover points. | A batch borrows the current owner and buffer, then takes permits only from reset gates whose typed scope selects its branch. Multi-step ownership changes use the whole-relay dispatch gate described below so teardown cannot race an admitted dispatch. |
 | Subscription interest | The cluster live-state watcher rebuilds an immutable index from domain and relay to interested node incarnations and advertisement versions whenever gossip changes. | A relay owner performs borrowed lookups in one published index. It neither formats gossip keys nor waits on the gossip mutex per batch. Subscription creation waits until every live node has observed the exact subscriber incarnation and at least the current advertisement version before reporting success. |
 | Clock installation | Each domain-clock lifecycle on each node publishes the complete missing, stopped, uninstalled, unpaced, or paced installation. | A read validates its bound lifecycle generation against one installation, then advances that installation's nondecreasing timestamp watermark atomically. A same-generation replacement retains the watermark; a different generation cannot be clamped by a stale reader. |
+| Accepted clock progress | Each runtime domain publishes its newest accepted generation, tick id, logical boundary, and authority UTC observation through a watch. | The watch serializes comparison and replacement, so concurrent progress deliveries cannot regress the id. Generation changes and stops publish absence. A session observer subscribes before reading, retains a sender until it observes domain removal, and uses an execution snapshot only to add its serving node's logical reading to a tick frame. |
 | Runtime-state assignment | Each state placement publishes one packed atomic binding containing its generation and capability. Replication roles are a separate immutable published snapshot. | A per-message operation admits itself, compares the exact binding it was granted, and proceeds only while that generation still grants the required capability. It never takes the assignment barrier. |
 | Ingestor quiesce decision | Each ingestor publishes the declared and pending modes, active causes, source support, and derived intake decision as one value. Concurrent lifecycle changes derive their replacement from the current publication. | Polling and per-message intake make one load to decide whether to dispatch, suspend, skip, buffer, drop, or reject. A source host retains its last observed publication across dispatch awaits; its change wait registers before comparing that publication with the current one, so an engagement or release in the gap wakes it. The retained-payload lock is reached only after the published decision selects buffering. |
 | Metric series handles | Each relay, node, ingestor, emitter, or concrete branch resolves its label set, internal series, and Prometheus child when its owning task or branch is created. | Recording uses the retained series directly. Counters update atomically; a histogram records through its already-resolved per-series accumulator without a registry lookup, key construction, or map guard. Registration and removal stay on lifecycle paths. |
@@ -210,6 +212,31 @@ share per input. The branch task owns those shares for the length of the callbac
 resolves them itself: it releases them when the checkpoint completes and negatively acknowledges
 them when it fails. Holding them needs no lock and no shared registry.
 
+### Client ingestor endpoints
+
+Each client ingestor a node executes has one endpoint task that owns every producer attached to it:
+the batches each queued, the round-robin order among them, the batches handed to the execution's
+admission worker or admitted and awaiting acknowledgement, and whether admission is open. Producers,
+the admission worker, acknowledgement watchers, the quiesce watch, and lifecycle changes reach that
+state only as commands on the task's channel, applied in the order they were sent, so nothing locks
+it. The admission worker takes one batch at a time over a channel of one, which is how the
+endpoint knows exactly which batch a worker that stopped never took. Each admitted batch's
+acknowledgement is awaited by a watcher task that reports its resolution as a command; the
+endpoint's cancellation token stops every watcher when it ends, and a report arriving after an
+attachment ended finds nothing to answer.
+
+After each command the task publishes its producer, outstanding, and window counts into plain
+atomics that `DESCRIBE` reads, and into metric gauges it resolved once. Each count is exact when
+written, and a reader may see one count of a change before another.
+
+The node's producer byte budget is one atomic counter. A reservation adds its bytes with a
+compare-and-swap that refuses to pass the budget, and dropping the reservation subtracts exactly
+those bytes, so concurrent opens through different sessions and links never overcommit it.
+
+A session's producer credit is held under a short mutex, taken by the receive loop when a batch
+arrives and returned by the producer's task before it queues that batch's reply, so a client that
+sends only after reading a reply always finds room. The mutex never crosses an await.
+
 ### Node quiesce accounting
 
 Every entity on a node keeps one set of quiesce counts. A drain reads them to decide whether the
@@ -276,6 +303,15 @@ gates. Dispatch loads that list once, compares the batch's branch fingerprint wi
 and waits only on matching gates. Removing a lease atomically republishes the list and releases its
 gate. This gives publication and dispatch one total order while unrelated branches neither acquire
 shared locks nor wait for the reset.
+
+### Client batch admission fence
+
+A client batch is validated before it is dispatched, and a quiesce can engage in between. The
+admission worker therefore tracks the batch's ACK root with the ingestor's drain accounting first,
+and only then reads the quiesce publication. Either the read comes before the engagement, so the
+drain that follows counts the root and waits for it, or the read observes the engagement and the
+batch is refused with its root resolved before anything was dispatched under it. No batch can be
+dispatched after a drain concluded that the ingestor held no admitted work.
 
 ### Assignment generations
 
@@ -434,13 +470,13 @@ read and waiter registration are scheduler-visible, a missed notification leaves
 pending and Shuttle reports the resulting deadlock. Name a bounded number of participants so the
 search remains reviewable; use bounded depth-first search for small races and random plus
 probabilistic concurrency testing (PCT) for larger ones. The server's shared runner supplies
-random, PCT, and bounded DFS modes; interconnect and execution use random and PCT. The runner
-caps each schedule at 10,000 steps. Individual checks choose their iteration counts and PCT
+random, PCT, and bounded DFS modes; interconnect, execution, and the Rust client use random and
+PCT. The runner caps each schedule at 10,000 steps. Individual checks choose their iteration counts and PCT
 depth; `SHUTTLE_REPORT_STEPS=1` reports the highest observed step count when tuning a check. A
 step cap is an exploration bound, not a product timeout.
 
 `just test-shuttle` runs only library tests whose full names contain `shuttle_`, one test per
-process, in `nervix-execution`, `nervix-interconnect`, and `nervix-server`. It then repeats each
+process, in `nervix-execution`, `nervix-interconnect`, `nervix-client-core`, and `nervix-server`. It then repeats each
 package under Shuttle's uncontrolled-nondeterminism detector. The recipe uses the repository's
 kache-backed build and prepares the server's test dependencies; `just test` continues to run the
 ordinary suite. CI runs `just test-shuttle` and uploads `target/shuttle-failures` when a check
@@ -467,7 +503,9 @@ A family of names means each member runs independently through the recipe.
 | Interconnect slots and membership (`crates/interconnect/src/connection/stream_slots/shuttle_checks.rs`, `request/shuttle_checks.rs`) | `management_drain_stops_leasing_and_waits_for_every_leased_slot`, `replication_drain_stops_leasing_and_waits_for_every_leased_slot`, `bulk_drain_stops_leasing_and_waits_for_every_leased_slot`, and `relay_drain_stops_leasing_and_waits_for_every_leased_slot` keep partition and subquota reservations isolated, forbid leases after drain starts, and wait for every lease to return. `racing_registrations_lose_no_handler_and_publish_each_name_once` prevents a lost handler registration and duplicate name. `a_membership_change_between_a_callers_check_and_its_wait_is_never_lost` prevents a missed discovery wakeup. |
 | Shutdown and signals (`src/application/shutdown.rs`, `termination_signals.rs`) | `shuttle_racing_stop_requests_accept_exactly_one_and_keep_its_deadline` retains the first stop request and its deadline. `shuttle_phases_only_advance_and_every_completion_waiter_observes_the_one_outcome` keeps phase order and one completion. `shuttle_an_expired_deadline_and_a_repeated_signal_let_exactly_one_forced_exit_end_the_process` and `shuttle_a_repeated_signal_before_the_deadline_ends_the_process_with_the_status_of_that_signal` give one forced-exit claimant and the exit status of the cause that won. |
 | Emitter batch payloads (`src/runtime/emitter_record_writes_shuttle_tests.rs`) | `shuttle_a_retried_payload_acknowledges_each_fanned_in_member_once_after_every_emitter` and `shuttle_a_sibling_failure_resolves_each_fanned_in_member_once_despite_a_retry` fan two source messages out to a batching emitter and a sibling: each source acknowledgement completes once, successfully only after both emitters confirmed it, and the retry writes the retained payload's first bytes. `shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once` cuts an attempt short at any point and requires the next one to write only unanswered payloads and deliver each rejected member's message error once. `shuttle_a_drain_never_finds_the_emitter_empty_while_a_member_is_retained` races a drain's reads against a stalled write and the force flush that repeats it. |
-| Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |
+| Client ingestors (`src/runtime/client_ingestor_shuttle_tests.rs`) | `shuttle_racing_reservations_never_exceed_the_node_budget_and_return_every_byte` races opens that each need more than half the node's producer budget: at most one holds it at a time and every reservation returns its bytes. `shuttle_a_batch_racing_a_quiesce_is_either_counted_by_its_drain_or_refused_undispatched` races the admission fence against an engagement and its drain: no batch is dispatched after the drain concluded. `shuttle_a_closing_producer_answers_every_admitted_batch_once_before_its_release` and `shuttle_an_ending_endpoint_answers_every_batch_once_and_ends_its_producer_last` race a close or an endpoint end against the worker's admission reports and the batches' acknowledgements: every batch is answered exactly once, a close answers each with its real outcome before the release, and an end reports no admitted batch as not admitted and comes last. |
+| Rust client submission slots (`crates/client-core/src/producer/slots_shuttle_tests.rs`) | `shuttle_a_wait_racing_its_resolution_takes_the_outcome_once_and_returns_the_credit`, `shuttle_a_cancelled_wait_loses_neither_the_outcome_nor_the_credit`, and `shuttle_a_release_racing_its_resolution_returns_the_credit_exactly_once` race a submission's resolution against the application's wait, an aborted wait followed by a new one, and a release: the outcome is taken at most once, a cancelled wait leaves it retrievable, and the credit comes back exactly once. |
+| Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `shuttle_delivery_sends_state_before_ticks_without_regressing_progress` explores the production observer and attachment delivery order across accepted ticks, same-generation unassignment and reassignment, and a generation change. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |
 
 The checks of WASM checkpoint holds and the durability barrier use the same runner and replay
 contract. Their state semantics live in the WASM state documentation; they do not turn Shuttle

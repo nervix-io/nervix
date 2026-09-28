@@ -297,16 +297,14 @@ impl SessionServiceImpl {
         node_id: ClusterNodeName,
     ) -> CommandResult {
         let availability = self.inner.cluster.availability_state().await;
-        let mut latest_nodes = availability.latest_nodes_by_id();
-        let Some(node) = latest_nodes.remove(&node_id) else {
+        let Some(identity) = availability.latest_observed_identity(&node_id) else {
             return command_error(format!(
                 "cannot identify the current incarnation of raft member '{node_id}'"
             ));
         };
         let membership_nodes = self.inner.consensus.membership_nodes().await;
         let member_at_admission = membership_nodes.contains_key(&node_id);
-        self.drop_admitted_node(node.identity(), member_at_admission)
-            .await
+        self.drop_admitted_node(identity, member_at_admission).await
     }
 
     pub(in crate::application) async fn drop_admitted_node(

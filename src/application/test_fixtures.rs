@@ -167,7 +167,7 @@ pub(in crate::application) fn test_tls_files(
 
 fn test_db_path() -> PathBuf {
     let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("nervix-session-test-{id}"))
+    std::env::temp_dir().join(format!("nervix-session-test-{}-{id}", std::process::id()))
 }
 
 pub(in crate::application) fn test_addr(base_port: u16) -> std::net::SocketAddr {
@@ -263,6 +263,11 @@ fn test_session_service(
     );
     let runtime = Runtime::new();
     let subscription_interests = SubscriptionInterests::new(cluster.clone(), runtime.metrics());
+    let client_producers = super::client_producers::ClientProducerRouter::new(
+        runtime.clone(),
+        interconnect.clone(),
+        consensus.proposer().local_node_id().clone(),
+    );
     SessionServiceImpl {
         inner: Arc::new(SessionServiceInner {
             cluster: cluster.clone(),
@@ -278,6 +283,7 @@ fn test_session_service(
             drain_support_shutdown: CancellationToken::new(),
             events: SessionEvents::new(16),
             subscription_interests,
+            client_producers,
             interconnect,
             service_tasks: super::service_tasks::ServiceTasks::default(),
             configured_basic_auth: None,
@@ -581,6 +587,7 @@ pub(in crate::application) async fn build_test_service(
             recovery_endpoints: Default::default(),
             interconnect: interconnect.clone(),
             node_unavailability_timeout: Duration::from_secs(10),
+            fault_injection: Default::default(),
         })
         .await
         .expect("cluster should start"),
