@@ -231,6 +231,14 @@ a serde JSON tree or a row map. Strict and loose field behavior, optional nulls,
 ranges, nested sequence shapes, invalid UTF-8 and malformed escape rejection remain the public
 wire-schema contract.
 
+On emission, a compiled `WIRE JSON` codec writes each object in schema field order directly from
+its typed Arrow columns. Field names are escaped when the codec is compiled. A runtime-selected
+SIMD classifier marks quotes, backslashes and control bytes in each string column once per batch;
+clean UTF-8 strings are copied without an escape pass, while marked strings use JSON escaping.
+Optional null fields are omitted, required null fields fail encoding, datetimes use their declared
+wire rule, and bytes use padded base64. Nested arrays retain their declared shape. The encoder
+writes into the caller's output buffer, including a bounded buffer when `MAX SIZE` applies.
+
 JAQ-native codecs parse a transport payload in a jaq-supported format and run explicitly directed
 JAQ transformations. An ingestion transformation turns every value the payload holds into zero
 or more JSON objects, and each object is decoded into the internal schema as one message

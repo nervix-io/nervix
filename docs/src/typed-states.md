@@ -166,7 +166,9 @@ the same typed union for enum variants and domain, resource, model, or field ref
 label, detail, and group held separately as presentation. The FlatBuffers discriminant selects
 behavior. A missing typed dependency is `MissingContext`, and a page cursor binds the dependencies,
 revision, candidate values, and presentation so changed form state is `StaleContext` rather than a
-silently retargeted page.
+silently retargeted page. The browser keeps missing prerequisites, stale context, empty results,
+loading, and failures as separate choice states. A missing prerequisite carries a hint; stale
+context offers a fresh lookup; only lookup and transport failures are alerts.
 
 Incomplete schema, branch, relay, and subscription form values stay in browser drafts. The
 completed conversion creates the current schema, branch, or relay Model, with field order,

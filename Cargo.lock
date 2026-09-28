@@ -3771,6 +3771,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fearless_simd"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3772b63c40606beea8fe1f7b06a60de27ceb9bfc2d9dad3427368ca41dc7e62"
+
+[[package]]
 name = "ferroid"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6560,6 +6566,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-columnar-json"
+version = "0.1.0-dev"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "base64-simd",
+ "chrono",
+ "criterion 0.5.1",
+ "error-stack",
+ "itoa",
+ "meticulous",
+ "nervix-simd-kernels",
+ "ryu",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "nervix-connector"
 version = "0.1.0-dev"
 dependencies = [
@@ -6594,15 +6619,14 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "async-trait",
- "chrono",
  "clickhouse",
  "error-stack",
  "hyper-rustls",
  "hyper-util",
  "meticulous",
+ "nervix-columnar-json",
  "nervix-connector",
  "nervix-models",
- "serde_json",
  "shuttle-tokio",
  "thiserror 2.0.21",
  "tokio",
@@ -7344,6 +7368,7 @@ dependencies = [
  "nervix-client-core",
  "nervix-client-ffi",
  "nervix-client-wire",
+ "nervix-columnar-json",
  "nervix-connector",
  "nervix-connector-clickhouse",
  "nervix-connector-http",
@@ -7439,6 +7464,17 @@ dependencies = [
  "uuid",
  "webpki-roots 1.0.9",
  "zeromq",
+]
+
+[[package]]
+name = "nervix-simd-kernels"
+version = "0.1.0-dev"
+dependencies = [
+ "error-stack",
+ "fastrand",
+ "fearless_simd",
+ "meticulous",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

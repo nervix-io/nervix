@@ -16,19 +16,13 @@ extern crate shuttle_tokio as tokio;
 use std::time::Duration;
 
 use ::clickhouse::{Client as ClickHouseClient, error::Error as ClickHouseError};
-use arrow_array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
-    Int64Array, ListArray, RecordBatch, StringArray, TimestampNanosecondArray, UInt8Array,
-    UInt16Array, UInt32Array, UInt64Array,
-};
-use arrow_schema::DataType;
-use chrono::DateTime;
 use error_stack::Report;
 use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
     rt::TokioExecutor as HyperTokioExecutor,
 };
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::ResultExt as _;
+use nervix_columnar_json::{FieldNulls, Float32Encoding, JsonColumnSpec, JsonColumns, NestedNulls};
 use nervix_connector::{
     MappedSinkRows, PerRecordOutcome, RejectedSinkRecord, RowSink, RustlsClientConfigSource,
     SinkHost, SinkLifecycle, SinkPublishError, SinkRecordPosition, SinkStartError, SinkStartResult,
@@ -96,199 +90,6 @@ impl ClickHouseWriteError {
             None => "ClickHouse insert request failed".to_string(),
         };
         Report::new(SinkPublishError::Publish { sink: CLICKHOUSE }).attach_printable(reason)
-    }
-}
-
-/// A mapped column this sink cannot write as JSON, named with the exact type it carries.
-#[derive(Debug, thiserror::Error)]
-#[error("ClickHouse VALUES column '{column}' has unsupported exact type {data_type}")]
-struct UnsupportedMappedColumn {
-    column: String,
-    data_type: DataType,
-}
-
-/// The mapped columns of one batch, downcast once so every row reads from the column that holds it.
-///
-/// Each target column is quoted once here rather than once per row, and the line is written in
-/// mapping order so the same mapping always produces the same bytes.
-struct MappedJsonColumns<'a> {
-    columns: Vec<MappedJsonField<'a>>,
-}
-
-/// One target column of the insert: its quoted JSON key and the Arrow column its values come from.
-struct MappedJsonField<'a> {
-    key: String,
-    values: MappedJsonColumn<'a>,
-}
-
-impl<'a> MappedJsonColumns<'a> {
-    fn new(
-        batch: &'a RecordBatch,
-        target_columns: &[String],
-    ) -> Result<Self, UnsupportedMappedColumn> {
-        let mut columns = Vec::with_capacity(target_columns.len());
-        for (index, column) in target_columns.iter().enumerate() {
-            let array = batch.column(index);
-            let values = MappedJsonColumn::new(array).ok_or_else(|| UnsupportedMappedColumn {
-                column: column.clone(),
-                data_type: array.data_type().clone(),
-            })?;
-            columns.push(MappedJsonField {
-                key: serde_json::Value::String(column.clone()).to_string(),
-                values,
-            });
-        }
-        Ok(Self { columns })
-    }
-
-    /// One `JSONEachRow` line, read column by column at the row the host selected.
-    fn row_line(&self, row: usize) -> String {
-        let mut line = String::from("{");
-        for (index, field) in self.columns.iter().enumerate() {
-            if index != 0 {
-                line.push(',');
-            }
-            line.push_str(&field.key);
-            line.push(':');
-            line.push_str(&field.values.value(row).to_string());
-        }
-        line.push('}');
-        line
-    }
-}
-
-/// One mapped column, held as the typed Arrow array it arrived in.
-enum MappedJsonColumn<'a> {
-    Bool(&'a BooleanArray),
-    U8(&'a UInt8Array),
-    I8(&'a Int8Array),
-    U16(&'a UInt16Array),
-    I16(&'a Int16Array),
-    U32(&'a UInt32Array),
-    I32(&'a Int32Array),
-    U64(&'a UInt64Array),
-    I64(&'a Int64Array),
-    F32(&'a Float32Array),
-    F64(&'a Float64Array),
-    String(&'a StringArray),
-    Datetime(&'a TimestampNanosecondArray),
-    List {
-        offsets: &'a ListArray,
-        elements: Box<MappedJsonColumn<'a>>,
-    },
-}
-
-impl<'a> MappedJsonColumn<'a> {
-    fn new(array: &'a ArrayRef) -> Option<Self> {
-        let array = array.as_ref();
-        if let Some(values) = array.as_any().downcast_ref::<BooleanArray>() {
-            return Some(Self::Bool(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<UInt8Array>() {
-            return Some(Self::U8(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<Int8Array>() {
-            return Some(Self::I8(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<UInt16Array>() {
-            return Some(Self::U16(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<Int16Array>() {
-            return Some(Self::I16(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<UInt32Array>() {
-            return Some(Self::U32(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<Int32Array>() {
-            return Some(Self::I32(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<UInt64Array>() {
-            return Some(Self::U64(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
-            return Some(Self::I64(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<Float32Array>() {
-            return Some(Self::F32(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
-            return Some(Self::F64(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
-            return Some(Self::String(values));
-        }
-        if let Some(values) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
-            return Some(Self::Datetime(values));
-        }
-        let values = array.as_any().downcast_ref::<ListArray>()?;
-        let elements = Self::new(values.values())?;
-        Some(Self::List {
-            offsets: values,
-            elements: Box::new(elements),
-        })
-    }
-
-    fn value(&self, row: usize) -> serde_json::Value {
-        if self.is_null(row) {
-            return serde_json::Value::Null;
-        }
-        match self {
-            Self::Bool(values) => serde_json::Value::from(values.value(row)),
-            Self::U8(values) => serde_json::Value::from(values.value(row)),
-            Self::I8(values) => serde_json::Value::from(values.value(row)),
-            Self::U16(values) => serde_json::Value::from(values.value(row)),
-            Self::I16(values) => serde_json::Value::from(values.value(row)),
-            Self::U32(values) => serde_json::Value::from(values.value(row)),
-            Self::I32(values) => serde_json::Value::from(values.value(row)),
-            Self::U64(values) => serde_json::Value::from(values.value(row)),
-            Self::I64(values) => serde_json::Value::from(values.value(row)),
-            Self::F32(values) => serde_json::Value::from(values.value(row)),
-            Self::F64(values) => serde_json::Value::from(values.value(row)),
-            Self::String(values) => serde_json::Value::from(values.value(row)),
-            Self::Datetime(values) => serde_json::Value::from(
-                DateTime::from_timestamp_nanos(values.value(row))
-                    .fixed_offset()
-                    .to_rfc3339(),
-            ),
-            Self::List { offsets, elements } => {
-                let offsets = offsets.value_offsets();
-                let non_negative = "Arrow builds list offsets as non-negative element positions";
-                let start = usize::try_from(offsets[row]).assured(non_negative);
-                let end = usize::try_from(
-                    offsets[row.checked_add(1).assured(
-                        "a list array holds one offset more than it holds rows, so the position \
-                         after the last row is addressable",
-                    )],
-                )
-                .assured(non_negative);
-                let mut items = Vec::with_capacity(end.checked_sub(start).assured(
-                    "Arrow list offsets increase, so a row ends no earlier than it starts",
-                ));
-                for element in start..end {
-                    items.push(elements.value(element));
-                }
-                serde_json::Value::Array(items)
-            }
-        }
-    }
-
-    fn is_null(&self, row: usize) -> bool {
-        match self {
-            Self::Bool(values) => values.is_null(row),
-            Self::U8(values) => values.is_null(row),
-            Self::I8(values) => values.is_null(row),
-            Self::U16(values) => values.is_null(row),
-            Self::I16(values) => values.is_null(row),
-            Self::U32(values) => values.is_null(row),
-            Self::I32(values) => values.is_null(row),
-            Self::U64(values) => values.is_null(row),
-            Self::I64(values) => values.is_null(row),
-            Self::F32(values) => values.is_null(row),
-            Self::F64(values) => values.is_null(row),
-            Self::String(values) => values.is_null(row),
-            Self::Datetime(values) => values.is_null(row),
-            Self::List { offsets, .. } => offsets.is_null(row),
-        }
     }
 }
 
@@ -385,16 +186,22 @@ impl SinkLifecycle for ClickHouseSink {}
 impl RowSink for ClickHouseSink {
     async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
         let mut outcome = PerRecordOutcome::with_capacity(rows.selected_rows.len());
-        let columns = match MappedJsonColumns::new(rows.batch, rows.target_columns) {
+        let specs = rows
+            .target_columns
+            .iter()
+            .map(|name| {
+                JsonColumnSpec::new(name, FieldNulls::Write)
+                    .with_float32_encoding(Float32Encoding::WidenedF64)
+            })
+            .collect::<Vec<_>>();
+        let columns = match JsonColumns::new(rows.batch, &specs, NestedNulls::Write) {
             Ok(columns) => columns,
             Err(error) => {
-                outcome.fail(
-                    Report::new(SinkPublishError::Publish { sink: CLICKHOUSE })
-                        .attach_printable(error.to_string()),
-                );
+                outcome.fail(error.change_context(SinkPublishError::Publish { sink: CLICKHOUSE }));
                 return outcome;
             }
         };
+        let mut previous_row_bytes = 0;
         for chunk in rows.selected_row_chunks {
             tokio::task::consume_budget().await;
             let Some(chunk_rows) = rows.selected_rows.get(chunk.clone()) else {
@@ -408,10 +215,21 @@ impl RowSink for ClickHouseSink {
                 );
                 return outcome;
             };
-            let lines = chunk_rows
-                .iter()
-                .map(|row| columns.row_line(*row))
-                .collect::<Vec<_>>();
+            let mut lines = Vec::with_capacity(chunk_rows.len());
+            for row in chunk_rows {
+                let mut encoded = Vec::with_capacity(previous_row_bytes);
+                if let Err(error) = columns.write_row(*row, &mut encoded) {
+                    outcome
+                        .fail(error.change_context(SinkPublishError::Publish { sink: CLICKHOUSE }));
+                    return outcome;
+                }
+                previous_row_bytes = encoded.len();
+                lines.push(
+                    String::from_utf8(encoded).assured(
+                        "Arrow strings are UTF-8 and the JSON writer adds only ASCII syntax",
+                    ),
+                );
+            }
             let chunk_lines = lines.iter().map(String::as_str).collect::<Vec<_>>();
             match Self::publish_json_lines(
                 &self.client,
@@ -491,7 +309,10 @@ impl RowSink for ClickHouseSink {
 mod tests {
     use std::sync::Arc as StdArc;
 
-    use arrow_schema::{Field, Schema, TimeUnit};
+    use arrow_array::{
+        Float32Array, Int64Array, ListArray, RecordBatch, StringArray, TimestampNanosecondArray,
+    };
+    use arrow_schema::{DataType, Field, Schema, TimeUnit};
 
     use super::*;
 
@@ -550,6 +371,7 @@ mod tests {
             Field::new("id", DataType::Int64, true),
             Field::new("name", DataType::Utf8, true),
             Field::new("at", DataType::Timestamp(TimeUnit::Nanosecond, None), true),
+            Field::new("ratio", DataType::Float32, true),
             Field::new(
                 "tags",
                 DataType::List(StdArc::new(Field::new("item", DataType::Int32, true))),
@@ -569,6 +391,7 @@ mod tests {
                     Some(1_700_000_000_123_456_789),
                     None,
                 ])),
+                StdArc::new(Float32Array::from(vec![Some(1.2), None])),
                 StdArc::new(tags),
             ],
         )
@@ -577,18 +400,36 @@ mod tests {
             "id".to_string(),
             "name".to_string(),
             "at".to_string(),
+            "ratio".to_string(),
             "tags".to_string(),
         ];
 
-        let mapped = MappedJsonColumns::new(&batch, &columns).expect("columns should be mapped");
+        let specs = columns
+            .iter()
+            .map(|name| {
+                JsonColumnSpec::new(name, FieldNulls::Write)
+                    .with_float32_encoding(Float32Encoding::WidenedF64)
+            })
+            .collect::<Vec<_>>();
+        let mapped = JsonColumns::new(&batch, &specs, NestedNulls::Write)
+            .assured("the test columns have supported Arrow types");
+
+        let mut first = Vec::new();
+        mapped
+            .write_row(0, &mut first)
+            .assured("the first test row is valid JSON");
+        let mut second = Vec::new();
+        mapped
+            .write_row(1, &mut second)
+            .assured("the second test row is valid JSON");
 
         assert_eq!(
-            mapped.row_line(0),
-            r#"{"id":7,"name":"first","at":"2023-11-14T22:13:20.123456789+00:00","tags":[1,2]}"#
+            first,
+            br#"{"id":7,"name":"first","at":"2023-11-14T22:13:20.123456789+00:00","ratio":1.2000000476837158,"tags":[1,2]}"#
         );
         assert_eq!(
-            mapped.row_line(1),
-            r#"{"id":null,"name":"second","at":null,"tags":[]}"#
+            second,
+            br#"{"id":null,"name":"second","at":null,"ratio":null,"tags":[]}"#
         );
     }
 

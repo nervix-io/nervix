@@ -194,6 +194,11 @@ inference or compilation retains its typed VM report under the domain and emitte
 the sink-initialization context. The emitter follows its existing initialization retry policy;
 the connector never receives a partially compiled mapping.
 
+The ClickHouse row sink uses the shared columnar JSON writer for `JSONEachRow`. It prepares typed
+column readers and string escape masks once for a mapped batch, then writes each selected row in
+mapping order without building per-row JSON values. It keeps the host's bounded chunks, request
+cadence, and per-record outcomes.
+
 An ordering group exists only where the sink plan declares one; today that is the SQS
 `FIFO GROUP`. The host compiles the declaration, evaluates it once per filtered source batch, and
 carries the result beside the batch: the batch's branch key for `FROM BRANCH`, or a string column

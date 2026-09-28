@@ -34,7 +34,7 @@ pub(super) struct PendingRowPayload {
 
 impl PendingRowPayload {
     fn encode(encoder: &CompiledCodecBatchEncoder<'_>, row_index: usize) -> Self {
-        let mut payload = Vec::new();
+        let mut payload = encoder.next_payload();
         let encoded = encoder.encode_row_into(row_index, &mut payload);
         Self {
             row_index,
