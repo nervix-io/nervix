@@ -10,10 +10,9 @@ pub(super) enum MessageErrorRecordConstructionError {
     InputProjection {
         error: error_stack::Report<crate::runtime_schema::RuntimeSchemaError>,
     },
-    #[error("message-error SET execution failed: {source}")]
+    #[error("message-error SET execution failed: {report}")]
     Execution {
-        #[source]
-        source: nervix_vm::RuntimeError,
+        report: error_stack::Report<nervix_vm::RuntimeError>,
     },
     #[error("message-error SET produced {rows} rows for one error")]
     RowCount { rows: usize },
@@ -1306,10 +1305,10 @@ impl Runtime {
             },
         )
         .await
-        .map_err(|source| {
+        .map_err(|report| {
             MessageErrorHandlingError::record_construction(
                 error,
-                MessageErrorRecordConstructionError::Execution { source },
+                MessageErrorRecordConstructionError::Execution { report },
             )
         })?;
         if result.batch.row_count() != 1 {

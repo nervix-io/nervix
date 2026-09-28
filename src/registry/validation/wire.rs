@@ -331,7 +331,7 @@ fn ensure_codec_jaq_programs(
     ] {
         if let Some(program) = program {
             CompiledJaqProgram::compile(program).map_err(|error| {
-                Report::new(error).change_context(RegistryError::InvalidCodecJaq {
+                error.change_context(RegistryError::InvalidCodecJaq {
                     domain: domain.clone(),
                     codec: identifier.clone(),
                     direction,

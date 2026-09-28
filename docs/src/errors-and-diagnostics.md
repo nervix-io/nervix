@@ -43,6 +43,17 @@ A syntax error names the codec, domain, and direction and rejects the transactio
 is committed. The browser keeps the draft editable so the program can be corrected and submitted
 under the same name.
 
+The expression VM returns reports for compile, batch, and runtime failures. `CompileError` keeps
+its typed diagnostic code, stable code spelling, operation span, and safe message; validation adds
+the model and route context without losing that cause. Roto setup returns `UdfError` reports and
+Roto's VM injector returns runtime reports, so a failing Arrow operation can remain in the chain.
+Jaq returns `JaqProgramError` or `JaqFormatError` reports for compilation, evaluation, and format
+conversion. A codec or runtime caller retains that report under its operation context. VM row
+errors remain typed values in the batch outcome and are formatted only when a message error is
+reported; this conversion does not turn them into report allocations per row.
+HTTP request-field compilation retains the VM report beneath the emitter's request-field context
+and attaches its safe message for diagnostics; an invalid request program never starts the sink.
+
 Resource planning checks the committed lookup key and codec, generator materialized source,
 output branch and route construction, and WASM guest-state generation before runtime binding.
 These failures name the owning node and relevant relay, codec, or field. A missing
