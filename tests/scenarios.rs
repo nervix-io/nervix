@@ -6490,6 +6490,31 @@ async fn then_dns_fixture_queried_name(world: &mut ScenarioWorld, name: String) 
     .unwrap_or_else(|_| panic!("no client asked the DNS fixture for '{name}' within 10 seconds"));
 }
 
+#[then(expr = "the DNS fixture eventually receives another question for {string}")]
+async fn then_dns_fixture_queried_name_again(world: &mut ScenarioWorld, name: String) {
+    let baseline = world
+        .cluster()
+        .dns_questions_for_name(&name)
+        .assured("the scenario configured fixture DNS before observing questions");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            tokio::task::consume_budget().await;
+            let count = world
+                .cluster()
+                .dns_questions_for_name(&name)
+                .assured("the scenario configured fixture DNS before observing questions");
+            if count > baseline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("no client asked the DNS fixture for '{name}' again within 30 seconds")
+    });
+}
+
 #[then("the DNS fixture received no questions for node names")]
 async fn then_the_dns_fixture_received_no_questions_for_node_names(world: &mut ScenarioWorld) {
     let questions = world
