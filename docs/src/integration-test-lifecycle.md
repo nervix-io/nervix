@@ -36,7 +36,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | In-process nodes | One Tokio task per node on the binary's multi-threaded runtime, which has one worker thread per CPU | The cluster fixture, `tests/common/cluster.rs` |
 | Server processes | Child processes executing the `nervix-server` binary | The server-process fixture, `tests/common/server_process.rs` |
 | Real-process cluster | Three server children with separate durable stores, ports and identities under one test certificate authority | `tests/common/server_process_cluster.rs`, using the server-process fixture |
-| CLI sessions | Child processes executing `nervix-cli`; a scenario reader retains at most 256 output lines | The scenario world, `tests/scenarios.rs` |
+| CLI sessions | Child processes executing `nervix-cli`; the subscription reader retains at most 256 output lines and the clock reader retains at most 2,048 | The scenario world, `tests/scenarios.rs` |
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
@@ -50,7 +50,8 @@ scenarios sharing that container.
 client coverage recipes build a standalone instrumented CLI beside their instrumented server binary
 and place the normal NSPL formatter there. The scenario runner selects the covered CLI through
 `NERVIX_TEST_CLI_PATH`, so its one-shot completion and command paths contribute to the same LCOV
-report as the CLI's binary unit tests and the server's public scenarios.
+report as the CLI's binary unit tests and the server's public scenarios. The focused CLI process
+coverage recipe exercises transaction inspection and the clock-following process scenarios.
 
 The number of scenarios that run at once is the number of CPUs times the concurrency factor, set by
 `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default. Cucumber's
@@ -123,7 +124,7 @@ second module runs the operation, it is named after the owner.
 | An HTTP receiver wait: captured requests or a recorded fault | `http_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
 | A server process's readiness, exit, or log line | `server_process.rs` | 120, 120, and 60 seconds | The step fails, quoting the last 80 lines of the process log |
 | Convergence of a restarted real-process cluster | `server_process_cluster.rs` | 120 seconds, with each status request capped at 10 seconds | The step fails with the last status or typed request failure from every member |
-| A one-shot CLI command or a subscription output assertion | `tests/scenarios.rs` | 60 seconds for a command, 30 seconds for an expected subscription line | The step fails with the process result or retained output lines |
+| A one-shot CLI command or a streaming output assertion | `tests/scenarios.rs` | 60 seconds for a command, 30 seconds for a subscription line, 10 or 20 seconds for a clock line, and 10 seconds for clock-process exit after Ctrl-C | The step fails with the process result or retained output lines |
 | One draw from the port pool | `port_pool.rs` | 65,536 consecutive draws that land on reserved ports | The draw fails with the pool exhausted |
 | The whole scenario run | `suite_watchdog.rs` | 37 minutes, injectable | Every active scenario is reported, live nodes get a 60-second cleanup window, and the process exits `124` |
 | Stopping the test dependencies after the run | `suite_watchdog.rs` | 2 minutes | The containers are left to the runner |
@@ -689,7 +690,10 @@ address, or not at all. A dependency's published port listens on every local add
 that cannot connect needs TCP forwarders: listeners at chosen loopback addresses such as
 `127.0.5.<n>`, all on one port drawn from the pool, that forward to the dependency and count the
 connections each accepted. Stopping a forwarder closes its listener and every connection it
-carried, so a client that still holds a cached answer naming it cannot reconnect there. An address
+carried, so a client that still holds a cached answer naming it cannot reconnect there. A scenario
+can restart that listener on its still-reserved port to let the same client reconnect while its
+target node stays up; the CLI clock process scenario uses this to observe reattachment after a
+transport loss without changing the node's clock installation. An address
 the scenario names without a forwarder refuses connections on that port. The TLS
 certificate the harness gives its containerized dependencies names `localhost`, `127.0.0.1` and
 `*.nervix.test`, so a dependency reached through a zone name presents a certificate for the name
