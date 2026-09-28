@@ -82,3 +82,13 @@ pub type ConfiguredFaultInjection = fault_injection::FaultInjection;
 pub struct ConfiguredFaultInjection {
     _marker: (),
 }
+
+#[cfg(not(feature = "testing"))]
+impl ConfiguredFaultInjection {
+    pub(crate) const fn gossip_send_delay(
+        &self,
+        _destination: &nervix_models::ClusterNodeName,
+    ) -> Option<std::time::Duration> {
+        None
+    }
+}

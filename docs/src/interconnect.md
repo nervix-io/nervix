@@ -97,7 +97,8 @@ destinations. A restarted process has a new incarnation and does not inherit the
 
 The failure detector retains dead process identities separately from the live peer view. Explicit
 Raft member removal uses the newest observed live or dead identity to fence the stopped process;
-dead identities never make a peer eligible for admission, transport, or placement.
+dead identities alone never make a peer eligible for membership admission. Scheduling can retain an
+already established health target while gossip liveness lapses, as described below.
 
 Connections are directed. Both nodes in a pair build their own outbound connections because some
 operations, including relay acknowledgements and cluster events, travel back over the receiver's
@@ -639,9 +640,15 @@ incarnations but does not replace application health checks. Gossip payloads rem
 management-event bound, so discovery cannot allocate an arbitrary wire message. A node that cannot
 take an exchange answers with a typed refusal rather than text: the message exceeds the gossip
 bound, the sending node could not be registered as an outbound peer, or its gossip receiver has
-shut down. A node that is shutting down closes its gossip transport before it stops gossip, so an
-exchange still waiting on a peer that stopped first ends at once instead of holding shutdown until
-its one-second deadline.
+shut down. Chitchat hands each outgoing datagram to a four-message queue for that destination. One
+worker per destination drives its interconnect requests in order, under the one-second request
+deadline; an unreachable peer therefore cannot hold the gossip loop while it receives from or sends
+to healthy peers. A full destination queue drops its newest datagram, and the next gossip round
+retries. Closing the transport cancels queued work and exchanges in flight.
+
+Each node's Chitchat live set is its own failure-detector estimate. An isolated peer can remain
+listed live until its missing heartbeats are observed, even after its links stop carrying requests;
+application probes provide the separate signal that eventually makes its work eligible for failover.
 
 Chitchat continues to select known dead peers for exchanges during its 24-hour dead-node retention
 period. When application health has retired one of those peers from the outbound pool, a gossip
@@ -665,10 +672,9 @@ endpoint appears. [Leader Discovery, Redirect, And
 Reconnect](./client-session-protocol.md#leader-discovery-redirect-and-reconnect) defines how
 clients follow it.
 
-Terminal teardown closes the gossip exchange path before it asks the gossip loop to stop. The loop
-reads its stop request only between rounds, and a round exchanges with each selected peer in turn
-under a one-second request timeout. Closing the path first makes an exchange still waiting on a
-peer that is itself stopping fail at once, instead of holding teardown for the rest of the round.
+Terminal teardown closes the gossip exchange path before it asks the gossip loop to stop. Closing
+the path first cancels destination workers and their queued or in-flight requests, so a peer that is
+itself stopping cannot hold teardown until an exchange deadline.
 
 Session subscription interest also propagates through gossip. The key encoding is private to the
 cluster layer: whenever the live-node state watcher changes, each node rebuilds an immutable index
@@ -885,9 +891,11 @@ An established HTTP/2 connection and a successful transport `PING` show that byt
 do not show that the peer application can accept work. Nervix therefore probes application health
 through a typed management request with reserved liveness capacity.
 
-A peer becomes a health target and an outbound target only while its interconnect endpoint is
-available. One whose endpoint is unavailable is neither probed nor dialled, and its availability
-stays unknown until discovery publishes an endpoint for it.
+A peer becomes a health target and an outbound target once discovery publishes its interconnect
+endpoint. A target with no usable endpoint is neither probed nor dialled, and its availability stays
+unknown until discovery publishes one. A previously established target remains eligible for probes
+and outbound connections through a temporary Chitchat liveness loss. A different incarnation or
+advertised endpoint must establish a new target.
 
 Each health round has at most one probe in flight for each peer and at most 32 probes across the
 node. A probe has a one-second total deadline. Results are published as they complete, so a silent
@@ -906,11 +914,12 @@ Health observations distinguish:
   including a target whose advertised host does not resolve.
 - **Capacity exhausted:** the probe could not obtain its reserved local capacity.
 
-A missing, stale, or capacity-exhausted observation produces unknown availability. It
-does not mark a peer unavailable and does not extend a previous run of failures. Only continuous,
-fresh failures for the configured node-unavailability interval produce unavailable status; a healthy
-observation resets that run. Scheduling and runtime availability use this application result, while
-consensus membership continues to use the cluster topology established by gossip.
+A missing, stale, or capacity-exhausted observation produces unknown availability. It does not mark
+a peer unavailable and does not extend a previous run of failures. Only continuous, fresh failures
+for the configured node-unavailability interval produce unavailable status; a healthy observation
+resets that run. Scheduling and runtime availability retain a previously discovered incarnation
+through a temporary gossip loss until application health marks it unavailable. Consensus membership
+continues to use the cluster topology established by gossip.
 
 `SHOW CLUSTER STATUS` exposes the interconnect address, endpoint generation, observation age,
 observation outcome, and derived availability. Its `connected` status means the latest application
