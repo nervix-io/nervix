@@ -185,8 +185,10 @@ pub(crate) struct LookupRuntime {
 
 #[derive(Debug, Clone)]
 pub(super) struct ObservedDomainTick {
+    pub(super) generation: u64,
     pub(super) tick_id: u64,
-    pub(super) wall_clock: Timestamp,
+    pub(super) logical_boundary: Timestamp,
+    pub(super) authority_utc: Timestamp,
 }
 
 #[derive(Debug)]
@@ -197,7 +199,7 @@ pub(super) struct RuntimeDomainState {
     pub(super) last_start: nervix_models::DomainStartPoint,
     pub(super) clock_authority: DomainClockAuthority,
     pub(super) clock: DomainClockLifecycle,
-    pub(super) progress: parking_lot::Mutex<Option<ObservedDomainTick>>,
+    pub(super) progress: watch::Sender<Option<ObservedDomainTick>>,
 }
 
 impl Runtime {
@@ -305,7 +307,7 @@ impl Runtime {
                     last_start: state.last_start.clone(),
                     clock_authority: authority.clone(),
                     clock,
-                    progress: parking_lot::Mutex::new(None),
+                    progress: watch::channel(None).0,
                 }
             });
             let generation_changed = entry.start_version != state.start_version;
@@ -316,7 +318,7 @@ impl Runtime {
             entry.clock_authority = authority.clone();
             entry.clock.synchronize(state, &authority);
             if generation_changed || matches!(state.status, nervix_models::DomainStatus::Stopped) {
-                *entry.progress.lock() = None;
+                entry.progress.send_replace(None);
             }
         }
         self.inner.domain_status_changed.send_modify(|version| {
@@ -986,7 +988,7 @@ mod tests {
                 .get(&domain("paced"))
                 .expect("domain should remain")
                 .progress
-                .lock()
+                .borrow()
                 .as_ref()
                 .map(|progress| progress.tick_id),
             Some(1)

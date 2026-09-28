@@ -321,9 +321,9 @@ Choose checks relevant to the configured graph:
 - `CREATE SUBSCRIPTION ...` checks live relay output without modifying the graph. A subscription
   ends when its relay is redefined or removed; create it again to read the current definition.
 - `ATTACH DOMAIN CLOCK;` shows the active domain's `START` generation and clock state, including a
-  paced domain's committed origin, UTC anchor, and rate, then reports each change until
-  `DETACH DOMAIN CLOCK;`. Use it when paced ingestion rejects `TIMESTAMP AT` values: the mapping
-  determines which logical tick centers the admission window has reached.
+  paced domain's committed origin, UTC anchor, and rate, then reports each state change and newest
+  accepted tick until `DETACH DOMAIN CLOCK;`. Use it when paced ingestion rejects `TIMESTAMP AT`
+  values: the mapping and tick frontier show which logical centers the admission window has reached.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.
 - `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
   expiry outcomes.

@@ -136,15 +136,21 @@ An attachment moves through one lifecycle:
   the domain precedes it. A second attach is refused as already attached, and a domain the serving
   node does not have is refused as not found. When the reply cannot be delivered, because the
   request was cancelled, the session ended, or the reply did not fit the session limits, the
-  attachment is abandoned before it delivers anything.
+  attachment is abandoned before it delivers anything. If the installation has not changed and the
+  node already holds a tick of that generation, its newest tick is the first frame after the reply.
 - **Following.** Each later change of the installed clock arrives as a `DomainClockObserved` frame
   carrying the new clock: `STOP` delivers stopped, a `START` delivers its generation and mapping,
   and a paced generation left without an assigned clock authority delivers uninstalled, then its
   mapping again once an authority is assigned. A frame carries the clock installed when it is sent.
   Changes made while an earlier frame waits for room on the session arrive together as the newest
   clock, and a change that leaves the clock as the client last received it sends nothing: moving the
-  authority to another node and the pause that alters a running model are not observed. Tick
-  progress is not delivered; a client projects logical time from the mapping, as every node does.
+  authority to another node and the pause that alters a running model are not observed. For a paced
+  installation, each newer accepted tick arrives as a `DomainClockTicked` frame with its generation,
+  one-based id, logical boundary, the authority's UTC observation, and the serving node's own
+  logical reading taken when it built the frame. A tick of a new generation follows that
+  generation's state frame. Ticks are replaceable on the control lane: each attached domain holds
+  at most one queued tick, updated to the newest while the client is slow. Tick ids may skip after
+  coalesced periods. An unpaced or uninstalled clock emits no ticks.
 - **Detached.** `DETACH DOMAIN CLOCK` stops delivery before its reply, so nothing about the domain
   follows the reply. A detach without an attachment is refused as not attached.
 - **Ended by the server.** When the domain no longer exists on the serving node, the session

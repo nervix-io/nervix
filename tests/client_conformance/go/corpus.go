@@ -443,6 +443,14 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 			return nil, err
 		}
 		return []string{"EVENT DOMAIN_CLOCK domain=" + string(observed.Domain()), line}, nil
+	case session.ServerBodyDomainClockTicked:
+		ticked := new(session.DomainClockTicked)
+		if err := union(message.Body, ticked); err != nil {
+			return nil, err
+		}
+		return []string{fmt.Sprintf("EVENT DOMAIN_CLOCK_TICK domain=%s generation=%d id=%d boundary=%d authority_utc=%d serving_logical=%d",
+			ticked.Domain(), ticked.Generation(), ticked.TickId(), ticked.LogicalBoundaryUnixNanos(),
+			ticked.AuthorityUtcUnixNanos(), ticked.ServingLogicalUnixNanos())}, nil
 	case session.ServerBodyDomainClockAttachmentEnded:
 		ended := new(session.DomainClockAttachmentEnded)
 		if err := union(message.Body, ended); err != nil {

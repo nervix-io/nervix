@@ -886,6 +886,10 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
       const observed = member(message.body(new wire.DomainClockObserved()) as wire.DomainClockObserved | null);
       return [`EVENT DOMAIN_CLOCK domain=${observed.domain()}`, clockLine(member(observed.clock()))];
     }
+    case wire.ServerBody.DomainClockTicked: {
+      const ticked = member(message.body(new wire.DomainClockTicked()) as wire.DomainClockTicked | null);
+      return [`EVENT DOMAIN_CLOCK_TICK domain=${ticked.domain()} generation=${ticked.generation()} id=${ticked.tickId()} boundary=${ticked.logicalBoundaryUnixNanos()} authority_utc=${ticked.authorityUtcUnixNanos()} serving_logical=${ticked.servingLogicalUnixNanos()}`];
+    }
     case wire.ServerBody.DomainClockAttachmentEnded: {
       const ended = member(
         message.body(new wire.DomainClockAttachmentEnded()) as wire.DomainClockAttachmentEnded | null,
