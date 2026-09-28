@@ -1222,6 +1222,47 @@ async fn then_http_receiver_request_repeats_request(
     );
 }
 
+/// Compares receipt times after both requests have arrived. The receiver records the first time
+/// before delaying its response, so this measures serialization without racing a silence window.
+#[then(expr = "HTTP receiver {string} request {int} arrived at least {string} after request {int}")]
+async fn then_http_receiver_requests_have_minimum_gap(
+    world: &mut ScenarioWorld,
+    name: String,
+    later: usize,
+    minimum_gap: String,
+    earlier: usize,
+) {
+    let minimum_gap = humantime::parse_duration(&minimum_gap)
+        .assured("the Cucumber expression supplies a valid minimum gap duration");
+    let later_request = captured_http_request(world, &name, later);
+    let earlier_request = captured_http_request(world, &name, earlier);
+    let Some(gap) = later_request
+        .received_at
+        .checked_duration_since(earlier_request.received_at)
+    else {
+        panic!("HTTP receiver '{name}' request {later} arrived before request {earlier}");
+    };
+    assert!(
+        gap >= minimum_gap,
+        "HTTP receiver '{name}' request {later} arrived {gap:?} after request {earlier}, below \
+         the {minimum_gap:?} minimum"
+    );
+}
+
+#[then(expr = "HTTP receiver {string} request {int} has no header {string}")]
+async fn then_http_receiver_request_has_no_header(
+    world: &mut ScenarioWorld,
+    name: String,
+    position: usize,
+    header: String,
+) {
+    let request = captured_http_request(world, &name, position);
+    assert!(
+        request.header_values(&header).is_empty(),
+        "HTTP receiver '{name}' request {position} unexpectedly carries '{header}':\n{request}"
+    );
+}
+
 /// Asserts that one captured request, counted from 1, carries exactly one nonempty `header` and a
 /// body containing `fragment`, for a request whose values are generated and so cannot be named.
 #[then(
