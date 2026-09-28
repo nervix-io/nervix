@@ -1,0 +1,24 @@
+SET 'parallelism.default' = '{{ lane_count }}';
+
+CREATE TABLE benchmark_input (
+  `value` STRING
+) WITH (
+  'connector' = 'kafka',
+  'topic' = '{{ input_topic }}',
+  'properties.bootstrap.servers' = '{{ kafka_bootstrap_servers }}',
+  'properties.group.id' = '{{ consumer_group }}',
+  'scan.startup.mode' = 'earliest-offset',
+  'format' = 'json'
+);
+
+CREATE TABLE benchmark_output (
+  `value` STRING
+) WITH (
+  'connector' = 'kafka',
+  'topic' = '{{ output_topic }}',
+  'properties.bootstrap.servers' = '{{ kafka_bootstrap_servers }}',
+  'format' = 'json'
+);
+
+INSERT INTO benchmark_output
+SELECT `value` FROM benchmark_input;

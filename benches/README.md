@@ -1,8 +1,8 @@
 # End-to-end benchmark framework
 
-The benchmark harness runs the same declared streaming workload against Nervix or a competitive
-implementation. Each run gets fresh Testcontainers dependencies, fresh Kafka topics, a unique
-consumer group, a high-rate idempotent producer, a timed steady-state warm-up, and a bounded wait
+The benchmark harness runs the same declared streaming workload against Nervix, Vector, or Flink.
+Each run gets fresh Testcontainers dependencies, fresh Kafka topics, a unique consumer group,
+a high-rate idempotent producer, a timed steady-state warm-up, and a bounded wait
 for the stable output the workload's declared load shape expects. Nothing depends on the
 repository's long-lived Docker Compose stack.
 
@@ -21,7 +21,8 @@ quarters of records whose value carries the retain marker, drop the duplicate of
 aggregate the survivors into tumbling windows, and publish one JSON summary per closed window. Its
 measured path is ingestor → deduplicator → window processor → emitter.
 
-Both workloads have `nervix` and `vector` implementations.
+All six Kafka workloads have `nervix`, `vector`, and `flink` implementations. The four `hot-path-*`
+workloads cover direct ingestion, a mapped processor, four-way fanout, and remote delivery.
 
 ## Running implementations
 
@@ -43,6 +44,18 @@ Run Vector 0.57.0 from its pinned official Debian image:
 ```bash
 just benchmark run kafka-filter-map --implementation vector
 ```
+
+Build Flink 2.0.1 with the matching Kafka SQL connector and run it:
+
+```bash
+just benchmark-flink-image
+just benchmark run kafka-filter-map --implementation flink
+```
+
+The local and CI `run-all` recipes build the Flink image before starting the catalog. The Flink
+container starts a local JobManager and TaskManager, submits the rendered SQL job, and signals
+readiness only after the job reaches `RUNNING`. Flink assigns Kafka partitions directly, so its
+manifests disable the consumer-group membership precheck; the output parity gate remains required.
 
 Build the local Nervix binaries once and run every workload implementation in catalog order:
 
@@ -67,8 +80,8 @@ The underlying image-only entry point is available for reproducing that CI path:
 just benchmark-ci nervix:runtime target/benchmarks
 ```
 
-The generic `benchmark` recipe only builds the harness. This keeps competitive runs from compiling
-the Nervix server unnecessarily.
+The generic `benchmark` recipe only builds the harness. Use `benchmark-nervix-local` when the
+current server binary also needs to be built.
 
 Override common load fields or workload parameters on any run:
 
@@ -86,8 +99,10 @@ overrides that policy for reproduction or smoke testing.
 
 Nervix consumes the flush values directly as NSPL durations and binary sizes. The runner derives
 Vector's `batch.timeout_secs`, `batch.max_bytes`, and `end_every_period_ms` from those same
-settings. Vector measures its native maximum before serialization, while Nervix limits an Arrow
-batch, so reports retain the native values and should not imply byte-for-byte equivalence.
+settings. Flink uses its native Kafka producer and SQL operators; its source and sink batching
+cannot be equated to Nervix route flushes or Vector sink batches. Reports retain each product's
+native settings. Vector measures its native maximum before serialization, while Nervix limits an
+Arrow batch, so byte caps do not imply byte-for-byte equivalence.
 
 `kafka-filter-map` also exposes `ingestor_mode`, the ingestor's whole `MODE` clause, so the same
 graph can be measured under acknowledgement instead of the `NO_ACK PARALLEL` default. The clause
@@ -99,13 +114,21 @@ just benchmark-ab main 5 kafka-filter-map \
   --parameter "'ingestor_mode=ACK PARALLEL MAX 1024 BATCH TIMEOUT 10ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s'"
 ```
 
-`kafka-dedup-window` matches its two implementations on the same drop rate and the same aggregate,
-not on identical internals. Vector's `dedupe` evicts by cache size where Nervix expires by
-`MAX TIME`, and Vector's `reduce` closes on a period where a Nervix window closes on whichever of
-its message and duration bounds is met first; the Nervix window also retains the records it
-buffered, which Vector's running sum does not. Sizing the Vector cache above the live keyspace and
-matching the period to `window_max_delay` makes both graphs produce the same record total, which is
-what parity checks.
+`kafka-dedup-window` matches the drop rate and summed record count across all three implementations.
+Vector's `dedupe` evicts by cache size; Nervix deduplication expires by `MAX TIME`. Vector's
+`reduce` closes periodically. The Nervix window closes when its message or duration bound is met
+and retains buffered records. The Vector cache is sized above the live keyspace, and its period
+matches `window_max_delay`, so both produce the record total that parity checks. Flink uses
+processing-time `ROW_NUMBER` deduplication and a tumbling SQL window of `window_max_delay`; it has
+no `window_messages` closure bound. The optional Nervix sketch and the NSPL-only
+`transform_expression` override are not comparable competitor settings; use the manifest defaults
+for three-way comparisons.
+
+The `hot-path-remote-delivery` Nervix graph places the source and destination on different nodes.
+The Vector and Flink graphs exercise the same Kafka input-to-output contract in one container but
+do not add a corresponding remote hop. Treat their rates as Kafka pipeline references, not
+remote-delivery throughput comparisons. The fanout graphs each produce four output records per
+input; Vector attaches four sinks, while Flink duplicates rows with a four-value cross join.
 
 ## Load shapes
 
@@ -328,10 +351,15 @@ config_path = "/etc/product/config.yaml"
 command = ["--config", "/etc/product/config.yaml"]
 readiness_port = 8686
 readiness_path = "/health"
+require_consumer_group_membership = true
+# Optionally also wait for a startup marker printed after a submitted job is running.
+readiness_log = "BENCHMARK_READY"
+# Set membership to false when the source assigns Kafka partitions without joining a group.
 ```
 
 Templates receive `kafka_bootstrap_servers`, `input_topic`, `output_topic`, `consumer_group`, the
-integer `lanes` list resolved from the run's partition count, the manifest's `parameters`, and a
+integer `lanes` list and `lane_count` resolved from the run's partition count, the manifest's
+`parameters`, and a
 `dependencies` map containing every started endpoint by its Cucumber key. Container
 implementations join Kafka's run-scoped Docker network; a local Nervix process receives Kafka's
 random host port instead. A multi-node Nervix implementation receives one certificate and state
@@ -349,8 +377,9 @@ output count.
 
 The `hot-path-ingest`, `hot-path-relay-fanout`, `hot-path-remote-delivery`, and
 `hot-path-processor` workloads use `--partitions` as the number of concurrent publishers. The
-remote-delivery workload starts two nodes and pins its ingestors and destination relay on opposite
-nodes. Run them with 1, 4, and 16 partitions to reproduce the contentionless data-plane matrix.
+remote-delivery Nervix graph starts two nodes and pins its ingestors and destination relay on
+opposite nodes. Run the Nervix cases with 1, 4, and 16 partitions to reproduce the contentionless
+data-plane matrix.
 
 ## Results
 

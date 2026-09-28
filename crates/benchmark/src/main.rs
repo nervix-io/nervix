@@ -610,6 +610,15 @@ async fn execute_run(
             resolved,
             &host_bootstrap,
             &mut subject,
+            match implementation {
+                Implementation::Nervix(_) => resolved.partitions,
+                Implementation::Container(container)
+                    if container.require_consumer_group_membership =>
+                {
+                    resolved.partitions
+                }
+                Implementation::Container(_) => 0,
+            },
         )
         .await
     }
@@ -1018,6 +1027,7 @@ async fn start_container_subject(
     let readiness_port = implementation.readiness_port.map(ContainerPort::Tcp);
     let mapped_ports = readiness_port.into_iter().collect::<Vec<_>>();
     let readiness_path = implementation.readiness_path.clone();
+    let readiness_log = implementation.readiness_log.clone();
     let command = implementation.command.clone();
     let network = docker_network.to_string();
     let configuration = rendered.as_bytes().to_vec();
@@ -1036,6 +1046,9 @@ async fn start_container_subject(
                             .with_port(port)
                             .with_expected_status_code(200_u16),
                     ));
+                }
+                if let Some(message) = readiness_log.as_deref() {
+                    image = image.with_wait_for(WaitFor::message_on_stdout(message));
                 }
                 let request = image
                     .with_network(network.clone())
@@ -1337,6 +1350,7 @@ async fn run_load_driver(
     resolved: &ResolvedRun,
     bootstrap_servers: &str,
     subject: &mut Subject,
+    minimum_consumers: u32,
 ) -> Result<()> {
     let load_driver = match &args.options.workload.load_driver {
         Some(path) => absolute_or_repository_path(repository_root, path),
@@ -1364,7 +1378,7 @@ async fn run_load_driver(
             "--consumer-group",
             &resolved.consumer_group,
             "--minimum-consumers",
-            &resolved.partitions.to_string(),
+            &minimum_consumers.to_string(),
             "--duration-seconds",
             &resolved.duration_seconds.to_string(),
             "--warmup-seconds",

@@ -625,10 +625,6 @@ impl BenchmarkRunner {
     fn new(args: CommonArgs, shape: LoadShape) -> Result<Self> {
         ensure!(args.duration_seconds > 0, "duration must be positive");
         ensure!(args.warmup_seconds > 0, "warm-up duration must be positive");
-        ensure!(
-            args.minimum_consumers > 0,
-            "minimum consumer count must be positive"
-        );
         ensure!(args.value_bytes > 0, "value byte count must be positive");
         ensure!(
             args.max_backlog_messages > 0,
@@ -1167,6 +1163,9 @@ impl BenchmarkRunner {
     }
 
     fn wait_for_consumer_group(&self) -> Result<()> {
+        if self.args.minimum_consumers == 0 {
+            return Ok(());
+        }
         let deadline = Instant::now() + self.wait_timeout;
         let mut stable_since = None;
         loop {

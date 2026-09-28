@@ -1,0 +1,49 @@
+api:
+  enabled: true
+  address: 0.0.0.0:8686
+
+acknowledgements:
+  enabled: false
+
+healthchecks:
+  enabled: true
+  require_healthy: true
+
+sources:
+{% for lane in lanes %}
+  kafka_in_{{ lane }}:
+    type: kafka
+    bootstrap_servers: "{{ kafka_bootstrap_servers }}"
+    group_id: "{{ consumer_group }}"
+    topics:
+      - "{{ input_topic }}"
+    auto_offset_reset: earliest
+    decoding:
+      codec: json
+      json:
+        lossy: false
+{% endfor %}
+
+sinks:
+{% for consumer in parameters.consumers %}
+  kafka_out_{{ consumer }}:
+    type: kafka
+    inputs:
+{% for lane in lanes %}
+      - kafka_in_{{ lane }}
+{% endfor %}
+    bootstrap_servers: "{{ kafka_bootstrap_servers }}"
+    topic: "{{ output_topic }}"
+    compression: none
+    batch:
+      max_bytes: {{ parameters.emitter_max_batch_bytes }}
+      timeout_secs: {{ parameters.emitter_flush_seconds }}
+    encoding:
+      codec: json
+      only_fields:
+        - value
+    healthcheck:
+      enabled: true
+    librdkafka_options:
+      enable.idempotence: "true"
+{% endfor %}

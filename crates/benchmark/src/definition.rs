@@ -99,6 +99,8 @@ pub enum DefinitionError {
          without whitespace"
     )]
     ContainerReadinessPath { implementation: String },
+    #[error("container implementation '{implementation}' readiness_log must not be empty")]
+    ContainerReadinessLog { implementation: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -167,6 +169,8 @@ pub struct ContainerImplementation {
     pub command: Option<Vec<String>>,
     pub readiness_port: Option<u16>,
     pub readiness_path: Option<String>,
+    pub readiness_log: Option<String>,
+    pub require_consumer_group_membership: bool,
 }
 
 #[derive(Deserialize)]
@@ -186,6 +190,8 @@ enum SerializedImplementation {
         command: Option<Vec<String>>,
         readiness_port: Option<u16>,
         readiness_path: Option<String>,
+        readiness_log: Option<String>,
+        require_consumer_group_membership: bool,
     },
 }
 
@@ -211,6 +217,8 @@ impl<'de> Deserialize<'de> for Implementation {
                 command,
                 readiness_port,
                 readiness_path,
+                readiness_log,
+                require_consumer_group_membership,
             } => Self::Container(ContainerImplementation {
                 image,
                 template,
@@ -218,6 +226,8 @@ impl<'de> Deserialize<'de> for Implementation {
                 command,
                 readiness_port,
                 readiness_path,
+                readiness_log,
+                require_consumer_group_membership,
             }),
         })
     }
@@ -498,6 +508,11 @@ impl ContainerImplementation {
                 implementation: name.to_string(),
             }));
         }
+        if self.readiness_log.as_ref().is_some_and(String::is_empty) {
+            return Err(Report::new(DefinitionError::ContainerReadinessLog {
+                implementation: name.to_string(),
+            }));
+        }
         Ok(())
     }
 }
@@ -556,6 +571,8 @@ mod tests {
             command: None,
             readiness_port: Some(8686),
             readiness_path: Some("/health".to_string()),
+            readiness_log: None,
+            require_consumer_group_membership: true,
         }
     }
 
@@ -857,6 +874,15 @@ mod tests {
                     ..container()
                 },
                 DefinitionError::ContainerReadinessPath {
+                    implementation: implementation(),
+                },
+            ),
+            (
+                ContainerImplementation {
+                    readiness_log: Some(String::new()),
+                    ..container()
+                },
+                DefinitionError::ContainerReadinessLog {
                     implementation: implementation(),
                 },
             ),
