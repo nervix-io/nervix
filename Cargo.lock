@@ -7575,6 +7575,7 @@ dependencies = [
 name = "nervix-wasm-protocol"
 version = "0.1.0-dev"
 dependencies = [
+ "error-stack",
  "flatbuffers",
  "flatc-rust",
  "meticulous",
@@ -7588,6 +7589,7 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
+ "error-stack",
  "meticulous",
  "nervix-wasm-protocol",
  "thiserror 2.0.21",

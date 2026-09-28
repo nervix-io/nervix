@@ -249,6 +249,8 @@ relay. Do not use them to scan across branches.
 - Every custom WASM guest is built for the current ABI, accepts
   `nervix_process_batch(ptr, size)`, validates that exact range against its reusable buffer, and
   declares positive `MAX FUEL` then `MAX MEMORY` limits immediately after `FILE`. Its
+  Rust `nervix-wasm-sdk` `Processor` callbacks return `error_stack::Result<_, GuestError>`;
+  follow the `Rust WASM Guest SDK` chapter for the callback contract. Its
   `nervix_dump_state` saves only durable computation state, never buffered input, ACK tokens,
   pending output, timeout handles, or latched error state, and reports a failed save with a
   negative code, after which Nervix keeps the state saved last. Its `nervix_load_state` rejects

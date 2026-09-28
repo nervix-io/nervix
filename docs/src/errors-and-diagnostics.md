@@ -46,6 +46,16 @@ Jaq returns `JaqProgramError` or `JaqFormatError` reports for compilation, evalu
 conversion. A codec or runtime caller retains that report under its operation context. VM row
 errors remain typed values in the batch outcome and are formatted only when a message error is
 reported; this conversion does not turn them into report allocations per row.
+
+The WASM FlatBuffers decoder reports protocol failures with their verified payload cause. The Rust
+guest SDK retains that report beneath its envelope or snapshot meaning, and its `Processor`
+callbacks return guest-error reports. It renders a failure only when returning an ABI code or
+global-error reason; rejected snapshot bytes and rejected application state keep their distinct
+codes and text. The host retains a typed guest-call cause beneath the failed operation, so its
+runtime caller can still distinguish a resource limit, invalid emission, and a saved-state verdict
+without classifying a rendered string. Callback and checkpoint acknowledgement decisions stay the
+same; [WASM State And Recovery](./wasm-state.md) owns those boundaries.
+
 HTTP request-field compilation retains the VM report beneath the emitter's request-field context
 and attaches its safe message for diagnostics; an invalid request program never starts the sink.
 
