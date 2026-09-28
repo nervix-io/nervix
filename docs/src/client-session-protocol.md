@@ -505,9 +505,11 @@ The leader serializes the requests that carry one reference, then consults its r
 - **Applying.** The request joins the admitted execution and waits for it. After a leader change,
   the new leader resumes every applying record on its own in its next reconciliation pass, which
   runs every 250 milliseconds, so the work completes whether or not anyone repeats it.
-- **Finished.** The request returns the retained outcome once that outcome is authoritative on every
-  live node. If that wait fails, the reply is `OutcomeUnknown` with cause `NotYetAuthoritative`, and
-  a later repetition returns the outcome.
+- **Finished.** The request returns the retained outcome once that outcome is authoritative on each
+  node in the leader's current completion participant set. The leader can retire an unreachable
+  node from that set; the node must catch up before its local reads reflect the completed effect.
+  If the wait fails, the reply is `OutcomeUnknown` with cause `NotYetAuthoritative`, and a later
+  repetition returns the outcome.
 
 The first reply is itself rebuilt from the durable record, so the reply to the original attempt and
 the reply to a repetition are identical except for their origin. The record keeps the disposition,
@@ -682,11 +684,12 @@ and a `COMMITTING` transaction continues without its client.
 
 **Read consistency.** A read, such as `SHOW`, `DESCRIBE`, or `LOOKUP`, is served by the node the
 session is on from its locally applied replicated state; it is not a linearizable read. Once a
-command completes, its effect is applied on every live node, so a read issued afterwards through any
-node observes it. Completion for a session bound to a transaction resolves against the committed
-configuration with the session's own queued statements applied, while every other session sees
-committed configuration alone. Inspecting a transaction reads it without changing its binding,
-domain, activity, or queue position.
+command completes, its effect is applied on every node in the leader's completion participant set,
+so a later read through one of those nodes observes it. A node the leader has retired can still
+serve an older local state until it catches up. Completion for a session bound to a transaction
+resolves against the committed configuration with the session's own queued statements applied,
+while every other session sees committed configuration alone. Inspecting a transaction reads it
+without changing its binding, domain, activity, or queue position.
 
 ## Leader Discovery, Redirect, And Reconnect
 
