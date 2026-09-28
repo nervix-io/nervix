@@ -1055,6 +1055,40 @@ async fn given_http_receiver_answers_unscripted_requests_with(
     http_receiver(world, &name).answer_unscripted_requests_with(response);
 }
 
+/// Gives every request for one exact target, its path and query, its own answer, which it takes
+/// instead of the script. Requests of independent branches or source relays have no order between
+/// them, so a scenario answers each of them by its target rather than by its position.
+#[given(expr = "HTTP receiver {string} answers requests for {string} with {string}")]
+async fn given_http_receiver_answers_requests_for_target(
+    world: &mut ScenarioWorld,
+    name: String,
+    target: String,
+    response: String,
+) {
+    let target = expand_placeholders(world, &target);
+    let response = match expand_placeholders(world, &response).parse::<ReceiverResponse>() {
+        Ok(response) => response,
+        Err(error) => panic!("invalid HTTP receiver response: {error}"),
+    };
+    http_receiver(world, &name).answer_requests_for(target, response);
+}
+
+/// Answers every request the receiver holds until released, and every one it holds later, with
+/// the named response. Until this step runs, such a request stays unresolved for as long as the
+/// scenario needs to observe it, bounded only by the client's own timeout.
+#[when(expr = "HTTP receiver {string} releases its held responses with {string}")]
+async fn when_http_receiver_releases_held_responses(
+    world: &mut ScenarioWorld,
+    name: String,
+    response: String,
+) {
+    let response = match expand_placeholders(world, &response).parse::<ReceiverResponse>() {
+        Ok(response) => response,
+        Err(error) => panic!("invalid HTTP receiver response: {error}"),
+    };
+    http_receiver(world, &name).release_held_responses(response);
+}
+
 #[then(expr = "HTTP receiver {string} eventually receives at least {int} request(s)")]
 async fn then_http_receiver_eventually_receives_requests(
     world: &mut ScenarioWorld,

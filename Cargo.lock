@@ -6616,6 +6616,7 @@ dependencies = [
  "async-trait",
  "error-stack",
  "httparse",
+ "httpdate",
  "meticulous",
  "nervix-connector",
  "nervix-dns",

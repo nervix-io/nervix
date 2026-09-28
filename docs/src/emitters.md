@@ -116,12 +116,14 @@ The shared variables are:
   duplicate on this path.
 - `RETRY POLICY BACKOFF <duration> MAX <duration>` is required by every mode. Infrastructure retry
   delays begin at `BACKOFF`, double on each attempt, and cap at `MAX`. A server-requested delay,
-  such as an HTTP rate-limit interval, can extend an individual delay. Retries continue with
-  backpressure until the external system recovers or an operator repairs its provisioning.
+  such as an HTTP rate-limit interval, can extend an individual delay; one the node's monotonic
+  clock cannot schedule extends nothing. Retries continue with backpressure until the external
+  system recovers or an operator repairs its provisioning.
 
-Request/response sinks—SQS, Sentry, OTEL, the databases, and Iceberg—do not take `ACK TIMEOUT`;
-their client request timeout bounds the response. SQS, Sentry, OTEL, and ClickHouse clients expose
-that bound as the optional `timeout_ms` CONFIG key. For every sink, Nervix accounts for records individually
+Request/response sinks—SQS, Sentry, OTEL, HTTP, the databases, and Iceberg—do not take
+`ACK TIMEOUT`; their client request timeout bounds the response. SQS, Sentry, OTEL, and ClickHouse
+clients expose that bound as the optional `timeout_ms` CONFIG key, and a client an HTTP emitter
+uses must declare it. For every sink, Nervix accounts for records individually
 wherever the transport exposes individual results: delivered records acknowledge upstream,
 definitively invalid records follow `ON MESSAGE ERROR`, and a retry resends only records that are
 neither delivered nor rejected. An ambiguous or infrastructure-wide failure is never used to
@@ -258,6 +260,45 @@ record through `ON MESSAGE ERROR`; later records proceed after that policy compl
 are never followed, `304` is not delivery, and `409` never implies an earlier delivery. Rejection
 diagnostics include the numeric status but no evaluated URL, header value, request body or response
 body.
+
+#### HTTP retries and acknowledgements
+
+A flush sends its requests in order and stops at the first one whose outcome is unresolved. That
+request and every request prepared after it stay retained, and records admitted while they wait
+queue behind them. A delivered request completes exactly its own record, and a rejected one resolves
+its record through `ON MESSAGE ERROR`; neither is sent again, even when its flush held other records
+that are retried. The retry resends the unresolved requests exactly as they were first sent, ahead
+of any request prepared later.
+
+Retries wait on the declared physical backoff: the first waits `BACKOFF`, each later one twice the
+previous wait up to `MAX`, and a flush that completes resets the wait to `BACKOFF`. There is no
+attempt limit; retrying continues until the request resolves or the emitter stops. A retryable
+status (`408`, `425`, `429`, `500`–`599`, `401`, `403` or `407`) whose final headers carry exactly
+one valid `Retry-After` field asks for a delay of its own: whole seconds, or an HTTP date in
+IMF-fixdate, RFC 850 or asctime form, compared with actual UTC when the response arrives. A date
+already past asks for no delay. The next attempt waits for the longer of that delay and the
+backoff, even beyond `MAX`, and the backoff sequence itself continues unchanged. A `Retry-After`
+that is missing, repeated in more than one field, malformed, such as fractional seconds, or
+unrepresentable, such as a delay ending after the year 2262, asks for nothing. `Retry-After` never
+turns a delivery or a rejection into a retry.
+
+The request timeout, the backoff and a `Retry-After` delay are physical. `TIME RATE` scales the
+emitter's `COLLECT FOR` and `FLUSH EACH` cadences and the domain time its expressions read, but
+never these waits, and `FLUSH IMMEDIATE` keeps its physical batching window.
+
+An `ATTACHED` emitter keeps the upstream acknowledgement of every unresolved request alive until
+the request resolves: a delivery acknowledges it, and a rejection leaves it to the emitter's
+message error policy. A `DETACHED` emitter acknowledges upstream at relay fan-out, yet still
+retries, keeps later work waiting behind an unresolved request, and routes rejections. Prepared
+requests and retry state live in memory only.
+
+An endpoint can apply a request whose outcome Nervix never learns: the response is lost, the
+connection fails, or the attempt times out after the endpoint acted. The retry then sends the same
+request again, so the endpoint can receive it twice. Nervix generates no idempotency key and does
+not interpret an endpoint's deduplication protocol. An endpoint that must recognize duplicates
+should receive a stable key taken from the record, such as
+`write_header('Idempotency-Key', input.event_id)`. A value generated during evaluation, such as
+`uuid_v4()`, stays the same across these retries but not across an upstream redelivery.
 
 `ALTER EMITTER ... SET TO HTTP` restates the complete method, path, mode and body selection.
 `SET CLIENT` changes the referenced client, `SET MODE` changes the retry policy, and `SET ENCODE
@@ -1425,6 +1466,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | ZeroMQ | Retry after socket send acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; socket send does not establish durable receiver storage | None |
 | Sentry | Retry after an ambiguous HTTP result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; an accepted event can still be subject to Sentry service policy | None |
 | OTEL | Retry after an ambiguous Export result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; `partial_success` acknowledges the whole request, so receiver-rejected records in that response are lost | None |
+| HTTP | Retry after a lost response, failed connection, or timeout following an endpoint that applied the request; a lost ACK or attached sibling failure | Any failure after detached relay acceptance; a `2xx` delivers on its headers, so an endpoint that later fails its own processing loses the record | None; the endpoint can deduplicate by a stable key the emitter writes with `write_header` |
 | ClickHouse | Retry after an ambiguous insert result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a crash after insert but before acknowledgement can also leave an inserted batch that later retries | None |
 | Postgres | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |
 | MySQL | Retry after an ambiguous transaction result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; a committed insert can survive a crash before Nervix observes success | `ON CONFLICT` |
