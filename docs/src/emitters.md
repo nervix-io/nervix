@@ -131,7 +131,7 @@ discard a record.
 | --- | --- | --- |
 | Kafka | `NO_ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | Local producer-queue acceptance for `NO_ACK`; one delivery report per record for `ACK` |
 | Pulsar | `NO_ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | Producer acceptance for `NO_ACK`; one broker receipt per record for `ACK` |
-| RabbitMQ | `NO_ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | Channel acceptance for `NO_ACK`; publisher confirm for `ACK` |
+| RabbitMQ | `NO_ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | The channel's answer to one round trip after each write for `NO_ACK`; publisher confirm for `ACK` |
 | MQTT | `QOS 0`; `QOS 1 ACK ...`; `QOS 2 ACK ...` | Client acceptance, `PUBACK`, or completion of the QoS 2 handshake respectively |
 | NATS | `NO_ACK`; `JETSTREAM ACK SEQUENTIAL`; `JETSTREAM ACK PARALLEL MAX <n>` | Core-NATS connection flush for `NO_ACK`; JetStream `PubAck` otherwise |
 | Redis Pub/Sub | `NO_ACK` | Server acceptance of `PUBLISH`; the subscriber count is not a delivery guarantee |
@@ -190,8 +190,46 @@ emitters publish one request per eligible source record, so they do not accept t
 `BATCH` clause. `SHOW CREATE EMITTER` preserves both request expressions and the explicit body
 selection.
 
-HTTP emitter configuration can currently be created, altered and inspected. Outbound request
-delivery is not yet available.
+#### HTTP requests
+
+An HTTP emitter sends one request for each eligible record. For each batch it admits, it resolves
+its materialized dependencies once and uses one execution snapshot, and every expression below
+reads that snapshot. Each record then passes, in order: its source `WHERE`; construction and
+finalization of its codec record; route `WHERE`; `METHOD`; `PATH`; and each `write_header`
+invocation as it is written. A record that route `WHERE` filters evaluates no request field and
+sends nothing, even when one of its request fields would fail.
+
+The first request field that fails rejects its record through `ON MESSAGE ERROR` before any part of
+its request is sent. A failed expression keeps its `evaluation` code; a value that is not a valid
+request field has the code `validation`. A method or path failure has the operation `publish` and
+names the request field, `method` or `path`, beside the fields its expression reads. A header write
+failure has the operation `invoke` and the zero-based position of its invocation. A record whose
+body the codec cannot encode when a flush releases it is rejected the same way with the operation
+`encode`. The message never quotes a method, target or header value. The error handler of every
+such rejection, and of any later rejection of an admitted request, reads the original input and the
+materialized state its batch was admitted with; with a codec it also reads the attempted record as
+`partial_output`.
+
+The method keeps its spelling. The request goes to exactly the normalized target: encoded
+separators such as `%2F`, repeated query parameters, a literal `+`, and the empty query of a
+trailing `?` stay as they are. Header names compare without ASCII case and a later write replaces an
+earlier value; an empty string is sent as an empty value. An invalid or reserved write rejects its
+record even when a later write would replace it, and the 128-header and 32 KiB bounds apply after
+every replacement. The body is exactly the bytes the codec produced, with no wrapper, array,
+newline, form encoding or compression added; Nervix adds no `Content-Type`, and a declared
+`Content-Encoding` does not transform the bytes. `WITHOUT BODY` sends zero content bytes.
+
+A prepared request, with its method, target, headers and body, is kept until the endpoint answers
+for it, so every retry resends it byte for byte: neither the request expressions nor the codec run
+again, including volatile calls such as `uuid_v4()`. Retained bodies occupy node memory, which
+memory pressure accounts for, until their requests complete.
+
+The emitter sends the requests of the records a flush releases one at a time and in order, and
+waits for each response's headers before it sends the next. The client's `timeout_ms` bounds each
+attempt. Complete `2xx` response headers deliver the record, and the response body is never read.
+No redirect is followed. Any other response, and any request that fails before its response
+headers arrive, fails the attempt: the emitter retries that request and every later one on its
+declared retry policy, and keeps their upstream acknowledgements alive until they complete.
 
 `ALTER EMITTER ... SET TO HTTP` restates the complete method, path, mode and body selection.
 `SET CLIENT` changes the referenced client, `SET MODE` changes the retry policy, and `SET ENCODE
@@ -369,6 +407,7 @@ counting what it writes around the payload:
 | Kafka | The producer's `message.max.bytes` client setting | The record key, headers and record overhead |
 | MQTT | The Maximum Packet Size the broker declared in its latest `CONNACK`, and the largest packet the protocol can express | The fixed header, topic, packet identifier and property length |
 | NATS | The `max_payload` the server announced | The message headers |
+| Pulsar | The `maxMessageSize` the broker announced when the producer's connection opened | The message metadata: the properties, the partition key and the producer's own fields |
 | SQS | 256 KiB | Message attribute names, types and values, and the FIFO message group |
 
 A batch message that does not fit is never written. Every member follows `ON MESSAGE ERROR` with
@@ -377,13 +416,32 @@ the limit, such as `mqtt rejected record: MQTT PUBLISH packet of 1200090 bytes e
 maximum packet size of 1048576 bytes`. The messages around it are still written. Declare a
 `MAX SIZE` that leaves room for the metadata to keep batches from reaching the limit.
 
-The remaining limits are not visible to the client. Pulsar's `maxMessageSize` and RabbitMQ's
-`max_message_size` are broker settings: a Pulsar broker refuses a larger message and RabbitMQ
-closes the channel it arrived on, and Nervix retries either as an infrastructure failure, so
-declare a `MAX SIZE` below them with room for the properties or headers. Redis rejects a value above its
-`proto-max-bulk-len` itself, and that rejection follows `ON MESSAGE ERROR` like the ones above.
-ZeroMQ fixes no limit; a receiving socket configured with a maximum message size drops a larger
-message after the sending socket has accepted it.
+A Pulsar broker announces its `maxMessageSize` on every connection, so a producer that reconnects
+to another broker checks against the new one's. A Pulsar topic can also set a smaller
+`maxMessageSize` policy of its own. Only the broker applies it, measuring the metadata and payload
+with ten bytes of framing, so such a message is written and refused afterwards. In `MODE ACK` the
+refusal rejects every member the same way, with the broker's reason, such as
+`pulsar rejected record: the Pulsar broker does not allow the message: Exceed maximum message
+size`. In `MODE NO_ACK` the message was already delivered when the producer accepted it, so the
+refusal is not observed.
+
+The remaining limits are not visible to the client. RabbitMQ's `max_message_size` is a broker
+setting that AMQP never tells a client, and the broker compares it with the message body alone. A
+batch message whose body is larger reaches the broker, which refuses it by closing the channel it
+arrived on and names the limit, and Nervix rejects the message on that answer, in every publishing
+mode: every member follows `ON MESSAGE ERROR` with code `external`, operation `publish` and one
+shared reference, and the message names the size and the limit, such as `rabbitmq rejected record:
+message body of 1200090 bytes exceeds the broker's max_message_size of 1048576 bytes`. The broker
+discards the messages written after the refused one with the channel, and Nervix writes them again
+on a new channel. A message written ahead of it that the broker had not confirmed yet may have
+reached its queue, as it can on a quorum queue, so the write then fails as an infrastructure
+failure, and its retry carries every message but the rejected one and those already confirmed.
+Headers do not count, so a `MAX SIZE` no larger than `max_message_size` keeps every batch message
+within it.
+
+Redis rejects a value above its `proto-max-bulk-len` itself, and that rejection follows
+`ON MESSAGE ERROR` like the ones above. ZeroMQ fixes no limit; a receiving socket configured with a
+maximum message size drops a larger message after the sending socket has accepted it.
 
 ## Altering emitters
 
@@ -602,6 +660,13 @@ TO PULSAR <client> TOPIC <topic>
 later broker errors; its throughput advantage may be smaller than Kafka's because Pulsar already
 pipelines producer work.
 
+A record whose message is larger than the `maxMessageSize` the broker announced for the producer's
+connection, counting its metadata and properties, follows `ON MESSAGE ERROR` in either mode: the
+producer refuses it before writing it, because the broker would close the connection and fail
+every message in flight on it. With `ACK`, a message the broker receives and refuses with
+`NotAllowedError`, such as one above the topic's own `maxMessageSize` policy, follows
+`ON MESSAGE ERROR` too, while any other broker error is retried.
+
 Pulsar emitters use the same client config surface as Pulsar ingestors:
 
 - `'addr'`: broker address such as `'pulsar://127.0.0.1:6650'`
@@ -622,7 +687,18 @@ TO RABBITMQ <client> QUEUE <queue>
 ```
 
 `ACK` enables publisher confirms and waits for the confirm of each message. A broker nack is an
-infrastructure failure and is retried with backpressure. `NO_ACK` acknowledges channel acceptance.
+infrastructure failure and is retried with backpressure. In `NO_ACK` the broker confirms nothing,
+so once a write's messages are on the channel, the emitter asks the channel for one round trip,
+which the broker answers only after it has taken every message written before it, and that answer
+acknowledges them. A `NO_ACK` write therefore waits for one round trip to the broker however many
+messages it carries, and a channel or connection lost before the answer leaves the write's messages
+to the retry.
+
+The broker's `max_message_size`, 16 MiB by default in RabbitMQ 4.x, bounds each message body;
+headers do not count. The broker closes the channel a larger body arrives on, and the emitter
+rejects that message through `ON MESSAGE ERROR` in either mode, instead of retrying it or
+acknowledging it, then keeps publishing on a new channel of the same connection; see
+[Broker and message emitters](#broker-and-message-emitters).
 
 The emitter resolves the host of the client's `addr` through the node's configured DNS resolver
 when it opens and whenever it reopens after a failed publish, so a changed DNS answer takes effect
@@ -1297,7 +1373,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | Kafka | `ACK` retry after an ambiguous delivery report or timeout; either mode after a lost upstream ACK or attached sibling failure | `NO_ACK` can lose a record after local producer-queue admission; broker durability follows Kafka client and topic configuration | None; Kafka producer idempotence is pass-through client configuration |
 | Pulsar | `ACK` retry after an ambiguous broker receipt; either mode after a lost upstream ACK or attached sibling failure | `NO_ACK` does not expose broker failures after producer acceptance; retention and durability remain broker policy | None |
 | NATS | JetStream retry after an ambiguous `PubAck`; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO_ACK` connection flush is not durable stream acknowledgement | None |
-| RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; either mode after a lost upstream ACK or attached sibling failure | `NO_ACK` can lose a record after channel acceptance; queue durability and message persistence remain broker policy | None |
+| RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO_ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | `NO_ACK` can lose a record after the broker's channel has taken it; queue durability and message persistence remain broker policy | None |
 | SQS | Retry after an ambiguous `SendMessage` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | None |
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
 | Redis Pub/Sub | Retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
@@ -1312,9 +1388,10 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 
 The [publishing-mode table](#publishing-modes) names each transport's exact completion point.
 `ATTACHED` waits only for that declared point and cannot make an earlier `NO_ACK` boundary durable.
-MQTT QoS 0, Core NATS, RabbitMQ `NO_ACK`, Redis Pub/Sub, and ZeroMQ can still lose a message after
-Nervix observes client-side acceptance. `DETACHED` cannot turn a confirming mode into
-fire-and-forget inside the emitter; it changes only whether the result participates upstream.
+MQTT QoS 0, Core NATS, Redis Pub/Sub, and ZeroMQ can still lose a message after Nervix observes
+client-side acceptance, and RabbitMQ `NO_ACK` after the broker's channel has taken it. `DETACHED`
+cannot turn a confirming mode into fire-and-forget inside the emitter; it changes only whether the
+result participates upstream.
 
 Emit a stable idempotency key at ingestion, for example with `uuid_v7()`, and carry it through the
 graph. Downstream consumers and queries can use that key to suppress retries within that admitted

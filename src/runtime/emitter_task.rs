@@ -3,8 +3,8 @@
 //! Layer: data plane.
 //! - **Owns.** Spawning an emitter task from its start plan, the loop that handles its commands,
 //!   force flushes, wakes and input batches, resolving each input batch's materialized state,
-//!   filters and ordering groups, the host context its connector reports through, and the
-//!   emitter's failure semantics.
+//!   filters, ordering groups and HTTP request fields, the host context its connector reports
+//!   through, and the emitter's failure semantics.
 //! - **Depends on.** The emitter's start plan and compiled programs, the relay interaction that
 //!   delivers its input, its buffer, retry schedule and publishing, and the node's metrics, events
 //!   and error policies.
@@ -51,6 +51,9 @@ struct EmitterBatchContext<'a> {
     source_filters: &'a HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
     filter_map: Option<&'a CompiledEmitterFilterMapProgram>,
     ordering_group: Option<&'a CompiledOrderingGroup>,
+    /// The request fields an HTTP emitter evaluates for every record its route keeps, absent for
+    /// every other sink.
+    http_requests: Option<&'a CompiledHttpRequestFields>,
     materialized_state: &'a [nervix_models::MaterializedStateDependency],
 }
 
@@ -106,6 +109,13 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     },
     #[error("emitter route kept source row {row} outside the {row_count} rows it has groups for")]
     OrderingGroupRowOutOfBounds { row: usize, row_count: usize },
+    #[error("emitter HTTP request count {request_count} does not match row count {row_count}")]
+    HttpRequestCountMismatch {
+        request_count: usize,
+        row_count: usize,
+    },
+    #[error("emitter batch row {row} has no HTTP request")]
+    MissingHttpRequest { row: usize },
     #[error("failed to select the ordering groups of the rows an emitter route kept")]
     SelectOrderingGroups,
     #[error("emitter delivered row {row} is outside batch with {row_count} rows")]
@@ -157,6 +167,8 @@ impl EmitterRuntimeError {
             | Self::HeaderCountMismatch { .. }
             | Self::OrderingGroupCountMismatch { .. }
             | Self::OrderingGroupRowOutOfBounds { .. }
+            | Self::HttpRequestCountMismatch { .. }
+            | Self::MissingHttpRequest { .. }
             | Self::SelectOrderingGroups
             | Self::DeliveryRowOutOfBounds { .. }
             | Self::AcknowledgementRowOutOfBounds { .. }
@@ -597,20 +609,54 @@ impl EmitterTask {
             None => input_schema.clone(),
         };
         let udfs = runtime.udf_executor(domain);
+        let compile_context = RuntimeVmCompileContext {
+            available_materialized_streams: &materialized_stream_specs,
+            available_lookups: &lookups,
+            current_branching: &input_branching,
+            udfs: udfs.as_ref(),
+        };
+        let route = match &plan.sink {
+            EmitterSinkPlan::Http(_) => EmitterRoute::HttpRequest,
+            _ => EmitterRoute::Declared,
+        };
         let filter_map = compile_emitter_filter_map_program(
             domain,
             &emitter,
-            input_schema.arrow_schema(),
-            input_schema.vm_sensitivity(),
-            output_compiled_schema.arrow_schema(),
-            output_compiled_schema.vm_sensitivity(),
-            RuntimeVmCompileContext {
-                available_materialized_streams: &materialized_stream_specs,
-                available_lookups: &lookups,
-                current_branching: &input_branching,
-                udfs: udfs.as_ref(),
+            route,
+            RuntimeVmSchemaPair {
+                input: input_schema.arrow_schema(),
+                input_sensitivity: input_schema.vm_sensitivity(),
+                output: output_compiled_schema.arrow_schema(),
+                output_sensitivity: output_compiled_schema.vm_sensitivity(),
             },
+            compile_context,
         )?;
+        let http_requests = match &plan.sink {
+            EmitterSinkPlan::Http(sink) => {
+                let output = codec.as_ref().map(|codec| RuntimeVmSchema {
+                    schema: codec.schema().arrow_schema(),
+                    sensitivity: codec.schema().vm_sensitivity(),
+                });
+                let compiled = CompiledHttpRequestFields::compile(
+                    &emitter.name,
+                    sink,
+                    HttpRequestSchemas {
+                        input: RuntimeVmSchema {
+                            schema: input_schema.arrow_schema(),
+                            sensitivity: input_schema.vm_sensitivity(),
+                        },
+                        output,
+                    },
+                    compile_context,
+                )
+                .map_err(|error| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("{error:#}"),
+                })?;
+                Some(compiled)
+            }
+            _ => None,
+        };
         let ordering_group = match plan.sink.ordering_group() {
             None => None,
             Some(declared) => Some(CompiledOrderingGroup::compile(
@@ -850,6 +896,7 @@ impl EmitterTask {
                 source_filters: &source_filters,
                 filter_map: filter_map.as_ref(),
                 ordering_group: ordering_group.as_ref(),
+                http_requests: http_requests.as_ref(),
                 materialized_state: &task_materialized_state,
             };
             let mut task_loop = EmitterTaskLoop {
@@ -1622,6 +1669,20 @@ impl EmitterBatchContext<'_> {
         };
 
         let Some(filter_map) = self.filter_map else {
+            if let Some(requests) = self.http_requests {
+                // Without a route an HTTP emitter sends no body, so every source record is one
+                // request.
+                return self
+                    .prepare_http_requests(
+                        requests,
+                        input_relay,
+                        batch,
+                        HttpRequestInput::Published,
+                        &materialized_values,
+                        execution_now,
+                    )
+                    .await;
+            }
             // Without a filter map every source row publishes as it arrived, so the groups
             // already align with the batch row for row.
             let publish_batch =
@@ -1629,6 +1690,12 @@ impl EmitterBatchContext<'_> {
             return self.with_ordering_groups(publish_batch, ordering_groups);
         };
 
+        // The request fields of an HTTP emitter with a codec body read the original source record
+        // of every finalized record its route keeps, and the route consumes the source batch.
+        let source_records = match (self.http_requests, filter_map.codec_route) {
+            (Some(_), true) => Some(SourceRecords::of(&batch)),
+            (Some(_), false) | (None, _) => None,
+        };
         let planned = plan_emitter_filter_map_batch(
             self.emitter,
             filter_map,
@@ -1651,6 +1718,26 @@ impl EmitterBatchContext<'_> {
         // A plan that kept no row has no batch to publish, and the rows it rejected have just
         // been reported.
         let batch = plan.batch?;
+        if let Some(requests) = self.http_requests {
+            let input = match source_records {
+                Some(records) => HttpRequestInput::Source {
+                    records,
+                    rows: plan.source_rows,
+                },
+                // A route without a codec only filters, so the rows it keeps are source records.
+                None => HttpRequestInput::Published,
+            };
+            return self
+                .prepare_http_requests(
+                    requests,
+                    input_relay,
+                    batch,
+                    input,
+                    &materialized_values,
+                    execution_now,
+                )
+                .await;
+        }
         let publish_batch =
             match EmitterPublishBatch::new(input_relay.clone(), batch, plan.headers, execution_now)
             {
@@ -1675,6 +1762,54 @@ impl EmitterBatchContext<'_> {
             },
         };
         self.with_ordering_groups(publish_batch, selected_groups)
+    }
+
+    /// Evaluates the request fields of every row `batch` publishes, delivers the message error of
+    /// each row whose request cannot be sent, and buffers the rest with their requests.
+    async fn prepare_http_requests(
+        &self,
+        requests: &CompiledHttpRequestFields,
+        input_relay: &RelayName,
+        batch: RelayRecordBatch,
+        input: HttpRequestInput,
+        materialized_values: &HashMap<String, RuntimeValue>,
+        execution_now: Timestamp,
+    ) -> Option<EmitterPublishBatch> {
+        let prepared = requests
+            .prepare(
+                self.emitter,
+                batch,
+                input,
+                materialized_values,
+                execution_now,
+            )
+            .await;
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let failure = error.current_context();
+                self.report_general_error(failure.acks.iter(), failure.reason.clone());
+                return None;
+            }
+        };
+        self.deliver_planned_message_errors(prepared.message_errors)
+            .await;
+        let AcceptedHttpRequests { batch, requests } = prepared.accepted?;
+        let publish_batch =
+            match EmitterPublishBatch::new(input_relay.clone(), batch, None, execution_now) {
+                Ok(publish_batch) => publish_batch,
+                Err(error) => {
+                    self.report_publish_batch_error(error);
+                    return None;
+                }
+            };
+        match publish_batch.with_http_requests(requests) {
+            Ok(publish_batch) => Some(publish_batch),
+            Err(error) => {
+                self.report_publish_batch_error(error);
+                None
+            }
+        }
     }
 
     /// `publish_batch` with the ordering group of each of its rows, when the emitter declares one.
@@ -1797,6 +1932,7 @@ mod tests {
             source_filters,
             filter_map: None,
             ordering_group: None,
+            http_requests: None,
             materialized_state,
         }
     }

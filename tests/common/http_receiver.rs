@@ -365,8 +365,9 @@ fn unescape_raw(text: &str) -> Result<Vec<u8>, ReceiverScriptError> {
     Ok(bytes)
 }
 
-/// One request exactly as the receiver read it.
-#[derive(Clone, Debug)]
+/// One request exactly as the receiver read it. Two captures are equal when their request lines,
+/// their header fields in the order they arrived, and their bodies are byte for byte the same.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CapturedRequest {
     pub(crate) method: String,
     pub(crate) target: String,
@@ -374,7 +375,7 @@ pub(crate) struct CapturedRequest {
     pub(crate) body: Vec<u8>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct CapturedHeader {
     name: String,
     value: Vec<u8>,

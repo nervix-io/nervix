@@ -2,10 +2,10 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The record and mapped-row sink traits, their lifecycle hooks, typed start and
-//!   publish failures, the identities a sink answers for — a record the host assigned, or a mapped
-//!   row's source position — the outcome it answers with, and the opaque handles through which a
-//!   sink reports to its host or keeps host-owned acknowledgements alive.
+//! - **Owns.** The record, mapped-row and HTTP request sink traits, their lifecycle hooks, typed
+//!   start and publish failures, the identities a sink answers for — a record the host assigned, or
+//!   a mapped row's source position — the outcome it answers with, and the opaque handles through
+//!   which a sink reports to its host or keeps host-owned acknowledgements alive.
 //! - **Depends on.** Arrow batches, vocabulary values, `error-stack`, Tokio's monotonic instant,
 //!   and trait-object support.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, error-policy
@@ -17,7 +17,8 @@ use arrow_array::RecordBatch;
 use async_trait::async_trait;
 use error_stack::Report;
 use nervix_models::{
-    FieldPath, MessageErrorCode, MessageErrorOperation, StructuredMessageError, Timestamp,
+    FieldPath, HttpApplicationHeaders, HttpMethod, HttpTarget, MessageErrorCode,
+    MessageErrorOperation, StructuredMessageError, Timestamp,
 };
 use thiserror::Error;
 use tokio::time::Instant;
@@ -111,6 +112,30 @@ impl SinkRecord {
         self
     }
 
+    pub fn rejected(&self, message: String) -> RejectedSinkRecord<SinkRecordId> {
+        RejectedSinkRecord::external(self.id, self.occurred_at, message)
+    }
+}
+
+/// One prepared HTTP request ready for a connector to send.
+///
+/// The host evaluated and validated every request field once, when it admitted the record, and
+/// keeps them with the body until the connector answers for the request, so every attempt sends the
+/// request the first attempt sent. A request carries no runtime acknowledgement: the host retains
+/// the acknowledgement of the one source record the request carries.
+#[derive(Debug)]
+pub struct SinkHttpRequest {
+    pub id: SinkRecordId,
+    pub method: HttpMethod,
+    pub target: HttpTarget,
+    pub headers: HttpApplicationHeaders,
+    /// Exactly the bytes the codec produced, or nothing for an emitter declared `WITHOUT BODY`.
+    pub body: Option<Vec<u8>>,
+    /// When the host admitted the record, which a rejection of the request is reported with.
+    pub occurred_at: Timestamp,
+}
+
+impl SinkHttpRequest {
     pub fn rejected(&self, message: String) -> RejectedSinkRecord<SinkRecordId> {
         RejectedSinkRecord::external(self.id, self.occurred_at, message)
     }
@@ -363,6 +388,15 @@ pub trait SinkLifecycle: Send {
 pub trait RecordSink: SinkLifecycle {
     /// Writes `records` and answers for each of them by its identity.
     async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId>;
+}
+
+/// A connector that sends one prepared HTTP request for each record.
+#[async_trait]
+pub trait HttpRequestSink: SinkLifecycle {
+    /// Sends `requests` in the order they are handed over and answers for each of them by its
+    /// identity. A request the connector leaves unanswered stays with the host, which sends it
+    /// again unchanged.
+    async fn publish(&mut self, requests: Vec<SinkHttpRequest>) -> PerRecordOutcome<SinkRecordId>;
 }
 
 /// A connector that encodes values directly from host-projected Arrow columns.
