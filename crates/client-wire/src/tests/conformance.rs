@@ -14,7 +14,8 @@ use bytes::Bytes;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     DomainClockObservation, DomainClockObservedState, DomainClockTickObservation, ModelKind,
-    ModelName, NodeRef, ParseAsType, PlacementPolicy, SchemaField, Timestamp,
+    ModelName, NodeRef, ParseAsType, PlacementPolicy, RequestedResourceVersion, SchemaField,
+    Timestamp,
 };
 
 use super::{
@@ -181,6 +182,24 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                                 label: "bundle".to_string(),
                                 detail: None,
                                 group: None,
+                            },
+                        },
+                        Choice {
+                            value: ChoiceValue::ResourceVersion(RequestedResourceVersion::Latest),
+                            presentation: ChoicePresentation {
+                                label: "LATEST".to_string(),
+                                detail: Some("Highest completed version".to_string()),
+                                group: Some("Resource version".to_string()),
+                            },
+                        },
+                        Choice {
+                            value: ChoiceValue::ResourceVersion(RequestedResourceVersion::Number(
+                                3,
+                            )),
+                            presentation: ChoicePresentation {
+                                label: "3".to_string(),
+                                detail: Some("Completed version".to_string()),
+                                group: Some("Resource version".to_string()),
                             },
                         },
                         Choice {
@@ -450,6 +469,7 @@ fn choice_value(value: &ChoiceValue) -> String {
         ChoiceValue::PlacementPolicy(value) => format!("placement:{value:?}"),
         ChoiceValue::Domain(domain) => format!("domain:{}", domain.as_str()),
         ChoiceValue::Resource(resource) => format!("resource:{}", resource.as_str()),
+        ChoiceValue::ResourceVersion(version) => format!("resource-version:{version}"),
         ChoiceValue::Model(node) => {
             format!("model:{}/{}", node.kind.as_str(), node.identifier.as_str())
         }

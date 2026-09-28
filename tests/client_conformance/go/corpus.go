@@ -61,6 +61,12 @@ func choiceValue(kind session.ChoiceValue, table tableOf) (string, error) {
 		value := new(session.ResourceChoiceReference)
 		value.Init(table.Bytes, table.Pos)
 		return "resource:" + string(value.Resource()), nil
+	case session.ChoiceValueResourceVersionNumber:
+		value := new(session.ResourceVersionNumber)
+		value.Init(table.Bytes, table.Pos)
+		return fmt.Sprintf("resource-version:%d", value.Version()), nil
+	case session.ChoiceValueLatestResourceVersion:
+		return "resource-version:LATEST", nil
 	case session.ChoiceValueModelChoiceReference:
 		value := new(session.ModelChoiceReference)
 		value.Init(table.Bytes, table.Pos)

@@ -171,6 +171,19 @@ An upload is a separate call with its own frames; see [Resource Uploads](#resour
   exactly as a cancellation after admission: the effect may happen, and a command's outcome is
   recovered by its execution reference.
 
+## Structured Choice Lookups
+
+- **Q-1.** A client that sends `ChoiceLookupRequest` MUST use the target's typed dependencies:
+  domain for internal schema, branch, relay, JSON/CBOR/AVRO wire schema, or resource choices;
+  domain followed by a relay `Model` reference for relay fields; and domain followed by a
+  `Resource` reference for completed resource versions. It MUST use the distinct wire-schema
+  targets when a form requires an exact format.
+- **Q-2.** A client MUST use the returned `ChoiceValue`, rather than its presentation label, for
+  selection. For completed resource versions it MUST handle `ResourceVersionNumber` and
+  `LatestResourceVersion` as distinct values. It MUST NOT offer a version absent from the result as
+  a completed upload. It MUST treat `MissingContext`, `StaleContext`, and `LookupFailed` as distinct
+  outcomes, and MUST restart a paged lookup after `StaleContext` rather than reuse its cursor.
+
 ## Routing Statements
 
 A client that accepts NSPL text sends some statements as requests of their own rather than as
@@ -519,6 +532,7 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | C-1 to C-7 | `request_identities_start_at_one_and_are_never_reused`, `response_reordering_cannot_take_another_requests_waiter`, `a_reply_no_request_waits_for_is_dropped`, `saturated_event_consumer_cannot_block_a_command_reply`, and `replies_reach_their_requests_in_whatever_order_they_arrive` in `nervix-client-core`; `untracked_domain_push_cannot_discard_a_pending_websocket_request` in the console |
 | C-8 | `A malformed request is refused with a typed rejection and the session keeps serving` in `session_protocol.feature`; `a_rejected_request_surfaces_as_a_typed_error` |
 | C-9, C-10 | `A long command leaves the session responsive and a waiter cancelled before admission admits nothing` and `Cancelling a durably admitted command ends only the wait for it` in `session_protocol.feature`; `cancelling_a_command_releases_its_pending_reply` |
+| Q-1, Q-2 | `configured_choices` unit tests for exact wire-schema, resource, version, and dependency choices; `typed_choices_and_lookup_states_round_trip` in `nervix-client-wire`; `A resource-backed codec selects a completed version and file explicitly` and `A codec can choose a wire schema staged earlier in its transaction` in `visual_create_codec.feature`; Go and Node.js corpus probes in `client_conformance.feature` |
 | L-1 to L-3 | `use_domain_is_served_by_the_client`, `list_domains_is_served_from_a_domain_list_request`, `execute_rejects_mixed_client_local_multi_statement_request`, `execute_rejects_client_local_command_during_transaction`, and `a_create_subscription_statement_is_sent_as_a_subscribe_request`; `Implicit multi-command requests are rejected` in `nspl_transactions.feature` |
 | E-1 to E-5 | In `client_wire_failures.feature`: `A command lost after durable admission is recovered by its request identity`, `A reclaimed command identity stays expired after a durable restart`, `A command identity outside its retry window starts no effect`, `A full command history refuses new identities and keeps every retained result`, `Concurrent exact BEGIN retries join one durable execution`, and `Reusing a durable transaction identity with different content fails semantically`; `a_command_reply_for_another_execution_cannot_claim_success` |
 | E-6 to E-8 | `Leadership lost after durable admission leaves an unknown outcome that a retry recovers` in `session_protocol.feature`; `an_unknown_outcome_is_recovered_with_the_same_execution_reference` and `replies_ask_for_the_routing_their_disposition_needs` |

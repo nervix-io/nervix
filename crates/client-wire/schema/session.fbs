@@ -135,7 +135,13 @@ enum ChoiceTarget : ubyte {
   Branch,
   Relay,
   /// The fields of one relay's records. Requires a domain and then a relay model reference.
-  RelayField
+  RelayField,
+  WireJsonSchema,
+  WireCborSchema,
+  WireAvroSchema,
+  Resource,
+  /// Completed versions of a resource. Requires a domain and then a resource reference.
+  CompletedResourceVersion
 }
 
 enum DomainPaceChoice : ubyte {
@@ -183,7 +189,9 @@ union ChoiceValue {
   DomainChoiceReference,
   ResourceChoiceReference,
   ModelChoiceReference,
-  FieldChoiceReference
+  FieldChoiceReference,
+  ResourceVersionNumber,
+  LatestResourceVersion
 }
 
 table ChoiceSelection {

@@ -228,11 +228,15 @@ they neither enter the command admission gate nor change the transaction queue.
 `ChoiceLookupRequest` resolves values for structured client controls without constructing partial
 NSPL. It carries a semantic target, typed dependent selections, search text, a page size from 1
 through 100, and an optional page cursor. Targets resolve domain pace, placement policy, and a
-domain's internal schemas, branches, relays, and relay fields. Placement requires exactly one
-domain-pace dependency. Schema, branch, and relay lookups require exactly one domain reference. A
+domain's internal schemas, each wire-schema format, branches, relays, relay fields, resource
+catalogs, and completed resource versions. Placement requires exactly one domain-pace dependency.
+Schema, wire-schema, branch, relay, and resource lookups require exactly one domain reference. A
 relay-field lookup requires that domain reference followed by a relay model reference, and returns
 the fields of the relay's records in the order its schema declares them; the other configuration
-lookups order their models by name. These lookups read the domain's current Models with the
+lookups order their models by name. A completed-version lookup requires the domain followed by a
+resource reference. It offers `LATEST` and each completed uploaded version, excluding applying or
+failed uploads. Resource catalog choices include resources staged in the session's attached
+transaction. These lookups read the domain's current Models with the
 requesting session's attached transaction prefix applied, so a model staged earlier in that
 transaction appears before commit. An absent or differently typed dependency, a domain that does
 not exist, or a relay the configuration no longer has returns `MissingContext`. A relay whose
@@ -240,7 +244,8 @@ schema the configuration does not declare returns `LookupFailed`.
 
 Each result separates semantics from presentation. `ChoiceValue` carries a domain-pace or
 placement-policy variant, a typed domain, resource, or model reference, or a reference to a field
-of the record the dependencies select. `ChoicePresentation` carries its label, optional detail, and
+of the record the dependencies select, or a requested resource version as an explicit number or
+`LATEST`. `ChoicePresentation` carries its label, optional detail, and
 optional group; a relay field's detail is its exact type followed by `OPTIONAL` and `SENSITIVE` as
 its schema declares them. A client selects by the typed value and never derives behavior from the
 label. `Ready` with no values is an ordinary empty match; `MissingContext`, `StaleContext`, and
@@ -251,7 +256,9 @@ ordered typed candidate set including its presentation metadata. Changing any pa
 `StaleContext` instead of continuing through a different result. Schema, branch, and relay pages
 also bind the canonical definition of each matching model, and relay-field pages bind the relay
 and its schema, so a change within an attached transaction invalidates a cursor even when names and
-field counts stay the same. Choice lookups are read-only and can run
+field counts stay the same. Wire-schema pages bind their canonical definitions; resource pages
+bind names and completed-version counts, and version pages bind the offered version values. Choice
+lookups are read-only and can run
 concurrently with each other and with commands. The web console additionally correlates
 each lookup with its control, draft revision, and session generation, so a late reply cannot
 replace the choices for a newer edit or connection.

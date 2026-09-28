@@ -637,6 +637,14 @@ function choiceValue(source: wire.Choice | wire.ChoiceSelection): string {
       );
       return `resource:${value.resource()}`;
     }
+    case wire.ChoiceValue.ResourceVersionNumber: {
+      const value = member(
+        source.value(new wire.ResourceVersionNumber()) as wire.ResourceVersionNumber | null,
+      );
+      return `resource-version:${value.version().toString()}`;
+    }
+    case wire.ChoiceValue.LatestResourceVersion:
+      return 'resource-version:LATEST';
     case wire.ChoiceValue.ModelChoiceReference: {
       const value = member(
         source.value(new wire.ModelChoiceReference()) as wire.ModelChoiceReference | null,
