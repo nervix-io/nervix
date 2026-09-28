@@ -66,8 +66,12 @@ same creation modifier.
 
 Pace and placement are typed choices supplied by the session server. They are searchable and
 paged independently, and the placement lookup carries the selected pace as a typed dependency.
-Loading, no-match, stale-context, and lookup-failure states remain distinct. An edit, dialog close,
-or replacement session makes an older reply ineligible to change the form.
+Loading and no matches have separate neutral messages. A missing prerequisite, such as a captured
+domain or a selected relay for its field list, shows a neutral hint naming what to choose. A stale
+choice page shows a neutral message and **Retry**, which requests a fresh first page. Lookup,
+session-channel, and unreadable-reply failures remain alerts. These states apply to the domain,
+branch, relay, and subscription forms. An edit, dialog close, or replacement session makes an
+older reply ineligible to change the form.
 
 A resource draft captures the selected domain the first time it opens. If the console later
 selects another domain, reopening the retained draft keeps its captured scope and offers **Use
