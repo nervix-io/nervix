@@ -1689,24 +1689,30 @@ impl Application {
                 }))
                 .buffer_unordered(MAX_CONCURRENT_HEALTH_PROBES);
                 tokio::pin!(probe_results);
-                let topology_changed = loop {
+                // A discovery change does not cancel the probes of the round in flight. A probe of
+                // an unreachable peer ends only at its deadline, and gossip can change more often
+                // than that deadline, so a round restarted on every change would never record the
+                // failures that make such a peer unavailable while availability keeps retaining
+                // it. The next round starts as soon as this one finishes instead.
+                let mut topology_changed = false;
+                loop {
                     tokio::task::consume_budget().await;
                     tokio::select! {
                         _ = health_shutdown.cancelled() => return,
-                        changed = health_topology.changed() => {
+                        changed = health_topology.changed(), if !topology_changed => {
                             changed.assured(
                                 "the cluster handle retains its Chitchat state sender for the server lifetime",
                             );
-                            break true;
+                            topology_changed = true;
                         }
                         result = probe_results.next() => match result {
                             Some(result) => {
                                 cluster_for_health.record_peer_health_result(result).await;
                             }
-                            None => break false,
+                            None => break,
                         }
                     }
-                };
+                }
                 if topology_changed {
                     continue;
                 }
