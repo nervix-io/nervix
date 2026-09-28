@@ -8,6 +8,10 @@ x-nervix-environment: &nervix-environment
   NERVIX_INTERCONNECT_TLS_CERT: /etc/nervix/interconnect/node.pem
   NERVIX_INTERCONNECT_TLS_KEY: /etc/nervix/interconnect/node-key.pem
   NERVIX_REPLICA_COUNT: "0"
+  NERVIX_RAFT_HEARTBEAT_INTERVAL: ${CHAOS_RAFT_HEARTBEAT_INTERVAL:-250ms}
+  NERVIX_RAFT_ELECTION_TIMEOUT_MIN: ${CHAOS_RAFT_ELECTION_TIMEOUT_MIN:-1500ms}
+  NERVIX_RAFT_ELECTION_TIMEOUT_MAX: ${CHAOS_RAFT_ELECTION_TIMEOUT_MAX:-3000ms}
+  NERVIX_NODE_UNAVAILABILITY_TIMEOUT: ${CHAOS_NODE_UNAVAILABILITY_TIMEOUT:-10s}
   RUST_LOG: nervix=info
 
 x-nervix-service: &nervix-service
@@ -185,7 +189,7 @@ services:
       <<: *run-labels
       io.nervix.chaos.role: load
     environment:
-      CHAOS_LOAD_INTERVAL: "0.5"
+      CHAOS_LOAD_INTERVAL: ${CHAOS_LOAD_INTERVAL:-0.5}
     volumes:
       - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/continuous-load.sh:/opt/chaos/continuous-load.sh:ro
       - ${CHAOS_LOAD_FILE:?CHAOS_LOAD_FILE is required}:/opt/chaos/input.ndjson:ro
