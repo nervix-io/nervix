@@ -189,6 +189,11 @@ mapping errors before calling a row sink. It retains the ACKs of the source rows
 mapped row or request carries, so no runtime ACK map enters the connector. Each publish is one call
 per batch, never a virtual call per row.
 
+The host compiles a row sink's `VALUES` projection before opening that sink. A failed VM
+inference or compilation retains its typed VM report under the domain and emitter context, then
+the sink-initialization context. The emitter follows its existing initialization retry policy;
+the connector never receives a partially compiled mapping.
+
 The ClickHouse row sink uses the shared columnar JSON writer for `JSONEachRow`. It prepares typed
 column readers and string escape masks once for a mapped batch, then writes each selected row in
 mapping order without building per-row JSON values. It keeps the host's bounded chunks, request
@@ -293,8 +298,9 @@ evaluated in written order. It validates each row's method, then its target on t
 origin, then each header write, rejects a row at the first field that fails, and buffers the rest
 with the fields they were admitted with, beside their Arrow rows, together with their original
 source records and the batch's materialized state, which the message error of a later rejection
-reads. When a flush releases a row, the
-host encodes its body and retains the request, as a prepared payload with that one member, in the
+reads. The request-field program must compile before the sink starts; a compile failure keeps the
+VM cause beneath the host's emitter context. When a flush releases a row, the host encodes its body
+and retains the request, as a prepared payload with that one member, in the
 same buffer that retains batch payloads. Every attempt hands the connector the retained requests
 unchanged, ahead of any request prepared after them, so a retry repeats the request the destination
 may already hold. One connector publish call awaits at most one request across the emitter

@@ -6,6 +6,7 @@ use arrow_array::{
     UInt8Array, UInt16Array, UInt32Array, UInt64Array, new_null_array,
 };
 use arrow_schema::{DataType, Schema, TimeUnit};
+use error_stack::Report;
 
 use crate::{RowErrors, RuntimeError};
 
@@ -89,7 +90,7 @@ macro_rules! declare_typed_arrays {
                 }
             }
 
-            pub fn try_from_array_ref(array: ArrayRef) -> Result<Self, RuntimeError> {
+            pub fn try_from_array_ref(array: ArrayRef) -> error_stack::Result<Self, RuntimeError> {
                 let converted = match array.data_type() {
                     $($data_type => array
                         .as_any()
@@ -104,9 +105,9 @@ macro_rules! declare_typed_arrays {
                     }
                     _ => None,
                 };
-                converted.ok_or_else(|| RuntimeError::UnsupportedColumnType {
+                converted.ok_or_else(|| Report::new(RuntimeError::UnsupportedColumnType {
                     data_type: array.data_type().clone(),
-                })
+                }))
             }
 
             pub fn uninitialized(data_type: DataType, len: usize) -> Self {
@@ -162,7 +163,10 @@ pub struct TypedBatch {
 }
 
 impl TypedBatch {
-    pub fn try_new(schema: Arc<Schema>, columns: Vec<TypedArray>) -> Result<Self, RuntimeError> {
+    pub fn try_new(
+        schema: Arc<Schema>,
+        columns: Vec<TypedArray>,
+    ) -> error_stack::Result<Self, RuntimeError> {
         let row_count = validate_batch(&schema, &columns)?;
         Ok(Self {
             schema,
@@ -180,15 +184,15 @@ impl TypedBatch {
         schema: Arc<Schema>,
         columns: Vec<TypedArray>,
         row_count: usize,
-    ) -> Result<Self, RuntimeError> {
+    ) -> error_stack::Result<Self, RuntimeError> {
         let inferred_row_count = validate_batch(&schema, &columns)?;
         if !columns.is_empty() && inferred_row_count != row_count {
-            return Err(RuntimeError::InvalidBatch {
+            return Err(Report::new(RuntimeError::InvalidBatch {
                 message: format!(
                     "provided row count {row_count} does not match column row count \
                      {inferred_row_count}"
                 ),
-            });
+            }));
         }
         Ok(Self {
             schema,
@@ -202,16 +206,16 @@ impl TypedBatch {
         schema: Arc<Schema>,
         columns: Vec<TypedArray>,
         errors: RowErrors,
-    ) -> Result<Self, RuntimeError> {
+    ) -> error_stack::Result<Self, RuntimeError> {
         let row_count = validate_batch(&schema, &columns)?;
         if errors.row_count() != row_count {
-            return Err(RuntimeError::InvalidBatch {
+            return Err(Report::new(RuntimeError::InvalidBatch {
                 message: format!(
                     "error row count {} does not match batch row count {}",
                     errors.row_count(),
                     row_count
                 ),
-            });
+            }));
         }
         Ok(Self {
             schema,
@@ -247,19 +251,19 @@ impl TypedBatch {
     /// field no route ever wrote reports that it is uninitialized, and a required field written
     /// with a null reports the null. Optional fields materialize their nulls, uninitialized
     /// included.
-    pub fn to_record_batch(&self) -> Result<RecordBatch, RuntimeError> {
+    pub fn to_record_batch(&self) -> error_stack::Result<RecordBatch, RuntimeError> {
         let mut arrays = Vec::with_capacity(self.columns.len());
         for (column, field) in self.columns.iter().zip(self.schema.fields()) {
             let field_is_required = !field.is_nullable();
             if field_is_required && column.is_uninitialized() {
-                return Err(RuntimeError::UninitializedRequiredColumn {
+                return Err(Report::new(RuntimeError::UninitializedRequiredColumn {
                     column: field.name().clone(),
-                });
+                }));
             }
             if field_is_required && column.null_count() > 0 {
-                return Err(RuntimeError::NullForRequiredColumn {
+                return Err(Report::new(RuntimeError::NullForRequiredColumn {
                     column: field.name().clone(),
-                });
+                }));
             }
             arrays.push(column.to_array_ref());
         }
@@ -272,21 +276,26 @@ impl TypedBatch {
         } else {
             RecordBatch::try_new(self.schema.clone(), arrays)
         };
-        exported.map_err(|error| RuntimeError::InvalidBatch {
-            message: error.to_string(),
+        exported.map_err(|error| {
+            Report::new(RuntimeError::InvalidBatch {
+                message: error.to_string(),
+            })
         })
     }
 }
 
-fn validate_batch(schema: &Schema, columns: &[TypedArray]) -> Result<usize, RuntimeError> {
+fn validate_batch(
+    schema: &Schema,
+    columns: &[TypedArray],
+) -> error_stack::Result<usize, RuntimeError> {
     if schema.fields().len() != columns.len() {
-        return Err(RuntimeError::InvalidBatch {
+        return Err(Report::new(RuntimeError::InvalidBatch {
             message: format!(
                 "column count {} does not match schema field count {}",
                 columns.len(),
                 schema.fields().len()
             ),
-        });
+        }));
     }
 
     let row_count = match columns.first() {
@@ -295,24 +304,24 @@ fn validate_batch(schema: &Schema, columns: &[TypedArray]) -> Result<usize, Runt
     };
     for (field, column) in schema.fields().iter().zip(columns) {
         if field.data_type() != &column.data_type() {
-            return Err(RuntimeError::InvalidBatch {
+            return Err(Report::new(RuntimeError::InvalidBatch {
                 message: format!(
                     "column '{}' has type {:?}, expected {:?}",
                     field.name(),
                     column.data_type(),
                     field.data_type()
                 ),
-            });
+            }));
         }
         if column.len() != row_count {
-            return Err(RuntimeError::InvalidBatch {
+            return Err(Report::new(RuntimeError::InvalidBatch {
                 message: format!(
                     "column '{}' has row count {}, expected {}",
                     field.name(),
                     column.len(),
                     row_count
                 ),
-            });
+            }));
         }
     }
 
@@ -399,7 +408,7 @@ mod tests {
         let error = TypedBatch::with_errors(sample_schema(), sample_columns(), RowErrors::new(1))
             .expect_err("batch must reject mismatched error rows");
 
-        match error {
+        match error.current_context() {
             RuntimeError::InvalidBatch { message } => {
                 assert!(message.contains("error row count 1"));
                 assert!(message.contains("batch row count 2"));
@@ -415,7 +424,7 @@ mod tests {
 
         let error = TypedBatch::try_new(schema, columns).expect_err("batch must reject wrong type");
 
-        match error {
+        match error.current_context() {
             RuntimeError::InvalidBatch { message } => {
                 assert!(message.contains("column 'ints'"));
                 assert!(message.contains("Boolean"));
@@ -459,7 +468,7 @@ mod tests {
             .to_record_batch()
             .expect_err("required uninitialized output must fail");
 
-        if let RuntimeError::UninitializedRequiredColumn { column } = error {
+        if let RuntimeError::UninitializedRequiredColumn { column } = error.current_context() {
             assert_eq!(column, "value");
         } else {
             panic!("expected required uninitialized column error, got {error:?}");
@@ -481,7 +490,7 @@ mod tests {
             .to_record_batch()
             .expect_err("a null written into a required output must fail");
 
-        if let RuntimeError::NullForRequiredColumn { column } = error {
+        if let RuntimeError::NullForRequiredColumn { column } = error.current_context() {
             assert_eq!(column, "value");
         } else {
             panic!("expected null for required column error, got {error:?}");
@@ -502,7 +511,7 @@ mod tests {
         let error =
             TypedBatch::try_new(schema, columns).expect_err("batch must reject wrong row count");
 
-        match error {
+        match error.current_context() {
             RuntimeError::InvalidBatch { message } => {
                 assert!(message.contains("column 'names'"));
                 assert!(message.contains("row count 1"));
