@@ -114,3 +114,53 @@ Feature: CLI public session dispatch
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: The CLI follows a domain clock through its generations
+    Given a <cluster_size> node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
+      START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
+      """
+    When the CLI follows the clock of domain "{{domain}}" on node "node-1"
+    Then within "10s" the CLI clock output contains "attached to the clock of domain '{{domain}}': generation 1, paced: period 100ms, skew 10ms, logical origin 2030-01-01T00:00:00Z, UTC anchor"
+    And within "10s" the CLI clock output contains "time rate 2"
+    And within "10s" the CLI clock output has 3 increasing ticks for generation 1 of domain "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      STOP;
+      """
+    Then within "10s" the CLI clock output contains "[events] domain clock [{{domain}}]: generation 1, stopped"
+    When the domain clock is started at now with time rate "1.0" on the leader node
+    Then within "10s" the CLI clock output contains "[events] domain clock [{{domain}}]: generation 2, paced: period 100ms, skew 10ms"
+    And within "10s" the CLI clock output has a tick for generation 2 after its state of domain "{{domain}}"
+    When the CLI clock process receives Ctrl-C
+    Then the CLI clock process exits successfully
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario: The CLI refuses to follow the clock of a missing domain
+    Given a 1 node nervix cluster is started
+    When the CLI attempts to follow the clock of missing domain "absent-clock" on node "node-1"
+    Then the CLI fails with "domain 'absent-clock' does not exist"
+
+  Scenario: The CLI restores a domain clock after transport loss
+    Given a 1 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
+      START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
+      """
+    Given the CLI clock connection to node "node-1" is forwarded
+    When the CLI follows the clock of domain "{{domain}}" through its TCP forwarder
+    Then within "10s" the CLI clock output contains "attached to the clock of domain '{{domain}}': generation 1, paced"
+    When the TCP forwarder at "127.0.0.1" stops
+    Then within "20s" the CLI clock output contains "[events] domain clock [{{domain}}] notice: the session was interrupted"
+    When the TCP forwarder at "127.0.0.1" restarts
+    Then within "20s" the CLI clock output has a fresh state for generation 1 after interruption of domain "{{domain}}"
+    And within "20s" the CLI clock output has a tick for generation 1 after its state of domain "{{domain}}"
+    When the CLI clock process receives Ctrl-C
+    Then the CLI clock process exits successfully

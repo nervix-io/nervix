@@ -666,7 +666,7 @@ coverage-shuttle output: build-web-console wasm-processor-guests download-onnxru
 coverage-bins output *args:
     cargo llvm-cov --bins --lcov --output-path {{ output }} {{ args }}
 
-# Exercise the one-shot CLI binary through the public transaction scenario with LLVM coverage.
+# Exercise the CLI binary through the public transaction and clock scenarios with LLVM coverage.
 coverage-cli-process output="target/cli-process.lcov":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -678,6 +678,9 @@ coverage-cli-process output="target/cli-process.lcov":
     LLVM_PROFILE_FILE="$coverage_dir/cli-%p-%m.profraw" \
         NERVIX_TEST_CLI_PATH="$coverage_dir/debug/nervix-cli" \
         just test-scenarios --input tests/features/runtime/nspl_transactions.feature --name CLI
+    LLVM_PROFILE_FILE="$coverage_dir/cli-%p-%m.profraw" \
+        NERVIX_TEST_CLI_PATH="$coverage_dir/debug/nervix-cli" \
+        just test-scenarios --input tests/features/tools/cli_session.feature --name clock
     llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | awk '/^host:/{print $2}')/bin"
     "$llvm_bin/llvm-profdata" merge -sparse "$coverage_dir"/*.profraw -o "$coverage_dir/merged.profdata"
     "$llvm_bin/llvm-cov" export "$coverage_dir/debug/nervix-cli" \
