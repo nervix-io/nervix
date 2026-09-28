@@ -117,10 +117,98 @@ boundaries, and runs the baseline's exact ledger verifier. The rolling default g
 1,000 records and allows 20 minutes; `--records`, `--timeout`, and the other baseline options remain
 available.
 
+Run verified network partitions, healing and quorum recovery on three nodes:
+
+```bash
+just chaos run partition-recovery --image nervix:debian
+just chaos run partition-recovery --image nervix:debian --case leader
+just chaos run partition-recovery --image nervix:debian --case quorum-loss --partition-seconds 90
+```
+
+`--case all`, the default, runs four cases in one cluster: `follower` isolates the observed
+follower that owns execution, `asymmetric` drops only the packets the observed leader sends to that
+follower, `leader` isolates the observed leader, and `quorum-loss` leaves no two nodes able to
+exchange a packet. `--partition-seconds N` (20–600, default 45) sets the minimum verified isolation
+window. The deployment keeps the standard 250 ms Raft heartbeat, 1.5–3 second election window and
+10-second node unavailability timeout, and the result records them.
+
+Every node has a fixed address inside a per-run `10.213.N.0/24` network, chosen away from existing
+Docker networks and host routes; every other container draws its address from the upper half of
+that network. A case writes a plan naming the directed node links to block and the Pumba rules that
+block exactly them, and checks that the rules imply exactly those links before anything is
+installed. An isolation places its rules on the other nodes: netem drops their packets to the
+isolated address and iptables drops packets arriving from it, so the isolation still holds while
+the isolated container restarts. The asymmetric case places one netem rule on the sending node, and
+quorum loss gives each node one netem configuration that covers both of its peers. Only node-to-node
+links are ever targeted: the broker, load, listener observer, CLI and probe containers keep their
+routes.
+
+Before installing, every node interface must carry only its default qdisc and an empty INPUT chain;
+faults are never stacked. One digest-pinned Pumba 1.2.1 container per node and rule kind, using the
+pinned nettools image published with it, is dry-run against the exact node container and then
+started detached. The runner reads each namespace's qdisc, u32 filters and INPUT rules until they
+match the plan exactly. It then proves the effect: for every directed node link, the verifier's
+route to each node and each node's route to the broker, it counts the ICMP echo requests the
+receiving kernel accepted from one sender at a time. An intended link must accept none and every
+other link must accept them, so a successful Pumba exit without effective isolation fails. Healing
+sends SIGTERM to every injector, requires exit code zero, requires every namespace back in its
+default state, and measures the whole matrix open again. Preflight first proves on the worker that a
+Pumba netem and an iptables fault each block a throwaway container's gateway traffic and heal on
+SIGTERM.
+
+Each node is observed through its own public status route, and a status only counts if it names
+the node that answered. Right after isolation the runner records the highest applied log index any
+node reports; a node cut off from every quorum must never apply past it for the whole fault, and in
+quorum loss no node may advance its Raft term. The isolated former leader may keep reporting itself
+leader: that label is recorded, and the runner instead requires the connected majority to elect a
+caught-up leader within 60 seconds, acknowledge a `CREATE RESOURCE` canary within 30 seconds and
+apply past the isolation boundary. In the asymmetric case a majority must agree on a leader that
+reports itself leader, and a canary through the node outside the one-way link must be acknowledged.
+A canary sent to the isolated former leader, or to any node during quorum loss, is bounded at 20
+seconds and must not be acknowledged. A canary through an isolated follower may be redirected to the
+majority leader, so its outcome is recorded as a cluster observation. Canaries are classified as
+acknowledged, refused, or uncertain, including an attempt stopped by its external bound, and after
+recovery every node must agree whether each one took effect. Acknowledged effects must exist and
+refused ones must not.
+
+In the follower and leader cases the majority must move the isolated node's execution to connected
+nodes within 90 seconds. With the follower isolated it must also keep delivering Kafka output. An
+isolated node keeps running work it was already admitted to, so the leader case records rather than
+requires majority delivery: Kafka can leave the source partition with the isolated former owner's
+consumer. Group members are attributed to nodes by their fixed addresses. At the end of every held
+fault except quorum loss, work owned by a node whose links stayed healthy must still be where it
+was: only the isolated node, or either end of the one-way link, may lose its work. The follower case
+also SIGKILLs and explicitly restarts the isolated follower inside the partition, requires the same
+container, volume and address, and re-measures the unchanged isolation and its public status route.
+
+A violation that leaves the experiment meaningful, such as an unexpected acknowledgement, an
+applied entry past the isolation boundary, a failover away from a healthy node, or a missing
+effect, is recorded in `results/partition-findings.ndjson`, and the run continues through healing,
+recovery and the final ledger so it keeps every violation it can observe. It then exits nonzero with
+the findings listed. Failures that make later steps meaningless, such as an ineffective or
+unremovable fault, no majority leader, or no convergence after healing, stop the run at once after
+recording every node's own status.
+
+After healing, all nodes must agree on a caught-up leader with every peer connected and no warnings
+within 150 seconds. Kafka membership must converge on the scheduled ingestor owner within 90
+seconds, and output must advance within 90 seconds. A canary through the rejoined node must be
+acknowledged, and no node may stop or restart outside the planned fault. The run ends with the
+exact ledger verifier, which reports identical replay duplicates separately. Each case keeps its
+plan, recorded rules, link matrices, injector commands and logs, status samples, canaries, consumer
+group snapshots, node events and timings under `partitions/`, and `results/partition-progress.json`
+summarizes them. A failed run retains `results/finding.json` with its failure category and a
+reproduction command naming the pinned image, the case and the partition window. A run that exits
+or is interrupted heals every run-owned fault before it captures diagnostics, including with
+`--keep`, and `just chaos cleanup` also removes Pumba sidecars left joined to run-owned containers.
+A partition run defaults to 1,000 input records paced two seconds apart and a 50-minute bound.
+
 The controller resolves the supplied reference to its immutable local image ID before Compose
 starts. If the reference is not local, it performs one bounded pull and then resolves the result.
 The Compose file has no build directives. Every Nervix node and every disposable administration
-container uses the resolved ID.
+container uses the resolved ID. Each run creates its own Compose network in a `10.213.N.0/24` range
+that overlaps no existing Docker network or host route. Nodes take the fixed addresses `.11` through
+`.13` and every other container an address from the upper half. The manifest records the network
+and the node addresses.
 
 The host needs Bash, Docker with Compose, GNU `timeout`, OpenSSL, and jq. Kafka administration,
 traffic, listener probes, metrics probes, and Nervix administration run in prebuilt containers.
@@ -143,7 +231,8 @@ All owned containers, networks, and volumes carry `io.nervix.chaos.run=<run-id>`
 gives Pumba scenarios an exact target selector; Nervix nodes additionally carry
 `io.nervix.chaos.target=true`. Normal exit, failure, timeout, and catchable signals preserve
 diagnostics and remove the labeled resources. Pause cleanup first unpauses every run-owned paused
-container, including when Pumba fails or the controller receives a supported signal. If a
+container, including when Pumba fails or the controller receives a supported signal. Partition
+runs first stop their injectors and remove any Pumba-owned qdisc or INPUT rule left on a node. If a
 controller is killed before its trap runs, use:
 
 ```bash
