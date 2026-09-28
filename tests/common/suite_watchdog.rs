@@ -84,8 +84,8 @@ pub(crate) const SUITE_BUDGET: Duration =
         None => panic!("the workflow job limit must cover the work that precedes the suite"),
     };
 /// The first split-job PR run completed all attempts in 21m49s, including four retries, with
-/// 88.3% run-slot utilization. One scenario still failed after those retries, so re-measure on a
-/// passing run while keeping 22 minutes as the observed suite ceiling.
+/// 88.3% run-slot utilization. The next, passing run took 20m26s with seven retries and 94.3%
+/// utilization. Round the slower complete run up to 22 minutes as the observed suite ceiling.
 const SLOWEST_HEALTHY_SUITE: Duration = Duration::from_secs(22 * 60);
 /// What the budget must leave beyond the slowest healthy suite, so a runner slower than the
 /// measuring one still finishes its own scenarios.

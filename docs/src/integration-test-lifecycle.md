@@ -205,7 +205,7 @@ ordering fails to build rather than producing a harness that outwaits itself.
 | Startup attempt, 36 seconds | A policy input | The slowest healthy node startup, 24.2 seconds, fits in one attempt; the same 3,465 startups had a 2.0-second median and a 4.3-second 99th percentile |
 | Node startup, 84 seconds | Two full attempts, each 36 seconds of readiness, a 5-second cleanup slice, and a 1-second pause | Stays under a 90-second ceiling |
 | Cluster cleanup, 60 seconds | The slowest healthy cluster stop, rounded up to 15 seconds, times a headroom of 4 | 12.2 seconds at the slowest over 163 cleanups, with a 0.15-second median and 1.6 seconds at the 90th percentile |
-| Suite, 41 minutes | The 60-minute scenario job limit, less 14 minutes allowed for pre-suite work and a 5-minute reserve after it | The first cold split-job run took 11m37s before the suite and 21m49s for the suite, including four retries; the 22-minute suite ceiling leaves at least 15 minutes of slack |
+| Suite, 41 minutes | The 60-minute scenario job limit, less 14 minutes allowed for pre-suite work and a 5-minute reserve after it | Split-job runs took 11m37s and 10m08s before the suite, then 21m49s and 20m26s for the suite; the 22-minute ceiling leaves at least 15 minutes of slack |
 
 The assertions keep these orderings, among others:
 
@@ -220,9 +220,9 @@ The assertions keep these orderings, among others:
   runtime shutdown together.
 
 The 22-minute observed suite ceiling plus 15 minutes of slack fits the 41-minute budget with four
-minutes to spare. The first split-job run was not green, so a passing run must confirm the ceiling.
-Increasing either measured input eventually fails the compile-time assertion. Measure both again
-whenever the suite, its concurrency, or the runner changes.
+minutes to spare. The second split-job run passed in 20m26s with seven retries and 94.3% run-slot
+utilization. Increasing either measured input eventually fails the compile-time assertion. Measure
+both again whenever the suite, its concurrency, or the runner changes.
 
 ## Status Requests And Status Waits
 
@@ -822,7 +822,7 @@ ends on its own.
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |
-| Work before the scenario binary starts | 14 minutes | The first cold kache 0.28.0 split-job run took 11m37s from job start to the binary; the ceiling adds 2m23s for setup variation |
+| Work before the scenario binary starts | 14 minutes | The first cold kache 0.28.0 split-job run took 11m37s from job start to the binary, and the next took 10m08s; the ceiling adds 2m23s beyond the slower measurement |
 | The scenario run | 41 minutes | What the limit leaves |
 | After the budget expires | 5-minute reserve | At most 60 seconds of cleanup window, 2 minutes of dependency stop, and 60 seconds of runtime shutdown, four minutes in all, and then the log upload, measured at 2 to 3 seconds with 8 seconds of steps after it |
 
@@ -833,8 +833,8 @@ the job's result uploads the whole `tests/logs` directory as the `scenario-logs`
 The first split-job PR run completed its suite in 21m49s with 88.3% run-slot utilization and four
 retries. One Raft snapshot scenario failed all three attempts because its setup accepted a purge
 that preceded the backlog under test. The corrected scenario waits for a purge beyond the measured
-backlog peak; a passing CI run must confirm the 22-minute suite ceiling. The 15-minute slack fits
-even if the next run reaches that ceiling.
+backlog peak. The next run passed in 20m26s with 94.3% utilization and seven retries, so the
+22-minute ceiling and 15-minute slack fit both measured runs.
 
 The job's limit remains the emergency guard outside the budget rather than the mechanism that ends a
 wedged run. A job the limit cancels is killed wherever its scenarios are: the logs it uploads end
