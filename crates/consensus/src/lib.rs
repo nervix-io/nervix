@@ -522,8 +522,41 @@ pub enum ConsensusCommand {
 )]
 pub enum ConsensusResponse {
     Applied,
-    Conflict(String),
+    Conflict(ConsensusConflict),
     Transaction(Box<TransactionMutationResponse>),
+}
+
+/// Why the replicated state machine refused a proposed change.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    Error,
+)]
+pub enum ConsensusConflict {
+    #[error("{0}")]
+    Reason(String),
+    #[error("command execution reference '{reference}' has expired")]
+    ExecutionReferenceExpired {
+        reference: nervix_models::CommandExecutionReference,
+    },
+    #[error("command execution reference '{reference}' conflicts by {kind}")]
+    ExecutionReferenceConflict {
+        reference: nervix_models::CommandExecutionReference,
+        kind: CommandExecutionRequestConflict,
+    },
+}
+
+impl From<String> for ConsensusConflict {
+    fn from(reason: String) -> Self {
+        Self::Reason(reason)
+    }
 }
 
 #[derive(
@@ -773,6 +806,7 @@ impl GossipNode {
 pub struct GossipState {
     pub live_nodes: Vec<GossipNode>,
     pub dead_node_ids: BTreeSet<ClusterNodeName>,
+    pub dead_node_identities: BTreeSet<ClusterNodeIdentity>,
 }
 
 impl GossipState {
@@ -822,6 +856,25 @@ impl GossipState {
 
     pub fn latest_nodes_by_id(&self) -> BTreeMap<ClusterNodeName, GossipNode> {
         self.latest_nodes(self.live_nodes.iter())
+    }
+
+    /// The newest observed process for an explicit removal, including an incarnation that
+    /// Chitchat has marked dead and therefore no longer includes in `live_nodes`.
+    pub fn latest_observed_identity(
+        &self,
+        node_id: &ClusterNodeName,
+    ) -> Option<ClusterNodeIdentity> {
+        self.live_nodes
+            .iter()
+            .filter(|node| &node.node_id == node_id)
+            .map(GossipNode::identity)
+            .chain(
+                self.dead_node_identities
+                    .iter()
+                    .filter(|identity| identity.node_id() == node_id)
+                    .cloned(),
+            )
+            .max_by_key(ClusterNodeIdentity::incarnation)
     }
 
     fn latest_nodes<'a>(
@@ -1416,7 +1469,7 @@ pub enum ConsensusError {
     #[error("{0}")]
     Write(String),
     #[error("consensus state changed: {0}")]
-    Conflict(String),
+    Conflict(ConsensusConflict),
     #[error("raft returned an unexpected response to a state mutation")]
     UnexpectedResponse,
     #[error("raft proposal lost leadership")]
@@ -2782,7 +2835,9 @@ impl Proposer {
     ) -> Result<u64, Report<ConsensusError>> {
         if authority.coordinator() != &self.inner.local_node_id {
             return Err(Report::new(ConsensusError::Conflict(
-                "ownership handoff reconciliation authority is not the local node".to_string(),
+                ConsensusConflict::Reason(
+                    "ownership handoff reconciliation authority is not the local node".to_string(),
+                ),
             )));
         }
         let response = self
@@ -3558,11 +3613,9 @@ impl Administrator {
         if !availability.dead_node_ids.contains(node_id) {
             return Err(ConsensusError::RemoveLiveNode(node_id.to_string()));
         }
-        let mut latest_nodes = availability.latest_nodes_by_id();
-        let Some(node) = latest_nodes.remove(node_id) else {
+        let Some(observed_identity) = availability.latest_observed_identity(node_id) else {
             return Err(ConsensusError::NodeIncarnationUnknown(node_id.to_string()));
         };
-        let observed_identity = node.identity();
         if &observed_identity != identity {
             return Err(ConsensusError::NodeIncarnationChanged {
                 expected: identity.clone(),
@@ -4235,9 +4288,9 @@ impl AppliedConsensusCommand {
         }
     }
 
-    fn conflict(reason: String) -> Self {
+    fn conflict(reason: impl Into<ConsensusConflict>) -> Self {
         Self {
-            response: ConsensusResponse::Conflict(reason),
+            response: ConsensusResponse::Conflict(reason.into()),
             schedule_changed: false,
             domains_changed: false,
             resources_changed: false,
@@ -4413,10 +4466,11 @@ fn apply_consensus_command_at(
         } => {
             if let Some(existing) = state.command_executions.get(&execution.reference) {
                 if existing.is_expired() {
-                    return AppliedConsensusCommand::conflict(format!(
-                        "command execution reference '{}' has expired",
-                        execution.reference,
-                    ));
+                    return AppliedConsensusCommand::conflict(
+                        ConsensusConflict::ExecutionReferenceExpired {
+                            reference: execution.reference.clone(),
+                        },
+                    );
                 }
                 if !existing.same_request(execution) {
                     let conflict = existing
@@ -4431,16 +4485,25 @@ fn apply_consensus_command_at(
                                 .verified("a proposed command execution is applying"),
                         )
                         .unwrap_or(CommandExecutionRequestConflict::Position);
-                    return AppliedConsensusCommand::conflict(format!(
-                        "command execution reference '{}' conflicts by {conflict}",
-                        execution.reference,
-                    ));
+                    return AppliedConsensusCommand::conflict(
+                        ConsensusConflict::ExecutionReferenceConflict {
+                            reference: execution.reference.clone(),
+                            kind: conflict,
+                        },
+                    );
                 }
             } else {
                 if let Err(reason) = state
                     .command_executions
                     .validate_admission(&execution.reference, policy)
                 {
+                    if let CommandExecutionAdmissionError::Expired = reason.current_context() {
+                        return AppliedConsensusCommand::conflict(
+                            ConsensusConflict::ExecutionReferenceExpired {
+                                reference: execution.reference.clone(),
+                            },
+                        );
+                    }
                     return AppliedConsensusCommand::conflict(format!(
                         "command execution reference '{}' {reason}",
                         execution.reference,
@@ -5839,15 +5902,15 @@ mod tests {
     use super::{
         AppliedEntryContext, AutomaticScheduleFence, ClusterSchedule, CommandExecution,
         CommandExecutionAdmissionPolicy, CommandExecutionDisposition, CommandExecutionEffect,
-        CommandExecutionResult, CommandExecutionState, ConsensusCommand, ConsensusResponse,
-        FjallLogReader, FjallStore, GossipNode, GossipState, LeaderTenure, MembershipMutation,
-        MembershipSnapshot, ProtocolOriginError, ResourceRecords, StateMachineChanges,
-        StateMachineData, TransactionApplicationOutcome, TransactionCommandResult,
-        TransactionCommitAdmissionFailure, TransactionMutationError, TransactionOutcome,
-        TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
-        TransactionStepResult, TypeConfig, UserCredentials, apply_consensus_command,
-        apply_consensus_command_at, apply_transaction_step_effect, io_error, storage_decode,
-        validate_protocol_origin,
+        CommandExecutionRequestConflict, CommandExecutionResult, CommandExecutionState,
+        ConsensusCommand, ConsensusConflict, ConsensusResponse, FjallLogReader, FjallStore,
+        GossipNode, GossipState, LeaderTenure, MembershipMutation, MembershipSnapshot,
+        ProtocolOriginError, ResourceRecords, StateMachineChanges, StateMachineData,
+        TransactionApplicationOutcome, TransactionCommandResult, TransactionCommitAdmissionFailure,
+        TransactionMutationError, TransactionOutcome, TransactionStatement,
+        TransactionStatementRequest, TransactionStepEffect, TransactionStepResult, TypeConfig,
+        UserCredentials, apply_consensus_command, apply_consensus_command_at,
+        apply_transaction_step_effect, io_error, storage_decode, validate_protocol_origin,
     };
     use crate::{
         ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionActivity,
@@ -5985,6 +6048,7 @@ mod tests {
             dead_node_ids: [ClusterNodeName::parse("node-3").expect("valid node name")]
                 .into_iter()
                 .collect(),
+            dead_node_identities: BTreeSet::new(),
         };
 
         assert_eq!(
@@ -5996,6 +6060,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn explicit_removal_identifies_a_dead_process_after_it_leaves_live_gossip() {
+        let stopped = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let newest_dead = node_identity("node-2", 3);
+        let mut state = GossipState {
+            live_nodes: vec![undiscovered_node("node-1", 1)],
+            dead_node_ids: BTreeSet::from([stopped.clone()]),
+            dead_node_identities: BTreeSet::from([node_identity("node-2", 2), newest_dead.clone()]),
+        };
+
+        assert_eq!(state.latest_observed_identity(&stopped), Some(newest_dead));
+        assert!(!state.live_node_ids().contains(&stopped));
+
+        state.live_nodes.push(undiscovered_node("node-2", 4));
+        assert_eq!(
+            state.latest_observed_identity(&stopped),
+            Some(node_identity("node-2", 4))
+        );
+    }
+
     /// A voter gossip has neither heard from nor declared dead is unobserved: it may still be
     /// starting. A live voter and a dead one are both observed.
     #[test]
@@ -6004,6 +6088,7 @@ mod tests {
         let state = GossipState {
             live_nodes: vec![undiscovered_node("node-1", 1)],
             dead_node_ids: BTreeSet::from([node("node-2")]),
+            dead_node_identities: BTreeSet::new(),
         };
         let voters = [node("node-1"), node("node-2"), node("node-3")];
 
@@ -6024,6 +6109,7 @@ mod tests {
             dead_node_ids: BTreeSet::from([
                 ClusterNodeName::parse("node-2").expect("valid node name")
             ]),
+            dead_node_identities: BTreeSet::new(),
         };
 
         assert_eq!(
@@ -6045,6 +6131,7 @@ mod tests {
                 gossip_node("node-2", 20, false),
             ],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
 
         assert_eq!(
@@ -6082,6 +6169,7 @@ mod tests {
                 ..undiscovered_node("node-2", 2)
             }],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
@@ -6113,6 +6201,7 @@ mod tests {
         let gossip = GossipState {
             live_nodes: vec![undiscovered_node("node-2", 2)],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
@@ -6137,6 +6226,7 @@ mod tests {
                 ..undiscovered_node("node-2", 2)
             }],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
@@ -6171,6 +6261,7 @@ mod tests {
                 ..undiscovered_node("node-2", 3)
             }],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
@@ -6206,6 +6297,7 @@ mod tests {
                 ..undiscovered_node("node-2", 2)
             }],
             dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
         };
         let membership = MembershipSnapshot {
             voters: BTreeSet::from([first.clone()]),
@@ -6651,7 +6743,9 @@ mod tests {
 
         assert_eq!(
             applied.response,
-            ConsensusResponse::Conflict("domain 'tenant' schedule changed".to_string())
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(
+                "domain 'tenant' schedule changed".to_string()
+            ))
         );
         assert_eq!(state.schedule.domain(&domain("tenant")), Some(&committed));
         assert!(!applied.schedule_changed);
@@ -6688,7 +6782,9 @@ mod tests {
 
         assert_eq!(
             applied.response,
-            ConsensusResponse::Conflict("domain 'tenant' node eligibility changed".to_string())
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(
+                "domain 'tenant' node eligibility changed".to_string()
+            ))
         );
         assert!(state.schedule.domain(&domain("tenant")).is_none());
         assert!(!applied.schedule_changed);
@@ -6719,7 +6815,9 @@ mod tests {
 
         assert_eq!(
             applied.response,
-            ConsensusResponse::Conflict("domain 'tenant' membership changed".to_string())
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(
+                "domain 'tenant' membership changed".to_string()
+            ))
         );
         assert!(state.schedule.domain(&domain("tenant")).is_none());
         assert!(!applied.schedule_changed);
@@ -6790,7 +6888,9 @@ mod tests {
         );
         assert_eq!(
             broader.response,
-            ConsensusResponse::Conflict("domain 'tenant' schedule changed".to_string())
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(
+                "domain 'tenant' schedule changed".to_string()
+            ))
         );
         assert!(state.schedule.domain(&domain("tenant")).is_some());
     }
@@ -6818,9 +6918,9 @@ mod tests {
 
         assert_eq!(
             applied.response,
-            ConsensusResponse::Conflict(
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(
                 "automatic schedule decision leader tenure changed".to_string()
-            )
+            ))
         );
         assert_eq!(state.schedule.domains.len(), 0);
         assert!(!applied.schedule_changed);
@@ -6960,7 +7060,7 @@ mod tests {
         fn assert_identity_conflict(
             state: &mut StateMachineData,
             execution: CommandExecution,
-            expected_kind: &str,
+            expected_kind: CommandExecutionRequestConflict,
         ) {
             let reference = execution.reference.clone();
             let response = apply_consensus_command(
@@ -6971,12 +7071,13 @@ mod tests {
                     policy: command_policy(10),
                 },
             );
-            let expected =
-                format!("command execution reference '{reference}' conflicts by {expected_kind}");
-            assert!(matches!(
+            assert_eq!(
                 response.response,
-                ConsensusResponse::Conflict(reason) if reason == expected
-            ));
+                ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceConflict {
+                    reference,
+                    kind: expected_kind,
+                })
+            );
         }
 
         let reference = command_reference(1);
@@ -6999,7 +7100,11 @@ mod tests {
         assert_eq!(state.command_executions.len(), 1);
 
         let conflicting = execution(&reference, owner.clone(), domain("tenant"), None, [8; 32]);
-        assert_identity_conflict(&mut state, conflicting, "content");
+        assert_identity_conflict(
+            &mut state,
+            conflicting,
+            CommandExecutionRequestConflict::Content,
+        );
 
         let conflicting = execution(
             &reference,
@@ -7008,7 +7113,11 @@ mod tests {
             None,
             [7; 32],
         );
-        assert_identity_conflict(&mut state, conflicting, "domain");
+        assert_identity_conflict(
+            &mut state,
+            conflicting,
+            CommandExecutionRequestConflict::Domain,
+        );
 
         let conflicting = execution(
             &reference,
@@ -7018,7 +7127,11 @@ mod tests {
             None,
             [7; 32],
         );
-        assert_identity_conflict(&mut state, conflicting, "owner");
+        assert_identity_conflict(
+            &mut state,
+            conflicting,
+            CommandExecutionRequestConflict::Owner,
+        );
 
         let conflicting = execution(
             &reference,
@@ -7027,7 +7140,11 @@ mod tests {
             Some(TransactionPosition::new(1)),
             [7; 32],
         );
-        assert_identity_conflict(&mut state, conflicting, "position");
+        assert_identity_conflict(
+            &mut state,
+            conflicting,
+            CommandExecutionRequestConflict::Position,
+        );
 
         let result = CommandExecutionResult {
             disposition: CommandExecutionDisposition::Completed {
@@ -7093,6 +7210,35 @@ mod tests {
             &mut state,
             &ConsensusCommand::ReclaimCommandExecutions {
                 finished_before: Timestamp::from_unix_nanos(1_700_000_011_000_000_000),
+                retry_fence: Timestamp::from_unix_nanos(1_699_999_999_000_000_000),
+            },
+        );
+        assert!(
+            state
+                .command_executions
+                .get(&reference)
+                .verified("the retry fence has not reached this execution reference")
+                .is_expired()
+        );
+        let retained_retry = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::AdmitCommandExecution {
+                execution: Box::new(original.clone()),
+                mutation_domains: BTreeSet::new(),
+                policy: command_policy(10),
+            },
+        );
+        assert_eq!(
+            retained_retry.response,
+            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceExpired {
+                reference: reference.clone(),
+            })
+        );
+
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::ReclaimCommandExecutions {
+                finished_before: Timestamp::from_unix_nanos(1_700_000_011_000_000_000),
                 retry_fence: Timestamp::from_unix_nanos(1_700_000_020_000_000_000),
             },
         );
@@ -7106,10 +7252,12 @@ mod tests {
                 policy: command_policy(10),
             },
         );
-        assert!(matches!(
+        assert_eq!(
             response.response,
-            ConsensusResponse::Conflict(reason) if reason.contains("has expired")
-        ));
+            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceExpired {
+                reference: reference.clone(),
+            })
+        );
         assert!(state.command_executions.get(&reference).is_none());
     }
 
@@ -7177,7 +7325,7 @@ mod tests {
         );
         assert!(matches!(
             conflict.response,
-            ConsensusResponse::Conflict(reason)
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(reason))
                 if reason.contains(&format!("mutation is owned by command '{}'", first.reference))
         ));
         assert!(!state.command_executions.contains_key(&second.reference));

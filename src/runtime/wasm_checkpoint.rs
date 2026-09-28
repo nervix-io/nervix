@@ -10,6 +10,7 @@
 //!   and replicas are reached.
 
 use error_stack::ResultExt as _;
+use nervix_wasm::WasmGuestReportExt as _;
 
 use super::*;
 
@@ -94,7 +95,7 @@ impl WasmCallbackReporting<'_> {
         ack_map: &mut WasmAckMap,
         holds: &mut WasmCheckpointHolds,
     ) {
-        let resource_limit_exceeded = failure.current_context().is_resource_limit_exceeded();
+        let resource_limit_exceeded = failure.is_resource_limit_exceeded();
         let module = &instance
             .as_ref()
             .verified("a guest callback only runs on a branch that holds an instance")

@@ -249,6 +249,8 @@ relay. Do not use them to scan across branches.
 - Every custom WASM guest is built for the current ABI, accepts
   `nervix_process_batch(ptr, size)`, validates that exact range against its reusable buffer, and
   declares positive `MAX FUEL` then `MAX MEMORY` limits immediately after `FILE`. Its
+  Rust `nervix-wasm-sdk` `Processor` callbacks return `error_stack::Result<_, GuestError>`;
+  follow the `Rust WASM Guest SDK` chapter for the callback contract. Its
   `nervix_dump_state` saves only durable computation state, never buffered input, ACK tokens,
   pending output, timeout handles, or latched error state, and reports a failed save with a
   negative code, after which Nervix keeps the state saved last. Its `nervix_load_state` rejects
@@ -322,9 +324,9 @@ Choose checks relevant to the configured graph:
   ends when its relay is redefined or removed; create it again to read the current definition. In
   the web console the tab turns ended and its resubscribe button does this under the same name.
 - `ATTACH DOMAIN CLOCK;` shows the active domain's `START` generation and clock state, including a
-  paced domain's committed origin, UTC anchor, and rate, then reports each change until
-  `DETACH DOMAIN CLOCK;`. Use it when paced ingestion rejects `TIMESTAMP AT` values: the mapping
-  determines which logical tick centers the admission window has reached.
+  paced domain's committed origin, UTC anchor, and rate, then reports each state change and newest
+  accepted tick until `DETACH DOMAIN CLOCK;`. Use it when paced ingestion rejects `TIMESTAMP AT`
+  values: the mapping and tick frontier show which logical centers the admission window has reached.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.
 - `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
   expiry outcomes.

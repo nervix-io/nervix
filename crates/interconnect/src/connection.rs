@@ -25,7 +25,7 @@ use bytes::Bytes;
 use dashmap::mapref::entry::Entry;
 use error_stack::Report;
 use futures_util::stream::FuturesUnordered;
-use h2::{Reason, RecvStream, SendStream, client, server};
+use h2::{Ping, PingPong, Reason, RecvStream, SendStream, client, server};
 use http::{Method, Request, Response, StatusCode, Version};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dns::ConnectionBudget;
@@ -97,6 +97,10 @@ const RELAY_CHANNEL_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const RESPONSE_LIMIT: u64 = 1024 * 1024;
 const BODY_CHUNK_BYTES: usize = 16 * 1024;
 const RESET_LIMIT: usize = 128;
+/// A blackholed established TCP session otherwise stays in the pool until the kernel abandons its
+/// retransmissions, which can outlast the cluster's partition-heal convergence deadline.
+const HTTP2_PING_INTERVAL: Duration = Duration::from_secs(15);
+const HTTP2_PING_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct ConnectionSlotKey {
@@ -1262,6 +1266,26 @@ impl TransportState {
         self.unregister_slot(&key, &slot_cancel);
     }
 
+    /// End a blackholed HTTP/2 connection without waiting for the kernel's TCP retransmission
+    /// timeout. Both ends monitor it, so a stale inbound class slot also releases its capacity.
+    async fn monitor_http2_connection(mut ping_pong: PingPong) {
+        loop {
+            tokio::task::consume_budget().await;
+            sleep(HTTP2_PING_INTERVAL).await;
+            match timeout(HTTP2_PING_TIMEOUT, ping_pong.ping(Ping::opaque())).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    debug!(?error, "interconnect HTTP/2 ping failed");
+                    break;
+                }
+                Err(_) => {
+                    debug!("interconnect HTTP/2 ping timed out");
+                    break;
+                }
+            }
+        }
+    }
+
     async fn acquire_connection_permits(
         &self,
         class: PoolClass,
@@ -1384,10 +1408,13 @@ impl TransportState {
 
             let mut builder = client::Builder::new();
             configure_client_builder(&mut builder, &self.options, key.class)?;
-            let (sender, connection) = builder
+            let (sender, mut connection) = builder
                 .handshake(stream)
                 .await
                 .map_err(TransportError::from)?;
+            let ping_pong = connection
+                .ping_pong()
+                .assured("a newly handshaken HTTP/2 connection has not lent out its ping handle");
             let cancel = CancellationToken::new();
             let closed = CancellationToken::new();
             let driver_cancel = cancel.clone();
@@ -1400,6 +1427,7 @@ impl TransportState {
                             debug!(?error, "outbound HTTP/2 connection closed");
                         }
                     }
+                    () = Self::monitor_http2_connection(ping_pong) => {}
                     _ = driver_cancel.cancelled() => {}
                     _ = force_close.cancelled() => {}
                     _ = sleep_until(certificate_expires_at) => {}
@@ -2016,6 +2044,11 @@ impl TransportState {
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
         let stream_slots = StdArc::new(Semaphore::new(peer.class.stream_slots_per_connection()));
+        let ping_pong = connection
+            .ping_pong()
+            .assured("a newly bound HTTP/2 connection has not lent out its ping handle");
+        let health_probe = Self::monitor_http2_connection(ping_pong);
+        tokio::pin!(health_probe);
         let connection_force_close = CancellationToken::new();
         let _connection_force_close_guard = CancelOnDrop::new(connection_force_close.clone());
         let mut draining = false;
@@ -2027,6 +2060,7 @@ impl TransportState {
                     .verified("entering drain always records its force-close deadline");
                 tokio::select! {
                     _ = self.force_close.cancelled() => break,
+                    () = &mut health_probe => break,
                     _ = sleep_until(deadline) => break,
                     accepted = connection.accept() => accepted,
                 }
@@ -2058,6 +2092,7 @@ impl TransportState {
                         continue;
                     }
                     _ = self.force_close.cancelled() => break,
+                    () = &mut health_probe => break,
                     _ = sleep_until(certificate_expires_at) => {
                         connection.graceful_shutdown();
                         draining = true;

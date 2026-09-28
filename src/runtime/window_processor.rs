@@ -1035,29 +1035,29 @@ impl VmFunctionInjector for WindowAggregateResults {
         _span: nervix_vm::program::Span,
         _now: Timestamp,
         _prior_error_rows: nervix_vm::RowErrorMask<'_>,
-    ) -> Result<nervix_vm::InjectedResult, nervix_vm::RuntimeError> {
+    ) -> error_stack::Result<nervix_vm::InjectedResult, nervix_vm::RuntimeError> {
         let FunctionName::WindowAggregate(invocation) = function else {
-            return Err(nervix_vm::RuntimeError::InvalidBatch {
+            return Err(Report::new(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!("function '{}' is not a window aggregate", function.as_str()),
-            });
+            }));
         };
         let Some(result) = self.results.get(invocation) else {
-            return Err(nervix_vm::RuntimeError::InvalidBatch {
+            return Err(Report::new(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
                     "window aggregate {} of structure {} was not evaluated for this emission",
                     invocation.function.nspl_name(),
                     invocation.demand_id
                 ),
-            });
+            }));
         };
         if !rows.fits(result.len()) {
-            return Err(nervix_vm::RuntimeError::InvalidBatch {
+            return Err(Report::new(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
                     "window aggregate {} evaluated {} rows for output rows selected as {rows:?}",
                     invocation.function.nspl_name(),
                     result.len()
                 ),
-            });
+            }));
         }
         let output = match rows {
             nervix_vm::RowSelection::All(_) => result.clone(),
@@ -1328,7 +1328,7 @@ mod tests {
             nervix_vm::RowErrorMask::none(1),
         );
         assert!(
-            matches!(beyond, Err(nervix_vm::RuntimeError::InvalidBatch { .. })),
+            matches!(beyond, Err(error) if matches!(error.current_context(), nervix_vm::RuntimeError::InvalidBatch { .. })),
             "a row past the evaluated output rows is refused"
         );
         let short = injector.inject_with_context(
@@ -1340,7 +1340,7 @@ mod tests {
             nervix_vm::RowErrorMask::none(2),
         );
         assert!(
-            matches!(short, Err(nervix_vm::RuntimeError::InvalidBatch { .. })),
+            matches!(short, Err(error) if matches!(error.current_context(), nervix_vm::RuntimeError::InvalidBatch { .. })),
             "a batch of another size than the evaluated output rows is refused"
         );
     }
