@@ -5,6 +5,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 compose_file="${script_dir}/compose.yaml"
 fixture_file="${script_dir}/fixtures/baseline.nspl"
 fixture_generator="${script_dir}/fixtures/generate-baseline.jq"
+# shellcheck source=tool-images.sh
+source "${script_dir}/tool-images.sh"
 
 usage() {
     cat <<EOF
@@ -22,6 +24,9 @@ Options:
   --outage-seconds N     Minimum held crash outage, 5..120 (default: ${outage_seconds}).
   pause-resume uses configured 10s/12s Raft election and 15s node detection
   thresholds, with 1s short and 75s failover-length pauses.
+  --case CASE            partition-recovery case: all, follower, asymmetric, leader,
+                         or quorum-loss (default: ${partition_case}).
+  --partition-seconds N  Minimum verified partition window, 20..600 (default: ${partition_seconds}).
   --keep                 Retain labeled Docker resources after diagnostics.
   -h, --help             Show this help.
 EOF
@@ -42,6 +47,9 @@ run_id=""
 overall_timeout=900
 outage_seconds=8
 outage_option_set=false
+partition_case=all
+partition_seconds=45
+partition_option_set=false
 keep_resources=false
 
 while [[ "$#" -gt 0 ]]; do
@@ -87,6 +95,18 @@ while [[ "$#" -gt 0 ]]; do
             outage_option_set=true
             shift 2
             ;;
+        --case)
+            [[ "$#" -ge 2 ]] || setup_error '--case requires a value'
+            partition_case="$2"
+            partition_option_set=true
+            shift 2
+            ;;
+        --partition-seconds)
+            [[ "$#" -ge 2 ]] || setup_error '--partition-seconds requires a value'
+            partition_seconds="$2"
+            partition_option_set=true
+            shift 2
+            ;;
         --keep)
             keep_resources=true
             shift
@@ -103,7 +123,7 @@ done
 
 [[ -n "${image_ref}" ]] || setup_error '--image is required and must name an already-built Nervix image'
 case "${scenario}" in
-    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume) ;;
+    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery) ;;
     *) setup_error "unknown scenario: ${scenario}" ;;
 esac
 [[ "${node_count}" == "1" || "${node_count}" == "3" ]] \
@@ -114,6 +134,20 @@ fi
 if [[ "${scenario}" == pause-resume && "${outage_option_set}" == true ]]; then
     setup_error 'pause-resume selects its own finite durations; --outage-seconds is for crash scenarios'
 fi
+if [[ "${scenario}" == partition-recovery && "${outage_option_set}" == true ]]; then
+    setup_error 'partition-recovery holds partitions, not outages; --outage-seconds is for crash scenarios'
+fi
+if [[ "${scenario}" != partition-recovery && "${partition_option_set}" == true ]]; then
+    setup_error '--case and --partition-seconds apply only to partition-recovery'
+fi
+case "${partition_case}" in
+    all | follower | asymmetric | leader | quorum-loss) ;;
+    *) setup_error "--case must be all, follower, asymmetric, leader, or quorum-loss, not ${partition_case}" ;;
+esac
+[[ "${partition_seconds}" =~ ^[0-9]+$ ]] \
+    || setup_error '--partition-seconds must be an integer from 20 through 600'
+((partition_seconds >= 20 && partition_seconds <= 600)) \
+    || setup_error '--partition-seconds must be an integer from 20 through 600'
 [[ "${record_count}" =~ ^[0-9]+$ ]] \
     || setup_error '--records must be an integer from 1 through 1000'
 ((record_count >= 1 && record_count <= 1000)) \
@@ -172,7 +206,8 @@ export CHAOS_PASSWORD="${password}"
 export CHAOS_KAFKA_IMAGE="apache/kafka:3.9.1"
 export CHAOS_KCAT_IMAGE="edenhill/kcat:1.7.1"
 export CHAOS_PROBE_IMAGE="alpine:3.22"
-export CHAOS_PUMBA_IMAGE="ghcr.io/alexei-led/pumba@sha256:780505fe261932765921c94a23e24bda107c72927654c26a5893a238d7708bf0"
+export CHAOS_PUMBA_IMAGE="${chaos_pumba_image}"
+export CHAOS_NETTOOLS_IMAGE="${chaos_nettools_image}"
 export CHAOS_LOAD_FILE="${artifact_dir}/fixtures/input.ndjson"
 export CHAOS_TRAFFIC_DIR="${artifact_dir}/traffic"
 export CHAOS_SCRIPT_DIR="${script_dir}"
@@ -183,6 +218,10 @@ if [[ "${scenario}" == pause-resume ]]; then
     export CHAOS_RAFT_ELECTION_TIMEOUT_MAX=12s
     export CHAOS_NODE_UNAVAILABILITY_TIMEOUT=15s
     export CHAOS_LOAD_INTERVAL=1.0
+fi
+if [[ "${scenario}" == partition-recovery ]]; then
+    # One record every two seconds keeps the bounded fixture flowing through all four cases.
+    export CHAOS_LOAD_INTERVAL=2.0
 fi
 
 jq -n \
@@ -423,6 +462,25 @@ finish() {
             fi
         fi
     fi
+    if [[ "${scenario}" == partition-recovery ]]; then
+        if [[ -n "${partition_event_recorder_pid:-}" ]]; then
+            kill "${partition_event_recorder_pid}" 2>/dev/null
+            wait "${partition_event_recorder_pid}" 2>/dev/null
+        fi
+        # Heal before anything else so neither retained resources nor diagnostics stay partitioned.
+        timeout --foreground --kill-after=5s 180s \
+            "${script_dir}/network-faults.sh" heal --run-id "${run_id}" \
+            --nettools "${CHAOS_NETTOOLS_IMAGE}" \
+            --output "${artifact_dir}/diagnostics/partition-heal.txt" \
+            >"${artifact_dir}/diagnostics/partition-heal-status.txt" 2>&1 \
+            || printf 'network fault healing on exit reported a failure\n' \
+                >>"${artifact_dir}/diagnostics/partition-heal-status.txt"
+        if [[ -n "${partition_restart_id:-}" && "${partition_restart_started:-true}" != true \
+            && "$(timeout --foreground --kill-after=5s 20s docker inspect --format '{{.State.Running}}' "${partition_restart_id}" 2>/dev/null)" == false ]]; then
+            timeout --foreground --kill-after=5s 30s docker start "${partition_restart_id}" \
+                >"${artifact_dir}/diagnostics/partition-restart-heal.txt" 2>&1
+        fi
+    fi
     if [[ "${scenario}" == *-crash && -n "${crash_target_id:-}" \
         && "${crash_restarted:-false}" != true ]]; then
         timeout --foreground --kill-after=5s 20s docker inspect "${crash_target_id}" \
@@ -434,7 +492,7 @@ finish() {
     fi
     capture_diagnostics
 
-    if [[ "${status}" -ne 0 && ( "${scenario}" == *-crash || "${scenario}" == pause-resume ) ]]; then
+    if [[ "${status}" -ne 0 && ( "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery ) ]]; then
         local reproducer_image="${image_id:-${image_ref}}"
         if [[ "${image_ref}" == *@sha256:* ]]; then
             reproducer_image="${image_ref}"
@@ -445,6 +503,9 @@ finish() {
         if [[ "${scenario}" == pause-resume ]]; then
             reproducer="$(printf 'just chaos run %q --image %q --records %q' \
                 "${scenario}" "${reproducer_image}" "${record_count}")"
+        elif [[ "${scenario}" == partition-recovery ]]; then
+            reproducer="$(printf 'just chaos run %q --image %q --records %q --case %q --partition-seconds %q' \
+                "${scenario}" "${reproducer_image}" "${record_count}" "${partition_case}" "${partition_seconds}")"
         else
             reproducer="$(printf 'just chaos run %q --image %q --nodes %q --records %q --outage-seconds %q' \
                 "${scenario}" "${reproducer_image}" "${node_count}" "${record_count}" "${outage_seconds}")"
@@ -474,6 +535,23 @@ finish() {
                 \( -name 'result.json' -o -name 'duration.json' -o -name 'pause-events.ndjson' \
                 -o -name 'pumba.txt' -o -name 'fault-command.json' -o -name 'observer.log' \) \
                 -size +0c 2>/dev/null)
+        fi
+        if [[ "${scenario}" == partition-recovery ]]; then
+            for evidence_path in results/partition-findings.ndjson results/partition-recovery.json \
+                diagnostics/partition-heal.txt diagnostics/network-preflight.txt; do
+                if [[ -s "${artifact_dir}/${evidence_path}" ]]; then
+                    evidence_paths+=("${evidence_path}")
+                fi
+            done
+            while IFS= read -r evidence_path; do
+                evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
+            done < <(find "${artifact_dir}/partitions" -type f \
+                \( -name 'plan.json' -o -name 'result.json' -o -name 'samples.ndjson' \
+                -o -name 'links-*.json' -o -name '*-netem.json' -o -name '*-iptables.json' \
+                -o -name '*-netem.log' -o -name '*-iptables.log' -o -name 'control-*.json' \
+                -o -name 'consumer-group-*.json' -o -name 'node-events.ndjson' \
+                -o -name 'isolation-boundary.json' -o -name 'observer.log' \) \
+                -size +0c 2>/dev/null | sort)
         fi
         local evidence_json
         evidence_json="$(printf '%s\n' "${evidence_paths[@]}" \
@@ -559,6 +637,40 @@ ensure_tool_image() {
     fi
     printf 'pulling required tool image %s\n' "${tool_image}"
     run_bounded 180 docker pull "${tool_image}"
+}
+
+# Chooses this run's network away from every Docker network and host route, then fixes the node
+# addresses outside the range Docker hands to every other container.
+select_run_network() {
+    local networks=()
+    mapfile -t networks < <(run_bounded 30 docker network ls --quiet)
+    local used_file
+    used_file="$(mktemp "${artifact_dir}/.used-networks.XXXXXX")"
+    if ((${#networks[@]} > 0)); then
+        run_bounded 30 docker network inspect \
+            --format '{{range .IPAM.Config}}{{println .Subnet}}{{end}}' "${networks[@]}" \
+            >>"${used_file}" 2>/dev/null || true
+    fi
+    if command -v ip >/dev/null 2>&1; then
+        ip -4 -o address show 2>/dev/null | awk '{ print $4 }' >>"${used_file}"
+        ip -4 route show 2>/dev/null | awk '$1 != "default" { print $1 }' >>"${used_file}"
+    fi
+    local subnet
+    subnet="$("${script_dir}/select-subnet.sh" "${run_id}" <"${used_file}")" \
+        || setup_error 'no free 10.213.N.0/24 network is available for this run'
+    rm -f "${used_file}"
+    local prefix="${subnet%.0/24}"
+    export CHAOS_SUBNET="${subnet}"
+    export CHAOS_DYNAMIC_RANGE="${prefix}.128/25"
+    export CHAOS_NODE_1_ADDRESS="${prefix}.11"
+    export CHAOS_NODE_2_ADDRESS="${prefix}.12"
+    export CHAOS_NODE_3_ADDRESS="${prefix}.13"
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.network = {subnet: $subnet, dynamic_range: $range, node_addresses: {"nervix-1": $one, "nervix-2": $two, "nervix-3": $three}}' \
+        --arg subnet "${CHAOS_SUBNET}" --arg range "${CHAOS_DYNAMIC_RANGE}" \
+        --arg one "${CHAOS_NODE_1_ADDRESS}" --arg two "${CHAOS_NODE_2_ADDRESS}" \
+        --arg three "${CHAOS_NODE_3_ADDRESS}"
 }
 
 generate_tls() {
@@ -753,6 +865,7 @@ phase "preflight"
 run_bounded 30 docker info >/dev/null \
     || setup_error 'Docker daemon is unavailable'
 run_bounded 30 docker compose version >"${artifact_dir}/docker-compose-version.txt"
+select_run_network
 
 if ! image_id="$(run_bounded 30 docker image inspect --format '{{.Id}}' "${image_ref}" 2>/dev/null)"; then
     printf 'image is not local; attempting bounded pull: %s\n' "${image_ref}"
@@ -788,6 +901,8 @@ if [[ "${scenario}" != "baseline" ]]; then
         pumba_preflight=(kill --signal SIGKILL impossible-chaos-preflight-target)
     elif [[ "${scenario}" == pause-resume ]]; then
         pumba_preflight=(pause --duration 1s impossible-chaos-preflight-target)
+    elif [[ "${scenario}" == partition-recovery ]]; then
+        pumba_preflight=(netem --duration 1s --target 192.0.2.1 loss --percent 100 impossible-chaos-preflight-target)
     fi
     run_bounded 30 docker run --rm \
         --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
@@ -795,6 +910,16 @@ if [[ "${scenario}" != "baseline" ]]; then
         "${pumba_preflight[@]}" \
         >"${artifact_dir}/diagnostics/pumba-docker-preflight.txt" 2>&1 \
         || setup_error 'Pumba cannot access the selected Docker daemon'
+fi
+if [[ "${scenario}" == partition-recovery ]]; then
+    ensure_tool_image "${CHAOS_NETTOOLS_IMAGE}"
+    nettools_image_id="$(run_bounded 30 docker image inspect --format '{{.Id}}' "${CHAOS_NETTOOLS_IMAGE}")"
+    # Pumba's netem and iptables faults must take effect on this worker's kernel and heal on SIGTERM.
+    run_bounded 120 "${script_dir}/network-faults.sh" preflight --run-id "${run_id}" \
+        --pumba "${pumba_image_id}" --nettools "${CHAOS_NETTOOLS_IMAGE}" \
+        --output "${artifact_dir}/diagnostics/network-preflight" \
+        >"${artifact_dir}/diagnostics/network-preflight.txt" 2>&1 \
+        || setup_error "this Docker worker cannot install and heal netem/iptables faults; see ${artifact_dir}/diagnostics/network-preflight.txt"
 fi
 
 update_manifest \
@@ -806,9 +931,15 @@ if [[ "${scenario}" != "baseline" ]]; then
     update_manifest '.pumba_image_id = $image_id | .pumba_image = $image' \
         --arg image_id "${pumba_image_id}" --arg image "${CHAOS_PUMBA_IMAGE}"
 fi
+if [[ "${scenario}" == partition-recovery ]]; then
+    # shellcheck disable=SC2016
+    update_manifest '.nettools_image_id = $image_id | .nettools_image = $image | .partition = {case: $case, minimum_window_seconds: ($seconds | tonumber)}' \
+        --arg image_id "${nettools_image_id}" --arg image "${CHAOS_NETTOOLS_IMAGE}" \
+        --arg case "${partition_case}" --arg seconds "${partition_seconds}"
+fi
 
 phase "verifier self-check"
-run_bounded 60 "${script_dir}/tests/self-test.sh" \
+run_bounded 180 "${script_dir}/tests/self-test.sh" \
     >"${artifact_dir}/results/verifier-self-test.txt" 2>&1
 
 phase "TLS generation"
@@ -933,6 +1064,10 @@ if [[ "${scenario}" != "baseline" ]]; then
         # shellcheck source=pause-resume-scenario.sh
         source "${script_dir}/pause-resume-scenario.sh"
         run_pause_resume
+    elif [[ "${scenario}" == "partition-recovery" ]]; then
+        # shellcheck source=partition-scenario.sh
+        source "${script_dir}/partition-scenario.sh"
+        run_partition_recovery
     else
         # shellcheck source=crash-scenario.sh
         source "${script_dir}/crash-scenario.sh"
@@ -979,7 +1114,7 @@ wait_for "Nervix consumer offsets at source boundary ${input_end}" 120 \
 cp "${artifact_dir}/traffic/consumer-group.attempt.txt" \
     "${artifact_dir}/traffic/consumer-group-final.txt"
 output_wait_timed_out=false
-if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume ]]; then
+if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery ]]; then
     if ! wait_for "output topic to contain at least ${input_end} records" 120 \
         output_has_all_records "${input_end}"; then
         output_wait_timed_out=true
@@ -1007,7 +1142,7 @@ observed_count="$(wc -l <"${artifact_dir}/traffic/observed-output.ndjson")"
 
 phase "external ledger verification"
 ledger_args=()
-if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume ]]; then
+if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery ]]; then
     ledger_args+=(--allow-replay-duplicates)
 fi
 "${script_dir}/verify-ledger.sh" \
@@ -1112,6 +1247,28 @@ elif [[ "${scenario}" == "pause-resume" ]]; then
         --slurpfile ledger "${artifact_dir}/results/ledger.json" \
         '{verdict:"pass",run_id:$run_id,image_id:$image_id,pumba_image_id:$pumba_image_id,topology_nodes:3,accepted_source_records:$accepted_records,observed_output_records:$observed_records,replay_duplicates:$ledger[0].duplicate_records,source_offsets_committed:true,ledger:"results/ledger.json",remote_path:"results/remote-path.json",progress:$progress[0]}' \
         >"${artifact_dir}/results/pause-resume.json"
+elif [[ "${scenario}" == "partition-recovery" ]]; then
+    jq -n \
+        --arg run_id "${run_id}" \
+        --arg image_id "${image_id}" \
+        --arg pumba_image_id "${pumba_image_id}" \
+        --arg nettools_image_id "${nettools_image_id}" \
+        --arg case "${partition_case}" \
+        --argjson accepted_records "${input_end}" \
+        --argjson observed_records "${output_end}" \
+        --slurpfile progress "${artifact_dir}/results/partition-progress.json" \
+        --slurpfile ledger "${artifact_dir}/results/ledger.json" \
+        --slurpfile findings <(cat "${artifact_dir}/results/partition-findings.ndjson" 2>/dev/null || true) \
+        '{verdict:(if ($findings | length) == 0 then "pass" else "fail" end),run_id:$run_id,image_id:$image_id,pumba_image_id:$pumba_image_id,nettools_image_id:$nettools_image_id,case:$case,topology_nodes:3,accepted_source_records:$accepted_records,observed_output_records:$observed_records,replay_duplicates:$ledger[0].duplicate_records,source_offsets_committed:true,ledger:"results/ledger.json",remote_path:"results/remote-path.json",findings:$findings,progress:$progress[0]}' \
+        >"${artifact_dir}/results/partition-recovery.json"
+    if [[ "$(jq -r '.verdict' "${artifact_dir}/results/partition-recovery.json")" != pass ]]; then
+        failure_category=product
+        current_phase="partition product findings"
+        printf 'partition-recovery recorded %d product finding(s):\n' \
+            "$(jq '.findings | length' "${artifact_dir}/results/partition-recovery.json")" >&2
+        jq -r '.findings[] | "- \(.case): \(.message)"' "${artifact_dir}/results/partition-recovery.json" >&2
+        exit 1
+    fi
 else
     jq -n \
         --arg run_id "${run_id}" \
