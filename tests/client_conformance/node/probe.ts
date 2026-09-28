@@ -751,6 +751,67 @@ function clockLine(clock: wire.DomainClockObservation): string {
   }
 }
 
+/** Renders an opened producer and the input schema its batches carry. */
+function producerLines(id: bigint, opened: wire.ProducerOpened, message: string): string[] {
+  const contract = member(opened.contract()).bytesArray();
+  if (contract === null || contract.length !== 32) {
+    throw new Error("an opened producer's contract is not a 32-byte fingerprint");
+  }
+  const attachment = opened.attachmentArray();
+  if (attachment === null || attachment.length !== 16) {
+    throw new Error("an opened producer's attachment is not 16 bytes");
+  }
+  let window: string;
+  switch (opened.windowType()) {
+    case wire.ProducerWindow.SequentialProducerWindow:
+      window = 'sequential';
+      break;
+    case wire.ProducerWindow.ParallelProducerWindow: {
+      const parallel = member(
+        opened.window(new wire.ParallelProducerWindow()) as wire.ParallelProducerWindow | null,
+      );
+      window = `parallel:${parallel.max()}`;
+      break;
+    }
+    default:
+      throw new Error(`undeclared producer window ${opened.windowType()}`);
+  }
+  const lines = [
+    `REPLY ${id} INGESTOR_OPENED domain=${opened.domain()} ingestor=${opened.ingestor()} generation=${opened.generation()} contract=${hex(contract)} attachment=${hex(attachment)} window=${window} ack_timeout=${opened.ackTimeoutNanos()} retry=${opened.retryBackoffNanos()}/${opened.retryMaxBackoffNanos()} granted=${opened.grantedBatches()}/${opened.grantedBytes()} max_batch=${opened.maxBatchBytes()}/${opened.maxBatchRows()} admission=${wire.ProducerAdmission[member(opened.admission())]} message=${message}`,
+  ];
+  for (let index = 0; index < opened.fieldsLength(); index += 1) {
+    lines.push(fieldLine('FIELD', readField(member(opened.fields(index)))));
+  }
+  return lines;
+}
+
+/** Renders the terminal outcome of one submitted batch. */
+function submissionLine(id: bigint, outcome: wire.SubmissionOutcome): string {
+  const message = text(bytesOf((encoding) => outcome.message(encoding)));
+  switch (outcome.dispositionType()) {
+    case wire.SubmissionDisposition.SubmissionCompleted:
+      return `REPLY ${id} SUBMISSION completed message=${message}`;
+    case wire.SubmissionDisposition.SubmissionNotAdmitted: {
+      const notAdmitted = member(
+        outcome.disposition(new wire.SubmissionNotAdmitted()) as wire.SubmissionNotAdmitted | null,
+      );
+      return `REPLY ${id} SUBMISSION not_admitted refusal=${wire.SubmissionRefusal[member(notAdmitted.refusal())]} message=${message}`;
+    }
+    case wire.SubmissionDisposition.SubmissionFailed: {
+      const failed = member(outcome.disposition(new wire.SubmissionFailed()) as wire.SubmissionFailed | null);
+      return `REPLY ${id} SUBMISSION failed failure=${wire.ProcessingFailure[member(failed.failure())]} message=${message}`;
+    }
+    case wire.SubmissionDisposition.SubmissionOutcomeUnknown: {
+      const unknown = member(
+        outcome.disposition(new wire.SubmissionOutcomeUnknown()) as wire.SubmissionOutcomeUnknown | null,
+      );
+      return `REPLY ${id} SUBMISSION unknown cause=${wire.OutcomeUncertainty[member(unknown.cause())]} message=${message}`;
+    }
+    default:
+      throw new Error(`undeclared submission disposition ${outcome.dispositionType()}`);
+  }
+}
+
 function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
   const message = wire.ServerMessage.getRootAsServerMessage(frameBuffer(frame, 'NXSM'));
   switch (message.bodyType()) {
@@ -855,6 +916,42 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
               throw new Error(`the corpus holds no ${outcome.dispositionType()} detach disposition`);
           }
         }
+        case wire.ReplyBody.OpenIngestorOutcome: {
+          const outcome = member(reply.body(new wire.OpenIngestorOutcome()) as wire.OpenIngestorOutcome | null);
+          const message = text(bytesOf((encoding) => outcome.message(encoding)));
+          switch (outcome.dispositionType()) {
+            case wire.OpenIngestorDisposition.ProducerOpened:
+              return producerLines(
+                id,
+                member(outcome.disposition(new wire.ProducerOpened()) as wire.ProducerOpened | null),
+                message,
+              );
+            case wire.OpenIngestorDisposition.ProducerRefused: {
+              const refused = member(outcome.disposition(new wire.ProducerRefused()) as wire.ProducerRefused | null);
+              return [
+                `REPLY ${id} INGESTOR_REFUSED refusal=${wire.ProducerRefusal[member(refused.refusal())]} message=${message}`,
+              ];
+            }
+            default:
+              throw new Error(`undeclared open disposition ${outcome.dispositionType()}`);
+          }
+        }
+        case wire.ReplyBody.SubmissionOutcome:
+          return [
+            submissionLine(id, member(reply.body(new wire.SubmissionOutcome()) as wire.SubmissionOutcome | null)),
+          ];
+        case wire.ReplyBody.CloseIngestorOutcome: {
+          const outcome = member(reply.body(new wire.CloseIngestorOutcome()) as wire.CloseIngestorOutcome | null);
+          const message = text(bytesOf((encoding) => outcome.message(encoding)));
+          switch (outcome.dispositionType()) {
+            case wire.CloseIngestorDisposition.ProducerClosed:
+              return [`REPLY ${id} INGESTOR_CLOSE closed message=${message}`];
+            case wire.CloseIngestorDisposition.ProducerNotOpen:
+              return [`REPLY ${id} INGESTOR_CLOSE not_open message=${message}`];
+            default:
+              throw new Error(`undeclared close disposition ${outcome.dispositionType()}`);
+          }
+        }
         default:
           throw new Error(`the corpus holds no ${wire.ReplyBody[reply.bodyType()]} reply`);
       }
@@ -892,6 +989,20 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
       );
       return [
         `EVENT DOMAIN_CLOCK_ENDED domain=${ended.domain()} reason=${wire.DomainClockAttachmentEndReason[member(ended.reason())]}`,
+      ];
+    }
+    case wire.ServerBody.ProducerAdmissionChanged: {
+      const changed = member(
+        message.body(new wire.ProducerAdmissionChanged()) as wire.ProducerAdmissionChanged | null,
+      );
+      return [
+        `EVENT PRODUCER_ADMISSION producer=${changed.producer()} admission=${wire.ProducerAdmission[member(changed.admission())]}`,
+      ];
+    }
+    case wire.ServerBody.ProducerEnded: {
+      const ended = member(message.body(new wire.ProducerEnded()) as wire.ProducerEnded | null);
+      return [
+        `EVENT PRODUCER_ENDED producer=${ended.producer()} reason=${wire.ProducerEndReason[member(ended.reason())]} message=${text(bytesOf((encoding) => ended.message(encoding)))}`,
       ];
     }
     default:
@@ -958,6 +1069,24 @@ function clientLines(frame: Uint8Array): string[] {
         message.request(new wire.DetachDomainClockRequest()) as wire.DetachDomainClockRequest | null,
       );
       return [`REQUEST ${id} DETACH_DOMAIN_CLOCK domain=${detach.domain()}`];
+    }
+    case wire.ClientRequest.OpenIngestorRequest: {
+      const open = member(message.request(new wire.OpenIngestorRequest()) as wire.OpenIngestorRequest | null);
+      const lines = [
+        `REQUEST ${id} OPEN_INGESTOR domain=${open.domain()} ingestor=${open.ingestor()} batches=${open.maxOutstandingBatches()} bytes=${open.maxOutstandingBytes()}`,
+      ];
+      for (let index = 0; index < open.expectedFieldsLength(); index += 1) {
+        lines.push(fieldLine('FIELD', readField(member(open.expectedFields(index)))));
+      }
+      return lines;
+    }
+    case wire.ClientRequest.SubmitBatchRequest: {
+      const submit = member(message.request(new wire.SubmitBatchRequest()) as wire.SubmitBatchRequest | null);
+      return [`REQUEST ${id} SUBMIT_BATCH producer=${submit.producer()} batch=${hex(member(submit.batchArray()))}`];
+    }
+    case wire.ClientRequest.CloseIngestorRequest: {
+      const close = member(message.request(new wire.CloseIngestorRequest()) as wire.CloseIngestorRequest | null);
+      return [`REQUEST ${id} CLOSE_INGESTOR producer=${close.producer()}`];
     }
     default:
       throw new Error(`the corpus holds no ${wire.ClientRequest[message.requestType()]} request`);

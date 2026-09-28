@@ -70,7 +70,7 @@ impl SchemaField {
 mod tests {
     use std::num::NonZeroU32;
 
-    use meticulous::{OptionExt as _, ResultExt as _};
+    use meticulous::OptionExt as _;
 
     use super::*;
     use crate::FieldName;

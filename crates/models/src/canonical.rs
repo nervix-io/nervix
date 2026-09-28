@@ -18,13 +18,13 @@ use crate::{
     AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
     AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTargetScope,
     AvroType, BinaryOperator, BranchEviction, BranchSelection, ClickHouseValueMapping,
-    ClientConfigEntry, ClientResourceMount, CodecEncoding, CodecEncodingRule,
-    CodecJaqTransformations, CodecName, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
-    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
-    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    ClientConfigEntry, ClientIngestMode, ClientIngestSource, ClientResourceMount, CodecEncoding,
+    CodecEncodingRule, CodecJaqTransformations, CodecName, CodecWireFormat,
+    CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse,
+    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
+    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
+    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
+    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
     CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
@@ -33,8 +33,8 @@ use crate::{
     EmitSink, EmitterBatchPolicy, EmitterBody, EmitterPublishingMode, EndpointIngestMode,
     Expression, FieldName, FieldScope, Float64Literal, FlushPolicy, GeneralErrorPolicy,
     IcebergCatalog, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorMapping, IngestSource, IngestTimestampSource, Inheritance, InputCollectPolicy,
-    InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode, Literal,
+    InferencerTensorMapping, IngestSource, IngestTimestampSource, IngestorInput, Inheritance,
+    InputCollectPolicy, InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode, Literal,
     MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy,
     Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession,
     MySqlConflictAction, NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch, ParseAsType,
@@ -900,6 +900,7 @@ impl Statement {
                 show.name.as_str()
             )),
             Self::ShowUdfs(_) => Ok("SHOW UDFS;".to_string()),
+            Self::ShowIngestors(_) => Ok("SHOW INGESTORS;".to_string()),
             Self::ShowPlacements(_) => Ok("SHOW PLACEMENTS;".to_string()),
             Self::ShowRelayMaterializedState(show) => Ok(format!(
                 "SHOW RELAY {} MATERIALIZED STATE;",
@@ -1696,14 +1697,25 @@ impl CreateIngestor {
             Some(IngestTimestampSource::At(field)) => format!(" TIMESTAMP AT {}", field.as_str()),
             None => String::new(),
         };
-        let mut clauses = vec![Clause::line(format!(
-            "FROM {}",
-            ingest_source_to_nspl(&self.source)
-        ))];
-        clauses.push(Clause::line(format!(
-            "DECODE USING {}",
-            self.decode_using_codec.as_str()
-        )));
+        let mut clauses = Vec::new();
+        match &self.input {
+            IngestorInput::Transport(input) => {
+                clauses.push(Clause::line(format!(
+                    "FROM {}",
+                    ingest_source_to_nspl(&input.source)
+                )));
+                clauses.push(Clause::line(format!(
+                    "DECODE USING {}",
+                    input.codec.as_str()
+                )));
+            }
+            IngestorInput::Client(source) => {
+                clauses.push(Clause::line(format!(
+                    "FROM {}",
+                    client_ingest_source_to_nspl(source)
+                )));
+            }
+        }
         if !timestamp.is_empty() {
             clauses.push(Clause::line(timestamp.trim_start().to_string()));
         }
@@ -2617,6 +2629,9 @@ fn alter_ingestor_operation_to_nspl(
         AlterIngestorOperation::SetSource { source } => {
             Ok(format!("SET FROM {}", ingest_source_to_nspl(source)))
         }
+        AlterIngestorOperation::SetClientSource { source } => {
+            Ok(format!("SET FROM {}", client_ingest_source_to_nspl(source)))
+        }
         AlterIngestorOperation::SetQuiesce { quiesce } => {
             Ok(format!("SET QUIESCE {}", ingest_quiesce_to_nspl(quiesce)))
         }
@@ -2808,6 +2823,32 @@ pub fn ingest_quiesce_to_nspl(quiesce: &crate::IngestQuiesceMode) -> String {
         crate::IngestQuiesceMode::EndpointBuffer { max_size } => {
             format!("BUFFER MAX SIZE {max_size}")
         }
+    }
+}
+
+/// A client source's clause after `FROM`. Its quiesce mode is always `SUSPEND`, which the grammar
+/// requires it to state.
+fn client_ingest_source_to_nspl(source: &ClientIngestSource) -> String {
+    format!(
+        "CLIENT SCHEMA {} MODE {} ON QUIESCE SUSPEND",
+        source.schema.as_str(),
+        source.mode.to_canonical_nspl()
+    )
+}
+
+impl ClientIngestMode {
+    /// The mode clause of a client source, after its `MODE` keyword.
+    pub fn to_canonical_nspl(&self) -> String {
+        let Self {
+            window,
+            ack_timeout,
+            retry_policy,
+        } = self;
+        format!(
+            "ACK {} ACK TIMEOUT {ack_timeout} RETRY POLICY {}",
+            ack_window_to_nspl(window),
+            retry_policy_to_nspl(retry_policy)
+        )
     }
 }
 
@@ -5065,15 +5106,17 @@ mod tests {
                 CreateIngestor {
                     name: named("http_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Http {
+                            client: named("http_main"),
+                            every: "30s"
+                                .parse()
+                                .assured("the fixture cadence is a positive duration"),
+                            quiesce: crate::IngestQuiesceMode::Suspend,
+                        },
+                        codec: named("orders_codec"),
+                    }),
                     timestamp_source: None,
-                    source: IngestSource::Http {
-                        client: named("http_main"),
-                        every: "30s"
-                            .parse()
-                            .assured("the fixture cadence is a positive duration"),
-                        quiesce: crate::IngestQuiesceMode::Suspend,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5088,21 +5131,23 @@ mod tests {
                 CreateIngestor {
                     name: named("kafka_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
-                    timestamp_source: None,
-                    source: IngestSource::Kafka {
-                        client: named("kafka_main"),
-                        topic: named("orders_topic"),
-                        offset_mode: KafkaOffsetMode::ConsumerGroup(named("orders_group")),
-                        instances: nonzero!(3u64),
-                        mode: KafkaIngestMode::AckParallel {
-                            max: nonzero!(8u64),
-                            batch_timeout: "100ms".to_string(),
-                            timeout: "5s".to_string(),
-                            retry_policy: retry.clone(),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Kafka {
+                            client: named("kafka_main"),
+                            topic: named("orders_topic"),
+                            offset_mode: KafkaOffsetMode::ConsumerGroup(named("orders_group")),
+                            instances: nonzero!(3u64),
+                            mode: KafkaIngestMode::AckParallel {
+                                max: nonzero!(8u64),
+                                batch_timeout: "100ms".to_string(),
+                                timeout: "5s".to_string(),
+                                retry_policy: retry.clone(),
+                            },
+                            quiesce: crate::IngestQuiesceMode::Suspend,
                         },
-                        quiesce: crate::IngestQuiesceMode::Suspend,
-                    },
+                        codec: named("orders_codec"),
+                    }),
+                    timestamp_source: None,
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5119,18 +5164,20 @@ mod tests {
                 CreateIngestor {
                     name: named("mqtt_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
-                    timestamp_source: None,
-                    source: IngestSource::Mqtt {
-                        client: named("mqtt_main"),
-                        topic: "orders_topic".to_string(),
-                        instances: nonzero!(1u64),
-                        mode: MqttIngestMode::NoAckSequential {
-                            session: MqttSession::Clean,
-                            qos: MqttQos::AtMostOnce,
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Mqtt {
+                            client: named("mqtt_main"),
+                            topic: "orders_topic".to_string(),
+                            instances: nonzero!(1u64),
+                            mode: MqttIngestMode::NoAckSequential {
+                                session: MqttSession::Clean,
+                                qos: MqttQos::AtMostOnce,
+                            },
+                            quiesce: crate::IngestQuiesceMode::Drop,
                         },
-                        quiesce: crate::IngestQuiesceMode::Drop,
-                    },
+                        codec: named("orders_codec"),
+                    }),
+                    timestamp_source: None,
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5146,16 +5193,18 @@ mod tests {
                 CreateIngestor {
                     name: named("nats_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Nats {
+                            client: named("nats_main"),
+                            subject: named("orders_subject"),
+                            queue_group: named("orders_workers"),
+                            instances: nonzero!(2u64),
+                            mode: NatsIngestMode::NoAckSequential,
+                            quiesce: crate::IngestQuiesceMode::Drop,
+                        },
+                        codec: named("orders_codec"),
+                    }),
                     timestamp_source: None,
-                    source: IngestSource::Nats {
-                        client: named("nats_main"),
-                        subject: named("orders_subject"),
-                        queue_group: named("orders_workers"),
-                        instances: nonzero!(2u64),
-                        mode: NatsIngestMode::NoAckSequential,
-                        quiesce: crate::IngestQuiesceMode::Drop,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5171,18 +5220,20 @@ mod tests {
                 CreateIngestor {
                     name: named("rabbit_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
-                    timestamp_source: None,
-                    source: IngestSource::RabbitMq {
-                        client: named("rmq_main"),
-                        queue: named("orders_q"),
-                        instances: nonzero!(2u64),
-                        mode: RabbitMqIngestMode::AckSequential {
-                            timeout: "10s".to_string(),
-                            retry_policy: retry.clone(),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::RabbitMq {
+                            client: named("rmq_main"),
+                            queue: named("orders_q"),
+                            instances: nonzero!(2u64),
+                            mode: RabbitMqIngestMode::AckSequential {
+                                timeout: "10s".to_string(),
+                                retry_policy: retry.clone(),
+                            },
+                            quiesce: crate::IngestQuiesceMode::Suspend,
                         },
-                        quiesce: crate::IngestQuiesceMode::Suspend,
-                    },
+                        codec: named("orders_codec"),
+                    }),
+                    timestamp_source: None,
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5199,14 +5250,16 @@ mod tests {
                 CreateIngestor {
                     name: named("redis_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::RedisPubSub {
+                            client: named("redis_main"),
+                            channel: named("orders_channel"),
+                            mode: RedisPubSubIngestMode::NoAckSequential,
+                            quiesce: crate::IngestQuiesceMode::Drop,
+                        },
+                        codec: named("orders_codec"),
+                    }),
                     timestamp_source: None,
-                    source: IngestSource::RedisPubSub {
-                        client: named("redis_main"),
-                        channel: named("orders_channel"),
-                        mode: RedisPubSubIngestMode::NoAckSequential,
-                        quiesce: crate::IngestQuiesceMode::Drop,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5222,16 +5275,18 @@ mod tests {
                 CreateIngestor {
                     name: named("prom_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Prometheus {
+                            client: named("prom_main"),
+                            query: "sum(rate(http_requests_total[5m]))".to_string(),
+                            every: "15s"
+                                .parse()
+                                .assured("the fixture cadence is a positive duration"),
+                            quiesce: crate::IngestQuiesceMode::Suspend,
+                        },
+                        codec: named("orders_codec"),
+                    }),
                     timestamp_source: None,
-                    source: IngestSource::Prometheus {
-                        client: named("prom_main"),
-                        query: "sum(rate(http_requests_total[5m]))".to_string(),
-                        every: "15s"
-                            .parse()
-                            .assured("the fixture cadence is a positive duration"),
-                        quiesce: crate::IngestQuiesceMode::Suspend,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5247,13 +5302,15 @@ mod tests {
                 CreateIngestor {
                     name: named("zmq_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::ZeroMq {
+                            client: named("zmq_main"),
+                            mode: ZeroMqIngestMode::NoAckSequential,
+                            quiesce: crate::IngestQuiesceMode::Suspend,
+                        },
+                        codec: named("orders_codec"),
+                    }),
                     timestamp_source: None,
-                    source: IngestSource::ZeroMq {
-                        client: named("zmq_main"),
-                        mode: ZeroMqIngestMode::NoAckSequential,
-                        quiesce: crate::IngestQuiesceMode::Suspend,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5269,18 +5326,20 @@ mod tests {
                 CreateIngestor {
                     name: named("sqs_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
-                    timestamp_source: None,
-                    source: IngestSource::Sqs {
-                        client: named("sqs_main"),
-                        queue: named("orders_queue"),
-                        instances: nonzero!(1u64),
-                        mode: SqsIngestMode::AckSequential {
-                            timeout: "20s".to_string(),
-                            retry_policy: retry.clone(),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Sqs {
+                            client: named("sqs_main"),
+                            queue: named("orders_queue"),
+                            instances: nonzero!(1u64),
+                            mode: SqsIngestMode::AckSequential {
+                                timeout: "20s".to_string(),
+                                retry_policy: retry.clone(),
+                            },
+                            quiesce: crate::IngestQuiesceMode::Suspend,
                         },
-                        quiesce: crate::IngestQuiesceMode::Suspend,
-                    },
+                        codec: named("orders_codec"),
+                    }),
+                    timestamp_source: None,
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5296,15 +5355,17 @@ mod tests {
                 CreateIngestor {
                     name: named("endpoint_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
-                    timestamp_source: None,
-                    source: IngestSource::Endpoint {
-                        endpoint: named("orders_endpoint"),
-                        mode: EndpointIngestMode::NoAckSequential,
-                        quiesce: crate::IngestQuiesceMode::EndpointBuffer {
-                            max_size: "1MiB".to_string(),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Endpoint {
+                            endpoint: named("orders_endpoint"),
+                            mode: EndpointIngestMode::NoAckSequential,
+                            quiesce: crate::IngestQuiesceMode::EndpointBuffer {
+                                max_size: "1MiB".to_string(),
+                            },
                         },
-                    },
+                        codec: named("orders_codec"),
+                    }),
+                    timestamp_source: None,
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5320,13 +5381,15 @@ mod tests {
                 CreateIngestor {
                     name: named("ws_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("orders_codec"),
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Websockets {
+                            client: named("ws_main"),
+                            mode: WebsocketsIngestMode::NoAckSequential,
+                            quiesce: crate::IngestQuiesceMode::Drop,
+                        },
+                        codec: named("orders_codec"),
+                    }),
                     timestamp_source: None,
-                    source: IngestSource::Websockets {
-                        client: named("ws_main"),
-                        mode: WebsocketsIngestMode::NoAckSequential,
-                        quiesce: crate::IngestQuiesceMode::Drop,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -5342,15 +5405,17 @@ mod tests {
                 CreateIngestor {
                     name: named("syslog_ingestor"),
                     output_routes: flushed_ingestor_outputs("orders"),
-                    decode_using_codec: named("syslog_codec"),
-                    timestamp_source: None,
-                    source: IngestSource::Syslog {
-                        client: named("syslog_main"),
-                        quiesce: crate::IngestQuiesceMode::Buffer {
-                            max_size: "1MiB".to_string(),
-                            overflow: crate::IngestQuiesceOverflow::DropOldest,
+                    input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                        source: IngestSource::Syslog {
+                            client: named("syslog_main"),
+                            quiesce: crate::IngestQuiesceMode::Buffer {
+                                max_size: "1MiB".to_string(),
+                                overflow: crate::IngestQuiesceOverflow::DropOldest,
+                            },
                         },
-                    },
+                        codec: named("syslog_codec"),
+                    }),
+                    timestamp_source: None,
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }

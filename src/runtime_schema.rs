@@ -77,12 +77,14 @@ use triomphe::Arc;
 
 mod arrow_body;
 mod batch_container;
+mod client_batch;
 mod jaq_unfold;
 mod syslog;
 
 pub(crate) use batch_container::{
     BatchContainerError, BatchMember, BatchMemberEncoding, BoundedBatchEncoding,
 };
+pub use client_batch::{ClientBatchError, ClientBatchLimits, ClientSchemaDifference};
 pub use jaq_unfold::UnfoldPosition;
 
 #[derive(Debug, Clone, PartialEq)]

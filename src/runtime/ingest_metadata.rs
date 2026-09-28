@@ -6,7 +6,7 @@
 //!   explicit execution timestamps.
 //! - **Must not know.** NSPL parsing, source-client lifecycle or persisted control state.
 
-use nervix_connector::{IngestMetadataRow, SourceMetadataScope};
+use nervix_connector::{IngestMetadataRow, NoIngestHeaders, SourceMetadataScope};
 use nervix_models::IngestSourceKind;
 
 use super::*;
@@ -69,12 +69,14 @@ pub(in crate::runtime) enum IngestMetadataKind {
 
 impl From<IngestSourceKind> for IngestMetadataKind {
     /// Kafka and Syslog messages expose their integration metadata; every other source exposes
-    /// transport headers only.
+    /// transport headers only. A client source's batches carry no headers, so its rows expose an
+    /// empty header list that no program may read.
     fn from(transport: IngestSourceKind) -> Self {
         match transport {
             IngestSourceKind::Kafka => Self::Kafka,
             IngestSourceKind::Syslog => Self::Syslog,
-            IngestSourceKind::Http
+            IngestSourceKind::Client
+            | IngestSourceKind::Http
             | IngestSourceKind::Pulsar
             | IngestSourceKind::Mqtt
             | IngestSourceKind::Nats
@@ -341,6 +343,19 @@ impl IngestMetadataBuilders {
 }
 
 impl IngestFilterMapMetadata {
+    /// The metadata of `rows` messages that arrived without transport headers or integration
+    /// fields, as every row of a client batch does.
+    pub(super) fn headerless(rows: usize) -> IngestMetadataResult<Self> {
+        let mut builders = IngestMetadataBuilders::new(IngestMetadataKind::Headers, rows);
+        let row = IngestMetadataRow::Headers {
+            headers: &NoIngestHeaders,
+        };
+        for _ in 0..rows {
+            builders.append(&row)?;
+        }
+        builders.finish()
+    }
+
     pub(super) fn selected_array(&self, array: &ArrayRef) -> IngestMetadataResult<ArrayRef> {
         if self.rows.iter().copied().eq(0..self.rows.len()) && self.rows.len() == array.len() {
             return Ok(array.clone());

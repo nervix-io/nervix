@@ -66,7 +66,8 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     AckMode, AckWindow, Assignment, AtomicTimestamp, BranchKeyFingerprint, BranchName,
-    ClickHouseValueMapping, ClientConfigEntry, ClientName, ClientPoolBounds, ClientResourceMount,
+    ClickHouseValueMapping, ClientConfigEntry, ClientName, ClientPoolBounds,
+    ClientProducerEndReason, ClientResourceMount,
     ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule, CodecName, CommandExecutionReference,
     CoordinationIdentity, CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateEmitter,
     CreateGenerator, CreateLookup, CreateRelay, CreateUdf, CreateWasmProcessor,
@@ -157,9 +158,10 @@ use crate::{
     registry::{
         ActiveGraph, BranchInstanceAckBoundary, BranchedNodeSpecs, BranchedProcessorNodeSpec,
         BranchedProcessorOperationSpec, BranchedProcessorOutputSpec, BranchedProcessorOutputsSpec,
-        BranchedProcessorSpec, DomainActivationPlan, DomainActivationPlanError,
-        EndpointIngestorStartPlan, EntrypointPlanError, EntrypointPlans, HttpIngestorStartPlan,
-        IngestorSpec, IngestorStartPlan, KafkaDomainOffsetPlacement, KafkaIngestorStartPlan,
+        BranchedProcessorSpec, ClientIngestorStartPlan, DomainActivationPlan,
+        DomainActivationPlanError, EndpointIngestorStartPlan, EntrypointPlanError, EntrypointPlans,
+        HttpIngestorStartPlan, IngestorInputPlan, IngestorSpec, IngestorStartPlan,
+        KafkaDomainOffsetPlacement, KafkaIngestorStartPlan, TransportInputPlan,
         KafkaOffsetPlan, LoweredConstruction, MqttIngestorStartPlan, NatsIngestorStartPlan,
         PlannedCodec, PlannedCodecWireFormat, PlannedEntryRoute, PlannedRouteBranch,
         PlannedSignalingProtocol, PrometheusIngestorStartPlan, PulsarIngestorStartPlan,
@@ -189,6 +191,7 @@ mod branch_instance_registry;
 mod branch_key;
 mod branch_lru_state;
 mod branch_runtime;
+mod client_ingestor;
 mod correlator;
 mod deduplicator;
 mod domain_clock;
@@ -298,6 +301,11 @@ use branch_runtime::{
     internal_processor_error_policies, persist_branch_instance_lru_snapshot,
     publish_branch_instance_lru_snapshot,
 };
+pub(crate) use client_ingestor::{
+    ClientIngestorGauges, ClientProducerEvent, ClientProducerEvents, ClientProducerHandle,
+    ClientProducerOpenRequest, ClientProducerReservation, ClientProducerRetention,
+    ClientSubmissionId, OpenedClientProducer,
+};
 use correlator::{
     CorrelatorMatchedBatch, CorrelatorOutputCompileContext, CorrelatorOutputContext,
     CorrelatorSide, CorrelatorTimeoutContext, compile_correlator_where_program,
@@ -385,7 +393,8 @@ use http_request_fields::{
 use inferencer_output::flush_branch_inferencer_output;
 pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
-    BranchedEntrypointInput, IngestGroupDispatch, IngestRouteCollector, IngestorDependencies,
+    BranchedEntrypointInput, ClientBatchDispatch, IngestGroupDispatch, IngestRouteCollector,
+    IngestorDependencies,
     IngestorRouteRuntimes, RawIngestDispatch, branched_branch_filter_blocking,
     branched_branch_plan_blocking, branched_entrypoint_batch_from_inputs_blocking,
     decode_ingested_payload,

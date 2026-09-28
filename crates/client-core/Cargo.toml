@@ -9,6 +9,8 @@ version.workspace = true
 workspace = true
 
 [features]
+# Encode Arrow record batches as the canonical stream a producer submits.
+arrow = ["dep:arrow-array", "dep:arrow-ipc", "nervix-models/arrow"]
 autocomplete = []
 default = []
 shuttle = [
@@ -21,8 +23,11 @@ shuttle = [
 [dependencies]
 ahash = { workspace = true }
 arch-into = { workspace = true }
+arrow-array = { workspace = true, optional = true }
+arrow-ipc = { workspace = true, optional = true }
 async-tar = { workspace = true, features = ["runtime-tokio"] }
 base64 = { workspace = true }
+bytes = { workspace = true }
 error-stack = { workspace = true }
 indexmap = { workspace = true }
 meticulous = { workspace = true }

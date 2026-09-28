@@ -4,8 +4,8 @@
 //!
 //! - **Owns.** Connecting to the session service, TLS selection, the dispatcher that pairs every
 //!   reply of a session exchange with the request it answers, submitting statements, transaction
-//!   state, completion suggestions, subscription streams, the domain clocks the session follows and
-//!   resource upload.
+//!   state, completion suggestions, subscription streams, the domain clocks the session follows,
+//!   the producers it opens against client ingestors, and resource upload.
 //! - **Depends on.** The session wire contract, the language layer — an edge may name the parser,
 //!   and this one does so for client-side parsing and completion — and the vocabulary.
 //! - **Must not know.** The registry, the runtime, or anything else inside the server. Everything
@@ -23,6 +23,7 @@ mod error;
 mod events;
 mod exchange;
 mod outcome;
+mod producer;
 mod subscriptions;
 mod upload;
 
@@ -56,7 +57,18 @@ pub use nervix_models::{
     TransactionInspection, TransactionLifecycle, TransactionOperationAdmission,
     TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
 };
+pub use nervix_client_wire::ProducerId;
+pub use nervix_models::{
+    AckWindow, ClientAttachmentId, ClientBatchDefect, ClientEndpointContract,
+    ClientProcessingFailure, ClientProducerAdmission, ClientProducerDescription,
+    ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy,
+    ClientProducerRefusal, ClientSubmissionRefusal, IngestorName, SchemaField,
+};
 pub use outcome::{CommandOutcome, ResourceUploadOutcome};
+pub use producer::{
+    PendingSubmission, Producer, ProducerBatch, ProducerEnd, ProducerError, ProducerOutcome,
+    SubmissionId, SubmissionUncertainty,
+};
 pub use subscriptions::{SubscriptionInterruption, SubscriptionLifecycle};
 use thiserror::Error;
 

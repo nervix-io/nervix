@@ -8,14 +8,16 @@
 //! Layer: edges.
 //!
 //! - **Owns.** The session schema, frame verification and ownership, the typed requests, replies,
-//!   transfers, events and rows the schema describes, the text every client displays a row as,
-//!   the session limits, and how frames travel over gRPC and WebSocket messages.
+//!   transfers, events and rows the schema describes, the producer operations and the batch bytes
+//!   they carry, the text every client displays a row as, the session limits, and how frames
+//!   travel over gRPC and WebSocket messages.
 //! - **Depends on.** `flatbuffers`, the vocabulary for names, timestamps, schema fields, the
-//!   transaction impact report, the resource description, the observed domain clock and the
-//!   status, inspection envelope and preview identity a session exchanges, `serde_json` to write a
-//!   row's display text, and tonic's codec traits for the gRPC transport.
-//! - **Must not know.** The server's registry, runtime or consensus, the parser, Arrow, or any
-//!   client's dispatch, reconnection or subscription state.
+//!   transaction impact report, the resource description, the observed domain clock, the client
+//!   producer contract and the status, inspection envelope and preview identity a session
+//!   exchanges, `serde_json` to write a row's display text, and tonic's codec traits for the gRPC
+//!   transport.
+//! - **Must not know.** The server's registry, runtime or consensus, the parser, Arrow — a batch is
+//!   bytes here, never columns — or any client's dispatch, reconnection or subscription state.
 
 include!(concat!(env!("OUT_DIR"), "/flatbuffers/session_module.rs"));
 
@@ -33,6 +35,7 @@ mod frame;
 pub mod grpc;
 mod impact;
 mod limits;
+mod producer;
 mod reply;
 mod request;
 mod resource;
@@ -75,6 +78,11 @@ pub use frame::{
     UploadReplyFrame, VerifiedFrame,
 };
 pub use limits::{LimitsError, SessionLimitSettings, SessionLimits};
+pub use producer::{
+    CloseIngestorDisposition, CloseIngestorOutcome, CloseIngestorRequest,
+    OpenIngestorDisposition, OpenIngestorOutcome, OpenIngestorRequest, ProducerAdmissionChanged,
+    ProducerEnded, ProducerId, ProducerOpened, SubmissionOutcome, SubmitBatchRequest,
+};
 pub use reply::{
     CancelOutcome, CancelState, CancellationStage, InspectionOutcome, RequestCancelled,
     RequestRejected, RequestRejection, SubscribeDisposition, SubscribeOutcome, SubscriptionOpened,

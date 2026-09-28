@@ -66,6 +66,11 @@ const INGESTOR_QUIESCE_BUFFERED_BYTES: &str = "ingestor_quiesce_buffered_bytes";
 const INGESTOR_QUIESCE_DROPPED_TOTAL: &str = "ingestor_quiesce_dropped_total";
 const INGESTOR_QUIESCE_REJECTED_TOTAL: &str = "ingestor_quiesce_rejected_total";
 const SESSION_SUBSCRIPTIONS: &str = "session_subscriptions";
+const CLIENT_INGESTOR_PRODUCERS: &str = "client_ingestor_producers";
+const CLIENT_INGESTOR_FORWARDED_PRODUCERS: &str = "client_ingestor_forwarded_producers";
+const CLIENT_INGESTOR_OUTSTANDING_BATCHES: &str = "client_ingestor_outstanding_batches";
+const CLIENT_INGESTOR_OUTSTANDING_BYTES: &str = "client_ingestor_outstanding_bytes";
+const CLIENT_INGESTOR_SUBMISSIONS_TOTAL: &str = "client_ingestor_submissions_total";
 const SESSION_SUBSCRIPTION_DROPPED_ROWS_TOTAL: &str = "session_subscription_dropped_rows_total";
 const JEMALLOC_SUBSYSTEM: &str = "jemalloc";
 const DOMAIN_TARGET_KIND: &str = "DOMAIN";
@@ -102,6 +107,9 @@ const BRANCH_EVICTION_PROMETHEUS_LABELS: &[&str] =
     &["domain", "branch", "physical_node_id", "reason"];
 const INGESTOR_QUIESCE_PROMETHEUS_LABELS: &[&str] = &["domain", "ingestor", "physical_node_id"];
 const SESSION_SUBSCRIPTION_PROMETHEUS_LABELS: &[&str] = &["domain", "relay"];
+const CLIENT_INGESTOR_PROMETHEUS_LABELS: &[&str] = &["domain", "ingestor"];
+const CLIENT_INGESTOR_SUBMISSION_PROMETHEUS_LABELS: &[&str] =
+    &["domain", "ingestor", "outcome", "cause"];
 const NO_DOMAIN_TIMESTAMP: i64 = i64::MIN;
 const NO_HISTOGRAM_CAPACITY: u64 = u64::MAX;
 const NO_WALL_ELAPSED_NANOS: u64 = u64::MAX;
@@ -1353,6 +1361,11 @@ struct PrometheusMetrics {
     ingestor_quiesce_rejected_total: IntCounterVec,
     session_subscriptions: IntGaugeVec,
     session_subscription_dropped_rows_total: IntCounterVec,
+    client_ingestor_producers: IntGaugeVec,
+    client_ingestor_forwarded_producers: IntGaugeVec,
+    client_ingestor_outstanding_batches: IntGaugeVec,
+    client_ingestor_outstanding_bytes: IntGaugeVec,
+    client_ingestor_submissions_total: IntCounterVec,
 }
 
 #[derive(Debug, Clone)]
@@ -1656,6 +1669,79 @@ impl PrometheusMetrics {
                 "this registry is built here and each metric is registered once under a distinct \
                  name",
             );
+        let client_ingestor_producers = IntGaugeVec::new(
+            Opts::new(
+                CLIENT_INGESTOR_PRODUCERS,
+                "Producers attached to a client ingestor this node executes.",
+            )
+            .namespace("nervix"),
+            CLIENT_INGESTOR_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        let client_ingestor_forwarded_producers = IntGaugeVec::new(
+            Opts::new(
+                CLIENT_INGESTOR_FORWARDED_PRODUCERS,
+                "Producers of a client ingestor this node executes whose sessions another node \
+                 serves.",
+            )
+            .namespace("nervix"),
+            CLIENT_INGESTOR_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        let client_ingestor_outstanding_batches = IntGaugeVec::new(
+            Opts::new(
+                CLIENT_INGESTOR_OUTSTANDING_BATCHES,
+                "Batches the producers of a client ingestor submitted and have no outcome for yet.",
+            )
+            .namespace("nervix"),
+            CLIENT_INGESTOR_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        let client_ingestor_outstanding_bytes = IntGaugeVec::new(
+            Opts::new(
+                CLIENT_INGESTOR_OUTSTANDING_BYTES,
+                "Arrow IPC bytes of the batches a client ingestor's producers have outstanding.",
+            )
+            .namespace("nervix"),
+            CLIENT_INGESTOR_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        let client_ingestor_submissions_total = IntCounterVec::new(
+            Opts::new(
+                CLIENT_INGESTOR_SUBMISSIONS_TOTAL,
+                "Batches a client ingestor answered, by outcome and cause.",
+            )
+            .namespace("nervix"),
+            CLIENT_INGESTOR_SUBMISSION_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        for collector in [
+            Box::new(client_ingestor_producers.clone()) as Box<dyn prometheus::core::Collector>,
+            Box::new(client_ingestor_forwarded_producers.clone()),
+            Box::new(client_ingestor_outstanding_batches.clone()),
+            Box::new(client_ingestor_outstanding_bytes.clone()),
+            Box::new(client_ingestor_submissions_total.clone()),
+        ] {
+            registry.register(collector).assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
+        }
         registry
             .register(Box::new(JemallocMetricsCollector::new()))
             .assured(
@@ -1689,6 +1775,11 @@ impl PrometheusMetrics {
             ingestor_quiesce_rejected_total,
             session_subscriptions,
             session_subscription_dropped_rows_total,
+            client_ingestor_producers,
+            client_ingestor_forwarded_producers,
+            client_ingestor_outstanding_batches,
+            client_ingestor_outstanding_bytes,
+            client_ingestor_submissions_total,
         }
     }
 
@@ -2543,6 +2634,79 @@ impl RuntimeMetrics {
                 i64::try_from(subscriptions)
                     .assured("every open subscription occupies memory, so the count fits in i64"),
             );
+    }
+
+    /// Records how many producers a client ingestor this node executes has attached, and the
+    /// batches and bytes they have outstanding.
+    pub(crate) fn set_client_ingestor_producers(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        gauges: crate::runtime::ClientIngestorGauges,
+    ) {
+        let labels = [domain.as_str(), ingestor.as_str()];
+        let prometheus = &self.series.prometheus;
+        prometheus
+            .client_ingestor_producers
+            .with_label_values(&labels)
+            .set(
+                i64::try_from(gauges.producers)
+                    .assured("every attached producer occupies memory, so the count fits in i64"),
+            );
+        prometheus
+            .client_ingestor_forwarded_producers
+            .with_label_values(&labels)
+            .set(
+                i64::try_from(gauges.forwarded_producers)
+                    .assured("every attached producer occupies memory, so the count fits in i64"),
+            );
+        prometheus
+            .client_ingestor_outstanding_batches
+            .with_label_values(&labels)
+            .set(
+                i64::try_from(gauges.outstanding_batches)
+                    .assured("every outstanding batch occupies memory, so the count fits in i64"),
+            );
+        prometheus
+            .client_ingestor_outstanding_bytes
+            .with_label_values(&labels)
+            .set(i64::try_from(gauges.outstanding_bytes).assured(
+                "outstanding bytes are held in memory within the node's producer budget, so they \
+                 fit in i64",
+            ));
+    }
+
+    /// Counts one batch a client ingestor answered with `outcome`.
+    pub(crate) fn record_client_submission_outcome(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        outcome: &nervix_models::ClientSubmissionOutcome,
+    ) {
+        self.series
+            .prometheus
+            .client_ingestor_submissions_total
+            .with_label_values(&[
+                domain.as_str(),
+                ingestor.as_str(),
+                outcome.class_label(),
+                outcome.cause_label(),
+            ])
+            .inc();
+    }
+
+    /// Counts one batch a client ingestor refused before admission.
+    pub(crate) fn record_client_submission_refusal(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        refusal: nervix_models::ClientSubmissionRefusal,
+    ) {
+        self.record_client_submission_outcome(
+            domain,
+            ingestor,
+            &nervix_models::ClientSubmissionOutcome::NotAdmitted(refusal),
+        );
     }
 
     /// Records rows a dropping session subscription to `relay` discarded.

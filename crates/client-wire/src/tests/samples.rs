@@ -1,13 +1,15 @@
 //! Representative values of every message family, at the edges of their ranges.
 
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, time::Duration};
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
+    AckWindow, ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
     AffectedTopology, AttributedGateBoundary, AttributedImpactNode, BranchKeyFingerprint,
-    CanonicalImpactSet, ConcreteBranchCoverage, ConfigurationImpact, ConfigurationTransition,
+    CanonicalImpactSet, ClientAttachmentId, ClientEndpointContract, ClientProducerAdmission,
+    ClientProducerDescription, ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy,
+    ConcreteBranchCoverage, ConfigurationImpact, ConfigurationTransition,
     DomainClockObservation, DomainClockObservedState, DomainClockPeriod, DomainClockSkew,
     DomainClockState, DomainLifecycleAction, DomainLifecycleImpact, DomainTimeRate,
     ExecutionStepImpactReport, ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution,
@@ -28,10 +30,11 @@ use super::fixtures::{name, non_zero, operation, reference, request};
 use crate::{
     AttachDomainClockRequest, AttachTransactionRequest, CancelRequest, CellWriter,
     ChoiceLookupRequest, ChoiceSelection, ChoiceTarget, ChoiceValue, ClientMessage, ClientRequest,
-    CommandDisposition, CommandOutcome, CommandRequest, DetachDomainClockRequest, Diagnostic,
-    EncodedFrame, InspectTransactionRequest, LeaderEndpoints, LeaderRedirect, OutcomeOrigin,
-    RowBranch, RowSchema, SelectDomainRequest, ServerFrame, SessionLimits, SourceSpan,
-    StatementDisposition, StatementOutcome, SubscribeRequest, SubscriptionHandle,
+    CloseIngestorRequest, CommandDisposition, CommandOutcome, CommandRequest,
+    DetachDomainClockRequest, Diagnostic, EncodedFrame, InspectTransactionRequest,
+    LeaderEndpoints, LeaderRedirect, OpenIngestorRequest, OutcomeOrigin, ProducerId, RowBranch,
+    RowSchema, SelectDomainRequest, ServerFrame, SessionLimits, SourceSpan, StatementDisposition,
+    StatementOutcome, SubmitBatchRequest, SubscribeRequest, SubscriptionHandle,
     SubscriptionRowsEncoder, SubscriptionType, SuggestRequest, UnsubscribeRequest, WireEncodeError,
 };
 
@@ -186,6 +189,22 @@ pub(crate) fn client_messages() -> Vec<ClientMessage> {
             .with_page(100, None)
             .assured("the largest bounded page is a valid page size"),
         ),
+        ClientRequest::OpenIngestor(OpenIngestorRequest {
+            domain: name("tenant"),
+            ingestor: name("orders_in"),
+            expected_fields: producer_fields(),
+            limits: ClientProducerLimits {
+                batches: NonZeroU32::new(8).assured("a literal non-zero count"),
+                bytes: non_zero(4 * 1024 * 1024),
+            },
+        }),
+        ClientRequest::SubmitBatch(SubmitBatchRequest {
+            producer: producer(),
+            batch: bytes::Bytes::from_static(b"\xff\xff\xff\xffARROW-IPC-BODY"),
+        }),
+        ClientRequest::CloseIngestor(CloseIngestorRequest {
+            producer: producer(),
+        }),
     ];
     requests
         .into_iter()
@@ -195,6 +214,52 @@ pub(crate) fn client_messages() -> Vec<ClientMessage> {
             request: request_body,
         })
         .collect()
+}
+
+/// The producer the samples name: the one request 19 opened.
+pub(crate) fn producer() -> ProducerId {
+    ProducerId::opened_by(request(19))
+}
+
+/// The input schema a sample producer submits: a required field and an optional sensitive one.
+pub(crate) fn producer_fields() -> Vec<SchemaField> {
+    vec![
+        SchemaField {
+            name: name("order_id"),
+            ty: ParseAsType::U64,
+            optional: false,
+            sensitive: false,
+        },
+        SchemaField {
+            name: name("card"),
+            ty: ParseAsType::String,
+            optional: true,
+            sensitive: true,
+        },
+    ]
+}
+
+/// What a sample producer is told when it opens, under `window`.
+pub(crate) fn producer_description(window: AckWindow) -> ClientProducerDescription {
+    ClientProducerDescription {
+        attachment: ClientAttachmentId::from_u128(0x0192_d4e4_7b36_7c3e_9f00_5b2d_8c3a_1e44),
+        fields: producer_fields(),
+        generation: u64::MAX,
+        contract: ClientEndpointContract::from_digest([0x5C; 32]),
+        policy: ClientProducerPolicy {
+            window,
+            ack_timeout: Duration::from_secs(30),
+            retry_backoff: Duration::from_millis(100),
+            retry_max_backoff: Duration::from_secs(5),
+        },
+        grant: ClientProducerGrant {
+            batches: NonZeroU32::new(8).assured("a literal non-zero count"),
+            bytes: non_zero(4 * 1024 * 1024),
+            max_batch_bytes: non_zero(4 * 1024 * 1024 - 256),
+            max_batch_rows: NonZeroU32::new(65_536).assured("a literal non-zero count"),
+        },
+        admission: ClientProducerAdmission::Open,
+    }
 }
 
 /// A domain clock in every installation state, at the edges of each value: the generation before

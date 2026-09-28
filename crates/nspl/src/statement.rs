@@ -136,6 +136,7 @@ pub fn statement_parser<'src>()
             .map(Statement::ShowRelayMaterializedState),
         crate::udf::describe_udf_parser().map(Statement::DescribeUdf),
         crate::udf::show_udfs_parser().map(Statement::ShowUdfs),
+        crate::ingestor::show_ingestors_parser().map(Statement::ShowIngestors),
         crate::placement::show_placements_parser().map(Statement::ShowPlacements),
     );
 
@@ -268,7 +269,7 @@ mod tests {
         ModelKind, ModelName, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode, OutputBranch,
         ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarIngestMode,
         RabbitMqIngestMode, RedisPubSubIngestMode, ReingestorName, RelayName, ReordererName,
-        RequestedResourceVersion, ResourceName, RetryPolicy, SchemaField, SchemaName,
+        RequestedResourceVersion, ResourceName, RetryPolicy, SchemaField, SchemaName, ShowIngestors,
         SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
         SignalingWireFormat, SqsIngestMode, Statement, SubscriptionBinding, SubscriptionLiteral,
         UncordonNode, WasmProcessorName, WindowProcessorName, WireSchemaField, ZeroMqIngestMode,
@@ -762,16 +763,20 @@ mod tests {
                         Model::Ingestor(CreateIngestor {
                             name: g.name(),
                             output_routes: flushed_ingestor_outputs(g.name()),
-                            decode_using_codec: g.name(),
+                            input: nervix_models::IngestorInput::Transport(
+                                nervix_models::TransportIngestorInput {
+                                    source: IngestSource::Kafka {
+                                        client: g.name(),
+                                        topic: g.name(),
+                                        offset_mode: KafkaOffsetMode::ConsumerGroup(g.name()),
+                                        instances: nonzero!(1u64),
+                                        mode,
+                                        quiesce: IngestQuiesceMode::Suspend,
+                                    },
+                                    codec: g.name(),
+                                },
+                            ),
                             timestamp_source: None,
-                            source: IngestSource::Kafka {
-                                client: g.name(),
-                                topic: g.name(),
-                                offset_mode: KafkaOffsetMode::ConsumerGroup(g.name()),
-                                instances: nonzero!(1u64),
-                                mode,
-                                quiesce: IngestQuiesceMode::Suspend,
-                            },
                             general_error_policy: GeneralErrorPolicy::Log,
                             filter_where: None,
                         })
@@ -779,61 +784,97 @@ mod tests {
                         Model::Ingestor(CreateIngestor {
                             name: g.name(),
                             output_routes: flushed_ingestor_outputs(g.name()),
-                            decode_using_codec: g.name(),
-                            timestamp_source: None,
-                            source: IngestSource::Pulsar {
-                                client: g.name(),
-                                topic: g.name(),
-                                subscription: g.name(),
-                                instances: nonzero!(1u64),
-                                mode: match mode {
-                                    KafkaIngestMode::AckParallel {
-                                        max,
-                                        batch_timeout,
-                                        timeout,
-                                        retry_policy,
-                                    } => PulsarIngestMode::AckParallel {
-                                        max,
-                                        batch_timeout,
-                                        timeout,
-                                        retry_policy,
+                            input: nervix_models::IngestorInput::Transport(
+                                nervix_models::TransportIngestorInput {
+                                    source: IngestSource::Pulsar {
+                                        client: g.name(),
+                                        topic: g.name(),
+                                        subscription: g.name(),
+                                        instances: nonzero!(1u64),
+                                        mode: match mode {
+                                            KafkaIngestMode::AckParallel {
+                                                max,
+                                                batch_timeout,
+                                                timeout,
+                                                retry_policy,
+                                            } => PulsarIngestMode::AckParallel {
+                                                max,
+                                                batch_timeout,
+                                                timeout,
+                                                retry_policy,
+                                            },
+                                            KafkaIngestMode::AckSequential {
+                                                timeout,
+                                                retry_policy,
+                                            } => PulsarIngestMode::AckSequential {
+                                                timeout,
+                                                retry_policy,
+                                            },
+                                            KafkaIngestMode::NoAckParallel => {
+                                                PulsarIngestMode::NoAckParallel
+                                            }
+                                        },
+                                        quiesce: IngestQuiesceMode::Suspend,
                                     },
-                                    KafkaIngestMode::AckSequential {
-                                        timeout,
-                                        retry_policy,
-                                    } => PulsarIngestMode::AckSequential {
-                                        timeout,
-                                        retry_policy,
-                                    },
-                                    KafkaIngestMode::NoAckParallel => {
-                                        PulsarIngestMode::NoAckParallel
-                                    }
+                                    codec: g.name(),
                                 },
-                                quiesce: IngestQuiesceMode::Suspend,
-                            },
+                            ),
+                            timestamp_source: None,
                             general_error_policy: GeneralErrorPolicy::Log,
                             filter_where: None,
                         })
                     }
+                } else if g.bool() {
+                    let window = if g.bool() {
+                        nervix_models::AckWindow::Sequential
+                    } else {
+                        nervix_models::AckWindow::Parallel {
+                            max: g.bounded_nonzero_u64(nonzero!(1u64), nonzero!(1024u64)),
+                        }
+                    };
+                    Model::Ingestor(CreateIngestor {
+                        name: g.name(),
+                        output_routes: flushed_ingestor_outputs(g.name()),
+                        input: nervix_models::IngestorInput::Client(
+                            nervix_models::ClientIngestSource {
+                                schema: g.name(),
+                                mode: nervix_models::ClientIngestMode {
+                                    window,
+                                    ack_timeout: format!("{}s", g.bounded_u64(1, 300)),
+                                    retry_policy: RetryPolicy {
+                                        backoff: format!("{}ms", g.bounded_u64(1, 1_000)),
+                                        max_backoff: format!("{}s", g.bounded_u64(1, 300)),
+                                    },
+                                },
+                            },
+                        ),
+                        timestamp_source: None,
+                        general_error_policy: GeneralErrorPolicy::Log,
+                        filter_where: None,
+                    })
                 } else {
                     Model::Ingestor(CreateIngestor {
                         name: g.name(),
                         output_routes: flushed_ingestor_outputs(g.name()),
-                        decode_using_codec: g.name(),
-                        timestamp_source: None,
-                        source: IngestSource::RabbitMq {
-                            client: g.name(),
-                            queue: g.name(),
-                            instances: nonzero!(1u64),
-                            mode: RabbitMqIngestMode::AckSequential {
-                                timeout: format!("{}s", g.bounded_u64(1, 300)),
-                                retry_policy: RetryPolicy {
-                                    backoff: format!("{}ms", g.bounded_u64(1, 1_000)),
-                                    max_backoff: format!("{}s", g.bounded_u64(1, 300)),
+                        input: nervix_models::IngestorInput::Transport(
+                            nervix_models::TransportIngestorInput {
+                                source: IngestSource::RabbitMq {
+                                    client: g.name(),
+                                    queue: g.name(),
+                                    instances: nonzero!(1u64),
+                                    mode: RabbitMqIngestMode::AckSequential {
+                                        timeout: format!("{}s", g.bounded_u64(1, 300)),
+                                        retry_policy: RetryPolicy {
+                                            backoff: format!("{}ms", g.bounded_u64(1, 1_000)),
+                                            max_backoff: format!("{}s", g.bounded_u64(1, 300)),
+                                        },
+                                    },
+                                    quiesce: IngestQuiesceMode::Suspend,
                                 },
+                                codec: g.name(),
                             },
-                            quiesce: IngestQuiesceMode::Suspend,
-                        },
+                        ),
+                        timestamp_source: None,
                         general_error_policy: GeneralErrorPolicy::Log,
                         filter_where: None,
                     })
@@ -912,14 +953,18 @@ mod tests {
             12 => Model::Ingestor(CreateIngestor {
                 name: g.name(),
                 output_routes: flushed_ingestor_outputs(g.name()),
-                decode_using_codec: g.name(),
+                input: nervix_models::IngestorInput::Transport(
+                    nervix_models::TransportIngestorInput {
+                        source: IngestSource::RedisPubSub {
+                            client: g.name(),
+                            channel: g.name(),
+                            mode: RedisPubSubIngestMode::NoAckSequential,
+                            quiesce: IngestQuiesceMode::Drop,
+                        },
+                        codec: g.name(),
+                    },
+                ),
                 timestamp_source: None,
-                source: IngestSource::RedisPubSub {
-                    client: g.name(),
-                    channel: g.name(),
-                    mode: RedisPubSubIngestMode::NoAckSequential,
-                    quiesce: IngestQuiesceMode::Drop,
-                },
                 general_error_policy: GeneralErrorPolicy::Log,
                 filter_where: None,
             }),
@@ -928,18 +973,22 @@ mod tests {
                     Model::Ingestor(CreateIngestor {
                         name: g.name(),
                         output_routes: flushed_ingestor_outputs(g.name()),
-                        decode_using_codec: g.name(),
-                        timestamp_source: None,
-                        source: IngestSource::Mqtt {
-                            client: g.name(),
-                            topic: g.ident().as_str().to_string(),
-                            instances: nonzero!(1u64),
-                            mode: MqttIngestMode::NoAckSequential {
-                                session: MqttSession::Clean,
-                                qos: MqttQos::AtMostOnce,
+                        input: nervix_models::IngestorInput::Transport(
+                            nervix_models::TransportIngestorInput {
+                                source: IngestSource::Mqtt {
+                                    client: g.name(),
+                                    topic: g.ident().as_str().to_string(),
+                                    instances: nonzero!(1u64),
+                                    mode: MqttIngestMode::NoAckSequential {
+                                        session: MqttSession::Clean,
+                                        qos: MqttQos::AtMostOnce,
+                                    },
+                                    quiesce: IngestQuiesceMode::Drop,
+                                },
+                                codec: g.name(),
                             },
-                            quiesce: IngestQuiesceMode::Drop,
-                        },
+                        ),
+                        timestamp_source: None,
                         general_error_policy: GeneralErrorPolicy::Log,
                         filter_where: None,
                     })
@@ -947,17 +996,22 @@ mod tests {
                     Model::Ingestor(CreateIngestor {
                         name: g.name(),
                         output_routes: flushed_ingestor_outputs(g.name()),
-                        decode_using_codec: g.name(),
+                        input: nervix_models::IngestorInput::Transport(
+                            nervix_models::TransportIngestorInput {
+                                source: IngestSource::Prometheus {
+                                    client: g.name(),
+                                    query:
+                                        r#"label_replace(vector(42.5), "source", "local", "", "")"#
+                                            .to_string(),
+                                    every: "15s"
+                                        .parse()
+                                        .assured("the fixture cadence is a positive duration"),
+                                    quiesce: IngestQuiesceMode::Suspend,
+                                },
+                                codec: g.name(),
+                            },
+                        ),
                         timestamp_source: None,
-                        source: IngestSource::Prometheus {
-                            client: g.name(),
-                            query: r#"label_replace(vector(42.5), "source", "local", "", "")"#
-                                .to_string(),
-                            every: "15s"
-                                .parse()
-                                .assured("the fixture cadence is a positive duration"),
-                            quiesce: IngestQuiesceMode::Suspend,
-                        },
                         general_error_policy: GeneralErrorPolicy::Log,
                         filter_where: None,
                     })
@@ -1076,13 +1130,17 @@ mod tests {
             19 => Model::Ingestor(CreateIngestor {
                 name: g.name(),
                 output_routes: flushed_ingestor_outputs(g.name()),
-                decode_using_codec: g.name(),
+                input: nervix_models::IngestorInput::Transport(
+                    nervix_models::TransportIngestorInput {
+                        source: IngestSource::ZeroMq {
+                            client: g.name(),
+                            mode: ZeroMqIngestMode::NoAckSequential,
+                            quiesce: IngestQuiesceMode::Suspend,
+                        },
+                        codec: g.name(),
+                    },
+                ),
                 timestamp_source: None,
-                source: IngestSource::ZeroMq {
-                    client: g.name(),
-                    mode: ZeroMqIngestMode::NoAckSequential,
-                    quiesce: IngestQuiesceMode::Suspend,
-                },
                 general_error_policy: GeneralErrorPolicy::Log,
                 filter_where: None,
             }),
@@ -1112,16 +1170,20 @@ mod tests {
             21 => Model::Ingestor(CreateIngestor {
                 name: g.name(),
                 output_routes: flushed_ingestor_outputs(g.name()),
-                decode_using_codec: g.name(),
+                input: nervix_models::IngestorInput::Transport(
+                    nervix_models::TransportIngestorInput {
+                        source: IngestSource::Nats {
+                            client: g.name(),
+                            subject: g.name(),
+                            queue_group: g.name(),
+                            instances: g.bounded_nonzero_u64(nonzero!(1u64), nonzero!(10u64)),
+                            mode: NatsIngestMode::NoAckSequential,
+                            quiesce: IngestQuiesceMode::Drop,
+                        },
+                        codec: g.name(),
+                    },
+                ),
                 timestamp_source: None,
-                source: IngestSource::Nats {
-                    client: g.name(),
-                    subject: g.name(),
-                    queue_group: g.name(),
-                    instances: g.bounded_nonzero_u64(nonzero!(1u64), nonzero!(10u64)),
-                    mode: NatsIngestMode::NoAckSequential,
-                    quiesce: IngestQuiesceMode::Drop,
-                },
                 general_error_policy: GeneralErrorPolicy::Log,
                 filter_where: None,
             }),
@@ -1284,31 +1346,35 @@ mod tests {
             _ => Model::Ingestor(CreateIngestor {
                 name: g.name(),
                 output_routes: flushed_ingestor_outputs(g.name()),
-                decode_using_codec: g.name(),
+                input: nervix_models::IngestorInput::Transport(
+                    nervix_models::TransportIngestorInput {
+                        source: if g.bool() {
+                            IngestSource::Endpoint {
+                                endpoint: g.name(),
+                                mode: EndpointIngestMode::NoAckSequential,
+                                quiesce: IngestQuiesceMode::EndpointBuffer {
+                                    max_size: "1MiB".to_string(),
+                                },
+                            }
+                        } else {
+                            IngestSource::Sqs {
+                                client: g.name(),
+                                queue: g.name(),
+                                instances: nonzero!(1u64),
+                                mode: SqsIngestMode::AckSequential {
+                                    timeout: format!("{}s", g.bounded_u64(1, 300)),
+                                    retry_policy: RetryPolicy {
+                                        backoff: format!("{}ms", g.bounded_u64(1, 1_000)),
+                                        max_backoff: format!("{}s", g.bounded_u64(1, 300)),
+                                    },
+                                },
+                                quiesce: IngestQuiesceMode::Suspend,
+                            }
+                        },
+                        codec: g.name(),
+                    },
+                ),
                 timestamp_source: None,
-                source: if g.bool() {
-                    IngestSource::Endpoint {
-                        endpoint: g.name(),
-                        mode: EndpointIngestMode::NoAckSequential,
-                        quiesce: IngestQuiesceMode::EndpointBuffer {
-                            max_size: "1MiB".to_string(),
-                        },
-                    }
-                } else {
-                    IngestSource::Sqs {
-                        client: g.name(),
-                        queue: g.name(),
-                        instances: nonzero!(1u64),
-                        mode: SqsIngestMode::AckSequential {
-                            timeout: format!("{}s", g.bounded_u64(1, 300)),
-                            retry_policy: RetryPolicy {
-                                backoff: format!("{}ms", g.bounded_u64(1, 1_000)),
-                                max_backoff: format!("{}s", g.bounded_u64(1, 300)),
-                            },
-                        },
-                        quiesce: IngestQuiesceMode::Suspend,
-                    }
-                },
                 general_error_policy: GeneralErrorPolicy::Log,
                 filter_where: None,
             }),
@@ -1634,8 +1700,30 @@ mod tests {
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"CREATE".to_string()));
         assert!(suggestions.contains(&"CLUSTER".to_string()));
+        assert!(suggestions.contains(&"INGESTORS".to_string()));
+        assert!(!suggestions.contains(&"INGESTOR".to_string()));
         assert!(!suggestions.contains(&"SCHEMA".to_string()));
         assert!(!suggestions.contains(&"CLIENT".to_string()));
+    }
+
+    #[test]
+    fn show_ingestors_parses_alone_and_refuses_trailing_words() {
+        assert_eq!(
+            parse_statement("SHOW INGESTORS;").ok(),
+            Some(Statement::ShowIngestors(ShowIngestors))
+        );
+        assert_eq!(
+            parse_statement("show ingestors").ok(),
+            Some(Statement::ShowIngestors(ShowIngestors))
+        );
+        assert!(parse_statement("SHOW INGESTORS orders;").is_err());
+        assert!(parse_statement("SHOW INGESTOR;").is_err());
+        let input = "SHOW INGESTORS ";
+        let suggestions = suggest_statement(input, input.len());
+        assert!(
+            !suggestions.contains(&"FROM".to_string()),
+            "the listing takes no clause, so no ingestor grammar leaks after it"
+        );
     }
 
     #[test]
@@ -2563,6 +2651,12 @@ mod tests {
         None,
         &[]
     )]
+    #[case::alter_client_ingestor(
+        "ALTER INGESTOR submit_events SET FROM CLIENT SCHEMA event MODE ACK PARALLEL MAX 8 ACK \
+             TIMEOUT 20s RETRY POLICY BACKOFF 50ms MAX 2s ON QUIESCE SUSPEND, SET QUIESCE SUSPEND;",
+        None,
+        &[]
+    )]
     #[case::alter_reingestor(
         "ALTER REINGESTOR repartition ADD FROM incoming_b WHERE input.active, SET FILTER \
              WHERE concat(input.tenant, ',') != '', SET DETACHED, REPLACE ROUTE TO outgoing \
@@ -2699,6 +2793,23 @@ mod tests {
                 ON edge
                 PATH '/ingest'
                 TYPE HTTP;
+        "#,
+        None,
+        &[]
+    )]
+    #[case::client_ingestor(
+        r#"
+            CREATE INGESTOR submit_events
+                FROM CLIENT SCHEMA event
+                    MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
+                    ON QUIESCE SUSPEND
+                TIMESTAMP NOW
+                TO events
+                    INHERIT ALL
+                    BRANCHED BY by_customer SET customer_id = message.customer_id
+                    FLUSH EACH 10ms MAX BATCH SIZE 1MiB
+                    ON MESSAGE ERROR LOG
+                ON GENERAL ERROR LOG;
         "#,
         None,
         &[]

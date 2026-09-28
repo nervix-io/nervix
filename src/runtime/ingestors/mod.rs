@@ -3,10 +3,10 @@
 //! Layer: data plane.
 //!
 //! - **Owns.** Starting an ingestor: preparing its quiescence, refusing a second start, compiling
-//!   its dependencies, and mapping its source plan to the connector that runs it, which is the only
-//!   place a source plan's kind selects anything.
+//!   its dependencies, and mapping its input plan to the connector that runs a transport or to the
+//!   client source the node hosts, which is the only place an input plan's kind selects anything.
 //! - **Depends on.** Ingestor start plans, the host source launcher, every source connector, and
-//!   the endpoint source the server keeps.
+//!   the endpoint and client sources the server keeps.
 //! - **Must not know.** NSPL parsing, registry validation, or placement computation.
 
 use super::*;
@@ -36,7 +36,7 @@ impl Runtime {
         &self,
         plan: &IngestorStartPlan,
     ) -> Result<(), RuntimeError> {
-        let IngestorStartPlan { ingestor, source } = plan;
+        let IngestorStartPlan { ingestor, input } = plan;
         let quiesce = self.prepare_ingestor_quiescence(&ingestor.domain, ingestor);
         if self.inner.ingestors.contains_key(&ingestor.runtime_key()) {
             return Err(RuntimeError::IngestorAlreadyRunning {
@@ -45,8 +45,17 @@ impl Runtime {
             });
         }
 
-        let dependencies = self.ingestor_dependencies(ingestor).await?;
-        let source = match source.clone() {
+        let transport = match input {
+            IngestorInputPlan::Transport(transport) => transport,
+            IngestorInputPlan::Client(client) => {
+                let dependencies = self.ingestor_dependencies(ingestor, &client.schema).await?;
+                self.host_client_source(ingestor, client, quiesce, dependencies);
+                return Ok(());
+            }
+        };
+        let codec = self.ingestor_codec(ingestor, &transport.codec)?;
+        let dependencies = self.ingestor_dependencies(ingestor, &codec.schema()).await?;
+        let source = match transport.source.clone() {
             SourceStartPlan::Http(plan) => plan.compose(self, ingestor).await?,
             SourceStartPlan::Kafka(plan) => plan.compose(self, ingestor).await?,
             SourceStartPlan::Pulsar(plan) => plan.compose(self, ingestor).await?,
@@ -61,7 +70,7 @@ impl Runtime {
             SourceStartPlan::Websockets(plan) => plan.compose(self, ingestor).await?,
             SourceStartPlan::Syslog(plan) => plan.compose(self, ingestor).await?,
         };
-        self.host_source(ingestor, quiesce, dependencies, source);
+        self.host_source(ingestor, quiesce, dependencies, codec, source);
         Ok(())
     }
 }
@@ -142,9 +151,13 @@ mod tests {
                 )))
                 .with_flush_policy(FlushPolicy::Immediate)
                 .with_branch(OutputBranch::Unbranched),
-                decode_using_codec: named("json"),
+                input: nervix_models::IngestorInput::Transport(
+                    nervix_models::TransportIngestorInput {
+                        source,
+                        codec: named("json"),
+                    },
+                ),
                 timestamp_source: None,
-                source,
                 general_error_policy: GeneralErrorPolicy::Log,
                 filter_where: None,
             };

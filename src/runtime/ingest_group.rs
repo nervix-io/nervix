@@ -226,10 +226,10 @@ impl<T> IngestGroupFailure<T> {
     }
 }
 
+/// What every execution of one ingestor dispatches through, whatever input it reads.
 pub(super) struct IngestorDependencies {
     pub(super) output_routes: Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<CompiledProgramWithMaterializedInterest>,
-    pub(super) codec: Arc<CompiledCodec>,
     pub(super) branched_templates: HashMap<RelayName, IngestorRouteTemplate>,
     pub(super) metrics: MessageMetricsHandle,
 }
@@ -276,6 +276,22 @@ pub(super) struct IngestGroupContribution<'a> {
     pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     pub(super) metadata: &'a [IngestMetadataRow<'a>],
     pub(super) acks: Vec<AckSet>,
+    pub(super) ingested_at: Timestamp,
+}
+
+/// One validated client batch entering its ingestor's filter and routes as one ingest group.
+///
+/// Every row shares the batch's ACK set, so the batch resolves once each of its rows has.
+pub(super) struct ClientBatchDispatch<'a> {
+    pub(super) domain: &'a DomainName,
+    pub(super) ingestor: &'a IngestorName,
+    pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
+    pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
+    pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
+    pub(super) branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
+    pub(super) metrics: &'a MessageMetricsHandle,
+    pub(super) batch: RuntimeRecordBatch,
+    pub(super) acks: AckSet,
     pub(super) ingested_at: Timestamp,
 }
 
@@ -1769,6 +1785,71 @@ impl Runtime {
             })
             .await;
         }
+    }
+
+    /// Runs one validated client batch through its ingestor as one ingest group, then forwards
+    /// the routed rows to their branch entrypoints.
+    ///
+    /// Like [`Self::flush_ingest_collector`], every failure after the rows entered the group is
+    /// handled by the ingestor's error policies before it is returned.
+    pub(super) async fn dispatch_client_batch(
+        &self,
+        dispatch: ClientBatchDispatch<'_>,
+    ) -> error_stack::Result<(), IngestGroupError> {
+        let ClientBatchDispatch {
+            domain,
+            ingestor,
+            timestamp_source,
+            output_routes,
+            filter_where,
+            branched_senders,
+            metrics,
+            batch,
+            acks,
+            ingested_at,
+        } = dispatch;
+        let row_count = batch.batch().num_rows();
+        if row_count == 0 {
+            // An empty batch carries nothing to route, so it is complete once it is admitted.
+            acks.ack_success();
+            return Ok(());
+        }
+        let ingest_metadata = IngestFilterMapMetadata::headerless(row_count).change_context(
+            IngestGroupError::Metadata {
+                operation: IngestMetadataOperation::Finish,
+            },
+        )?;
+        let mut row_acks = Vec::with_capacity(row_count);
+        acks.split_into(row_count, &mut row_acks);
+        let record_metadata = vec![
+            RuntimeRecordMetadata::from_ingested_at_watermarks(ingested_at, ingested_at);
+            row_count
+        ];
+        let rows = IngestGroupRows {
+            batch: Arc::new(batch),
+            record_metadata,
+            ingest_metadata,
+            acks: row_acks,
+        };
+        let context = IngestGroupContext {
+            domain: domain.clone(),
+            ingestor: ingestor.clone(),
+            timestamp_source: timestamp_source.cloned(),
+            output_routes: output_routes.clone(),
+            filter_where: filter_where.cloned(),
+        };
+        let mut collector =
+            IngestRouteCollector::new(IngestMetadataKind::Headers, row_count, metrics.clone());
+        let routing =
+            collector
+                .routing_snapshot(self, domain)
+                .change_context(IngestGroupError::Routing {
+                    domain: domain.clone(),
+                })?;
+        self.execute_ingest_group(&routing, &context, rows, &mut collector)
+            .await?;
+        self.flush_ingest_collector(domain, ingestor, branched_senders, &mut collector)
+            .await
     }
 
     pub(in crate::runtime) async fn dispatch_raw_ingest_payload(

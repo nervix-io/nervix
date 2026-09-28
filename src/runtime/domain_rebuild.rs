@@ -378,11 +378,13 @@ impl Runtime {
                 .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
         );
         for plan in entrypoints.ingestors() {
-            if let Err(error) = Self::parse_ingest_acknowledgement(
-                domain,
-                &plan.ingestor.name,
-                plan.acknowledgement(),
-            ) {
+            // A client source's window and durations are already typed in its plan.
+            let Some(acknowledgement) = plan.transport_acknowledgement() else {
+                continue;
+            };
+            if let Err(error) =
+                Self::parse_ingest_acknowledgement(domain, &plan.ingestor.name, acknowledgement)
+            {
                 self.record_ingestor_transient_error(
                     domain,
                     &plan.ingestor.name,

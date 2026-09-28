@@ -14,6 +14,7 @@ use crate::{
     common::{RequestId, WireValueError},
     frame::{ClientFrame, EncodedFrame, VerifiedFrame},
     limits::SessionLimits,
+    producer::{CloseIngestorRequest, OpenIngestorRequest, SubmitBatchRequest},
     subscription::SubscriptionType,
     transaction::{
         decode_inspection_target, decode_operation_number, decode_preview_identity,
@@ -174,6 +175,9 @@ pub enum ClientRequest {
     Cancel(CancelRequest),
     AttachDomainClock(AttachDomainClockRequest),
     DetachDomainClock(DetachDomainClockRequest),
+    OpenIngestor(OpenIngestorRequest),
+    SubmitBatch(SubmitBatchRequest),
+    CloseIngestor(CloseIngestorRequest),
 }
 
 /// One request of a session.
@@ -211,7 +215,7 @@ impl ClientMessage {
         let message = frame.root();
         let request_id =
             RequestId::decode(decoder, "ClientMessage.request_id", message.request_id())?;
-        let request = ClientRequest::decode(decoder, message)?;
+        let request = ClientRequest::decode(frame, decoder, message)?;
         Ok(Self {
             request_id,
             request,
@@ -363,11 +367,24 @@ impl ClientRequest {
                 );
                 EncodedUnion::new(wire::ClientRequest::DetachDomainClockRequest, request)
             }
+            Self::OpenIngestor(open) => EncodedUnion::new(
+                wire::ClientRequest::OpenIngestorRequest,
+                open.encode(encoder)?,
+            ),
+            Self::SubmitBatch(submit) => EncodedUnion::new(
+                wire::ClientRequest::SubmitBatchRequest,
+                submit.encode(encoder)?,
+            ),
+            Self::CloseIngestor(close) => EncodedUnion::new(
+                wire::ClientRequest::CloseIngestorRequest,
+                close.encode(encoder),
+            ),
         };
         Ok(union)
     }
 
     fn decode(
+        frame: &VerifiedFrame<ClientFrame>,
         decoder: Decoder<'_>,
         message: wire::ClientMessage<'_>,
     ) -> Result<Self, Report<WireDecodeError>> {
@@ -473,6 +490,18 @@ impl ClientRequest {
                 Self::DetachDomainClock(DetachDomainClockRequest {
                     domain: decoder.name("DetachDomainClockRequest.domain", detach.domain())?,
                 })
+            }
+            wire::ClientRequest::OpenIngestorRequest => {
+                let open = request_member(message.request_as_open_ingestor_request());
+                Self::OpenIngestor(OpenIngestorRequest::decode(decoder, open)?)
+            }
+            wire::ClientRequest::SubmitBatchRequest => {
+                let submit = request_member(message.request_as_submit_batch_request());
+                Self::SubmitBatch(SubmitBatchRequest::decode(frame, decoder, submit)?)
+            }
+            wire::ClientRequest::CloseIngestorRequest => {
+                let close = request_member(message.request_as_close_ingestor_request());
+                Self::CloseIngestor(CloseIngestorRequest::decode(decoder, close)?)
             }
             undeclared => {
                 return Err(decoder.unknown_union("ClientMessage.request", undeclared.0));

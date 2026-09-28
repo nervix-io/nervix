@@ -341,22 +341,24 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
         ModelKind::Ingestor => Model::Ingestor(CreateIngestor {
             name: named(identifier_raw),
             output_routes: ProcessorOutputs::new(Vec::new()),
-            decode_using_codec: named("events_codec"),
-            timestamp_source: None,
-            source: IngestSource::Kafka {
-                client: named("kafka_main"),
-                topic: named("notifications"),
-                offset_mode: KafkaOffsetMode::Domain,
-                instances: nonzero!(1u64),
-                mode: nervix_models::KafkaIngestMode::AckSequential {
-                    timeout: "5s".to_string(),
-                    retry_policy: nervix_models::RetryPolicy {
-                        backoff: "1s".to_string(),
-                        max_backoff: "30s".to_string(),
+            input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
+                source: IngestSource::Kafka {
+                    client: named("kafka_main"),
+                    topic: named("notifications"),
+                    offset_mode: KafkaOffsetMode::Domain,
+                    instances: nonzero!(1u64),
+                    mode: nervix_models::KafkaIngestMode::AckSequential {
+                        timeout: "5s".to_string(),
+                        retry_policy: nervix_models::RetryPolicy {
+                            backoff: "1s".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
                     },
+                    quiesce: nervix_models::IngestQuiesceMode::Suspend,
                 },
-                quiesce: nervix_models::IngestQuiesceMode::Suspend,
-            },
+                codec: named("events_codec"),
+            }),
+            timestamp_source: None,
             general_error_policy: nervix_models::GeneralErrorPolicy::Log,
             filter_where: None,
         }),

@@ -217,16 +217,18 @@ mod tests {
             output_routes: with_inherit_all(ProcessorOutputs::single(named("events")))
                 .with_flush_policy(FlushPolicy::Immediate)
                 .with_branch(OutputBranch::Unbranched),
-            decode_using_codec: named("payload_codec"),
+            input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
+                source: IngestSource::Kafka {
+                    client: named("kafka"),
+                    topic: named("events"),
+                    offset_mode,
+                    instances: nonzero!(1u64),
+                    mode: KafkaIngestMode::NoAckParallel,
+                    quiesce: IngestQuiesceMode::Suspend,
+                },
+                codec: named("payload_codec"),
+            }),
             timestamp_source: None,
-            source: IngestSource::Kafka {
-                client: named("kafka"),
-                topic: named("events"),
-                offset_mode,
-                instances: nonzero!(1u64),
-                mode: KafkaIngestMode::NoAckParallel,
-                quiesce: IngestQuiesceMode::Suspend,
-            },
             general_error_policy: GeneralErrorPolicy::Log,
             filter_where: None,
         })

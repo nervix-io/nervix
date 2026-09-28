@@ -93,6 +93,7 @@ use scheduling::{
 };
 use session::grpc::SessionGrpcService;
 pub use session_service::SessionServiceImpl;
+use client_producers::ClientProducerRouter;
 use session_service::{
     RuntimeStateApplication, SESSION_EVENT_CAPACITY, SessionEvents, SessionServiceInner,
     apply_current_cluster_runtime_state,
@@ -127,6 +128,7 @@ use crate::{
 mod admitted_connection;
 mod authentication;
 mod background_task;
+mod client_producers;
 mod cluster_status;
 mod command_execution;
 mod command_result;
@@ -1781,6 +1783,11 @@ impl Application {
                     runtime.metrics(),
                 ),
                 interconnect: interconnect.clone(),
+                client_producers: ClientProducerRouter::new(
+                    runtime.clone(),
+                    interconnect.clone(),
+                    consensus.proposer().local_node_id().clone(),
+                ),
                 service_tasks: ServiceTasks::default(),
                 configured_basic_auth,
                 auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
@@ -1856,6 +1863,11 @@ impl Application {
                         .map_err(ResourceInterconnectError::replica_publish)
                 }
             })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        service
+            .inner
+            .client_producers
+            .serve_links(&interconnect)
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
         let describe_ingestor_service = service.clone();
         interconnect

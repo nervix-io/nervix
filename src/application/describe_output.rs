@@ -20,7 +20,7 @@ use nervix_models::{
     BranchSelection, CanonicalNsplError, ClusterNodeName, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor,
     CreateReorderer, CreateWindowProcessor, EmitSink, EmitterBody, IcebergCatalog, IngestSource,
-    IngestTimestampSource, KafkaOffsetMode, Model, ModelKind, ModelName, MongoDbConflictAction,
+    IngestTimestampSource, IngestorInput, KafkaOffsetMode, Model, ModelKind, ModelName, MongoDbConflictAction,
     MySqlConflictAction, NodeRef, PlacementName, PlacementPolicy, PostgresConflictAction,
     ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion, ResourceDescription,
     ResourceEntryContent, ResourceManifestEntry, ResourceUsage, ResourceVersionEntries,
@@ -61,6 +61,14 @@ pub(in crate::application) fn runtime_ingestor_describe_to_envelope(
                 instance_assignments: kafka.instance_assignments,
             }
         }),
+        client_producers: summary.client_producers.map(|gauges| {
+            nervix_interconnect::ClientProducersDescribeEnvelope {
+                producers: gauges.producers,
+                forwarded_producers: gauges.forwarded_producers,
+                outstanding_batches: gauges.outstanding_batches,
+                outstanding_bytes: gauges.outstanding_bytes,
+            }
+        }),
         metrics,
     }
 }
@@ -90,6 +98,14 @@ pub(in crate::application) fn runtime_ingestor_describe_from_envelope(
                     observed_partitions: kafka.observed_partitions,
                     rebalance_epoch: kafka.rebalance_epoch,
                     instance_assignments: kafka.instance_assignments,
+                }
+            }),
+            client_producers: summary.client_producers.map(|producers| {
+                crate::runtime::ClientIngestorGauges {
+                    producers: producers.producers,
+                    forwarded_producers: producers.forwarded_producers,
+                    outstanding_batches: producers.outstanding_batches,
+                    outstanding_bytes: producers.outstanding_bytes,
                 }
             }),
         },
@@ -146,24 +162,6 @@ pub(in crate::application) fn format_millis_duration(millis: u64) -> String {
     humantime::format_duration(Duration::from_millis(millis)).to_string()
 }
 
-fn format_ingestor_source(source: &IngestSource) -> &'static str {
-    match source {
-        IngestSource::Http { .. } => "HTTP",
-        IngestSource::Kafka { .. } => "KAFKA",
-        IngestSource::Pulsar { .. } => "PULSAR",
-        IngestSource::Mqtt { .. } => "MQTT",
-        IngestSource::Nats { .. } => "NATS",
-        IngestSource::RabbitMq { .. } => "RABBITMQ",
-        IngestSource::RedisPubSub { .. } => "REDIS",
-        IngestSource::Prometheus { .. } => "PROMETHEUS",
-        IngestSource::ZeroMq { .. } => "ZEROMQ",
-        IngestSource::Sqs { .. } => "SQS",
-        IngestSource::Endpoint { .. } => "ENDPOINT",
-        IngestSource::Websockets { .. } => "WEBSOCKETS",
-        IngestSource::Syslog { .. } => "SYSLOG",
-    }
-}
-
 pub(in crate::application) fn format_endpoint_describe_output(
     name: &ModelName,
     endpoint: &CreateEndpoint,
@@ -197,7 +195,7 @@ pub(in crate::application) fn format_ingestor_describe_output(
     let mut lines = vec![
         format!("ingestor: {}", name.as_str()),
         "kind: INGESTOR".to_string(),
-        format!("source: {}", format_ingestor_source(&ingestor.source)),
+        format!("source: {}", ingestor.input.source_label()),
         format!(
             "streams: {}",
             ingestor
@@ -207,7 +205,17 @@ pub(in crate::application) fn format_ingestor_describe_output(
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        format!("codec: {}", ingestor.decode_using_codec.as_str()),
+    ];
+    match &ingestor.input {
+        IngestorInput::Transport(transport) => {
+            lines.push(format!("codec: {}", transport.codec.as_str()));
+        }
+        IngestorInput::Client(client) => {
+            lines.push(format!("schema: {}", client.schema.as_str()));
+            lines.push(format!("mode: {}", client.mode.to_canonical_nspl()));
+        }
+    }
+    lines.extend([
         format!(
             "owner: {}",
             match ingestor_node.execution_node() {
@@ -232,7 +240,7 @@ pub(in crate::application) fn format_ingestor_describe_output(
         format!("ready: {}", if summary.ready { "true" } else { "false" }),
         format!(
             "quiesce: {}",
-            ingest_quiesce_to_nspl(ingestor.source.quiesce())
+            ingest_quiesce_to_nspl(ingestor.input.quiesce())
         ),
         format!(
             "quiesce state: {}",
@@ -254,7 +262,10 @@ pub(in crate::application) fn format_ingestor_describe_output(
             "nervix_ingestor_quiesce_rejected_total: {}",
             summary.quiesce_counters.rejected_total
         ),
-    ];
+    ]);
+    if let IngestorInput::Client(_) = &ingestor.input {
+        lines.extend(format_client_producer_lines(summary));
+    }
     lines.extend(format_processor_output_lines(&ingestor.output_routes));
     let memory_backpressure_state = if summary.memory_backpressure_paused {
         "active"
@@ -276,12 +287,12 @@ pub(in crate::application) fn format_ingestor_describe_output(
     };
     lines.push(format!("reconnect wait: {reconnect_wait}"));
 
-    if let IngestSource::Kafka {
+    if let Some(IngestSource::Kafka {
         topic,
         offset_mode,
         instances,
         ..
-    } = &ingestor.source
+    }) = ingestor.input.transport_source()
     {
         lines.push(format!("kafka topic: {}", topic.as_str()));
         lines.push(format!(
@@ -321,12 +332,12 @@ pub(in crate::application) fn format_ingestor_describe_output(
                 lines.push(format!("kafka instance {instance_idx} partitions: -"));
             }
         }
-    } else if let IngestSource::Pulsar {
+    } else if let Some(IngestSource::Pulsar {
         topic,
         subscription,
         instances,
         ..
-    } = &ingestor.source
+    }) = ingestor.input.transport_source()
     {
         lines.push(format!("pulsar topic: {}", topic.as_str()));
         lines.push(format!("pulsar subscription: {}", subscription.as_str()));
@@ -334,6 +345,76 @@ pub(in crate::application) fn format_ingestor_describe_output(
     }
 
     lines.join("\n")
+}
+
+/// One line of `SHOW INGESTORS`: the ingestor's source, its schema or codec, the node that
+/// executes it and its state, and for a client ingestor whether it admits batches and the
+/// producers attached to it. `summary` is `None` when no node executes the ingestor, or when its
+/// node could not be asked.
+pub(in crate::application) fn format_ingestor_listing_line(
+    ingestor: &CreateIngestor,
+    owner: &str,
+    summary: Option<&RuntimeIngestorDescribe>,
+) -> String {
+    let mut line = format!(
+        "{} source={}",
+        ingestor.name.as_str(),
+        ingestor.input.source_label()
+    );
+    match &ingestor.input {
+        IngestorInput::Transport(transport) => {
+            line.push_str(" codec=");
+            line.push_str(transport.codec.as_str());
+        }
+        IngestorInput::Client(client) => {
+            line.push_str(" schema=");
+            line.push_str(client.schema.as_str());
+        }
+    }
+    let status = match summary {
+        Some(summary) if summary.quiesce_state.is_some() => "quiesced",
+        Some(summary) if summary.running => "running",
+        Some(_) => "stopped",
+        None if owner == "-" => "stopped",
+        None => "unavailable",
+    };
+    line.push_str(&format!(" owner={owner} status={status}"));
+    if let IngestorInput::Client(_) = &ingestor.input {
+        let admission = match summary {
+            Some(summary) if summary.running && summary.quiesce_state.is_none() => "open",
+            Some(summary) if summary.running => "suspended",
+            _ => "-",
+        };
+        let gauges = match summary {
+            Some(summary) => summary.client_producers.unwrap_or_default(),
+            None => crate::runtime::ClientIngestorGauges::default(),
+        };
+        line.push_str(&format!(
+            " admission={admission} producers={} outstanding_batches={} outstanding_bytes={}",
+            gauges.producers, gauges.outstanding_batches, gauges.outstanding_bytes
+        ));
+    }
+    line
+}
+
+/// Whether a client ingestor admits batches now, and the producers attached to it on the node
+/// that executes it.
+fn format_client_producer_lines(summary: &RuntimeIngestorDescribe) -> Vec<String> {
+    let admission = if !summary.running {
+        "-"
+    } else if summary.quiesce_state.is_some() {
+        "suspended"
+    } else {
+        "open"
+    };
+    let gauges = summary.client_producers.unwrap_or_default();
+    vec![
+        format!("admission: {admission}"),
+        format!("producers: {}", gauges.producers),
+        format!("forwarded producers: {}", gauges.forwarded_producers),
+        format!("outstanding batches: {}", gauges.outstanding_batches),
+        format!("outstanding bytes: {}", gauges.outstanding_bytes),
+    ]
 }
 
 fn format_branch_selection(branched_by: &BranchSelection) -> &str {
@@ -1465,7 +1546,10 @@ fn placement_member_model_is_eligible<Version>(model: &Model<Version>) -> bool {
         | Model::Reorderer(_)
         | Model::WindowProcessor(_)
         | Model::Emitter(_) => true,
-        Model::Ingestor(ingestor) => !matches!(&ingestor.source, IngestSource::Endpoint { .. }),
+        Model::Ingestor(ingestor) => !matches!(
+            ingestor.input.transport_source(),
+            Some(IngestSource::Endpoint { .. })
+        ),
         Model::Relay(_) => true,
         _ => false,
     }

@@ -73,6 +73,8 @@ pub(crate) struct IngestorDescribe {
     pub(crate) reconnect_backoff: Option<String>,
     pub(crate) reconnect_wait_millis: Option<u64>,
     pub(crate) kafka_domain_offsets: Option<KafkaDomainOffsetDescribe>,
+    /// The producers attached to a client ingestor this node runs an endpoint for.
+    pub(crate) client_producers: Option<ClientIngestorGauges>,
 }
 
 impl Runtime {
@@ -530,6 +532,7 @@ impl Runtime {
                 reconnect_backoff: self.ingestor_reconnect_backoff(domain, ingestor),
                 reconnect_wait_millis: self.ingestor_reconnect_wait_millis(domain, ingestor),
                 kafka_domain_offsets: None,
+                client_producers: self.client_ingestor_gauges(domain, ingestor),
             });
         }
 
@@ -554,6 +557,7 @@ impl Runtime {
                 reconnect_backoff: self.ingestor_reconnect_backoff(domain, ingestor),
                 reconnect_wait_millis: self.ingestor_reconnect_wait_millis(domain, ingestor),
                 kafka_domain_offsets: None,
+                client_producers: self.client_ingestor_gauges(domain, ingestor),
             });
         }
         let Some(execution) = self.inner.executions.get(domain) else {
@@ -567,15 +571,20 @@ impl Runtime {
                 reconnect_backoff: self.ingestor_reconnect_backoff(domain, ingestor),
                 reconnect_wait_millis: self.ingestor_reconnect_wait_millis(domain, ingestor),
                 kafka_domain_offsets: None,
+                client_producers: self.client_ingestor_gauges(domain, ingestor),
             });
         };
         let kafka_domain_offsets = if let Some(plan) = execution.entrypoints.ingestor(ingestor)
-            && let SourceStartPlan::Kafka(KafkaIngestorStartPlan {
-                topic,
-                offsets: KafkaOffsetPlan::Domain(_),
-                instances,
+            && let IngestorInputPlan::Transport(TransportInputPlan {
+                source:
+                    SourceStartPlan::Kafka(KafkaIngestorStartPlan {
+                        topic,
+                        offsets: KafkaOffsetPlan::Domain(_),
+                        instances,
+                        ..
+                    }),
                 ..
-            }) = &plan.source
+            }) = &plan.input
             && let Some(node) = execution.schedule.nodes.get(&NodeRef::new(
                 ModelKind::Ingestor,
                 ModelName::from(ingestor),
@@ -600,6 +609,7 @@ impl Runtime {
             reconnect_backoff: self.ingestor_reconnect_backoff(domain, ingestor),
             reconnect_wait_millis: self.ingestor_reconnect_wait_millis(domain, ingestor),
             kafka_domain_offsets,
+            client_producers: self.client_ingestor_gauges(domain, ingestor),
         })
     }
 

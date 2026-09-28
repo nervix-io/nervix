@@ -13,26 +13,32 @@ use std::{fmt::Write as _, fs, path::PathBuf};
 use bytes::Bytes;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
+    AckWindow, ClientBatchDefect, ClientOutcomeUncertainty, ClientProcessingFailure,
+    ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
+    ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
     DomainClockObservation, DomainClockObservedState, ModelKind, ModelName, NodeRef, ParseAsType,
     PlacementPolicy, SchemaField,
 };
 
 use super::{
-    fixtures::{limits, name, request},
+    fixtures::{limits, name, non_zero, request},
     samples::{
-        client_messages, command_outcome, domain_clock_observations, leader, row_schema,
-        rows_frame, subscription,
+        client_messages, command_outcome, domain_clock_observations, leader, producer,
+        producer_description, row_schema, rows_frame, subscription,
     },
 };
 use crate::{
     CellView, CellsView, Choice, ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceValue,
-    ClientFrame, ClientMessage, ClientRequest, CommandDisposition, DomainClockAttachDisposition,
-    DomainClockAttachOutcome, DomainClockAttachmentEndReason, DomainClockAttachmentEnded,
-    DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainPaceChoice,
-    LeaderRedirect, Reply, ReplyBody, ReplyDelivery, RequestRejected, RequestRejection,
-    ServerEvent, ServerFrame, ServerMessage, SubscribeDisposition, SubscribeOutcome,
-    SubscriptionEndReason, SubscriptionEnded, SubscriptionOpened, SubscriptionType, SuggestOutcome,
-    Suggestion, SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause, VerifiedFrame,
+    ClientFrame, ClientMessage, ClientRequest, CloseIngestorDisposition, CloseIngestorOutcome,
+    CommandDisposition, DomainClockAttachDisposition, DomainClockAttachOutcome,
+    DomainClockAttachmentEndReason, DomainClockAttachmentEnded, DomainClockDetachDisposition,
+    DomainClockDetachOutcome, DomainClockObserved, DomainPaceChoice, LeaderRedirect,
+    OpenIngestorDisposition, OpenIngestorOutcome, ProducerAdmissionChanged, ProducerEnded,
+    ProducerOpened, Reply, ReplyBody, ReplyDelivery, RequestRejected, RequestRejection,
+    ServerEvent, ServerFrame, ServerMessage, SubmissionOutcome, SubscribeDisposition,
+    SubscribeOutcome, SubscriptionEndReason, SubscriptionEnded, SubscriptionOpened,
+    SubscriptionType, SuggestOutcome, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
+    UnknownOutcomeCause, VerifiedFrame, producer::wire_refusal, wire,
 };
 
 const UPDATE_ENV: &str = "NERVIX_UPDATE_CLIENT_WIRE_CORPUS";
@@ -120,15 +126,45 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
     }
     .encode(&limits())
     .assured("a corpus clock frame fits the default limits");
+    let submission = |id: u64, outcome: ClientSubmissionOutcome, message: &str| {
+        reply(
+            id,
+            ReplyBody::Submission(SubmissionOutcome {
+                outcome,
+                message: message.to_string(),
+            }),
+        )
+    };
+    let producer_opened = ProducerOpened {
+        domain: name("tenant"),
+        ingestor: name("orders_in"),
+        description: producer_description(AckWindow::Parallel { max: non_zero(8) }),
+    };
+    let producer_admission = ProducerAdmissionChanged {
+        producer: producer(),
+        admission: ClientProducerAdmission::Suspended,
+    }
+    .encode(&limits())
+    .assured("a corpus producer frame fits the default limits");
+    let producer_ended = ProducerEnded {
+        producer: producer(),
+        reason: ClientProducerEndReason::Relocated,
+        message: "ingestor 'orders_in' moved to node-2".to_string(),
+    }
+    .encode(&limits())
+    .assured("a corpus producer frame fits the default limits");
     vec![
         ("client_attach_domain_clock.nxcm", client(15)),
         ("client_cancel.nxcm", client(13)),
         ("client_choice.nxcm", client(14)),
         ("client_choice_relay_field.nxcm", client(17)),
+        ("client_close_ingestor.nxcm", client(20)),
         ("client_command.nxcm", client(0)),
         ("client_command_bare.nxcm", client(2)),
         ("client_commit.nxcm", client(1)),
         ("client_detach_domain_clock.nxcm", client(16)),
+        ("client_open_ingestor.nxcm", client(18)),
+        ("client_submit_batch.nxcm", client(19)),
         ("client_subscribe.nxcm", client(11)),
         ("client_suggest.nxcm", client(3)),
         (
@@ -286,6 +322,43 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             clock_observed(1, DomainClockObservedState::Unpaced),
         ),
         (
+            "server_ingestor_closed.nxsm",
+            reply(
+                21,
+                ReplyBody::CloseIngestor(CloseIngestorOutcome {
+                    disposition: CloseIngestorDisposition::Closed,
+                    message: "producer 19 closed".to_string(),
+                }),
+            ),
+        ),
+        (
+            "server_ingestor_opened.nxsm",
+            reply(
+                19,
+                ReplyBody::OpenIngestor(OpenIngestorOutcome {
+                    disposition: OpenIngestorDisposition::Opened(Box::new(producer_opened)),
+                    message: "producer attached to ingestor 'orders_in'".to_string(),
+                }),
+            ),
+        ),
+        (
+            "server_ingestor_refused.nxsm",
+            reply(
+                19,
+                ReplyBody::OpenIngestor(OpenIngestorOutcome {
+                    disposition: OpenIngestorDisposition::Refused(
+                        ClientProducerRefusal::SchemaMismatch,
+                    ),
+                    message: "field 'card' differs in sensitivity".to_string(),
+                }),
+            ),
+        ),
+        (
+            "server_producer_admission.nxsm",
+            producer_admission.into_bytes(),
+        ),
+        ("server_producer_ended.nxsm", producer_ended.into_bytes()),
+        (
             "server_rejected.nxsm",
             reply(
                 5,
@@ -297,6 +370,36 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             ),
         ),
         ("server_rows.nxsm", rows_frame(&limits()).into_bytes()),
+        (
+            "server_submission_completed.nxsm",
+            submission(20, ClientSubmissionOutcome::Completed, ""),
+        ),
+        (
+            "server_submission_failed.nxsm",
+            submission(
+                20,
+                ClientSubmissionOutcome::ProcessingFailed(ClientProcessingFailure::AckTimedOut),
+                "no acknowledgement progress within 30s",
+            ),
+        ),
+        (
+            "server_submission_not_admitted.nxsm",
+            submission(
+                20,
+                ClientSubmissionOutcome::NotAdmitted(ClientSubmissionRefusal::InvalidBatch(
+                    ClientBatchDefect::TooManyRows,
+                )),
+                "the batch has 70000 rows, more than the 65536 one batch may carry",
+            ),
+        ),
+        (
+            "server_submission_unknown.nxsm",
+            submission(
+                20,
+                ClientSubmissionOutcome::OutcomeUnknown(ClientOutcomeUncertainty::OwnerLost),
+                "the connection to node-2 was lost",
+            ),
+        ),
         ("server_subscription_ended.nxsm", ended.into_bytes()),
         (
             "server_subscription_opened.nxsm",
@@ -459,6 +562,69 @@ fn clock_line(clock: &DomainClockObservation) -> String {
             paced.mapping.logical_start().unix_nanos(),
             paced.mapping.wall_started_at().unix_nanos(),
             paced.mapping.time_rate().get().to_bits()
+        ),
+    }
+}
+
+/// The schema's name for a schema enum value.
+fn schema_name(name: Option<&'static str>) -> &'static str {
+    name.assured("every value a corpus frame carries is declared by the schema")
+}
+
+fn producer_lines(id: u64, opened: &ProducerOpened, message: &str, lines: &mut Vec<String>) {
+    let ClientProducerDescription {
+        attachment,
+        fields,
+        generation,
+        contract,
+        policy,
+        grant,
+        admission,
+    } = &opened.description;
+    let window = match policy.window {
+        AckWindow::Sequential => "sequential".to_string(),
+        AckWindow::Parallel { max } => format!("parallel:{max}"),
+    };
+    lines.push(format!(
+        "REPLY {id} INGESTOR_OPENED domain={} ingestor={} generation={generation} contract={} \
+         attachment={} window={window} ack_timeout={} retry={}/{} granted={}/{} \
+         max_batch={}/{} admission={} message={}",
+        opened.domain.as_str(),
+        opened.ingestor.as_str(),
+        hex(contract.as_digest()),
+        hex(&attachment.as_u128().to_be_bytes()),
+        policy.ack_timeout.as_nanos(),
+        policy.retry_backoff.as_nanos(),
+        policy.retry_max_backoff.as_nanos(),
+        grant.batches,
+        grant.bytes,
+        grant.max_batch_bytes,
+        grant.max_batch_rows,
+        schema_name(wire::ProducerAdmission::from(*admission).variant_name()),
+        text(message)
+    ));
+    for field in fields {
+        lines.push(field_line("FIELD", field));
+    }
+}
+
+fn submission_line(id: u64, outcome: &SubmissionOutcome) -> String {
+    let message = text(&outcome.message);
+    match outcome.outcome {
+        ClientSubmissionOutcome::Completed => {
+            format!("REPLY {id} SUBMISSION completed message={message}")
+        }
+        ClientSubmissionOutcome::NotAdmitted(refusal) => format!(
+            "REPLY {id} SUBMISSION not_admitted refusal={} message={message}",
+            schema_name(wire_refusal(refusal).variant_name())
+        ),
+        ClientSubmissionOutcome::ProcessingFailed(failure) => format!(
+            "REPLY {id} SUBMISSION failed failure={} message={message}",
+            schema_name(wire::ProcessingFailure::from(failure).variant_name())
+        ),
+        ClientSubmissionOutcome::OutcomeUnknown(cause) => format!(
+            "REPLY {id} SUBMISSION unknown cause={} message={message}",
+            schema_name(wire::OutcomeUncertainty::from(cause).variant_name())
         ),
     }
 }
@@ -629,6 +795,27 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                         domain.as_str()
                     ));
                 }
+                ReplyBody::OpenIngestor(outcome) => match &outcome.disposition {
+                    OpenIngestorDisposition::Opened(opened) => {
+                        producer_lines(id.get(), opened, &outcome.message, lines);
+                    }
+                    OpenIngestorDisposition::Refused(refusal) => lines.push(format!(
+                        "REPLY {id} INGESTOR_REFUSED refusal={} message={}",
+                        schema_name(wire::ProducerRefusal::from(*refusal).variant_name()),
+                        text(&outcome.message)
+                    )),
+                },
+                ReplyBody::Submission(outcome) => lines.push(submission_line(id.get(), outcome)),
+                ReplyBody::CloseIngestor(outcome) => {
+                    let disposition = match outcome.disposition {
+                        CloseIngestorDisposition::Closed => "closed",
+                        CloseIngestorDisposition::NotOpen => "not_open",
+                    };
+                    lines.push(format!(
+                        "REPLY {id} INGESTOR_CLOSE {disposition} message={}",
+                        text(&outcome.message)
+                    ));
+                }
                 other => panic!("the corpus holds no {other:?} reply"),
             }
         }
@@ -673,6 +860,21 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                 "EVENT DOMAIN_CLOCK_ENDED domain={} reason={:?}",
                 ended.domain.as_str(),
                 ended.reason
+            ));
+        }
+        ServerMessage::Event(ServerEvent::ProducerAdmissionChanged(changed)) => {
+            lines.push(format!(
+                "EVENT PRODUCER_ADMISSION producer={} admission={}",
+                changed.producer,
+                schema_name(wire::ProducerAdmission::from(changed.admission).variant_name())
+            ));
+        }
+        ServerMessage::Event(ServerEvent::ProducerEnded(ended)) => {
+            lines.push(format!(
+                "EVENT PRODUCER_ENDED producer={} reason={} message={}",
+                ended.producer,
+                schema_name(wire::ProducerEndReason::from(ended.reason).variant_name()),
+                text(&ended.message)
             ));
         }
         other => panic!("the corpus holds no {other:?} message"),
@@ -753,6 +955,27 @@ fn render_client(message: &ClientMessage, lines: &mut Vec<String>) {
         ClientRequest::DetachDomainClock(detach) => lines.push(format!(
             "REQUEST {id} DETACH_DOMAIN_CLOCK domain={}",
             detach.domain.as_str()
+        )),
+        ClientRequest::OpenIngestor(open) => {
+            lines.push(format!(
+                "REQUEST {id} OPEN_INGESTOR domain={} ingestor={} batches={} bytes={}",
+                open.domain.as_str(),
+                open.ingestor.as_str(),
+                open.limits.batches,
+                open.limits.bytes
+            ));
+            for field in &open.expected_fields {
+                lines.push(field_line("FIELD", field));
+            }
+        }
+        ClientRequest::SubmitBatch(submit) => lines.push(format!(
+            "REQUEST {id} SUBMIT_BATCH producer={} batch={}",
+            submit.producer,
+            hex(&submit.batch)
+        )),
+        ClientRequest::CloseIngestor(close) => lines.push(format!(
+            "REQUEST {id} CLOSE_INGESTOR producer={}",
+            close.producer
         )),
         other => panic!("the corpus holds no {other:?} request"),
     }

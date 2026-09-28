@@ -2,70 +2,80 @@
 //!
 //! Layer: decisions.
 //!
-//! - **Owns.** Resolving an ingestor and the source it reads into one typed start plan, and
-//!   validating its source name, source kind, client, codec and route identities together.
+//! - **Owns.** Resolving an ingestor and the input it reads into one typed start plan, validating
+//!   its source name, source kind, client, codec and route identities together, and deciding a
+//!   client source's acknowledgement window, timeouts and endpoint contract.
 //! - **Depends on.** Validated schedule Models, the entrypoint route planner and vocabulary
 //!   values.
 //! - **Must not know.** Tokio, locks, shared maps, connector I/O, node-local resources, or task
 //!   spawning.
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 
-use error_stack::Report;
+use arch_into::ArchInto as _;
+use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_models::{
-    ClientConfigEntry, ClientName, ClientResourceMount, ClusterNodeName, CodecName,
-    ConsumerGroupName, CreateIngestor, DomainName, EndpointName, IngestAcknowledgement,
-    IngestQuiesceMode, IngestSource, IngestSourceKind, IngestTimestampSource, IngestorName,
+    AckWindow, ClientConfigEntry, ClientEndpointContract, ClientIngestSource, ClientName,
+    ClientProducerPolicy, ClientResourceMount, ClusterNodeName, CodecName, ConsumerGroupName, CreateIngestor,
+    CreateSchema, DomainName, EndpointName, FlushPolicy, IngestAcknowledgement, IngestQuiesceMode,
+    IngestSource, IngestSourceKind, IngestTimestampSource, IngestorInput, IngestorName,
     KafkaIngestMode, KafkaOffsetMode, MessageErrorOperation, Model, ModelName, MqttIngestMode,
-    PulsarIngestMode, RabbitMqIngestMode, ScheduledNode, SignalingProtocolName, SqsIngestMode,
+    PulsarIngestMode, RabbitMqIngestMode, ResolvedBranching, SchemaField, SchemaName,
+    ScheduledNode, SignalingProtocolName, SqsIngestMode,
 };
+use triomphe::Arc;
 
-use super::entrypoint_plan::{
-    EntrypointOwner, EntrypointPlanError, EntrypointRouteContext, LoweredFilter, PlannedEntryRoute,
+use super::{
+    domain_activation_plan::DomainActivationPlan,
+    entrypoint_plan::{
+        EntrypointOwner, EntrypointPlanError, EntrypointRouteContext, LoweredFilter,
+        PlannedEntryRoute,
+    },
 };
+use crate::runtime_schema::CompiledSchema;
 
-/// The source an ingestor declares, asked for its transport class and the quiesce modes it honors.
+/// The input an ingestor declares, asked for its source class and the quiesce modes it honors.
 ///
 /// Both come from the source vocabulary, which is the one declaration of what a source carries
 /// and which quiesce modes it supports.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DeclaredIngestSource {
-    source: IngestSource,
+pub(crate) struct DeclaredIngestorInput {
+    input: IngestorInput,
 }
 
-impl DeclaredIngestSource {
-    /// The transport class of the source, which decides whether its messages carry headers and
+impl DeclaredIngestorInput {
+    /// The source class of the input, which decides whether its messages carry headers and
     /// which metadata they expose to the ingestor's programs.
-    pub(crate) fn transport(&self) -> IngestSourceKind {
-        self.source.transport_kind()
+    pub(crate) fn source_kind(&self) -> IngestSourceKind {
+        self.input.source_kind()
     }
 
     pub(crate) fn quiesce_mode(&self) -> &IngestQuiesceMode {
-        self.source.quiesce()
+        self.input.quiesce()
     }
 
     pub(crate) fn supports_quiesce(&self, mode: &IngestQuiesceMode) -> bool {
-        self.source.supports_quiesce(mode)
+        self.input.supports_quiesce(mode)
     }
 }
 
-/// The ingestor itself: what it decodes, filters and routes, independent of the source it reads.
+/// The ingestor itself: what it filters and routes, independent of the input it reads.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct IngestorSpec {
     pub(crate) domain: DomainName,
     pub(crate) name: IngestorName,
     /// Every output route in declared order, which is never empty.
     pub(crate) routes: Vec<PlannedEntryRoute>,
-    pub(crate) decode_using_codec: CodecName,
     pub(crate) timestamp_source: Option<IngestTimestampSource>,
     pub(crate) filter_where: Option<LoweredFilter>,
-    pub(crate) declared_source: DeclaredIngestSource,
+    pub(crate) declared_input: DeclaredIngestorInput,
 }
 
 impl IngestorSpec {
     /// Whether the ingestor's programs may read the transport headers of its messages.
     pub(crate) fn reads_headers(&self) -> bool {
-        self.declared_source.transport().reads_headers()
+        self.declared_input.source_kind().reads_headers()
     }
 }
 
@@ -185,12 +195,62 @@ pub(crate) struct EndpointIngestorStartPlan {
     pub(crate) mode: nervix_models::EndpointIngestMode,
 }
 
-/// Everything the host needs to start one ingestor: the ingestor itself and the plan of the source
-/// it reads from.
+/// Everything the host needs to start one ingestor: the ingestor itself and the plan of the input
+/// it reads.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct IngestorStartPlan {
     pub(crate) ingestor: IngestorSpec,
+    pub(crate) input: IngestorInputPlan,
+}
+
+/// The plan of what one ingestor reads. A transport's payloads are decoded by its codec; a client
+/// source's batches already carry its input schema, so it names none.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum IngestorInputPlan {
+    Transport(TransportInputPlan),
+    Client(ClientIngestorStartPlan),
+}
+
+/// A transport source and the codec that decodes its payloads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TransportInputPlan {
+    pub(crate) codec: CodecName,
     pub(crate) source: SourceStartPlan,
+}
+
+/// A client source: the schema every submitted batch matches, the policy its producers submit
+/// under, and the contract they attach to.
+#[derive(Debug, Clone)]
+pub(crate) struct ClientIngestorStartPlan {
+    pub(crate) schema_name: SchemaName,
+    /// The declared fields in order, with their optionality and sensitivity, as producers are told
+    /// them.
+    pub(crate) fields: Vec<SchemaField>,
+    pub(crate) schema: Arc<CompiledSchema>,
+    pub(crate) policy: ClientProducerPolicy,
+    pub(crate) contract: ClientEndpointContract,
+}
+
+impl ClientIngestorStartPlan {
+    /// How many submitted batches may await their acknowledgement across every producer.
+    pub(crate) fn window_size(&self) -> NonZeroUsize {
+        let declared = match self.policy.window {
+            AckWindow::Sequential => NonZeroU64::MIN,
+            AckWindow::Parallel { max } => max,
+        };
+        NonZeroUsize::new(declared.get().arch_into())
+            .assured("a non-zero declared window is still non-zero at this target's pointer width")
+    }
+}
+
+/// Plans compare by what they decide; the compiled schema is derived from `fields`.
+impl PartialEq for ClientIngestorStartPlan {
+    fn eq(&self, other: &Self) -> bool {
+        self.schema_name == other.schema_name
+            && self.fields == other.fields
+            && self.policy == other.policy
+            && self.contract == other.contract
+    }
 }
 
 /// The plan of one ingestor's source, which the composition root maps to the connector that runs
@@ -213,7 +273,9 @@ pub(crate) enum SourceStartPlan {
 }
 
 impl IngestorStartPlan {
-    /// Decides the start plan of one scheduled ingestor from the node its source resolved to.
+    /// Decides the start plan of one scheduled ingestor from the node its input resolved to: the
+    /// client or endpoint a transport reads through, or the schema a client source's batches
+    /// carry.
     pub(in crate::registry) fn decide(
         domain: &DomainName,
         scheduled: &ScheduledNode,
@@ -221,17 +283,15 @@ impl IngestorStartPlan {
         source_model: &Model,
         routes: &EntrypointRouteContext<'_>,
     ) -> Result<Self, Report<EntrypointPlanError>> {
-        let source = SourceStartPlan::decide(ingestor, source_model, scheduled)?;
-        let Some(codec) = routes.activation().codecs.get(&ingestor.decode_using_codec) else {
-            return Err(Report::new(EntrypointPlanError::MissingCodec {
-                ingestor: ingestor.name.clone(),
-                codec: ingestor.decode_using_codec.clone(),
-            }));
-        };
+        let DecidedInput {
+            plan: input,
+            schema: input_schema,
+        } = IngestorInputPlan::decide(ingestor, source_model, scheduled, routes.activation())?;
         let identifier = ModelName::from(&ingestor.name);
         let owner = EntrypointOwner::ingestor(&identifier, ingestor);
-        let input = codec.schema.arrow_schema();
-        let routes = routes.plan_routes(&owner, ingestor.output_routes.outputs(), &input)?;
+        let input_arrow_schema = input_schema.arrow_schema();
+        let routes =
+            routes.plan_routes(&owner, ingestor.output_routes.outputs(), &input_arrow_schema)?;
         let filter_where = match ingestor.filter_where.as_ref() {
             Some(filter) => Some(LoweredFilter::planned(
                 &owner,
@@ -244,20 +304,23 @@ impl IngestorStartPlan {
             domain: domain.clone(),
             name: ingestor.name.clone(),
             routes,
-            decode_using_codec: ingestor.decode_using_codec.clone(),
             timestamp_source: ingestor.timestamp_source.clone(),
             filter_where,
-            declared_source: DeclaredIngestSource {
-                source: ingestor.source.clone(),
+            declared_input: DeclaredIngestorInput {
+                input: ingestor.input.clone(),
             },
         };
-        Ok(Self { ingestor, source })
+        Ok(Self { ingestor, input })
     }
 
-    /// The acknowledgement the source's delivery mode declares. A source whose statement declares
-    /// no delivery mode acknowledges nothing.
-    pub(crate) fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
-        match &self.source {
+    /// The acknowledgement a transport's delivery mode declares. A transport whose statement
+    /// declares no delivery mode acknowledges nothing. A client source acknowledges through its
+    /// own window and has no transport acknowledgement.
+    pub(crate) fn transport_acknowledgement(&self) -> Option<IngestAcknowledgement<'_>> {
+        let IngestorInputPlan::Transport(transport) = &self.input else {
+            return None;
+        };
+        let acknowledgement = match &transport.source {
             SourceStartPlan::Kafka(plan) => plan.mode.acknowledgement(),
             SourceStartPlan::Pulsar(plan) => plan.mode.acknowledgement(),
             SourceStartPlan::Mqtt(plan) => plan.mode.acknowledgement(),
@@ -271,30 +334,176 @@ impl IngestorStartPlan {
             SourceStartPlan::Http(_)
             | SourceStartPlan::Prometheus(_)
             | SourceStartPlan::Syslog(_) => IngestAcknowledgement::Unacknowledged,
-        }
+        };
+        Some(acknowledgement)
     }
 
     /// Whether this ingestor keeps the offsets it resumes from as domain state, which its
     /// placement then replicates.
     pub(crate) fn keeps_domain_offsets(&self) -> bool {
         matches!(
-            &self.source,
-            SourceStartPlan::Kafka(KafkaIngestorStartPlan {
-                offsets: KafkaOffsetPlan::Domain(_),
+            &self.input,
+            IngestorInputPlan::Transport(TransportInputPlan {
+                source: SourceStartPlan::Kafka(KafkaIngestorStartPlan {
+                    offsets: KafkaOffsetPlan::Domain(_),
+                    ..
+                }),
                 ..
             })
         )
     }
 }
 
-impl SourceStartPlan {
+/// An ingestor's input plan together with the compiled schema its programs read.
+struct DecidedInput {
+    plan: IngestorInputPlan,
+    schema: Arc<CompiledSchema>,
+}
+
+impl IngestorInputPlan {
     fn decide(
         ingestor: &CreateIngestor,
         source_model: &Model,
         scheduled: &ScheduledNode,
+        activation: &DomainActivationPlan,
+    ) -> Result<DecidedInput, Report<EntrypointPlanError>> {
+        match &ingestor.input {
+            IngestorInput::Transport(transport) => {
+                let source =
+                    SourceStartPlan::decide(&ingestor.name, &transport.source, source_model, scheduled)?;
+                let Some(codec) = activation.codecs.get(&transport.codec) else {
+                    return Err(Report::new(EntrypointPlanError::MissingCodec {
+                        ingestor: ingestor.name.clone(),
+                        codec: transport.codec.clone(),
+                    }));
+                };
+                Ok(DecidedInput {
+                    plan: Self::Transport(TransportInputPlan {
+                        codec: transport.codec.clone(),
+                        source,
+                    }),
+                    schema: codec.schema.clone(),
+                })
+            }
+            IngestorInput::Client(client) => {
+                let plan = ClientIngestorStartPlan::decide(ingestor, client, source_model, activation)?;
+                let schema = plan.schema.clone();
+                Ok(DecidedInput {
+                    plan: Self::Client(plan),
+                    schema,
+                })
+            }
+        }
+    }
+}
+
+impl ClientIngestorStartPlan {
+    fn decide(
+        ingestor: &CreateIngestor,
+        client: &ClientIngestSource,
+        source_model: &Model,
+        activation: &DomainActivationPlan,
     ) -> Result<Self, Report<EntrypointPlanError>> {
-        let name = &ingestor.name;
-        match (&ingestor.source, source_model) {
+        let Model::Schema(schema_model) = source_model else {
+            return Err(Report::new(EntrypointPlanError::SourceKindMismatch {
+                ingestor: ingestor.name.clone(),
+                resolved: source_model.kind(),
+            }));
+        };
+        if schema_model.name != client.schema {
+            return Err(Report::new(EntrypointPlanError::SourceIdentityMismatch {
+                ingestor: ingestor.name.clone(),
+                expected: ModelName::from(&client.schema),
+                resolved: ModelName::from(&schema_model.name),
+            }));
+        }
+        let Some(schema) = activation.schemas.get(&client.schema) else {
+            return Err(Report::new(EntrypointPlanError::MissingClientSchema {
+                ingestor: ingestor.name.clone(),
+                schema: client.schema.clone(),
+            }));
+        };
+        let duration = |clause: &'static str, value: &str| {
+            let invalid = || {
+                Report::new(EntrypointPlanError::InvalidClientDuration {
+                    ingestor: ingestor.name.clone(),
+                    clause,
+                    value: value.to_string(),
+                })
+            };
+            let Ok(parsed) = humantime::parse_duration(value) else {
+                return Err(invalid());
+            };
+            if parsed.is_zero() {
+                return Err(invalid());
+            }
+            Ok(parsed)
+        };
+        let policy = ClientProducerPolicy {
+            window: client.mode.window,
+            ack_timeout: duration("ACK TIMEOUT", &client.mode.ack_timeout)?,
+            retry_backoff: duration("RETRY POLICY BACKOFF", &client.mode.retry_policy.backoff)?,
+            retry_max_backoff: duration("RETRY POLICY MAX", &client.mode.retry_policy.max_backoff)?,
+        };
+        let contract = client_endpoint_contract(ingestor, schema_model, activation)?;
+        Ok(Self {
+            schema_name: client.schema.clone(),
+            fields: schema_model.fields.clone(),
+            schema: schema.clone(),
+            policy,
+            contract,
+        })
+    }
+}
+
+/// The identity of a client ingestor's endpoint contract: the ingestor as producers see it, its
+/// input schema, and the branch declarations its routes construct. Flush cadence is left out, so
+/// a change that only retunes flushing keeps every producer attached.
+fn client_endpoint_contract(
+    ingestor: &CreateIngestor,
+    schema: &CreateSchema,
+    activation: &DomainActivationPlan,
+) -> Result<ClientEndpointContract, Report<EntrypointPlanError>> {
+    let unrenderable = || EntrypointPlanError::UnrenderableClientContract {
+        ingestor: ingestor.name.clone(),
+    };
+    let mut contract_ingestor = ingestor.clone();
+    for route in &mut contract_ingestor.output_routes.routes {
+        route.flush_policy = Some(FlushPolicy::Immediate);
+    }
+    let mut hasher = blake3::Hasher::new();
+    let mut add = |part: &str| {
+        let length: u64 = part.len().arch_into();
+        hasher.update(&length.to_le_bytes());
+        hasher.update(part.as_bytes());
+    };
+    add(&contract_ingestor.to_canonical_nspl().change_context_lazy(unrenderable)?);
+    add(&schema.to_canonical_nspl().change_context_lazy(unrenderable)?);
+    for route in ingestor.output_routes.outputs() {
+        add(route.relay.as_str());
+        let branching = activation
+            .relays
+            .get(&route.relay)
+            .map(|relay| &relay.branching);
+        match branching {
+            Some(ResolvedBranching::Branched { branch, schema }) => {
+                add(branch.as_str());
+                add(&schema.to_canonical_nspl().change_context_lazy(unrenderable)?);
+            }
+            Some(ResolvedBranching::Unbranched) | None => add("UNBRANCHED"),
+        }
+    }
+    Ok(ClientEndpointContract::from_digest(*hasher.finalize().as_bytes()))
+}
+
+impl SourceStartPlan {
+    fn decide(
+        name: &IngestorName,
+        source: &IngestSource,
+        source_model: &Model,
+        scheduled: &ScheduledNode,
+    ) -> Result<Self, Report<EntrypointPlanError>> {
+        match (source, source_model) {
             (
                 IngestSource::Http {
                     client: expected,
@@ -605,9 +814,11 @@ mod tests {
             output_routes: with_inherit_all(ProcessorOutputs::single(named("events")))
                 .with_flush_policy(FlushPolicy::Immediate)
                 .with_branch(OutputBranch::Unbranched),
-            decode_using_codec: named("json"),
+            input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
+                source,
+                codec: named("json"),
+            }),
             timestamp_source: None,
-            source,
             general_error_policy: GeneralErrorPolicy::Log,
             filter_where: None,
         })
@@ -1107,9 +1318,11 @@ mod tests {
         let ingestor = CreateIngestor {
             name: named("source"),
             output_routes: ProcessorOutputs::single(named("events")),
-            decode_using_codec: named("json"),
+            input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
+                source: case.source.clone(),
+                codec: named("json"),
+            }),
             timestamp_source: None,
-            source: case.source.clone(),
             general_error_policy: GeneralErrorPolicy::Log,
             filter_where: None,
         };

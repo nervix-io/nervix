@@ -213,6 +213,7 @@ aws-sdk-sqs = { workspace = true }
 aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 criterion = { workspace = true }
 cucumber = { workspace = true, features = ["libtest"] }
+flatbuffers = { workspace = true }
 h2 = { workspace = true }
 http = { workspace = true }
 httparse = { workspace = true }
@@ -223,7 +224,7 @@ lapin = { workspace = true }
 mongodb = { workspace = true }
 # This is mysql_async's AWS-LC-backed Rustls feature; do not use default-rustls-ring.
 mysql_async = { workspace = true, features = ["default-rustls"] }
-nervix-client-core = { workspace = true }
+nervix-client-core = { workspace = true, features = ["arrow"] }
 nervix-client-ffi = { workspace = true }
 nervix-test-environment = { workspace = true }
 nix = { workspace = true, features = ["signal"] }

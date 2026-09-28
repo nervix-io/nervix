@@ -121,6 +121,7 @@ def main() -> int:
         ROOT / "crates/connectors/otel/src/lib.rs",
         ROOT / "crates/connectors/prometheus/src/lib.rs",
         ROOT / "crates/connectors/sentry/src/lib.rs",
+        runtime_root / "client_ingestor.rs",
         runtime_root / "domain_clock.rs",
         runtime_root / "emitter_task.rs",
         runtime_root / "endpoint.rs",

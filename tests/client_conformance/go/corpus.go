@@ -217,6 +217,95 @@ func commandLines(id uint64, outcome *session.CommandOutcome) ([]string, error) 
 	return lines, nil
 }
 
+// producerLines renders an opened producer and the input schema its batches carry.
+func producerLines(id uint64, opened *session.ProducerOpened, message []byte) ([]string, error) {
+	contract := opened.Contract(nil)
+	if contract == nil || contract.BytesLength() != 32 {
+		return nil, errors.New("an opened producer's contract is not a 32-byte fingerprint")
+	}
+	if opened.AttachmentLength() != 16 {
+		return nil, errors.New("an opened producer's attachment is not 16 bytes")
+	}
+	window := ""
+	switch opened.WindowType() {
+	case session.ProducerWindowSequentialProducerWindow:
+		window = "sequential"
+	case session.ProducerWindowParallelProducerWindow:
+		parallel := new(session.ParallelProducerWindow)
+		if err := union(opened.Window, parallel); err != nil {
+			return nil, err
+		}
+		window = fmt.Sprintf("parallel:%d", parallel.Max())
+	default:
+		return nil, fmt.Errorf("undeclared producer window %d", opened.WindowType())
+	}
+	admission := opened.Admission()
+	if admission == nil {
+		return nil, errors.New("an opened producer has no admission state")
+	}
+	lines := []string{fmt.Sprintf(
+		"REPLY %d INGESTOR_OPENED domain=%s ingestor=%s generation=%d contract=%s attachment=%s "+
+			"window=%s ack_timeout=%d retry=%d/%d granted=%d/%d max_batch=%d/%d admission=%s message=%s",
+		id, opened.Domain(), opened.Ingestor(), opened.Generation(),
+		hex.EncodeToString(contract.BytesBytes()), hex.EncodeToString(opened.AttachmentBytes()), window,
+		opened.AckTimeoutNanos(), opened.RetryBackoffNanos(), opened.RetryMaxBackoffNanos(),
+		opened.GrantedBatches(), opened.GrantedBytes(), opened.MaxBatchBytes(), opened.MaxBatchRows(),
+		session.EnumNamesProducerAdmission[*admission], text(message))}
+	for index := 0; index < opened.FieldsLength(); index++ {
+		row := new(session.RowField)
+		opened.Fields(row, index)
+		parsed, err := readField(row)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, parsed.line("FIELD"))
+	}
+	return lines, nil
+}
+
+// submissionLine renders the terminal outcome of one submitted batch.
+func submissionLine(id uint64, outcome *session.SubmissionOutcome) (string, error) {
+	message := text(outcome.Message())
+	switch outcome.DispositionType() {
+	case session.SubmissionDispositionSubmissionCompleted:
+		return fmt.Sprintf("REPLY %d SUBMISSION completed message=%s", id, message), nil
+	case session.SubmissionDispositionSubmissionNotAdmitted:
+		notAdmitted := new(session.SubmissionNotAdmitted)
+		if err := union(outcome.Disposition, notAdmitted); err != nil {
+			return "", err
+		}
+		refusal := notAdmitted.Refusal()
+		if refusal == nil {
+			return "", errors.New("a refused submission has no refusal")
+		}
+		return fmt.Sprintf("REPLY %d SUBMISSION not_admitted refusal=%s message=%s", id,
+			session.EnumNamesSubmissionRefusal[*refusal], message), nil
+	case session.SubmissionDispositionSubmissionFailed:
+		failed := new(session.SubmissionFailed)
+		if err := union(outcome.Disposition, failed); err != nil {
+			return "", err
+		}
+		failure := failed.Failure()
+		if failure == nil {
+			return "", errors.New("a failed submission has no failure")
+		}
+		return fmt.Sprintf("REPLY %d SUBMISSION failed failure=%s message=%s", id,
+			session.EnumNamesProcessingFailure[*failure], message), nil
+	case session.SubmissionDispositionSubmissionOutcomeUnknown:
+		unknown := new(session.SubmissionOutcomeUnknown)
+		if err := union(outcome.Disposition, unknown); err != nil {
+			return "", err
+		}
+		cause := unknown.Cause()
+		if cause == nil {
+			return "", errors.New("an unknown submission outcome has no cause")
+		}
+		return fmt.Sprintf("REPLY %d SUBMISSION unknown cause=%s message=%s", id,
+			session.EnumNamesOutcomeUncertainty[*cause], message), nil
+	}
+	return "", fmt.Errorf("undeclared submission disposition %d", outcome.DispositionType())
+}
+
 func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 	if err := frameRoot(frame, "NXSM"); err != nil {
 		return nil, err
@@ -385,6 +474,57 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 					id, notAttached.Domain(), message)}, nil
 			}
 			return nil, fmt.Errorf("the corpus holds no %d detach disposition", outcome.DispositionType())
+		case session.ReplyBodyOpenIngestorOutcome:
+			outcome := new(session.OpenIngestorOutcome)
+			if err := union(value.Body, outcome); err != nil {
+				return nil, err
+			}
+			switch outcome.DispositionType() {
+			case session.OpenIngestorDispositionProducerOpened:
+				opened := new(session.ProducerOpened)
+				if err := union(outcome.Disposition, opened); err != nil {
+					return nil, err
+				}
+				return producerLines(id, opened, outcome.Message())
+			case session.OpenIngestorDispositionProducerRefused:
+				refused := new(session.ProducerRefused)
+				if err := union(outcome.Disposition, refused); err != nil {
+					return nil, err
+				}
+				refusal := refused.Refusal()
+				if refusal == nil {
+					return nil, errors.New("a refused producer has no refusal")
+				}
+				return []string{fmt.Sprintf("REPLY %d INGESTOR_REFUSED refusal=%s message=%s", id,
+					session.EnumNamesProducerRefusal[*refusal], text(outcome.Message()))}, nil
+			}
+			return nil, fmt.Errorf("undeclared open disposition %d", outcome.DispositionType())
+		case session.ReplyBodySubmissionOutcome:
+			outcome := new(session.SubmissionOutcome)
+			if err := union(value.Body, outcome); err != nil {
+				return nil, err
+			}
+			line, err := submissionLine(id, outcome)
+			if err != nil {
+				return nil, err
+			}
+			return []string{line}, nil
+		case session.ReplyBodyCloseIngestorOutcome:
+			outcome := new(session.CloseIngestorOutcome)
+			if err := union(value.Body, outcome); err != nil {
+				return nil, err
+			}
+			disposition := ""
+			switch outcome.DispositionType() {
+			case session.CloseIngestorDispositionProducerClosed:
+				disposition = "closed"
+			case session.CloseIngestorDispositionProducerNotOpen:
+				disposition = "not_open"
+			default:
+				return nil, fmt.Errorf("undeclared close disposition %d", outcome.DispositionType())
+			}
+			return []string{fmt.Sprintf("REPLY %d INGESTOR_CLOSE %s message=%s", id, disposition,
+				text(outcome.Message()))}, nil
 		}
 		return nil, fmt.Errorf("the corpus holds no %s reply", value.BodyType())
 	case session.ServerBodySubscriptionRows:
@@ -454,6 +594,28 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 		}
 		return []string{fmt.Sprintf("EVENT DOMAIN_CLOCK_ENDED domain=%s reason=%s", ended.Domain(),
 			session.EnumNamesDomainClockAttachmentEndReason[*reason])}, nil
+	case session.ServerBodyProducerAdmissionChanged:
+		changed := new(session.ProducerAdmissionChanged)
+		if err := union(message.Body, changed); err != nil {
+			return nil, err
+		}
+		admission := changed.Admission()
+		if admission == nil {
+			return nil, errors.New("an admission change has no admission state")
+		}
+		return []string{fmt.Sprintf("EVENT PRODUCER_ADMISSION producer=%d admission=%s",
+			changed.Producer(), session.EnumNamesProducerAdmission[*admission])}, nil
+	case session.ServerBodyProducerEnded:
+		ended := new(session.ProducerEnded)
+		if err := union(message.Body, ended); err != nil {
+			return nil, err
+		}
+		reason := ended.Reason()
+		if reason == nil {
+			return nil, errors.New("an ended producer has no reason")
+		}
+		return []string{fmt.Sprintf("EVENT PRODUCER_ENDED producer=%d reason=%s message=%s",
+			ended.Producer(), session.EnumNamesProducerEndReason[*reason], text(ended.Message()))}, nil
 	}
 	return nil, fmt.Errorf("the corpus holds no %s message", message.BodyType())
 }
@@ -544,6 +706,30 @@ func clientLines(frame []byte) ([]string, error) {
 		detach := new(session.DetachDomainClockRequest)
 		detach.Init(table.Bytes, table.Pos)
 		return []string{fmt.Sprintf("REQUEST %d DETACH_DOMAIN_CLOCK domain=%s", id, detach.Domain())}, nil
+	case session.ClientRequestOpenIngestorRequest:
+		open := new(session.OpenIngestorRequest)
+		open.Init(table.Bytes, table.Pos)
+		lines := []string{fmt.Sprintf("REQUEST %d OPEN_INGESTOR domain=%s ingestor=%s batches=%d bytes=%d",
+			id, open.Domain(), open.Ingestor(), open.MaxOutstandingBatches(), open.MaxOutstandingBytes())}
+		for index := 0; index < open.ExpectedFieldsLength(); index++ {
+			row := new(session.RowField)
+			open.ExpectedFields(row, index)
+			parsed, err := readField(row)
+			if err != nil {
+				return nil, err
+			}
+			lines = append(lines, parsed.line("FIELD"))
+		}
+		return lines, nil
+	case session.ClientRequestSubmitBatchRequest:
+		submit := new(session.SubmitBatchRequest)
+		submit.Init(table.Bytes, table.Pos)
+		return []string{fmt.Sprintf("REQUEST %d SUBMIT_BATCH producer=%d batch=%s", id, submit.Producer(),
+			hex.EncodeToString(submit.BatchBytes()))}, nil
+	case session.ClientRequestCloseIngestorRequest:
+		closing := new(session.CloseIngestorRequest)
+		closing.Init(table.Bytes, table.Pos)
+		return []string{fmt.Sprintf("REQUEST %d CLOSE_INGESTOR producer=%d", id, closing.Producer())}, nil
 	}
 	return nil, fmt.Errorf("the corpus holds no %s request", message.RequestType())
 }

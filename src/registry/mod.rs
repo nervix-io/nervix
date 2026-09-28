@@ -48,7 +48,8 @@ pub(crate) use entrypoint_plan::{
 pub(crate) use error::RegistryError;
 pub(crate) use graph::{ActiveGraph, EdgeKind};
 pub(crate) use ingestor_plan::{
-    EndpointIngestorStartPlan, HttpIngestorStartPlan, IngestorSpec, IngestorStartPlan,
+    ClientIngestorStartPlan, EndpointIngestorStartPlan, HttpIngestorStartPlan,
+    IngestorInputPlan, IngestorSpec, IngestorStartPlan, TransportInputPlan,
     KafkaDomainOffsetPlacement, KafkaIngestorStartPlan, KafkaOffsetPlan, MqttIngestorStartPlan,
     NatsIngestorStartPlan, PrometheusIngestorStartPlan, PulsarIngestorStartPlan,
     RabbitMqIngestorStartPlan, RedisPubSubIngestorStartPlan, SourceStartPlan, SqsIngestorStartPlan,

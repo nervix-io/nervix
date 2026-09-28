@@ -32,7 +32,7 @@ strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 triomphe = { workspace = true }
 url = { workspace = true }
-uuid = { workspace = true, features = ["serde"] }
+uuid = { workspace = true, features = ["serde", "v7"] }
 
 [dev-dependencies]
 rstest = { workspace = true }

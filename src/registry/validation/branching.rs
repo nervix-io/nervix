@@ -1471,22 +1471,26 @@ mod tests {
                                 }],
                             },
                         ),
-                        decode_using_codec: named("event_codec"),
-                        timestamp_source: None,
-                        source: IngestSource::Kafka {
-                            client: named("broker_in_2"),
-                            topic: named("notifications"),
-                            offset_mode: KafkaOffsetMode::ConsumerGroup(named("cg")),
-                            instances: nonzero!(1u64),
-                            mode: KafkaIngestMode::AckSequential {
-                                timeout: "30s".to_string(),
-                                retry_policy: nervix_models::RetryPolicy {
-                                    backoff: "200ms".to_string(),
-                                    max_backoff: "5s".to_string(),
+                        input: nervix_models::IngestorInput::Transport(
+                            nervix_models::TransportIngestorInput {
+                                source: IngestSource::Kafka {
+                                    client: named("broker_in_2"),
+                                    topic: named("notifications"),
+                                    offset_mode: KafkaOffsetMode::ConsumerGroup(named("cg")),
+                                    instances: nonzero!(1u64),
+                                    mode: KafkaIngestMode::AckSequential {
+                                        timeout: "30s".to_string(),
+                                        retry_policy: nervix_models::RetryPolicy {
+                                            backoff: "200ms".to_string(),
+                                            max_backoff: "5s".to_string(),
+                                        },
+                                    },
+                                    quiesce: nervix_models::IngestQuiesceMode::Suspend,
                                 },
+                                codec: named("event_codec"),
                             },
-                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                        },
+                        ),
+                        timestamp_source: None,
                         general_error_policy: GeneralErrorPolicy::Log,
                         filter_where: None,
                     }),

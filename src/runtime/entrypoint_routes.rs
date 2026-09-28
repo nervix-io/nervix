@@ -214,11 +214,12 @@ impl ExecutionBuildDeps<'_> {
         Ok(BoundRouteBranch::Constructed(program))
     }
 
-    /// Compiles an ingestor's node filter and routes against the codec it decodes with.
+    /// Compiles an ingestor's node filter and routes against its input schema: what its codec
+    /// decodes a transport's payloads into, or the schema a client source's batches carry.
     pub(super) fn bind_ingestor(
         &self,
         ingestor: &IngestorSpec,
-        codec: &CompiledCodec,
+        input_schema: &CompiledSchema,
     ) -> error_stack::Result<BoundIngestorPrograms, EntrypointBindingError> {
         let identifier = ModelName::from(&ingestor.name);
         let target = EntrypointTarget {
@@ -230,8 +231,8 @@ impl ExecutionBuildDeps<'_> {
             identifier: &identifier,
         };
         let input = RuntimeVmSchema {
-            schema: codec.schema().arrow_schema(),
-            sensitivity: codec.schema().vm_sensitivity(),
+            schema: input_schema.arrow_schema(),
+            sensitivity: input_schema.vm_sensitivity(),
         };
         let unbranched = ResolvedBranching::unbranched();
         let filter_where = match ingestor.filter_where.as_ref() {
@@ -581,13 +582,17 @@ mod tests {
                 output_routes: with_inherit_all(ProcessorOutputs::single(named("keyed")))
                     .with_flush_policy(FlushPolicy::Immediate)
                     .with_branch(branched_by("keyed", &["tenant"])),
-                decode_using_codec: named("payload_codec"),
+                input: nervix_models::IngestorInput::Transport(
+                    nervix_models::TransportIngestorInput {
+                        source: IngestSource::ZeroMq {
+                            client: named("zmq"),
+                            mode: ZeroMqIngestMode::NoAckSequential,
+                            quiesce: IngestQuiesceMode::Suspend,
+                        },
+                        codec: named("payload_codec"),
+                    },
+                ),
                 timestamp_source: None,
-                source: IngestSource::ZeroMq {
-                    client: named("zmq"),
-                    mode: ZeroMqIngestMode::NoAckSequential,
-                    quiesce: IngestQuiesceMode::Suspend,
-                },
                 general_error_policy: GeneralErrorPolicy::Log,
                 filter_where: Some(expression("input.value > 1")),
             }),

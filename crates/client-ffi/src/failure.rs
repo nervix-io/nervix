@@ -117,7 +117,9 @@ impl Failure {
                 FailureKind::Uncertain
             }
             ClientError::EventOverflow { .. } => FailureKind::Overflow,
-            ClientError::AttachTransaction(_) | ClientError::RequestRejected { .. } => {
+            ClientError::AttachTransaction(_)
+            | ClientError::RequestRejected { .. }
+            | ClientError::ProducerRefused { .. } => {
                 FailureKind::Rejected
             }
             ClientError::RequestCancelled { .. } => FailureKind::Cancelled,

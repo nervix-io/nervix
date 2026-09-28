@@ -15,10 +15,12 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_jaq::StatefulJaqProgram;
 use nervix_models::{
-    Assignment, AssignmentTarget, CodecBatchContainer, CreateClientHttp, CreateCodec,
+    Assignment, AssignmentTarget, ClientIngestMode, CodecBatchContainer, CreateClientHttp,
+    CreateCodec,
     CreateEmitter, CreateIngestor, CreateSchema, CreateSignalingProtocol, DomainName, EmitSink,
     EndpointName, Expression, FieldName, HttpApplicationHeaders, HttpBodyMode, HttpHeaderName,
-    HttpHeaderValue, HttpMethod, HttpOrigin, IngestSource, IngestTimestampSource, Model,
+    HttpHeaderValue, HttpMethod, HttpOrigin, IngestSource, IngestTimestampSource, IngestorInput,
+    Model,
     ModelIndex, ModelName, OtelAggregationTemporality, OtelMetricKind, OtelSignal,
     OtelValueMapping, ParseAsType, ProcessorOutput, RelayName, RouteConstruction, SchemaField,
     SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName,
@@ -63,11 +65,11 @@ pub(in crate::registry) fn validate_ingestor_source(
             reason,
         })
     };
-    let quiesce = ingestor.source.quiesce();
-    if !ingestor.source.supports_quiesce(quiesce) {
+    let quiesce = ingestor.input.quiesce();
+    if !ingestor.input.supports_quiesce(quiesce) {
         return Err(invalid(format!(
             "{} ingestors do not support ON QUIESCE {}",
-            ingestor.source.transport_label(),
+            ingestor.input.source_label(),
             quiesce.kind_label()
         )));
     }
@@ -94,14 +96,47 @@ pub(in crate::registry) fn validate_ingestor_source(
         }
         nervix_models::IngestQuiesceMode::Suspend | nervix_models::IngestQuiesceMode::Drop => {}
     }
-    if let IngestSource::Mqtt { topic, .. } = &ingestor.source
-        && topic.is_empty()
-    {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "MQTT topic filter must not be empty".to_string(),
-        }));
+    match &ingestor.input {
+        IngestorInput::Transport(input) => {
+            if let IngestSource::Mqtt { topic, .. } = &input.source
+                && topic.is_empty()
+            {
+                return Err(invalid("MQTT topic filter must not be empty".to_string()));
+            }
+        }
+        IngestorInput::Client(source) => validate_client_ingest_mode(&source.mode, invalid)?,
+    }
+    Ok(())
+}
+
+/// A client source's ACK timeout and retry policy are positive durations, and its retry ceiling
+/// is at least its first backoff, so the plan and every producer read one valid policy.
+fn validate_client_ingest_mode(
+    mode: &ClientIngestMode,
+    invalid: impl Fn(String) -> Report<RegistryError>,
+) -> Result<(), Report<RegistryError>> {
+    // A producer is told each policy duration in whole nanoseconds, so each must be one.
+    let positive = |clause: &str, value: &str| {
+        let parsed = humantime::parse_duration(value)
+            .map_err(|error| invalid(format!("invalid {clause} duration '{value}': {error}")))?;
+        if parsed.is_zero() {
+            return Err(invalid(format!("{clause} must be greater than zero")));
+        }
+        if u64::try_from(parsed.as_nanos()).is_err() {
+            return Err(invalid(format!(
+                "{clause} {value} is longer than the longest duration a producer is told"
+            )));
+        }
+        Ok(parsed)
+    };
+    positive("ACK TIMEOUT", &mode.ack_timeout)?;
+    let backoff = positive("RETRY POLICY BACKOFF", &mode.retry_policy.backoff)?;
+    let max_backoff = positive("RETRY POLICY MAX", &mode.retry_policy.max_backoff)?;
+    if max_backoff < backoff {
+        return Err(invalid(format!(
+            "RETRY POLICY MAX {} is shorter than its BACKOFF {}",
+            mode.retry_policy.max_backoff, mode.retry_policy.backoff
+        )));
     }
     Ok(())
 }
@@ -1038,7 +1073,7 @@ pub(in crate::registry) fn validate_ingestor_filter_where_for_internal_schemas(
     input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
     filter_where: Option<&Expression>,
-    source: &IngestSource,
+    input: &IngestorInput,
 ) -> Result<(), Report<RegistryError>> {
     let Some(filter_where) = filter_where else {
         return Ok(());
@@ -1057,13 +1092,13 @@ pub(in crate::registry) fn validate_ingestor_filter_where_for_internal_schemas(
             reason: format!("FILTER WHERE is invalid: {reason}"),
         })
     })?;
-    if program_uses_header_reads(&parsed.inner) && !source.reads_headers() {
+    if program_uses_header_reads(&parsed.inner) && !input.reads_headers() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
                 "{} ingestors do not support read_header or read_headers",
-                source.transport_label()
+                input.source_label()
             ),
         }));
     }
@@ -1107,13 +1142,13 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
             reason: format!("ingestor output route is invalid: {reason}"),
         })
     })?;
-    if program_uses_header_reads(&parsed.inner) && !ingestor.source.reads_headers() {
+    if program_uses_header_reads(&parsed.inner) && !ingestor.input.reads_headers() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
                 "{} ingestors do not support read_header or read_headers",
-                ingestor.source.transport_label()
+                ingestor.input.source_label()
             ),
         }));
     }
@@ -1127,7 +1162,7 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
         readonly_binding_for_internal_schema("input", input_schema),
         writable_binding_for_internal_schema("output", output_schema),
     ];
-    if let Some(metadata_schema) = ingestor_filter_map_metadata_schema(&ingestor.source) {
+    if let Some(metadata_schema) = ingestor_filter_map_metadata_schema(&ingestor.input) {
         bindings.push(CompileBinding::readonly(
             "metadata",
             arrow_schema_for_internal_schema(&metadata_schema),
@@ -1173,8 +1208,13 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
     Ok(output_schema.clone())
 }
 
-fn ingestor_filter_map_metadata_schema(source: &IngestSource) -> Option<CreateSchema> {
-    match source {
+/// The typed metadata scope an ingestor's programs read as `metadata`: Kafka's position and
+/// Syslog's peer address. Every other transport, and every client source, exposes none.
+fn ingestor_filter_map_metadata_schema(input: &IngestorInput) -> Option<CreateSchema> {
+    let IngestorInput::Transport(input) = input else {
+        return None;
+    };
+    match &input.source {
         IngestSource::Kafka { .. } => Some(CreateSchema {
             name: SchemaName::parse("ingestor_metadata")
                 .assured("this is a constant literal that satisfies the identifier grammar"),
@@ -2132,18 +2172,22 @@ mod tests {
                 Model::Ingestor(CreateIngestor {
                     name: IngestorName::parse("mqtt_ing").expect("valid identifier"),
                     output_routes: unbranched_transforming_outputs("notifications"),
-                    decode_using_codec: CodecName::parse("event_codec").expect("valid identifier"),
-                    timestamp_source: None,
-                    source: IngestSource::Mqtt {
-                        client: ClientName::parse("mqtt_main").expect("valid identifier"),
-                        topic: "notifications".to_string(),
-                        instances: nonzero!(2u64),
-                        mode: MqttIngestMode::NoAckSequential {
-                            session: MqttSession::Clean,
-                            qos: MqttQos::AtMostOnce,
+                    input: nervix_models::IngestorInput::Transport(
+                        nervix_models::TransportIngestorInput {
+                            source: IngestSource::Mqtt {
+                                client: ClientName::parse("mqtt_main").expect("valid identifier"),
+                                topic: "notifications".to_string(),
+                                instances: nonzero!(2u64),
+                                mode: MqttIngestMode::NoAckSequential {
+                                    session: MqttSession::Clean,
+                                    qos: MqttQos::AtMostOnce,
+                                },
+                                quiesce: nervix_models::IngestQuiesceMode::Drop,
+                            },
+                            codec: CodecName::parse("event_codec").expect("valid identifier"),
                         },
-                        quiesce: nervix_models::IngestQuiesceMode::Drop,
-                    },
+                    ),
+                    timestamp_source: None,
                     general_error_policy: GeneralErrorPolicy::Log,
                     filter_where: None,
                 }),
@@ -2203,20 +2247,24 @@ mod tests {
                 Model::Ingestor(CreateIngestor {
                     name: IngestorName::parse("ing").expect("valid identifier"),
                     output_routes: unbranched_transforming_outputs("notifications"),
-                    decode_using_codec: CodecName::parse("event_codec").expect("valid identifier"),
+                    input: nervix_models::IngestorInput::Transport(
+                        nervix_models::TransportIngestorInput {
+                            source: IngestSource::Kafka {
+                                client: ClientName::parse("broker").expect("valid identifier"),
+                                topic: TopicName::parse("notifications").expect("valid identifier"),
+                                offset_mode: KafkaOffsetMode::ConsumerGroup(
+                                    ConsumerGroupName::parse("cg").expect("valid consumer group"),
+                                ),
+                                instances: nonzero!(1u64),
+                                mode: KafkaIngestMode::NoAckParallel,
+                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                            },
+                            codec: CodecName::parse("event_codec").expect("valid identifier"),
+                        },
+                    ),
                     timestamp_source: Some(IngestTimestampSource::At(
                         FieldName::parse("occurred_at").expect("valid field name"),
                     )),
-                    source: IngestSource::Kafka {
-                        client: ClientName::parse("broker").expect("valid identifier"),
-                        topic: TopicName::parse("notifications").expect("valid identifier"),
-                        offset_mode: KafkaOffsetMode::ConsumerGroup(
-                            ConsumerGroupName::parse("cg").expect("valid consumer group"),
-                        ),
-                        instances: nonzero!(1u64),
-                        mode: KafkaIngestMode::NoAckParallel,
-                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -2231,6 +2279,104 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(path);
+    }
+
+    /// A client ingestor reading `event_schema` into `notifications` under `mode`.
+    fn client_ingestor(mode: nervix_models::ClientIngestMode) -> Model {
+        Model::Ingestor(CreateIngestor {
+            name: IngestorName::parse("app_in").expect("valid identifier"),
+            output_routes: unbranched_transforming_outputs("notifications"),
+            input: nervix_models::IngestorInput::Client(nervix_models::ClientIngestSource {
+                schema: SchemaName::parse("event_schema").expect("valid identifier"),
+                mode,
+            }),
+            timestamp_source: None,
+            general_error_policy: GeneralErrorPolicy::Log,
+            filter_where: None,
+        })
+    }
+
+    fn client_mode(ack_timeout: &str, backoff: &str, max_backoff: &str) -> nervix_models::ClientIngestMode {
+        nervix_models::ClientIngestMode {
+            window: AckWindow::Parallel {
+                max: nonzero!(4u64),
+            },
+            ack_timeout: ack_timeout.to_string(),
+            retry_policy: RetryPolicy {
+                backoff: backoff.to_string(),
+                max_backoff: max_backoff.to_string(),
+            },
+        }
+    }
+
+    fn apply_client_ingestor(
+        registry: &Registry,
+        with_schema: bool,
+        mode: nervix_models::ClientIngestMode,
+    ) -> Result<(), Report<RegistryError>> {
+        let domain = DomainName::parse("default").expect("valid domain");
+        let mut models = Vec::new();
+        if with_schema {
+            models.push(schema("event_schema"));
+        } else {
+            models.push(schema("other_schema"));
+        }
+        models.push(relay(
+            "notifications",
+            if with_schema { "event_schema" } else { "other_schema" },
+        ));
+        models.push(client_ingestor(mode));
+        registry.apply_batch(&domain, models).map(|_| ())
+    }
+
+    #[test]
+    fn a_client_ingestor_validates_against_its_schema_without_a_codec() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        apply_client_ingestor(&registry, true, client_mode("30s", "100ms", "5s"))
+            .expect("a client ingestor of an existing schema is valid");
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn a_client_ingestor_needs_its_schema() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let error = apply_client_ingestor(&registry, false, client_mode("30s", "100ms", "5s"))
+            .expect_err("a client ingestor of a missing schema is invalid");
+        assert!(
+            format!("{error:#}").contains("event_schema"),
+            "unexpected error: {error:#}"
+        );
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn a_client_ingestor_needs_positive_bounded_durations_and_an_ordered_backoff() {
+        for (mode, expected) in [
+            (
+                client_mode("0s", "100ms", "5s"),
+                "ACK TIMEOUT must be greater than zero",
+            ),
+            (
+                client_mode("30s", "10s", "5s"),
+                "RETRY POLICY MAX 5s is shorter than its BACKOFF 10s",
+            ),
+            (
+                client_mode("1000years", "100ms", "5s"),
+                "longer than the longest duration a producer is told",
+            ),
+        ] {
+            let path = temp_db_path();
+            let registry = Registry::open(&path).expect("registry should open");
+            let error = apply_client_ingestor(&registry, true, mode)
+                .expect_err("an invalid client mode is refused");
+            assert!(
+                format!("{error:#}").contains(expected),
+                "expected {expected:?}, got: {error:#}"
+            );
+            let _ = fs::remove_dir_all(path);
+        }
     }
 
     #[test]
@@ -2325,19 +2471,24 @@ mod tests {
                             interval: "100ms".to_string(),
                             max_batch_size: "1MiB".to_string(),
                         }),
-                        decode_using_codec: CodecName::parse("event_codec")
-                            .expect("valid identifier"),
+                        input: nervix_models::IngestorInput::Transport(
+                            nervix_models::TransportIngestorInput {
+                                source: IngestSource::Kafka {
+                                    client: ClientName::parse("broker").expect("valid identifier"),
+                                    topic: TopicName::parse("notifications")
+                                        .expect("valid identifier"),
+                                    offset_mode: KafkaOffsetMode::ConsumerGroup(
+                                        ConsumerGroupName::parse("cg")
+                                            .expect("valid consumer group"),
+                                    ),
+                                    instances: nonzero!(1u64),
+                                    mode: KafkaIngestMode::NoAckParallel,
+                                    quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                                },
+                                codec: CodecName::parse("event_codec").expect("valid identifier"),
+                            },
+                        ),
                         timestamp_source: None,
-                        source: IngestSource::Kafka {
-                            client: ClientName::parse("broker").expect("valid identifier"),
-                            topic: TopicName::parse("notifications").expect("valid identifier"),
-                            offset_mode: KafkaOffsetMode::ConsumerGroup(
-                                ConsumerGroupName::parse("cg").expect("valid consumer group"),
-                            ),
-                            instances: nonzero!(1u64),
-                            mode: KafkaIngestMode::NoAckParallel,
-                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                        },
                         general_error_policy: GeneralErrorPolicy::Log,
                         filter_where: None,
                     }),
@@ -2403,18 +2554,22 @@ mod tests {
                         interval: "100ms".to_string(),
                         max_batch_size: "1MiB".to_string(),
                     }),
-                    decode_using_codec: CodecName::parse("event_codec").expect("valid identifier"),
+                    input: nervix_models::IngestorInput::Transport(
+                        nervix_models::TransportIngestorInput {
+                            source: IngestSource::Kafka {
+                                client: ClientName::parse("broker").expect("valid identifier"),
+                                topic: TopicName::parse("notifications").expect("valid identifier"),
+                                offset_mode: KafkaOffsetMode::ConsumerGroup(
+                                    ConsumerGroupName::parse("cg").expect("valid consumer group"),
+                                ),
+                                instances: nonzero!(1u64),
+                                mode: KafkaIngestMode::NoAckParallel,
+                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                            },
+                            codec: CodecName::parse("event_codec").expect("valid identifier"),
+                        },
+                    ),
                     timestamp_source: None,
-                    source: IngestSource::Kafka {
-                        client: ClientName::parse("broker").expect("valid identifier"),
-                        topic: TopicName::parse("notifications").expect("valid identifier"),
-                        offset_mode: KafkaOffsetMode::ConsumerGroup(
-                            ConsumerGroupName::parse("cg").expect("valid consumer group"),
-                        ),
-                        instances: nonzero!(1u64),
-                        mode: KafkaIngestMode::NoAckParallel,
-                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,
@@ -2492,18 +2647,22 @@ mod tests {
                         interval: "100ms".to_string(),
                         max_batch_size: "1MiB".to_string(),
                     }),
-                    decode_using_codec: CodecName::parse("event_codec").expect("valid identifier"),
+                    input: nervix_models::IngestorInput::Transport(
+                        nervix_models::TransportIngestorInput {
+                            source: IngestSource::Kafka {
+                                client: ClientName::parse("broker").expect("valid identifier"),
+                                topic: TopicName::parse("notifications").expect("valid identifier"),
+                                offset_mode: KafkaOffsetMode::ConsumerGroup(
+                                    ConsumerGroupName::parse("cg").expect("valid consumer group"),
+                                ),
+                                instances: nonzero!(1u64),
+                                mode: KafkaIngestMode::NoAckParallel,
+                                quiesce: nervix_models::IngestQuiesceMode::Suspend,
+                            },
+                            codec: CodecName::parse("event_codec").expect("valid identifier"),
+                        },
+                    ),
                     timestamp_source: None,
-                    source: IngestSource::Kafka {
-                        client: ClientName::parse("broker").expect("valid identifier"),
-                        topic: TopicName::parse("notifications").expect("valid identifier"),
-                        offset_mode: KafkaOffsetMode::ConsumerGroup(
-                            ConsumerGroupName::parse("cg").expect("valid consumer group"),
-                        ),
-                        instances: nonzero!(1u64),
-                        mode: KafkaIngestMode::NoAckParallel,
-                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                    },
                     general_error_policy: GeneralErrorPolicy::Log,
 
                     filter_where: None,

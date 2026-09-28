@@ -1089,16 +1089,20 @@ mod tests {
                     Model::Ingestor(CreateIngestor {
                         name: IngestorName::parse("http_ing").expect("valid identifier"),
                         output_routes: unbranched_transforming_outputs("notifications"),
-                        decode_using_codec: CodecName::parse("event_codec")
-                            .expect("valid identifier"),
-                        timestamp_source: None,
-                        source: IngestSource::Endpoint {
-                            endpoint: EndpointName::parse("ingest_http").expect("valid identifier"),
-                            mode: nervix_models::EndpointIngestMode::NoAckSequential,
-                            quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
-                                max_size: "1MiB".to_string(),
+                        input: nervix_models::IngestorInput::Transport(
+                            nervix_models::TransportIngestorInput {
+                                source: IngestSource::Endpoint {
+                                    endpoint: EndpointName::parse("ingest_http")
+                                        .expect("valid identifier"),
+                                    mode: nervix_models::EndpointIngestMode::NoAckSequential,
+                                    quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                                        max_size: "1MiB".to_string(),
+                                    },
+                                },
+                                codec: CodecName::parse("event_codec").expect("valid identifier"),
                             },
-                        },
+                        ),
+                        timestamp_source: None,
                         general_error_policy: GeneralErrorPolicy::Log,
 
                         filter_where: None,
@@ -1157,16 +1161,20 @@ mod tests {
                     Model::Ingestor(CreateIngestor {
                         name: IngestorName::parse("ws_ing").expect("valid identifier"),
                         output_routes: unbranched_transforming_outputs("notifications"),
-                        decode_using_codec: CodecName::parse("event_codec")
-                            .expect("valid identifier"),
-                        timestamp_source: None,
-                        source: IngestSource::Endpoint {
-                            endpoint: EndpointName::parse("ingest_ws").expect("valid identifier"),
-                            mode: nervix_models::EndpointIngestMode::NoAckSequential,
-                            quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
-                                max_size: "1MiB".to_string(),
+                        input: nervix_models::IngestorInput::Transport(
+                            nervix_models::TransportIngestorInput {
+                                source: IngestSource::Endpoint {
+                                    endpoint: EndpointName::parse("ingest_ws")
+                                        .expect("valid identifier"),
+                                    mode: nervix_models::EndpointIngestMode::NoAckSequential,
+                                    quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                                        max_size: "1MiB".to_string(),
+                                    },
+                                },
+                                codec: CodecName::parse("event_codec").expect("valid identifier"),
                             },
-                        },
+                        ),
+                        timestamp_source: None,
                         general_error_policy: GeneralErrorPolicy::Log,
 
                         filter_where: None,

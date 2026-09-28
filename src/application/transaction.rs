@@ -679,6 +679,7 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         Statement::LookupQuery(_) => "LOOKUP",
         Statement::ShowCreate(_)
         | Statement::ShowUdfs(_)
+        | Statement::ShowIngestors(_)
         | Statement::ShowPlacements(_)
         | Statement::ShowRelayMaterializedState(_)
         | Statement::ShowClusterStatus(_)

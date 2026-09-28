@@ -20,7 +20,7 @@ use nervix_models::{
     AckMode, Assignment, BranchName, CodecName, CreateIngestor, CreateReingestor, ErrorPolicies,
     Expression, FlushPolicy, GeneralErrorPolicy, IngestorName, MessageErrorOperation,
     MessageErrorPolicy, Model, ModelKind, ModelName, NodeRef, OutputBranch, ProcessorOutput,
-    ReingestorName, RelayName, ResolvedBranching, RouteConstruction, ScheduledNodes,
+    ReingestorName, RelayName, ResolvedBranching, RouteConstruction, ScheduledNodes, SchemaName,
 };
 use nervix_vm::{
     FrontendResult, SemanticScopePolicy, lower_branch_construction, lower_route_construction,
@@ -63,6 +63,19 @@ pub(crate) enum EntrypointPlanError {
         ingestor: IngestorName,
         codec: CodecName,
     },
+    #[error("ingestor '{ingestor}' reads client batches of missing schema '{schema}'")]
+    MissingClientSchema {
+        ingestor: IngestorName,
+        schema: SchemaName,
+    },
+    #[error("ingestor '{ingestor}' declares {clause} '{value}', which is not a positive duration")]
+    InvalidClientDuration {
+        ingestor: IngestorName,
+        clause: &'static str,
+        value: String,
+    },
+    #[error("ingestor '{ingestor}' has an endpoint contract canonical NSPL cannot render")]
+    UnrenderableClientContract { ingestor: IngestorName },
     #[error("{kind:?} '{node}' declares no input relay")]
     MissingInput { kind: ModelKind, node: ModelName },
     #[error("{kind:?} '{node}' declares no output route")]
@@ -487,8 +500,8 @@ impl EntrypointPlans {
                             node: node.identifier.clone(),
                         }));
                     }
-                    let source_kind = ingestor.source.source_kind();
-                    let source_ref = ingestor.source.source_ref();
+                    let source_kind = ingestor.input.source_model_kind();
+                    let source_ref = ingestor.input.source_ref();
                     let Some(source) = nodes.get(&NodeRef::new(source_kind, source_ref.clone()))
                     else {
                         return Err(Report::new(EntrypointPlanError::MissingSource {

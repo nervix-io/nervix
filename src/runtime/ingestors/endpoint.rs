@@ -262,15 +262,19 @@ mod tests {
                             output_routes: with_inherit_all(ProcessorOutputs::single(relay))
                                 .with_flush_policy(FlushPolicy::Immediate)
                                 .with_branch(OutputBranch::Unbranched),
-                            decode_using_codec: codec,
-                            timestamp_source: None,
-                            source: IngestSource::Endpoint {
-                                endpoint,
-                                mode: EndpointIngestMode::NoAckSequential,
-                                quiesce: IngestQuiesceMode::EndpointBuffer {
-                                    max_size: "1MiB".to_string(),
+                            input: nervix_models::IngestorInput::Transport(
+                                nervix_models::TransportIngestorInput {
+                                    source: IngestSource::Endpoint {
+                                        endpoint,
+                                        mode: EndpointIngestMode::NoAckSequential,
+                                        quiesce: IngestQuiesceMode::EndpointBuffer {
+                                            max_size: "1MiB".to_string(),
+                                        },
+                                    },
+                                    codec: codec,
                                 },
-                            },
+                            ),
+                            timestamp_source: None,
                             general_error_policy: GeneralErrorPolicy::Log,
                             filter_where: None,
                         })),

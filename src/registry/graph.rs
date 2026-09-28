@@ -19,7 +19,8 @@ use nervix_dataflow_graph::{
 };
 use nervix_models::{
     ConcreteBranchCoverage, CreateSchema, DomainName, DomainSchedule, ImpactEdgeKind,
-    ImpactNodeCoverage, IngestSource, Model, ModelIndex, ModelKind, ModelName, NodeRef,
+    ImpactNodeCoverage, IngestSource, IngestorInput, Model, ModelIndex, ModelKind, ModelName,
+    NodeRef,
     ParseAsType, PlacementPolicy, RelayName, ResolvedBranching, ScheduledNode, SchemaField,
     SchemaFingerprint,
 };
@@ -582,15 +583,25 @@ impl ActiveNode {
         let Model::Ingestor(ingestor) = self.config.as_ref() else {
             return None;
         };
-        let source = ingestor.source.source_ref();
-        let source_kind = ingestor.source.source_kind().as_str();
-        Some(DataflowNode::new(
-            format!("{}_source:{}", source_kind, source.as_str()),
-            source.as_str(),
-            DataflowNodeRole::Client {
-                transport: ingestor.source.transport_label().to_string(),
-            },
-        ))
+        let transport = ingestor.input.source_label().to_string();
+        match &ingestor.input {
+            IngestorInput::Transport(input) => {
+                let source = input.source.source_ref();
+                let source_kind = input.source.source_kind().as_str();
+                Some(DataflowNode::new(
+                    format!("{}_source:{}", source_kind, source.as_str()),
+                    source.as_str(),
+                    DataflowNodeRole::Client { transport },
+                ))
+            }
+            // Application producers have no configured identity of their own; they submit
+            // through the ingestor, so the node is named by it.
+            IngestorInput::Client(_) => Some(DataflowNode::new(
+                format!("CLIENT_source:{}", ingestor.name.as_str()),
+                "applications",
+                DataflowNodeRole::Client { transport },
+            )),
+        }
     }
 
     /// The external system an ingestor reads from. The ingest and emit sides of one named client
@@ -854,10 +865,12 @@ fn ingestor_subtype(model: &Model) -> &str {
     let Model::Ingestor(ingestor) = model else {
         return "INGESTOR";
     };
-    if let IngestSource::Endpoint { .. } = ingestor.source {
+    if let IngestorInput::Transport(input) = &ingestor.input
+        && let IngestSource::Endpoint { .. } = input.source
+    {
         return "INGESTOR";
     }
-    ingestor.source.transport_label()
+    ingestor.input.source_label()
 }
 
 fn emitter_subtype(model: &Model) -> &str {

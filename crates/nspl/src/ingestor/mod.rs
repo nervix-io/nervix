@@ -10,26 +10,37 @@ use std::num::NonZeroU64;
 use chumsky::prelude::*;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AlterIngestor, AlterIngestorOperation, CreateIngestor, CreateStatement, EndpointIngestMode,
-    GeneralErrorPolicy, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
-    IngestTimestampSource, KafkaIngestMode, KafkaOffsetMode, MqttIngestMode, MqttQos, MqttSession,
-    NatsIngestMode, PulsarIngestMode, RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy,
-    SqsIngestMode, WebsocketsIngestMode, ZeroMqIngestMode,
+    AlterIngestor, AlterIngestorOperation, ClientIngestMode, ClientIngestSource, CreateIngestor,
+    CreateStatement, EndpointIngestMode, GeneralErrorPolicy, IngestQuiesceMode,
+    IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorInput, KafkaIngestMode,
+    KafkaOffsetMode, MqttIngestMode, MqttQos, MqttSession, NatsIngestMode, PulsarIngestMode,
+    RabbitMqIngestMode, RedisPubSubIngestMode, RetryPolicy, ShowIngestors, SqsIngestMode,
+    TransportIngestorInput, WebsocketsIngestMode, ZeroMqIngestMode,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, ack_timeout, alter_ingestor_route_body,
-        alter_op_separator, boxed_choice, byte_size_lit, channel_ref, client_ref, codec_ref,
+        LexedInput, ParseError, ParseFromSourceError, ack_timeout, ack_window,
+        alter_ingestor_route_body, alter_op_separator, boxed_choice, byte_size_lit, channel_ref,
+        client_ref, codec_ref,
         consumer_group_ref, domain_clock_period_lit, duration_lit, endpoint_ref, field_ref,
         filter_where_clause, flushed_ingestor_outputs, general_error_policy, if_not_exists_clause,
         ingestor_name, into_parse_error, kw, kw_phrase2, lex_input, mqtt_topic_filter,
         nats_queue_group_ref, nonzero_u64_value, parallel_ack_window, queue_ref, relay_ref,
-        retry_policy, sequential_ack_window, string_lit, subject_ref, subscription_ref,
-        suggest_from, tok, topic_ref, where_expression,
+        retry_policy, schema_ref, sequential_ack_window, string_lit, subject_ref,
+        subscription_ref, suggest_from, tok, topic_ref, where_expression,
     },
 };
+
+/// `SHOW INGESTORS`: the ingestors of the selected domain.
+pub fn show_ingestors_parser<'src>()
+-> impl Parser<'src, &'src [Token], ShowIngestors, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Show)
+        .ignore_then(kw(Identifier::Ingestors))
+        .to(ShowIngestors)
+        .then_ignore(tok(Token::Semicolon).or_not())
+}
 
 /// The count after `INSTANCES`.
 fn instance_count<'src>()
@@ -717,12 +728,59 @@ fn ingest_source_parser<'src>()
     )
 }
 
+/// The acknowledging mode of a client source: its window, its ACK timeout and the retry policy a
+/// producer applies to a batch refused before admission.
+fn client_mode_parser<'src>()
+-> impl Parser<'src, &'src [Token], ClientIngestMode, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Ack)
+        .ignore_then(ack_window())
+        .then(ack_timeout())
+        .then(retry_policy())
+        .map(|((window, ack_timeout), retry_policy)| ClientIngestMode {
+            window,
+            ack_timeout,
+            retry_policy,
+        })
+}
+
+/// `CLIENT SCHEMA <schema> MODE ... ON QUIESCE SUSPEND`: typed batches application clients
+/// submit through their sessions. Suspension is the only quiesce mode it honors, and it decodes
+/// nothing, so no `DECODE USING` follows.
+fn client_ingest_source_parser<'src>()
+-> impl Parser<'src, &'src [Token], ClientIngestSource, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Client)
+        .ignore_then(kw(Identifier::Schema))
+        .ignore_then(schema_ref())
+        .then_ignore(kw(Identifier::Mode))
+        .then(client_mode_parser())
+        .then_ignore(suspend_only_quiesce_clause())
+        .map(|(schema, mode)| ClientIngestSource { schema, mode })
+}
+
+/// What follows `FROM`: a transport and the codec that decodes its payloads, or a client source.
+fn ingestor_input_parser<'src>()
+-> impl Parser<'src, &'src [Token], IngestorInput, extra::Err<ParseError<'src>>> + Clone {
+    choice((
+        ingest_source_parser()
+            .then_ignore(kw_phrase2(Identifier::Decode, Identifier::Using))
+            .then(codec_ref())
+            .map(|(source, codec)| {
+                IngestorInput::Transport(TransportIngestorInput { source, codec })
+            }),
+        client_ingest_source_parser().map(IngestorInput::Client),
+    ))
+    .boxed()
+}
+
 pub fn alter_ingestor_parser<'src>()
 -> impl Parser<'src, &'src [Token], AlterIngestor, extra::Err<ParseError<'src>>> + Clone {
     let set_source = kw(Identifier::Set)
         .ignore_then(kw(Identifier::From))
-        .ignore_then(ingest_source_parser())
-        .map(|source| AlterIngestorOperation::SetSource { source });
+        .ignore_then(choice((
+            ingest_source_parser().map(|source| AlterIngestorOperation::SetSource { source }),
+            client_ingest_source_parser()
+                .map(|source| AlterIngestorOperation::SetClientSource { source }),
+        )));
     let set_quiesce = kw(Identifier::Set)
         .ignore_then(kw(Identifier::Quiesce))
         .ignore_then(alter_quiesce_body())
@@ -807,10 +865,8 @@ pub fn create_ingestor_parser<'src>()
         .then_ignore(kw(Identifier::Ingestor))
         .then(ingestor_name())
         .then_ignore(kw(Identifier::From))
-        .then(ingest_source_parser())
+        .then(ingestor_input_parser())
         .boxed()
-        .then_ignore(kw_phrase2(Identifier::Decode, Identifier::Using))
-        .then(codec_ref())
         .then(timestamp_source().or_not())
         .then(filter_where_clause().or_not())
         .boxed()
@@ -820,10 +876,7 @@ pub fn create_ingestor_parser<'src>()
         .map(
             |(
                 (
-                    (
-                        ((((if_not_exists, name), source), decode_using_codec), timestamp_source),
-                        filter_where,
-                    ),
+                    ((((if_not_exists, name), input), timestamp_source), filter_where),
                     output_routes,
                 ),
                 general_error_policy,
@@ -832,9 +885,8 @@ pub fn create_ingestor_parser<'src>()
                     CreateIngestor {
                         name,
                         output_routes,
-                        decode_using_codec,
+                        input,
                         timestamp_source,
-                        source,
                         general_error_policy,
                         filter_where,
                     },
@@ -903,11 +955,19 @@ pub fn suggest_alter_ingestor(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::FlushPolicy;
+    use nervix_models::{FlushPolicy, SchemaName};
     use nonzero_ext::nonzero;
 
     use super::*;
     use crate::lexer::lex;
+
+    /// The transport a parsed ingestor reads, which every transport fixture below declares.
+    fn transport(parsed: &CreateIngestor) -> &TransportIngestorInput {
+        let IngestorInput::Transport(input) = &parsed.input else {
+            panic!("the fixture ingestor reads a transport");
+        };
+        input
+    }
 
     fn to_tokens(input: &str) -> Vec<Token> {
         lex(input)
@@ -1169,7 +1229,7 @@ mod tests {
             vec!["notifications"]
         );
         assert_eq!(
-            parsed.decode_using_codec.as_str(),
+            transport(&parsed).codec.as_str(),
             "notification_kafka_message"
         );
         assert_eq!(
@@ -1182,7 +1242,7 @@ mod tests {
         );
         assert_eq!(parsed.timestamp_source, None);
         assert_eq!(
-            parsed.source,
+            transport(&parsed).source,
             IngestSource::Kafka {
                 client: nervix_models::ClientName::try_from("kafka_main")
                     .expect("valid client identifier"),
@@ -1315,7 +1375,7 @@ mod tests {
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
         let IngestSource::Kafka {
             instances, mode, ..
-        } = &parsed.source
+        } = &transport(&parsed).source
         else {
             panic!("expected kafka ingestor source");
         };
@@ -1345,7 +1405,7 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::Kafka { mode, .. } = &parsed.source else {
+        let IngestSource::Kafka { mode, .. } = &transport(&parsed).source else {
             panic!("expected kafka ingestor source");
         };
         assert!(matches!(mode, KafkaIngestMode::NoAckParallel));
@@ -1391,7 +1451,7 @@ mod tests {
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.source,
+            transport(&parsed).source,
             IngestSource::Pulsar {
                 client: nervix_models::ClientName::try_from("pulsar_main")
                     .expect("valid client identifier"),
@@ -1454,7 +1514,7 @@ mod tests {
             vec!["notifications"]
         );
         assert_eq!(
-            parsed.source,
+            transport(&parsed).source,
             IngestSource::RabbitMq {
                 client: nervix_models::ClientName::try_from("rabbit_main")
                     .expect("valid client identifier"),
@@ -1489,7 +1549,7 @@ mod tests {
 
         assert_eq!(parsed.name.as_str(), "redis_notifications");
         assert_eq!(
-            parsed.source,
+            transport(&parsed).source,
             IngestSource::RedisPubSub {
                 client: nervix_models::ClientName::try_from("redis_main")
                     .expect("valid client identifier"),
@@ -1767,7 +1827,7 @@ mod tests {
 
         assert_eq!(parsed.name.as_str(), "mqtt_notifications");
         assert_eq!(
-            parsed.source,
+            transport(&parsed).source,
             IngestSource::Mqtt {
                 client: nervix_models::ClientName::try_from("mqtt_main")
                     .expect("valid client identifier"),
@@ -1801,7 +1861,7 @@ mod tests {
             instances,
             mode: MqttIngestMode::NoAckParallel { session, qos, .. },
             ..
-        } = &parsed.source
+        } = &transport(&parsed).source
         else {
             panic!("expected parallel NO_ACK MQTT source");
         };
@@ -1830,7 +1890,7 @@ mod tests {
         let parsed = parse_create_ingestor_tokens(&to_tokens(input)).expect("parse should succeed");
 
         assert_eq!(
-            parsed.source,
+            transport(&parsed).source,
             IngestSource::Mqtt {
                 client: nervix_models::ClientName::try_from("mqtt_main")
                     .expect("valid client identifier"),
@@ -1880,7 +1940,7 @@ mod tests {
         "#;
 
         let parsed = parse_create_ingestor_tokens(&to_tokens(input)).expect("parse should succeed");
-        let IngestSource::Mqtt { mode, .. } = &parsed.source else {
+        let IngestSource::Mqtt { mode, .. } = &transport(&parsed).source else {
             panic!("expected mqtt ingestor source");
         };
 
@@ -1955,7 +2015,7 @@ mod tests {
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.source,
+            transport(&parsed).source,
             IngestSource::Nats {
                 client: nervix_models::ClientName::try_from("nats_main")
                     .expect("valid client identifier"),
@@ -2049,7 +2109,7 @@ mod tests {
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.source,
+            transport(&parsed).source,
             IngestSource::Prometheus {
                 client: nervix_models::ClientName::try_from("prom_main")
                     .expect("valid client identifier"),
@@ -2077,7 +2137,7 @@ mod tests {
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.source,
+            transport(&parsed).source,
             IngestSource::Http {
                 client: nervix_models::ClientName::try_from("http_main")
                     .expect("valid client identifier"),
@@ -2143,7 +2203,7 @@ mod tests {
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.source,
+            transport(&parsed).source,
             IngestSource::Endpoint {
                 endpoint: nervix_models::EndpointName::try_from("ws_notifications_endpoint")
                     .expect("valid endpoint identifier"),
@@ -2170,7 +2230,7 @@ mod tests {
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.source,
+            transport(&parsed).source,
             IngestSource::Websockets {
                 client: nervix_models::ClientName::try_from("ws_main")
                     .expect("valid client identifier"),
@@ -2195,7 +2255,7 @@ mod tests {
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.source,
+            transport(&parsed).source,
             IngestSource::ZeroMq {
                 client: nervix_models::ClientName::try_from("zmq_main")
                     .expect("valid client identifier"),
@@ -2219,7 +2279,7 @@ mod tests {
 
         let parsed = parse_create_ingestor(input).expect("parse should succeed");
         assert_eq!(
-            parsed.source,
+            transport(&parsed).source,
             IngestSource::Syslog {
                 client: nervix_models::ClientName::try_from("syslog_listener")
                     .expect("valid client identifier"),
@@ -2275,7 +2335,7 @@ mod tests {
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
 
         assert_eq!(
-            parsed.source,
+            transport(&parsed).source,
             IngestSource::Sqs {
                 client: nervix_models::ClientName::try_from("sqs_main")
                     .expect("valid client identifier"),
@@ -2307,7 +2367,7 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::Kafka { instances, .. } = parsed.source else {
+        let IngestSource::Kafka { instances, .. } = transport(&parsed).source.clone() else {
             panic!("expected kafka ingestor source");
         };
         assert_eq!(instances, nonzero!(3u64));
@@ -2326,7 +2386,7 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::RabbitMq { instances, .. } = parsed.source else {
+        let IngestSource::RabbitMq { instances, .. } = transport(&parsed).source.clone() else {
             panic!("expected rabbitmq ingestor source");
         };
         assert_eq!(instances, nonzero!(2u64));
@@ -2345,7 +2405,7 @@ mod tests {
 
         let tokens = to_tokens(input);
         let parsed = parse_create_ingestor_tokens(&tokens).expect("parse should succeed");
-        let IngestSource::Sqs { instances, .. } = parsed.source else {
+        let IngestSource::Sqs { instances, .. } = transport(&parsed).source.clone() else {
             panic!("expected sqs ingestor source");
         };
         assert_eq!(instances, nonzero!(4u64));
@@ -2442,5 +2502,162 @@ mod tests {
             }
             other => panic!("expected parse error, got {other:?}"),
         }
+    }
+
+    const CLIENT_SOURCE: &str = "CLIENT SCHEMA event MODE ACK PARALLEL MAX 64 ACK TIMEOUT 30s \
+                                 RETRY POLICY BACKOFF 100ms MAX 5s ON QUIESCE SUSPEND";
+
+    fn client_ingestor(source: &str) -> String {
+        format!(
+            "CREATE INGESTOR submit_events FROM {source} TIMESTAMP NOW TO events INHERIT ALL \
+             UNBRANCHED FLUSH EACH 10ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR \
+             LOG;"
+        )
+    }
+
+    #[test]
+    fn parses_a_client_source_without_a_codec() {
+        let parsed = parse_create_ingestor(&client_ingestor(CLIENT_SOURCE))
+            .expect("a client source should parse");
+        assert_eq!(
+            parsed.input,
+            IngestorInput::Client(ClientIngestSource {
+                schema: SchemaName::parse("event").expect("valid schema name"),
+                mode: ClientIngestMode {
+                    window: nervix_models::AckWindow::Parallel {
+                        max: nonzero!(64u64),
+                    },
+                    ack_timeout: "30s".to_string(),
+                    retry_policy: RetryPolicy {
+                        backoff: "100ms".to_string(),
+                        max_backoff: "5s".to_string(),
+                    },
+                },
+            })
+        );
+        assert_eq!(parsed.timestamp_source, Some(IngestTimestampSource::Now));
+        assert_eq!(parsed.input.codec(), None);
+
+        let sequential = parse_create_ingestor(&client_ingestor(
+            "client schema event mode ack sequential ack timeout 5s retry policy backoff 1s max \
+             2s on quiesce suspend",
+        ))
+        .expect("keywords are case-insensitive and ACK SEQUENTIAL is a client window");
+        let IngestorInput::Client(source) = &sequential.input else {
+            panic!("the statement declares a client source");
+        };
+        assert_eq!(source.mode.window, nervix_models::AckWindow::Sequential);
+    }
+
+    #[test]
+    fn rejects_client_sources_outside_their_contract() {
+        let invalid_sources = [
+            // A client source decodes nothing, so it names no codec.
+            "CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s \
+             ON QUIESCE SUSPEND DECODE USING event_codec",
+            // Suspension is the only quiesce mode a client source honors.
+            "CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s \
+             ON QUIESCE BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST",
+            "CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s \
+             ON QUIESCE DROP",
+            // The mode acknowledges and states both its timeout and its whole retry policy.
+            "CLIENT SCHEMA event MODE NO_ACK SEQUENTIAL ON QUIESCE SUSPEND",
+            "CLIENT SCHEMA event MODE ACK SEQUENTIAL RETRY POLICY BACKOFF 1s MAX 2s ON QUIESCE \
+             SUSPEND",
+            "CLIENT SCHEMA event MODE ACK PARALLEL MAX 4 ACK TIMEOUT 5s ON QUIESCE SUSPEND",
+            "CLIENT SCHEMA event MODE ACK PARALLEL MAX 0 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s \
+             MAX 2s ON QUIESCE SUSPEND",
+            "CLIENT SCHEMA event MODE ACK PARALLEL MAX 4 BATCH TIMEOUT 1s ACK TIMEOUT 5s RETRY \
+             POLICY BACKOFF 1s MAX 2s ON QUIESCE SUSPEND",
+            // One scheduled execution serves every producer, and the quiesce clause is required.
+            "CLIENT SCHEMA event INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY \
+             BACKOFF 1s MAX 2s ON QUIESCE SUSPEND",
+            "CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s",
+            "CLIENT event MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s ON \
+             QUIESCE SUSPEND",
+        ];
+        for source in invalid_sources {
+            assert!(
+                parse_create_ingestor(&client_ingestor(source)).is_err(),
+                "source `{source}` should be rejected"
+            );
+        }
+        // A transport still requires its codec.
+        assert!(
+            parse_create_ingestor(
+                "CREATE INGESTOR i FROM KAFKA c TOPIC t OFFSET BY DOMAIN MODE NO_ACK PARALLEL ON \
+                 QUIESCE SUSPEND TO s UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
+                 ERROR LOG;"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_set_from_client_as_its_own_alteration() {
+        let parsed = parse_alter_ingestor(&format!(
+            "ALTER INGESTOR submit_events SET FROM {CLIENT_SOURCE}, SET QUIESCE SUSPEND;"
+        ))
+        .expect("SET FROM CLIENT should parse");
+        let [
+            AlterIngestorOperation::SetClientSource { source },
+            AlterIngestorOperation::SetQuiesce { quiesce },
+        ] = parsed.operations.as_slice()
+        else {
+            panic!("expected a client source and a quiesce operation");
+        };
+        assert_eq!(source.schema.as_str(), "event");
+        assert_eq!(quiesce, &IngestQuiesceMode::Suspend);
+    }
+
+    #[test]
+    fn client_source_completion_follows_its_own_grammar() {
+        let after_from = "CREATE INGESTOR i FROM ";
+        assert!(
+            suggest_create_ingestor(after_from, after_from.len()).contains(&"CLIENT".to_string())
+        );
+
+        let after_client = "CREATE INGESTOR i FROM CLIENT ";
+        assert_eq!(
+            suggest_create_ingestor(after_client, after_client.len()),
+            ["SCHEMA".to_string()]
+        );
+
+        let after_mode = "CREATE INGESTOR i FROM CLIENT SCHEMA event MODE ";
+        assert_eq!(
+            suggest_create_ingestor(after_mode, after_mode.len()),
+            ["ACK".to_string()]
+        );
+
+        let after_ack = "CREATE INGESTOR i FROM CLIENT SCHEMA event MODE ACK ";
+        let window = suggest_create_ingestor(after_ack, after_ack.len());
+        assert!(window.contains(&"SEQUENTIAL".to_string()));
+        assert!(window.contains(&"PARALLEL".to_string()));
+
+        let after_window = "CREATE INGESTOR i FROM CLIENT SCHEMA event MODE ACK PARALLEL MAX 4 ";
+        assert_eq!(
+            suggest_create_ingestor(after_window, after_window.len()),
+            ["ACK TIMEOUT".to_string()]
+        );
+
+        let quiesce = "CREATE INGESTOR i FROM CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT \
+                       5s RETRY POLICY BACKOFF 1s MAX 2s ON QUIESCE ";
+        assert_eq!(
+            suggest_create_ingestor(quiesce, quiesce.len()),
+            ["SUSPEND".to_string()]
+        );
+
+        let after_source = "CREATE INGESTOR i FROM CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK \
+                            TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s ON QUIESCE SUSPEND ";
+        let next = suggest_create_ingestor(after_source, after_source.len());
+        assert!(next.contains(&"TIMESTAMP".to_string()));
+        assert!(next.contains(&"TO".to_string()));
+        assert!(!next.contains(&"DECODE USING".to_string()));
+
+        let alter = "ALTER INGESTOR i SET FROM CLIENT ";
+        assert_eq!(
+            suggest_alter_ingestor(alter, alter.len()),
+            ["SCHEMA".to_string()]
+        );
     }
 }

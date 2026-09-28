@@ -7,6 +7,7 @@ mod events;
 mod fixtures;
 mod frames;
 mod impact;
+mod producers;
 mod replies;
 mod requests;
 mod resources;

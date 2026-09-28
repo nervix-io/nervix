@@ -22,6 +22,10 @@ use crate::{
     event::{LeadershipObserved, ServerNotice, SessionEnding},
     frame::{EncodedFrame, ServerFrame, VerifiedFrame},
     limits::SessionLimits,
+    producer::{
+        CloseIngestorOutcome, OpenIngestorOutcome, ProducerAdmissionChanged, ProducerEnded,
+        SubmissionOutcome,
+    },
     reply::{
         CancelOutcome, InspectionOutcome, RequestCancelled, RequestRejected, SubscribeOutcome,
         SuggestOutcome, UnsubscribeOutcome,
@@ -50,6 +54,9 @@ pub enum ReplyBody {
     Rejected(RequestRejected),
     DomainClockAttach(DomainClockAttachOutcome),
     DomainClockDetach(DomainClockDetachOutcome),
+    OpenIngestor(OpenIngestorOutcome),
+    Submission(SubmissionOutcome),
+    CloseIngestor(CloseIngestorOutcome),
 }
 
 /// A complete reply to one request.
@@ -88,6 +95,9 @@ impl Reply {
             ReplyBody::Rejected(rejected) => rejected.encode_body(&mut encoder)?,
             ReplyBody::DomainClockAttach(outcome) => outcome.encode_body(&mut encoder)?,
             ReplyBody::DomainClockDetach(outcome) => outcome.encode_body(&mut encoder)?,
+            ReplyBody::OpenIngestor(outcome) => outcome.encode_body(&mut encoder)?,
+            ReplyBody::Submission(outcome) => outcome.encode_body(&mut encoder)?,
+            ReplyBody::CloseIngestor(outcome) => outcome.encode_body(&mut encoder)?,
         };
         let reply = wire::Reply::create(
             encoder.fbb(),
@@ -178,6 +188,22 @@ impl Reply {
                     reply_member(reply.body_as_domain_clock_detach_outcome()),
                 )?)
             }
+            wire::ReplyBody::OpenIngestorOutcome => {
+                ReplyBody::OpenIngestor(OpenIngestorOutcome::decode(
+                    decoder,
+                    reply_member(reply.body_as_open_ingestor_outcome()),
+                )?)
+            }
+            wire::ReplyBody::SubmissionOutcome => ReplyBody::Submission(SubmissionOutcome::decode(
+                decoder,
+                reply_member(reply.body_as_submission_outcome()),
+            )?),
+            wire::ReplyBody::CloseIngestorOutcome => {
+                ReplyBody::CloseIngestor(CloseIngestorOutcome::decode(
+                    decoder,
+                    reply_member(reply.body_as_close_ingestor_outcome()),
+                )?)
+            }
             undeclared => return Err(decoder.unknown_union("Reply.body", undeclared.0)),
         };
         Ok(Self { request_id, body })
@@ -204,6 +230,8 @@ pub enum ServerEvent {
     SessionEnding(SessionEnding),
     DomainClockObserved(DomainClockObserved),
     DomainClockAttachmentEnded(DomainClockAttachmentEnded),
+    ProducerAdmissionChanged(ProducerAdmissionChanged),
+    ProducerEnded(ProducerEnded),
 }
 
 /// Everything a server frame can hold.
@@ -295,6 +323,16 @@ impl ServerMessage {
                     server_member(message.body_as_domain_clock_attachment_ended()),
                 )?)
             }
+            wire::ServerBody::ProducerAdmissionChanged => {
+                ServerEvent::ProducerAdmissionChanged(ProducerAdmissionChanged::decode(
+                    decoder,
+                    server_member(message.body_as_producer_admission_changed()),
+                )?)
+            }
+            wire::ServerBody::ProducerEnded => ServerEvent::ProducerEnded(ProducerEnded::decode(
+                decoder,
+                server_member(message.body_as_producer_ended()),
+            )?),
             undeclared => {
                 return Err(decoder.unknown_union("ServerMessage.body", undeclared.0));
             }

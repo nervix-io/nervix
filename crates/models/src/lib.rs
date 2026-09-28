@@ -18,6 +18,7 @@
 #[cfg(feature = "arrow")]
 mod arrow_types;
 mod canonical;
+mod client_producer;
 mod cluster_node;
 mod command;
 mod completion;
@@ -25,6 +26,7 @@ mod domain_clock;
 mod emitter_batch;
 mod expression;
 mod http_request;
+mod ingestor_input;
 mod json_path;
 mod message_error;
 mod model_index;
@@ -49,6 +51,14 @@ pub use canonical::{
     CanonicalNsplError, alter_avro_wire_schema_to_canonical_nspl,
     alter_cbor_wire_schema_to_canonical_nspl, alter_json_wire_schema_to_canonical_nspl,
     expression_to_nspl, ingest_quiesce_to_nspl,
+};
+pub use client_producer::{
+    CLIENT_PRODUCER_NODE_BYTES, CLIENT_PRODUCER_SESSION_BYTES, ClientAttachmentId,
+    ClientBatchDefect, ClientEndpointContract, ClientOutcomeUncertainty, ClientProcessingFailure,
+    ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
+    ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy, ClientProducerRefusal,
+    ClientSubmissionOutcome, ClientSubmissionRefusal, MAX_CLIENT_BATCH_ROWS,
+    MAX_CLIENT_PRODUCER_BATCHES, MAX_CLIENT_PRODUCERS_PER_SESSION,
 };
 pub use cluster_node::{ClusterNodeIdentity, ClusterNodeIncarnation, CoordinationIdentity};
 pub use command::{
@@ -75,6 +85,9 @@ pub use expression::{
 pub use http_request::{
     HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin,
     HttpRequestFieldError, HttpTarget,
+};
+pub use ingestor_input::{
+    ClientIngestMode, ClientIngestSource, IngestorInput, IngestorInputKind, TransportIngestorInput,
 };
 pub use json_path::{JsonPath, JsonPathError, JsonPathStep};
 pub use message_error::{
@@ -189,7 +202,7 @@ pub use statement::{
     RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
     RelocationPreferenceStrategy, RelocationSelection, ResolvedBranching, ResolvedCodecWireFormat,
     RetryPolicy, S3ConfigEntry, ScheduledModel, ScheduledNode, ScheduledNodes, SentryConfigEntry,
-    ShowClusterStatus, ShowCreate, ShowPlacements, ShowRelayMaterializedState, ShowTransactions,
+    ShowClusterStatus, ShowCreate, ShowIngestors, ShowPlacements, ShowRelayMaterializedState, ShowTransactions,
     ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
     SignalingWaitStep, SignalingWireFormat, SinkCapabilities, SqsConfigEntry, SqsFifoGroup,
     SqsIngestMode, StartDomain, Statement, StopDomain, SubscriptionBinding,

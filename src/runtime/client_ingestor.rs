@@ -1,0 +1,1633 @@
+//! Client ingestors on the node that executes them.
+//!
+//! Layer: data plane.
+//!
+//! - **Owns.** The producers attached to each client ingestor this node executes, the batches they
+//!   queued, their fair admission into the ingestor's one acknowledgement window, the ACK root of
+//!   every admitted batch and its terminal outcome, the admission state producers are told, the
+//!   end of their attachments, and the node's byte budget for producer payloads.
+//! - **Depends on.** Typed client source plans, the ingestor's bound routes and quiesce control,
+//!   the ingest group executor, ACK roots, and Arrow body decoding.
+//! - **Must not know.** Sessions, the session or interconnect wire, NSPL, or how a producer
+//!   reached this node.
+//!
+//! Each client ingestor this node executes has one endpoint task. It owns every attachment, the
+//! batches each queued, the round-robin order among them, and how many admitted batches still
+//! await their acknowledgement. Nothing else mutates that state, so nothing locks it: producers,
+//! the admission worker, acknowledgement watchers and lifecycle changes all reach it through its
+//! command channel, in the order they sent their commands.
+//!
+//! The endpoint task outlives one execution of its ingestor. An alteration that restarts the
+//! ingestor without changing its endpoint contract finds the same producers attached once the new
+//! execution is installed; one that changes the contract, a new domain generation, and the end of
+//! the ingestor on this node all end the attachments with the reason that applies.
+//!
+//! One execution admits one batch at a time through its admission worker, which validates the
+//! batch, gives it one tracked ACK root, and dispatches it through the ingestor's filter and
+//! routes. The window bounds how many admitted batches may await their acknowledgement across
+//! every producer, so attaching another producer never widens it.
+
+use bytes::Bytes;
+use indexmap::IndexMap;
+use nervix_connector::physical_time::actual_utc_now;
+use nervix_models::{
+    CLIENT_PRODUCER_NODE_BYTES, ClientAttachmentId, ClientEndpointContract,
+    ClientOutcomeUncertainty, ClientProcessingFailure, ClientProducerAdmission,
+    ClientProducerDescription, ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits,
+    ClientProducerPolicy, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
+    MAX_CLIENT_BATCH_ROWS, SchemaField,
+};
+
+use std::num::NonZeroU32;
+
+use super::*;
+use crate::runtime_schema::ClientBatchLimits;
+
+/// The most bytes of a failure's description a producer is told, so an outcome stays one small
+/// frame whatever failed downstream.
+const MAX_OUTCOME_DETAIL_BYTES: usize = 1024;
+
+/// The identity the serving side of a producer gave one submitted batch, echoed in its outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct ClientSubmissionId(NonZeroU64);
+
+impl ClientSubmissionId {
+    pub(crate) const fn new(value: NonZeroU64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) const fn get(self) -> NonZeroU64 {
+        self.0
+    }
+}
+
+/// The node's budget for the Arrow IPC bytes producers may have outstanding: those submitted
+/// through the sessions this node serves, and those forwarded to it for a client ingestor it
+/// executes. A producer reserves its whole granted window when it opens and returns it when its
+/// attachment ends, so a full budget refuses the open rather than stalling an opened producer.
+///
+/// This is a handle: every clone reserves from the same node budget.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ClientProducerBudget {
+    reserved: Arc<AtomicU64>,
+}
+
+impl ClientProducerBudget {
+    /// Reserves `bytes` of the node's budget, or `None` when that would exceed it.
+    pub(crate) fn try_reserve(&self, bytes: NonZeroU64) -> Option<ClientProducerReservation> {
+        let mut current = self.reserved.load(Ordering::Acquire);
+        loop {
+            let next = current.checked_add(bytes.get())?;
+            if next > CLIENT_PRODUCER_NODE_BYTES {
+                return None;
+            }
+            match self.reserved.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(ClientProducerReservation {
+                        budget: self.clone(),
+                        bytes,
+                    });
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// The bytes every live reservation holds together.
+    #[cfg(test)]
+    pub(crate) fn reserved(&self) -> u64 {
+        self.reserved.load(Ordering::Acquire)
+    }
+}
+
+/// Bytes of the node's producer budget, returned when this is dropped.
+#[derive(Debug)]
+pub(crate) struct ClientProducerReservation {
+    budget: ClientProducerBudget,
+    bytes: NonZeroU64,
+}
+
+impl Drop for ClientProducerReservation {
+    fn drop(&mut self) {
+        let previous = self
+            .budget
+            .reserved
+            .fetch_sub(self.bytes.get(), Ordering::AcqRel);
+        previous.checked_sub(self.bytes.get()).verified(
+            "a reservation returns exactly the bytes it added, and it returns them once, when it \
+             is dropped",
+        );
+    }
+}
+
+/// What a producer asks the node executing a client ingestor for.
+pub(crate) struct ClientProducerOpenRequest {
+    pub(crate) domain: DomainName,
+    pub(crate) ingestor: IngestorName,
+    pub(crate) expected_fields: Vec<SchemaField>,
+    pub(crate) limits: ClientProducerLimits,
+    /// The largest payload one submission can carry to this node, which the serving session's
+    /// frame decides.
+    pub(crate) max_batch_bytes: NonZeroU64,
+    /// Whether this node retains the payloads for another node's session, which this node's
+    /// budget then counts again.
+    pub(crate) retention: ClientProducerRetention,
+}
+
+/// Where the payloads of a producer are retained while they are outstanding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClientProducerRetention {
+    /// The producer's session is on this node, whose budget its session already reserved.
+    Local,
+    /// The producer's session is on another node, which forwards its payloads here.
+    Forwarded,
+}
+
+/// An opened producer: what it was told, the handle it submits through, and the events that
+/// answer it.
+pub(crate) struct OpenedClientProducer {
+    pub(crate) description: ClientProducerDescription,
+    pub(crate) handle: ClientProducerHandle,
+    pub(crate) events: ClientProducerEvents,
+}
+
+/// What reaches a producer from the endpoint it is attached to.
+///
+/// `outcomes` carries one outcome for every batch the producer submitted and, once the endpoint
+/// ends the attachment, its reason as the last event. It is bounded by the producer's granted
+/// batches plus that one end. It closes once the endpoint has released the attachment, so a
+/// producer that closed learns its release when every outcome before it has been read.
+/// `admission` holds the newest admission state; changes in between are coalesced.
+pub(crate) struct ClientProducerEvents {
+    pub(crate) outcomes: mpsc::UnboundedReceiver<ClientProducerEvent>,
+    pub(crate) admission: watch::Receiver<ClientProducerAdmission>,
+}
+
+/// One event about an attached producer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClientProducerEvent {
+    /// The terminal outcome of one submitted batch, with a bounded, non-sensitive description of a
+    /// refusal or failure.
+    Outcome {
+        submission: ClientSubmissionId,
+        outcome: ClientSubmissionOutcome,
+        detail: Option<String>,
+    },
+    /// The endpoint ended the attachment. Nothing about it follows.
+    Ended(ClientProducerEndReason),
+}
+
+/// The handle a producer's serving side submits through. Dropping it detaches the producer
+/// without answering what it still has outstanding; admitted work continues in the graph.
+pub(crate) struct ClientProducerHandle {
+    commands: mpsc::UnboundedSender<EndpointCommand>,
+    attachment: ClientAttachmentId,
+    detached: bool,
+}
+
+impl ClientProducerHandle {
+    /// Hands one batch to the endpoint, which answers it with exactly one outcome.
+    pub(crate) fn submit(&self, submission: ClientSubmissionId, body: Bytes) {
+        let command = EndpointCommand::Submit {
+            attachment: self.attachment,
+            submission,
+            body,
+        };
+        // An endpoint that ended already told the producer so, and that end answers the batch.
+        self.commands
+            .send(command)
+            .means_shutdown("client ingestor endpoint");
+    }
+
+    /// Stops admission for this producer. The endpoint refuses the batches it has not admitted
+    /// yet, answers each admitted one once its acknowledgement resolves, and then releases the
+    /// producer, which closes its outcomes after the last of those answers.
+    pub(crate) fn close(mut self) {
+        let command = EndpointCommand::Close {
+            attachment: self.attachment,
+        };
+        self.detached = true;
+        // An endpoint that ended already ended this producer too, and closed its outcomes.
+        self.commands
+            .send(command)
+            .means_shutdown("client ingestor endpoint");
+    }
+}
+
+impl Drop for ClientProducerHandle {
+    fn drop(&mut self) {
+        if self.detached {
+            return;
+        }
+        let command = EndpointCommand::Detach {
+            attachment: self.attachment,
+        };
+        self.commands
+            .send(command)
+            .means_shutdown("client ingestor endpoint");
+    }
+}
+
+/// The endpoint task of one client ingestor on this node, reached through its commands, and the
+/// counts it publishes for observation.
+pub(in crate::runtime) struct ClientIngestorEndpoint {
+    commands: mpsc::UnboundedSender<EndpointCommand>,
+    gauges: Arc<PublishedClientGauges>,
+}
+
+/// The counts an endpoint task rewrites after every change, so `DESCRIBE` reads them without
+/// reaching the task. Each count is exact when written; a reader may see one count of a change
+/// before the others.
+#[derive(Debug, Default)]
+pub(in crate::runtime) struct PublishedClientGauges {
+    producers: AtomicU64,
+    forwarded_producers: AtomicU64,
+    outstanding_batches: AtomicU64,
+    outstanding_bytes: AtomicU64,
+}
+
+impl PublishedClientGauges {
+    fn publish(&self, gauges: ClientIngestorGauges) {
+        self.producers.store(gauges.producers, Ordering::Release);
+        self.forwarded_producers
+            .store(gauges.forwarded_producers, Ordering::Release);
+        self.outstanding_batches
+            .store(gauges.outstanding_batches, Ordering::Release);
+        self.outstanding_bytes
+            .store(gauges.outstanding_bytes, Ordering::Release);
+    }
+
+    fn snapshot(&self) -> ClientIngestorGauges {
+        ClientIngestorGauges {
+            producers: self.producers.load(Ordering::Acquire),
+            forwarded_producers: self.forwarded_producers.load(Ordering::Acquire),
+            outstanding_batches: self.outstanding_batches.load(Ordering::Acquire),
+            outstanding_bytes: self.outstanding_bytes.load(Ordering::Acquire),
+        }
+    }
+}
+
+/// One running execution of a client ingestor, as its endpoint admits batches into it.
+pub(in crate::runtime) struct ClientExecution {
+    contract: ClientEndpointContract,
+    generation: u64,
+    fields: Vec<SchemaField>,
+    window: NonZeroUsize,
+    policy: ClientProducerPolicy,
+    /// The admission worker of this execution. It takes one batch at a time.
+    jobs: mpsc::Sender<AdmissionJob>,
+}
+
+/// Everything the admission worker of one execution dispatches through.
+pub(in crate::runtime) struct ClientIntake {
+    pub(in crate::runtime) runtime: Runtime,
+    pub(in crate::runtime) domain: DomainName,
+    pub(in crate::runtime) ingestor: IngestorName,
+    pub(in crate::runtime) schema: Arc<CompiledSchema>,
+    pub(in crate::runtime) timestamp_source: Option<IngestTimestampSource>,
+    pub(in crate::runtime) output_routes: Arc<BoundIngestorRoutes>,
+    pub(in crate::runtime) filter_where: Option<CompiledProgramWithMaterializedInterest>,
+    pub(in crate::runtime) branched_senders:
+        HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
+    pub(in crate::runtime) metrics: MessageMetricsHandle,
+    pub(in crate::runtime) quiesce: Arc<IngestorQuiesceControl>,
+    pub(in crate::runtime) trackers: IngestorAckRootTrackers,
+    pub(in crate::runtime) ack_timeout: Duration,
+}
+
+/// Whether an execution may admit a batch right now, as its quiesce publication decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum ClientIntakeState {
+    /// Batches are admitted.
+    Open,
+    /// A quiesce or memory pressure holds admission; it opens again once released.
+    Suspended,
+    /// An ownership handoff or shutdown stopped intake for good on this execution.
+    Draining,
+}
+
+impl ClientIntakeState {
+    fn admission(self) -> ClientProducerAdmission {
+        match self {
+            Self::Open => ClientProducerAdmission::Open,
+            Self::Suspended | Self::Draining => ClientProducerAdmission::Suspended,
+        }
+    }
+
+    /// The refusal a batch arriving in this state receives, or `None` while batches are admitted.
+    fn refusal(self) -> Option<ClientSubmissionRefusal> {
+        match self {
+            Self::Open => None,
+            Self::Suspended => Some(ClientSubmissionRefusal::Suspended),
+            Self::Draining => Some(ClientSubmissionRefusal::Draining),
+        }
+    }
+}
+
+enum EndpointCommand {
+    Attach(AttachCommand),
+    Submit {
+        attachment: ClientAttachmentId,
+        submission: ClientSubmissionId,
+        body: Bytes,
+    },
+    Close {
+        attachment: ClientAttachmentId,
+    },
+    Detach {
+        attachment: ClientAttachmentId,
+    },
+    Install(Arc<ClientExecution>),
+    Uninstall,
+    Intake(ClientIntakeState),
+    Admission(AdmissionReport),
+    Resolved {
+        attachment: ClientAttachmentId,
+        submission: ClientSubmissionId,
+        outcome: ClientSubmissionOutcome,
+        detail: Option<String>,
+    },
+    End {
+        reason: ClientProducerEndReason,
+        done: oneshot::Sender<()>,
+    },
+}
+
+struct AttachCommand {
+    expected_fields: Vec<SchemaField>,
+    limits: ClientProducerLimits,
+    max_batch_bytes: NonZeroU64,
+    reservation: Option<ClientProducerReservation>,
+    reply: oneshot::Sender<Result<AttachedProducer, ClientProducerRefusal>>,
+}
+
+struct AttachedProducer {
+    description: ClientProducerDescription,
+    events: ClientProducerEvents,
+}
+
+/// One batch the endpoint hands its admission worker.
+struct AdmissionJob {
+    attachment: ClientAttachmentId,
+    submission: ClientSubmissionId,
+    body: Bytes,
+    max_batch_bytes: NonZeroU64,
+}
+
+/// What the admission worker made of one batch.
+struct AdmissionReport {
+    attachment: ClientAttachmentId,
+    submission: ClientSubmissionId,
+    result: AdmissionResult,
+}
+
+enum AdmissionResult {
+    /// The batch entered the graph under this ACK root, whose completion decides its outcome
+    /// under the ACK timeout of the execution that admitted it.
+    Admitted {
+        completion: AckCompletion,
+        ack_timeout: Duration,
+    },
+    /// No row of the batch entered the graph.
+    Refused {
+        refusal: ClientSubmissionRefusal,
+        detail: Option<String>,
+    },
+}
+
+/// A batch an attachment queued and the endpoint has not handed its worker yet.
+struct QueuedSubmission {
+    submission: ClientSubmissionId,
+    body: Bytes,
+}
+
+/// One attached producer, as its endpoint task holds it.
+struct Attachment {
+    generation: u64,
+    contract: ClientEndpointContract,
+    grant: ClientProducerGrant,
+    queue: VecDeque<QueuedSubmission>,
+    /// Batches admitted or handed to the worker, not yet answered, with their payload bytes.
+    outstanding: HashMap<ClientSubmissionId, u64>,
+    /// Payload bytes of every queued and outstanding batch.
+    held_bytes: u64,
+    events: mpsc::UnboundedSender<ClientProducerEvent>,
+    admission: watch::Sender<ClientProducerAdmission>,
+    /// Set once the producer asked to close; the attachment is released once nothing is
+    /// outstanding.
+    closing: bool,
+    /// The node budget this attachment reserved for payloads another node forwards, which marks
+    /// the producer as served through that node.
+    forwarded: Option<ClientProducerReservation>,
+}
+
+impl Attachment {
+    /// Batches this attachment holds that have not been answered.
+    fn held_batches(&self) -> usize {
+        self.queue
+            .len()
+            .checked_add(self.outstanding.len())
+            .assured("both counts are bounded by the attachment's granted batches")
+    }
+
+    fn answer(
+        &mut self,
+        submission: ClientSubmissionId,
+        outcome: ClientSubmissionOutcome,
+        detail: Option<String>,
+    ) {
+        let event = ClientProducerEvent::Outcome {
+            submission,
+            outcome,
+            detail,
+        };
+        // A producer whose serving side is gone learns nothing more about this attachment.
+        self.events.send(event).means_peer_left("client producer");
+    }
+
+    /// Refuses every batch still queued, in the order the producer sent them.
+    fn refuse_queued(&mut self, refusal: ClientSubmissionRefusal) {
+        while let Some(queued) = self.queue.pop_front() {
+            let bytes: u64 = queued.body.len().arch_into();
+            self.held_bytes = self
+                .held_bytes
+                .checked_sub(bytes)
+                .verified("a queued batch's bytes were added when it was queued");
+            self.answer(
+                queued.submission,
+                ClientSubmissionOutcome::NotAdmitted(refusal),
+                None,
+            );
+        }
+    }
+
+    /// Ends the attachment: every queued batch is refused, every outstanding one's outcome is
+    /// unknown, and the reason is the last event.
+    fn end(mut self, reason: ClientProducerEndReason) {
+        self.refuse_queued(ClientSubmissionRefusal::ProducerEnded);
+        let outstanding = std::mem::take(&mut self.outstanding);
+        for submission in outstanding.into_keys() {
+            self.answer(
+                submission,
+                ClientSubmissionOutcome::OutcomeUnknown(ClientOutcomeUncertainty::Interrupted),
+                None,
+            );
+        }
+        self.events
+            .send(ClientProducerEvent::Ended(reason))
+            .means_peer_left("client producer");
+    }
+}
+
+/// An attachment an installed execution no longer serves, and why.
+struct EndedAttachment {
+    attachment: ClientAttachmentId,
+    reason: ClientProducerEndReason,
+}
+
+/// The batch an endpoint handed its admission worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkerBatch {
+    attachment: ClientAttachmentId,
+    submission: ClientSubmissionId,
+}
+
+/// The state one endpoint task owns.
+struct Endpoint {
+    domain: DomainName,
+    ingestor: IngestorName,
+    commands: mpsc::UnboundedReceiver<EndpointCommand>,
+    /// Handed to the workers and watchers that report back to this task.
+    reports: mpsc::WeakUnboundedSender<EndpointCommand>,
+    execution: Option<Arc<ClientExecution>>,
+    intake: ClientIntakeState,
+    attachments: IndexMap<ClientAttachmentId, Attachment, RandomState>,
+    /// Where round-robin selection resumes.
+    cursor: usize,
+    /// Admitted batches still awaiting their acknowledgement, and the batch the worker holds.
+    window_used: usize,
+    /// The batch handed to the worker and not reported yet.
+    in_worker: Option<WorkerBatch>,
+    /// Cancelled when this task ends, which stops every acknowledgement watcher it started.
+    ended: CancellationToken,
+    metrics: RuntimeMetrics,
+    gauges: Arc<PublishedClientGauges>,
+}
+
+impl Runtime {
+    /// The node's producer byte budget, which sessions serving producers reserve from.
+    pub(crate) fn client_producer_budget(&self) -> ClientProducerBudget {
+        self.inner.client_producer_budget.clone()
+    }
+
+    /// Attaches one producer to a client ingestor this node executes.
+    ///
+    /// The refusal names why nothing was attached: the domain, the ingestor or its kind, an
+    /// execution this node does not run, the expected schema, the limits, or the budget.
+    pub(crate) async fn open_client_producer(
+        &self,
+        request: ClientProducerOpenRequest,
+    ) -> Result<OpenedClientProducer, ClientProducerRefusal> {
+        let ClientProducerOpenRequest {
+            domain,
+            ingestor,
+            expected_fields,
+            limits,
+            max_batch_bytes,
+            retention,
+        } = request;
+        if !limits.is_within_bounds() {
+            return Err(ClientProducerRefusal::InvalidLimits);
+        }
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let commands = match self.inner.client_ingestors.get(&key) {
+            Some(endpoint) => endpoint.commands.clone(),
+            None => return Err(self.client_producer_refusal(&domain, &ingestor)),
+        };
+        let reservation = match retention {
+            ClientProducerRetention::Local => None,
+            ClientProducerRetention::Forwarded => {
+                let Some(reservation) = self.inner.client_producer_budget.try_reserve(limits.bytes)
+                else {
+                    return Err(ClientProducerRefusal::NodeCapacityExhausted);
+                };
+                Some(reservation)
+            }
+        };
+        let (reply, attached) = oneshot::channel();
+        let command = EndpointCommand::Attach(AttachCommand {
+            expected_fields,
+            limits,
+            max_batch_bytes,
+            reservation,
+            reply,
+        });
+        if commands.send(command).is_err() {
+            return Err(ClientProducerRefusal::EndpointUnavailable);
+        }
+        let Ok(attached) = attached.await else {
+            return Err(ClientProducerRefusal::EndpointUnavailable);
+        };
+        let AttachedProducer {
+            description,
+            events,
+        } = attached?;
+        let handle = ClientProducerHandle {
+            commands,
+            attachment: description.attachment,
+            detached: false,
+        };
+        Ok(OpenedClientProducer {
+            description,
+            handle,
+            events,
+        })
+    }
+
+    /// Why this node cannot attach a producer to an ingestor it runs no endpoint for.
+    fn client_producer_refusal(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+    ) -> ClientProducerRefusal {
+        let status = self
+            .inner
+            .domains
+            .get(domain)
+            .map(|state| state.status.clone());
+        match status {
+            None => return ClientProducerRefusal::DomainNotFound,
+            Some(nervix_models::DomainStatus::Stopped) => {
+                return ClientProducerRefusal::DomainStopped;
+            }
+            Some(_) => {}
+        }
+        let Some(execution) = self.inner.executions.get(domain) else {
+            return ClientProducerRefusal::EndpointUnavailable;
+        };
+        match execution.entrypoints.ingestor(ingestor).map(|plan| &plan.input) {
+            None => ClientProducerRefusal::IngestorNotFound,
+            Some(IngestorInputPlan::Transport(_)) => ClientProducerRefusal::NotClientIngestor,
+            Some(IngestorInputPlan::Client(_)) => ClientProducerRefusal::EndpointUnavailable,
+        }
+    }
+
+    /// Starts a client ingestor's execution on this node: its admission worker and the watch that
+    /// tells its endpoint when admission opens or stops. The endpoint task is created the first
+    /// time its ingestor starts here and kept across restarts.
+    pub(in crate::runtime) fn host_client_source(
+        &self,
+        ingestor: &IngestorSpec,
+        plan: &ClientIngestorStartPlan,
+        quiesce: Arc<IngestorQuiesceControl>,
+        dependencies: IngestorDependencies,
+    ) {
+        let IngestorDependencies {
+            output_routes,
+            filter_where,
+            branched_templates,
+            metrics,
+        } = dependencies;
+        let domain = &ingestor.domain;
+        let branched_runtime = self.start_branched_entrypoint_runtimes(
+            domain,
+            &ModelName::from(&ingestor.name),
+            branched_templates,
+        );
+        self.prepare_ingestor_readiness(domain, &ingestor.name, NonZeroU64::MIN);
+        let (shutdown_tx, _) = watch::channel(false);
+        let (jobs, job_receiver) = mpsc::channel(1);
+        let generation = match self.inner.executions.get(domain) {
+            Some(execution) => execution.start_version,
+            None => 0,
+        };
+        let execution = Arc::new(ClientExecution {
+            contract: plan.contract,
+            generation,
+            fields: plan.fields.clone(),
+            window: plan.window_size(),
+            policy: plan.policy,
+            jobs,
+        });
+        let commands = self.client_ingestor_endpoint(domain, &ingestor.name);
+        let intake = ClientIntake {
+            runtime: self.clone(),
+            domain: domain.clone(),
+            ingestor: ingestor.name.clone(),
+            schema: plan.schema.clone(),
+            timestamp_source: ingestor.timestamp_source.clone(),
+            output_routes,
+            filter_where,
+            branched_senders: branched_runtime.senders.clone(),
+            metrics,
+            quiesce: quiesce.clone(),
+            trackers: self.ingestor_ack_root_trackers(domain, &ingestor.name),
+            ack_timeout: plan.policy.ack_timeout,
+        };
+        let worker = tokio::spawn(run_admission_worker(
+            intake,
+            job_receiver,
+            commands.downgrade(),
+            shutdown_tx.subscribe(),
+        ));
+        let watcher = tokio::spawn(watch_client_intake(
+            quiesce,
+            commands.downgrade(),
+            shutdown_tx.subscribe(),
+        ));
+        if commands.send(EndpointCommand::Install(execution)).is_err() {
+            debug!(
+                domain = domain.as_str(),
+                ingestor = ingestor.name.as_str(),
+                "a client ingestor's endpoint ended while its execution was installed"
+            );
+        }
+        self.mark_ingestor_instance_ready(domain, &ingestor.name, 0);
+        info!(
+            domain = domain.as_str(),
+            ingestor = ingestor.name.as_str(),
+            "started client ingestor"
+        );
+        self.inner.ingestors.insert(
+            ingestor.runtime_key(),
+            IngestorRuntime {
+                shutdown: shutdown_tx,
+                branched: branched_runtime.runtimes,
+                tasks: vec![worker, watcher],
+            },
+        );
+    }
+
+    /// The commands of the endpoint task of a client ingestor, starting the task if this node has
+    /// none for it yet.
+    fn client_ingestor_endpoint(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+    ) -> mpsc::UnboundedSender<EndpointCommand> {
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        if let Some(endpoint) = self.inner.client_ingestors.get(&key)
+            && !endpoint.commands.is_closed()
+        {
+            return endpoint.commands.clone();
+        }
+        let (commands, receiver) = mpsc::unbounded_channel();
+        let gauges = Arc::new(PublishedClientGauges::default());
+        let endpoint = Endpoint {
+            domain: domain.clone(),
+            ingestor: ingestor.clone(),
+            commands: receiver,
+            reports: commands.downgrade(),
+            execution: None,
+            intake: ClientIntakeState::Suspended,
+            attachments: IndexMap::with_hasher(RandomState::default()),
+            cursor: 0,
+            window_used: 0,
+            in_worker: None,
+            ended: CancellationToken::new(),
+            metrics: self.inner.metrics.clone(),
+            gauges: gauges.clone(),
+        };
+        tokio::spawn(endpoint.run());
+        self.inner.client_ingestors.insert(
+            key,
+            ClientIngestorEndpoint {
+                commands: commands.clone(),
+                gauges,
+            },
+        );
+        commands
+    }
+
+    /// The producers attached to a client ingestor's endpoint on this node, or `None` when this
+    /// node has no endpoint for it.
+    pub(in crate::runtime) fn client_ingestor_gauges(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+    ) -> Option<ClientIngestorGauges> {
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let endpoint = self.inner.client_ingestors.get(&key)?;
+        Some(endpoint.gauges.snapshot())
+    }
+
+    /// Tells a client ingestor's endpoint that its execution stopped. Its producers stay attached
+    /// until the endpoint learns whether a restart keeps their contract.
+    pub(in crate::runtime) fn uninstall_client_execution(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+    ) {
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let Some(endpoint) = self.inner.client_ingestors.get(&key) else {
+            return;
+        };
+        endpoint
+            .commands
+            .send(EndpointCommand::Uninstall)
+            .means_shutdown("client ingestor endpoint");
+    }
+
+    /// Ends the endpoints of the client ingestors this node no longer executes, each with the
+    /// reason that applies, once every ingestor this node should run has been started.
+    pub(crate) async fn reconcile_client_ingestor_endpoints(&self, local_node_id: &ClusterNodeName) {
+        let keys = self
+            .inner
+            .client_ingestors
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            tokio::task::consume_budget().await;
+            if self.inner.ingestors.contains_key(&key) {
+                continue;
+            }
+            let Some(reason) = self.client_endpoint_end_reason(&key, local_node_id) else {
+                continue;
+            };
+            self.end_client_ingestor_endpoint(&key, reason).await;
+        }
+    }
+
+    /// Ends every client ingestor endpoint on this node, as the node shuts down.
+    pub(in crate::runtime) async fn end_client_ingestor_endpoints(
+        &self,
+        reason: ClientProducerEndReason,
+    ) {
+        let keys = self
+            .inner
+            .client_ingestors
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            tokio::task::consume_budget().await;
+            self.end_client_ingestor_endpoint(&key, reason).await;
+        }
+    }
+
+    async fn end_client_ingestor_endpoint(
+        &self,
+        key: &DomainNodeRef,
+        reason: ClientProducerEndReason,
+    ) {
+        let Some((_, endpoint)) = self.inner.client_ingestors.remove(key) else {
+            return;
+        };
+        let (done, ended) = oneshot::channel();
+        if endpoint
+            .commands
+            .send(EndpointCommand::End { reason, done })
+            .is_err()
+        {
+            return;
+        }
+        ended.await.means_shutdown("client ingestor endpoint");
+    }
+
+    /// Why an endpoint whose ingestor this node does not run should end, or `None` while the
+    /// ingestor is still scheduled here and may start again.
+    fn client_endpoint_end_reason(
+        &self,
+        key: &DomainNodeRef,
+        local_node_id: &ClusterNodeName,
+    ) -> Option<ClientProducerEndReason> {
+        let status = self
+            .inner
+            .domains
+            .get(&key.domain)
+            .map(|state| state.status.clone());
+        match status {
+            None => return Some(ClientProducerEndReason::EndpointRemoved),
+            Some(nervix_models::DomainStatus::Stopped) => {
+                return Some(ClientProducerEndReason::DomainStopped);
+            }
+            Some(_) => {}
+        }
+        let Some(execution) = self.inner.executions.get(&key.domain) else {
+            return Some(ClientProducerEndReason::DomainStopped);
+        };
+        let ingestor = IngestorName::from(key.identifier());
+        let Some(plan) = execution.entrypoints.ingestor(&ingestor) else {
+            return Some(ClientProducerEndReason::EndpointRemoved);
+        };
+        if let IngestorInputPlan::Transport(_) = plan.input {
+            return Some(ClientProducerEndReason::EndpointChanged);
+        }
+        let identity = NodeRef::new(ModelKind::Ingestor, ModelName::from(&ingestor));
+        let scheduled = execution.schedule.nodes.get(&identity)?;
+        if Self::scheduled_node_executes_locally(scheduled, Some(local_node_id)) {
+            return None;
+        }
+        Some(ClientProducerEndReason::Relocated)
+    }
+}
+
+impl Endpoint {
+    async fn run(mut self) {
+        while let Some(command) = self.commands.recv().await {
+            tokio::task::consume_budget().await;
+            match command {
+                EndpointCommand::Attach(attach) => self.attach(attach),
+                EndpointCommand::Submit {
+                    attachment,
+                    submission,
+                    body,
+                } => self.submit(attachment, submission, body),
+                EndpointCommand::Close { attachment } => self.close(attachment),
+                EndpointCommand::Detach { attachment } => self.detach(attachment),
+                EndpointCommand::Install(execution) => self.install(execution),
+                EndpointCommand::Uninstall => self.uninstall(),
+                EndpointCommand::Intake(intake) => self.set_intake(intake),
+                EndpointCommand::Admission(report) => self.admission(report),
+                EndpointCommand::Resolved {
+                    attachment,
+                    submission,
+                    outcome,
+                    detail,
+                } => self.resolved(attachment, submission, outcome, detail),
+                EndpointCommand::End { reason, done } => {
+                    self.end(reason);
+                    if done.send(()).is_err() {
+                        debug!("the caller that ended a client ingestor endpoint stopped waiting");
+                    }
+                    return;
+                }
+            }
+            self.pump();
+        }
+        // Every command sender is gone: the node is shutting down and ended no producer itself.
+        self.end(ClientProducerEndReason::ShuttingDown);
+    }
+
+    fn attach(&mut self, attach: AttachCommand) {
+        let AttachCommand {
+            expected_fields,
+            limits,
+            max_batch_bytes,
+            reservation,
+            reply,
+        } = attach;
+        let attached = self.attached_producer(expected_fields, limits, max_batch_bytes, reservation);
+        if reply.send(attached).is_err() {
+            // The open was cancelled before its answer arrived; the new attachment has no
+            // producer and is released.
+            debug!(
+                domain = self.domain.as_str(),
+                ingestor = self.ingestor.as_str(),
+                "a producer open was cancelled before it was answered"
+            );
+        }
+    }
+
+    fn attached_producer(
+        &mut self,
+        expected_fields: Vec<SchemaField>,
+        limits: ClientProducerLimits,
+        max_batch_bytes: NonZeroU64,
+        reservation: Option<ClientProducerReservation>,
+    ) -> Result<AttachedProducer, ClientProducerRefusal> {
+        let Some(execution) = self.execution.clone() else {
+            return Err(ClientProducerRefusal::EndpointUnavailable);
+        };
+        if expected_fields != execution.fields {
+            return Err(ClientProducerRefusal::SchemaMismatch);
+        }
+        let max_batch_bytes = max_batch_bytes.min(limits.bytes);
+        let grant = ClientProducerGrant {
+            batches: limits.batches,
+            bytes: limits.bytes,
+            max_batch_bytes,
+            max_batch_rows: NonZeroU32::new(MAX_CLIENT_BATCH_ROWS)
+                .assured("the row limit is a non-zero constant"),
+        };
+        let admission_state = self.intake.admission();
+        let (events, outcomes) = mpsc::unbounded_channel();
+        let (admission, admission_receiver) = watch::channel(admission_state);
+        let id = ClientAttachmentId::new();
+        let description = ClientProducerDescription {
+            attachment: id,
+            fields: execution.fields.clone(),
+            generation: execution.generation,
+            contract: execution.contract,
+            policy: execution.policy,
+            grant,
+            admission: admission_state,
+        };
+        self.attachments.insert(
+            id,
+            Attachment {
+                generation: execution.generation,
+                contract: execution.contract,
+                grant,
+                queue: VecDeque::new(),
+                outstanding: HashMap::new(),
+                held_bytes: 0,
+                events,
+                admission,
+                closing: false,
+                forwarded: reservation,
+            },
+        );
+        self.record_producers();
+        debug!(
+            domain = self.domain.as_str(),
+            ingestor = self.ingestor.as_str(),
+            attachment = %id,
+            "a producer attached to a client ingestor"
+        );
+        Ok(AttachedProducer {
+            description,
+            events: ClientProducerEvents {
+                outcomes,
+                admission: admission_receiver,
+            },
+        })
+    }
+
+    fn submit(
+        &mut self,
+        attachment: ClientAttachmentId,
+        submission: ClientSubmissionId,
+        body: Bytes,
+    ) {
+        let Some(entry) = self.attachments.get_mut(&attachment) else {
+            // A detached or ended producer's late batch has nobody to answer.
+            return;
+        };
+        let bytes: u64 = body.len().arch_into();
+        if entry.closing {
+            entry.answer(
+                submission,
+                ClientSubmissionOutcome::NotAdmitted(ClientSubmissionRefusal::ProducerEnded),
+                None,
+            );
+            return;
+        }
+        let batches_fit = entry.held_batches() < entry.grant.batches.get().arch_into();
+        let bytes_fit = match entry.held_bytes.checked_add(bytes) {
+            Some(held) => held <= entry.grant.bytes.get(),
+            None => false,
+        };
+        if !batches_fit || !bytes_fit {
+            entry.answer(
+                submission,
+                ClientSubmissionOutcome::NotAdmitted(ClientSubmissionRefusal::CreditExceeded),
+                Some("the batch exceeds the producer's granted credit".to_string()),
+            );
+            self.end_attachment(attachment, ClientProducerEndReason::ProtocolViolated);
+            return;
+        }
+        if let Some(refusal) = self.intake.refusal() {
+            self.metrics
+                .record_client_submission_refusal(&self.domain, &self.ingestor, refusal);
+            entry.answer(submission, ClientSubmissionOutcome::NotAdmitted(refusal), None);
+            return;
+        }
+        entry.held_bytes = entry
+            .held_bytes
+            .checked_add(bytes)
+            .verified("the credit check above established that the sum fits");
+        entry.queue.push_back(QueuedSubmission { submission, body });
+    }
+
+    fn close(&mut self, attachment: ClientAttachmentId) {
+        let Some(entry) = self.attachments.get_mut(&attachment) else {
+            // The attachment already ended, which closed its outcomes.
+            return;
+        };
+        entry.refuse_queued(ClientSubmissionRefusal::ProducerEnded);
+        entry.closing = true;
+        self.release_if_closed(attachment);
+    }
+
+    /// Releases a closing attachment once every batch it admitted has its outcome. Dropping it
+    /// closes its outcomes behind the last one.
+    fn release_if_closed(&mut self, attachment: ClientAttachmentId) {
+        let finished = match self.attachments.get(&attachment) {
+            Some(entry) => entry.closing && entry.outstanding.is_empty(),
+            None => false,
+        };
+        if !finished {
+            return;
+        }
+        self.attachments.shift_remove(&attachment).verified(
+            "the attachment was found above, and this task alone removes attachments",
+        );
+        debug!(
+            domain = self.domain.as_str(),
+            ingestor = self.ingestor.as_str(),
+            attachment = %attachment,
+            "a closed producer was released"
+        );
+        self.record_producers();
+    }
+
+    fn detach(&mut self, attachment: ClientAttachmentId) {
+        if self.attachments.shift_remove(&attachment).is_some() {
+            debug!(
+                domain = self.domain.as_str(),
+                ingestor = self.ingestor.as_str(),
+                attachment = %attachment,
+                "a producer detached from a client ingestor"
+            );
+            self.record_producers();
+        }
+    }
+
+    fn install(&mut self, execution: Arc<ClientExecution>) {
+        let mut ended = Vec::new();
+        for (id, entry) in &self.attachments {
+            if entry.generation != execution.generation {
+                ended.push(EndedAttachment {
+                    attachment: *id,
+                    reason: ClientProducerEndReason::DomainStopped,
+                });
+            } else if entry.contract != execution.contract {
+                ended.push(EndedAttachment {
+                    attachment: *id,
+                    reason: ClientProducerEndReason::EndpointChanged,
+                });
+            }
+        }
+        for EndedAttachment { attachment, reason } in ended {
+            self.end_attachment(attachment, reason);
+        }
+        self.refuse_lost_job();
+        self.execution = Some(execution);
+        // The new execution's intake watch reports its state before any batch is handed over.
+        self.set_intake(ClientIntakeState::Suspended);
+    }
+
+    fn uninstall(&mut self) {
+        // The worker reports every batch it took before its task ends, and the task is joined
+        // before this command is sent, so a batch still held here never reached it.
+        self.refuse_lost_job();
+        self.execution = None;
+        self.set_intake(ClientIntakeState::Suspended);
+    }
+
+    /// Answers the batch handed to a worker that stopped before it took it.
+    fn refuse_lost_job(&mut self) {
+        let Some(WorkerBatch {
+            attachment,
+            submission,
+        }) = self.in_worker.take()
+        else {
+            return;
+        };
+        self.window_used = self
+            .window_used
+            .checked_sub(1)
+            .verified("the batch handed to the worker holds one slot of the window");
+        self.answer_outstanding(
+            attachment,
+            submission,
+            ClientSubmissionOutcome::NotAdmitted(ClientSubmissionRefusal::Suspended),
+            None,
+        );
+    }
+
+    fn set_intake(&mut self, intake: ClientIntakeState) {
+        self.intake = intake;
+        let admission = intake.admission();
+        let refusal = intake.refusal();
+        for entry in self.attachments.values_mut() {
+            if let Some(refusal) = refusal {
+                entry.refuse_queued(refusal);
+            }
+            entry.admission.send_if_modified(|current| {
+                let changed = *current != admission;
+                *current = admission;
+                changed
+            });
+        }
+    }
+
+    fn admission(&mut self, report: AdmissionReport) {
+        let AdmissionReport {
+            attachment,
+            submission,
+            result,
+        } = report;
+        if self.in_worker
+            == Some(WorkerBatch {
+                attachment,
+                submission,
+            })
+        {
+            self.in_worker = None;
+        }
+        match result {
+            AdmissionResult::Admitted {
+                completion,
+                ack_timeout,
+            } => {
+                // An execution that stopped since keeps no hold on the batch: its ACK root still
+                // decides the outcome.
+                self.watch_acknowledgement(attachment, submission, completion, ack_timeout);
+            }
+            AdmissionResult::Refused { refusal, detail } => {
+                self.window_used = self
+                    .window_used
+                    .checked_sub(1)
+                    .verified("a batch the worker refused held one slot of the window");
+                self.metrics
+                    .record_client_submission_refusal(&self.domain, &self.ingestor, refusal);
+                self.answer_outstanding(
+                    attachment,
+                    submission,
+                    ClientSubmissionOutcome::NotAdmitted(refusal),
+                    detail,
+                );
+            }
+        }
+    }
+
+    fn resolved(
+        &mut self,
+        attachment: ClientAttachmentId,
+        submission: ClientSubmissionId,
+        outcome: ClientSubmissionOutcome,
+        detail: Option<String>,
+    ) {
+        self.window_used = self
+            .window_used
+            .checked_sub(1)
+            .verified("an admitted batch holds one slot of the window until it is resolved");
+        self.metrics
+            .record_client_submission_outcome(&self.domain, &self.ingestor, &outcome);
+        self.answer_outstanding(attachment, submission, outcome, detail);
+    }
+
+    /// Answers a batch an attachment holds outstanding, if the attachment still holds it.
+    fn answer_outstanding(
+        &mut self,
+        attachment: ClientAttachmentId,
+        submission: ClientSubmissionId,
+        outcome: ClientSubmissionOutcome,
+        detail: Option<String>,
+    ) {
+        let Some(entry) = self.attachments.get_mut(&attachment) else {
+            return;
+        };
+        let Some(bytes) = entry.outstanding.remove(&submission) else {
+            return;
+        };
+        entry.held_bytes = entry
+            .held_bytes
+            .checked_sub(bytes)
+            .verified("an outstanding batch's bytes were added when it was queued");
+        entry.answer(submission, outcome, detail);
+        self.release_if_closed(attachment);
+    }
+
+    fn watch_acknowledgement(
+        &self,
+        attachment: ClientAttachmentId,
+        submission: ClientSubmissionId,
+        completion: AckCompletion,
+        ack_timeout: Duration,
+    ) {
+        let reports = self.reports.clone();
+        let ended = self.ended.clone();
+        tokio::spawn(async move {
+            let resolution = tokio::select! {
+                biased;
+                () = ended.cancelled() => return,
+                resolution = await_client_acknowledgement(completion, ack_timeout) => resolution,
+            };
+            let Some(reports) = reports.upgrade() else {
+                return;
+            };
+            let command = EndpointCommand::Resolved {
+                attachment,
+                submission,
+                outcome: resolution.outcome,
+                detail: resolution.detail,
+            };
+            reports.send(command).means_shutdown("client ingestor endpoint");
+        });
+    }
+
+    /// Hands the worker the next batch, taking the attachments in turn, while the execution admits,
+    /// the worker is free and the window has room.
+    fn pump(&mut self) {
+        let Some(execution) = self.execution.clone() else {
+            return;
+        };
+        if self.intake != ClientIntakeState::Open
+            || self.in_worker.is_some()
+            || self.window_used >= execution.window.get()
+            || self.attachments.is_empty()
+        {
+            return;
+        }
+        let count = self.attachments.len();
+        for step in 0..count {
+            let index = self
+                .cursor
+                .checked_add(step)
+                .assured("the cursor and the step are both below the attachment count")
+                % count;
+            let Some((id, entry)) = self.attachments.get_index_mut(index) else {
+                continue;
+            };
+            let Some(queued) = entry.queue.pop_front() else {
+                continue;
+            };
+            let id = *id;
+            let bytes: u64 = queued.body.len().arch_into();
+            entry.outstanding.insert(queued.submission, bytes);
+            let job = AdmissionJob {
+                attachment: id,
+                submission: queued.submission,
+                body: queued.body,
+                max_batch_bytes: entry.grant.max_batch_bytes,
+            };
+            match execution.jobs.try_send(job) {
+                Ok(()) => {
+                    self.in_worker = Some(WorkerBatch {
+                        attachment: id,
+                        submission: queued.submission,
+                    });
+                    self.window_used = self
+                        .window_used
+                        .checked_add(1)
+                        .assured("the window is below its configured size, checked above");
+                    self.cursor = index
+                        .checked_add(1)
+                        .assured("an index below the attachment count has a successor");
+                }
+                Err(error) => {
+                    // The worker stopped without this execution being uninstalled yet; the
+                    // batch is refused like any batch arriving while admission is held.
+                    let job = match error {
+                        mpsc::error::TrySendError::Full(job)
+                        | mpsc::error::TrySendError::Closed(job) => job,
+                    };
+                    self.answer_outstanding(
+                        job.attachment,
+                        job.submission,
+                        ClientSubmissionOutcome::NotAdmitted(ClientSubmissionRefusal::Suspended),
+                        None,
+                    );
+                }
+            }
+            return;
+        }
+    }
+
+    fn end_attachment(&mut self, attachment: ClientAttachmentId, reason: ClientProducerEndReason) {
+        let Some(entry) = self.attachments.shift_remove(&attachment) else {
+            return;
+        };
+        debug!(
+            domain = self.domain.as_str(),
+            ingestor = self.ingestor.as_str(),
+            attachment = %attachment,
+            reason = reason.as_ref(),
+            "a client ingestor ended a producer"
+        );
+        if let Some(held) = self.in_worker
+            && held.attachment == attachment
+        {
+            // The worker still reports the batch; its report finds the attachment gone.
+            debug!("an ended producer had a batch with the admission worker");
+        }
+        entry.end(reason);
+        self.record_producers();
+    }
+
+    fn end(&mut self, reason: ClientProducerEndReason) {
+        self.ended.cancel();
+        let attachments = std::mem::take(&mut self.attachments);
+        if !attachments.is_empty() {
+            info!(
+                domain = self.domain.as_str(),
+                ingestor = self.ingestor.as_str(),
+                producers = attachments.len(),
+                reason = reason.as_ref(),
+                "ended the producers of a client ingestor"
+            );
+        }
+        for (_, entry) in attachments {
+            entry.end(reason);
+        }
+        self.record_producers();
+    }
+
+    fn record_producers(&self) {
+        let mut gauges = ClientIngestorGauges::default();
+        for entry in self.attachments.values() {
+            let batches: u64 = entry.held_batches().arch_into();
+            gauges.producers = gauges
+                .producers
+                .checked_add(1)
+                .assured("every counted attachment is held in memory");
+            if entry.forwarded.is_some() {
+                gauges.forwarded_producers = gauges
+                    .forwarded_producers
+                    .checked_add(1)
+                    .assured("every counted attachment is held in memory");
+            }
+            gauges.outstanding_batches = gauges
+                .outstanding_batches
+                .checked_add(batches)
+                .assured("every counted batch is held in memory");
+            gauges.outstanding_bytes = gauges
+                .outstanding_bytes
+                .checked_add(entry.held_bytes)
+                .assured("every counted byte is held in memory");
+        }
+        self.gauges.publish(gauges);
+        self.metrics
+            .set_client_ingestor_producers(&self.domain, &self.ingestor, gauges);
+    }
+}
+
+/// The producers attached to one client ingestor's endpoint, as its metrics and `DESCRIBE`
+/// report them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ClientIngestorGauges {
+    pub(crate) producers: u64,
+    /// Producers whose sessions another node serves and forwards their batches from.
+    pub(crate) forwarded_producers: u64,
+    /// Batches the producers submitted that have no outcome yet.
+    pub(crate) outstanding_batches: u64,
+    /// The Arrow IPC bytes of those batches.
+    pub(crate) outstanding_bytes: u64,
+}
+
+/// How one admitted batch's acknowledgement resolved, and what its producer is told about it.
+struct ClientAcknowledgement {
+    outcome: ClientSubmissionOutcome,
+    detail: Option<String>,
+}
+
+/// Waits for an admitted batch's ACK root. The timeout counts the time without progress, so a
+/// batch whose downstream work keeps reporting that it is alive does not time out.
+async fn await_client_acknowledgement(
+    mut completion: AckCompletion,
+    ack_timeout: Duration,
+) -> ClientAcknowledgement {
+    loop {
+        tokio::task::consume_budget().await;
+        let progress = tokio::time::timeout(ack_timeout, completion.wait_for_progress()).await;
+        match progress {
+            Ok(AckProgress::Alive) => {}
+            Ok(AckProgress::Complete(AckOutcome::Ack)) => {
+                return ClientAcknowledgement {
+                    outcome: ClientSubmissionOutcome::Completed,
+                    detail: None,
+                };
+            }
+            Ok(AckProgress::Complete(AckOutcome::NoAck(reason))) => {
+                return ClientAcknowledgement {
+                    outcome: ClientSubmissionOutcome::ProcessingFailed(
+                        ClientProcessingFailure::Rejected,
+                    ),
+                    detail: Some(bounded_detail(reason)),
+                };
+            }
+            Err(_) => {
+                return ClientAcknowledgement {
+                    outcome: ClientSubmissionOutcome::ProcessingFailed(
+                        ClientProcessingFailure::AckTimedOut,
+                    ),
+                    detail: Some(format!(
+                        "no acknowledgement progress within {}",
+                        humantime::format_duration(ack_timeout)
+                    )),
+                };
+            }
+        }
+    }
+}
+
+/// A failure's description cut to what one outcome carries, at a character boundary.
+fn bounded_detail(mut detail: String) -> String {
+    if detail.len() <= MAX_OUTCOME_DETAIL_BYTES {
+        return detail;
+    }
+    let mut end = MAX_OUTCOME_DETAIL_BYTES;
+    while !detail.is_char_boundary(end) {
+        end = end
+            .checked_sub(1)
+            .assured("index zero is a character boundary, so the search stops there");
+    }
+    detail.truncate(end);
+    detail
+}
+
+/// Tells an endpoint whenever its execution's quiesce publication changes whether batches are
+/// admitted, starting with the state at installation.
+async fn watch_client_intake(
+    quiesce: Arc<IngestorQuiesceControl>,
+    reports: mpsc::WeakUnboundedSender<EndpointCommand>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut observation = quiesce.observation();
+    loop {
+        tokio::task::consume_budget().await;
+        let state = quiesce.client_intake_state();
+        let Some(sender) = reports.upgrade() else {
+            return;
+        };
+        if sender.send(EndpointCommand::Intake(state)).is_err() {
+            return;
+        }
+        drop(sender);
+        tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
+                }
+            }
+            () = quiesce.wait_for_change_since(&mut observation) => {}
+        }
+    }
+}
+
+/// Admits the batches one execution's endpoint hands over, one at a time, until the execution
+/// stops. Every batch it takes is reported, admitted or refused, before its task ends.
+async fn run_admission_worker(
+    intake: ClientIntake,
+    mut jobs: mpsc::Receiver<AdmissionJob>,
+    reports: mpsc::WeakUnboundedSender<EndpointCommand>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        tokio::task::consume_budget().await;
+        let job = tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
+                }
+                continue;
+            }
+            job = jobs.recv() => job,
+        };
+        let Some(job) = job else {
+            return;
+        };
+        let attachment = job.attachment;
+        let submission = job.submission;
+        let result = intake.admit(job).await;
+        let Some(reports) = reports.upgrade() else {
+            return;
+        };
+        let report = EndpointCommand::Admission(AdmissionReport {
+            attachment,
+            submission,
+            result,
+        });
+        if reports.send(report).is_err() {
+            return;
+        }
+    }
+}
+
+impl ClientIntake {
+    /// Validates one batch and dispatches it into the graph under a new ACK root.
+    async fn admit(&self, job: AdmissionJob) -> AdmissionResult {
+        let limits = ClientBatchLimits {
+            max_bytes: job.max_batch_bytes,
+            max_rows: NonZeroUsize::new(MAX_CLIENT_BATCH_ROWS.arch_into())
+                .assured("the row limit is a non-zero constant"),
+        };
+        let decoded = self
+            .schema
+            .decode_client_batch(self.runtime.executor(), job.body, limits)
+            .await;
+        let batch = match decoded {
+            Ok(batch) => batch,
+            Err(error) => {
+                let failure = error.current_context();
+                let Some(defect) = failure.defect() else {
+                    return AdmissionResult::Refused {
+                        refusal: ClientSubmissionRefusal::Busy,
+                        detail: None,
+                    };
+                };
+                return AdmissionResult::Refused {
+                    refusal: ClientSubmissionRefusal::InvalidBatch(defect),
+                    detail: Some(bounded_detail(failure.to_string())),
+                };
+            }
+        };
+        // The fence against a quiesce that engaged while the batch was validated. The root is
+        // tracked before the decision is read, so either the drain that follows a quiesce counts
+        // this root and waits for it, or this read observes the quiesce and the batch is refused
+        // with its root resolved before anything was dispatched under it.
+        let (root, completion) = self.trackers.tracked_root();
+        if let Some(refusal) = self.quiesce.client_intake_state().refusal() {
+            root.ack_success();
+            return AdmissionResult::Refused {
+                refusal,
+                detail: None,
+            };
+        }
+        let dispatched = self
+            .runtime
+            .dispatch_client_batch(ClientBatchDispatch {
+                domain: &self.domain,
+                ingestor: &self.ingestor,
+                timestamp_source: self.timestamp_source.as_ref(),
+                output_routes: &self.output_routes,
+                filter_where: self.filter_where.as_ref(),
+                branched_senders: &self.branched_senders,
+                metrics: &self.metrics,
+                batch,
+                acks: root.attached(),
+                ingested_at: actual_utc_now(),
+            })
+            .await;
+        match dispatched {
+            Ok(()) => root.ack_success(),
+            Err(error) => {
+                debug!(
+                    domain = self.domain.as_str(),
+                    ingestor = self.ingestor.as_str(),
+                    error = %error,
+                    "a client batch failed after it was admitted"
+                );
+                root.no_ack(error.current_context().to_string());
+            }
+        }
+        AdmissionResult::Admitted {
+            completion,
+            ack_timeout: self.ack_timeout,
+        }
+    }
+}
+
+impl IngestorQuiesceControl {
+    /// Whether a client source admits a batch under the current publication. An ownership
+    /// handoff or a shutdown stops intake for good on this execution; every other hold is a
+    /// suspension that the release ends.
+    pub(in crate::runtime) fn client_intake_state(&self) -> ClientIntakeState {
+        match self.cause() {
+            None => ClientIntakeState::Open,
+            Some(IngestorQuiesceCause::OwnershipHandoff | IngestorQuiesceCause::Shutdown) => {
+                ClientIntakeState::Draining
+            }
+            Some(
+                IngestorQuiesceCause::EntityHold
+                | IngestorQuiesceCause::DomainPause
+                | IngestorQuiesceCause::MemoryPressure,
+            ) => ClientIntakeState::Suspended,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "client_ingestor_tests.rs"]
+mod tests;

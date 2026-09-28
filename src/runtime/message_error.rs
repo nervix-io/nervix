@@ -1091,15 +1091,34 @@ impl Runtime {
         let mut current_branch_relay = None;
         match scheduled.config.as_ref() {
             Model::Ingestor(model) => {
-                let Some(codec) = execution.codecs.get(&model.decode_using_codec) else {
-                    return Err(error_stack::Report::new(
-                        MessageErrorHandlingError::CodecUnavailable {
-                            codec: model.decode_using_codec.clone(),
-                        },
-                    ));
+                let input_schema = match &model.input {
+                    nervix_models::IngestorInput::Transport(input) => {
+                        let Some(codec) = execution.codecs.get(&input.codec) else {
+                            return Err(error_stack::Report::new(
+                                MessageErrorHandlingError::CodecUnavailable {
+                                    codec: input.codec.clone(),
+                                },
+                            ));
+                        };
+                        codec.schema()
+                    }
+                    nervix_models::IngestorInput::Client(_) => {
+                        let Some(IngestorInputPlan::Client(plan)) = execution
+                            .entrypoints
+                            .ingestor(&model.name)
+                            .map(|plan| &plan.input)
+                        else {
+                            return Err(error_stack::Report::new(
+                                MessageErrorHandlingError::RuntimeModelUnavailable {
+                                    node: owner.clone(),
+                                },
+                            ));
+                        };
+                        plan.schema.clone()
+                    }
                 };
-                schemas.input = codec.schema().into();
-                schemas.allow_header_reads = model.source.reads_headers();
+                schemas.input = input_schema.into();
+                schemas.allow_header_reads = model.input.reads_headers();
                 schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Reingestor(model) => {
