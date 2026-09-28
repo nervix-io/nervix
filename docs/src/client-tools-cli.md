@@ -234,8 +234,8 @@ nervix-cli --domain quickstart subscribe sampled orders \
 | --- | --- |
 | `--dropping` | drop deliveries when the session transport queue is full |
 | `--blocking` | block instead of dropping; this is the default, so the flag is only ever explicit |
-| `--batch-sample-rate <0.0-1.0>` | per-arrival sampling of delivered batches |
-| `--where <expression>` | NSPL predicate over delivered records, validated locally before connecting |
+| `--batch-sample-rate <0.0-1.0>` | sampling of each row the predicate selected |
+| `--where <expression>` | NSPL predicate over delivered records, validated locally before the subscription opens |
 
 `--dropping` and `--blocking` are mutually exclusive. Subscription semantics, sampling, and
 backpressure are covered in [Sessions](sessions.md).
@@ -287,17 +287,21 @@ the server, so it works before a cluster exists.
 ## Leader Redirects
 
 Persistent statements are applied by the leader. The CLI gives each one a stable execution
-reference and retains it until the terminal result. If the session lands on a follower the client
-reports the redirect and reconnects on its own, following up to four hops:
+reference and retains it until the terminal result. If the session lands on a follower, the client
+follows the redirect and reconnects on its own, repeating the statement under the same reference,
+and waits out an election the same way; all of it is bounded by the client's 120-second retry
+deadline. A statement the leader never answered in that time is reported with its execution
+reference as not known yet. A redirect that reaches the terminal as a statement's own result is
+printed as:
 
 ```text
-topology: not-a-leader, retry on leader 'node-2' at http://10.0.0.12:47391
+topology: not-a-leader, retry on leader 'node-2' at http://10.0.0.12:47391/
 ```
 
 Transaction controls follow the same redirect beginning with `BEGIN`. The CLI retains the returned
 transaction id and attaches it on the new connection before resuming any queued statement or
 commit. Each append keeps its execution reference and expected queue position. A pending commit
-waits through `COMMITTING` for the exact retained terminal result. An open
+waits for the exact retained terminal result recorded under its own reference. An open
 transaction therefore survives an unclean connection loss or leader failover; a clean CLI exit
-reverts it. See
-[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions).
+reverts it. See [Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions) and
+[Client Session Protocol](client-session-protocol.md).

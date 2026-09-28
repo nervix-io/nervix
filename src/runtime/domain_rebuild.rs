@@ -406,9 +406,9 @@ impl Runtime {
         }
         let udf_executor = Box::pin(self.compile_domain_udfs(domain, resource_plans.udfs.clone()))
             .await
-            .map_err(|error| RuntimeError::BuildDomainExecution {
+            .map_err(|error| RuntimeError::CompileDomainUdfs {
                 domain: domain.as_str().to_string(),
-                reason: format!("failed to compile domain UDFs: {error}"),
+                report: error,
             })?;
         let all_branched_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         let branch_relays = branch_relays_from_plans(&all_branched_specs, &entrypoints);
@@ -969,9 +969,9 @@ impl Runtime {
         let udf_executor = self
             .compile_domain_udfs(domain, resource_plans.udfs.clone())
             .await
-            .map_err(|error| RuntimeError::BuildDomainExecution {
+            .map_err(|error| RuntimeError::CompileDomainUdfs {
                 domain: domain.as_str().to_string(),
-                reason: format!("failed to compile domain UDFs: {error}"),
+                report: error,
             })?;
         let entrypoints = Arc::new(
             EntrypointPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)

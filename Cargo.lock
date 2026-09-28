@@ -7287,6 +7287,7 @@ dependencies = [
  "arrow-schema",
  "arrow-select",
  "blake3",
+ "error-stack",
  "fastrand",
  "meticulous",
  "nervix-approx-into",

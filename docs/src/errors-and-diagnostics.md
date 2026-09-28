@@ -38,6 +38,17 @@ Values a caller acts on belong in typed fields; display formatting happens when 
 reported. `anyhow` remains at integration and tooling boundaries whose caller has no domain choice
 to make, such as a foreign callback that only accepts a general error.
 
+The expression VM returns reports for compile, batch, and runtime failures. `CompileError` keeps
+its typed diagnostic code, stable code spelling, operation span, and safe message; validation adds
+the model and route context without losing that cause. Roto setup returns `UdfError` reports and
+Roto's VM injector returns runtime reports, so a failing Arrow operation can remain in the chain.
+Jaq returns `JaqProgramError` or `JaqFormatError` reports for compilation, evaluation, and format
+conversion. A codec or runtime caller retains that report under its operation context. VM row
+errors remain typed values in the batch outcome and are formatted only when a message error is
+reported; this conversion does not turn them into report allocations per row.
+HTTP request-field compilation retains the VM report beneath the emitter's request-field context
+and attaches its safe message for diagnostics; an invalid request program never starts the sink.
+
 Resource planning checks the committed lookup key and codec, generator materialized source,
 output branch and route construction, and WASM guest-state generation before runtime binding.
 These failures name the owning node and relevant relay, codec, or field. A missing
@@ -316,8 +327,11 @@ sequenceDiagram
 
 At the public edge, the session maps a typed validation or execution result to a command
 disposition, message, and diagnostics; a transaction's admitted and retained outcomes stay
-distinct from a new execution. `DESCRIBE TRANSACTION` and `SHOW TRANSACTIONS` read beside an
-attached transaction only as separate requests; combining either read with another statement
+distinct from a new execution. [Command
+Dispositions](./client-session-protocol.md#command-dispositions) defines each disposition, the phase
+that produces it, and what a client may conclude from it, and typed request rejections are covered
+in [Rejections](./client-session-protocol.md#rejections). `DESCRIBE TRANSACTION` and
+`SHOW TRANSACTIONS` read beside an attached transaction only as separate requests; combining either read with another statement
 returns a session planning diagnostic before anything enters the queue. An incomplete impact
 report carries its planning diagnostics and cannot supply a commit preview. A stale preview is a
 recoverable command disposition that applies no effects and tells the client to refresh its
