@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 
 use error_stack::Report;
+use meticulous::OptionExt as _;
 use thiserror::Error;
 use url::{Position, Url};
 
@@ -100,11 +101,11 @@ impl HttpOrigin {
         if parsed.origin() != self.0.origin() || parsed.path().starts_with("//") {
             return Err(Report::new(HttpRequestFieldError::Target));
         }
-        let target = &parsed[Position::BeforePath..Position::AfterQuery];
-        if target.len() > 8 * 1024 {
+        let target = HttpTarget { url: parsed };
+        if target.as_str().len() > 8 * 1024 {
             return Err(Report::new(HttpRequestFieldError::Target));
         }
-        Ok(HttpTarget(target.to_string()))
+        Ok(target)
     }
 }
 
@@ -134,12 +135,22 @@ impl HttpMethod {
     }
 }
 
+/// A request target normalized on the origin it was parsed against, which it cannot leave.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HttpTarget(String);
+pub struct HttpTarget {
+    /// The origin followed by the normalized path and query.
+    url: Url,
+}
 
 impl HttpTarget {
+    /// The normalized path and query, exactly as the request line carries them.
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.url[Position::BeforePath..Position::AfterQuery]
+    }
+
+    /// The absolute URL a request is sent to: the origin followed by this target.
+    pub fn url(&self) -> &Url {
+        &self.url
     }
 }
 
@@ -203,7 +214,10 @@ pub struct HttpApplicationHeaders {
 }
 
 impl HttpApplicationHeaders {
-    pub fn write(
+    /// Writes `value` under `name`, replacing the value an earlier write gave the same name. A
+    /// write that would take the headers past 128 names, or whose name and value together exceed
+    /// 32 KiB, is refused and changes nothing.
+    pub fn insert(
         &mut self,
         name: HttpHeaderName,
         value: HttpHeaderValue,
@@ -223,24 +237,30 @@ impl HttpApplicationHeaders {
         Ok(())
     }
 
+    /// Checks the 32 KiB bound on every retained name and value together, once every invocation
+    /// has replaced any earlier value written under the same name.
     pub fn validate_total(&self) -> Result<(), Report<HttpRequestFieldError>> {
-        // The map is bounded at 128 entries. The total is checked after every invocation has
-        // replaced any earlier value with the same name.
-        let mut bytes = 0usize;
-        for (existing_name, existing_value) in &self.values {
-            let retained_size = existing_name
-                .0
-                .len()
-                .checked_add(existing_value.0.len())
-                .ok_or_else(|| Report::new(HttpRequestFieldError::HeaderLimit))?;
-            bytes = bytes
-                .checked_add(retained_size)
-                .ok_or_else(|| Report::new(HttpRequestFieldError::HeaderLimit))?;
-        }
-        if bytes > 32 * 1024 {
+        if self.field_bytes() > 32 * 1024 {
             return Err(Report::new(HttpRequestFieldError::HeaderLimit));
         }
         Ok(())
+    }
+
+    /// The UTF-8 bytes of every retained name and value.
+    pub fn field_bytes(&self) -> usize {
+        // `insert` admits at most 128 fields of at most 32 KiB each, so no sum below overflows.
+        let mut bytes = 0usize;
+        for (name, value) in &self.values {
+            let field = name
+                .0
+                .len()
+                .checked_add(value.0.len())
+                .assured("insert admits a field of at most 32 KiB");
+            bytes = bytes
+                .checked_add(field)
+                .assured("insert admits at most 128 fields of at most 32 KiB each");
+        }
+        bytes
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&HttpHeaderName, &HttpHeaderValue)> {
@@ -271,7 +291,7 @@ fn http_token_byte(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::{OptionExt as _, ResultExt as _};
+    use meticulous::ResultExt as _;
 
     use super::*;
 
@@ -296,6 +316,11 @@ mod tests {
                 target
             );
         }
+        let target = origin
+            .target("/v1/a/../events?")
+            .assured("a dot segment and an empty query form a valid origin-relative target");
+        assert_eq!(target.as_str(), "/v1/events?");
+        assert_eq!(target.url().as_str(), "https://api.example.com/v1/events?");
         for source in [
             "//other.example/events",
             "/a/..//events",
@@ -329,13 +354,13 @@ mod tests {
 
         let mut headers = HttpApplicationHeaders::default();
         headers
-            .write(
+            .insert(
                 HttpHeaderName::parse("X-Key").assured("X-Key is a valid application field name"),
                 HttpHeaderValue::parse("first").assured("first is a valid field value"),
             )
             .assured("one short application header is within both envelope limits");
         headers
-            .write(
+            .insert(
                 HttpHeaderName::parse("x-key").assured("x-key is a valid application field name"),
                 HttpHeaderValue::parse("second").assured("second is a valid field value"),
             )
@@ -354,7 +379,7 @@ mod tests {
             .assured("ASCII letter bytes are permitted in a header value");
         assert!(
             headers
-                .write(
+                .insert(
                     HttpHeaderName::parse("X-Other").assured("valid name"),
                     oversized
                 )
@@ -390,19 +415,19 @@ mod tests {
             let name = HttpHeaderName::parse(&format!("X-{index}"))
                 .assured("an ASCII alphanumeric application header name is valid");
             headers
-                .write(name, value.clone())
+                .insert(name, value.clone())
                 .assured("up to 128 short headers fit the count and byte bounds");
         }
         let next =
             HttpHeaderName::parse("X-next").assured("X-next is a valid application header name");
-        assert!(headers.write(next, value).is_err());
+        assert!(headers.insert(next, value).is_err());
 
         let replacement =
             HttpHeaderName::parse("x-0").assured("x-0 is a valid application header name");
         let replacement_value =
             HttpHeaderValue::parse("replacement").assured("replacement is a valid header value");
         headers
-            .write(replacement, replacement_value)
+            .insert(replacement, replacement_value)
             .assured("replacing one existing header does not increase the count past 128");
         assert_eq!(headers.iter().count(), 128);
 
@@ -410,20 +435,20 @@ mod tests {
         let large = HttpHeaderValue::parse(&"a".repeat(20 * 1024))
             .assured("ASCII letters are valid header-value bytes");
         sized
-            .write(
+            .insert(
                 HttpHeaderName::parse("X-One").assured("valid application header name"),
                 large.clone(),
             )
             .assured("an individual header below 32 KiB is valid");
         sized
-            .write(
+            .insert(
                 HttpHeaderName::parse("X-Two").assured("valid application header name"),
                 large,
             )
             .assured("each individual header is below 32 KiB");
         assert!(sized.validate_total().is_err());
         sized
-            .write(
+            .insert(
                 HttpHeaderName::parse("x-one").assured("valid application header name"),
                 HttpHeaderValue::parse("short").assured("valid header value"),
             )
@@ -431,5 +456,9 @@ mod tests {
         sized
             .validate_total()
             .assured("the replacement brings the final envelope below 32 KiB");
+        assert_eq!(
+            sized.field_bytes(),
+            "x-one".len() + "short".len() + "x-two".len() + 20 * 1024
+        );
     }
 }

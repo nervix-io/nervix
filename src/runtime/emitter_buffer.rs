@@ -1,9 +1,10 @@
 //! The batches an emitter holds between receiving and publishing them.
 //!
 //! Layer: data plane.
-//! - **Owns.** The emitter's buffer of released batches with their source relay and branch,
+//! - **Owns.** The emitter's buffer of released batches with their source relay and branch, the
+//!   request an HTTP emitter admitted each row with and what a later rejection of the row reads,
 //!   message and byte accounting, where every row stands in its publication, the batch payloads
-//!   retained for the rows they carry, and flush cadence.
+//!   and HTTP requests retained for the rows they carry, and flush cadence.
 //! - **Depends on.** Relay batches and their acknowledgements, the emitter's flush policy, and the
 //!   domain clock its cadence is resolved against.
 //! - **Must not know.** Which connector publishes the batches, how their rows are encoded or
@@ -68,6 +69,9 @@ pub(super) struct EmitterPublishBatch {
     headers: Option<Vec<EmitterHeaders>>,
     /// The ordering group of every row, absent when the emitter declares none.
     ordering_groups: Option<OrderingGroups>,
+    /// The request every row was admitted with, present only for an emitter that publishes through
+    /// an HTTP sink.
+    http_requests: Option<AdmittedHttpRequests>,
     /// Where every row stands in its publication.
     rows: Vec<BufferedRow>,
 }
@@ -79,8 +83,8 @@ enum BufferedRow {
     /// No attempt has prepared the row for its sink yet, or the attempt that did left it for the
     /// next one.
     Pending,
-    /// A batch payload the emitter retains carries the row, so only the sink's answer for that
-    /// payload resolves it.
+    /// A batch payload or HTTP request the emitter retains carries the row, so only the sink's
+    /// answer for it resolves the row.
     Prepared,
     /// The row was delivered, or rejected once its message error was delivered.
     Resolved,
@@ -105,6 +109,7 @@ impl EmitterPublishBatch {
             execution_now,
             headers: None,
             ordering_groups: None,
+            http_requests: None,
             rows: vec![BufferedRow::Pending; row_count],
         }
     }
@@ -130,6 +135,7 @@ impl EmitterPublishBatch {
             execution_now,
             headers,
             ordering_groups: None,
+            http_requests: None,
             rows: vec![BufferedRow::Pending; row_count],
         })
     }
@@ -162,6 +168,60 @@ impl EmitterPublishBatch {
         }
         self.ordering_groups = Some(groups);
         Ok(self)
+    }
+
+    /// This batch with the request each of its rows was admitted with.
+    pub(super) fn with_http_requests(
+        mut self,
+        requests: AdmittedHttpRequests,
+    ) -> EmitterRuntimeResult<Self> {
+        let row_count = self.batch.batch.batch().num_rows();
+        let request_count = requests.request_count();
+        if request_count != row_count {
+            return Err(Report::new(EmitterRuntimeError::HttpRequestCountMismatch {
+                request_count,
+                row_count,
+            }));
+        }
+        self.http_requests = Some(requests);
+        Ok(self)
+    }
+
+    /// The request fields row `row` was admitted with.
+    pub(super) fn http_request(&self, row: usize) -> EmitterRuntimeResult<&HttpRequestFields> {
+        let requests = match &self.http_requests {
+            Some(requests) => requests,
+            None => {
+                return Err(Report::new(EmitterRuntimeError::MissingHttpRequest { row }));
+            }
+        };
+        requests
+            .request(row)
+            .ok_or_else(|| Report::new(EmitterRuntimeError::MissingHttpRequest { row }))
+    }
+
+    /// What the message error of row `row` reads besides the error once the row is rejected after
+    /// admission. An HTTP request's error reads its original source record, its attempted codec
+    /// record and the materialized state its batch was admitted with; any other row's reads the
+    /// row as this batch holds it.
+    pub(super) fn rejected_record_input(
+        &self,
+        row: usize,
+    ) -> EmitterRuntimeResult<RejectedRecordInput> {
+        if let Some(requests) = &self.http_requests {
+            return requests
+                .rejected_record(&self.batch, row)
+                .change_context(EmitterRuntimeError::EncodeBatch);
+        }
+        let record = self
+            .batch
+            .runtime_row(row)
+            .change_context(EmitterRuntimeError::EncodeBatch)?;
+        Ok(RejectedRecordInput {
+            record,
+            partial_output: None,
+            materialized_state: HashMap::default(),
+        })
     }
 
     /// The ordering group row `row` is published under, absent when the emitter declares none, or
@@ -201,11 +261,17 @@ impl EmitterPublishBatch {
             Some(groups) => groups.estimated_bytes(),
             None => 0,
         };
+        let request_bytes = match &self.http_requests {
+            Some(requests) => requests.estimated_bytes(),
+            None => 0,
+        };
         self.batch
             .estimated_bytes()
             .checked_add(header_bytes)
             .assured(BYTES_IN_MEMORY)
             .checked_add(group_bytes)
+            .assured(BYTES_IN_MEMORY)
+            .checked_add(request_bytes)
             .assured(BYTES_IN_MEMORY)
     }
 
@@ -293,8 +359,8 @@ impl EmitterPublishBatch {
         Ok(())
     }
 
-    /// Records that a retained batch payload carries `row`, which only the sink's answer for that
-    /// payload resolves from now on.
+    /// Records that a retained batch payload or HTTP request carries `row`, which only the sink's
+    /// answer for it resolves from now on.
     pub(super) fn mark_prepared(&mut self, row: usize) -> EmitterRuntimeResult<()> {
         let row_count = self.rows.len();
         let state = self.rows.get_mut(row).ok_or_else(|| {
@@ -428,24 +494,29 @@ impl PublishReport {
 ///
 /// The buffer is the one owner of everything a failed attempt leaves behind: the batches, whose
 /// acknowledgements the retry keeps alive, where each of their rows stands, and the batch payloads
-/// an attempt already offered to the sink without learning their outcome. Its connector may be
-/// reopened between attempts, so none of that lives with the connector.
+/// or HTTP requests an attempt already offered to the sink without learning their outcome. Its
+/// connector may be reopened between attempts, so none of that lives with the connector.
 #[derive(Default)]
 pub(super) struct EmitterBatchBuffer {
     flush_policy: Option<RuntimeFlushPolicy>,
     pending: Vec<EmitterPublishBatch>,
-    prepared: PreparedPayloads,
+    /// The batch payloads a record sink was handed and has not answered for.
+    payloads: PreparedPayloads<EncodedPayload>,
+    /// The requests an HTTP sink was handed and has not answered for. An emitter publishes through
+    /// one sink, so at most one of the two holds anything.
+    requests: PreparedPayloads<PreparedHttpRequest>,
     pending_messages: u64,
     pending_bytes: u64,
     cadence: BranchBufferTimer,
     buffered_messages: Arc<EmitterBufferedMessages>,
 }
 
-/// What one flush hands the emitter's sink: the buffered batches, and the batch payloads earlier
-/// attempts prepared from their rows and retained.
+/// What one flush hands the emitter's sink: the buffered batches, and the batch payloads or HTTP
+/// requests earlier attempts prepared from their rows and retained.
 pub(super) struct EmitterPublication<'a> {
     pub(super) batches: &'a mut [EmitterPublishBatch],
-    pub(super) prepared: &'a mut PreparedPayloads,
+    pub(super) payloads: &'a mut PreparedPayloads<EncodedPayload>,
+    pub(super) requests: &'a mut PreparedPayloads<PreparedHttpRequest>,
 }
 
 impl EmitterBatchBuffer {
@@ -457,7 +528,8 @@ impl EmitterBatchBuffer {
         Self {
             flush_policy: context.parse_flush_policy("emitter", flush_policy),
             pending: Vec::new(),
-            prepared: PreparedPayloads::default(),
+            payloads: PreparedPayloads::default(),
+            requests: PreparedPayloads::default(),
             pending_messages: 0,
             pending_bytes: 0,
             cadence: BranchBufferTimer::default(),
@@ -517,7 +589,8 @@ impl EmitterBatchBuffer {
     pub(super) fn publication_mut(&mut self) -> EmitterPublication<'_> {
         EmitterPublication {
             batches: self.pending.as_mut_slice(),
-            prepared: &mut self.prepared,
+            payloads: &mut self.payloads,
+            requests: &mut self.requests,
         }
     }
 
@@ -541,7 +614,8 @@ impl EmitterBatchBuffer {
         Self {
             flush_policy: Some(flush_policy),
             pending: Vec::new(),
-            prepared: PreparedPayloads::default(),
+            payloads: PreparedPayloads::default(),
+            requests: PreparedPayloads::default(),
             pending_messages: 0,
             pending_bytes: 0,
             cadence: BranchBufferTimer::default(),
@@ -621,11 +695,12 @@ impl EmitterBatchBuffer {
         AckSet::merged(self.pending.iter().map(EmitterPublishBatch::merged_acks))
     }
 
-    /// Takes every batch back, together with the rows the retained payloads carry, which are still
-    /// unresolved in the batches returned.
+    /// Takes every batch back, together with the rows the retained payloads and requests carry,
+    /// which are still unresolved in the batches returned.
     pub(super) fn drain_pending(&mut self) -> Vec<EmitterPublishBatch> {
         let pending = std::mem::take(&mut self.pending);
-        self.prepared.clear();
+        self.payloads.clear();
+        self.requests.clear();
         self.pending_messages = 0;
         self.pending_bytes = 0;
         self.cadence.clear();
@@ -635,7 +710,8 @@ impl EmitterBatchBuffer {
 
     pub(super) fn clear(&mut self) {
         self.pending.clear();
-        self.prepared.clear();
+        self.payloads.clear();
+        self.requests.clear();
         self.pending_messages = 0;
         self.pending_bytes = 0;
         self.cadence.clear();
@@ -806,6 +882,50 @@ mod tests {
                 header_count: 0,
                 row_count: 1,
             }
+        );
+    }
+
+    #[test]
+    fn a_batch_counts_the_request_fields_of_its_rows() {
+        let origin = nervix_models::HttpOrigin::parse("https://api.example.com")
+            .expect("the test origin has an HTTPS scheme and a host");
+        let mut headers = nervix_models::HttpApplicationHeaders::default();
+        headers
+            .insert(
+                nervix_models::HttpHeaderName::parse("X-Key").expect("a valid field name"),
+                nervix_models::HttpHeaderValue::parse("abc").expect("a valid field value"),
+            )
+            .expect("one short header is within the envelope");
+        let fields = HttpRequestFields {
+            method: nervix_models::HttpMethod::parse(
+                "POST",
+                nervix_models::HttpBodyMode::WithoutBody,
+            )
+            .expect("POST is a valid method"),
+            target: origin.target("/events").expect("an origin-relative target"),
+            headers,
+        };
+        let expected: u64 =
+            ("POST".len() + "/events".len() + "x-key".len() + "abc".len()).arch_into();
+        assert_eq!(fields.estimated_bytes(), expected);
+        let request_bytes = fields.estimated_bytes();
+        let plain = EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100));
+        let with_requests =
+            EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100))
+                .with_http_requests(AdmittedHttpRequests::published(vec![fields]))
+                .expect("one request for the one row");
+
+        assert_eq!(
+            with_requests.estimated_bytes(),
+            plain.estimated_bytes() + request_bytes
+        );
+        assert_eq!(
+            with_requests
+                .http_request(0)
+                .expect("the row has its request")
+                .target
+                .as_str(),
+            "/events"
         );
     }
 
