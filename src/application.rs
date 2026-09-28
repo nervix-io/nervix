@@ -1689,26 +1689,21 @@ impl Application {
                 }))
                 .buffer_unordered(MAX_CONCURRENT_HEALTH_PROBES);
                 tokio::pin!(probe_results);
-                let topology_changed = loop {
+                // Gossip revisions can arrive faster than a silent peer's probe deadline.
+                // Finish the round so those revisions cannot suppress failure observations.
+                // Results are fenced against the current identity and endpoint when published;
+                // a pending topology update starts the next round without the cadence wait.
+                loop {
                     tokio::task::consume_budget().await;
                     tokio::select! {
                         _ = health_shutdown.cancelled() => return,
-                        changed = health_topology.changed() => {
-                            changed.assured(
-                                "the cluster handle retains its Chitchat state sender for the server lifetime",
-                            );
-                            break true;
-                        }
                         result = probe_results.next() => match result {
                             Some(result) => {
                                 cluster_for_health.record_peer_health_result(result).await;
                             }
-                            None => break false,
+                            None => break,
                         }
                     }
-                };
-                if topology_changed {
-                    continue;
                 }
                 tokio::select! {
                     _ = health_shutdown.cancelled() => break,

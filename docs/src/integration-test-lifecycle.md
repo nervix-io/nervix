@@ -125,7 +125,7 @@ second module runs the operation, it is named after the owner.
 | Convergence of a restarted real-process cluster | `server_process_cluster.rs` | 120 seconds, with each status request capped at 10 seconds | The step fails with the last status or typed request failure from every member |
 | A one-shot CLI command or a subscription output assertion | `tests/scenarios.rs` | 60 seconds for a command, 30 seconds for an expected subscription line | The step fails with the process result or retained output lines |
 | One draw from the port pool | `port_pool.rs` | 65,536 consecutive draws that land on reserved ports | The draw fails with the pool exhausted |
-| The whole scenario run | `suite_watchdog.rs` | 37 minutes, injectable | Every active scenario is reported, live nodes get a 60-second cleanup window, and the process exits `124` |
+| The whole scenario run | `suite_watchdog.rs` | 40 minutes, injectable | Every active scenario is reported, live nodes get a 60-second cleanup window, and the process exits `124` |
 | Stopping the test dependencies after the run | `suite_watchdog.rs` | 2 minutes | The containers are left to the runner |
 | Dropping the runtime after the run | `suite_watchdog.rs`, run by `tests/scenarios.rs` | 60 seconds | Blocking tasks still running are abandoned |
 
@@ -174,7 +174,7 @@ ordering fails to build rather than producing a harness that outwaits itself.
 | Startup attempt, 36 seconds | A policy input | The slowest healthy node startup, 24.2 seconds, fits in one attempt; the same 3,465 startups had a 2.0-second median and a 4.3-second 99th percentile |
 | Node startup, 84 seconds | Two full attempts, each 36 seconds of readiness, a 5-second cleanup slice, and a 1-second pause | Stays under a 90-second ceiling |
 | Cluster cleanup, 60 seconds | The slowest healthy cluster stop, rounded up to 15 seconds, times a headroom of 4 | 12.2 seconds at the slowest over 163 cleanups, with a 0.15-second median and 1.6 seconds at the 90th percentile |
-| Suite, 37 minutes | The 60-minute job limit, less 18 minutes of work before the suite and a 5-minute reserve after it | Outlasts the slowest healthy suite, 21m08s over five jobs and taken as 22 minutes, by 15 minutes of slack |
+| Suite, 40 minutes | The 75-minute job limit, less 30 minutes of work before the suite and a 5-minute reserve after it | Outlasts the slowest healthy suite, 21m08s over five jobs and taken as 22 minutes, by at least 15 minutes of slack |
 
 The assertions keep these orderings, among others:
 
@@ -188,11 +188,10 @@ The assertions keep these orderings, among others:
 - The suite watchdog's cleanup window fits inside the reserve, and so do the dependency stop and the
   runtime shutdown together.
 
-The suite derivation holds with no margin: 22 minutes of slowest healthy suite plus 15 minutes of
-slack is exactly the 37-minute budget. Raising either measured input, and both the suite and the
-work before it grow with the workspace, fails that assertion at compile time until the job limit or
-the slack changes. Measure the inputs again whenever the suite, its concurrency, or the runner
-changes.
+The suite derivation leaves three minutes beyond the required 22 minutes of slowest healthy suite
+plus 15 minutes of slack. Both the suite and the work before it grow with the workspace; an input
+that consumes that margin fails the assertion at compile time until the surrounding budget changes.
+Measure the inputs again whenever the suite, its concurrency, or the runner changes.
 
 ## Status Requests And Status Waits
 
@@ -733,7 +732,7 @@ minutes of the limit and keeps the same 5-minute reserve.
 
 ## The Suite Watchdog
 
-The scenario run has one budget, 37 minutes from the moment it starts, which `--suite-budget` or
+The scenario run has one budget, 40 minutes from the moment it starts, which `--suite-budget` or
 `NERVIX_TEST_SUITE_BUDGET` replaces with a duration such as `4m`. The budget is a clock rather than
 a count of failures. Cucumber's fail-fast stops scheduling scenarios and leaves those already
 running where they are, so it cannot end a run whose step, diagnostic, or node stop never returns;
@@ -783,12 +782,16 @@ a consensus commit delay that only its scenario's cleanup releases.
 
 The suite runs inside `just test-coverage` in the CI `tests` job, after the builds and the test
 binaries that precede it, the focused harness regressions among them. The job's `timeout-minutes` is
-60, and the budget is derived from it so that the job ends on its own.
+75, and the budget is derived from it so that the job ends on its own.
+
+Local coverage iteration uses `just coverage-scenarios <lcov-path> <scenario-options>` for a fresh
+measurement. `just coverage-scenarios-append <lcov-path> <scenario-options>` retains those profiles
+and reuses unchanged instrumented artifacts when adding another selection of scenarios.
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |
-| Work before the scenario binary starts | 18 minutes | Measured at 6m28s, 7m50s, 9m25s, 12m21s, and 15m26s over five jobs, and rising with the workspace |
-| The scenario run | 37 minutes | What the limit leaves |
+| Work before the scenario binary starts | 30 minutes | Measured at 6m28s to 15m26s over five earlier jobs, then 25m23s in run 36456248186 on 2026-09-28; the latter exceeded the previous setup allowance and let the outer job limit kill the suite before its watchdog fired |
+| The scenario run | 40 minutes | What the limit leaves |
 | After the budget expires | 5-minute reserve | At most 60 seconds of cleanup window, 2 minutes of dependency stop, and 60 seconds of runtime shutdown, four minutes in all, and then the log upload, measured at 2 to 3 seconds with 8 seconds of steps after it |
 
 A healthy suite finishes inside its budget and exits `0` or reports its failures. A wedged one exits
@@ -909,7 +912,7 @@ Its limits:
 - When a cluster construction fails, the nodes it started are stopped one after another under the
   scenario-driven stop watchdog rather than under the cleanup budget.
 - A construction's convergence checks are separate 40-second waits after its startup deadline.
-- The suite budget's derivation holds with no margin.
+- The suite budget leaves three minutes beyond its measured healthy duration and required slack.
 
 ## Qualification Evidence
 

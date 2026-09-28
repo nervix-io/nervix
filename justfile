@@ -588,6 +588,13 @@ coverage-scenarios output *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
+# Add selected scenarios to the current coverage profiles without rebuilding unchanged artifacts.
+coverage-scenarios-append output *args: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov --no-clean --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
 # Collect the changed DNS client units and their public one-/three-node paths into one LCOV
 # profile so patch coverage can be checked before opening the PR.
 coverage-dns-clients output="target/dns-clients.lcov": tests-deps
