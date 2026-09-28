@@ -1,4 +1,85 @@
 Feature: Kafka emission
+  @json_columnar_emission
+  Scenario Outline: Kafka JSON emission preserves exact bytes for escaped and clean columns
+    Given Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "columnar_json_out_{{test_id}}" is observed
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA incoming_event (
+        clean STRING,
+        escaped STRING,
+        secret STRING SENSITIVE,
+        note STRING OPTIONAL,
+        occurred_at DATETIME,
+        blob BYTES
+      );
+      CREATE WIRE JSON SCHEMA incoming_wire MODE STRICT (
+        clean string,
+        escaped string,
+        secret string,
+        note string OPTIONAL,
+        occurred_at string,
+        blob BYTES
+      );
+      CREATE CODEC incoming_codec FROM WIRE JSON SCHEMA incoming_wire TO SCHEMA incoming_event
+        ENCODE occurred_at AS RFC3339;
+      CREATE SCHEMA outgoing_event (
+        clean STRING,
+        escaped STRING,
+        note STRING OPTIONAL,
+        occurred_at DATETIME,
+        blob BYTES
+      );
+      CREATE WIRE JSON SCHEMA outgoing_wire MODE STRICT (
+        clean string,
+        escaped string,
+        note string OPTIONAL,
+        occurred_at string,
+        blob BYTES
+      );
+      CREATE CODEC outgoing_codec FROM WIRE JSON SCHEMA outgoing_wire TO SCHEMA outgoing_event
+        ENCODE occurred_at AS RFC3339;
+      CREATE RELAY events SCHEMA incoming_event UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR http_events
+        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING incoming_codec
+        TO events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE EMITTER kafka_events FROM events
+        TO KAFKA kafka_main TOPIC columnar_json_out_{{test_id}}
+          MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING outgoing_codec
+        INHERIT ALL EXCEPT secret
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"clean":"plain café","escaped":"quote \" slash \\ newline \n","secret":"hidden","note":null,"occurred_at":"2023-11-14T22:13:20.123456789+00:00","blob":"AP8="}
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"clean":"second","escaped":"no escapes","secret":"also hidden","note":"present","occurred_at":"2023-11-14T22:13:20+00:00","blob":""}
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"clean":"plain café","escaped":"quote \" slash \\ newline \n","occurred_at":"2023-11-14T22:13:20.123456789+00:00","blob":"AP8="}
+      {"clean":"second","escaped":"no escapes","note":"present","occurred_at":"2023-11-14T22:13:20+00:00","blob":""}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Kafka emitter filter-map publishes message fields and headers
     Given Kafka is running
     And MQTT is running
