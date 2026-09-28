@@ -6491,6 +6491,7 @@ dependencies = [
  "reedline",
  "rpassword",
  "serde_json",
+ "strum 0.26.3",
  "thiserror 2.0.21",
  "tokio",
  "triomphe",

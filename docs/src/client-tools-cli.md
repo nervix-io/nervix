@@ -136,6 +136,24 @@ A domain clock line follows every change after the attach reply. When the server
 attachment, or the session holding it is interrupted and the clock is attached again on the next
 session, the line reads `[events] domain clock [<domain>] notice: ...` with the reason.
 
+The REPL prints these lines when it draws its next prompt: after the statement that is running
+finishes, or when you press Enter on an empty line.
+
+Output keeps printing across reconnects. When the session is lost, the next statement you run opens
+a new one; the client also opens one at once while a subscription or a followed clock waits to be
+restored. Server notices then resume with the new session, rows arrive from every subscription
+restored on it or opened after it, and a followed clock prints its state again once it is attached
+there. When the client cannot open a session within its 120-second retry deadline, a line names
+what is waiting and why, and the client keeps trying:
+
+```text
+[events] notice: subscription events could not resume yet: failed to connect to server; the client keeps trying
+```
+
+If server notices arrive faster than the CLI reads them, the client drops the ones it held and
+`[events] notice: server notices were dropped because they arrived faster than they were read`
+marks the gap; the notices after it keep printing.
+
 ### Leaving
 
 `exit`, `quit`, `Ctrl-D`, or `Ctrl-C`.
@@ -239,6 +257,11 @@ nervix-cli --domain quickstart subscribe sampled orders \
 
 `--dropping` and `--blocking` are mutually exclusive. Subscription semantics, sampling, and
 backpressure are covered in [Sessions](sessions.md).
+
+The subcommand prints server notices beside the rows, and keeps printing both across reconnects:
+the client opens the subscription again on its next session, reports the gap as an interruption
+notice, and resumes the notices of the new session, as described in [Asynchronous
+Output](#asynchronous-output).
 
 ## Cluster Node Administration
 

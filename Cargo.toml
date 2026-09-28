@@ -227,7 +227,7 @@ mysql_async = { workspace = true, features = ["default-rustls"] }
 nervix-client-core = { workspace = true }
 nervix-client-ffi = { workspace = true }
 nervix-test-environment = { workspace = true }
-nix = { workspace = true, features = ["signal"] }
+nix = { workspace = true, features = ["fs", "signal", "term"] }
 playwright-rs = { workspace = true }
 pulsar = { workspace = true }
 rcgen = { workspace = true }

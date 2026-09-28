@@ -690,7 +690,10 @@ session into that domain's observations as well: a `ClusterObserved` summary and
 entities, at once and then every 500 milliseconds. A session that selects no domain receives
 neither. Server notices report runtime and control-plane errors and cluster events as text for
 display. A session that falls behind the node's notice bus skips the notices it missed; the node
-logs how many.
+logs how many. The Rust client holds at most 128 notices and 1 MiB its caller has not read. A
+notice that does not fit drops the ones held, and the caller's next read reports that gap before
+the notices that follow it. Notices end with the session that delivered them, and the client's
+notice stream continues with the next session it opens.
 
 There is no separate discovery request. A client learns where the leader is from these observations
 and from the redirects in its replies. Endpoints come from the cluster's discovery, which carries
@@ -753,6 +756,12 @@ it:
 
 Only then does it repeat outstanding commands, each under its original execution reference and, for
 an append, its original expected position.
+
+The client's event streams outlive the session. A caller reading subscription events, clock events,
+or notices keeps reading across the replacement: the interruptions of step 3 mark the gap, and
+events of the new session follow them. Reading subscription or clock events opens a new session
+while one waits to be restored; reading notices never does, and waits for the session something
+else opens. A failed attempt to open one is returned to the reader, and its next read tries again.
 
 ```mermaid
 stateDiagram-v2
@@ -973,8 +982,10 @@ subscription's queued events, reports a consumer overflow, and marks the subscri
 `DeliveryFailed`; the reader that routes replies never waits. Because one subscription may hold only
 2 MiB, a single Row frame above 2 MiB, which the server may send, overflows it at once. The CLI
 bounds its terminal output to 128 lines and 1 MiB, cuts a line above 8 KiB, and reports how many
-lines it omitted. The web console keeps at most 256 lines and 256 KiB per REPL and per subscription
-tab, and marks where it omitted earlier lines.
+lines it omitted. It keeps reading every stream across reconnects, and when the client cannot
+reopen a session to restore subscriptions or clocks it prints why while the client keeps trying.
+The web console keeps at most 256 lines and 256 KiB per REPL and per subscription tab, and marks
+where it omitted earlier lines.
 
 ## Domain Clock Attachment
 
