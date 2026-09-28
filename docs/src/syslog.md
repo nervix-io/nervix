@@ -259,17 +259,22 @@ external emission.
 ### UDP
 
 Each encoded record is one datagram. An encoded payload above 65,507 bytes is a message error.
+With an emitter `BATCH` clause and a `SYSLOG` codec, the codec writes one RFC 5424 message per
+batch. Its `MSG` is a JSON array of the members' complete RFC 5424 messages, and the outer header
+contains the fields every member shares. Each complete batch frame is one datagram and is checked
+against the same UDP limit.
 
 ### TCP
 
 The emitter keeps one persistent connection. `octet-counting` writes the decimal byte length, one
-space, and the payload. `non-transparent` writes the payload followed by LF; an encoded payload
+space, and the payload. It rejects a payload whose count needs more than ten digits before writing.
+`non-transparent` writes the payload followed by LF; an encoded payload
 that already contains LF is a message error in this mode.
 
 ### TLS
 
 The emitter uses octet-counted framing over one verified TLS connection. RFC 5425 does not permit
-non-transparent TLS framing.
+non-transparent TLS framing. The same ten-digit count limit applies.
 
 For every transport, success means the local socket accepted and flushed the complete frame. No
 remote delivery acknowledgment exists. Connection establishment and write failures are

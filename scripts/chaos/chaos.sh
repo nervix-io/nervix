@@ -11,11 +11,13 @@ Usage:
   just chaos run rolling-restart --image IMAGE [--nodes 1|3] [--records N]
   just chaos run leader-crash --image IMAGE [--nodes 1|3] [--records N]
   just chaos run follower-crash|ingestor-owner-crash|emitter-owner-crash --image IMAGE [--records N]
+  just chaos run pause-resume --image IMAGE [--records N]
   just chaos cleanup --run-id RUN_ID
   just chaos self-test
 
 Run `just chaos run baseline --help` for all baseline options.
 Run `just chaos run rolling-restart --help` for rolling-restart options.
+Run `just chaos run pause-resume --help` for pause-resume options.
 EOF
 }
 
@@ -30,6 +32,7 @@ leader-crash  Observed leader SIGKILL, failover, and explicit Docker restart
 follower-crash  Observed follower SIGKILL and recovery (three-node)
 ingestor-owner-crash  Observed ingestor owner SIGKILL and placement recovery (three-node)
 emitter-owner-crash  Observed emitter owner SIGKILL and placement recovery (three-node)
+pause-resume  Short and failover-length Pumba pauses of the observed leader and execution owner (three-node)
 EOF
 }
 
@@ -62,6 +65,9 @@ case "${command_name}" in
                 ;;
             leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash)
                 exec "${script_dir}/run-crash.sh" --scenario "${scenario}" "$@"
+                ;;
+            pause-resume)
+                exec "${script_dir}/run-pause-resume.sh" "$@"
                 ;;
             *)
                 printf 'unknown chaos scenario: %s\n' "${scenario}" >&2

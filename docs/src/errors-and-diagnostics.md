@@ -228,6 +228,15 @@ contract, by naming a record the write did not carry or answering twice for one,
 error of any member. It fails the attempt without a retry, and the emitter's unresolved rows then
 follow `ON MESSAGE ERROR` as a failed publish.
 
+The Sentry sink rejects a final serialized event above its decompressed event limit before sending
+the envelope. The Syslog sink rejects a UDP datagram above its payload limit, a stream frame whose
+octet count needs more than ten digits, or an LF-bearing non-transparent TCP frame before writing.
+A batching OTEL sink measures the full protobuf Export request after mapping; if
+halving still leaves one source record above `MAX SIZE`, that record receives an external publish
+message error. Other members can be sent in bounded requests. An OTLP receiver's
+`partial_success` has no member identities, so it acknowledges the entire request and emits a
+warning instead of inventing per-record rejections.
+
 An HTTP emitter rejects a record at the first request field that fails, in the order it evaluates
 them: `METHOD`, `PATH`, and then each header write. A failed expression keeps the `evaluation`
 code and an invalid value has the `validation` code. Method and path failures report the `publish`
@@ -238,6 +247,16 @@ the emitter and the violated rule and never quotes the evaluated value. An admit
 its original source record and the materialized state its batch was admitted with until it
 completes, so every rejection of it after admission gives the handler the same input, state and
 attempted codec record that a request-field failure does.
+
+An HTTP endpoint's complete final `2xx` headers deliver the record. Other `3xx`/`4xx` statuses,
+except `401`, `403`, `407`, `408`, `425` and `429`, reject only their record with code `external`
+and operation `publish`; `101` has the same outcome. The rejection message includes the numeric
+status but no evaluated destination, headers or body. The exception statuses and `5xx` keep the
+request pending as infrastructure failures; `401`, `403` and `407` name authentication or
+authorization in their typed cause. DNS, connection, TLS, timeout, malformed or oversized response
+headers, invalid final framing and loss before complete final headers are infrastructure failures
+as well. The connector reports them without a request URL or sensitive response value. The emitter
+host owns their retry schedule and keeps the prepared request and ACK lease while they are pending.
 
 `ON MESSAGE ERROR` belongs to the route and handles record-specific work. Ingestor and emitter
 `ON GENERAL ERROR` handles node-wide source and sink failures. A WASM processor's node-wide `ON

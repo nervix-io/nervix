@@ -18,6 +18,8 @@
 //! than it sends and then stall, never answer, close the connection without answering, or write
 //! arbitrary bytes. The last three are how a scenario loses a response the endpoint already acted
 //! on, holds an attempt past its timeout, and sends framing no valid endpoint would.
+//! Generated field counts and value bytes can be set independently for the interim and final
+//! block. Capture times precede the scripted response, so timing assertions need no silence window.
 //!
 //! # Bounds
 //!
@@ -90,6 +92,11 @@ pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_CAPTURED_REQUESTS: usize = 4096;
 /// The most faults one receiver keeps. Faults beyond it are counted but not kept. A policy input.
 pub(crate) const MAX_RECORDED_FAULTS: usize = 256;
+/// The largest generated response header value the script permits. It reaches beyond the
+/// emitter's 64 KiB response limit without letting one scenario allocate without a bound.
+const MAX_SCRIPTED_HEADER_VALUE_BYTES: usize = 128 * 1024;
+/// Enough generated fields to exceed the emitter limit without unbounded fixture allocation.
+const MAX_SCRIPTED_HEADER_COUNT: usize = 512;
 /// The bytes one read takes from a connection.
 const READ_CHUNK_BYTES: usize = 16 * 1024;
 
@@ -148,9 +155,12 @@ pub(crate) struct ScriptedResponse {
     headers: Vec<ResponseHeader>,
     body: Vec<u8>,
     interim: Option<u16>,
+    interim_extra_headers: usize,
+    interim_header_value_bytes: Option<usize>,
     delay: Option<Duration>,
     body_delivery: BodyDelivery,
     extra_headers: usize,
+    header_value_bytes: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,9 +183,12 @@ impl ScriptedResponse {
             headers: Vec::new(),
             body: Vec::new(),
             interim: None,
+            interim_extra_headers: 0,
+            interim_header_value_bytes: None,
             delay: None,
             body_delivery: BodyDelivery::Complete,
             extra_headers: 0,
+            header_value_bytes: None,
         }
     }
 
@@ -190,9 +203,7 @@ impl ScriptedResponse {
         for header in &self.headers {
             head.extend_from_slice(format!("{}: {}\r\n", header.name, header.value).as_bytes());
         }
-        for index in 0..self.extra_headers {
-            head.extend_from_slice(format!("x-fixture-extra-{index}: extra\r\n").as_bytes());
-        }
+        Self::append_generated_headers(&mut head, self.extra_headers, self.header_value_bytes);
         if self.carries_content() {
             let declared = match self.body_delivery {
                 BodyDelivery::Complete => self.body.len(),
@@ -208,7 +219,34 @@ impl ScriptedResponse {
         head
     }
 
+    fn interim_head(&self) -> Option<Vec<u8>> {
+        let status = self.interim?;
+        let mut head = status_line(status).into_bytes();
+        Self::append_generated_headers(
+            &mut head,
+            self.interim_extra_headers,
+            self.interim_header_value_bytes,
+        );
+        head.extend_from_slice(b"\r\n");
+        Some(head)
+    }
+
+    fn append_generated_headers(head: &mut Vec<u8>, count: usize, value_bytes: Option<usize>) {
+        for index in 0..count {
+            head.extend_from_slice(format!("x-fixture-extra-{index}: extra\r\n").as_bytes());
+        }
+        if let Some(value_bytes) = value_bytes {
+            head.extend_from_slice(b"x-fixture-fill: ");
+            head.extend(std::iter::repeat_n(b'x', value_bytes));
+            head.extend_from_slice(b"\r\n");
+        }
+    }
+
     fn parse_clause(&mut self, clause: &str) -> Result<(), ReceiverScriptError> {
+        if let Some(bytes) = clause.strip_prefix("header value bytes ") {
+            self.header_value_bytes = Some(Self::header_value_size(bytes)?);
+            return Ok(());
+        }
         if let Some(header) = clause.strip_prefix("header ") {
             let Some((name, value)) = header.split_once(':') else {
                 return Err(ReceiverScriptError::Header {
@@ -223,6 +261,14 @@ impl ScriptedResponse {
         }
         if let Some(body) = clause.strip_prefix("body ") {
             self.body = body.as_bytes().to_vec();
+            return Ok(());
+        }
+        if let Some(count) = clause.strip_prefix("interim extra headers ") {
+            self.interim_extra_headers = Self::header_count(count)?;
+            return Ok(());
+        }
+        if let Some(bytes) = clause.strip_prefix("interim header value bytes ") {
+            self.interim_header_value_bytes = Some(Self::header_value_size(bytes)?);
             return Ok(());
         }
         if let Some(status) = clause.strip_prefix("interim ") {
@@ -244,15 +290,35 @@ impl ScriptedResponse {
             return Ok(());
         }
         if let Some(count) = clause.strip_prefix("extra headers ") {
-            self.extra_headers = count.parse().map_err(|source| ReceiverScriptError::Count {
-                text: count.to_string(),
-                source,
-            })?;
+            self.extra_headers = Self::header_count(count)?;
             return Ok(());
         }
         Err(ReceiverScriptError::UnknownClause {
             clause: clause.to_string(),
         })
+    }
+
+    fn header_count(text: &str) -> Result<usize, ReceiverScriptError> {
+        let count = Self::parse_count(text)?;
+        if count > MAX_SCRIPTED_HEADER_COUNT {
+            return Err(ReceiverScriptError::HeaderCount { count });
+        }
+        Ok(count)
+    }
+
+    fn parse_count(text: &str) -> Result<usize, ReceiverScriptError> {
+        text.parse().map_err(|source| ReceiverScriptError::Count {
+            text: text.to_string(),
+            source,
+        })
+    }
+
+    fn header_value_size(text: &str) -> Result<usize, ReceiverScriptError> {
+        let size = Self::parse_count(text)?;
+        if size > MAX_SCRIPTED_HEADER_VALUE_BYTES {
+            return Err(ReceiverScriptError::HeaderValueSize { size });
+        }
+        Ok(size)
     }
 }
 
@@ -290,7 +356,9 @@ pub(crate) enum ReceiverScriptError {
     Status { text: String },
     #[error(
         "response clause {clause:?} is not one of `header <name>: <value>`, `body <text>`, \
-         `interim <status>`, `after <duration>`, `stall body`, or `extra headers <count>`"
+         `interim <status>`, `interim extra headers <count>`, `interim header value bytes \
+         <count>`, `after <duration>`, `stall body`, `extra headers <count>`, or `header value \
+         bytes <count>`"
     )]
     UnknownClause { clause: String },
     #[error("header clause {clause:?} has no `:` between its name and value")]
@@ -307,6 +375,10 @@ pub(crate) enum ReceiverScriptError {
         #[source]
         source: ParseIntError,
     },
+    #[error("generated response header value of {size} bytes exceeds the receiver script limit")]
+    HeaderValueSize { size: usize },
+    #[error("{count} generated response headers exceed the receiver script limit")]
+    HeaderCount { count: usize },
     #[error("raw bytes {text:?} end inside an escape; use `\\r`, `\\n`, or `\\\\`")]
     Escape { text: String },
 }
@@ -367,12 +439,14 @@ fn unescape_raw(text: &str) -> Result<Vec<u8>, ReceiverScriptError> {
 
 /// One request exactly as the receiver read it. Two captures are equal when their request lines,
 /// their header fields in the order they arrived, and their bodies are byte for byte the same.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct CapturedRequest {
     pub(crate) method: String,
     pub(crate) target: String,
     headers: Vec<CapturedHeader>,
     pub(crate) body: Vec<u8>,
+    /// When the receiver finished reading the request, before its scripted response began.
+    pub(crate) received_at: Instant,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -380,6 +454,19 @@ struct CapturedHeader {
     name: String,
     value: Vec<u8>,
 }
+
+/// Byte equality deliberately excludes capture time so a retry can be compared with the
+/// request it repeats.
+impl PartialEq for CapturedRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.method == other.method
+            && self.target == other.target
+            && self.headers == other.headers
+            && self.body == other.body
+    }
+}
+
+impl Eq for CapturedRequest {}
 
 impl CapturedRequest {
     /// Every value sent under `name`, compared without ASCII case, in the order they arrived.
@@ -394,6 +481,7 @@ impl CapturedRequest {
 
 impl fmt::Display for CapturedRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(formatter, "received at {:?}", self.received_at)?;
         writeln!(formatter, "{} {}", self.method, self.target)?;
         for header in &self.headers {
             writeln!(
@@ -1130,9 +1218,7 @@ impl Connection {
                 () = tokio::time::sleep(delay) => {}
             }
         }
-        if let Some(interim) = response.interim {
-            let mut interim_head = status_line(interim).into_bytes();
-            interim_head.extend_from_slice(b"\r\n");
+        if let Some(interim_head) = response.interim_head() {
             self.write(stream, &interim_head).await?;
         }
         self.write(stream, &response.head()).await?;
@@ -1232,6 +1318,7 @@ impl Connection {
                 target: head.target,
                 headers: head.headers,
                 body,
+                received_at: Instant::now(),
             },
             closes: head.closes,
         }))

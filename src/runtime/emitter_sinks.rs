@@ -19,7 +19,9 @@ use nervix_connector_mongodb::{MongoDbSink, MongoDbSinkConfig};
 use nervix_connector_mqtt::{MqttSink, MqttSinkConfig};
 use nervix_connector_mysql::{MySqlSink, MySqlSinkConfig};
 use nervix_connector_nats::{NatsSink, NatsSinkConfig};
-use nervix_connector_otel::{OtelLiteral, OtelResourceAttribute, OtelSink, OtelSinkConfig};
+use nervix_connector_otel::{
+    OtelBatchLimits, OtelLiteral, OtelResourceAttribute, OtelSink, OtelSinkConfig,
+};
 use nervix_connector_postgres::{PostgresSink, PostgresSinkConfig};
 use nervix_connector_pulsar::{PulsarSink, PulsarSinkConfig};
 use nervix_connector_rabbitmq::{RabbitMqSink, RabbitMqSinkConfig};
@@ -347,6 +349,10 @@ impl EmitterSinkStarter {
                     config: sink.client.config.entries.clone(),
                     dns: context.dns()?,
                     signal: sink.signal.clone(),
+                    batch: sink.batch.map(|policy| OtelBatchLimits {
+                        max_messages: policy.max_messages.get(),
+                        max_size: policy.max_size.bytes(),
+                    }),
                     values: mapped_column_names(&sink.values),
                     attributes: mapped_column_names(&sink.attributes),
                     resource,

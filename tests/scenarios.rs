@@ -1222,6 +1222,47 @@ async fn then_http_receiver_request_repeats_request(
     );
 }
 
+/// Compares receipt times after both requests have arrived. The receiver records the first time
+/// before delaying its response, so this measures serialization without racing a silence window.
+#[then(expr = "HTTP receiver {string} request {int} arrived at least {string} after request {int}")]
+async fn then_http_receiver_requests_have_minimum_gap(
+    world: &mut ScenarioWorld,
+    name: String,
+    later: usize,
+    minimum_gap: String,
+    earlier: usize,
+) {
+    let minimum_gap = humantime::parse_duration(&minimum_gap)
+        .assured("the Cucumber expression supplies a valid minimum gap duration");
+    let later_request = captured_http_request(world, &name, later);
+    let earlier_request = captured_http_request(world, &name, earlier);
+    let Some(gap) = later_request
+        .received_at
+        .checked_duration_since(earlier_request.received_at)
+    else {
+        panic!("HTTP receiver '{name}' request {later} arrived before request {earlier}");
+    };
+    assert!(
+        gap >= minimum_gap,
+        "HTTP receiver '{name}' request {later} arrived {gap:?} after request {earlier}, below \
+         the {minimum_gap:?} minimum"
+    );
+}
+
+#[then(expr = "HTTP receiver {string} request {int} has no header {string}")]
+async fn then_http_receiver_request_has_no_header(
+    world: &mut ScenarioWorld,
+    name: String,
+    position: usize,
+    header: String,
+) {
+    let request = captured_http_request(world, &name, position);
+    assert!(
+        request.header_values(&header).is_empty(),
+        "HTTP receiver '{name}' request {position} unexpectedly carries '{header}':\n{request}"
+    );
+}
+
 /// Asserts that one captured request, counted from 1, carries exactly one nonempty `header` and a
 /// body containing `fragment`, for a request whose values are generated and so cannot be named.
 #[then(
@@ -21881,6 +21922,69 @@ async fn then_otel_collector_eventually_contains(world: &mut ScenarioWorld, expe
         assert!(
             Instant::now() < deadline,
             "timed out waiting for OpenTelemetry Collector to contain {expected:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(
+    expr = "OpenTelemetry Collector receives a two-member {string} export followed by a \
+            one-member export"
+)]
+async fn then_otel_collector_receives_split_exports(
+    world: &mut ScenarioWorld,
+    signal: String,
+    #[step] step: &Step,
+) {
+    let (heading, count_key) = match signal.as_str() {
+        "logs" => ("Logs", "log records"),
+        "traces" => ("Traces", "spans"),
+        "metrics" => ("Metrics", "data points"),
+        _ => panic!("unsupported OTEL signal {signal}"),
+    };
+    let expected = expand_placeholders(world, docstring(step));
+    let members = expected
+        .lines()
+        .map(str::trim)
+        .filter(|member| !member.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(members.len(), 3, "the step names exactly three members");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let export_boundary = format!("\tinfo\t{heading}\t");
+    loop {
+        tokio::task::consume_budget().await;
+        let logs = world
+            .dependencies
+            .otel_collector_logs()
+            .await
+            .expect("OpenTelemetry Collector logs must be readable");
+        let mut two_record_export = None;
+        let mut one_record_export = None;
+        for (index, block) in logs.split(export_boundary.as_str()).enumerate() {
+            let count = block
+                .lines()
+                .next()
+                .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .and_then(|header| header[count_key].as_u64());
+            if count == Some(2)
+                && block.find(members[0]).is_some_and(|first| {
+                    block.find(members[1]).is_some_and(|second| first < second)
+                })
+            {
+                two_record_export = Some(index);
+            }
+            if count == Some(1) && block.contains(members[2]) {
+                one_record_export = Some(index);
+            }
+        }
+        if let (Some(first), Some(second)) = (two_record_export, one_record_export)
+            && first < second
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for ordered two-member and one-member {signal} exports"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

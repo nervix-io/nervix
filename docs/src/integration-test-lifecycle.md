@@ -41,6 +41,11 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
+The OpenTelemetry Collector dependency exposes its stdout and stderr to scenario assertions. A
+batching scenario reads the Collector's debug exporter output to check the number and order of
+records in each received export request, using unique test markers to distinguish simultaneous
+scenarios sharing that container.
+
 `tests-deps` builds the CLI and NSPL formatter in the normal target directory. The full and focused
 client coverage recipes build a standalone instrumented CLI beside their instrumented server binary
 and place the normal NSPL formatter there. The scenario runner selects the covered CLI through
@@ -606,6 +611,10 @@ receiver in its place, because only a receiver the harness controls can capture 
 and choose exactly how to answer: a status sequence, a delayed, held, or lost response, a stalled
 body, or malformed framing. A receiver can serve TLS with a certificate for chosen names and can
 require the client certificate it issued, whose files a node mounts as a resource.
+Its response script can generate exact and over-limit header counts and value sizes separately for
+an interim or final block. It timestamps a request when its complete body arrives, before its
+scripted response delay begins, so a scenario can assert the measured gap between two requests
+without racing a window in which nothing should happen.
 
 Everything a receiver holds is bounded, and exceeding a bound is recorded as a fault, not captured.
 
@@ -615,6 +624,8 @@ Everything a receiver holds is bounded, and exceeding a bound is recorded as a f
 | One request body | 16 MiB |
 | Captured requests | 4,096 per receiver |
 | Kept faults | 256 per receiver; later faults are counted but not kept |
+| One generated response header value | 128 KiB, enough to test both sides of the emitter's 64 KiB header limit |
+| Generated response headers per block | 512, enough to test both sides of the emitter's 128-field limit |
 
 Every await a receiver connection makes also waits for the receiver's stop, so a held response or
 a stalled body ends as soon as cleanup begins. The receivers of a scenario stop together in the
