@@ -75,10 +75,11 @@ client-wire-baseline samples="100" upload_samples="5" payload_bytes="1024" outpu
     export NERVIX_CLIENT_WIRE_BASELINE_UPLOAD_SAMPLES={{ quote(upload_samples) }}
     export NERVIX_CLIENT_WIRE_BASELINE_PAYLOAD_BYTES={{ quote(payload_bytes) }}
     export NERVIX_CLIENT_WIRE_BASELINE_OUTPUT={{ quote(output) }}
-    RUSTC_WRAPPER= cargo test --features testing --test scenarios -- \
+    cargo test --features testing --test scenarios -- \
         --input tests/features/runtime/client_wire_baseline.feature \
         --tags @client_wire_baseline \
-        --concurrency 1
+        --concurrency 1 \
+        --retry 0
 
 # Capture the web console images the book publishes. The capture tool starts a real nervix-server,
 # seeds it with nervix-cli, and drives the console in a browser, so the images are build output
@@ -688,6 +689,30 @@ bench *args: build-web-console
 # Criterion measures CPU; its unit probe measures allocations.
 bench-subscription-rows *args:
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
+
+# Write raw component timing and retained-allocation samples for Arrow-to-Row delivery.
+client-wire-cost output="target/client-wire-cost.json":
+    cargo bench --package nervix-server --bench client_wire_cost --features benchmarks -- {{ quote(output) }}
+
+# Run the component benchmark with coverage instrumentation for changed benchmark lines.
+coverage-client-wire-cost output="target/client-wire-cost.lcov" report="target/client-wire-cost-coverage.json":
+    cargo llvm-cov --bench client_wire_cost --features benchmarks --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(report) }}
+
+# Check the typed Arrow workload's selection, null, redaction, branch and frame-limit assertions.
+test-client-wire-bench-fixture:
+    cargo test --package nervix-server --features benchmarks --lib subscription_row::benchmark::tests -- --nocapture
+
+# Capture raw timings through the exported Rust binding's C ABI on a 100-row frame.
+client-wire-binding-cost output="target/client-wire-binding-cost.json":
+    NERVIX_CLIENT_WIRE_BINDING_COST_OUTPUT="$(realpath -m {{ quote(output) }})" cargo test --package nervix-client-ffi --lib tests::profiles_bulk_binding_access_and_retain_release -- --exact --nocapture
+
+# Measure CPython ctypes and GC overhead on the same live rows used by conformance.
+client-wire-binding-host-cost output_dir="target/client-wire-binding-host":
+    NERVIX_CLIENT_WIRE_BINDING_PROFILE_DIR="$(realpath -m {{ quote(output_dir) }})" just test-client-conformance '@client_probe_python' --concurrency 1 --retry 0
+
+# Compare the same native command workload over plaintext and TLS with one-node test clusters.
+client-wire-tls-cost output_dir="target/client-wire-tls-cost":
+    NERVIX_CLIENT_WIRE_TLS_OUTPUT_DIR={{ quote(output_dir) }} just test-scenarios --input tests/features/runtime/client_wire_tls_cost.feature --tags @client_wire_tls_cost --concurrency 1 --retry 0
 
 # Measure durable WASM guest-state checkpoints against unsynchronized writes of the same states. The
 # store lives under the crate target directory, so the synchronization cost is that of its storage.

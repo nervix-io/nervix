@@ -2607,6 +2607,34 @@ fn then_client_wire_baseline_artifact_exists(world: &mut ScenarioWorld) {
     );
 }
 
+#[when("the client-wire command transport cost is captured")]
+async fn when_client_wire_command_transport_cost_is_captured(world: &mut ScenarioWorld) {
+    let leader = current_leader_node(world).await;
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&leader)
+        .expect("failed to resolve leader gRPC URI");
+    let artifact = crate::common::client_wire_tls_cost::capture(&grpc_uri, &world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("client-wire transport cost failed: {error:#}"));
+    world.placeholders.insert(
+        "client_wire_tls_cost_artifact".to_string(),
+        artifact.display().to_string(),
+    );
+}
+
+#[then("the client-wire command transport artifact exists")]
+fn then_client_wire_command_transport_artifact_exists(world: &mut ScenarioWorld) {
+    let artifact = world
+        .placeholders
+        .get("client_wire_tls_cost_artifact")
+        .verified("the preceding step captured the transport cost artifact");
+    assert!(
+        Path::new(artifact).is_file(),
+        "client-wire transport artifact was not written to {artifact}"
+    );
+}
+
 /// How long a probe may take to open its session and subscription. Starting a JVM or compiling
 /// nothing still costs seconds on a loaded machine, so this bounds a wait, not a race.
 const CLIENT_PROBE_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(180);
@@ -24115,7 +24143,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     if cli.tags_filter.is_none() {
         cli.tags_filter = Some(
             "(not @client_wire_expected_failure) and (not @client_wire_baseline) and (not \
-             @client_conformance_toolchain)"
+             @client_wire_tls_cost) and (not @client_conformance_toolchain)"
                 .parse()
                 .assured("the built-in opt-in scenario tag expression is valid"),
         );
