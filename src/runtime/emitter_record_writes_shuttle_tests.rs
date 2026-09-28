@@ -62,20 +62,22 @@ fn one_batch(acks: Vec<AckSet>) -> EmitterPublishBatch {
     EmitterPublishBatch::from_batch(batch, Timestamp::from_unix_nanos(1))
 }
 
-fn payload(rows: &[usize], bytes: &[u8]) -> PreparedPayload {
+fn payload(rows: &[usize], bytes: &[u8]) -> PreparedPayload<EncodedPayload> {
     let mut members = Vec::with_capacity(rows.len());
     for row in rows {
         members.push(position(*row));
     }
     PreparedPayload {
         members,
-        envelope: BatchEnvelope {
-            key: None,
-            headers: Vec::new(),
-            message_group: None,
-        },
         occurred_at: Timestamp::from_unix_nanos(1),
-        payload: bytes.to_vec(),
+        content: EncodedPayload {
+            envelope: BatchEnvelope {
+                key: None,
+                headers: Vec::new(),
+                message_group: None,
+            },
+            payload: bytes.to_vec(),
+        },
     }
 }
 
@@ -282,7 +284,7 @@ async fn deliver_message_error(
 /// errors of the members it rejected.
 async fn attempt(
     batches: &mut [EmitterPublishBatch],
-    prepared: &mut PreparedPayloads,
+    prepared: &mut PreparedPayloads<EncodedPayload>,
     record: &AttemptRecord,
 ) {
     let write = prepared.next_write();
@@ -441,7 +443,11 @@ fn a_drain_never_finds_the_emitter_empty_while_a_member_is_retained() {
         let (request_flush, flush_requested) = tokio::sync::oneshot::channel::<()>();
 
         let emitter = tokio::spawn(async move {
-            let EmitterPublication { batches, prepared } = buffer.publication_mut();
+            let EmitterPublication {
+                batches,
+                payloads: prepared,
+                ..
+            } = buffer.publication_mut();
             prepared
                 .retain(payload(&[0, 1], CONFIRMED_PAYLOAD), batches)
                 .assured("both members are pending rows of the buffered batch");
@@ -455,7 +461,11 @@ fn a_drain_never_finds_the_emitter_empty_while_a_member_is_retained() {
             flush_requested
                 .await
                 .assured("the force flush task requests exactly one flush");
-            let EmitterPublication { batches, prepared } = buffer.publication_mut();
+            let EmitterPublication {
+                batches,
+                payloads: prepared,
+                ..
+            } = buffer.publication_mut();
             let retry = prepared.next_write();
             tokio::task::yield_now().await;
             let mut confirmed = PerRecordOutcome::with_capacity(1);

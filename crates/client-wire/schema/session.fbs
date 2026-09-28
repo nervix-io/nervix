@@ -130,7 +130,8 @@ table NodeRef {
 /// The semantic question a structured control asks without manufacturing partial NSPL.
 enum ChoiceTarget : ubyte {
   DomainPace,
-  PlacementPolicy
+  PlacementPolicy,
+  Schema
 }
 
 enum DomainPaceChoice : ubyte {

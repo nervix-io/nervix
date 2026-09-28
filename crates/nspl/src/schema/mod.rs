@@ -28,6 +28,17 @@ fn json_type<'src>()
         kw(Identifier::Array).to(JsonType::Array),
         kw(Identifier::Boolean).to(JsonType::Boolean),
         kw(Identifier::Null).to(JsonType::Null),
+        kw(Identifier::U8).to(JsonType::U8),
+        kw(Identifier::I8).to(JsonType::I8),
+        kw(Identifier::U16).to(JsonType::U16),
+        kw(Identifier::I16).to(JsonType::I16),
+        kw(Identifier::U32).to(JsonType::U32),
+        kw(Identifier::I32).to(JsonType::I32),
+        kw(Identifier::U64).to(JsonType::U64),
+        kw(Identifier::I64).to(JsonType::I64),
+        kw(Identifier::Datetime).to(JsonType::Datetime),
+        kw(Identifier::F32).to(JsonType::F32),
+        kw(Identifier::F64).to(JsonType::F64),
         kw(Identifier::Bytes).to(JsonType::Bytes),
     )
 }
@@ -894,13 +905,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_internal_types_in_json_wire_schema_definition() {
-        let input = "CREATE WIRE JSON SCHEMA notification MODE STRICT ( user_id U32 );";
-
-        assert!(parse_create_wire_schema(input).is_err());
-    }
-
-    #[test]
     fn rejects_strictness_before_legacy_wire_schema_order() {
         let input = "CREATE STRICT WIRE JSON SCHEMA notification ( user_id integer );";
 
@@ -963,6 +967,23 @@ mod tests {
     }
 
     #[test]
+    fn parses_exact_json_wire_numeric_and_datetime_types() {
+        let input =
+            "CREATE WIRE JSON SCHEMA typed MODE STRICT (id U32, time DATETIME, metric F32);";
+        let parsed = parse_create_wire_schema_tokens(&to_tokens(input))
+            .expect("exact JSON wire types are current schema types");
+        let Statement::Create(create) = parsed else {
+            panic!("expected create statement");
+        };
+        let Model::WireJsonSchema(schema) = *create.body else {
+            panic!("expected JSON wire schema");
+        };
+        assert_eq!(schema.fields[0].ty, JsonType::U32);
+        assert_eq!(schema.fields[1].ty, JsonType::Datetime);
+        assert_eq!(schema.fields[2].ty, JsonType::F32);
+    }
+
+    #[test]
     fn rejects_invalid_if_exists_clause_for_schema() {
         let input = "CREATE IF EXISTS SCHEMA notification ( user_id U32 );";
         assert!(parse_create_schema(input).is_err());
@@ -1012,8 +1033,9 @@ mod tests {
         let suggestions = suggest_create_wire_schema(input, input.len());
         assert!(suggestions.contains(&"STRING".to_string()));
         assert!(suggestions.contains(&"NUMBER".to_string()));
-        assert!(!suggestions.contains(&"U32".to_string()));
-        assert!(!suggestions.contains(&"DATETIME".to_string()));
+        assert!(suggestions.contains(&"U32".to_string()));
+        assert!(suggestions.contains(&"DATETIME".to_string()));
+        assert!(!suggestions.contains(&"BOOL".to_string()));
     }
 
     #[test]
@@ -1053,14 +1075,15 @@ mod tests {
     }
 
     #[test]
-    fn suggests_types_from_cbor_wire_schema_grammar_without_internal_leakage() {
+    fn suggests_types_from_cbor_wire_schema_grammar() {
         let input = "CREATE WIRE CBOR SCHEMA s MODE LOOSE (id ";
         let suggestions = suggest_create_wire_schema(input, input.len());
         assert!(suggestions.contains(&"STRING".to_string()));
         assert!(suggestions.contains(&"INTEGER".to_string()));
         assert!(suggestions.contains(&"OBJECT".to_string()));
-        assert!(!suggestions.contains(&"U32".to_string()));
-        assert!(!suggestions.contains(&"DATETIME".to_string()));
+        assert!(suggestions.contains(&"U32".to_string()));
+        assert!(suggestions.contains(&"DATETIME".to_string()));
+        assert!(!suggestions.contains(&"BOOL".to_string()));
     }
 
     #[test]

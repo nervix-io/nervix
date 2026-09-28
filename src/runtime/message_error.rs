@@ -371,6 +371,53 @@ pub(super) fn captured_partial_output(
     }
 }
 
+/// The `partial_output` view of row `row` of a batch of records already finalized for their codec.
+/// A failure to build it leaves the handler without the view, as [`captured_partial_output`] does.
+pub(super) fn finalized_partial_output(
+    batch: &RuntimeRecordBatch,
+    row: usize,
+) -> Option<RuntimeRecordBatch> {
+    match finalized_partial_output_row(batch, row) {
+        Ok(partial_output) => Some(partial_output),
+        Err(error) => {
+            debug!(
+                error = %error,
+                row, "failed to capture the partial output view for a message error"
+            );
+            None
+        }
+    }
+}
+
+/// Row `row` of a batch of records already finalized for their codec, as the one record of a
+/// `partial_output` view with every field optional.
+fn finalized_partial_output_row(
+    batch: &RuntimeRecordBatch,
+    row: usize,
+) -> error_stack::Result<RuntimeRecordBatch, MessageErrorHandlingError> {
+    let record_batch = batch.batch();
+    if row >= record_batch.num_rows() {
+        return Err(error_stack::Report::new(
+            MessageErrorHandlingError::PartialOutputRowOutOfBounds {
+                row,
+                rows: record_batch.num_rows(),
+            },
+        ));
+    }
+    let mut fields = Vec::with_capacity(record_batch.num_columns());
+    let mut columns = Vec::with_capacity(record_batch.num_columns());
+    for (field, column) in record_batch
+        .schema()
+        .fields()
+        .iter()
+        .zip(record_batch.columns())
+    {
+        fields.push(StdArc::new(field.as_ref().clone().with_nullable(true)));
+        columns.push(column.slice(row, 1));
+    }
+    partial_output_batch(fields, columns)
+}
+
 pub(super) fn vm_partial_output_row_to_runtime_batch(
     batch: &VmTypedBatch,
     row: usize,
@@ -404,16 +451,21 @@ pub(super) fn vm_partial_output_row_to_runtime_batch(
         ));
     }
     let (fields, columns): (Vec<_>, Vec<_>) = fields_and_columns.into_iter().unzip();
+    partial_output_batch(fields, columns)
+}
+
+/// The one-record `partial_output` batch of `fields`, whose `columns` each hold that record's
+/// value. Its row count is explicit, so a view without fields still holds its record.
+fn partial_output_batch(
+    fields: Vec<arrow_schema::FieldRef>,
+    columns: Vec<ArrayRef>,
+) -> error_stack::Result<RuntimeRecordBatch, MessageErrorHandlingError> {
     let schema = StdArc::new(arrow_schema::Schema::new(fields));
-    let record_batch = if columns.is_empty() {
-        RecordBatch::try_new_with_options(
-            schema.clone(),
-            columns,
-            &arrow_array::RecordBatchOptions::new().with_row_count(Some(1)),
-        )
-    } else {
-        RecordBatch::try_new(schema.clone(), columns)
-    }
+    let record_batch = RecordBatch::try_new_with_options(
+        schema.clone(),
+        columns,
+        &arrow_array::RecordBatchOptions::new().with_row_count(Some(1)),
+    )
     .map_err(|source| {
         error_stack::Report::new(MessageErrorHandlingError::PartialOutputArrow { source })
     })?;
@@ -1358,6 +1410,46 @@ mod tests {
             error.current_context(),
             MessageErrorHandlingError::PartialOutputRowOutOfBounds { row: 1, rows: 1 }
         ));
+    }
+
+    #[test]
+    fn a_finalized_record_is_captured_alone_with_every_field_optional() {
+        let schema = test_schema(&[("result", ParseAsType::I64)]);
+        let mut messages = Vec::new();
+        for result in [7, 8] {
+            messages.push(RelayMessage {
+                key: None,
+                record: test_runtime_row([("result".to_string(), RuntimeValue::I64(result))]),
+                acks: AckSet::empty(),
+            });
+        }
+        let finalized = RelayRecordBatch::from_messages(schema, messages)
+            .expect("the test rows match the test schema");
+
+        let Ok(captured) = finalized_partial_output_row(&finalized.batch, 1) else {
+            panic!("row 1 is inside the batch");
+        };
+
+        assert_eq!(captured.batch().num_rows(), 1);
+        let field = captured.batch().schema().field(0).clone();
+        assert_eq!(field.name(), "result");
+        assert!(field.is_nullable());
+        let results = captured
+            .batch()
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow_array::Int64Array>()
+            .expect("the captured result keeps its I64 column");
+        assert_eq!(results.value(0), 8);
+
+        let Err(error) = finalized_partial_output_row(&finalized.batch, 2) else {
+            panic!("row 2 is outside the batch");
+        };
+        assert!(matches!(
+            error.current_context(),
+            MessageErrorHandlingError::PartialOutputRowOutOfBounds { row: 2, rows: 2 }
+        ));
+        assert!(finalized_partial_output(&finalized.batch, 2).is_none());
     }
 
     #[test]

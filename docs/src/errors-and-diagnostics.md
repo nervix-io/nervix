@@ -43,6 +43,8 @@ Jaq returns `JaqProgramError` or `JaqFormatError` reports for compilation, evalu
 conversion. A codec or runtime caller retains that report under its operation context. VM row
 errors remain typed values in the batch outcome and are formatted only when a message error is
 reported; this conversion does not turn them into report allocations per row.
+HTTP request-field compilation retains the VM report beneath the emitter's request-field context
+and attaches its safe message for diagnostics; an invalid request program never starts the sink.
 
 Schemaful JSON parsing has one codec decode failure carrying the simd-json source. Malformed
 syntax, invalid UTF-8, and invalid escapes enter through that failure; object shape, missing or
@@ -64,6 +66,13 @@ its connect and resume contexts, so `DESCRIBE INGESTOR` shows the deepest cause,
 resolver's own lookup error. The sink changes it into a configuration failure for an invalid
 address or CA file and an initialization failure otherwise, leading with the connection error's
 message, which `DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
+
+A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar sink: a message
+larger than the maximum message size the broker announced, which carries the measured size of its
+metadata and payload and the limit as typed fields, or a message the broker answered with
+`NotAllowedError`, which carries the broker's reason. Either becomes a record rejection with code
+`external` and operation `publish`. Every other failure of the client, its connection or the broker
+stays an infrastructure failure of the attempt, which the emitter retries.
 
 The vocabulary is the innermost owner, and its Model operations report the same way. An alteration
 is applied to a copy of the stored Model, which replaces the original only when every operation
@@ -157,6 +166,13 @@ retain the selected entity or placement so an operator can correct the request. 
 Plane](./control-plane.md) for activation and [Typed States And Validation
 Boundaries](./typed-states.md) for required state.
 
+Visual schema and branch editors report incomplete names, fields, types, modes, references and
+instance limits before submitting a command, while retaining the editable draft. Once a completed
+branch command reaches the registry, the registry remains the owner of branch key validation: a
+schema containing `BYTES`, even under a collection type, returns the branch, domain and field in
+its diagnostic. The console presents that command failure inline and does not replace it with a
+local guess or silently change the selected schema.
+
 Domain activation has typed failures for a relay or codec missing its schema, a codec missing its
 wire definition, a relay missing its branch or carrying an invalid branch TTL, and an endpoint
 missing its VHOST or signaling protocol. The report identifies the owning relay, codec, or
@@ -200,6 +216,17 @@ together, while each keeps its own occurrence time and branch. A sink answer tha
 contract, by naming a record the write did not carry or answering twice for one, is not a message
 error of any member. It fails the attempt without a retry, and the emitter's unresolved rows then
 follow `ON MESSAGE ERROR` as a failed publish.
+
+An HTTP emitter rejects a record at the first request field that fails, in the order it evaluates
+them: `METHOD`, `PATH`, and then each header write. A failed expression keeps the `evaluation`
+code and an invalid value has the `validation` code. Method and path failures report the `publish`
+operation and name their request field, `method` or `path`, beside the fields the expression reads;
+a header write reports `invoke` with its zero-based invocation position. A body the codec cannot
+encode rejects its record with the `encode` operation when a flush releases it. The message names
+the emitter and the violated rule and never quotes the evaluated value. An admitted request keeps
+its original source record and the materialized state its batch was admitted with until it
+completes, so every rejection of it after admission gives the handler the same input, state and
+attempted codec record that a request-field failure does.
 
 `ON MESSAGE ERROR` belongs to the route and handles record-specific work. Ingestor and emitter
 `ON GENERAL ERROR` handles node-wide source and sink failures. A WASM processor's node-wide `ON

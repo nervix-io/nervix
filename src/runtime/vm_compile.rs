@@ -1320,23 +1320,47 @@ pub(super) fn compile_wasm_output_filter_map_program(
     }))
 }
 
+/// Which construction an emitter's route compiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum EmitterRoute {
+    /// The construction the emitter declares, which an emitter declaring none does not compile.
+    Declared,
+    /// An HTTP emitter's construction without its header writes, which are request fields it
+    /// evaluates after `METHOD` and `PATH` and only for the records the route keeps. With a codec
+    /// body the route always compiles, because it finalizes the record the codec encodes.
+    HttpRequest,
+}
+
 pub(in crate::runtime) fn compile_emitter_filter_map_program(
     domain: &DomainName,
     emitter: &CreateEmitter,
-    input_schema: StdArc<arrow_schema::Schema>,
-    input_sensitivity: VmSchemaSensitivity,
-    output_schema: StdArc<arrow_schema::Schema>,
-    output_sensitivity: VmSchemaSensitivity,
+    route: EmitterRoute,
+    schemas: RuntimeVmSchemaPair,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledEmitterFilterMapProgram>, RuntimeError> {
-    if emitter.construction.is_empty() {
-        return Ok(None);
-    }
     let codec_route = emitter.body.codec().is_some();
+    let construction = match route {
+        EmitterRoute::Declared => {
+            if emitter.construction.is_empty() {
+                return Ok(None);
+            }
+            emitter.construction.clone()
+        }
+        EmitterRoute::HttpRequest => {
+            let construction = RouteConstruction {
+                invocations: Vec::new(),
+                ..emitter.construction.clone()
+            };
+            if construction.is_empty() && !codec_route {
+                return Ok(None);
+            }
+            construction
+        }
+    };
     if !codec_route
-        && (emitter.construction.inherit.is_some()
-            || !emitter.construction.assignments.is_empty()
-            || !emitter.construction.invocations.is_empty())
+        && (construction.inherit.is_some()
+            || !construction.assignments.is_empty()
+            || !construction.invocations.is_empty())
     {
         return Err(RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),
@@ -1348,15 +1372,12 @@ pub(in crate::runtime) fn compile_emitter_filter_map_program(
     }
     let parsed = if codec_route {
         lower_transforming_route(
-            &emitter.construction,
-            input_schema.as_ref(),
-            output_schema.as_ref(),
+            &construction,
+            schemas.input.as_ref(),
+            schemas.output.as_ref(),
         )
     } else {
-        lower_route_construction(
-            &emitter.construction,
-            SemanticScopePolicy::read_only("input"),
-        )
+        lower_route_construction(&construction, SemanticScopePolicy::read_only("input"))
     }
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
@@ -1385,7 +1406,7 @@ pub(in crate::runtime) fn compile_emitter_filter_map_program(
             .inner
             .set
             .len()
-            .checked_sub(emitter.construction.assignments.len())
+            .checked_sub(construction.assignments.len())
             .verified(
                 "a compiled construction lists one set operation per inherited field before its \
                  assignments",
@@ -1418,12 +1439,7 @@ pub(in crate::runtime) fn compile_emitter_filter_map_program(
             identifier: &ModelName::from(&emitter.name),
         },
         parsed,
-        RuntimeVmSchemaPair {
-            input: input_schema,
-            input_sensitivity,
-            output: output_schema,
-            output_sensitivity,
-        },
+        schemas,
         codec_route,
         error_sites,
         context,

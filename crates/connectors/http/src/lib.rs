@@ -1,13 +1,19 @@
-//! HTTP paced source connector.
+//! HTTP paced source and request sink connectors.
 //!
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** HTTP client configuration interpretation, polling, response bodies, response-header
-//!   semantics, and source-boundary arrival observation.
+//!   semantics, and source-boundary arrival observation for the source; sending prepared requests
+//!   and answering for each of them for the sink.
 //! - **Depends on.** The connector contract, HTTP client settings, vocabulary configuration and
-//!   `reqwest`.
+//!   request fields, and `reqwest`.
 //! - **Must not know.** Domain clocks, runtime collectors, relays, branches, schedules, registry
 //!   state, or placement computation.
+
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+
+mod sink;
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
@@ -19,6 +25,7 @@ use nervix_connector::{
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, Timestamp};
 use reqwest::{Client as HttpClient, Method, StatusCode, header::HeaderMap};
+pub use sink::{HttpSink, HttpSinkConfig};
 use thiserror::Error;
 
 const HTTP: &str = "http";
