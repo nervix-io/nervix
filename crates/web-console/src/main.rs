@@ -9250,12 +9250,19 @@ mod tests {
         let target = match control {
             ChoiceControl::DomainPace => nervix_client_wire::ChoiceTarget::DomainPace,
             ChoiceControl::PlacementPolicy => nervix_client_wire::ChoiceTarget::PlacementPolicy,
-            ChoiceControl::BranchSchema | ChoiceControl::RelaySchema => {
-                nervix_client_wire::ChoiceTarget::Schema
-            }
+            ChoiceControl::BranchSchema
+            | ChoiceControl::RelaySchema
+            | ChoiceControl::CodecSchema => nervix_client_wire::ChoiceTarget::Schema,
             ChoiceControl::RelayBranch => nervix_client_wire::ChoiceTarget::Branch,
             ChoiceControl::SubscriptionRelay => nervix_client_wire::ChoiceTarget::Relay,
             ChoiceControl::SubscriptionField => nervix_client_wire::ChoiceTarget::RelayField,
+            ChoiceControl::CodecWireSchema => nervix_client_wire::ChoiceTarget::WireJsonSchema,
+            ChoiceControl::CodecResource | ChoiceControl::SignalingResource => {
+                nervix_client_wire::ChoiceTarget::Resource
+            }
+            ChoiceControl::CodecVersion | ChoiceControl::SignalingVersion => {
+                nervix_client_wire::ChoiceTarget::CompletedResourceVersion
+            }
         };
         ConsoleRequest::Choice {
             request: ChoiceLookupRequest::new(target, Vec::new(), String::new()),
