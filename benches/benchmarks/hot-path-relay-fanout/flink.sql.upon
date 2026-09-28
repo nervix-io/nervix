@@ -1,6 +1,7 @@
 SET 'parallelism.default' = '{{ lane_count }}';
 
 CREATE TABLE benchmark_input (
+  `id` STRING,
   `value` STRING
 ) WITH (
   'connector' = 'kafka',
@@ -12,6 +13,7 @@ CREATE TABLE benchmark_input (
 );
 
 CREATE TABLE benchmark_output (
+  `id` STRING,
   `value` STRING
 ) WITH (
   'connector' = 'kafka',
@@ -21,6 +23,6 @@ CREATE TABLE benchmark_output (
 );
 
 INSERT INTO benchmark_output
-SELECT `value`
+SELECT `id`, `value`
 FROM benchmark_input
 CROSS JOIN (VALUES (0), (1), (2), (3)) AS copies(copy_id);

@@ -126,20 +126,25 @@ for three-way comparisons.
 
 The `hot-path-remote-delivery` Nervix graph places the source and destination on different nodes.
 The Vector and Flink graphs exercise the same Kafka input-to-output contract in one container but
-do not add a corresponding remote hop. Treat their rates as Kafka pipeline references, not
-remote-delivery throughput comparisons. The fanout graphs each produce four output records per
-input; Vector attaches four sinks, while Flink duplicates rows with a four-value cross join.
+do not add a corresponding remote hop. Their rates are Kafka pipeline references; the comparison
+report omits relative deltas and rankings for this workload. The fanout graphs each produce four
+output records per input; Vector attaches four sinks, while Flink duplicates rows with a
+four-value cross join.
 
 ## Load shapes
 
 A workload declares in `[load.shape]` what the driver generates and what the measured path owes it
 in return. The driver produces indivisible *cycles* of input messages, each cycle written to one
 Kafka partition, and every shape states how many output records one complete cycle must yield.
-Parity is exact against that contract, so a graph that drops records has to state its drop rate
-rather than assume one output per input.
+The expected output count follows that contract, so a graph that drops records has to state its
+drop rate rather than assume one output per input.
 
-`uniform-passthrough` sends identical payloads and expects one output message per input message.
-Its output record count is Kafka's high watermark, so the driver never has to read a payload back.
+The uniform shapes send a unique `id` per cycle. `uniform-passthrough` expects one unchanged output
+per input, `uniform-uppercase` expects one uppercase output, and `uniform-fanout` expects the
+declared number of unchanged copies. `uniform-filter-map` sends one retained `x` value and one
+filtered `y` value per cycle and expects one uppercase `X` output. Kafka high watermarks drive the
+timed drain; afterward, a separate consumer verifies every expected ID, copy count, and value
+across warm-up and measured records. The audit runs after the end-to-end timer stops.
 
 `keyed-windowed` sends cycles of `keys_per_cycle` distinct keys, each produced `copies_per_key`
 times as one pass over the key list per copy. The first `retained_keys` keys of a cycle carry the
@@ -152,7 +157,8 @@ own value, that count holds whether the node filter runs before or after dedupli
 Window output cardinality is not a function of the input count, so `keyed-windowed` parity is the
 sum of the `count_field` the summaries carry rather than a count of output messages. The driver
 consumes the output topic from its beginning on a run-scoped assignment and accumulates that sum,
-which also drives the live backlog signal, the warm-up handshake, and the drain wait.
+which also drives the live backlog signal, the warm-up handshake, and the drain wait. This checks
+the aggregate total, not each input key's identity; the report labels that distinction.
 
 Duplicates of one key are `keys_per_cycle` messages apart on one partition. That is far enough to
 exercise a live keyspace and close enough that the deduplicator's `MAX TIME` can never expire a key
@@ -371,9 +377,8 @@ The typed dependency contract is Kafka-to-Kafka. The shared test-environment cra
 other Cucumber dependency starters, but a workload using one of them needs a corresponding typed
 benchmark dependency before it is exposed in a manifest, and a workload whose output cardinality
 none of the declared shapes describes needs a new `[load.shape]` variant with its own exact parity
-arithmetic. `uniform-passthrough` expects one output per input, `uniform-fanout` declares an
-`outputs_per_input` multiplier, and `keyed-windowed` declares its complete cycle and retained
-output count.
+arithmetic. The uniform shapes declare unchanged, uppercase, filtered, or fanout output, and
+`keyed-windowed` declares its complete cycle and retained output count.
 
 The `hot-path-ingest`, `hot-path-relay-fanout`, `hot-path-remote-delivery`, and
 `hot-path-processor` workloads use `--partitions` as the number of concurrent publishers. The
@@ -404,8 +409,9 @@ batches_total`, and `relay_buffer_len` p50, p90, and p99 bucket upper bounds.
 invocation; it never selects unrelated runs by timestamp. It attempts every declared workload and
 implementation even when an earlier entry fails, and records every execution in a status table
 before the completed measurements and failures. A run passes only after the output records the
-workload's shape expects have arrived and remained stable for a confirmation interval and, for
-Nervix, the metrics scrape has been parsed successfully.
+workload's shape expects have arrived and remained stable for a confirmation interval, the uniform
+output audit has passed where applicable, and, for Nervix, the metrics scrape has been parsed
+successfully.
 
 This is a single-host end-to-end benchmark. Its rate includes Kafka, the load driver, the selected
 product, and the output drain. Compare products only with identical workload inputs, and do not use

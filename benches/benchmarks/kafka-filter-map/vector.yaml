@@ -37,7 +37,7 @@ transforms:
       if !contains(value, "x") {
         abort
       }
-      . = {"value": upcase(value)}
+      . = {"id": string!(.id), "value": upcase(value)}
 {% endfor %}
 
 sinks:
@@ -55,6 +55,7 @@ sinks:
     encoding:
       codec: json
       only_fields:
+        - id
         - value
     healthcheck:
       enabled: true

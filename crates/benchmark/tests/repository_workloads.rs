@@ -95,7 +95,12 @@ fn kafka_filter_map_implementations_render_from_one_workload() {
     };
     assert_eq!(
         benchmark.definition().load.shape,
-        LoadShape::UniformPassthrough
+        LoadShape::UniformFilterMap
+    );
+    assert_eq!(benchmark.definition().load.shape.messages_per_cycle(), 2);
+    assert_eq!(
+        benchmark.definition().load.shape.output_records_per_cycle(),
+        1
     );
 
     let nervix = benchmark
@@ -119,7 +124,7 @@ fn kafka_filter_map_implementations_render_from_one_workload() {
         .render_implementation_with_parameters("flink", inputs, &settings.parameters)
         .expect("Flink implementation should render");
     assert!(flink.contains("SET 'parallelism.default' = '16'"));
-    assert!(flink.contains("SELECT UPPER(`value`)"));
+    assert!(flink.contains("SELECT `id`, UPPER(`value`)"));
 }
 
 #[test]
@@ -292,7 +297,7 @@ fn hot_path_workloads_render_the_publisher_matrix_and_remote_placement() {
         .render_implementation_with_parameters("nervix", inputs, &settings.parameters)
         .assured("the configured processor expression renders");
     assert_eq!(
-        graph.matches(&format!("SET value = {expression}")).count(),
+        graph.matches(&format!("value = {expression}")).count(),
         LANES.arch_into()
     );
 }

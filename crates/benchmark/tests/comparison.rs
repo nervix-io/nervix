@@ -45,6 +45,7 @@ max_backlog_messages = 4096
 output_topic = "benchmark-output"
 partitions = 16
 subject = "container"
+subject_nodes = 1
 value_bytes = 128
 wait_timeout_seconds = 120
 warmup_seconds = 10
@@ -72,7 +73,7 @@ producer_flush_seconds=0.100000
 drain_seconds={:.6}
 end_to_end_seconds=30.500000
 parity_stability_seconds=0.500000
-wire_bytes_per_message=140
+wire_bytes_per_message=164
 partitions=16
 warmup_messages=16
 max_backlog_messages=4096
@@ -81,6 +82,7 @@ input_messages={}
 expected_output_records={}
 output_messages={}
 output_records={}
+output_validation="ids-and-values"
 output_records_at_generation_end={}
 backlog_messages_at_generation_end=0
 output_records_at_flush={}
@@ -185,16 +187,16 @@ fn renders_a_deterministic_markdown_comparison_from_exact_run_directories() {
 
     assert!(markdown.starts_with("## Benchmark comparison\n"));
     assert!(markdown.contains(
-        "**Configuration:** 30 s + 10 s warm-up · 16 partitions · 128 B values (140 B wire) · \
+        "**Configuration:** 30 s + 10 s warm-up · 16 partitions · 128 B values (164 B wire) · \
          backlog cap 4,096"
     ));
     assert!(markdown.contains(
-        "| Nervix | **1,200 msg/s** | **0.16 MiB/s** | **1,250 rec/s** | 4.500 s | ✅ 36,000 in / \
-         13,500 rec | ⚠️ 4,096 (100.0%) | baseline |"
+        "| Nervix | **1,200 msg/s** | **0.16 MiB/s** | **1,250 rec/s** | 4.500 s | ✅ IDs and \
+         values: 36,000 in / 13,500 rec | ⚠️ 4,096 (100.0%) | baseline |"
     ));
     assert!(markdown.contains(
-        "| Vector | 1,000 msg/s | 0.13 MiB/s | 1,020 rec/s | **0.100 s** | ✅ 30,000 in / 11,250 \
-         rec | 512 (12.5%) | −16.7% |"
+        "| Vector | 1,000 msg/s | 0.13 MiB/s | 1,020 rec/s | **0.100 s** | ✅ IDs and values: \
+         30,000 in / 11,250 rec | 512 (12.5%) | −16.7% |"
     ));
     assert!(markdown.contains("Nervix reached the configured backlog cap"));
     assert!(markdown.contains("<summary>Nervix runtime observations</summary>"));
@@ -210,6 +212,56 @@ fn renders_a_deterministic_markdown_comparison_from_exact_run_directories() {
     assert!(markdown.contains("`ghcr.io/nervix-io/nervix:pr-109`"));
     assert!(markdown.contains("`timberio/vector:0.57.0-debian`"));
     assert_eq!(markdown, comparison.render_markdown());
+}
+
+#[test]
+fn does_not_rank_one_container_references_against_a_two_node_run() {
+    let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+    let nervix = write_run(
+        artifacts.path(),
+        Fixture {
+            implementation: "nervix",
+            image: "nervix:test",
+            input_messages: 36_000,
+            expected_output_records: 36_000,
+            output_records: 36_000,
+            generation_rate: 1_250.0,
+            end_to_end_rate: 1_200.0,
+            payload_rate: 0.16,
+            drain_seconds: 4.5,
+            peak_backlog: 512,
+        },
+    );
+    let vector = write_run(
+        artifacts.path(),
+        Fixture {
+            implementation: "vector",
+            image: "vector:test",
+            input_messages: 30_000,
+            expected_output_records: 30_000,
+            output_records: 30_000,
+            generation_rate: 1_020.0,
+            end_to_end_rate: 1_000.0,
+            payload_rate: 0.13,
+            drain_seconds: 0.1,
+            peak_backlog: 512,
+        },
+    );
+    let manifest_path = nervix.join("run.toml");
+    let manifest = fs::read_to_string(&manifest_path).expect("fixture manifest should be readable");
+    write(
+        &manifest_path,
+        &manifest.replace("subject_nodes = 1", "subject_nodes = 2"),
+    );
+
+    let markdown = BenchmarkComparison::from_run_directories(&[nervix, vector])
+        .expect("both valid runs should be reportable")
+        .render_markdown();
+    assert!(markdown.contains("reference only"));
+    assert!(
+        markdown.contains("Implementations with different node counts are shown as references")
+    );
+    assert!(!markdown.contains("**1,200 msg/s**"));
 }
 
 #[test]

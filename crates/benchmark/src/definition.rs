@@ -124,10 +124,16 @@ pub struct LoadConfiguration {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum LoadShape {
-    /// Identical payloads, one output message for every accepted input message.
+    /// Distinct record IDs, one unchanged output message per input message.
     UniformPassthrough,
 
-    /// Identical payloads, each copied to a fixed number of output consumers.
+    /// Distinct record IDs, one uppercase output message per input message.
+    UniformUppercase,
+
+    /// One retained and one filtered input per cycle, yielding one uppercase output.
+    UniformFilterMap,
+
+    /// Distinct record IDs, each copied to a fixed number of output consumers.
     UniformFanout { outputs_per_input: u64 },
 
     /// Cycles of distinct keys, each key produced `copies_per_key` times, with `retained_keys` of
@@ -377,7 +383,8 @@ impl LoadShape {
     #[must_use]
     pub fn messages_per_cycle(&self) -> u64 {
         match self {
-            Self::UniformPassthrough | Self::UniformFanout { .. } => 1,
+            Self::UniformPassthrough | Self::UniformUppercase | Self::UniformFanout { .. } => 1,
+            Self::UniformFilterMap => 2,
             Self::KeyedWindowed {
                 keys_per_cycle,
                 copies_per_key,
@@ -392,7 +399,7 @@ impl LoadShape {
     #[must_use]
     pub fn output_records_per_cycle(&self) -> u64 {
         match self {
-            Self::UniformPassthrough => 1,
+            Self::UniformPassthrough | Self::UniformUppercase | Self::UniformFilterMap => 1,
             Self::UniformFanout { outputs_per_input } => *outputs_per_input,
             Self::KeyedWindowed { retained_keys, .. } => *retained_keys,
         }

@@ -41,6 +41,7 @@ sinks:
     encoding:
       codec: json
       only_fields:
+        - id
         - value
     healthcheck:
       enabled: true

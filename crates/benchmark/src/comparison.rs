@@ -56,6 +56,7 @@ pub(crate) struct RunManifest {
     image: Option<String>,
     pub(crate) implementation: String,
     pub(crate) max_backlog_messages: u64,
+    subject_nodes: u8,
     pub(crate) partitions: u32,
     subject: String,
     pub(crate) value_bytes: u64,
@@ -79,9 +80,17 @@ pub(crate) struct LoadReport {
     input_messages: u64,
     expected_output_records: u64,
     output_records: u64,
+    output_validation: OutputValidation,
     output_records_per_second_during_generation: f64,
     pub(crate) end_to_end_messages_per_second: f64,
     end_to_end_payload_mib_per_second: f64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum OutputValidation {
+    IdsAndValues,
+    AggregateCount,
 }
 
 impl LoadReport {
@@ -393,6 +402,18 @@ impl BenchmarkRuns {
             .unwrap_or(0);
         let baseline_name = display_name(&self.runs[baseline].manifest.implementation);
         let baseline_rate = self.runs[baseline].report.end_to_end_messages_per_second;
+        let baseline_nodes = self.runs[baseline].manifest.subject_nodes;
+        let topology_matches = self
+            .runs
+            .iter()
+            .all(|run| run.manifest.subject_nodes == baseline_nodes);
+        let rank = |rendered, value, best| {
+            if topology_matches {
+                emphasize_best(rendered, value, best)
+            } else {
+                rendered
+            }
+        };
         let best_end_to_end = self
             .runs
             .iter()
@@ -428,8 +449,8 @@ impl BenchmarkRuns {
             format_count(first.manifest.max_backlog_messages),
         );
         markdown.push_str(&format!(
-            "| Implementation | End-to-end | Payload | During generation | Drain ↓ | Parity | \
-             Peak backlog | vs. {baseline_name} |\n"
+            "| Implementation | End-to-end | Payload | During generation | Drain ↓ | Output check \
+             | Peak backlog | vs. {baseline_name} |\n"
         ));
         markdown.push_str("|:--|--:|--:|--:|--:|--:|--:|--:|\n");
         for (index, run) in self.runs.iter().enumerate() {
@@ -443,8 +464,12 @@ impl BenchmarkRuns {
                 format_rounded_count(run.report.output_records_per_second_during_generation)
             );
             let drain = format!("{:.3} s", run.report.drain_seconds);
+            let validation = match run.report.output_validation {
+                OutputValidation::IdsAndValues => "✅ IDs and values",
+                OutputValidation::AggregateCount => "⚠️ aggregate count only",
+            };
             let parity = format!(
-                "{} in / {} rec",
+                "{validation}: {} in / {} rec",
                 format_count(run.report.input_messages),
                 format_count(run.report.output_records)
             );
@@ -458,31 +483,32 @@ impl BenchmarkRuns {
             };
             let relative = if index == baseline {
                 "baseline".to_string()
+            } else if !topology_matches {
+                "reference only".to_string()
             } else {
                 format_percentage(
                     (run.report.end_to_end_messages_per_second / baseline_rate - 1.0) * 100.0,
                 )
             };
             markdown.push_str(&format!(
-                "| {} | {} | {} | {} | {} | ✅ {} | {}{} ({backlog_percentage:.1}%) | {relative} \
-                 |\n",
+                "| {} | {} | {} | {} | {} | {} | {}{} ({backlog_percentage:.1}%) | {relative} |\n",
                 display_name(&run.manifest.implementation),
-                emphasize_best(
+                rank(
                     end_to_end,
                     run.report.end_to_end_messages_per_second,
                     best_end_to_end
                 ),
-                emphasize_best(
+                rank(
                     payload,
                     run.report.end_to_end_payload_mib_per_second,
                     best_payload
                 ),
-                emphasize_best(
+                rank(
                     generation,
                     run.report.output_records_per_second_during_generation,
                     best_generation,
                 ),
-                emphasize_best(drain, run.report.drain_seconds, best_drain),
+                rank(drain, run.report.drain_seconds, best_drain),
                 parity,
                 cap_marker,
                 format_count(run.report.peak_backlog_messages),
@@ -500,6 +526,13 @@ impl BenchmarkRuns {
                 "\n> [!WARNING]\n> {} reached the configured backlog cap. Treat this as a \
                  bounded-pressure comparison, not a definitive maximum-throughput result.\n",
                 human_list(&saturated)
+            ));
+        }
+        if !topology_matches {
+            markdown.push_str(&format!(
+                "\n> [!NOTE]\n> {baseline_name} uses {baseline_nodes} runtime nodes in this \
+                 workload. Implementations with different node counts are shown as references \
+                 without rankings or relative deltas.\n"
             ));
         }
         for run in &self.runs {
@@ -762,6 +795,9 @@ fn validate_report(
         return Err(invalid(
             "partition count does not match run.toml".to_string(),
         ));
+    }
+    if manifest.subject_nodes == 0 {
+        return Err(invalid("subject node count must be positive".to_string()));
     }
     if report.max_backlog_messages != manifest.max_backlog_messages {
         return Err(invalid("backlog cap does not match run.toml".to_string()));

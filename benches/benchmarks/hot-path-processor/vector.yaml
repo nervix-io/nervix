@@ -33,7 +33,7 @@ transforms:
     drop_on_abort: true
     drop_on_error: true
     source: |
-      . = {"value": upcase(string!(.value))}
+      . = {"id": string!(.id), "value": upcase(string!(.value))}
 {% endfor %}
 
 sinks:
@@ -52,6 +52,7 @@ sinks:
     encoding:
       codec: json
       only_fields:
+        - id
         - value
     healthcheck:
       enabled: true

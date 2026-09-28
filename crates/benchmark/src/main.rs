@@ -1744,9 +1744,11 @@ fn write_run_manifest(
         Implementation::Container(container) => ("container", Some(container.image.as_str())),
     };
     table.insert("subject".to_string(), subject.into());
-    if let Implementation::Nervix(nervix) = implementation {
-        table.insert("nervix_nodes".to_string(), i64::from(nervix.nodes).into());
-    }
+    let subject_nodes = match implementation {
+        Implementation::Nervix(nervix) => nervix.nodes,
+        Implementation::Container(_) => 1,
+    };
+    table.insert("subject_nodes".to_string(), i64::from(subject_nodes).into());
     if let Some(image) = image {
         table.insert("image".to_string(), image.into());
     }
@@ -1872,6 +1874,8 @@ fn absolute_or_repository_path(repository_root: &Path, path: &Path) -> PathBuf {
 fn shape_arguments(shape: &LoadShape) -> Vec<String> {
     match shape {
         LoadShape::UniformPassthrough => vec!["uniform-passthrough".to_string()],
+        LoadShape::UniformUppercase => vec!["uniform-uppercase".to_string()],
+        LoadShape::UniformFilterMap => vec!["uniform-filter-map".to_string()],
         LoadShape::UniformFanout { outputs_per_input } => vec![
             "uniform-fanout".to_string(),
             "--outputs-per-input".to_string(),

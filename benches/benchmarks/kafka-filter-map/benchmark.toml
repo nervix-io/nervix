@@ -11,7 +11,7 @@ wait_timeout_seconds = 120
 warmup_seconds = 10
 
 [load.shape]
-kind = "uniform-passthrough"
+kind = "uniform-filter-map"
 
 [parameters]
 emitter_flush_each = "10ms"
