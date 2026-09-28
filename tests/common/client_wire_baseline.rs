@@ -47,6 +47,8 @@ use super::{
 const DEFAULT_SAMPLES: usize = 100;
 const DEFAULT_UPLOAD_SAMPLES: usize = 5;
 const DEFAULT_PAYLOAD_BYTES: usize = 1024;
+const CONTROL_COMMAND_SAMPLES: usize = 20;
+const RECORDS_PER_CONTROL_COMMAND: usize = 8;
 const MAX_SAMPLES: usize = 10_000;
 const MAX_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -62,7 +64,43 @@ struct Workload {
     upload_samples: usize,
     subscription_detail_bytes: usize,
     upload_file_bytes: usize,
+    paused_subscriber_records: usize,
+    slow_subscriber_records: usize,
     concrete_branches: Vec<&'static str>,
+}
+
+impl Workload {
+    async fn publish_control_burst(
+        &self,
+        process: &ServerProcess,
+        host: &str,
+        sample: usize,
+    ) -> Result<()> {
+        let detail = "x".repeat(self.subscription_detail_bytes);
+        for offset in 0..RECORDS_PER_CONTROL_COMMAND {
+            tokio::task::consume_budget().await;
+            let index = sample * RECORDS_PER_CONTROL_COMMAND + offset;
+            let tenant = if index.is_multiple_of(2) {
+                "acme"
+            } else {
+                "beta"
+            };
+            let sequence = i64::try_from(index).context("control record index does not fit i64")?;
+            let payload = serde_json::json!({
+                "tenant": tenant,
+                "sequence": sequence,
+                "detail": detail,
+            })
+            .to_string();
+            timeout(
+                OPERATION_TIMEOUT,
+                process.publish_http(host, "/records", &payload),
+            )
+            .await
+            .context("subscriber control publication timed out")??;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -110,6 +148,8 @@ impl Settings {
                 upload_samples,
                 subscription_detail_bytes: payload_bytes,
                 upload_file_bytes: payload_bytes,
+                paused_subscriber_records: CONTROL_COMMAND_SAMPLES * RECORDS_PER_CONTROL_COMMAND,
+                slow_subscriber_records: CONTROL_COMMAND_SAMPLES * RECORDS_PER_CONTROL_COMMAND,
                 concrete_branches: vec!["acme", "beta"],
             },
         })
@@ -156,11 +196,31 @@ struct Operations {
     typed_json_subscription: OperationReport,
     graph_snapshot: OperationReport,
     resource_upload: OperationReport,
+    prepared_native_command: PreparedCommandReport,
+    control_with_paused_subscriber: OperationReport,
+    control_with_slow_subscriber: SlowControlReport,
+}
+
+#[derive(Debug, Serialize)]
+struct PreparedCommandReport {
+    prepare_microseconds: Distribution,
+    execute_microseconds: Distribution,
+}
+
+#[derive(Debug, Serialize)]
+struct SlowControlReport {
+    operation: OperationReport,
+    row_events: u64,
+    consumer_overflow_events: u64,
+    delivery_lost_events: u64,
+    rows_skipped_events: u64,
+    drain_timeouts: u64,
 }
 
 #[derive(Debug, Serialize)]
 struct OperationReport {
     transport: &'static str,
+    elapsed_seconds: f64,
     latency_microseconds: Distribution,
     request_encoded_bytes: Distribution,
     response_encoded_bytes: Distribution,
@@ -173,6 +233,7 @@ struct Distribution {
     min: u64,
     p50: u64,
     p90: u64,
+    p95: u64,
     p99: u64,
     max: u64,
     values: Vec<u64>,
@@ -223,6 +284,7 @@ impl Samples {
             min: self.histogram.min(),
             p50: self.histogram.value_at_quantile(0.50),
             p90: self.histogram.value_at_quantile(0.90),
+            p95: self.histogram.value_at_quantile(0.95),
             p99: self.histogram.value_at_quantile(0.99),
             max: self.histogram.max(),
             values: self.values,
@@ -231,6 +293,7 @@ impl Samples {
 }
 
 struct OperationSamples {
+    started: Instant,
     latency: Samples,
     request_bytes: Samples,
     response_bytes: Samples,
@@ -239,6 +302,7 @@ struct OperationSamples {
 impl OperationSamples {
     fn new() -> Result<Self> {
         Ok(Self {
+            started: Instant::now(),
             latency: Samples::new()?,
             request_bytes: Samples::new()?,
             response_bytes: Samples::new()?,
@@ -248,6 +312,7 @@ impl OperationSamples {
     fn finish(self, transport: &'static str) -> OperationReport {
         OperationReport {
             transport,
+            elapsed_seconds: self.started.elapsed().as_secs_f64(),
             latency_microseconds: self.latency.finish(),
             request_encoded_bytes: self.request_bytes.finish(),
             response_encoded_bytes: self.response_bytes.finish(),
@@ -395,17 +460,53 @@ pub(crate) async fn capture(
         settings.workload.upload_file_bytes,
     )
     .await?;
-    let final_metrics = scrape_metrics(process).await?;
-    record_memory_phase("resource_uploads", &final_metrics, &mut memory_phases)?;
+    let upload_metrics = scrape_metrics(process).await?;
+    record_memory_phase("resource_uploads", &upload_metrics, &mut memory_phases)?;
+    record_process_phase(
+        "resource_uploads",
+        client_pid,
+        server_pid,
+        &mut process_phases,
+    )?;
+    record_queue_occupancy("resource_uploads", &upload_metrics, &mut queue_occupancy)?;
 
+    let prepared_native_command =
+        measure_prepared_native_commands(process, domain, settings.workload.command_samples)
+            .await?;
+    let prepared_metrics = scrape_metrics(process).await?;
+    record_memory_phase("prepared_commands", &prepared_metrics, &mut memory_phases)?;
+    record_process_phase(
+        "prepared_commands",
+        client_pid,
+        server_pid,
+        &mut process_phases,
+    )?;
+    record_queue_occupancy("prepared_commands", &prepared_metrics, &mut queue_occupancy)?;
+
+    let control_with_paused_subscriber =
+        measure_control_with_paused_subscriber(process, domain, &host, &settings.workload).await?;
+    let paused_metrics = scrape_metrics(process).await?;
+    record_memory_phase("paused_subscriber", &paused_metrics, &mut memory_phases)?;
+    record_process_phase(
+        "paused_subscriber",
+        client_pid,
+        server_pid,
+        &mut process_phases,
+    )?;
+    record_queue_occupancy("paused_subscriber", &paused_metrics, &mut queue_occupancy)?;
+
+    let control_with_slow_subscriber =
+        measure_control_with_slow_subscriber(process, domain, &host, &settings.workload).await?;
+    let final_metrics = scrape_metrics(process).await?;
+    record_memory_phase("slow_subscriber", &final_metrics, &mut memory_phases)?;
     let client_after = read_process_counters(client_pid)?;
     let server_after = read_process_counters(server_pid)?;
     process_phases.push(ProcessPhase {
-        phase: "resource_uploads",
+        phase: "slow_subscriber",
         client: client_after.clone(),
         server: server_after.clone(),
     });
-    record_queue_occupancy("resource_uploads", &final_metrics, &mut queue_occupancy)?;
+    record_queue_occupancy("slow_subscriber", &final_metrics, &mut queue_occupancy)?;
     ensure!(
         queue_occupancy
             .iter()
@@ -417,7 +518,7 @@ pub(crate) async fn capture(
         .with_context(|| format!("failed to write raw metrics to {}", metrics_path.display()))?;
 
     let report = BaselineReport {
-        schema_version: 1,
+        schema_version: 2,
         captured_at_utc: chrono::Utc::now().to_rfc3339(),
         git_commit: command_output("git", &["rev-parse", "HEAD"])?,
         git_worktree_status: command_output("git", &["status", "--short"])?,
@@ -430,6 +531,9 @@ pub(crate) async fn capture(
             typed_json_subscription: subscription,
             graph_snapshot,
             resource_upload,
+            prepared_native_command,
+            control_with_paused_subscriber,
+            control_with_slow_subscriber,
         },
         client_process: ProcessReport::from_counters(client_pid, client_before, client_after)?,
         server_process: ProcessReport::from_counters(server_pid, server_before, server_after)?,
@@ -531,6 +635,43 @@ async fn measure_commands(
     Ok(observations.finish("native gRPC bidirectional stream"))
 }
 
+/// Separates client parsing/preparation from the same command's request and reply against the
+/// release server. Each sample uses a fresh execution identity, as the regular command does.
+async fn measure_prepared_native_commands(
+    process: &ServerProcess,
+    domain: &str,
+    samples: usize,
+) -> Result<PreparedCommandReport> {
+    let grpc_uri = process.grpc_uri();
+    let client = Client::connect_with_options(
+        &grpc_uri,
+        client_domain(domain),
+        client_connect_options(&grpc_uri)?,
+    )
+    .await
+    .context("failed to connect prepared command client")?;
+    let warmup = client.execute(COMMAND_QUERY).await?;
+    ensure!(warmup.succeeded(), "prepared command warm-up failed");
+    let mut prepare = Samples::new()?;
+    let mut execute = Samples::new()?;
+    for _ in 0..samples {
+        tokio::task::consume_budget().await;
+        let started = Instant::now();
+        let prepared = client.prepare_execution(COMMAND_QUERY).await;
+        prepare.record_duration(started.elapsed())?;
+        let started = Instant::now();
+        let outcome = timeout(OPERATION_TIMEOUT, client.execute_prepared(&prepared))
+            .await
+            .context("prepared command timed out")??;
+        execute.record_duration(started.elapsed())?;
+        ensure!(outcome.succeeded(), "prepared command failed");
+    }
+    Ok(PreparedCommandReport {
+        prepare_microseconds: prepare.finish(),
+        execute_microseconds: execute.finish(),
+    })
+}
+
 async fn measure_subscriptions(
     process: &ServerProcess,
     domain: &str,
@@ -608,6 +749,136 @@ async fn measure_subscriptions(
             .record_usize(rows.rows.frame().len())?;
     }
     Ok(observations.finish("HTTP admission to native gRPC typed Row subscription frames"))
+}
+
+/// Measures command replies while an independent gRPC subscriber leaves its response stream
+/// unread. Publishing is interleaved with control requests so the subscriber stays active during
+/// every measured command rather than being a historical load phase.
+async fn measure_control_with_paused_subscriber(
+    process: &ServerProcess,
+    domain: &str,
+    host: &str,
+    workload: &Workload,
+) -> Result<OperationReport> {
+    let mut paused = process.open_session(domain).await?;
+    let opened = paused
+        .observe_command("CREATE SUBSCRIPTION client_wire_paused TO client_wire_records;")
+        .await
+        .context("failed to create paused subscriber")?;
+    ensure!(
+        outcome_succeeded(&opened.result),
+        "paused subscriber did not open"
+    );
+
+    let mut control = process.open_session(domain).await?;
+    let warmup = control.observe_command(COMMAND_QUERY).await?;
+    ensure!(
+        outcome_succeeded(&warmup.result),
+        "paused control warm-up failed"
+    );
+    let mut observations = OperationSamples::new()?;
+    for sample in 0..CONTROL_COMMAND_SAMPLES {
+        tokio::task::consume_budget().await;
+        workload
+            .publish_control_burst(process, host, sample)
+            .await?;
+        let started = Instant::now();
+        let observed = timeout(OPERATION_TIMEOUT, control.observe_command(COMMAND_QUERY))
+            .await
+            .context("paused subscriber control request timed out")??;
+        observations.latency.record_duration(started.elapsed())?;
+        observations
+            .request_bytes
+            .record_usize(observed.request_frame_bytes)?;
+        observations
+            .response_bytes
+            .record_usize(observed.response_frame_bytes)?;
+        ensure!(
+            outcome_succeeded(&observed.result),
+            "paused control command failed"
+        );
+    }
+    drop(paused);
+    Ok(observations.finish("native gRPC commands with an unread Row subscriber"))
+}
+
+/// The application drains only one event after each burst of records, leaving a growing bounded
+/// backlog in its Rust client while independent control requests complete.
+async fn measure_control_with_slow_subscriber(
+    process: &ServerProcess,
+    domain: &str,
+    host: &str,
+    workload: &Workload,
+) -> Result<SlowControlReport> {
+    let grpc_uri = process.grpc_uri();
+    let client = Client::connect_with_options(
+        &grpc_uri,
+        client_domain(domain),
+        client_connect_options(&grpc_uri)?,
+    )
+    .await
+    .context("failed to connect slow native subscription client")?;
+    let outcome = client
+        .subscribe(&SubscriptionRequest::new(
+            "client_wire_slow",
+            "client_wire_records",
+        ))
+        .await
+        .context("failed to create slow native subscription")?;
+    ensure!(outcome.succeeded(), "slow subscriber did not open");
+
+    let mut control = process.open_session(domain).await?;
+    let warmup = control.observe_command(COMMAND_QUERY).await?;
+    ensure!(
+        outcome_succeeded(&warmup.result),
+        "slow control warm-up failed"
+    );
+    let mut observations = OperationSamples::new()?;
+    let mut row_events = 0_u64;
+    let mut consumer_overflow_events = 0_u64;
+    let mut delivery_lost_events = 0_u64;
+    let mut rows_skipped_events = 0_u64;
+    let mut drain_timeouts = 0_u64;
+    for sample in 0..CONTROL_COMMAND_SAMPLES {
+        tokio::task::consume_budget().await;
+        workload
+            .publish_control_burst(process, host, sample)
+            .await?;
+        let started = Instant::now();
+        let observed = timeout(OPERATION_TIMEOUT, control.observe_command(COMMAND_QUERY))
+            .await
+            .context("slow subscriber control request timed out")??;
+        observations.latency.record_duration(started.elapsed())?;
+        observations
+            .request_bytes
+            .record_usize(observed.request_frame_bytes)?;
+        observations
+            .response_bytes
+            .record_usize(observed.response_frame_bytes)?;
+        ensure!(
+            outcome_succeeded(&observed.result),
+            "slow control command failed"
+        );
+        match timeout(Duration::from_millis(100), client.next_subscription()).await {
+            Ok(Ok(SubscriptionEvent::Rows(_))) => row_events += 1,
+            Ok(Ok(SubscriptionEvent::ConsumerOverflow(_))) => consumer_overflow_events += 1,
+            Ok(Ok(SubscriptionEvent::DeliveryLost(_))) => delivery_lost_events += 1,
+            Ok(Ok(SubscriptionEvent::RowsSkipped(_))) => rows_skipped_events += 1,
+            Ok(Ok(SubscriptionEvent::Ended(_) | SubscriptionEvent::Interrupted(_))) => {
+                return Err(anyhow!("slow subscriber ended during control measurement"));
+            }
+            Ok(Err(error)) => return Err(error).context("slow subscriber read failed"),
+            Err(_) => drain_timeouts += 1,
+        }
+    }
+    Ok(SlowControlReport {
+        operation: observations.finish("native gRPC commands with a slowly drained Row subscriber"),
+        row_events,
+        consumer_overflow_events,
+        delivery_lost_events,
+        rows_skipped_events,
+        drain_timeouts,
+    })
 }
 
 async fn measure_graph_snapshots(

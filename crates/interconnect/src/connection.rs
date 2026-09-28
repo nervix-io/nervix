@@ -28,6 +28,7 @@ use futures_util::stream::FuturesUnordered;
 use h2::{Reason, RecvStream, SendStream, client, server};
 use http::{Method, Request, Response, StatusCode, Version};
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_dns::ConnectionBudget;
 use nervix_execution::{
     BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
     sync::{ArcSwap, CancellationToken, DashMap},
@@ -70,7 +71,7 @@ mod relay;
 mod stream;
 pub(crate) mod stream_slots;
 
-use dial::{DialedStream, OutboundDial, SetupBudget};
+use dial::{DialedStream, OutboundDial};
 pub(crate) use duplex::FrameReader;
 pub use duplex::{
     ChargedItem, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress, DuplexSender,
@@ -1359,7 +1360,7 @@ impl TransportState {
         key: &ConnectionSlotKey,
         slot_cancel: &CancellationToken,
     ) -> Result<Arc<ClientConnection>, Report<TransportError>> {
-        let budget = SetupBudget::start(self.options.connection_setup_timeout);
+        let budget = ConnectionBudget::start(self.options.connection_setup_timeout);
         let setup = async {
             let DialedStream {
                 stream: tcp,

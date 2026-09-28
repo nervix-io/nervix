@@ -3,7 +3,11 @@
 //! Rows events are built from frames the wire contract encodes, so every accessor reads a real
 //! verified frame. The conformance scenarios drive the same functions against a running cluster.
 
-use std::{num::NonZeroU64, ptr, slice, time::Duration};
+use std::{
+    num::NonZeroU64,
+    ptr, slice,
+    time::{Duration, Instant},
+};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
@@ -169,16 +173,21 @@ fn write_row(
 }
 
 fn rows_event(schema: RowSchema) -> SubscriptionEvent {
+    rows_event_count(schema, 2)
+}
+
+fn rows_event_count(schema: RowSchema, count: usize) -> SubscriptionEvent {
     let limits = SessionLimits::DEFAULT;
     let mut batch =
         SubscriptionRowsEncoder::branched(handle(), &limits, |key| key.push_string("acme"))
             .assured("the key fits the limits");
-    batch
-        .push_row(|cells| write_row(cells, Some("h\u{e9}\u{0}"), true))
-        .assured("the row fits the limits");
-    batch
-        .push_row(|cells| write_row(cells, None, false))
-        .assured("the row fits the limits");
+    for index in 0..count {
+        let extreme = index.is_multiple_of(2);
+        let text = if extreme { Some("h\u{e9}\u{0}") } else { None };
+        batch
+            .push_row(|cells| write_row(cells, text, extreme))
+            .assured("the row fits the limits");
+    }
     let frame = batch
         .finish()
         .assured("the batch fits the limits")
@@ -194,6 +203,112 @@ fn rows_event(schema: RowSchema) -> SubscriptionEvent {
         schema: Arc::new(schema),
         rows,
     })
+}
+
+#[test]
+fn profiles_bulk_binding_access_and_retain_release() {
+    const COUNT: usize = 100;
+    const SAMPLES: usize = 200;
+
+    fn sample(mut call: impl FnMut()) -> Vec<u64> {
+        for _ in 0..10 {
+            call();
+        }
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            call();
+            samples.push(
+                u64::try_from(started.elapsed().as_nanos())
+                    .assured("a binding probe call completes within 584 years"),
+            );
+        }
+        samples
+    }
+
+    let event = Shared::new(rows_event_count(schema(), COUNT));
+    assert_eq!(
+        unsafe { nx_event_row_count(event.0) },
+        u64::try_from(COUNT).assured("100 fits u64")
+    );
+    let mut states = vec![0_u8; COUNT];
+    let mut fixed = vec![0_u8; COUNT * std::mem::size_of::<i64>()];
+    let mut offsets = vec![0_u64; COUNT + 1];
+    let mut text = vec![0_u8; COUNT * 4 / 2];
+    let mut text_len = 0;
+    let mut frame = ptr::null();
+    let mut frame_len = 0;
+
+    let retain_release = sample(|| {
+        // SAFETY: the original event is live and this reference is released exactly once.
+        let retained = unsafe { nx_event_retain(event.0) };
+        assert!(!retained.is_null());
+        unsafe { nx_event_release(retained) };
+    });
+    let frame_borrow = sample(|| {
+        // SAFETY: the event is live and both outputs are writable.
+        succeeded(unsafe { nx_event_frame(event.0, &mut frame, &mut frame_len) });
+    });
+    let column_states = sample(|| {
+        // SAFETY: the event is live and states has one byte per row.
+        succeeded(unsafe {
+            nx_event_column_states(event.0, ROWS, 7, states.as_mut_ptr(), states.len())
+        });
+    });
+    let column_fixed = sample(|| {
+        // SAFETY: the event is live and fixed has eight bytes per row.
+        succeeded(unsafe {
+            nx_event_column_fixed(event.0, ROWS, 7, fixed.as_mut_ptr().cast(), fixed.len())
+        });
+    });
+    let column_varlen = sample(|| {
+        // SAFETY: the event is live, offsets has one entry per row plus an end, and text has the
+        // exact total capacity for the alternating four-byte strings.
+        succeeded(unsafe {
+            nx_event_column_varlen(
+                event.0,
+                ROWS,
+                12,
+                offsets.as_mut_ptr(),
+                offsets.len(),
+                text.as_mut_ptr(),
+                text.len(),
+                &mut text_len,
+            )
+        });
+    });
+    assert_eq!(text_len, text.len());
+    assert_eq!(
+        offsets[COUNT],
+        u64::try_from(text.len()).assured("the text buffer fits u64")
+    );
+    assert!(frame_len > 0);
+    assert_eq!(states, vec![u8::from(CellState::Value); COUNT]);
+
+    if let Some(output) = std::env::var_os("NERVIX_CLIENT_WIRE_BINDING_COST_OUTPUT") {
+        let output = std::path::PathBuf::from(output);
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent).assured("the binding report directory is writable");
+        }
+        let report = serde_json::json!({
+            "schema_version": 1,
+            "rows": COUNT,
+            "frame_bytes": frame_len,
+            "samples_per_stage": SAMPLES,
+            "samples_nanoseconds": {
+                "retain_release": retain_release,
+                "borrowed_frame": frame_borrow,
+                "column_states": column_states,
+                "column_fixed": column_fixed,
+                "column_varlen": column_varlen,
+            },
+        });
+        std::fs::write(
+            output,
+            serde_json::to_vec_pretty(&report).assured("the report serializes"),
+        )
+        .assured("the binding report is writable");
+    }
 }
 
 /// An event handed out as a host's first reference, released when dropped.

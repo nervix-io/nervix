@@ -75,10 +75,11 @@ client-wire-baseline samples="100" upload_samples="5" payload_bytes="1024" outpu
     export NERVIX_CLIENT_WIRE_BASELINE_UPLOAD_SAMPLES={{ quote(upload_samples) }}
     export NERVIX_CLIENT_WIRE_BASELINE_PAYLOAD_BYTES={{ quote(payload_bytes) }}
     export NERVIX_CLIENT_WIRE_BASELINE_OUTPUT={{ quote(output) }}
-    RUSTC_WRAPPER= cargo test --features testing --test scenarios -- \
+    cargo test --features testing --test scenarios -- \
         --input tests/features/runtime/client_wire_baseline.feature \
         --tags @client_wire_baseline \
-        --concurrency 1
+        --concurrency 1 \
+        --retry 0
 
 # Capture the web console images the book publishes. The capture tool starts a real nervix-server,
 # seeds it with nervix-cli, and drives the console in a browser, so the images are build output
@@ -585,7 +586,10 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
         --package nervix-connector-sentry \
         --package nervix-connector-otel \
         --package nervix-connector-iceberg \
-        --package nervix-connector-rabbitmq
+        --package nervix-connector-rabbitmq \
+        --package nervix-connector-syslog \
+        --package nervix-connector-websockets \
+        --package nervix-interconnect
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
     run_scenario() {
         cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
@@ -597,6 +601,10 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
     run_scenario tests/features/runtime/otel_emission.feature 'OTEL.*metric.*HTTP'
     run_scenario tests/features/runtime/iceberg_emission.feature 'DNS.*fixture|Iceberg.*holds.*ACK'
     run_scenario tests/features/runtime/rabbitmq_dns_resolution.feature 'RabbitMQ|AMQPS'
+    run_scenario tests/features/runtime/syslog_dns_resolution.feature 'Syslog'
+    run_scenario tests/features/runtime/websocket_client_ingestion.feature 'Websocket client ingestor connects'
+    run_scenario tests/features/runtime/websocket_client_tls_resource_mounts.feature 'Websocket client keeps'
+    run_scenario tests/features/runtime/websocket_dns_resolution.feature 'WebSocket clients reconnect'
     just coverage-dns-clients-report {{ quote(output) }}
 
 # Export the profiles collected by `coverage-dns-clients` without rebuilding its test binaries.
@@ -610,7 +618,10 @@ coverage-dns-clients-report output="target/dns-clients.lcov":
         --package nervix-connector-sentry \
         --package nervix-connector-otel \
         --package nervix-connector-iceberg \
-        --package nervix-connector-rabbitmq
+        --package nervix-connector-rabbitmq \
+        --package nervix-connector-syslog \
+        --package nervix-connector-websockets \
+        --package nervix-interconnect
 
 # Measure the Shuttle-only test paths, which production-mode workspace coverage cannot compile.
 # The same checks run under ordinary and nondeterminism-detection schedules, with one test thread
@@ -678,6 +689,30 @@ bench *args: build-web-console
 # Criterion measures CPU; its unit probe measures allocations.
 bench-subscription-rows *args:
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
+
+# Write raw component timing and retained-allocation samples for Arrow-to-Row delivery.
+client-wire-cost output="target/client-wire-cost.json":
+    cargo bench --package nervix-server --bench client_wire_cost --features benchmarks -- {{ quote(output) }}
+
+# Run the component benchmark with coverage instrumentation for changed benchmark lines.
+coverage-client-wire-cost output="target/client-wire-cost.lcov" report="target/client-wire-cost-coverage.json":
+    cargo llvm-cov --bench client_wire_cost --features benchmarks --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(report) }}
+
+# Check the typed Arrow workload's selection, null, redaction, branch and frame-limit assertions.
+test-client-wire-bench-fixture:
+    cargo test --package nervix-server --features benchmarks --lib subscription_row::benchmark::tests -- --nocapture
+
+# Capture raw timings through the exported Rust binding's C ABI on a 100-row frame.
+client-wire-binding-cost output="target/client-wire-binding-cost.json":
+    NERVIX_CLIENT_WIRE_BINDING_COST_OUTPUT="$(realpath -m {{ quote(output) }})" cargo test --package nervix-client-ffi --lib tests::profiles_bulk_binding_access_and_retain_release -- --exact --nocapture
+
+# Measure CPython ctypes and GC overhead on the same live rows used by conformance.
+client-wire-binding-host-cost output_dir="target/client-wire-binding-host":
+    NERVIX_CLIENT_WIRE_BINDING_PROFILE_DIR="$(realpath -m {{ quote(output_dir) }})" just test-client-conformance '@client_probe_python' --concurrency 1 --retry 0
+
+# Compare the same native command workload over plaintext and TLS with one-node test clusters.
+client-wire-tls-cost output_dir="target/client-wire-tls-cost":
+    NERVIX_CLIENT_WIRE_TLS_OUTPUT_DIR={{ quote(output_dir) }} just test-scenarios --input tests/features/runtime/client_wire_tls_cost.feature --tags @client_wire_tls_cost --concurrency 1 --retry 0
 
 # Measure durable WASM guest-state checkpoints against unsynchronized writes of the same states. The
 # store lives under the crate target directory, so the synchronization cost is that of its storage.
@@ -944,6 +979,16 @@ validate-dns-dependencies:
         if ! rg -q '^tcp-stream v[^ ]+ .*rustls--aws_lc_rs' <<< "${graph}" || \
             rg -q '^tcp-stream v[^ ]+ .*rustls--ring' <<< "${graph}"; then
             echo "${package} does not select AWS-LC for RabbitMQ TLS" >&2
+            exit 1
+        fi
+    done
+    # Syslog and WebSocket client transports resolve through the node resolver before opening
+    # their own concrete-address sockets, even when built without the server's feature graph.
+    for package in nervix-connector-syslog nervix-connector-websockets; do
+        graph="$(cargo tree --package "${package}" --edges normal --format '{p} {f}' --prefix none)"
+        if ! rg -q '^nervix-dns v' <<< "${graph}" || \
+            ! rg -q '^hickory-resolver v0\.26\.[0-9]+ .*tokio' <<< "${graph}"; then
+            echo "${package} lacks the node resolver for its outbound connections" >&2
             exit 1
         fi
     done
