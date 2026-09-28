@@ -11,8 +11,7 @@ use ahash::{HashMap, HashMapExt};
 use error_stack::Report;
 use meticulous::{OptionExt, ResultExt};
 use nervix_models::{
-    DomainName, EndpointType, HttpBodyMode, IngestSource, Model, ModelIndex, ModelKind, NodeRef,
-    RelayName,
+    DomainName, EndpointType, IngestSource, Model, ModelIndex, ModelKind, NodeRef, RelayName,
 };
 use petgraph::graph::DiGraph;
 use triomphe::Arc;
@@ -36,14 +35,13 @@ use crate::registry::{
             validate_processing_branch_selections,
         },
         connector::{
-            HttpEmitterRequestPlan, effective_emitter_filter_map_schema,
-            effective_ingestor_output_filter_map_schema, ensure_ingestor_timestamp_source,
-            ensure_signaling_protocol_is_valid, validate_direct_values_sensitivity,
-            validate_emitter_batch_container, validate_emitter_publishing_contract,
-            validate_endpoint_paths, validate_http_emitter_client,
-            validate_http_literal_request_fields, validate_http_request_expressions,
-            validate_ingestor_filter_where_for_internal_schemas, validate_ingestor_source,
-            validate_sqs_fifo_group_expression, validate_vhost_hostnames,
+            effective_emitter_filter_map_schema, effective_ingestor_output_filter_map_schema,
+            ensure_ingestor_timestamp_source, ensure_signaling_protocol_is_valid,
+            validate_direct_values_sensitivity, validate_emitter_batch_container,
+            validate_emitter_publishing_contract, validate_endpoint_paths,
+            validate_http_emitter_client, validate_http_literal_request_fields,
+            validate_http_request_expressions, validate_ingestor_filter_where_for_internal_schemas,
+            validate_ingestor_source, validate_sqs_fifo_group_expression, validate_vhost_hostnames,
         },
         expression::add_udf_dependency_edges,
         materialized_state::{
@@ -119,7 +117,6 @@ impl DomainState {
     ) -> Result<Self, Report<RegistryError>> {
         let mut graph = DiGraph::<ActiveNode, EdgeKind>::new();
         let mut indices = HashMap::new();
-        let mut http_emitter_plans = HashMap::new();
 
         for (key, model) in models {
             let resolved_branching = match model {
@@ -1432,7 +1429,7 @@ impl DomainState {
                             ),
                         }));
                     }
-                    let http_client_plan = if let (
+                    let http_origin = if let (
                         nervix_models::EmitSink::Http { .. },
                         Model::ClientHttp(http_client),
                     ) = (emitter.sink.as_ref(), client_model)
@@ -1489,7 +1486,7 @@ impl DomainState {
                     } else {
                         producer_schema
                     };
-                    let http_fields = validate_http_request_expressions(
+                    validate_http_request_expressions(
                         domain,
                         identifier,
                         models,
@@ -1497,7 +1494,7 @@ impl DomainState {
                         producer_schema,
                         output_schema,
                     )?;
-                    let (effective_schema, route_program) = effective_emitter_filter_map_schema(
+                    let effective_schema = effective_emitter_filter_map_schema(
                         domain,
                         identifier,
                         models,
@@ -1505,29 +1502,8 @@ impl DomainState {
                         producer_schema,
                         output_schema,
                     )?;
-                    if let Some(client_plan) = http_client_plan {
-                        validate_http_literal_request_fields(
-                            domain,
-                            identifier,
-                            &client_plan.origin,
-                            emitter,
-                        )?;
-                        let body = if emitter.body.codec().is_some() {
-                            HttpBodyMode::Codec
-                        } else {
-                            HttpBodyMode::WithoutBody
-                        };
-                        let fields = http_fields
-                            .verified("the HTTP emitter branch compiled request fields above");
-                        http_emitter_plans.insert(
-                            key.clone(),
-                            Arc::new(HttpEmitterRequestPlan {
-                                client: client_plan,
-                                body,
-                                fields,
-                                route: route_program,
-                            }),
-                        );
+                    if let Some(origin) = &http_origin {
+                        validate_http_literal_request_fields(domain, identifier, origin, emitter)?;
                     }
                     if let Some(codec_name) = emitter.body.codec() {
                         let consumer_schema =
@@ -1573,7 +1549,6 @@ impl DomainState {
                 graph,
                 indices,
                 placement,
-                http_emitter_plans,
             },
         })
     }

@@ -28,6 +28,7 @@ shuttle = [
   "nervix-client-core/shuttle",
   "nervix-connector/shuttle",
   "nervix-connector-clickhouse/shuttle",
+  "nervix-connector-http/shuttle",
   "nervix-connector-iceberg/shuttle",
   "nervix-connector-kafka/shuttle",
   "nervix-connector-mongodb/shuttle",
@@ -550,7 +551,9 @@ prost = "0.13"
 prost-reflect = "0.15.3"
 prost-types = "0.13"
 protox = "0.8.0"
-pulsar = { version = "6.7.2", default-features = false, features = [
+# 6.9.0 with the broker's announced maxMessageSize kept per connection, a larger message refused
+# before it is written, and a broker SendError resolved with its server error.
+pulsar = { git = "https://github.com/nervix-io/pulsar-rs.git", branch = "nervix-max-message-size", default-features = false, features = [
   "compression",
   "tokio-rustls-runtime",
 ] }

@@ -25,7 +25,7 @@ it, and a ticket that consumes it coordinates through that ticket rather than ed
 | HTTP client settings, TLS and mounted resources | The connector-crate epic's shared `HttpClientConfig` in `crates/connector`, and the resource-version binding contract | Validation of an emitter-bound client's origin and required `timeout_ms`, extending the shared builder rather than forking it | [03](https://app.clickup.com/t/86bc78na5) |
 | Expression scopes, types, sensitivity and URL semantics | The typed-states and columnar VM epics | Exact non-null `STRING` request fields, the codec and bodyless scopes, explicit leakage, and WHATWG normalization through the `url` crate the URL functions already use | [03](https://app.clickup.com/t/86bc78na5), [04](https://app.clickup.com/t/86bc78nb2) |
 | Prepared payloads and source membership | [Emitter Batching 06](https://app.clickup.com/t/86bc73jd6) | One prepared request per eligible record, carried as a prepared payload with exactly one member; no second retry carrier or acknowledgement map | [04](https://app.clickup.com/t/86bc78nb2) |
-| The outbound HTTP sink in the connector crate | The connector-crate epic, qualified by [Connectors 14](https://app.clickup.com/t/86bc21vve) | The sink half of `crates/connectors/http`, which is source-only today; driver, header and response interpretation stay in the crate, and the host keeps lifecycle, retry cadence and acknowledgements | [05](https://app.clickup.com/t/86bc78nbh) |
+| The outbound HTTP sink in the connector crate | The connector-crate epic, qualified by [Connectors 14](https://app.clickup.com/t/86bc21vve) | The sink half of `crates/connectors/http` and the contract's HTTP request sink; driver, header and response interpretation stay in the crate, and the host keeps lifecycle, retry cadence and acknowledgements | [04](https://app.clickup.com/t/86bc78nb2) sends each prepared request and answers `2xx` as delivered and every other outcome as a failed attempt, so its scenarios reach the receiver; [05](https://app.clickup.com/t/86bc78nbh) classifies responses and qualifies the transport |
 | Retry, acknowledgement and backpressure in the emitter host | [Collapse the emitter task loop's repeated publish-outcome handling](https://app.clickup.com/t/86bc6r9m9), consumed through Emitter Batching 06 | Response classification, `Retry-After`, and the one-request-in-flight rule, applied through the consolidated outcome owner | [06](https://app.clickup.com/t/86bc78nqt) |
 | Deterministic checks of completion, cancellation and force flush | The Shuttle epic | Extensions to the landed production-type checks wherever HTTP changes completion or cancellation ownership | [06](https://app.clickup.com/t/86bc78nqt) |
 | `ALTER` impact classification, gates, drain and transaction inspection | The transaction-quiesce epic | The HTTP sink's `ENTITY_PAUSE`, `DYNAMIC` and `DOMAIN_PAUSE` classification and its drain scenarios, through the existing planner and report | [07](https://app.clickup.com/t/86bc78nr7) |
@@ -84,7 +84,7 @@ These gaps are the delivery tasks' work, and none of them contradicts the specif
 | `write_header` is declared only for Kafka, Pulsar, RabbitMQ, NATS and SQS | 02 |
 | `timeout_ms` is optional for every HTTP client, and `endpoint` is never validated as a URL | 03 |
 | HTTP client configuration is documented only on the ingestor page | 03 |
-| `crates/connectors/http` implements only the source contract | 05 |
+| `crates/connectors/http` implements only the source contract | 04, which added the request sink its scenarios send through; 05 completes response classification |
 | `docs/src/emitters.md` has no HTTP sink and lists request/response sinks without it | 02 through 08, each with its own surface |
 
 ## The HTTP receiver fixture
@@ -105,6 +105,10 @@ records its bounds and its cleanup.
 | `Given HTTP receiver "<name>" answers unscripted requests with "<response>"` | Replaces the standing response, a `200` without a body until replaced. |
 | `Then HTTP receiver "<name>" eventually receives at least <n> requests` | Waits up to 60 seconds for the capture count. |
 | `Then HTTP receiver "<name>" request <i> is` | Compares one captured request: request line, the named headers exactly, and the exact body. |
+| `Then HTTP receiver "<name>" captured one request that is` | Finds the one captured request with the docstring's request line, wherever it arrived, and compares it the same way, for requests of independent branches or relays. |
+| `Then HTTP receiver "<name>" request <i> repeats request <j>` | Compares two captures byte for byte: request line, every header field in arrival order, and body. |
+| `Then HTTP receiver "<name>" request <i> carries header "<header>" and a body containing "<text>"` | Checks a generated header and body that cannot be named in advance. |
+| `Then HTTP receiver "<name>" has captured exactly <n> requests` | Counts the captures when the step runs, after the expected requests arrived and every request that must never be sent would have preceded them. |
 | `Then HTTP receiver "<name>" eventually records a failed TLS handshake` | Waits up to 60 seconds for a client to fail its handshake. |
 
 Script lines cover every receiver behavior the specification's criteria depend on:
@@ -140,7 +144,7 @@ rules are chosen to stay valid over HTTP/2 as well, but no criterion requires an
 
 ## Initial failing cases
 
-`tests/features/runtime/http_emitter.feature` holds the two initial public cases, each on one and
+`tests/features/runtime/http_emitter.feature` held the two initial public cases, each on one and
 three nodes:
 
 - `An HTTP emitter sends each record with its own method, path, headers, and codec body` sends two
@@ -149,22 +153,16 @@ three nodes:
 - `An HTTP emitter declared without a body sends zero content bytes` sends a constant `DELETE` to a
   record-computed path with a declared header and no body.
 
-Both carry `@http_emitter_expected_failure`, which the suite excludes unless tags are selected
-explicitly, and both fail at the statement that creates the emitter, because the grammar has no
-`TO HTTP` sink. On 24 September 2026 all four examples failed that way with `--retry 0`, each at
-the `CREATE EMITTER` statement with this parse diagnostic, and each receiver stopped cleanly having
-captured nothing:
-
-```text
-expected OTEL | CLICKHOUSE | POSTGRES | MYSQL | MONGODB | ICEBERG | KAFKA | PULSAR | RABBITMQ | REDIS | MQTT | NATS | ZEROMQ | SYSLOG | SQS | SENTRY, found HTTP
-```
-
-The same feature without a tag selection runs no scenario. They are the red half of the public evidence for criteria 1 and 2. HTTP Emitter 05
-removes the tag once the first request reaches the receiver; until then, run them with:
-
-```console
-just test-scenarios --input tests/features/runtime/http_emitter.feature --tags @http_emitter_expected_failure
-```
+On 24 September 2026 both failed at the statement that created the emitter, because the grammar had
+no `TO HTTP` sink. Once HTTP Emitter 02 and 03 landed they failed at activation instead, with
+`cannot plan emitter 'deliver_event': HTTP emitter requires a HTTP client, found HTTP 'api'`, as did
+the request scenarios HTTP Emitter 04 added first, on 27 September 2026 with `--retry 0`. Its
+encode-failure scenario came once requests reached the receiver. The same day, on one and three
+nodes, both expected requests arrived but the rejected record's error never reached its route,
+because the handler read the finalized record, which has no `tenant`, as `input`. HTTP Emitter 04
+prepares and sends the requests and keeps each admitted request's source record and state, so
+every case now runs in the ordinary suite under `@http_emitter_requests`, and the suite no longer
+excludes an expected-failure tag.
 
 ## Acceptance matrix
 
@@ -174,8 +172,8 @@ them in the ordinary suite; HTTP Emitter 09 composes the complete matrix and clo
 
 | Criterion | Public scenarios | Observable evidence | Receiver control | Owner |
 | --- | --- | --- | --- | --- |
-| 1. Constant and computed methods, paths and queries reach the receiver with exact codec bytes and headers, and two records choose different requests | `http_emitter.feature`: the dynamic request case above, plus a constant `METHOD 'POST'` and `PATH '/v1/events'` case | Captured request lines, header values and body bytes, differing per record | Capture, standing `204` | 04 prepares, 05 sends and removes the tag |
-| 2. A bodyless request carries zero content bytes and its headers; `GET` and `HEAD` are accepted only without a body, including when computed | The bodyless case above; `GET` and `HEAD` bodyless cases; a codec emitter whose computed method is `GET` | Empty captured body; configuration rejection for a literal `GET` with a codec; a message error with operation `publish` and field `method` for a computed one | Capture | 02 grammar, 03 literal rejection, 04 computed rejection, 05 sends |
+| 1. Constant and computed methods, paths and queries reach the receiver with exact codec bytes and headers, and two records choose different requests | `http_emitter.feature`: the dynamic request case above, plus a constant `METHOD 'POST'` and `PATH '/v1/events'` case, and a codec that fails to encode one of three records | Captured request lines, header values and body bytes, differing per record; no request and an `encode` message error for the record whose body cannot be encoded | Capture, standing `204` | 04 |
+| 2. A bodyless request carries zero content bytes and its headers; `GET` and `HEAD` are accepted only without a body, including when computed | The bodyless case above; `GET` and `HEAD` bodyless cases; a codec emitter whose computed method is `GET` | Empty captured body; configuration rejection for a literal `GET` with a codec; a message error with operation `publish` and field `method` for a computed one | Capture | 02 grammar, 03 literal rejection, 04 computed rejection and sending |
 | 3. Request fields read the original input and the finalized output; a record filtered by route `WHERE` evaluates nothing and sends nothing | A codec emitter whose path reads `output` and whose header reads `input`; a route `WHERE` that filters one of two records whose request fields would fail | The captured values match the finalized output and the original input; the receiver captures one request and no message error is routed | Capture | 04 |
 | 4. Invalid types, nullable expressions, unavailable scopes, wrong client types, invalid literals, a missing timeout and implicit sensitive leakage reject configuration; explicit leakage permits the value | Negative `CREATE` and `ALTER` cases for each rejection; one positive leakage case | The command fails with the owning node, route, operation and field, and quotes no value; the leaked value reaches the receiver | Capture for the positive case | 03 |
 | 5. Header names compare without case, later writes replace earlier ones, invalid and reserved fields, CR/LF, edge whitespace and every envelope limit reject the record, and empty values and internal spaces stay valid | Records exercising each header rule and the 128-header and 32 KiB bounds | Replaced and empty values in captured requests; message errors with operation `invoke` and the invocation index for each rejection; no request for a rejected record | Capture | 04 |

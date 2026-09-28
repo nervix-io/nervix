@@ -237,6 +237,13 @@ those additions. No new public wire form or serialization fallback was introduce
 | `just test-scenarios --tags @client_wire15 --concurrency 1 --retry 0` | 3 scenarios and 71 steps passed after the presentation change and again after the main merge. |
 | `just validate` and `just ratchet` | Passed before and after the main merge; architecture debt did not increase. |
 
+After the measurements, `origin/main` advanced to `1b30c6ca` with HTTP emitter and shared test
+harness changes. The final merge retained this task's opt-in TLS scenario filter and removed the
+emitter expected-failure exclusion that `main` had retired. On that merged tree, `just validate`,
+`just ratchet`, the two TLS scenarios (12 steps), and the three Client Wire 15 qualification
+scenarios (71 steps) all passed. Numeric results above remain tied to their archived measurement
+commits rather than being relabeled as results from the later merge.
+
 Six `just coverage-lib`, `just coverage-scenarios` and `just coverage-client-wire-cost` LCOV
 reports together covered **833/847 executable changed Rust lines (98.35%)**. The union includes the
 standalone benchmark, server fixture, FFI test helper, display path and both opt-in Cucumber

@@ -56,6 +56,13 @@ resolver's own lookup error. The sink changes it into a configuration failure fo
 address or CA file and an initialization failure otherwise, leading with the connection error's
 message, which `DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
 
+A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar sink: a message
+larger than the maximum message size the broker announced, which carries the measured size of its
+metadata and payload and the limit as typed fields, or a message the broker answered with
+`NotAllowedError`, which carries the broker's reason. Either becomes a record rejection with code
+`external` and operation `publish`. Every other failure of the client, its connection or the broker
+stays an infrastructure failure of the attempt, which the emitter retries.
+
 The vocabulary is the innermost owner, and its Model operations report the same way. An alteration
 is applied to a copy of the stored Model, which replaces the original only when every operation
 succeeds, so a refusal leaves the stored Model unchanged. Each refusal names what it refused in
@@ -198,6 +205,17 @@ together, while each keeps its own occurrence time and branch. A sink answer tha
 contract, by naming a record the write did not carry or answering twice for one, is not a message
 error of any member. It fails the attempt without a retry, and the emitter's unresolved rows then
 follow `ON MESSAGE ERROR` as a failed publish.
+
+An HTTP emitter rejects a record at the first request field that fails, in the order it evaluates
+them: `METHOD`, `PATH`, and then each header write. A failed expression keeps the `evaluation`
+code and an invalid value has the `validation` code. Method and path failures report the `publish`
+operation and name their request field, `method` or `path`, beside the fields the expression reads;
+a header write reports `invoke` with its zero-based invocation position. A body the codec cannot
+encode rejects its record with the `encode` operation when a flush releases it. The message names
+the emitter and the violated rule and never quotes the evaluated value. An admitted request keeps
+its original source record and the materialized state its batch was admitted with until it
+completes, so every rejection of it after admission gives the handler the same input, state and
+attempted codec record that a request-field failure does.
 
 `ON MESSAGE ERROR` belongs to the route and handles record-specific work. Ingestor and emitter
 `ON GENERAL ERROR` handles node-wide source and sink failures. A WASM processor's node-wide `ON

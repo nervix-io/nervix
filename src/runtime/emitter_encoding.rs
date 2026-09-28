@@ -25,10 +25,11 @@ use super::{
 };
 use crate::runtime_schema::{BatchContainerError, CompiledCodecBatchEncoder};
 
+/// The encoding of one pending row, or why the codec could not encode it.
 #[derive(Debug)]
-struct PendingRowPayload {
-    row_index: usize,
-    payload: Result<Vec<u8>, Report<CodecError>>,
+pub(super) struct PendingRowPayload {
+    pub(super) row_index: usize,
+    pub(super) payload: Result<Vec<u8>, Report<CodecError>>,
 }
 
 impl PendingRowPayload {
@@ -91,7 +92,11 @@ impl EmitterSink for EncodedRecordSink {
         context: &EmitterSinkContext,
         publication: EmitterPublication<'_>,
     ) -> EmitterRuntimeResult<()> {
-        let EmitterPublication { batches, prepared } = publication;
+        let EmitterPublication {
+            batches,
+            payloads: prepared,
+            ..
+        } = publication;
         let Some(policy) = self.batch else {
             return self.publish_rows(context, batches).await;
         };
@@ -134,7 +139,9 @@ impl EncodedRecordSink {
     }
 }
 
-async fn encode_pending_broker_payloads(
+/// Encodes each of `pending_rows` of `batch` with the emitter's codec, off the reactor when the
+/// codec's transformations require it.
+pub(super) async fn encode_pending_broker_payloads(
     codec: Arc<CompiledCodec>,
     context: &EmitterSinkContext,
     batch: &EmitterPublishBatch,
@@ -311,7 +318,7 @@ async fn pack_batch_records(
     policy: EmitterBatchPolicy,
     context: &EmitterSinkContext,
     batches: &mut [EmitterPublishBatch],
-) -> EmitterRuntimeResult<Vec<PreparedPayload>> {
+) -> EmitterRuntimeResult<Vec<PreparedPayload<EncodedPayload>>> {
     let mut payloads = Vec::new();
     let mut unpublishable = Vec::new();
     let mut rejected = Vec::new();
@@ -383,9 +390,8 @@ async fn pack_batch_records(
                     .assured("packing positions refer to the source batches it received");
                 payloads.push(PreparedPayload {
                     members: rows,
-                    envelope,
                     occurred_at: batch.execution_now(),
-                    payload,
+                    content: EncodedPayload { envelope, payload },
                 });
             }
             PackedOutcome::MemberFailed { position, error } => {
@@ -678,7 +684,8 @@ mod tests {
                 &context,
                 EmitterPublication {
                     batches: &mut batches,
-                    prepared: &mut prepared,
+                    payloads: &mut prepared,
+                    requests: &mut PreparedPayloads::default(),
                 },
             )
             .await
@@ -697,7 +704,8 @@ mod tests {
             &context,
             EmitterPublication {
                 batches: &mut batches,
-                prepared: &mut prepared,
+                payloads: &mut prepared,
+                requests: &mut PreparedPayloads::default(),
             },
         )
         .await
@@ -745,7 +753,8 @@ mod tests {
                 &context,
                 EmitterPublication {
                     batches: &mut batches,
-                    prepared: &mut prepared,
+                    payloads: &mut prepared,
+                    requests: &mut PreparedPayloads::default(),
                 },
             )
             .await
@@ -756,7 +765,8 @@ mod tests {
             &context,
             EmitterPublication {
                 batches: &mut batches,
-                prepared: &mut prepared,
+                payloads: &mut prepared,
+                requests: &mut PreparedPayloads::default(),
             },
         )
         .await
