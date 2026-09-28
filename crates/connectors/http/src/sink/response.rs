@@ -8,7 +8,7 @@
 
 use error_stack::Report;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt as _};
+use tokio::io::AsyncRead;
 
 const MAX_HEADER_FIELDS: usize = 128;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
@@ -80,8 +80,7 @@ where
             return Err(Report::new(ResponseHeadError::Excessive));
         }
         let mut chunk = [0_u8; READ_BYTES];
-        let read = stream
-            .read(&mut chunk)
+        let read = tokio::io::AsyncReadExt::read(stream, &mut chunk)
             .await
             .map_err(|_| Report::new(ResponseHeadError::Read))?;
         if read == 0 {
