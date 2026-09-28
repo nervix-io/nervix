@@ -355,6 +355,7 @@ struct ScenarioWorld {
     fault_injection: FaultInjection,
     consensus_commit_delays: BTreeMap<String, Duration>,
     burst_raft_retention_peak: Option<nervix_consensus::RaftLogRetention>,
+    saved_raft_log_heads: BTreeMap<String, Option<u64>>,
     durable_catch_up: Option<DurableCatchUpObservation>,
     durable_catch_up_writer: Option<DurableCatchUpWriter>,
     follower_commands_memory: Option<FollowerCommandsMemoryObservation>,
@@ -463,6 +464,7 @@ impl fmt::Debug for ScenarioWorld {
                 &self.avro_http_optional_fields.len(),
             )
             .field("burst_raft_retention_peak", &self.burst_raft_retention_peak)
+            .field("saved_raft_log_heads", &self.saved_raft_log_heads)
             .field("transaction_qualification", &self.transaction_qualification)
             .field("temp_root_initialized", &self.temp_root.is_some())
             .field("browser_initialized", &self.browser.is_some())
@@ -4989,7 +4991,42 @@ async fn then_leader_purged_covered_log(world: &mut ScenarioWorld, duration: Str
     let observer = world
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&leader));
-    await_covered_log_purge(&observer, &duration).await;
+    await_covered_log_purge(&observer, &duration, None).await;
+}
+
+#[given(expr = "node {string} raft log head is saved before stop")]
+async fn given_node_raft_log_head_is_saved_before_stop(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&node_id));
+    let retention = observer.raft_log_retention();
+    world.saved_raft_log_heads.insert(
+        node_id,
+        retention.last_log_index.max(retention.snapshot_index),
+    );
+}
+
+#[then(
+    expr = "within {string} the leader node has purged its covered raft log beyond stopped node \
+            {string}"
+)]
+async fn then_leader_purged_covered_log_beyond_stopped_node(
+    world: &mut ScenarioWorld,
+    duration: String,
+    stopped_node_id: String,
+) {
+    let stopped_node_id = expand_placeholders(world, &stopped_node_id);
+    let stopped_head = world
+        .saved_raft_log_heads
+        .get(&stopped_node_id)
+        .copied()
+        .verified("the scenario saved this follower's log head before stopping it");
+    let leader = running_leader_node(world).await;
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&leader));
+    await_covered_log_purge(&observer, &duration, stopped_head).await;
 }
 
 #[then(
@@ -5084,13 +5121,14 @@ async fn await_purge_beyond_retention_peak(
 async fn await_covered_log_purge(
     observer: &nervix_consensus::Observer,
     duration: &str,
+    beyond: Option<u64>,
 ) -> nervix_consensus::RaftLogRetention {
     let deadline = Instant::now()
         + humantime::parse_duration(duration).expect("step duration must be a valid duration");
     loop {
         tokio::task::consume_budget().await;
         let retention = observer.raft_log_retention();
-        if retention.purged_index.is_some() {
+        if retention.purged_index > beyond {
             assert!(
                 retention.snapshot_index >= retention.purged_index,
                 "the leader purged entries its snapshot does not cover: {retention:?}"
@@ -5099,7 +5137,8 @@ async fn await_covered_log_purge(
         }
         assert!(
             Instant::now() < deadline,
-            "the leader did not purge its covered raft log within {duration}: {retention:?}"
+            "the leader did not purge its covered raft log beyond {beyond:?} within {duration}: \
+             {retention:?}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
