@@ -367,12 +367,7 @@ pub(super) fn routed_payload(delivery: RoutedDelivery<'_>) -> RelayPayload {
         relay: delivery.consumer.relay.clone(),
         key: BranchKey::to_remote_key(&delivery.batch.key),
         batch_ipc: delivery.batch_ipc,
-        metadata: delivery
-            .batch
-            .metadata
-            .iter()
-            .map(RuntimeRecordMetadata::to_remote)
-            .collect(),
+        metadata: delivery.batch.metadata.to_remote(),
         acks: delivery.acks,
         admission: None,
     }
@@ -1255,11 +1250,7 @@ impl RelayBoundaryServices {
                     relay: relay.clone(),
                     key: BranchKey::to_remote_key(&batch.key),
                     batch_ipc,
-                    metadata: batch
-                        .metadata
-                        .iter()
-                        .map(RuntimeRecordMetadata::to_remote)
-                        .collect(),
+                    metadata: batch.metadata.to_remote(),
                     acks: remote_acks,
                     admission: None,
                 },

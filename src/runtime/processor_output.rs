@@ -100,7 +100,7 @@ pub(super) struct PendingProcessorOutputBatch {
     pub(super) input_rows: Vec<usize>,
     pub(super) key: Option<BranchKey>,
     pub(super) batch: RuntimeRecordBatch,
-    pub(super) metadata: Vec<RuntimeRecordMetadata>,
+    pub(super) metadata: RecordMetadataColumns,
 }
 
 impl PendingProcessorOutputBatch {
@@ -118,7 +118,7 @@ pub(super) fn pending_output_batches_by_key(
     input_rows: &[usize],
     keys: Vec<Option<BranchKey>>,
     batch: RuntimeRecordBatch,
-    metadata: &[RuntimeRecordMetadata],
+    metadata: &RecordMetadataColumns,
 ) -> error_stack::Result<Vec<PendingProcessorOutputBatch>, ProcessorOutputError> {
     if input_rows.len() != keys.len()
         || input_rows.len() != batch.batch().num_rows()
@@ -146,12 +146,15 @@ pub(super) fn pending_output_batches_by_key(
         let branch_batch = batch
             .take(&rows)
             .change_context(ProcessorOutputError::TakeBranchRows)?;
+        let branch_metadata = metadata.take(&rows).verified(
+            "the shape check above proved the metadata has one row for every grouped key",
+        );
         pending.push(PendingProcessorOutputBatch {
             output_index,
             input_rows: rows.iter().map(|row| input_rows[*row]).collect(),
             key,
             batch: branch_batch,
-            metadata: rows.iter().map(|row| metadata[*row].clone()).collect(),
+            metadata: branch_metadata,
         });
     }
     Ok(pending)
@@ -315,10 +318,9 @@ pub(super) async fn evaluate_processor_output_events(
                 ),
             });
         }
-        let metadata = success_input_rows
-            .iter()
-            .map(|input_row| batch.metadata[*input_row].clone())
-            .collect::<Vec<_>>();
+        let metadata = batch.metadata.take(&success_input_rows).verified(
+            "the program selects rows of this batch, whose metadata has one entry for every row",
+        );
         vec![PendingProcessorOutputBatch {
             output_index,
             input_rows: success_input_rows,
@@ -883,7 +885,9 @@ mod tests {
         let batch = test_schema(&[("id", ParseAsType::U32)])
             .batch_from_test_rows([[("id".to_string(), RuntimeValue::U32(7))]])
             .expect("one test row should form a batch");
-        let Err(error) = pending_output_batches_by_key(0, &[0, 1], vec![None], batch, &[]) else {
+        let no_metadata = RecordMetadataColumns::from_rows([]);
+        let Err(error) = pending_output_batches_by_key(0, &[0, 1], vec![None], batch, &no_metadata)
+        else {
             panic!("rows, keys and metadata that disagree must not form pending batches");
         };
         assert_eq!(
