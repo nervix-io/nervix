@@ -303,7 +303,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   one of `ENCODE USING <codec>` or `WITHOUT BODY`. Do not add an ACK window, `ACK TIMEOUT`,
   `NO_ACK` or `BATCH`; see [Emitters](../../../docs/src/emitters.md#http-request-configuration)
   for client origin and timeout requirements, request-field types and sensitivity, bodyless
-  construction, and ALTER rules.
+  construction, and ALTER rules. Each record is one request: route `WHERE` filters before any
+  request field is evaluated, a failed method, path, header write or body encoding rejects the
+  record through `ON MESSAGE ERROR` before any part of its request is sent, and a retry resends the
+  prepared request unchanged. Declare
+  `Content-Type` and any idempotency key with `write_header`; see
+  [HTTP requests](../../../docs/src/emitters.md#http-requests).
 - Write a supported emitter's optional `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` after the complete
   sink clause and route construction, before `FLUSH`; it is required for ClickHouse, Postgres,
   MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a

@@ -29,11 +29,12 @@ in the server, but uses the same source lifecycle and host intake.
 ### DNS for HTTP and Iceberg
 
 The node loads and validates one `nervix-dns` resolver at startup. Composition passes its handle
-into the HTTP polling and Prometheus source plans and into the Sentry, OTEL HTTP, and Iceberg sink
-plans. The shared `HttpClientConfig` installs it on every Nervix-owned Reqwest 0.13 HTTP client.
-Iceberg REST uses a separate Reqwest 0.12 client with that same resolver. Iceberg object storage
-uses OpenDAL 0.57 with a configured Reqwest 0.13 client installed through `HttpClientLayer`; the
-layer also supplies HTTP calls made by OpenDAL's credential providers through its accessor info.
+into the HTTP polling and Prometheus source plans and into the HTTP request, Sentry, OTEL HTTP, and
+Iceberg sink plans. The shared `HttpClientConfig` installs it on every Nervix-owned Reqwest 0.13
+HTTP client. Iceberg REST uses a separate Reqwest 0.12 client with that same resolver. Iceberg
+object storage uses OpenDAL 0.57 with a configured Reqwest 0.13 client installed through
+`HttpClientLayer`; the layer also supplies HTTP calls made by OpenDAL's credential providers through
+its accessor info.
 The Reqwest 0.12 client receives an explicit AWS-LC rustls configuration with bundled trust
 roots, including in an isolated Iceberg connector build.
 The three Iceberg backends keep their S3, GCS, and Azure property mappings, URL-derived bucket or
@@ -174,14 +175,17 @@ sequenceDiagram
 
 ## Sink boundary
 
-The host prepares one batch for either of two sink contracts. A **record sink** receives
+The host prepares one batch for one of three sink contracts. A **record sink** receives
 codec-encoded keys, payloads, headers, optional ordering groups, timestamps, and the identity the
 host assigned each record of the write. A **row sink** receives host-projected Arrow columns,
 target columns, selected rows, and bounded chunks; it encodes its external representation from
-those columns. The host evaluates `VALUES` once per batch and excludes rows with mapping errors
-before calling a row sink. It retains the ACKs of the source rows every record or mapped row
-carries, so no runtime ACK map enters the connector. Each publish is one call per batch, never a
-virtual call per row.
+those columns. An **HTTP request sink** receives prepared requests: each carries the identity the
+host assigned it, the validated method, the target normalized on the client's origin, the
+application headers after case-insensitive replacement, and the exact body bytes the codec
+produced or no body at all. The host evaluates `VALUES` once per batch and excludes rows with
+mapping errors before calling a row sink. It retains the ACKs of the source rows every record,
+mapped row or request carries, so no runtime ACK map enters the connector. Each publish is one call
+per batch, never a virtual call per row.
 
 An ordering group exists only where the sink plan declares one; today that is the SQS
 `FIFO GROUP`. The host compiles the declaration, evaluates it once per filtered source batch, and
@@ -232,10 +236,14 @@ against the Maximum Packet Size of the broker's latest `CONNACK` and the largest
 express, the SQS sink counts attributes and the FIFO group against 256 KiB, and the Kafka producer,
 the NATS client and the Pulsar client check `message.max.bytes`, `max_payload` and the
 `maxMessageSize` of the connection's `CommandConnected` with the key, headers or message metadata
-they write. A limit the connector cannot learn stays with the destination, and whatever the
-destination reports when a message exceeds it is classified like any other publish failure: a
-Pulsar broker answers a message above a topic's own `maxMessageSize` policy with `NotAllowedError`,
-a definitive rejection of that message.
+they write. A limit the connector cannot learn stays with the destination, and the destination's own
+answer decides the outcome. A Pulsar broker answers a message above a topic's own `maxMessageSize`
+policy with `NotAllowedError`, a definitive rejection of that message. RabbitMQ never tells a client
+its `max_message_size`, but its refusal of a larger body closes the channel with the limit named,
+so the RabbitMQ sink rejects the first message of the write the broker had not answered whose body
+exceeds that limit, with the same kind of reason, and writes the messages the broker discarded
+behind it again on a new channel. Anything else a destination reports when a message exceeds its
+limit is classified like any other publish failure.
 
 The host owns that membership. It keeps every payload it offers the sink, with its exact bytes,
 key, headers, ordering group and member positions, in the emitter buffer beside the batches the
@@ -252,6 +260,22 @@ than the connector, so reopening a connector between attempts keeps them; only a
 the attempt for good releases them, and their members then follow the error policy with every other
 unresolved row. A row sink names every member itself, so its retry writes only the rows it left
 unresolved; MongoDB's per-document results shrink a retried bulk write this way.
+
+An HTTP emitter's request fields are the host's, not the connector's. When the emitter admits a
+batch, the host evaluates one compiled program over each record's original input, its finalized
+codec record and the batch's materialized state, only for the rows route `WHERE` kept: `METHOD` and
+`PATH` are written into a write-only request namespace, and each `write_header` invocation is
+evaluated in written order. It validates each row's method, then its target on the client's
+origin, then each header write, rejects a row at the first field that fails, and buffers the rest
+with the fields they were admitted with, beside their Arrow rows, together with their original
+source records and the batch's materialized state, which the message error of a later rejection
+reads. When a flush releases a row, the
+host encodes its body and retains the request, as a prepared payload with that one member, in the
+same buffer that retains batch payloads. Every attempt hands the connector the retained requests
+unchanged, ahead of any request prepared after them, so a retry repeats the request the destination
+may already hold. The HTTP connector sends them one at a time, waits for each response's headers,
+and never follows a redirect; complete `2xx` headers deliver the request, and any other answer or a
+failed exchange ends the attempt with that request and every later one unresolved.
 
 For a sink that stages writes, the lifecycle exposes a domain or physical commit deadline,
 staged-message count, pending ACKs, and a commit operation. The host includes that deadline in
@@ -299,6 +323,16 @@ sequenceDiagram
   successful catalog commit does. The sink retains ACKs and its client while a failed commit is
   retried. [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate
   limits.
+- **RabbitMQ sink.** The broker answers no `NO_ACK` message itself, so the sink ends a `NO_ACK`
+  write with one round trip on its channel, which the broker answers only after it has taken every
+  message written before it, and the answer delivers the write; a write costs that one round trip,
+  not one per message. A broker that closes the channel names its reason, and Lapin hands it only
+  to what was waiting on the channel at that moment, so the sink reads the reason from its
+  connection's events, once for every channel it loses. The size refusal leaves the connection
+  open, and the sink opens its next channel on it; a message the broker had not confirmed ahead of
+  the refused one may be in its queue, so the attempt then fails for the host's retry. Any other
+  loss is an infrastructure failure, and the host reopens the sink. [RabbitMQ
+  emission](./emitters.md#rabbitmq) defines the public behavior.
 - **Pooled sinks.** The connector owns the driver's pool and borrowed connection. The host owns
   the lease on the node's named client and the runtime wait while no connection is available.
   [Database client pools](./database-client-pools.md) defines the bounds.
@@ -306,6 +340,17 @@ sequenceDiagram
   node, independent of leadership and placement. This includes Syslog and server endpoint
   listeners. The host owns their lifecycle across joins, restarts, elections, and shutdown;
   their transport implementations remain in their owning integration or server edge.
+- **Named Syslog and WebSocket clients.** Outbound Syslog UDP, TCP and TLS senders and WebSocket
+  `ws` and `wss` sources resolve through the node's asynchronous resolver for each new connection
+  attempt. The node resolver owns DNS cache and TTL policy; the connectors keep their framing,
+  upgrade, TLS, signaling and retry behavior. DNS and ordered address attempts share a physical
+  connection budget. Syslog UDP binds a socket in each attempted address's IP family and sends to
+  the first address whose socket setup succeeds. TCP and TLS senders and WebSocket clients try
+  successive answers within that budget.
+  TLS verifies the configured name, and a WebSocket upgrade retains its original URL authority,
+  path and query. The source host cancels a pending resume when shutdown or quiesce changes its
+  lifecycle state. DNS and connection failures remain infrastructure outcomes for the host to retry;
+  a resolved address alone never completes a Syslog record or an input acknowledgement.
 - **WebSocket signaling.** The WebSocket crate owns the compiled signaling engine shared by
   client sources and server endpoint sessions. Its send, wait, and accept-data steps govern when
   frames become payload; the host still owns intake and routing. Domain activation resolves the

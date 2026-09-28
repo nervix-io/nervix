@@ -1,5 +1,5 @@
 [package]
-description = "The HTTP source connector for Nervix"
+description = "The HTTP source and sink connectors for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-http"
@@ -8,6 +8,14 @@ version.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+shuttle = [
+  "dep:shuttle-tokio",
+  "nervix-connector/shuttle",
+  "shuttle-tokio/shuttle",
+]
+
 [dependencies]
 async-trait = { workspace = true }
 error-stack = { workspace = true }
@@ -15,4 +23,9 @@ nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 reqwest = { workspace = true, features = ["rustls"] }
+shuttle-tokio = { workspace = true, features = ["rt"], optional = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

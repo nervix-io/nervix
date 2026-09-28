@@ -445,7 +445,7 @@ not an array — and Nervix never changes a destination schema to make an array 
 | --- | --- | --- | --- |
 | Kafka | The encoded batch payload written as the record value | The record key, headers and the producer's own record framing | Broker `message.max.bytes` and producer `max.request.size`, both 1 MiB by default |
 | Pulsar | The encoded batch payload written as the message payload | Message metadata and properties | Broker `maxMessageSize`, 5 MiB by default, which the broker announces on every connection; a topic's own `maxMessageSize` policy may be smaller |
-| RabbitMQ | The encoded batch payload written as the message body | Basic properties and headers | `max_message_size`, 16 MiB by default in RabbitMQ 4.x |
+| RabbitMQ | The encoded batch payload written as the message body | Basic properties and headers | `max_message_size`, 16 MiB by default in RabbitMQ 4.x, compared with the body alone |
 | Redis Pub/Sub | The encoded batch payload written as the message | The RESP command framing | `proto-max-bulk-len`, 512 MiB by default |
 | MQTT | The encoded batch payload written as the PUBLISH payload | The fixed and variable headers, including the topic | The broker's `Maximum Packet Size`; the protocol maximum is 268,435,455 bytes |
 | NATS | The encoded batch payload written as the message payload | The subject and protocol headers | `max_payload`, 1 MiB by default |
@@ -471,9 +471,17 @@ them; and the 256 KiB SQS message with its attributes and FIFO group. A Pulsar t
 `maxMessageSize` policy is applied only by the broker, which answers a larger message with
 `NotAllowedError`; a confirming `MODE ACK` rejects the batch with that answer, while `NO_ACK` has
 already completed at producer acceptance. RabbitMQ's `max_message_size` is a broker setting a client
-cannot read, so a larger message reaches the broker, which closes the channel it arrived on, and the
-emitter retries it as an infrastructure failure. Redis answers a value above `proto-max-bulk-len`
-with a rejection, and ZeroMQ fixes no limit of its own.
+cannot read, so a larger message reaches the broker, which closes the channel it arrived on with a
+refusal that names the limit and discards every message written on that channel after it. The
+connector takes that refusal as the destination's definitive rejection of the first message of the
+attempt the broker had not answered whose body exceeds the limit, so every member of that batch
+follows `ON MESSAGE ERROR`, and it writes the discarded messages again on a new channel of the same
+connection. A message written ahead of the refused one that the broker had not confirmed may already
+be in its queue, so the attempt then fails as an infrastructure failure and its unresolved payloads
+are retried. In `NO_ACK` a RabbitMQ write completes with one round trip on its channel, which the
+broker answers only after it has taken every message written before it, so a refused message is
+found before any member is acknowledged. Redis answers a value above `proto-max-bulk-len` with a
+rejection, and ZeroMQ fixes no limit of its own.
 
 Iceberg is the one sink with two byte bounds, and they measure different things on purpose:
 `BATCH ... MAX SIZE` bounds one written data file, while `COMMIT EACH ... MAX SIZE` bounds the
@@ -486,7 +494,7 @@ second is valid and simply means every commit publishes one data file.
 | --- | --- | --- |
 | Kafka | The producer queue accepts the record (`NO_ACK`), or its delivery report arrives (`ACK`) | None: the record is the unit, so the batch is delivered or it is not |
 | Pulsar | The producer accepts the message (`NO_ACK`), or the broker receipt arrives (`ACK`) | None |
-| RabbitMQ | The channel accepts the message (`NO_ACK`), or the publisher confirm arrives (`ACK`) | None |
+| RabbitMQ | The channel answers the round trip that follows the write (`NO_ACK`), or the publisher confirm arrives (`ACK`) | None |
 | Redis Pub/Sub | The server answers `PUBLISH` | None |
 | MQTT | The client accepts the packet (QoS 0), `PUBACK` arrives (QoS 1), or the QoS 2 handshake completes | None |
 | NATS | The connection flush completes (core), or the `PubAck` arrives (JetStream) | None |

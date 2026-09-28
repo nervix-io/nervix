@@ -105,13 +105,14 @@ use crate::common::{
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
-        KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR,
-        MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR,
-        RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
+        KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
+        MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR,
+        POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, RUSTFS_ADDR,
+        TestDependencies,
     },
     http_receiver::{
-        ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET, ReceiverFault,
-        ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
+        CapturedRequest, ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET,
+        ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
@@ -1069,10 +1070,92 @@ async fn then_http_receiver_eventually_receives_requests(
     }
 }
 
-/// Compares one captured request, counted from 1, with the docstring: `<METHOD> <target>`, then
-/// the headers the request must carry with exactly these values, then an empty line, then the
-/// exact body. Header names compare without case; headers the docstring does not name are not
-/// checked. A docstring without a body requires a request with zero content bytes.
+/// A request a step's docstring describes: `<METHOD> <target>`, then the headers the request must
+/// carry with exactly these values, then an empty line, then the exact body. Header names compare
+/// without case; headers the docstring does not name are not checked. A docstring without a body
+/// describes a request with zero content bytes.
+struct ExpectedHttpRequest {
+    request_line: String,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+impl ExpectedHttpRequest {
+    fn from_step(world: &ScenarioWorld, step: &Step) -> Self {
+        // Cucumber keeps the newlines that open and close a docstring; neither is part of a
+        // request.
+        let expected = expand_placeholders(world, docstring(step))
+            .trim_matches('\n')
+            .to_string();
+        // Without an empty line the docstring names no body, which is a request with zero content
+        // bytes.
+        let (head, body) = match expected.split_once("\n\n") {
+            Some((head, body)) => (head, body),
+            None => (expected.as_str(), ""),
+        };
+        let mut head_lines = head.lines();
+        let request_line = head_lines.next().unwrap_or_default().to_string();
+        let mut headers = Vec::new();
+        for header in head_lines {
+            let Some((header_name, value)) = header.split_once(':') else {
+                panic!("expected header line '{header}' has no ':'");
+            };
+            headers.push((header_name.trim().to_string(), value.trim().to_string()));
+        }
+        Self {
+            request_line,
+            headers,
+            body: body.to_string(),
+        }
+    }
+
+    /// Whether `request` has this request line, which is how a step finds the one captured request
+    /// a docstring describes when the order requests arrive in is not part of the contract.
+    fn has_request_line_of(&self, request: &CapturedRequest) -> bool {
+        self.request_line == format!("{} {}", request.method, request.target)
+    }
+
+    /// Asserts that `request`, which `described` names in a failure, is the request this
+    /// docstring describes.
+    fn assert_matches(&self, described: &str, request: &CapturedRequest) {
+        assert!(
+            self.has_request_line_of(request),
+            "{described} has another request line than '{}':\n{request}",
+            self.request_line
+        );
+        for (header_name, value) in &self.headers {
+            let values = request.header_values(header_name);
+            assert_eq!(
+                values,
+                vec![value.as_bytes()],
+                "{described} does not carry exactly one '{header_name}' header with the expected \
+                 value:\n{request}"
+            );
+        }
+        assert_eq!(
+            request.body,
+            self.body.as_bytes(),
+            "{described} has another body:\n{request}"
+        );
+    }
+}
+
+/// The request a receiver captured at `position`, counted from 1.
+fn captured_http_request(world: &ScenarioWorld, name: &str, position: usize) -> CapturedRequest {
+    let captured = http_receiver(world, name).captured();
+    let Some(index) = position.checked_sub(1) else {
+        panic!("HTTP receiver requests are counted from 1");
+    };
+    match captured.get(index) {
+        Some(request) => request.clone(),
+        None => panic!(
+            "HTTP receiver '{name}' captured {} request(s), not request {position}",
+            captured.len()
+        ),
+    }
+}
+
+/// Compares one captured request, counted from 1, with the request the docstring describes.
 #[then(expr = "HTTP receiver {string} request {int} is")]
 async fn then_http_receiver_request_is(
     world: &mut ScenarioWorld,
@@ -1080,51 +1163,115 @@ async fn then_http_receiver_request_is(
     position: usize,
     #[step] step: &Step,
 ) {
-    // Cucumber keeps the newlines that open and close a docstring; neither is part of a request.
-    let expected = expand_placeholders(world, docstring(step))
-        .trim_matches('\n')
-        .to_string();
-    let receiver = http_receiver(world, &name);
-    let captured = receiver.captured();
-    let Some(index) = position.checked_sub(1) else {
-        panic!("HTTP receiver requests are counted from 1");
-    };
-    let Some(request) = captured.get(index) else {
+    let expected = ExpectedHttpRequest::from_step(world, step);
+    let request = captured_http_request(world, &name, position);
+    expected.assert_matches(
+        &format!("HTTP receiver '{name}' request {position}"),
+        &request,
+    );
+}
+
+/// Finds the one captured request with the docstring's request line, wherever it arrived, and
+/// compares it with the request the docstring describes. Requests of independent branches or
+/// source relays have no order between them, so a scenario names each by its request line.
+#[then(expr = "HTTP receiver {string} captured one request that is")]
+async fn then_http_receiver_captured_one_request_that_is(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let expected = ExpectedHttpRequest::from_step(world, step);
+    let captured = http_receiver(world, &name).captured();
+    let mut matching = Vec::new();
+    for request in &captured {
+        if expected.has_request_line_of(request) {
+            matching.push(request);
+        }
+    }
+    let [request] = matching.as_slice() else {
         panic!(
-            "HTTP receiver '{name}' captured {} request(s), not request {position}",
+            "HTTP receiver '{name}' captured {} request(s) with the request line '{}', not \
+             exactly one, among {} captured request(s)",
+            matching.len(),
+            expected.request_line,
             captured.len()
         );
     };
-    // Without an empty line the docstring names no body, which is a request with zero content
-    // bytes.
-    let (head, body) = match expected.split_once("\n\n") {
-        Some((head, body)) => (head, body),
-        None => (expected.as_str(), ""),
-    };
-    let mut head_lines = head.lines();
-    let request_line = head_lines.next().unwrap_or_default();
-    assert_eq!(
-        request_line,
-        format!("{} {}", request.method, request.target),
-        "HTTP receiver '{name}' request {position} has another request line:\n{request}"
+    expected.assert_matches(
+        &format!("HTTP receiver '{name}' request '{}'", expected.request_line),
+        request,
     );
-    for header in head_lines {
-        let Some((header_name, value)) = header.split_once(':') else {
-            panic!("expected header line '{header}' has no ':'");
-        };
-        let values = request.header_values(header_name.trim());
-        assert_eq!(
-            values,
-            vec![value.trim().as_bytes()],
-            "HTTP receiver '{name}' request {position} does not carry exactly one '{}' header \
-             with the expected value:\n{request}",
-            header_name.trim()
+}
+
+/// Compares two captured requests, counted from 1, byte for byte: request line, every header field
+/// in the order it arrived, and body. A retry sends the request it prepared, so a resent request
+/// repeats the attempt before it exactly.
+#[then(expr = "HTTP receiver {string} request {int} repeats request {int}")]
+async fn then_http_receiver_request_repeats_request(
+    world: &mut ScenarioWorld,
+    name: String,
+    repeated: usize,
+    original: usize,
+) {
+    let repeated_request = captured_http_request(world, &name, repeated);
+    let original_request = captured_http_request(world, &name, original);
+    assert_eq!(
+        repeated_request, original_request,
+        "HTTP receiver '{name}' request {repeated} does not repeat request \
+         {original}:\n{repeated_request}\n---\n{original_request}"
+    );
+}
+
+/// Asserts that one captured request, counted from 1, carries exactly one nonempty `header` and a
+/// body containing `fragment`, for a request whose values are generated and so cannot be named.
+#[then(
+    expr = "HTTP receiver {string} request {int} carries header {string} and a body containing \
+            {string}"
+)]
+async fn then_http_receiver_request_carries_header_and_body_fragment(
+    world: &mut ScenarioWorld,
+    name: String,
+    position: usize,
+    header: String,
+    fragment: String,
+) {
+    let request = captured_http_request(world, &name, position);
+    let values = request.header_values(&header);
+    let [value] = values.as_slice() else {
+        panic!(
+            "HTTP receiver '{name}' request {position} carries {} '{header}' header(s), not \
+             exactly one:\n{request}",
+            values.len()
         );
+    };
+    assert!(
+        !value.is_empty(),
+        "HTTP receiver '{name}' request {position} carries an empty '{header}' header:\n{request}"
+    );
+    assert!(
+        String::from_utf8_lossy(&request.body).contains(&fragment),
+        "HTTP receiver '{name}' request {position} has no '{fragment}' in its body:\n{request}"
+    );
+}
+
+/// Asserts how many requests the receiver holds when the step runs. A scenario uses it once the
+/// requests it expects have arrived and every request that must never be sent would have preceded
+/// them, so a count above the expected one names a request that was sent although it must not be.
+#[then(expr = "HTTP receiver {string} has captured exactly {int} request(s)")]
+async fn then_http_receiver_has_captured_exactly(
+    world: &mut ScenarioWorld,
+    name: String,
+    expected: usize,
+) {
+    let captured = http_receiver(world, &name).captured();
+    let mut listing = String::new();
+    for request in &captured {
+        listing.push_str(&format!("{request}\n---\n"));
     }
     assert_eq!(
-        request.body,
-        body.as_bytes(),
-        "HTTP receiver '{name}' request {position} has another body:\n{request}"
+        captured.len(),
+        expected,
+        "HTTP receiver '{name}' captured another number of requests:\n{listing}"
     );
 }
 
@@ -5963,6 +6110,81 @@ async fn given_otel_http_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
 async fn given_rabbitmq_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
     publish_fixture_name(world, RABBITMQ_ADDR, &name, "rabbitmq_dns_addr");
     publish_fixture_name(world, RABBITMQ_TLS_ADDR, &name, "rabbitmq_tls_dns_addr");
+}
+
+#[given("the WebSocket mock endpoints are published under fixture DNS")]
+async fn given_websocket_mock_has_fixture_dns(world: &mut ScenarioWorld) {
+    publish_fixture_name(
+        world,
+        MOCK_WS_ADDR,
+        "websocket.nervix.test",
+        "mock_ws_dns_addr",
+    );
+    publish_fixture_name(
+        world,
+        MOCK_WSS_ADDR,
+        "websocket.nervix.test",
+        "mock_wss_dns_addr",
+    );
+}
+
+#[given(
+    expr = "the WebSocket endpoint {string} is forwarded as {string} from fixture addresses \
+            {string}"
+)]
+async fn given_websocket_endpoint_is_forwarded(
+    world: &mut ScenarioWorld,
+    endpoint: String,
+    name: String,
+    addresses: String,
+) {
+    let endpoint = expand_placeholders(world, &endpoint);
+    let mut url = url::Url::parse(&endpoint).expect("the WebSocket endpoint is a URL");
+    let host = url
+        .host_str()
+        .expect("the WebSocket endpoint has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("the WebSocket mock listens on a literal address");
+    let port = url
+        .port()
+        .expect("the WebSocket mock endpoint names its port");
+    let addresses = fixture_addresses(&addresses);
+    let forwarders = TcpForwarders::start(&addresses, std::net::SocketAddr::new(host, port))
+        .await
+        .expect("the WebSocket forwarders could not listen");
+    url.set_host(Some(&name))
+        .expect("the fixture name is a valid WebSocket URL host");
+    url.set_port(Some(forwarders.port()))
+        .expect("the WebSocket URL can carry the forwarder port");
+    world.placeholders.insert(
+        "websocket_forwarded_addr".to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
+    world.tcp_forwarders = Some(forwarders);
+}
+
+#[given(
+    expr = "the Syslog endpoint {string} is forwarded as {string} from fixture addresses {string}"
+)]
+async fn given_syslog_endpoint_is_forwarded(
+    world: &mut ScenarioWorld,
+    endpoint: String,
+    name: String,
+    addresses: String,
+) {
+    let endpoint = expand_placeholders(world, &endpoint);
+    let target = endpoint
+        .parse::<std::net::SocketAddr>()
+        .expect("the Syslog listener has a literal socket address");
+    let addresses = fixture_addresses(&addresses);
+    let forwarders = TcpForwarders::start(&addresses, target)
+        .await
+        .expect("the Syslog forwarders could not listen");
+    world.placeholders.insert(
+        "syslog_forwarded_addr".to_string(),
+        format!("{name}:{}", forwarders.port()),
+    );
+    world.tcp_forwarders = Some(forwarders);
 }
 
 /// Stand TCP forwarders to the plain RabbitMQ listener at `addresses`, and record in placeholder
@@ -17881,6 +18103,28 @@ async fn given_syslog_udp_emission_endpoint_is_observed(world: &mut ScenarioWorl
     );
 }
 
+#[given("the observed Syslog UDP endpoint is published under fixture DNS")]
+async fn given_syslog_udp_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
+    let endpoint = url::Url::parse(&format!("syslog://{}", world.syslog_emit_addr))
+        .expect("the observed Syslog endpoint has a valid authority");
+    let address = endpoint
+        .host_str()
+        .expect("the observed Syslog endpoint has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("the observed Syslog endpoint listens on a literal address");
+    world
+        .cluster()
+        .publish_dns_service("syslog.nervix.test", vec![address])
+        .expect("the cluster has a DNS fixture");
+    let port = endpoint
+        .port()
+        .expect("the observed Syslog endpoint has a port");
+    world.placeholders.insert(
+        "syslog_dns_addr".to_string(),
+        format!("syslog.nervix.test:{port}"),
+    );
+}
+
 #[given(expr = "ClickHouse table {string} exists")]
 async fn given_clickhouse_table_exists(world: &mut ScenarioWorld, table: String) {
     let table = expand_placeholders(world, &table);
@@ -23871,7 +24115,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     if cli.tags_filter.is_none() {
         cli.tags_filter = Some(
             "(not @client_wire_expected_failure) and (not @client_wire_baseline) and (not \
-             @http_emitter_expected_failure) and (not @client_conformance_toolchain)"
+             @client_conformance_toolchain)"
                 .parse()
                 .assured("the built-in opt-in scenario tag expression is valid"),
         );
