@@ -434,6 +434,7 @@ hickory-resolver = { version = "0.26.3", default-features = false, features = [
 http = "1"
 http-body-util = "0.1"
 httparse = "1"
+httpdate = "1"
 humantime = "2"
 hyper = "1"
 hyper-rustls = "0.27"

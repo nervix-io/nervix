@@ -313,6 +313,8 @@ authorization in their typed cause. DNS, connection, TLS, timeout, malformed or 
 headers, invalid final framing and loss before complete final headers are infrastructure failures
 as well. The connector reports them without a request URL or sensitive response value. The emitter
 host owns their retry schedule and keeps the prepared request and ACK lease while they are pending.
+A valid `Retry-After` on a retained status can only lengthen that schedule: it never turns a
+delivered or rejected record into a retry, and an invalid one is ignored rather than reported.
 
 `ON MESSAGE ERROR` belongs to the route and handles record-specific work. Ingestor and emitter
 `ON GENERAL ERROR` handles node-wide source and sink failures. A WASM processor's node-wide `ON

@@ -3,9 +3,11 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** One bounded physical HTTP/1.1 exchange at a time, exact prepared request bytes,
-//!   TLS and DNS transport, response header validation, and one outcome for each request.
-//! - **Depends on.** The connector contract, shared client TLS settings, node DNS resolver,
-//!   vocabulary request fields, Tokio I/O, rustls and the HTTP/1.1 response parser.
+//!   TLS and DNS transport, response header validation, one outcome for each request, and the
+//!   retry delay a retryable response asks for.
+//! - **Depends on.** The connector contract and its actual-UTC read, shared client TLS settings,
+//!   node DNS resolver, vocabulary request fields, Tokio I/O, rustls and the HTTP/1.1 response
+//!   parser.
 //! - **Must not know.** How request fields or bodies were prepared, runtime batches, relays,
 //!   branches, acknowledgements, registry state or when the host retries.
 
@@ -17,8 +19,8 @@ use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
     HttpRequestSink, PerRecordOutcome, RustlsClientConfigSource, SinkHost, SinkHttpRequest,
-    SinkLifecycle, SinkPublishError, SinkRecordId, SinkStartError, SinkStartResult,
-    client_config_value,
+    SinkLifecycle, SinkPublishError, SinkRecordId, SinkRetryDelay, SinkStartError, SinkStartResult,
+    client_config_value, physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::ClientConfigEntry;
@@ -32,7 +34,7 @@ use tokio::{
 use tokio_rustls::TlsConnector;
 use url::{Host, Position, Url};
 
-use self::response::{Disposition, FinalStatus, read_final_headers};
+use self::response::{Disposition, FinalResponse, read_final_headers};
 
 const HTTP_SINK: &str = "HTTP";
 
@@ -106,7 +108,7 @@ impl HttpSink {
         })
     }
 
-    async fn send(&self, request: &SinkHttpRequest) -> HttpAttemptResult<FinalStatus> {
+    async fn send(&self, request: &SinkHttpRequest) -> HttpAttemptResult<FinalResponse> {
         match tokio::time::timeout(self.timeout, self.exchange(request)).await {
             Ok(result) => result,
             Err(_) => Err(Report::new(HttpAttemptError::Timeout)),
@@ -114,7 +116,7 @@ impl HttpSink {
     }
 
     /// DNS, connection, TLS, request send and complete final headers share one physical timeout.
-    async fn exchange(&self, request: &SinkHttpRequest) -> HttpAttemptResult<FinalStatus> {
+    async fn exchange(&self, request: &SinkHttpRequest) -> HttpAttemptResult<FinalResponse> {
         let url = request.target.url();
         let mut stream = self.connect(url).await?;
         let head = Self::request_head(request);
@@ -221,6 +223,21 @@ impl HttpSink {
     fn publish_error(error: Report<HttpAttemptError>) -> Report<SinkPublishError> {
         error.change_context(SinkPublishError::Publish { sink: HTTP_SINK })
     }
+
+    /// The failure of an attempt whose endpoint answered with a status to retry, carrying the
+    /// delay the response's one valid `Retry-After` asks for. Its date is compared with actual UTC
+    /// now, as the response has just arrived, and the host waits for this delay when it is longer
+    /// than its own backoff.
+    fn retryable_status_error(
+        error: HttpAttemptError,
+        response: FinalResponse,
+    ) -> Report<SinkPublishError> {
+        let failure = Self::publish_error(Report::new(error));
+        match response.retry_delay(actual_utc_now()) {
+            Some(delay) => failure.attach(SinkRetryDelay(delay)),
+            None => failure,
+        }
+    }
 }
 
 #[async_trait]
@@ -232,13 +249,15 @@ impl HttpRequestSink for HttpSink {
         let mut outcome = PerRecordOutcome::with_capacity(requests.len());
         for request in requests {
             tokio::task::consume_budget().await;
-            let status = match self.send(&request).await {
-                Ok(status) => status,
+            let response = match self.send(&request).await {
+                Ok(response) => response,
                 Err(error) => {
                     outcome.fail(Self::publish_error(error));
                     return outcome;
                 }
             };
+            let status = response.status();
+            // A delivered or rejected record is final, so its `Retry-After` is never read.
             match status.disposition() {
                 Disposition::Delivered => outcome.deliver(request.id),
                 Disposition::Rejected => outcome.reject(request.rejected(format!(
@@ -246,19 +265,21 @@ impl HttpRequestSink for HttpSink {
                     status.code()
                 ))),
                 Disposition::AuthenticationFailure => {
-                    outcome.fail(Self::publish_error(Report::new(
+                    outcome.fail(Self::retryable_status_error(
                         HttpAttemptError::Authentication {
                             status: status.code(),
                         },
-                    )));
+                        response,
+                    ));
                     return outcome;
                 }
                 Disposition::RetryableFailure => {
-                    outcome.fail(Self::publish_error(Report::new(
+                    outcome.fail(Self::retryable_status_error(
                         HttpAttemptError::RetryableStatus {
                             status: status.code(),
                         },
-                    )));
+                        response,
+                    ));
                     return outcome;
                 }
             }
@@ -346,6 +367,48 @@ mod tests {
             .assured("the prepared test fields are all UTF-8");
         assert!(head.contains("accept: application/json\r\n"));
         assert!(!head.contains("accept: */*"));
+    }
+
+    async fn final_response(head: &'static [u8]) -> FinalResponse {
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt as _;
+            server
+                .write_all(head)
+                .await
+                .assured("the in-memory server writes its whole response head");
+        });
+        read_final_headers(&mut client)
+            .await
+            .assured("the fixture response head is complete and valid")
+    }
+
+    #[tokio::test]
+    async fn a_retryable_status_carries_only_the_delay_its_retry_after_asks_for() {
+        let limited = final_response(
+            b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+        let error = HttpSink::retryable_status_error(
+            HttpAttemptError::RetryableStatus { status: 429 },
+            limited,
+        );
+        assert_eq!(
+            error.downcast_ref::<SinkRetryDelay>(),
+            Some(&SinkRetryDelay(Duration::from_secs(30)))
+        );
+        assert_eq!(
+            *error.current_context(),
+            SinkPublishError::Publish { sink: HTTP_SINK }
+        );
+
+        let unstated =
+            final_response(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n").await;
+        let error = HttpSink::retryable_status_error(
+            HttpAttemptError::Authentication { status: 401 },
+            unstated,
+        );
+        assert!(error.downcast_ref::<SinkRetryDelay>().is_none());
     }
 
     #[test]

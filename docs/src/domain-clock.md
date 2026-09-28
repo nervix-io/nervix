@@ -394,7 +394,7 @@ The architecture keeps four time classes distinct:
 | Domain logical time | Expressions, explicit domain cadence, collection and flush cadence, TTL, retention, window completion, and guest-requested timeouts |
 | Preserved source time | External event timestamps, broker metadata, and window membership inputs |
 | Physical monotonic time | Network deadlines, retry and backoff, acknowledgements, cancellation, shutdown, drain, state checkpoint deadlines, safety timeouts, and physical batching minima |
-| Actual UTC | Paced projection input, unpaced domain reads, administrative records, security validity, and explicitly external observation fields |
+| Actual UTC | Paced projection input, unpaced domain reads, administrative records, security validity, explicitly external observation fields, and the comparison of a server-supplied HTTP date, such as `Retry-After`, with the present |
 
 Logical deadlines and physical deadlines are different types and cannot be interchanged. Actual
 UTC enters the data plane through a dedicated boundary, and expression engines cannot read it

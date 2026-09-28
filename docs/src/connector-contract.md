@@ -276,10 +276,12 @@ the attempt without a retry. A record left unanswered without a reported failure
 unresolved, and the host retries it, because nothing says that record was not written. The host
 applies the answers to the corresponding ACK roots and error policy. The emitter task owns its buffer, maximum batch size, flush cadence,
 retry schedule, fault injection, stop deadline, and metrics. The connector owns the external
-operation and its completion point. A receiver-requested delay can extend, but cannot shorten,
-the host's retry backoff. `finish` lets a transport empty a client-side queue within the remaining
-stop deadline; Kafka uses it. A sink may keep its client after a publish failure when reopening it
-would discard staged work or a persistent session.
+operation and its completion point. A receiver-requested delay, which a connector attaches to the
+attempt's failure, can extend, but cannot shorten, the host's retry backoff; the backoff sequence
+advances as it would without it. The host ignores a delay whose end its monotonic clock cannot
+represent, so the backoff alone decides that wait. `finish` lets a transport empty a client-side
+queue within the remaining stop deadline; Kafka uses it. A sink may keep its client after a
+publish failure when reopening it would discard staged work or a persistent session.
 
 The task loop keeps the connector state, buffer, retry schedule, backoff, and reconnect decision in
 one mutable owner. Force flushes, cadence or retry wakes, and input-triggered publishes all apply one
@@ -384,6 +386,16 @@ later requests unresolved; the authentication statuses retain a distinct infrast
 Other `3xx`/`4xx` and `101` reject their one request with a structured external message error,
 then publication continues with the next request. The host applies delivered and rejected
 members, branches and acknowledgements and keeps unresolved prepared bytes for retry.
+
+When the final head of a retryable or authentication status carries exactly one `Retry-After`
+field, the connector reads it as RFC 9110 `delay-seconds`, whole digits only, or as an HTTP date
+in IMF-fixdate, RFC 850 or asctime form. It compares a date with actual UTC, read through the
+contract's physical-time owner as the response arrives, and a date already past asks for no delay.
+It attaches the resulting delay to the attempt's failure as the receiver-requested delay. Two such
+fields, any other text, a number beyond 64 bits, a date after 2262, or a delay that would end after
+2262 attach nothing, and neither does an interim head or a delivered or rejected request. The host
+waits for the longer of this delay and its backoff on its monotonic clock, so the domain's
+`TIME RATE` never shortens it.
 
 For a sink that stages writes, the lifecycle exposes a domain or physical commit deadline,
 staged-message count, pending ACKs, and a commit operation. The host includes that deadline in
