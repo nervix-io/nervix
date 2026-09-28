@@ -224,6 +224,7 @@ struct EntityScheduleSwapFailureKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
     Admission(ClusterNodeName),
+    ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
     RelocationPublication(DomainName),
     ResponseDelivery(ClusterNodeName),
@@ -802,6 +803,20 @@ impl FaultInjection {
 
     pub fn release_command_admission_pause(&self, node_id: &ClusterNodeName) {
         self.release_command_pause(&CommandPausePoint::Admission(node_id.clone()));
+    }
+
+    /// Holds a command after its leader-local reference lookup and before its replicated proposal.
+    pub fn pause_command_reference_lookup_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::ReferenceLookup(node_id));
+    }
+
+    pub async fn wait_for_command_reference_lookup_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::ReferenceLookup(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_command_reference_lookup_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::ReferenceLookup(node_id.clone()));
     }
 
     /// Holds the next persistent command after its applying record is committed and before its
@@ -1417,6 +1432,11 @@ impl FaultInjection {
 
     pub(crate) async fn pause_command_admission_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::Admission(node_id.clone()))
+            .await;
+    }
+
+    pub(crate) async fn pause_command_reference_lookup_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::ReferenceLookup(node_id.clone()))
             .await;
     }
 

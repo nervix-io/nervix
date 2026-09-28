@@ -522,8 +522,41 @@ pub enum ConsensusCommand {
 )]
 pub enum ConsensusResponse {
     Applied,
-    Conflict(String),
+    Conflict(ConsensusConflict),
     Transaction(Box<TransactionMutationResponse>),
+}
+
+/// Why the replicated state machine refused a proposed change.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    Error,
+)]
+pub enum ConsensusConflict {
+    #[error("{0}")]
+    Reason(String),
+    #[error("command execution reference '{reference}' has expired")]
+    ExecutionReferenceExpired {
+        reference: nervix_models::CommandExecutionReference,
+    },
+    #[error("command execution reference '{reference}' conflicts by {kind}")]
+    ExecutionReferenceConflict {
+        reference: nervix_models::CommandExecutionReference,
+        kind: CommandExecutionRequestConflict,
+    },
+}
+
+impl From<String> for ConsensusConflict {
+    fn from(reason: String) -> Self {
+        Self::Reason(reason)
+    }
 }
 
 #[derive(
@@ -1436,7 +1469,7 @@ pub enum ConsensusError {
     #[error("{0}")]
     Write(String),
     #[error("consensus state changed: {0}")]
-    Conflict(String),
+    Conflict(ConsensusConflict),
     #[error("raft returned an unexpected response to a state mutation")]
     UnexpectedResponse,
     #[error("raft proposal lost leadership")]
@@ -2802,7 +2835,9 @@ impl Proposer {
     ) -> Result<u64, Report<ConsensusError>> {
         if authority.coordinator() != &self.inner.local_node_id {
             return Err(Report::new(ConsensusError::Conflict(
-                "ownership handoff reconciliation authority is not the local node".to_string(),
+                ConsensusConflict::Reason(
+                    "ownership handoff reconciliation authority is not the local node".to_string(),
+                ),
             )));
         }
         let response = self
@@ -4253,9 +4288,9 @@ impl AppliedConsensusCommand {
         }
     }
 
-    fn conflict(reason: String) -> Self {
+    fn conflict(reason: impl Into<ConsensusConflict>) -> Self {
         Self {
-            response: ConsensusResponse::Conflict(reason),
+            response: ConsensusResponse::Conflict(reason.into()),
             schedule_changed: false,
             domains_changed: false,
             resources_changed: false,
@@ -4431,10 +4466,11 @@ fn apply_consensus_command_at(
         } => {
             if let Some(existing) = state.command_executions.get(&execution.reference) {
                 if existing.is_expired() {
-                    return AppliedConsensusCommand::conflict(format!(
-                        "command execution reference '{}' has expired",
-                        execution.reference,
-                    ));
+                    return AppliedConsensusCommand::conflict(
+                        ConsensusConflict::ExecutionReferenceExpired {
+                            reference: execution.reference.clone(),
+                        },
+                    );
                 }
                 if !existing.same_request(execution) {
                     let conflict = existing
@@ -4449,16 +4485,25 @@ fn apply_consensus_command_at(
                                 .verified("a proposed command execution is applying"),
                         )
                         .unwrap_or(CommandExecutionRequestConflict::Position);
-                    return AppliedConsensusCommand::conflict(format!(
-                        "command execution reference '{}' conflicts by {conflict}",
-                        execution.reference,
-                    ));
+                    return AppliedConsensusCommand::conflict(
+                        ConsensusConflict::ExecutionReferenceConflict {
+                            reference: execution.reference.clone(),
+                            kind: conflict,
+                        },
+                    );
                 }
             } else {
                 if let Err(reason) = state
                     .command_executions
                     .validate_admission(&execution.reference, policy)
                 {
+                    if let CommandExecutionAdmissionError::Expired = reason.current_context() {
+                        return AppliedConsensusCommand::conflict(
+                            ConsensusConflict::ExecutionReferenceExpired {
+                                reference: execution.reference.clone(),
+                            },
+                        );
+                    }
                     return AppliedConsensusCommand::conflict(format!(
                         "command execution reference '{}' {reason}",
                         execution.reference,
@@ -5857,15 +5902,15 @@ mod tests {
     use super::{
         AppliedEntryContext, AutomaticScheduleFence, ClusterSchedule, CommandExecution,
         CommandExecutionAdmissionPolicy, CommandExecutionDisposition, CommandExecutionEffect,
-        CommandExecutionResult, CommandExecutionState, ConsensusCommand, ConsensusResponse,
-        FjallLogReader, FjallStore, GossipNode, GossipState, LeaderTenure, MembershipMutation,
-        MembershipSnapshot, ProtocolOriginError, ResourceRecords, StateMachineChanges,
-        StateMachineData, TransactionApplicationOutcome, TransactionCommandResult,
-        TransactionCommitAdmissionFailure, TransactionMutationError, TransactionOutcome,
-        TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
-        TransactionStepResult, TypeConfig, UserCredentials, apply_consensus_command,
-        apply_consensus_command_at, apply_transaction_step_effect, io_error, storage_decode,
-        validate_protocol_origin,
+        CommandExecutionRequestConflict, CommandExecutionResult, CommandExecutionState,
+        ConsensusCommand, ConsensusConflict, ConsensusResponse, FjallLogReader, FjallStore,
+        GossipNode, GossipState, LeaderTenure, MembershipMutation, MembershipSnapshot,
+        ProtocolOriginError, ResourceRecords, StateMachineChanges, StateMachineData,
+        TransactionApplicationOutcome, TransactionCommandResult, TransactionCommitAdmissionFailure,
+        TransactionMutationError, TransactionOutcome, TransactionStatement,
+        TransactionStatementRequest, TransactionStepEffect, TransactionStepResult, TypeConfig,
+        UserCredentials, apply_consensus_command, apply_consensus_command_at,
+        apply_transaction_step_effect, io_error, storage_decode, validate_protocol_origin,
     };
     use crate::{
         ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionActivity,
@@ -6698,7 +6743,9 @@ mod tests {
 
         assert_eq!(
             applied.response,
-            ConsensusResponse::Conflict("domain 'tenant' schedule changed".to_string())
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(
+                "domain 'tenant' schedule changed".to_string()
+            ))
         );
         assert_eq!(state.schedule.domain(&domain("tenant")), Some(&committed));
         assert!(!applied.schedule_changed);
@@ -6735,7 +6782,9 @@ mod tests {
 
         assert_eq!(
             applied.response,
-            ConsensusResponse::Conflict("domain 'tenant' node eligibility changed".to_string())
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(
+                "domain 'tenant' node eligibility changed".to_string()
+            ))
         );
         assert!(state.schedule.domain(&domain("tenant")).is_none());
         assert!(!applied.schedule_changed);
@@ -6766,7 +6815,9 @@ mod tests {
 
         assert_eq!(
             applied.response,
-            ConsensusResponse::Conflict("domain 'tenant' membership changed".to_string())
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(
+                "domain 'tenant' membership changed".to_string()
+            ))
         );
         assert!(state.schedule.domain(&domain("tenant")).is_none());
         assert!(!applied.schedule_changed);
@@ -6837,7 +6888,9 @@ mod tests {
         );
         assert_eq!(
             broader.response,
-            ConsensusResponse::Conflict("domain 'tenant' schedule changed".to_string())
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(
+                "domain 'tenant' schedule changed".to_string()
+            ))
         );
         assert!(state.schedule.domain(&domain("tenant")).is_some());
     }
@@ -6865,9 +6918,9 @@ mod tests {
 
         assert_eq!(
             applied.response,
-            ConsensusResponse::Conflict(
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(
                 "automatic schedule decision leader tenure changed".to_string()
-            )
+            ))
         );
         assert_eq!(state.schedule.domains.len(), 0);
         assert!(!applied.schedule_changed);
@@ -7007,7 +7060,7 @@ mod tests {
         fn assert_identity_conflict(
             state: &mut StateMachineData,
             execution: CommandExecution,
-            expected_kind: &str,
+            expected_kind: CommandExecutionRequestConflict,
         ) {
             let reference = execution.reference.clone();
             let response = apply_consensus_command(
@@ -7018,12 +7071,13 @@ mod tests {
                     policy: command_policy(10),
                 },
             );
-            let expected =
-                format!("command execution reference '{reference}' conflicts by {expected_kind}");
-            assert!(matches!(
+            assert_eq!(
                 response.response,
-                ConsensusResponse::Conflict(reason) if reason == expected
-            ));
+                ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceConflict {
+                    reference,
+                    kind: expected_kind,
+                })
+            );
         }
 
         let reference = command_reference(1);
@@ -7046,7 +7100,11 @@ mod tests {
         assert_eq!(state.command_executions.len(), 1);
 
         let conflicting = execution(&reference, owner.clone(), domain("tenant"), None, [8; 32]);
-        assert_identity_conflict(&mut state, conflicting, "content");
+        assert_identity_conflict(
+            &mut state,
+            conflicting,
+            CommandExecutionRequestConflict::Content,
+        );
 
         let conflicting = execution(
             &reference,
@@ -7055,7 +7113,11 @@ mod tests {
             None,
             [7; 32],
         );
-        assert_identity_conflict(&mut state, conflicting, "domain");
+        assert_identity_conflict(
+            &mut state,
+            conflicting,
+            CommandExecutionRequestConflict::Domain,
+        );
 
         let conflicting = execution(
             &reference,
@@ -7065,7 +7127,11 @@ mod tests {
             None,
             [7; 32],
         );
-        assert_identity_conflict(&mut state, conflicting, "owner");
+        assert_identity_conflict(
+            &mut state,
+            conflicting,
+            CommandExecutionRequestConflict::Owner,
+        );
 
         let conflicting = execution(
             &reference,
@@ -7074,7 +7140,11 @@ mod tests {
             Some(TransactionPosition::new(1)),
             [7; 32],
         );
-        assert_identity_conflict(&mut state, conflicting, "position");
+        assert_identity_conflict(
+            &mut state,
+            conflicting,
+            CommandExecutionRequestConflict::Position,
+        );
 
         let result = CommandExecutionResult {
             disposition: CommandExecutionDisposition::Completed {
@@ -7140,6 +7210,35 @@ mod tests {
             &mut state,
             &ConsensusCommand::ReclaimCommandExecutions {
                 finished_before: Timestamp::from_unix_nanos(1_700_000_011_000_000_000),
+                retry_fence: Timestamp::from_unix_nanos(1_699_999_999_000_000_000),
+            },
+        );
+        assert!(
+            state
+                .command_executions
+                .get(&reference)
+                .verified("the retry fence has not reached this execution reference")
+                .is_expired()
+        );
+        let retained_retry = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::AdmitCommandExecution {
+                execution: Box::new(original.clone()),
+                mutation_domains: BTreeSet::new(),
+                policy: command_policy(10),
+            },
+        );
+        assert_eq!(
+            retained_retry.response,
+            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceExpired {
+                reference: reference.clone(),
+            })
+        );
+
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::ReclaimCommandExecutions {
+                finished_before: Timestamp::from_unix_nanos(1_700_000_011_000_000_000),
                 retry_fence: Timestamp::from_unix_nanos(1_700_000_020_000_000_000),
             },
         );
@@ -7153,10 +7252,12 @@ mod tests {
                 policy: command_policy(10),
             },
         );
-        assert!(matches!(
+        assert_eq!(
             response.response,
-            ConsensusResponse::Conflict(reason) if reason.contains("has expired")
-        ));
+            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceExpired {
+                reference: reference.clone(),
+            })
+        );
         assert!(state.command_executions.get(&reference).is_none());
     }
 
@@ -7224,7 +7325,7 @@ mod tests {
         );
         assert!(matches!(
             conflict.response,
-            ConsensusResponse::Conflict(reason)
+            ConsensusResponse::Conflict(ConsensusConflict::Reason(reason))
                 if reason.contains(&format!("mutation is owned by command '{}'", first.reference))
         ));
         assert!(!state.command_executions.contains_key(&second.reference));

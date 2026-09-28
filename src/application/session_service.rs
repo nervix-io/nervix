@@ -1759,7 +1759,9 @@ impl SessionServiceImpl {
 }
 
 /// The answer to a request whose execution reference aged out of execution history.
-fn expired_reference(reference: &CommandExecutionReference) -> CommandResult {
+pub(in crate::application) fn expired_reference(
+    reference: &CommandExecutionReference,
+) -> CommandResult {
     let message = format!("command execution reference '{reference}' has expired");
     CommandResult {
         diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],

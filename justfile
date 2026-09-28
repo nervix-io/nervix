@@ -486,7 +486,7 @@ test-coverage: tests-deps
 # Rewrite lcov.info from the profiles the last coverage recipe collected, over the sources of every
 # workspace package, so crate lines the server's tests executed are measured as CI measures them.
 coverage-report-workspace:
-    cargo llvm-cov report --workspace --lcov --output-path lcov.info
+    cargo llvm-cov report --package 'nervix-*' --lcov --output-path lcov.info
 
 # Measure changed server lines against its unit tests and selected Cucumber features while iterating.
 # The full `test-coverage` recipe remains the CI gate for workspace coverage and CRAP.
@@ -501,6 +501,13 @@ test-coverage-feature +features: tests-deps
             --test scenarios -- --input "${feature}" --concurrency 1
     done
     cargo llvm-cov report --lcov --output-path lcov.info
+
+# Add client and vocabulary tests to an existing coverage profile without clearing server and
+# public-scenario coverage collected by `test-coverage-feature`.
+test-coverage-client-packages:
+    cargo llvm-cov --no-report --all-targets \
+        --package nervix-client-core --package nervix-client-wire \
+        --package nervix-models --package nervix-cli --package nervix-web-console
 
 # Measure browser and CLI binary tests together with their public session scenarios.
 test-coverage-clients: tests-deps

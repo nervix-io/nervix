@@ -296,7 +296,9 @@ The console sends a statement whether or not a domain is selected, and the serve
 it needs one: `SHOW CLUSTER STATUS` or `CREATE DOMAIN` runs with no domain selected, while a
 statement that acts on a domain fails with `no active domain selected`.
 
-The console session does not follow domain clocks. `ATTACH DOMAIN CLOCK` and `DETACH DOMAIN CLOCK`
+The console event log renders domain-clock state and tick frames, including the tick id, boundary,
+authority UTC observation, and serving node's logical reading, when the session receives them.
+The console session does not yet follow domain clocks. `ATTACH DOMAIN CLOCK` and `DETACH DOMAIN CLOCK`
 typed into the REPL reach the server as commands, which refuses them as session-local; follow a
 domain clock with the [command line client](client-tools-cli.md#session-and-transaction-statements)
 or the [Rust client library](client-library.md#following-a-domain-clock).

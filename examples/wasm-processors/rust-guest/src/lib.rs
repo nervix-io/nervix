@@ -19,6 +19,7 @@ use std::{sync::Arc, time::Duration};
 
 use arrow_array::{Array, ArrayRef, Int32Array, StringArray};
 use arrow_schema::ArrowError;
+use error_stack::{Report, Result};
 use nervix_wasm_sdk::{
     AckSidecar, AckTokenSet, BranchContext, GuestContext, GuestError, InputBatch, MessageErrorSet,
     OutputColumnRef, OutputEnvelope, Processor, ProcessorField, ProcessorSchema, ProcessorType,
@@ -92,7 +93,7 @@ impl Processor for EvenRowFilter {
                     .branch()
                     .output_schemas()
                     .first()
-                    .ok_or(GuestError::NotInitialized)?;
+                    .ok_or_else(|| Report::new(GuestError::NotInitialized))?;
                 let output = message_error_envelope(
                     ctx.branch().input_schema(),
                     output_schema,
@@ -174,10 +175,10 @@ impl Processor for EvenRowFilter {
 
 nervix_wasm_sdk::export_processor!(EvenRowFilter);
 
-fn int32_input_error() -> GuestError {
-    GuestError::ArrowIpc(ArrowError::SchemaError(
+fn int32_input_error() -> Report<GuestError> {
+    Report::new(GuestError::ArrowIpc(ArrowError::SchemaError(
         "input column 0 is not a non-null I32 column".to_string(),
-    ))
+    )))
 }
 
 fn first_i32_value(input: &InputBatch) -> Result<Option<i32>, GuestError> {
@@ -204,7 +205,7 @@ fn filter_even_rows(
     start_row: u64,
 ) -> Result<OutputEnvelope, GuestError> {
     if output_schemas.is_empty() {
-        return Err(GuestError::NotInitialized);
+        return Err(Report::new(GuestError::NotInitialized));
     }
     let acks = pending.acks();
     let mut selected_values = Vec::new();
@@ -339,7 +340,7 @@ fn output_columns(
             }) {
                 return Ok(OutputColumnRef::Input {
                     column_index: u32::try_from(column_index)
-                        .map_err(|_| GuestError::InvalidSize)?,
+                        .map_err(|_| Report::new(GuestError::InvalidSize))?,
                 });
             }
             if destination.optional {
@@ -357,7 +358,8 @@ fn output_columns(
                     ))
                 })?;
             Ok(OutputColumnRef::Generated {
-                column_index: u32::try_from(column_index).map_err(|_| GuestError::InvalidSize)?,
+                column_index: u32::try_from(column_index)
+                    .map_err(|_| Report::new(GuestError::InvalidSize))?,
             })
         })
         .collect()

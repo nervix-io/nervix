@@ -290,6 +290,7 @@ struct ScenarioWorld {
     last_publish_at: Option<Instant>,
     last_command_error: Option<String>,
     last_command_output: Option<String>,
+    last_command_disposition: Option<nervix_client_wire::CommandDisposition>,
     last_cli_output: Option<Output>,
     cli_subscription_process: Option<tokio::process::Child>,
     cli_subscription_lines: Option<StdArc<StdMutex<VecDeque<String>>>>,
@@ -8515,6 +8516,49 @@ async fn when_command_admission_pause_is_released(world: &mut ScenarioWorld, nod
         .release_command_admission_pause(&crate::common::cluster::node_name(&node_id));
 }
 
+#[given(expr = "command reference lookup on node {string} pauses before proposal")]
+async fn given_command_reference_lookup_pause(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_command_reference_lookup_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "the command reference lookup pause on node {string} is reached")]
+async fn then_command_reference_lookup_pause_is_reached(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node_name = crate::common::cluster::node_name(&node_id);
+    let fault_injection = world.fault_injection.clone();
+    let request = world
+        .background_command_result
+        .as_mut()
+        .verified("the preceding step started a background command request");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::select! {
+            () = fault_injection.wait_for_command_reference_lookup_pause(&node_name) => {},
+            result = request => panic!(
+                "command on '{node_id}' returned before its reference lookup pause: {result:?}"
+            ),
+        }
+    })
+    .await
+    .unwrap_or_else(|error| panic!("command reference lookup pause was not reached: {error}"));
+}
+
+#[when(expr = "the command reference lookup pause on node {string} is released")]
+async fn when_command_reference_lookup_pause_is_released(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_command_reference_lookup_pause(&crate::common::cluster::node_name(&node_id));
+}
+
 #[given(expr = "command execution on node {string} pauses after durable admission")]
 async fn given_command_durable_admission_pause(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -10355,6 +10399,7 @@ async fn execute_command_request_with_reference_on_leader(
         .run_command_result_with_reference(&query, execution_reference)
         .await
         .unwrap_or_else(|error| panic!("resumed command request failed: {error}"));
+    world.last_command_disposition = Some(result.disposition.clone());
     if result.succeeded() {
         world.last_command_error = None;
         world.last_command_output = Some(result.message);
@@ -10362,6 +10407,51 @@ async fn execute_command_request_with_reference_on_leader(
         world.last_command_output = None;
         world.last_command_error = Some(result.message);
     }
+}
+
+#[then("the last command request reports an expired execution reference")]
+fn then_last_command_request_reports_expired_execution_reference(world: &mut ScenarioWorld) {
+    assert_eq!(
+        world.last_command_disposition,
+        Some(nervix_client_wire::CommandDisposition::ExecutionReferenceExpired)
+    );
+}
+
+#[then("the background command request reports a content conflict or unknown leadership outcome")]
+async fn then_background_command_request_reports_conflict_or_unknown_leadership(
+    world: &mut ScenarioWorld,
+) {
+    let request = world
+        .background_command_result
+        .take()
+        .verified("the preceding step started a background command request");
+    let result = tokio::time::timeout(Duration::from_secs(30), request)
+        .await
+        .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
+        .assured("the background command task is owned by this scenario")
+        .assured("the background command transport is live until its answer");
+    assert!(matches!(
+        result.disposition,
+        nervix_client_wire::CommandDisposition::ExecutionReferenceConflict(
+            nervix_client_wire::ExecutionReferenceConflict::Content,
+        ) | nervix_client_wire::CommandDisposition::OutcomeUnknown(
+            nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
+        )
+    ));
+}
+
+#[then("the last command request reports an execution reference content conflict")]
+fn then_last_command_request_reports_execution_reference_content_conflict(
+    world: &mut ScenarioWorld,
+) {
+    assert_eq!(
+        world.last_command_disposition,
+        Some(
+            nervix_client_wire::CommandDisposition::ExecutionReferenceConflict(
+                nervix_client_wire::ExecutionReferenceConflict::Content,
+            )
+        )
+    );
 }
 
 #[then(expr = "command execution reference {string} is eventually reclaimed")]

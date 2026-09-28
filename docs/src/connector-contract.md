@@ -177,6 +177,16 @@ sequenceDiagram
 
 ## Sink boundary
 
+Each domain revision decides one typed emitter execution plan per scheduled emitter before
+publishing the domain execution. The plan resolves its sink clients and codec, retains its ordered
+source relay edges and lowered source predicates, and lowers its route, HTTP request fields, SQS
+ordering group and row sink mappings. It also converts OTEL resource literals and the Iceberg
+commit cadence and size into connector values. Initial startup, reassignment and an entity swap
+use that same plan. A swap publishes new source and remote consumer edges from the new plan; it
+does not reconstruct the emitter from a Model in the host. The host resolves resource mounts and
+binds the lowered VM programs to installed schemas and UDFs when it starts the task. A retry
+reopens the sink with the same typed configuration.
+
 The host prepares one batch for one of three sink contracts. A **record sink** receives
 codec-encoded keys, payloads, headers, optional ordering groups, timestamps, and the identity the
 host assigned each record of the write. A **row sink** receives host-projected Arrow columns,
@@ -200,7 +210,7 @@ mapping order without building per-row JSON values. It keeps the host's bounded 
 cadence, and per-record outcomes.
 
 An ordering group exists only where the sink plan declares one; today that is the SQS
-`FIFO GROUP`. The host compiles the declaration, evaluates it once per filtered source batch, and
+`FIFO GROUP`. The host binds the lowered declaration, evaluates it once per filtered source batch, and
 carries the result beside the batch: the batch's branch key for `FROM BRANCH`, or a string column
 for an expression, whose null rows keep the reason they have no group. It selects that column
 through the rows the emitter's route keeps, so each record keeps the group of its own input row. A
@@ -410,7 +420,8 @@ sequenceDiagram
 ## Failure and observation
 
 An ingestor opens all source instances before registration, so a failed source start leaves no
-running ingestor. A sink initialization failure is reported as an emitter initialization error;
+running ingestor. An invalid emitter declaration or expression fails planning before its new
+execution plan is published. A sink initialization failure is reported as an emitter initialization error;
 the emitter remains unavailable and retries opening on its configured backoff. Invalid settings
 and missing external topics, queues, tables, namespaces, or other required entities surface as
 start errors: Nervix does not create them as a side effect. During execution, read and publish

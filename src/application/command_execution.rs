@@ -21,7 +21,8 @@ use nervix_consensus::{
     CommandExecutionRequestConflict, CommandExecutionResult, CommandExecutionState,
     CommandExecutionStatementDisposition, CommandExecutionStatementResult,
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
-    CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, ConsensusError,
+    CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, ConsensusConflict,
+    ConsensusError,
 };
 use nervix_execution::sync::DashMap;
 use nervix_models::{
@@ -38,7 +39,7 @@ use super::{
     command_result::{CommandDiagnostic, CommandDisposition, CommandResult, OutcomeUnknownCause},
     domain_clock::current_timestamp,
     model_mutation::{command_error, is_persistent_statement},
-    session_service::{SessionServiceImpl, conflicting_reference},
+    session_service::{SessionServiceImpl, conflicting_reference, expired_reference},
     subscription::{PendingSessionCommand, SessionCommandOperation, SessionSubscriptions},
     transaction::is_queueable_transaction_statement,
 };
@@ -464,11 +465,7 @@ impl SessionServiceImpl {
             .await
         {
             if existing.is_expired() {
-                let message = format!("command execution reference '{reference}' has expired");
-                return Err(Box::new(CommandResult {
-                    diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
-                    ..CommandResult::new(CommandDisposition::ExecutionReferenceExpired, message)
-                }));
+                return Err(Box::new(expired_reference(&reference)));
             }
             if let Some(conflict) = existing.request_conflict(
                 &owner,
@@ -503,6 +500,12 @@ impl SessionServiceImpl {
             }
             return Ok(CommandAdmission::Existing(existing));
         }
+
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_command_reference_lookup_if_armed(self.inner.consensus.local_node_id())
+            .await;
 
         let effect = match &request.body {
             PersistentCommandRequestBody::Transaction(transaction) => {
@@ -612,6 +615,11 @@ impl SessionServiceImpl {
                              being admitted; retry it with the same reference to learn its outcome"
                         ),
                     )));
+                }
+                if let Some(result) =
+                    replicated_admission_refusal(&reference, error.current_context())
+                {
+                    return Err(Box::new(result));
                 }
                 let message = error.to_string();
                 let result = self
@@ -805,13 +813,7 @@ impl SessionServiceImpl {
                 OutcomeUnknownCause::StillApplying,
                 format!("command execution reference '{reference}' is still applying"),
             ))),
-            CommandExecutionState::Expired => {
-                let message = format!("command execution reference '{reference}' has expired");
-                Err(Box::new(CommandResult {
-                    diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
-                    ..CommandResult::new(CommandDisposition::ExecutionReferenceExpired, message)
-                }))
-            }
+            CommandExecutionState::Expired => Err(Box::new(expired_reference(reference))),
             CommandExecutionState::Finished {
                 outcome_revision,
                 result,
@@ -936,6 +938,21 @@ pub(in crate::application) enum CommandAdmission {
 }
 
 /// An admitted command whose outcome is not known yet, for `cause`.
+fn replicated_admission_refusal(
+    reference: &CommandExecutionReference,
+    error: &ConsensusError,
+) -> Option<CommandResult> {
+    match error {
+        ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceExpired { .. }) => {
+            Some(expired_reference(reference))
+        }
+        ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceConflict {
+            kind, ..
+        }) => Some(conflicting_reference(reference, *kind)),
+        _ => None,
+    }
+}
+
 fn outcome_unknown(cause: OutcomeUnknownCause, message: String) -> CommandResult {
     CommandResult {
         diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
@@ -1118,6 +1135,35 @@ mod tests {
             statement: ClientStatement::Server(statement),
             domain: None,
         })
+    }
+
+    #[test]
+    fn replicated_admission_refusals_keep_their_typed_dispositions() {
+        let reference = CommandExecutionReference::parse("reference.admission")
+            .assured("the test reference is an identifier-shaped literal");
+        let expired = ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceExpired {
+            reference: reference.clone(),
+        });
+        assert_eq!(
+            replicated_admission_refusal(&reference, &expired).map(|result| result.disposition),
+            Some(CommandDisposition::ExecutionReferenceExpired)
+        );
+
+        let conflict = ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceConflict {
+            reference: reference.clone(),
+            kind: CommandExecutionRequestConflict::Content,
+        });
+        assert_eq!(
+            replicated_admission_refusal(&reference, &conflict).map(|result| result.disposition),
+            Some(CommandDisposition::ExecutionReferenceConflict(
+                CommandExecutionRequestConflict::Content,
+            ))
+        );
+
+        let unrelated = ConsensusError::Conflict(ConsensusConflict::Reason(format!(
+            "command execution reference '{reference}' has expired"
+        )));
+        assert!(replicated_admission_refusal(&reference, &unrelated).is_none());
     }
 
     #[tokio::test]

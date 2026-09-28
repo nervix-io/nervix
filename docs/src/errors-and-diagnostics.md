@@ -51,6 +51,16 @@ Jaq returns `JaqProgramError` or `JaqFormatError` reports for compilation, evalu
 conversion. A codec or runtime caller retains that report under its operation context. VM row
 errors remain typed values in the batch outcome and are formatted only when a message error is
 reported; this conversion does not turn them into report allocations per row.
+
+The WASM FlatBuffers decoder reports protocol failures with their verified payload cause. The Rust
+guest SDK retains that report beneath its envelope or snapshot meaning, and its `Processor`
+callbacks return guest-error reports. It renders a failure only when returning an ABI code or
+global-error reason; rejected snapshot bytes and rejected application state keep their distinct
+codes and text. The host retains a typed guest-call cause beneath the failed operation, so its
+runtime caller can still distinguish a resource limit, invalid emission, and a saved-state verdict
+without classifying a rendered string. Callback and checkpoint acknowledgement decisions stay the
+same; [WASM State And Recovery](./wasm-state.md) owns those boundaries.
+
 HTTP request-field compilation retains the VM report beneath the emitter's request-field context
 and attaches its safe message for diagnostics; an invalid request program never starts the sink.
 
@@ -228,6 +238,14 @@ an unparseable flush or collection cadence, rather than restating it. Runtime in
 domain context to either report, and an ingestor that fails to start while its domain execution is
 built records that report as its transient error.
 
+Emitter execution planning has typed failures for missing source relays or codecs, an unresolved
+or mismatched client, unsupported publishing mode, an invalid source predicate or route, invalid
+HTTP request fields or SQS ordering group, empty or invalid row mappings, nonliteral OTEL resource
+attributes, and invalid Iceberg commit settings. Each report names the emitter and, for a source
+predicate, its relay. The decision fails before a new emitter plan or remote consumer edge is
+published. Binding a valid plan against installed schemas and UDFs may still fail during startup;
+opening an external sink may fail independently and follows the emitter's retry policy.
+
 Node startup validates execution memory limits before admitting any work. A Commands budget must
 hold both the bounded resident replication window and one bounded normalized command-state write;
 the larger requirement controls admission. Arithmetic that cannot represent either requirement is
@@ -332,7 +350,11 @@ sequenceDiagram
 
 At the public edge, the session maps a typed validation or execution result to a command
 disposition, message, and diagnostics; a transaction's admitted and retained outcomes stay
-distinct from a new execution. [Command
+distinct from a new execution. Replicated admission preserves an expired execution reference and
+the kind of a conflicting reference as typed consensus conflicts. The session returns
+`ExecutionReferenceExpired` or `ExecutionReferenceConflict` from those variants, including when a
+leader change lets the replicated check discover the conflict after the leader's local check. A
+client never has to classify those refusals from message text. [Command
 Dispositions](./client-session-protocol.md#command-dispositions) defines each disposition, the phase
 that produces it, and what a client may conclude from it, and typed request rejections are covered
 in [Rejections](./client-session-protocol.md#rejections). `DESCRIBE TRANSACTION` and
@@ -370,6 +392,11 @@ prints it; a client decides from the variant. The Rust client's `execute` turns 
 reports a stopped or uninstalled clock, or a projection outside the timestamp range, as a typed
 `DomainClockReadError`. See
 [Domain Clock Attachment](./sessions.md#domain-clock-attachment).
+
+If a paced clock cannot convert one period through its rate, the authority can still emit its
+already-due first tick. Scheduling a later tick then reports a rate-conversion or cadence error and
+stops production. A next-boundary overflow reports its own clock arithmetic error. None of these
+cases emits an early tick or silently clamps the interval.
 
 ## Sensitive Data And Observability
 
