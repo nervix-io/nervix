@@ -1152,3 +1152,16 @@ impl TransportState {
         .await
     }
 }
+
+fn header_u64(request: &Request<RecvStream>, name: &'static str) -> Result<u64, TransportError> {
+    let value = request
+        .headers()
+        .get(name)
+        .ok_or_else(|| TransportError::RelayGrant(format!("missing {name} header")))?;
+    let value = value
+        .to_str()
+        .map_err(|error| TransportError::RelayGrant(error.to_string()))?;
+    value
+        .parse()
+        .map_err(|error| TransportError::RelayGrant(format!("invalid {name} header: {error}")))
+}

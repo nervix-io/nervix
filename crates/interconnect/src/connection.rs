@@ -78,7 +78,7 @@ pub use duplex::{
 };
 pub use stream::IncomingByteStream;
 pub(crate) use stream::OutboundByteStreamRequest;
-use stream_slots::StreamSlotQuotas;
+use stream_slots::{StreamSlotQuotas, configure_client_builder, configure_server_builder};
 
 const CONNECT_PATH: &str = "/v1/connect";
 const CONTROL_PATH: &str = "/v1/control";
@@ -2754,48 +2754,6 @@ impl StreamLease {
     }
 }
 
-fn configure_client_builder(
-    builder: &mut client::Builder,
-    options: &TransportOptions,
-    class: PoolClass,
-) -> Result<(), TransportError> {
-    let stream_slots = class.stream_slots_per_connection();
-    let streams = u32::try_from(stream_slots).map_err(|_| TransportError::InvalidOptions {
-        reason: "pool stream slots exceed the HTTP/2 setting width".to_string(),
-    })?;
-    builder
-        .initial_window_size(options.initial_stream_window_bytes)
-        .initial_connection_window_size(options.initial_connection_window_bytes)
-        .max_header_list_size(options.max_header_bytes)
-        .max_concurrent_streams(streams)
-        .initial_max_send_streams(stream_slots)
-        .max_local_error_reset_streams(Some(RESET_LIMIT))
-        .max_pending_accept_reset_streams(RESET_LIMIT)
-        .max_send_buffer_size(BODY_CHUNK_BYTES);
-    Ok(())
-}
-
-fn configure_server_builder(
-    builder: &mut server::Builder,
-    options: &TransportOptions,
-) -> Result<(), TransportError> {
-    let streams =
-        u32::try_from(PoolClass::Management.stream_slots_per_connection()).map_err(|_| {
-            TransportError::InvalidOptions {
-                reason: "pool stream slots exceed the HTTP/2 setting width".to_string(),
-            }
-        })?;
-    builder
-        .initial_window_size(options.initial_stream_window_bytes)
-        .initial_connection_window_size(options.initial_connection_window_bytes)
-        .max_header_list_size(options.max_header_bytes)
-        .max_concurrent_streams(streams)
-        .max_local_error_reset_streams(Some(RESET_LIMIT))
-        .max_pending_accept_reset_streams(RESET_LIMIT)
-        .max_send_buffer_size(BODY_CHUNK_BYTES);
-    Ok(())
-}
-
 async fn send_body(
     stream: &mut SendStream<Bytes>,
     body: ChargedBytes,
@@ -2955,17 +2913,4 @@ async fn read_body_into(
         body.flow_control().release_capacity(chunk.len())?;
     }
     Ok(())
-}
-
-fn header_u64(request: &Request<RecvStream>, name: &'static str) -> Result<u64, TransportError> {
-    let value = request
-        .headers()
-        .get(name)
-        .ok_or_else(|| TransportError::RelayGrant(format!("missing {name} header")))?;
-    let value = value
-        .to_str()
-        .map_err(|error| TransportError::RelayGrant(error.to_string()))?;
-    value
-        .parse()
-        .map_err(|error| TransportError::RelayGrant(format!("invalid {name} header: {error}")))
 }
