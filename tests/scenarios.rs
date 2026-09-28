@@ -108,7 +108,7 @@ use crate::common::{
         KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
         MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR,
         POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, RUSTFS_ADDR,
-        TestDependencies,
+        SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
     http_receiver::{
         CapturedRequest, ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET,
@@ -6140,6 +6140,18 @@ async fn given_rabbitmq_endpoints_have_fixture_dns(world: &mut ScenarioWorld, na
     publish_fixture_name(world, RABBITMQ_TLS_ADDR, &name, "rabbitmq_tls_dns_addr");
 }
 
+#[given(expr = "the ClickHouse endpoints are published under fixture DNS name {string}")]
+async fn given_clickhouse_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
+    publish_fixture_name(world, CLICKHOUSE_ADDR, &name, "clickhouse_dns_addr");
+    publish_fixture_name(world, CLICKHOUSE_TLS_ADDR, &name, "clickhouse_tls_dns_addr");
+}
+
+#[given(expr = "the SQS endpoints are published under fixture DNS name {string}")]
+async fn given_sqs_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
+    publish_fixture_name(world, SQS_ENDPOINT, &name, "sqs_dns_endpoint");
+    publish_fixture_name(world, SQS_TLS_ENDPOINT, &name, "sqs_tls_dns_endpoint");
+}
+
 #[given("the WebSocket mock endpoints are published under fixture DNS")]
 async fn given_websocket_mock_has_fixture_dns(world: &mut ScenarioWorld) {
     publish_fixture_name(
@@ -6167,28 +6179,14 @@ async fn given_websocket_endpoint_is_forwarded(
     addresses: String,
 ) {
     let endpoint = expand_placeholders(world, &endpoint);
-    let mut url = url::Url::parse(&endpoint).expect("the WebSocket endpoint is a URL");
-    let host = url
-        .host_str()
-        .expect("the WebSocket endpoint has a host")
-        .parse::<std::net::IpAddr>()
-        .expect("the WebSocket mock listens on a literal address");
-    let port = url
-        .port()
-        .expect("the WebSocket mock endpoint names its port");
-    let addresses = fixture_addresses(&addresses);
-    let forwarders = TcpForwarders::start(&addresses, std::net::SocketAddr::new(host, port))
-        .await
-        .expect("the WebSocket forwarders could not listen");
-    url.set_host(Some(&name))
-        .expect("the fixture name is a valid WebSocket URL host");
-    url.set_port(Some(forwarders.port()))
-        .expect("the WebSocket URL can carry the forwarder port");
-    world.placeholders.insert(
-        "websocket_forwarded_addr".to_string(),
-        url.to_string().trim_end_matches('/').to_string(),
-    );
-    world.tcp_forwarders = Some(forwarders);
+    forward_under_fixture_name(
+        world,
+        &endpoint,
+        &name,
+        &addresses,
+        "websocket_forwarded_addr",
+    )
+    .await;
 }
 
 #[given(
@@ -6220,28 +6218,87 @@ async fn given_syslog_endpoint_is_forwarded(
 /// The scenario decides separately what the DNS fixture answers for `name`.
 #[given(expr = "RabbitMQ is forwarded as {string} from the fixture addresses {string}")]
 async fn given_rabbitmq_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
-    let endpoint = world
-        .placeholders
-        .get(RABBITMQ_ADDR)
-        .expect("RabbitMQ was started");
-    let mut url = url::Url::parse(endpoint).expect("the RabbitMQ endpoint is a URL");
-    let host = url
-        .host_str()
-        .expect("the RabbitMQ endpoint has a host")
-        .parse::<std::net::IpAddr>()
-        .expect("RabbitMQ listens on a literal address");
-    let port = url.port().expect("the RabbitMQ endpoint names its port");
-    let addresses = fixture_addresses(&addresses);
-    let forwarders = TcpForwarders::start(&addresses, std::net::SocketAddr::new(host, port))
-        .await
-        .expect("the RabbitMQ forwarders could not listen");
-    url.set_host(Some(&name))
-        .expect("the fixture name is a valid URL host");
-    url.set_port(Some(forwarders.port()))
-        .expect("an AMQP URL carries a port");
+    let endpoint = started_dependency(world, RABBITMQ_ADDR);
+    forward_under_fixture_name(
+        world,
+        &endpoint,
+        &name,
+        &addresses,
+        "rabbitmq_forwarded_addr",
+    )
+    .await;
+}
+
+/// Stand TCP forwarders to the plain ClickHouse HTTP listener at `addresses`, and record in
+/// placeholder `clickhouse_forwarded_addr` the ClickHouse URL that reaches them through the
+/// fixture name `name`. The scenario decides separately what the DNS fixture answers for `name`.
+#[given(expr = "ClickHouse is forwarded as {string} from the fixture addresses {string}")]
+async fn given_clickhouse_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
+    let endpoint = started_dependency(world, CLICKHOUSE_ADDR);
+    forward_under_fixture_name(
+        world,
+        &endpoint,
+        &name,
+        &addresses,
+        "clickhouse_forwarded_addr",
+    )
+    .await;
+}
+
+/// Stand TCP forwarders to the plain SQS listener at `addresses`, and record in placeholder
+/// `sqs_forwarded_endpoint` the SQS endpoint that reaches them through the fixture name `name`.
+/// The scenario decides separately what the DNS fixture answers for `name`.
+#[given(expr = "SQS is forwarded as {string} from the fixture addresses {string}")]
+async fn given_sqs_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
+    let endpoint = started_dependency(world, SQS_ENDPOINT);
+    forward_under_fixture_name(
+        world,
+        &endpoint,
+        &name,
+        &addresses,
+        "sqs_forwarded_endpoint",
+    )
+    .await;
+}
+
+/// The URL of the started dependency placeholder `source` names.
+fn started_dependency(world: &ScenarioWorld, source: &str) -> String {
     world
         .placeholders
-        .insert("rabbitmq_forwarded_addr".to_string(), url.to_string());
+        .get(source)
+        .unwrap_or_else(|| panic!("the dependency behind '{source}' was not started"))
+        .clone()
+}
+
+/// Stand TCP forwarders at `addresses` to the literal address and port of the URL `endpoint`, and
+/// record in placeholder `target` that URL with the fixture name `name` as its host and the
+/// forwarders' port as its port.
+async fn forward_under_fixture_name(
+    world: &mut ScenarioWorld,
+    endpoint: &str,
+    name: &str,
+    addresses: &str,
+    target: &str,
+) {
+    let mut url = url::Url::parse(endpoint).expect("the forwarded endpoint is a URL");
+    let host = url
+        .host_str()
+        .expect("the forwarded endpoint has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("the forwarded dependency listens on a literal address");
+    let port = url.port().expect("the forwarded endpoint names its port");
+    let addresses = fixture_addresses(addresses);
+    let forwarders = TcpForwarders::start(&addresses, std::net::SocketAddr::new(host, port))
+        .await
+        .unwrap_or_else(|error| panic!("the forwarders to {endpoint} could not listen: {error}"));
+    url.set_host(Some(name))
+        .expect("the fixture name is a valid URL host");
+    url.set_port(Some(forwarders.port()))
+        .expect("the forwarded URL can carry the forwarder port");
+    world.placeholders.insert(
+        target.to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
     world.tcp_forwarders = Some(forwarders);
 }
 

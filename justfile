@@ -589,6 +589,8 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
         --package nervix-connector-rabbitmq \
         --package nervix-connector-syslog \
         --package nervix-connector-websockets \
+        --package nervix-connector-clickhouse \
+        --package nervix-connector-sqs \
         --package nervix-interconnect
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
     run_scenario() {
@@ -605,6 +607,8 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
     run_scenario tests/features/runtime/websocket_client_ingestion.feature 'Websocket client ingestor connects'
     run_scenario tests/features/runtime/websocket_client_tls_resource_mounts.feature 'Websocket client keeps'
     run_scenario tests/features/runtime/websocket_dns_resolution.feature 'WebSocket clients reconnect'
+    run_scenario tests/features/runtime/clickhouse_dns_resolution.feature 'ClickHouse'
+    run_scenario tests/features/runtime/sqs_dns_resolution.feature 'SQS'
     just coverage-dns-clients-report {{ quote(output) }}
 
 # Export the profiles collected by `coverage-dns-clients` without rebuilding its test binaries.
@@ -621,6 +625,8 @@ coverage-dns-clients-report output="target/dns-clients.lcov":
         --package nervix-connector-rabbitmq \
         --package nervix-connector-syslog \
         --package nervix-connector-websockets \
+        --package nervix-connector-clickhouse \
+        --package nervix-connector-sqs \
         --package nervix-interconnect
 
 # Measure the Shuttle-only test paths, which production-mode workspace coverage cannot compile.
@@ -992,6 +998,27 @@ validate-dns-dependencies:
             exit 1
         fi
     done
+    # ClickHouse and SQS hand the node resolver to their drivers' own DNS hooks, Hyper's connector
+    # and Smithy's HTTP client, even when built without the server's feature graph, and complete
+    # TLS with AWS-LC alone.
+    for package in nervix-connector-clickhouse nervix-connector-sqs; do
+        graph="$(cargo tree --package "${package}" --edges normal --format '{p} {f}' --prefix none)"
+        if ! rg -q '^nervix-dns v' <<< "${graph}" || \
+            ! rg -q '^hickory-resolver v0\.26\.[0-9]+ .*tokio' <<< "${graph}"; then
+            echo "${package} lacks the node resolver for its outbound connections" >&2
+            exit 1
+        fi
+        if rg -q '^rustls v[^ ]+ (.*,)?ring(,|$)' <<< "${graph}"; then
+            echo "${package} selected Rustls's Ring provider" >&2
+            exit 1
+        fi
+    done
+    graph="$(cargo tree --package nervix-connector-sqs --edges normal --format '{p} {f}' --prefix none)"
+    if ! rg -q '^aws-smithy-http-client v[^ ]+ (.*,)?rustls-aws-lc(,|$)' <<< "${graph}" || \
+        rg -q '^aws-smithy-http-client v[^ ]+ (.*,)?(rustls-ring|legacy-rustls-ring|s2n-tls)(,|$)' <<< "${graph}"; then
+        echo "nervix-connector-sqs does not select AWS-LC alone for its Smithy HTTP client" >&2
+        exit 1
+    fi
     # MongoDB keeps its driver's Hickory SRV and TXT discovery; the driver still resolves the
     # addresses it connects to through Tokio.
     graph="$(cargo tree --package nervix-connector-mongodb --edges normal --format '{p} {f}' --prefix none)"

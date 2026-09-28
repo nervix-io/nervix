@@ -86,6 +86,55 @@ Lapin thread, and a failed handshake ends that thread and closes the socket. An 
 connection is not closed because its host's answer changed or expired; the next connection uses
 the new answer.
 
+### DNS for ClickHouse and SQS
+
+Composition passes the node resolver into every ClickHouse sink configuration and into every SQS
+source plan and sink configuration. Both connectors keep their driver's HTTP client and hand the
+resolver to it at the driver's own DNS hook, so every new connection resolves its host again while
+the request URL, its authority, the TLS server name and the signing inputs remain what the client
+configured. `nervix-dns` implements both hooks on the node resolver: Hyper's resolver service for
+`hyper-util`'s `HttpConnector`, and Smithy's `ResolveDns`.
+
+A ClickHouse client builds `HttpConnector` over the node resolver in both of its forms. Without TLS
+entries it is the plain HTTP client the driver would build for itself in this build, which has no
+driver TLS feature: an `https` address fails its request, and the connector keeps the driver's
+60-second TCP keepalive and 2-second pool idle timeout. With `tls_ca_file` or client identity
+entries the same connector is wrapped in the AWS-LC rustls configuration those entries build,
+trusting the bundled WebPKI roots, the platform's native roots and the configured CA, and serving
+`http` or `https` addresses. Hyper
+dials a literal IPv4 or IPv6 host without asking the resolver, tries a name's answers in order, and
+applies the URL's port or its scheme's default. The connector's `timeout_ms` bounds the send and the
+response of an insert, and the connection and its lookup run inside that response wait.
+
+An SQS client installs a Smithy HTTP client whose connector resolves through the node resolver
+with `build_with_resolver`. Without `tls_ca_file` the client is the SDK's default HTTPS client with
+that resolver: AWS-LC, the platform's native roots, and a proxy taken from `HTTP_PROXY`,
+`HTTPS_PROXY` and `NO_PROXY`, whose host the node resolver resolves while the proxy resolves the
+service. With `tls_ca_file` it trusts that CA alone and uses no proxy, as before. The SDK signs each
+request with SigV4 for the configured endpoint before the connector resolves its host, so the
+signature, the `Host` header and the certificate check all name that host, whichever address
+accepted the connection. The SDK's default 3.1-second connect timeout, and the operation and
+attempt timeouts a sink's `timeout_ms` sets, include the lookup. The client names static
+credentials and its region, so `aws-config` never consults the default credential or region chains
+that could reach IMDS, ECS, STS or SSO over HTTP. It still builds its SSO token chain, which SQS
+never asks for a token because it signs with SigV4; the loader receives the same HTTP client, so
+that chain would use the node resolver too.
+
+Both hooks give a lookup at most 30 seconds, like the Reqwest hooks; the client's own deadline
+cancels it sooner, and a lookup cut short that way fails as that deadline's timeout rather than as a
+lookup failure. A lookup failure reaches the connector as a cause of the driver's connection
+error, where the connector finds the typed `DnsLookupError` and keeps it as the context beneath its
+existing failure: a ClickHouse publish failure, an SQS sink start or publish failure, and an SQS
+source open, read or acknowledgement failure. The report's message names the host and the lookup
+failure. Any other failure to reach the service, including a certificate that does not name the
+configured host, is described by every cause of the driver's connection error, which describes the
+connection and never a record; a service's own response keeps its existing description. None of
+these failures rejects a record or acknowledges input. The host retries each on its declared
+backoff. An SQS sink keeps the SDK's own retries disabled, while an SQS source keeps the SDK's
+standard retry mode, which makes up to three attempts at a request whose connection failed, lookup
+failures included, before the source reports the failure. Pooled connections stay open when their
+host's answer changes or expires; the next connection resolves again.
+
 ```mermaid
 sequenceDiagram
     participant NSPL as NSPL and Models

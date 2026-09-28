@@ -2,9 +2,12 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The closed set of lookup failures and their classification from Hickory's errors.
+//! - **Owns.** The closed set of lookup failures, their classification from Hickory's errors, and
+//!   finding a failed lookup among the causes of a client library's error.
 //! - **Depends on.** Hickory's error types.
 //! - **Must not know.** Whether a caller retries, or what it would have connected to.
+
+use std::error::Error;
 
 use hickory_resolver::net::{DnsError, NetError};
 use strum::AsRefStr;
@@ -72,5 +75,21 @@ impl DnsLookupError {
 
     pub const fn failure(&self) -> DnsLookupFailure {
         self.failure
+    }
+
+    /// The failed lookup among `error` and its causes, if resolving a host is what failed.
+    ///
+    /// A client library that resolved through one of the resolver's DNS hooks keeps the lookup's
+    /// own failure among the causes of the connection error it reports, however many errors of its
+    /// own it wraps around it.
+    pub fn find_in<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a Self> {
+        let mut current = Some(error);
+        while let Some(cause) = current {
+            if let Some(lookup) = cause.downcast_ref::<Self>() {
+                return Some(lookup);
+            }
+            current = cause.source();
+        }
+        None
     }
 }
