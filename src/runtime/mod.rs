@@ -11,10 +11,12 @@
 //! - **Must not know.** NSPL text, transactions, the gRPC surface or consensus. It is told what to
 //!   run and runs it.
 //!
-//! Nonprocessor lifecycle paths still read Models directly instead of consuming plans, and `just
-//! ratchet` counts those remaining violations. Processor tasks consume published typed plans. This
-//! module also holds the connectors themselves rather than hosting them; moving each integration
-//! into its connector crate closes that violation.
+//! Generator, lookup, WASM, emitter, UDF compilation, relay transition, relay state replication
+//! and message-error paths still read Models directly instead of consuming plans, and `just
+//! ratchet` counts those remaining violations. Processor tasks consume published typed plans, and
+//! ingestors and reingestors start from the entrypoint plans each domain installs with its
+//! schedule. This module also holds the connectors themselves rather than hosting them; moving each
+//! integration into its connector crate closes that violation.
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -66,23 +68,21 @@ use nervix_models::{
     AckMode, Assignment, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClickHouseValueMapping,
     ClientConfigEntry, ClientName, ClientPoolBounds, ClientResourceMount, ClusterNodeIncarnation,
     ClusterNodeName, ClusterSchedule, CodecName, CommandExecutionReference, CoordinationIdentity,
-    CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateEmitter, CreateGenerator,
-    CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateUdf, CreateWasmProcessor,
-    DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef, DomainSchedule, DomainState,
-    EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName, EndpointType,
-    ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName,
-    IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
-    InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
-    IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
+    CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateEmitter, CreateGenerator, CreateLookup,
+    CreateRelay, CreateUdf, CreateWasmProcessor, DomainClockAuthority, DomainConfig, DomainName,
+    DomainNodeRef, DomainSchedule, DomainState, EmitSink, EmitterAckWindow, EmitterName,
+    EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
+    FlushPolicy, GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend,
+    IcebergValueMapping, InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode,
+    IngestQuiesceOverflow, IngestTimestampSource, IngestorName, KafkaPartitionSchedule,
     Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
     MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName,
-    MongoDbValueMapping, MqttIngestMode, MySqlValueMapping, NodeRef, OtelValueMapping,
-    OutputBranch, OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
-    OwnershipStateResetCause, ParseAsType, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
-    RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName, RetryPolicy,
-    RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes, SchemaFingerprint,
-    SignalingProtocolName, SignalingWireFormat, SqsIngestMode, StructuredMessageError,
+    MongoDbValueMapping, MySqlValueMapping, NodeRef, OtelValueMapping, OwnershipStateComponent,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
+    PostgresValueMapping, ProcessorOutput, RelayName, RemoteAckOutcome, RemoteAckRegistration,
+    RemoteAckResolution, RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName,
+    RetryPolicy, RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes,
+    SchemaFingerprint, SignalingProtocolName, SignalingWireFormat, StructuredMessageError,
     SubscriptionName, Timestamp, WasmCheckpointInspection, WasmRejectedStatePolicy,
     WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
 };
@@ -91,9 +91,10 @@ use nervix_models::{
     CreateClientAzureBlob, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
     CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientOtel,
     CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-    CreateClientWebsockets, CreateClientZeroMq,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientZeroMq,
 };
+#[cfg(test)]
+use nervix_models::{CreateIngestor, CreateReingestor, IngestSource, OutputBranch};
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use nervix_roto::UdfExecutor;
 #[cfg(test)]
@@ -111,8 +112,8 @@ use nervix_vm::{
     execute_predicate_in_context as execute_vm_predicate_in_context,
     execute_program_with_selection_in_context,
     infer_set_expr_types_for_bindings_with_udfs as infer_vm_set_expr_types_for_bindings_with_udfs,
-    lower_branch_construction, lower_finalized_output_filter, lower_generated_route,
-    lower_route_construction, lower_set_only_route, lower_transforming_route,
+    lower_finalized_output_filter, lower_generated_route, lower_route_construction,
+    lower_set_only_route, lower_transforming_route,
     program::{
         CaseArm, Expr, FunctionName, InternalFieldNamespace, InternalFieldRef, Literal,
         Span as VmSpan, SpannedExpr,
@@ -154,11 +155,18 @@ use crate::{
         RelayMetricsHandle, RuntimeMetrics, RuntimeMetricsSnapshot,
     },
     registry::{
-        ActiveGraph, BranchInstanceAckBoundary, BranchedIngestorSpec, BranchedNodeSpecs,
-        BranchedProcessorNodeSpec, BranchedProcessorOperationSpec, BranchedProcessorOutputSpec,
-        BranchedProcessorOutputsSpec, BranchedProcessorSpec, DomainActivationPlan,
-        DomainActivationPlanError, PlannedCodec, PlannedCodecWireFormat, PlannedSignalingProtocol,
-        RuntimeChange, RuntimeChanges, ScheduleDelta, branched_node_specs_from_scheduled_nodes,
+        ActiveGraph, BranchInstanceAckBoundary, BranchedNodeSpecs, BranchedProcessorNodeSpec,
+        BranchedProcessorOperationSpec, BranchedProcessorOutputSpec, BranchedProcessorOutputsSpec,
+        BranchedProcessorSpec, DomainActivationPlan, DomainActivationPlanError,
+        EndpointIngestorStartPlan, EntrypointPlanError, EntrypointPlans, HttpIngestorStartPlan,
+        IngestorSpec, IngestorStartPlan, KafkaDomainOffsetPlacement, KafkaIngestorStartPlan,
+        KafkaOffsetPlan, LoweredConstruction, MqttIngestorStartPlan, NatsIngestorStartPlan,
+        PlannedCodec, PlannedCodecWireFormat, PlannedEntryRoute, PlannedRouteBranch,
+        PlannedSignalingProtocol, PrometheusIngestorStartPlan, PulsarIngestorStartPlan,
+        RabbitMqIngestorStartPlan, RedisPubSubIngestorStartPlan, ReingestorInputPlan,
+        ReingestorPlan, RuntimeChanges, ScheduleDelta, SourceStartPlan, SqsIngestorStartPlan,
+        SyslogIngestorStartPlan, WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan,
+        branched_node_specs_from_scheduled_nodes,
     },
     resource::ResourceStore,
     runtime_ack::{
@@ -189,6 +197,7 @@ mod domain_rebuild;
 mod emitter_batch_packing;
 mod emitter_buffer;
 mod emitter_encoding;
+mod emitter_http_requests;
 mod emitter_ordering_group;
 mod emitter_publishing;
 mod emitter_record_writes;
@@ -200,6 +209,7 @@ mod emitter_task;
 mod emitter_values;
 mod endpoint;
 mod entity_gate;
+mod entrypoint_routes;
 mod error;
 mod events;
 mod fault_injection;
@@ -207,6 +217,7 @@ mod filter_map;
 mod force_flush;
 mod forced_recovery_decision;
 mod generator;
+mod http_request_fields;
 mod inferencer;
 mod inferencer_output;
 mod ingest_group;
@@ -214,7 +225,6 @@ mod ingest_metadata;
 mod ingestion_time;
 mod ingestor_quiesce;
 mod ingestor_start;
-mod ingestor_start_plan;
 mod ingestors;
 mod kafka_offset_state;
 mod local_drain;
@@ -310,7 +320,7 @@ use domain_execution::{
     RuntimeDomainState,
 };
 pub(crate) use domain_execution::{DomainRoutingCache, SharedDomainRouting};
-use domain_rebuild::branch_relays_from_branched_specs;
+use domain_rebuild::branch_relays_from_plans;
 use emitter_buffer::{
     DeliveredAcknowledgements, EmitterBatchBuffer, EmitterBufferedMessages, EmitterPublication,
     EmitterPublishBatch, PublishReport, RowToPack,
@@ -319,11 +329,13 @@ use emitter_encoding::EncodedRecordSink;
 use emitter_ordering_group::{CompiledOrderingGroup, OrderingGroupError, OrderingGroups};
 use emitter_publishing::{
     EmitterPublishBatchOwner, EmitterPublishControl, EmitterPublishFailure, EmitterPublishResult,
-    EmitterSink, EmitterSinkState, RejectedEmitterRecord, await_emitter_confirmation,
-    emitter_unavailable_reason, finish_rejected_records, sink_publish_failure,
+    EmitterSink, EmitterSinkState, RejectedEmitterRecord, RejectedRecordInput,
+    await_emitter_confirmation, emitter_unavailable_reason, finish_rejected_records,
+    sink_publish_failure,
 };
 use emitter_record_writes::{
-    PreparedPayload, PreparedPayloads, PreparedWrite, RowAnswers, RowRecords,
+    EncodedPayload, PreparedHttpRequest, PreparedPayload, PreparedPayloads, PreparedWrite,
+    RowAnswers, RowRecords,
 };
 use emitter_retry::{
     EmitterAcknowledgements, EmitterRetryDeferral, EmitterRetrySchedule, RETRY_ACK_ALIVE_EACH,
@@ -349,18 +361,27 @@ use entity_gate::{
     NodeQuiesceCounters, NodeQuiesceWorkGuard, OutputBufferQuiesceGauge,
     OwnershipHandoffFreezeWatch,
 };
+pub(crate) use entrypoint_routes::EntrypointBindingError;
+use entrypoint_routes::{
+    BoundEntryRoute, BoundIngestorRoutes, BoundReingestorInput, BoundReingestorRoute,
+    BoundRouteBranch, RelayRuntimeHandles,
+};
 pub(in crate::runtime) use events::RuntimeEvents;
 use filter_map::{
-    FilterMapBatchInputs, FilterMapOutcomeInputs, InferencerFilterMapTensors, VmUninitializedInput,
-    append_filter_map_nested_value, evaluate_filter_map_on_batch, evaluate_output_branch_program,
-    execute_filter_map_program_on_batch, expression_reads_sensitive_source,
-    plan_emitter_filter_map_batch, plan_filter_map_messages,
+    ExecutedFilterMap, FilterMapBatchInputs, FilterMapOutcomeInputs, InferencerFilterMapTensors,
+    VmUninitializedInput, append_filter_map_nested_value, evaluate_filter_map_on_batch,
+    evaluate_output_branch_program, execute_filter_map_program_on_batch,
+    expression_reads_sensitive_source, plan_emitter_filter_map_batch, plan_filter_map_messages,
 };
 use force_flush::{
     DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant,
     IngestorAckRootTrackers,
 };
 use generator::{GeneratorTaskRouteSpec, GeneratorTaskSpec};
+use http_request_fields::{
+    AcceptedHttpRequests, AdmittedHttpRequests, CompiledHttpRequestFields, HttpRequestFields,
+    HttpRequestInput, HttpRequestSchemas, SourceRecords,
+};
 use inferencer_output::flush_branch_inferencer_output;
 pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
@@ -382,7 +403,6 @@ use ingestor_quiesce::{
     DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL, IngestorReadiness, RuntimeReconnectStatus,
 };
 use ingestor_start::IngestorRuntime;
-use ingestor_start_plan::*;
 use kafka_offset_state::{
     KafkaOffsetSnapshotInstaller, KafkaOffsetStateAssignment, KafkaOffsetStateOriginator,
     KafkaOffsetStatePersistence, KafkaOffsetStateRead, ReplicatedKafkaOffsetState,
@@ -404,8 +424,8 @@ use materialized_state::{
 use message_error::{
     MessageErrorCompileSchemas, MessageErrorFailure, MessageErrorHandling,
     MessageErrorSourceContext, SingleRecordFilterMapOutcome, captured_partial_output,
-    invalid_output_fields, planned_structured_message_error, structured_message_error,
-    vm_partial_output_row_to_runtime_batch,
+    finalized_partial_output, invalid_output_fields, planned_structured_message_error,
+    structured_message_error, vm_partial_output_row_to_runtime_batch,
 };
 use message_error_delivery::{
     MessageErrorDelivery, MessageErrorRouteKey, MessageErrorRouteRuntime, MessageErrorRouteTarget,
@@ -416,7 +436,7 @@ use nervix_models::{DeduplicatorName, ReingestorName};
 pub(in crate::runtime) use node::{RuntimeInner, SharedActiveGraph};
 use planning::{
     ProcessorPlanBindingContext, bind_published_processor_plans,
-    materialize_ingestor_route_template,
+    materialize_ingestor_route_template, parse_branch_flush_policy, parse_input_collect_policy,
 };
 use processor_branch_task::{
     PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, ProcessorBranchHandoff, ProcessorNodeCommand,
@@ -450,7 +470,7 @@ use processors::{
     WindowBounds, WindowFlushContext,
 };
 pub(in crate::runtime) use reconnect_backoff::{AcknowledgementKeepalive, RuntimeReconnectBackoff};
-use reingestor::ReingestorInputSpec;
+use reingestor::{PlannedReingestorInput, ReingestorInputConsumer, ReingestorRuntimes};
 pub(in crate::runtime) use relay_batch::RelayDispatchResult;
 use relay_batch::build_stream_record_batch_preserving_acks;
 use relay_boundary::{
@@ -471,8 +491,8 @@ use remote_dispatch::{REMOTE_ACK_ALIVE_INTERVAL, RemoteDispatchRegistry, RemoteD
 use reorderer::{ReordererFlushContext, flush_branch_reorderer_output, reorder_key_part};
 use schedule_apply::ScheduleApplication;
 use scheduled_node::{
-    EmitterTaskBuildDeps, EmitterTaskDeps, ExecutionBuildDeps, ScheduledNodePlacement,
-    ScheduledNodeTask,
+    EmitterTaskBuildDeps, EmitterTaskDeps, ExecutionBuildDeps, PlacedNodeState,
+    ScheduledDomainPlans, ScheduledNodePlacement, ScheduledNodeTask,
 };
 pub(in crate::runtime) use shared_clients::{SharedClientError, SharedClientLease};
 use snapshot_staging::{SnapshotStaging, SnapshotStagingLimits};
@@ -493,13 +513,14 @@ pub(in crate::runtime) use state_store::{
 pub(in crate::runtime) use test_fixtures::STUPID_CHANNEL_CAPACITY_REMOVE_ME;
 #[cfg(test)]
 use test_fixtures::{
-    OptionalTestField, TWO_ITEM_TEST_CHANNEL_CAPACITY, TestIngestHeaders, attach_loopback_cluster,
-    batch_value, branch_model, branched_by, concrete_branch_key, construction, domain,
-    execute_filter_map_for_test, expression, ingest_metadata_for_test,
-    install_test_domain_execution, install_unpaced_test_domain, junction_branch_template,
-    key_label, named, nonzero_capacity, paced_domain_state, processor_branched_by,
-    publish_state_identity, quiesce_test_batch, row_value, scheduled_model, string_branch_key,
-    test_branching, test_domain_clock, test_domain_clock_authority, test_ingestor_quiesce_control,
+    EntrypointTestDomain, OptionalTestField, TWO_ITEM_TEST_CHANNEL_CAPACITY, TestIngestHeaders,
+    attach_loopback_cluster, batch_value, bind_ingestor_route_for_test, branch_model, branched_by,
+    concrete_branch_key, construction, domain, execute_filter_map_for_test, expression,
+    ingest_metadata_for_test, install_test_domain_execution, install_unpaced_test_domain,
+    junction_branch_template, key_label, named, nonzero_capacity, paced_domain_state,
+    planned_entrypoints_for_test, processor_branched_by, publish_state_identity,
+    quiesce_test_batch, row_value, scheduled_model, string_branch_key, test_branching,
+    test_domain_clock, test_domain_clock_authority, test_ingestor_quiesce_control,
     test_named_branching, test_optional_schema, test_relay_boundary_services, test_schema,
     u32_branch_key, unbranched_subscription_definition, unpaced_domain_state,
     validate_wasm_test_output_groups, validate_wasm_test_outputs, vm_input_from_test_rows,
@@ -509,22 +530,23 @@ use test_fixtures::{
     with_inherit_all,
 };
 pub(in crate::runtime) use vm_compile::{
-    CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, KeyProjectionKind,
-    MaterializedFieldInterest, MaterializedLookupKeyMode, compile_emitter_filter_map_program,
-    compile_key_projection_program,
+    CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, EmitterRoute,
+    KeyProjectionKind, MaterializedFieldInterest, MaterializedLookupKeyMode,
+    compile_emitter_filter_map_program, compile_key_projection_program,
 };
 use vm_compile::{
-    CompiledMessageErrorSites, GeneratorSetProgramSchemas, OutputNamespaceInput,
-    RuntimeCompileTarget, RuntimeFilterScope, RuntimeVmSchema, RuntimeVmSchemaPair,
-    compile_emitter_filter_map_part, compile_expression_filter_program,
+    CompiledMessageErrorSite, CompiledMessageErrorSites, GeneratorSetProgramSchemas,
+    OutputNamespaceInput, RouteProgram, RuntimeCompileTarget, RuntimeFilterScope, RuntimeVmSchema,
+    RuntimeVmSchemaPair, bind_ingestor_filter_map_program, bind_output_branch_program,
+    bind_processor_output_filter_map_program, bind_scoped_filter_program,
+    collect_expression_field_paths, compile_emitter_filter_map_part,
     compile_finalized_output_filter_program, compile_generator_set_program,
-    compile_ingestor_filter_map_program, compile_message_error_set_program,
-    compile_output_branch_program, compile_processor_output_filter_map_program,
+    compile_message_error_set_program, compile_processor_output_filter_map_program,
     compile_reorderer_program, compile_scoped_filter_program,
     compile_wasm_output_filter_map_program, compiled_message_error_sites,
     evaluate_constant_expression_vm, referenced_materialized_stream_bindings,
-    relay_branch_schema_for_routing, relay_schema_for_routing, relay_schema_for_runtime,
-    runtime_udf_compile_options, runtime_udf_signatures,
+    relay_schema_for_routing, relay_schema_for_runtime, runtime_udf_compile_options,
+    runtime_udf_signatures,
 };
 use vm_input::{
     SharedBatchColumns, VmInputProjectionSources, compute_lookup_hash_map_columns,
@@ -590,7 +612,7 @@ mod window_state;
 
 #[doc(hidden)]
 pub use branch_key::BranchKey;
-pub(crate) use domain_clock::DomainExecutionSnapshot;
+pub(crate) use domain_clock::{DomainClockObserver, DomainExecutionSnapshot};
 pub(crate) use domain_execution::LookupRuntime;
 /// Opaque runtime-state handle types exposed only so compile-fail tests can prove that forbidden
 /// operations are absent from each capability.

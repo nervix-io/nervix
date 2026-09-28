@@ -7,6 +7,7 @@
 //! - **Must not know.** NSPL parsing, source-client lifecycle or persisted control state.
 
 use nervix_connector::{IngestMetadataRow, SourceMetadataScope};
+use nervix_models::IngestSourceKind;
 
 use super::*;
 
@@ -64,6 +65,28 @@ pub(in crate::runtime) enum IngestMetadataKind {
     Kafka,
     Syslog,
     Headers,
+}
+
+impl From<IngestSourceKind> for IngestMetadataKind {
+    /// Kafka and Syslog messages expose their integration metadata; every other source exposes
+    /// transport headers only.
+    fn from(transport: IngestSourceKind) -> Self {
+        match transport {
+            IngestSourceKind::Kafka => Self::Kafka,
+            IngestSourceKind::Syslog => Self::Syslog,
+            IngestSourceKind::Http
+            | IngestSourceKind::Pulsar
+            | IngestSourceKind::Mqtt
+            | IngestSourceKind::Nats
+            | IngestSourceKind::RabbitMq
+            | IngestSourceKind::RedisPubSub
+            | IngestSourceKind::Prometheus
+            | IngestSourceKind::ZeroMq
+            | IngestSourceKind::Sqs
+            | IngestSourceKind::Endpoint
+            | IngestSourceKind::Websockets => Self::Headers,
+        }
+    }
 }
 
 impl IngestMetadataKind {
@@ -537,6 +560,32 @@ mod tests {
         },
     };
 
+    #[test]
+    fn a_source_transport_decides_the_metadata_its_messages_expose() {
+        let expected = [
+            (IngestSourceKind::Kafka, IngestMetadataKind::Kafka),
+            (IngestSourceKind::Syslog, IngestMetadataKind::Syslog),
+            (IngestSourceKind::Http, IngestMetadataKind::Headers),
+            (IngestSourceKind::Pulsar, IngestMetadataKind::Headers),
+            (IngestSourceKind::Mqtt, IngestMetadataKind::Headers),
+            (IngestSourceKind::Nats, IngestMetadataKind::Headers),
+            (IngestSourceKind::RabbitMq, IngestMetadataKind::Headers),
+            (IngestSourceKind::RedisPubSub, IngestMetadataKind::Headers),
+            (IngestSourceKind::Prometheus, IngestMetadataKind::Headers),
+            (IngestSourceKind::ZeroMq, IngestMetadataKind::Headers),
+            (IngestSourceKind::Sqs, IngestMetadataKind::Headers),
+            (IngestSourceKind::Endpoint, IngestMetadataKind::Headers),
+            (IngestSourceKind::Websockets, IngestMetadataKind::Headers),
+        ];
+        for (transport, metadata) in expected {
+            assert_eq!(
+                IngestMetadataKind::from(transport),
+                metadata,
+                "{transport:?}"
+            );
+        }
+    }
+
     /// A JSON codec over a one-field `value` schema, for tests that decode payloads into a group.
     fn metering_value_codec() -> Arc<CompiledCodec> {
         let schema = Arc::new(compile_schema(&CreateSchema {
@@ -719,9 +768,9 @@ mod tests {
             ("amount", ParseAsType::I64),
             ("raw", ParseAsType::String),
         ]);
-        let program = compile_ingestor_filter_map_program(
+        let program = bind_ingestor_route_for_test(
             &domain("default"),
-            named::<ModelName>("logic_ingestor"),
+            &named::<ModelName>("logic_ingestor"),
             IngestMetadataKind::Kafka,
             true,
             &construction(
@@ -770,8 +819,7 @@ mod tests {
                 udfs: None,
             },
         )
-        .expect("filter-map must compile")
-        .expect("program must exist");
+        .expect("filter-map must compile");
 
         let record = test_runtime_row([
             (
@@ -964,9 +1012,9 @@ mod tests {
             },
             quiesce: nervix_models::IngestQuiesceMode::Suspend,
         };
-        let program = compile_ingestor_filter_map_program(
+        let program = bind_ingestor_route_for_test(
             &domain("default"),
-            named::<ModelName>("header_ingestor"),
+            &named::<ModelName>("header_ingestor"),
             IngestMetadataKind::Kafka,
             source.reads_headers(),
             &construction(
@@ -987,8 +1035,7 @@ mod tests {
                 udfs: None,
             },
         )
-        .expect("header filter-map must compile")
-        .expect("program must exist");
+        .expect("header filter-map must compile");
         let record = test_runtime_row([
             (
                 "tenant".to_string(),
@@ -1105,7 +1152,7 @@ mod tests {
             Some(RuntimeValue::I64(1))
         );
 
-        let top_filter = compile_expression_filter_program(
+        let top_filter = compile_scoped_filter_program(
             RuntimeCompileTarget {
                 domain: &domain("default"),
                 identifier: &named("header_ingestor"),
@@ -1118,13 +1165,17 @@ mod tests {
                 schema: input_schema.arrow_schema(),
                 sensitivity: VmSchemaSensitivity::default(),
             },
-            true,
             MessageErrorOperation::FilterWhere,
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
                 current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
+            },
+            RuntimeFilterScope::Source {
+                namespace: "input",
+                allow_header_reads: true,
+                allow_metadata: true,
             },
         )
         .expect("top FILTER WHERE must compile")

@@ -11,9 +11,9 @@
 //!   transfers, events and rows the schema describes, the text every client displays a row as,
 //!   the session limits, and how frames travel over gRPC and WebSocket messages.
 //! - **Depends on.** `flatbuffers`, the vocabulary for names, timestamps, schema fields, the
-//!   transaction impact report, the resource description and the status, inspection envelope and
-//!   preview identity a session exchanges, `serde_json` to write a row's display text, and tonic's codec traits for the gRPC
-//!   transport.
+//!   transaction impact report, the resource description, the observed domain clock and the
+//!   status, inspection envelope and preview identity a session exchanges, `serde_json` to write a
+//!   row's display text, and tonic's codec traits for the gRPC transport.
 //! - **Must not know.** The server's registry, runtime or consensus, the parser, Arrow, or any
 //!   client's dispatch, reconnection or subscription state.
 
@@ -26,6 +26,7 @@ mod codec;
 mod command;
 mod common;
 mod domain;
+mod domain_clock;
 mod event;
 mod frame;
 #[cfg(feature = "grpc")]
@@ -61,6 +62,11 @@ pub use domain::{
     ClusterObserved, DomainEntity, DomainInfo, DomainList, DomainSelection, DomainSnapshotObserved,
     DomainsObserved,
 };
+pub use domain_clock::{
+    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachmentEndReason,
+    DomainClockAttachmentEnded, DomainClockDetachDisposition, DomainClockDetachOutcome,
+    DomainClockObserved,
+};
 pub use event::{
     Leadership, LeadershipObserved, NoticeLevel, ServerNotice, SessionEndReason, SessionEnding,
 };
@@ -76,9 +82,9 @@ pub use reply::{
     UnsubscribeOutcome,
 };
 pub use request::{
-    AttachTransactionRequest, CancelRequest, ClientMessage, ClientRequest, CommandRequest,
-    InspectTransactionRequest, SelectDomainRequest, SubscribeRequest, SuggestRequest,
-    UnsubscribeRequest,
+    AttachDomainClockRequest, AttachTransactionRequest, CancelRequest, ClientMessage,
+    ClientRequest, CommandRequest, DetachDomainClockRequest, InspectTransactionRequest,
+    SelectDomainRequest, SubscribeRequest, SuggestRequest, UnsubscribeRequest,
 };
 pub use row::{
     CellView, CellWriter, CellsView, EmptyBranchKey, RowBatchView, RowBranch, RowConformanceError,

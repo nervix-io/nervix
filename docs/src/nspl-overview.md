@@ -778,6 +778,7 @@ Show commands:
 
 ```nspl,ignore
 SHOW CREATE <kind> <name>;
+SHOW CREATE BRANCH by_tenant;
 SHOW PLACEMENTS;
 SHOW RELAY <name> MATERIALIZED STATE;
 SHOW CLUSTER STATUS;

@@ -190,8 +190,46 @@ emitters publish one request per eligible source record, so they do not accept t
 `BATCH` clause. `SHOW CREATE EMITTER` preserves both request expressions and the explicit body
 selection.
 
-HTTP emitter configuration can currently be created, altered and inspected. Outbound request
-delivery is not yet available.
+#### HTTP requests
+
+An HTTP emitter sends one request for each eligible record. For each batch it admits, it resolves
+its materialized dependencies once and uses one execution snapshot, and every expression below
+reads that snapshot. Each record then passes, in order: its source `WHERE`; construction and
+finalization of its codec record; route `WHERE`; `METHOD`; `PATH`; and each `write_header`
+invocation as it is written. A record that route `WHERE` filters evaluates no request field and
+sends nothing, even when one of its request fields would fail.
+
+The first request field that fails rejects its record through `ON MESSAGE ERROR` before any part of
+its request is sent. A failed expression keeps its `evaluation` code; a value that is not a valid
+request field has the code `validation`. A method or path failure has the operation `publish` and
+names the request field, `method` or `path`, beside the fields its expression reads. A header write
+failure has the operation `invoke` and the zero-based position of its invocation. A record whose
+body the codec cannot encode when a flush releases it is rejected the same way with the operation
+`encode`. The message never quotes a method, target or header value. The error handler of every
+such rejection, and of any later rejection of an admitted request, reads the original input and the
+materialized state its batch was admitted with; with a codec it also reads the attempted record as
+`partial_output`.
+
+The method keeps its spelling. The request goes to exactly the normalized target: encoded
+separators such as `%2F`, repeated query parameters, a literal `+`, and the empty query of a
+trailing `?` stay as they are. Header names compare without ASCII case and a later write replaces an
+earlier value; an empty string is sent as an empty value. An invalid or reserved write rejects its
+record even when a later write would replace it, and the 128-header and 32 KiB bounds apply after
+every replacement. The body is exactly the bytes the codec produced, with no wrapper, array,
+newline, form encoding or compression added; Nervix adds no `Content-Type`, and a declared
+`Content-Encoding` does not transform the bytes. `WITHOUT BODY` sends zero content bytes.
+
+A prepared request, with its method, target, headers and body, is kept until the endpoint answers
+for it, so every retry resends it byte for byte: neither the request expressions nor the codec run
+again, including volatile calls such as `uuid_v4()`. Retained bodies occupy node memory, which
+memory pressure accounts for, until their requests complete.
+
+The emitter sends the requests of the records a flush releases one at a time and in order, and
+waits for each response's headers before it sends the next. The client's `timeout_ms` bounds each
+attempt. Complete `2xx` response headers deliver the record, and the response body is never read.
+No redirect is followed. Any other response, and any request that fails before its response
+headers arrive, fails the attempt: the emitter retries that request and every later one on its
+declared retry policy, and keeps their upstream acknowledgements alive until they complete.
 
 `ALTER EMITTER ... SET TO HTTP` restates the complete method, path, mode and body selection.
 `SET CLIENT` changes the referenced client, `SET MODE` changes the retry policy, and `SET ENCODE
@@ -370,6 +408,7 @@ counting what it writes around the payload:
 | Kafka | The producer's `message.max.bytes` client setting | The record key, headers and record overhead |
 | MQTT | The Maximum Packet Size the broker declared in its latest `CONNACK`, and the largest packet the protocol can express | The fixed header, topic, packet identifier and property length |
 | NATS | The `max_payload` the server announced | The message headers |
+| Pulsar | The `maxMessageSize` the broker announced when the producer's connection opened | The message metadata: the properties, the partition key and the producer's own fields |
 | SQS | 256 KiB | Message attribute names, types and values, and the FIFO message group |
 
 A batch message that does not fit is never written. Every member follows `ON MESSAGE ERROR` with
@@ -378,13 +417,21 @@ the limit, such as `mqtt rejected record: MQTT PUBLISH packet of 1200090 bytes e
 maximum packet size of 1048576 bytes`. The messages around it are still written. Declare a
 `MAX SIZE` that leaves room for the metadata to keep batches from reaching the limit.
 
-The remaining limits are not visible to the client. Pulsar's `maxMessageSize` and RabbitMQ's
-`max_message_size` are broker settings: a Pulsar broker refuses a larger message and RabbitMQ
-closes the channel it arrived on, and Nervix retries either as an infrastructure failure, so
-declare a `MAX SIZE` below them with room for the properties or headers. Redis rejects a value above its
-`proto-max-bulk-len` itself, and that rejection follows `ON MESSAGE ERROR` like the ones above.
-ZeroMQ fixes no limit; a receiving socket configured with a maximum message size drops a larger
-message after the sending socket has accepted it.
+A Pulsar broker announces its `maxMessageSize` on every connection, so a producer that reconnects
+to another broker checks against the new one's. A Pulsar topic can also set a smaller
+`maxMessageSize` policy of its own. Only the broker applies it, measuring the metadata and payload
+with ten bytes of framing, so such a message is written and refused afterwards. In `MODE ACK` the
+refusal rejects every member the same way, with the broker's reason, such as
+`pulsar rejected record: the Pulsar broker does not allow the message: Exceed maximum message
+size`. In `MODE NO_ACK` the message was already delivered when the producer accepted it, so the
+refusal is not observed.
+
+The remaining limits are not visible to the client. RabbitMQ's `max_message_size` is a broker
+setting: RabbitMQ closes the channel a larger message arrived on, and Nervix retries it as an
+infrastructure failure, so declare a `MAX SIZE` below it with room for the headers. Redis rejects a
+value above its `proto-max-bulk-len` itself, and that rejection follows `ON MESSAGE ERROR` like the
+ones above. ZeroMQ fixes no limit; a receiving socket configured with a maximum message size drops a
+larger message after the sending socket has accepted it.
 
 ## Altering emitters
 
@@ -602,6 +649,13 @@ TO PULSAR <client> TOPIC <topic>
 `ACK` waits for each broker receipt. `NO_ACK` acknowledges producer acceptance and does not expose
 later broker errors; its throughput advantage may be smaller than Kafka's because Pulsar already
 pipelines producer work.
+
+A record whose message is larger than the `maxMessageSize` the broker announced for the producer's
+connection, counting its metadata and properties, follows `ON MESSAGE ERROR` in either mode: the
+producer refuses it before writing it, because the broker would close the connection and fail
+every message in flight on it. With `ACK`, a message the broker receives and refuses with
+`NotAllowedError`, such as one above the topic's own `maxMessageSize` policy, follows
+`ON MESSAGE ERROR` too, while any other broker error is retried.
 
 Pulsar emitters use the same client config surface as Pulsar ingestors:
 

@@ -220,6 +220,31 @@ acknowledgements, and its unchanged cadence deadline; while a retry is scheduled
 for the retry instead of the cadence, and a forced flush or drain still releases the buffer. The
 maximum batch size releases a buffer that has reached it as soon as no retry is pending.
 
+## Following A Domain Clock
+
+A client session can follow the active domain's clock instead of inferring it from the domain list:
+
+```nspl
+ATTACH DOMAIN CLOCK;
+DETACH DOMAIN CLOCK;
+```
+
+The attach reply, and a frame on every later change, carry the `START` generation and the clock as
+the serving node has it installed: stopped, uninstalled, unpaced, or paced with its `PERIOD`,
+`SKEW`, logical origin, UTC anchor, and `TIME RATE`. A paced clock is the committed mapping this
+chapter describes, so a client projects the domain's logical time for its own UTC observation with
+the same arithmetic every node uses, including rounding down, and reconstructs the admission window
+from the origin, `PERIOD`, and `SKEW`. A driver of a paced simulation can therefore choose
+`TIMESTAMP AT` values the ingestor admits, such as the newest reached center, and compute how long
+to wait until a logical instant. The projection uses the client host's UTC, so the synchronization
+requirement above extends to such a client: its offset from the cluster's hosts, multiplied by
+`TIME RATE`, shifts every answer. Tick progress is not delivered to sessions.
+
+Both statements are session-local, are refused while a transaction is open, and follow each domain
+at most once. See [Domain Clock Attachment](sessions.md#domain-clock-attachment) for the delivery
+contract and [Rust Client Library](client-library.md#following-a-domain-clock) for the helper that
+performs this arithmetic.
+
 ## Execution-Time Snapshots
 
 Each accepted unit of domain work reads its domain clock once and uses that execution-time snapshot

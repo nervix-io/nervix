@@ -129,9 +129,9 @@ impl Runtime {
     /// offset state was placed on.
     fn kafka_offset_originator(
         &self,
-        placement: Option<&KafkaOffsetStatePlacement>,
+        ingestor: &IngestorSpec,
+        placement: &KafkaDomainOffsetPlacement,
     ) -> Option<KafkaOffsetStateOriginator> {
-        let placement = placement?;
         let dispatcher = self.inner.remote_dispatcher.load();
         let local_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id)?;
         if placement.primary_node.as_ref() != Some(local_node_id) {
@@ -140,8 +140,21 @@ impl Runtime {
         let state = self
             .inner
             .replicated_kafka_offset_states
-            .get(&placement.placement)?;
+            .get(&ingestor.kafka_offset_state_placement())?;
         ReplicatedKafkaOffsetState::current_originator(state.value())
+    }
+}
+
+impl IngestorSpec {
+    /// Where this ingestor's domain offsets live as node-owned state.
+    pub(in crate::runtime) fn kafka_offset_state_placement(&self) -> RuntimeStatePlacement {
+        RuntimeStatePlacement {
+            domain: self.domain.clone(),
+            state: RuntimeState::KafkaOffset,
+            kind: ModelKind::Ingestor,
+            identifier: ModelName::from(&self.name),
+            branch_key: None,
+        }
     }
 }
 
@@ -233,23 +246,20 @@ impl KafkaIngestorStartPlan {
         let KafkaIngestorStartPlan {
             client,
             topic,
-            offset_mode,
+            offsets,
             instances,
             mode,
-            offset_state_placement,
         } = self;
         let domain = &ingestor.domain;
         let acknowledgement =
             Runtime::parse_ingest_acknowledgement(domain, &ingestor.name, mode.acknowledgement())?;
-        let kafka_offset_state = runtime.kafka_offset_originator(offset_state_placement.as_ref());
         let resolved_client = runtime
             .resolve_client_config(domain, client.mount.as_ref(), &client.config)
             .map_err(|error| ingestor.start_failure(error.to_string()))?;
 
-        let rebalance_tx = if offset_mode == KafkaOffsetMode::Domain {
-            Some(watch::channel(0_u64).0)
-        } else {
-            None
+        let rebalance_tx = match &offsets {
+            KafkaOffsetPlan::Domain(_) => Some(watch::channel(0_u64).0),
+            KafkaOffsetPlan::ConsumerGroup(_) => None,
         };
         let mut companions: Vec<Box<dyn SourceCompanion>> = Vec::new();
         if let Some(rebalance_tx) = rebalance_tx.as_ref() {
@@ -273,13 +283,13 @@ impl KafkaIngestorStartPlan {
         }
 
         let enable_auto_commit = acknowledgement == SourceAckPolicy::None
-            && matches!(offset_mode, KafkaOffsetMode::ConsumerGroup(_));
-        let source_offset_mode = match offset_mode {
-            KafkaOffsetMode::ConsumerGroup(group) => KafkaSourceOffsetMode::ConsumerGroup {
+            && matches!(offsets, KafkaOffsetPlan::ConsumerGroup(_));
+        let source_offset_mode = match offsets {
+            KafkaOffsetPlan::ConsumerGroup(group) => KafkaSourceOffsetMode::ConsumerGroup {
                 group_id: group.as_str().to_string(),
             },
-            KafkaOffsetMode::Domain => {
-                let Some(state) = kafka_offset_state else {
+            KafkaOffsetPlan::Domain(placement) => {
+                let Some(state) = runtime.kafka_offset_originator(ingestor, &placement) else {
                     return Err(ingestor
                         .start_failure("Kafka DOMAIN offsets are not authoritative on this node"));
                 };

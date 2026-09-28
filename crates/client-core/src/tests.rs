@@ -376,6 +376,7 @@ fn reader_fixture(capacity: usize) -> ReaderFixture {
         notices: notices.clone(),
         leadership,
         domains,
+        clocks: crate::domain_clock::DomainClockAttachments::new(),
     };
     let generation = sinks.begin_generation();
     let reader = ExchangeReader::new(pending.clone(), sinks, generation);
@@ -901,6 +902,7 @@ async fn event_queue_counts_retained_bytes_as_well_as_records() {
         notices: notices.clone(),
         leadership,
         domains,
+        clocks: crate::domain_clock::DomainClockAttachments::new(),
     };
     let generation = sinks.begin_generation();
     notices.push(

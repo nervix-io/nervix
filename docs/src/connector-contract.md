@@ -11,7 +11,7 @@ the resulting Arrow batches inside the graph.
 | Layer | Responsibility |
 | --- | --- |
 | Vocabulary and registry | Define and validate source capabilities, schemas, delivery modes, header availability, branches, and references before activation. The registry names no connector crate. |
-| Decision and composition | Convert a validated Model into a typed source or sink start plan once. The server is the composition root and the only crate that names every integration. It resolves client resource mounts before opening a connector. |
+| Decision and composition | Convert a validated Model into a typed source or sink start plan once. The registry decides every ingestor's source plan together with its codec and lowered routes, validating the source name, kind, client and route identities as one decision. The server is the composition root and the only crate that names every integration. It resolves client resource mounts before opening a connector. |
 | `nervix-connector` | Define source and sink operations, typed boundary values, and opaque host services. It knows neither a driver nor graph execution state. |
 | `nervix-connector-*` | Own one integration's driver, connection and configuration interpretation, transport headers, protocol acknowledgements, and per-record results. A crate implements the source contract, the sink contract, or both. |
 | Host data plane | Own tasks, intake and Arrow decoding, branch routing, ACK trees, quiesce, buffering, retry and flush scheduling, metrics, events, and drain. It executes typed plans; it does not parse NSPL or read a Model during data-plane execution. |
@@ -29,11 +29,12 @@ in the server, but uses the same source lifecycle and host intake.
 ### DNS for HTTP and Iceberg
 
 The node loads and validates one `nervix-dns` resolver at startup. Composition passes its handle
-into the HTTP polling and Prometheus source plans and into the Sentry, OTEL HTTP, and Iceberg sink
-plans. The shared `HttpClientConfig` installs it on every Nervix-owned Reqwest 0.13 HTTP client.
-Iceberg REST uses a separate Reqwest 0.12 client with that same resolver. Iceberg object storage
-uses OpenDAL 0.57 with a configured Reqwest 0.13 client installed through `HttpClientLayer`; the
-layer also supplies HTTP calls made by OpenDAL's credential providers through its accessor info.
+into the HTTP polling and Prometheus source plans and into the HTTP request, Sentry, OTEL HTTP, and
+Iceberg sink plans. The shared `HttpClientConfig` installs it on every Nervix-owned Reqwest 0.13
+HTTP client. Iceberg REST uses a separate Reqwest 0.12 client with that same resolver. Iceberg
+object storage uses OpenDAL 0.57 with a configured Reqwest 0.13 client installed through
+`HttpClientLayer`; the layer also supplies HTTP calls made by OpenDAL's credential providers through
+its accessor info.
 The Reqwest 0.12 client receives an explicit AWS-LC rustls configuration with bundled trust
 roots, including in an isolated Iceberg connector build.
 The three Iceberg backends keep their S3, GCS, and Azure property mappings, URL-derived bucket or
@@ -102,6 +103,13 @@ sequenceDiagram
 
 ## Source boundary
 
+Each domain revision installs its ingestor plans with its schedule. Building a domain, swapping or
+relocating an ingestor, starting the ingestors a runtime revision leaves missing, and placing Kafka
+domain offsets all read those same plans; none of them reads the ingestor's Model. Starting an
+ingestor binds its codec, node filter, routes and branched entrypoints against the installed domain
+surfaces and parses its declared acknowledgement before any connector instance opens, so a start
+that fails leaves nothing running.
+
 A source plan combines connector-specific settings, validated capabilities, and the host's ACK
 policy. Capabilities state whether header reads are available, which typed metadata scope exists,
 whether quiesce is supported, the nonzero instance count, and the supported acknowledgement mode.
@@ -167,14 +175,17 @@ sequenceDiagram
 
 ## Sink boundary
 
-The host prepares one batch for either of two sink contracts. A **record sink** receives
+The host prepares one batch for one of three sink contracts. A **record sink** receives
 codec-encoded keys, payloads, headers, optional ordering groups, timestamps, and the identity the
 host assigned each record of the write. A **row sink** receives host-projected Arrow columns,
 target columns, selected rows, and bounded chunks; it encodes its external representation from
-those columns. The host evaluates `VALUES` once per batch and excludes rows with mapping errors
-before calling a row sink. It retains the ACKs of the source rows every record or mapped row
-carries, so no runtime ACK map enters the connector. Each publish is one call per batch, never a
-virtual call per row.
+those columns. An **HTTP request sink** receives prepared requests: each carries the identity the
+host assigned it, the validated method, the target normalized on the client's origin, the
+application headers after case-insensitive replacement, and the exact body bytes the codec
+produced or no body at all. The host evaluates `VALUES` once per batch and excludes rows with
+mapping errors before calling a row sink. It retains the ACKs of the source rows every record,
+mapped row or request carries, so no runtime ACK map enters the connector. Each publish is one call
+per batch, never a virtual call per row.
 
 An ordering group exists only where the sink plan declares one; today that is the SQS
 `FIFO GROUP`. The host compiles the declaration, evaluates it once per filtered source batch, and
@@ -222,10 +233,13 @@ Where it can learn that limit it measures the complete message and rejects a rec
 fit before writing it, with a reason naming the size and the limit, so the rejection follows the
 message error policy instead of failing the transport: the MQTT sink measures the `PUBLISH` packet
 against the Maximum Packet Size of the broker's latest `CONNACK` and the largest packet MQTT can
-express, the SQS sink counts attributes and the FIFO group against 256 KiB, and the Kafka producer
-and the NATS client check `message.max.bytes` and `max_payload` with the key and headers they
-write. A limit the connector cannot learn stays with the destination, and whatever the destination
-reports when a message exceeds it is classified like any other publish failure.
+express, the SQS sink counts attributes and the FIFO group against 256 KiB, and the Kafka producer,
+the NATS client and the Pulsar client check `message.max.bytes`, `max_payload` and the
+`maxMessageSize` of the connection's `CommandConnected` with the key, headers or message metadata
+they write. A limit the connector cannot learn stays with the destination, and whatever the
+destination reports when a message exceeds it is classified like any other publish failure: a
+Pulsar broker answers a message above a topic's own `maxMessageSize` policy with `NotAllowedError`,
+a definitive rejection of that message.
 
 Syslog sends a completed codec payload as one transport frame. Its UDP writer rejects a frame above
 65,507 bytes, octet-counted TCP and TLS reject a count needing more than ten digits, and
@@ -259,6 +273,22 @@ is halved; an oversized singleton is rejected locally. Every accepted request an
 positions. A receiver's `partial_success` still acknowledges the whole request with a warning,
 because OTLP does not identify the rejected members. A failed request leaves only its unanswered
 positions for the host to retry.
+
+An HTTP emitter's request fields are the host's, not the connector's. When the emitter admits a
+batch, the host evaluates one compiled program over each record's original input, its finalized
+codec record and the batch's materialized state, only for the rows route `WHERE` kept: `METHOD` and
+`PATH` are written into a write-only request namespace, and each `write_header` invocation is
+evaluated in written order. It validates each row's method, then its target on the client's
+origin, then each header write, rejects a row at the first field that fails, and buffers the rest
+with the fields they were admitted with, beside their Arrow rows, together with their original
+source records and the batch's materialized state, which the message error of a later rejection
+reads. When a flush releases a row, the
+host encodes its body and retains the request, as a prepared payload with that one member, in the
+same buffer that retains batch payloads. Every attempt hands the connector the retained requests
+unchanged, ahead of any request prepared after them, so a retry repeats the request the destination
+may already hold. The HTTP connector sends them one at a time, waits for each response's headers,
+and never follows a redirect; complete `2xx` headers deliver the request, and any other answer or a
+failed exchange ends the attempt with that request and every later one unresolved.
 
 For a sink that stages writes, the lifecycle exposes a domain or physical commit deadline,
 staged-message count, pending ACKs, and a commit operation. The host includes that deadline in
@@ -294,6 +324,13 @@ sequenceDiagram
   committed partition schedule. The leader observes partition topology and commits assignments;
   executing sources follow that schedule. Offset snapshots can lag a crash, so this mode remains
   at least once. [Kafka ingestion](./ingestors.md#kafka) defines the recovery details.
+- **Pulsar client.** The Pulsar source and sink build on Nervix's fork of `pulsar-rs`,
+  `nervix-io/pulsar-rs`, because the released crate discards `CommandConnected`. The fork keeps each
+  connection's announced `maxMessageSize`, refuses a message whose serialized metadata and payload
+  exceed it before writing it, as the Java client does, and resolves a send the broker answers with
+  `SendError` with that error's server code and reason. The broker itself only closes the
+  connection on a frame larger than the maximum plus 10 KiB of framing, which would fail every
+  other message in flight on it.
 - **Iceberg sink.** It stages Arrow data locally, prepares data files, and publishes a catalog
   update on its explicit commit cadence or maximum size. Staging does not complete an ACK;
   successful catalog commit does. The sink retains ACKs and its client while a failed commit is
@@ -340,7 +377,8 @@ drain boundary. This chapter does not redefine those output formats.
    public statement form. Keep external driver configuration raw only where pass-through is its
    intentional contract.
 2. Validate schema, reference, branch, header, quiesce, delivery, and external contract rules in
-   the registry. Convert the validated Model into one typed start-plan variant before execution.
+   the registry. Convert the validated Model into one typed start-plan variant before execution;
+   a source's variant belongs to the registry's ingestor planner.
 3. Add one crate under `crates/connectors/` with its ownership header, driver dependencies, and
    source or sink contract implementation. Add its composition mapping in the server; do not
    teach the contract or registry about the driver.

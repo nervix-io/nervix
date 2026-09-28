@@ -5,13 +5,14 @@
 //!   and pairing the connector it opens with the input the host prepares for its contract. It is
 //!   the only place that names every sink crate.
 //! - **Depends on.** The emitter start plan, the connector crates and their contract, the host's
-//!   values projection and record encoding, and the pooled client leases.
+//!   values projection, record encoding and request preparation, and the pooled client leases.
 //! - **Must not know.** When the emitter publishes, how it buffers or retries, or how a batch is
 //!   encoded or mapped.
 
 use error_stack::ResultExt as _;
-use nervix_connector::{RecordSink, RowSink, SinkStartResult};
+use nervix_connector::{HttpRequestSink, RecordSink, RowSink, SinkStartResult};
 use nervix_connector_clickhouse::{ClickHouseSink, ClickHouseSinkConfig};
+use nervix_connector_http::{HttpSink, HttpSinkConfig};
 use nervix_connector_iceberg::{IcebergCommitPolicy, IcebergSink, IcebergSinkConfig};
 use nervix_connector_kafka::{KafkaSink, KafkaSinkConfig};
 use nervix_connector_mongodb::{MongoDbSink, MongoDbSinkConfig};
@@ -31,7 +32,11 @@ use nervix_connector_syslog::{SyslogSink, SyslogSinkConfig};
 use nervix_connector_zeromq::{ZeroMqSink, ZeroMqSinkConfig};
 use nervix_models::EmitterBatchPolicy;
 
-use super::{pooled_sink_clients::PooledSinkClient, *};
+use super::{
+    emitter_http_requests::{HttpRequestBody, PreparedRequestSink},
+    pooled_sink_clients::PooledSinkClient,
+    *,
+};
 
 fn mapped_column_names(mappings: &[ClickHouseValueMapping]) -> Vec<String> {
     mappings
@@ -121,7 +126,8 @@ impl EmitterSinkContext {
 ///
 /// Each variant of an emitter's sink plan maps to its crate's constructor, and the connector that
 /// constructor opens is paired with what the host prepares its input with: a record sink with the
-/// codec its records are encoded by, a row sink with the projection that maps its columns.
+/// codec its records are encoded by, a row sink with the projection that maps its columns, and an
+/// HTTP sink with the body its requests carry.
 pub(super) struct EmitterSinkStarter;
 
 impl EmitterSinkStarter {
@@ -136,7 +142,8 @@ impl EmitterSinkStarter {
                 SyslogSink::check_client_config(&sink.client.config.entries)
                     .change_context(EmitterRuntimeError::InvalidSinkConfig)
             }
-            EmitterSinkPlan::Kafka(_)
+            EmitterSinkPlan::Http(_)
+            | EmitterSinkPlan::Kafka(_)
             | EmitterSinkPlan::Pulsar(_)
             | EmitterSinkPlan::RabbitMq(_)
             | EmitterSinkPlan::Redis(_)
@@ -164,6 +171,16 @@ impl EmitterSinkStarter {
         let label = plan.sink.label();
         let batch = plan.sink.batch();
         let sink = match &plan.sink {
+            EmitterSinkPlan::Http(sink) => Self::http_request(
+                codec,
+                HttpSink::new(
+                    HttpSinkConfig {
+                        config: sink.client.config.entries.clone(),
+                        dns: context.dns()?,
+                    },
+                    context.sink_host(),
+                ),
+            )?,
             EmitterSinkPlan::Kafka(sink) => Self::record(
                 label,
                 codec,
@@ -512,6 +529,25 @@ impl EmitterSinkStarter {
             codec: codec.clone(),
             batch,
         });
+        Ok(sink)
+    }
+
+    /// Pairs an HTTP sink with the body the host prepares each of its requests with: the bytes of
+    /// the codec an emitter encodes its records with, or no content for an emitter declared
+    /// `WITHOUT BODY`, which names no codec.
+    fn http_request<T>(
+        codec: Option<&Arc<CompiledCodec>>,
+        started: SinkStartResult<T>,
+    ) -> EmitterRuntimeResult<Box<dyn EmitterSink>>
+    where
+        T: HttpRequestSink + 'static,
+    {
+        let sink = started.change_context(EmitterRuntimeError::InitializeSink)?;
+        let body = match codec {
+            Some(codec) => HttpRequestBody::Encoded(codec.clone()),
+            None => HttpRequestBody::Absent,
+        };
+        let sink: Box<dyn EmitterSink> = Box::new(PreparedRequestSink::new(Box::new(sink), body));
         Ok(sink)
     }
 
