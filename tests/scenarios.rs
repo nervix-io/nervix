@@ -105,9 +105,10 @@ use crate::common::{
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
-        KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR,
-        MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR,
-        RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
+        KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
+        MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR,
+        POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, RUSTFS_ADDR,
+        TestDependencies,
     },
     http_receiver::{
         CapturedRequest, ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET,
@@ -2603,6 +2604,34 @@ fn then_client_wire_baseline_artifact_exists(world: &mut ScenarioWorld) {
     assert!(
         Path::new(artifact).is_file(),
         "client-wire baseline artifact was not written to {artifact}"
+    );
+}
+
+#[when("the client-wire command transport cost is captured")]
+async fn when_client_wire_command_transport_cost_is_captured(world: &mut ScenarioWorld) {
+    let leader = current_leader_node(world).await;
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&leader)
+        .expect("failed to resolve leader gRPC URI");
+    let artifact = crate::common::client_wire_tls_cost::capture(&grpc_uri, &world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("client-wire transport cost failed: {error:#}"));
+    world.placeholders.insert(
+        "client_wire_tls_cost_artifact".to_string(),
+        artifact.display().to_string(),
+    );
+}
+
+#[then("the client-wire command transport artifact exists")]
+fn then_client_wire_command_transport_artifact_exists(world: &mut ScenarioWorld) {
+    let artifact = world
+        .placeholders
+        .get("client_wire_tls_cost_artifact")
+        .verified("the preceding step captured the transport cost artifact");
+    assert!(
+        Path::new(artifact).is_file(),
+        "client-wire transport artifact was not written to {artifact}"
     );
 }
 
@@ -6109,6 +6138,81 @@ async fn given_otel_http_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
 async fn given_rabbitmq_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
     publish_fixture_name(world, RABBITMQ_ADDR, &name, "rabbitmq_dns_addr");
     publish_fixture_name(world, RABBITMQ_TLS_ADDR, &name, "rabbitmq_tls_dns_addr");
+}
+
+#[given("the WebSocket mock endpoints are published under fixture DNS")]
+async fn given_websocket_mock_has_fixture_dns(world: &mut ScenarioWorld) {
+    publish_fixture_name(
+        world,
+        MOCK_WS_ADDR,
+        "websocket.nervix.test",
+        "mock_ws_dns_addr",
+    );
+    publish_fixture_name(
+        world,
+        MOCK_WSS_ADDR,
+        "websocket.nervix.test",
+        "mock_wss_dns_addr",
+    );
+}
+
+#[given(
+    expr = "the WebSocket endpoint {string} is forwarded as {string} from fixture addresses \
+            {string}"
+)]
+async fn given_websocket_endpoint_is_forwarded(
+    world: &mut ScenarioWorld,
+    endpoint: String,
+    name: String,
+    addresses: String,
+) {
+    let endpoint = expand_placeholders(world, &endpoint);
+    let mut url = url::Url::parse(&endpoint).expect("the WebSocket endpoint is a URL");
+    let host = url
+        .host_str()
+        .expect("the WebSocket endpoint has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("the WebSocket mock listens on a literal address");
+    let port = url
+        .port()
+        .expect("the WebSocket mock endpoint names its port");
+    let addresses = fixture_addresses(&addresses);
+    let forwarders = TcpForwarders::start(&addresses, std::net::SocketAddr::new(host, port))
+        .await
+        .expect("the WebSocket forwarders could not listen");
+    url.set_host(Some(&name))
+        .expect("the fixture name is a valid WebSocket URL host");
+    url.set_port(Some(forwarders.port()))
+        .expect("the WebSocket URL can carry the forwarder port");
+    world.placeholders.insert(
+        "websocket_forwarded_addr".to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
+    world.tcp_forwarders = Some(forwarders);
+}
+
+#[given(
+    expr = "the Syslog endpoint {string} is forwarded as {string} from fixture addresses {string}"
+)]
+async fn given_syslog_endpoint_is_forwarded(
+    world: &mut ScenarioWorld,
+    endpoint: String,
+    name: String,
+    addresses: String,
+) {
+    let endpoint = expand_placeholders(world, &endpoint);
+    let target = endpoint
+        .parse::<std::net::SocketAddr>()
+        .expect("the Syslog listener has a literal socket address");
+    let addresses = fixture_addresses(&addresses);
+    let forwarders = TcpForwarders::start(&addresses, target)
+        .await
+        .expect("the Syslog forwarders could not listen");
+    world.placeholders.insert(
+        "syslog_forwarded_addr".to_string(),
+        format!("{name}:{}", forwarders.port()),
+    );
+    world.tcp_forwarders = Some(forwarders);
 }
 
 /// Stand TCP forwarders to the plain RabbitMQ listener at `addresses`, and record in placeholder
@@ -18027,6 +18131,28 @@ async fn given_syslog_udp_emission_endpoint_is_observed(world: &mut ScenarioWorl
     );
 }
 
+#[given("the observed Syslog UDP endpoint is published under fixture DNS")]
+async fn given_syslog_udp_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
+    let endpoint = url::Url::parse(&format!("syslog://{}", world.syslog_emit_addr))
+        .expect("the observed Syslog endpoint has a valid authority");
+    let address = endpoint
+        .host_str()
+        .expect("the observed Syslog endpoint has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("the observed Syslog endpoint listens on a literal address");
+    world
+        .cluster()
+        .publish_dns_service("syslog.nervix.test", vec![address])
+        .expect("the cluster has a DNS fixture");
+    let port = endpoint
+        .port()
+        .expect("the observed Syslog endpoint has a port");
+    world.placeholders.insert(
+        "syslog_dns_addr".to_string(),
+        format!("syslog.nervix.test:{port}"),
+    );
+}
+
 #[given(expr = "ClickHouse table {string} exists")]
 async fn given_clickhouse_table_exists(world: &mut ScenarioWorld, table: String) {
     let table = expand_placeholders(world, &table);
@@ -24017,7 +24143,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     if cli.tags_filter.is_none() {
         cli.tags_filter = Some(
             "(not @client_wire_expected_failure) and (not @client_wire_baseline) and (not \
-             @client_conformance_toolchain)"
+             @client_wire_tls_cost) and (not @client_conformance_toolchain)"
                 .parse()
                 .assured("the built-in opt-in scenario tag expression is valid"),
         );

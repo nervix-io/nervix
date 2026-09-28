@@ -711,6 +711,13 @@ ON QUIESCE BUFFER MAX SIZE <bytes> ON OVERFLOW DROP OLDEST|DROP NEWEST
 ```
 
 This opens an outbound WebSocket connection and decodes text or binary frames.
+For `ws` and `wss`, each initial connection and resume resolves the URL host through the node's
+asynchronous resolver. It tries the returned addresses in order within one 30-second budget for
+DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host
+header, TLS server name, path and query; custom TLS roots and client identity remain in effect.
+An expired DNS answer is refreshed on a new attempt, while a healthy connection stays open.
+Resolution and connection failures are transient source failures handled by the host's existing
+retry lifecycle. Cancelling or stopping the source drops a pending connection attempt.
 Both quiesce modes continue polling the connection so keepalives and reconnect behavior remain live.
 A stop-reading mode is unavailable because it would starve protocol maintenance and become a
 disconnect.

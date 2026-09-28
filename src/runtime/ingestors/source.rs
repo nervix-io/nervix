@@ -1252,7 +1252,18 @@ pub(super) async fn run_source_instance_with_retry<C>(
 
         if !ready || source.needs_resume() {
             flush_for_lifecycle(&mut host).await;
-            match source.resume().await {
+            let resumed = tokio::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                    continue;
+                }
+                _ = host.wait_for_quiesce_change() => continue,
+                resumed = source.resume() => resumed,
+            };
+            match resumed {
                 Ok(SourceResume::Ready) => {
                     ready = true;
                     if pending_rejection.is_none() {
@@ -1540,6 +1551,7 @@ mod tests {
         IngestMessageHeaders, IngestMetadataRow, SourceConnector, SourceError, SourceResult,
     };
     use parking_lot::Mutex;
+    use tokio::sync::Notify;
 
     use super::*;
 
@@ -1605,6 +1617,8 @@ mod tests {
         replay_rejected: bool,
         /// Replays each resume leaves pending, as a quiesce released during it would.
         replays_pending_after_resume: usize,
+        resume_started: Option<Arc<Notify>>,
+        block_resume: bool,
         observations: Arc<Mutex<SourceLoopObservations>>,
     }
 
@@ -1617,14 +1631,21 @@ mod tests {
         }
 
         async fn resume(&mut self) -> SourceResult<SourceResume> {
-            let mut observations = self.observations.lock();
-            observations.resumes += 1;
-            observations.sequence.push("resume");
-            observations.pending_replays = observations
-                .pending_replays
-                .checked_add(self.replays_pending_after_resume)
-                .verified("the test leaves at most a few replays pending");
-            drop(observations);
+            {
+                let mut observations = self.observations.lock();
+                observations.resumes += 1;
+                observations.sequence.push("resume");
+                observations.pending_replays = observations
+                    .pending_replays
+                    .checked_add(self.replays_pending_after_resume)
+                    .verified("the test leaves at most a few replays pending");
+            }
+            if let Some(started) = self.resume_started.as_ref() {
+                started.notify_one();
+            }
+            if self.block_resume {
+                future::pending::<()>().await;
+            }
             match self.resume_results.pop_front() {
                 Some(result) => result,
                 None => Ok(SourceResume::Ready),
@@ -1723,6 +1744,7 @@ mod tests {
         observations: Arc<Mutex<SourceLoopObservations>>,
         suspend_intake: bool,
         wake_quiesce: bool,
+        quiesce_change: Option<Arc<Notify>>,
         wake_suspension: bool,
         active: bool,
     }
@@ -1733,6 +1755,7 @@ mod tests {
                 observations,
                 suspend_intake: false,
                 wake_quiesce: false,
+                quiesce_change: None,
                 wake_suspension: false,
                 active: true,
             }
@@ -1784,6 +1807,11 @@ mod tests {
         }
 
         async fn wait_for_quiesce_change(&mut self) {
+            if let Some(change) = self.quiesce_change.as_ref() {
+                change.notified().await;
+                self.observations.lock().quiesce_waits += 1;
+                return;
+            }
             if self.wake_quiesce {
                 self.observations.lock().quiesce_waits += 1;
                 return;
@@ -1866,6 +1894,8 @@ mod tests {
             reject_failures_left: 0,
             replay_rejected: false,
             replays_pending_after_resume: 0,
+            resume_started: None,
+            block_resume: false,
             observations: observations.clone(),
         };
         let host = SourceHost::new(FakeHost::running(observations.clone()));
@@ -1894,6 +1924,8 @@ mod tests {
             reject_failures_left: 0,
             replay_rejected: false,
             replays_pending_after_resume: 0,
+            resume_started: None,
+            block_resume: false,
             observations,
         }
     }
@@ -1908,6 +1940,8 @@ mod tests {
             reject_failures_left: 0,
             replay_rejected: false,
             replays_pending_after_resume: 2,
+            resume_started: None,
+            block_resume: false,
             observations: observations.clone(),
         };
         let host = SourceHost::new(FakeHost::running(observations.clone()));
@@ -1936,6 +1970,66 @@ mod tests {
             ]
         );
         assert_eq!(observations.pending_replays, 0);
+    }
+
+    #[tokio::test]
+    async fn source_shutdown_cancels_pending_resume_and_closes_the_source() {
+        let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+        let started = Arc::new(Notify::new());
+        let mut source = empty_source(observations.clone());
+        source.resume_started = Some(started.clone());
+        source.block_resume = true;
+        let host = SourceHost::new(FakeHost::running(observations.clone()));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let running = tokio::spawn(run_source_instance_with_retry(
+            source,
+            host,
+            SourceAckPolicy::None,
+            SourceAckPolicy::None.retry(),
+            shutdown_rx,
+        ));
+        started.notified().await;
+        shutdown_tx.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(10), running)
+            .await
+            .assured("shutdown cancels the pending resume through the source-loop select")
+            .assured("the source loop exits without a task panic");
+        assert_eq!(observations.lock().closes, 1);
+    }
+
+    #[tokio::test]
+    async fn source_quiesce_change_cancels_pending_resume_before_retrying() {
+        let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+        let started = Arc::new(Notify::new());
+        let changed = Arc::new(Notify::new());
+        let mut source = empty_source(observations.clone());
+        source.resume_started = Some(started.clone());
+        source.block_resume = true;
+        let mut fake_host = FakeHost::running(observations.clone());
+        fake_host.quiesce_change = Some(changed.clone());
+        let host = SourceHost::new(fake_host);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let running = tokio::spawn(run_source_instance_with_retry(
+            source,
+            host,
+            SourceAckPolicy::None,
+            SourceAckPolicy::None.retry(),
+            shutdown_rx,
+        ));
+        started.notified().await;
+        changed.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), started.notified())
+            .await
+            .assured("the quiesce notification interrupts resume so the loop retries it");
+        shutdown_tx.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(10), running)
+            .await
+            .assured("shutdown cancels the retried resume through the source-loop select")
+            .assured("the source loop exits without a task panic");
+        let observations = observations.lock();
+        assert_eq!(observations.resumes, 2);
+        assert_eq!(observations.quiesce_waits, 1);
+        assert_eq!(observations.closes, 1);
     }
 
     #[tokio::test]
