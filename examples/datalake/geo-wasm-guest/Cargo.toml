@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 arrow-array = "58"
+error-stack = "0.5"
 geo = { version = "0.33.1", default-features = false }
 geohash = "0.13.2"
 maxminddb = "0.28"

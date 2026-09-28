@@ -1,9 +1,11 @@
-//! Reqwest connection checks against the configured node resolver and a local DNS authority.
+//! HTTP client checks against the configured node resolver and a local DNS authority.
 //!
 //! Outside the layer order: a test harness.
 //!
-//! - **Owns.** Observable DNS, connection, TTL, and timeout evidence for both Reqwest adapters.
-//! - **Depends on.** `nervix-dns`, Reqwest, Tokio, and the in-process DNS authority.
+//! - **Owns.** Observable DNS, connection, TTL, and timeout evidence for both Reqwest hooks, the
+//!   Hyper connector hook, and the Smithy hook, and the typed lookup failure each hands its library.
+//! - **Depends on.** `nervix-dns`, Reqwest, `hyper-util`, the Smithy DNS trait, Tokio, and the
+//!   in-process DNS authority.
 //! - **Must not know.** Connector plans, graph execution, or control-plane state.
 
 use std::{
@@ -11,8 +13,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+use aws_smithy_runtime_api::client::dns::ResolveDns as _;
+use bytes::Bytes;
+use http_body_util::Empty;
+use hyper_util::{
+    client::legacy::{Client as HyperClient, connect::HttpConnector},
+    rt::TokioExecutor,
+};
 use meticulous::ResultExt as _;
-use nervix_dns::{DnsConfiguration, DnsResolver, NameServers};
+use nervix_dns::{DnsConfiguration, DnsLookupError, DnsLookupFailure, DnsResolver, NameServers};
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -63,6 +72,11 @@ async fn serve_once(address: SocketAddr, body: &'static str) {
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .assured("the loopback HTTP endpoint is available");
+    serve_on(listener, body).await;
+}
+
+/// Answer one request on `listener` with `body`, after checking it kept the fixture authority.
+async fn serve_on(listener: tokio::net::TcpListener, body: &'static str) {
     let (mut stream, _) = listener.accept().await.assured("the test client connects");
     let mut request = [0_u8; 2048];
     let length = stream
@@ -369,4 +383,123 @@ async fn redirect_destination_uses_the_configured_resolver() {
     target_server
         .await
         .assured("the destination server finishes");
+}
+
+impl Fixture {
+    fn answer_name_not_found(&self) {
+        self.authority.set(
+            NAME,
+            DnsAnswer::NameNotFound {
+                negative_ttl: Duration::from_secs(1),
+            },
+        );
+    }
+}
+
+#[tokio::test]
+async fn hyper_connector_uses_all_answers_and_keeps_the_url_authority() {
+    let fixture = Fixture::start().await;
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .assured("the test endpoint can bind");
+    let port = listener
+        .local_addr()
+        .assured("the listener has an address")
+        .port();
+    // Nothing listens on the first answer, so it refuses the connection and the next is dialled.
+    fixture.answer(
+        vec![
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        ],
+        Duration::from_secs(1),
+    );
+    let server = tokio::spawn(serve_on(listener, "hyper"));
+    let client = HyperClient::builder(TokioExecutor::new())
+        .build::<_, Empty<Bytes>>(HttpConnector::new_with_resolver(fixture.resolver.clone()));
+    let uri = format!("http://{NAME}:{port}/test")
+        .parse::<http::Uri>()
+        .assured("the test URL is valid");
+
+    let response = client
+        .get(uri)
+        .await
+        .assured("the second DNS answer connects");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    server.await.assured("the HTTP server task finishes");
+    assert!(fixture.authority.questions_for(NAME) > 0);
+}
+
+#[tokio::test]
+async fn hyper_connector_failures_keep_the_typed_lookup_failure() {
+    let fixture = Fixture::start().await;
+    fixture.answer_name_not_found();
+    let client = HyperClient::builder(TokioExecutor::new())
+        .build::<_, Empty<Bytes>>(HttpConnector::new_with_resolver(fixture.resolver.clone()));
+    let uri = format!("http://{NAME}:12345/test")
+        .parse::<http::Uri>()
+        .assured("the test URL is valid");
+
+    let error = client
+        .get(uri)
+        .await
+        .expect_err("a name that does not exist cannot be connected");
+
+    let lookup = DnsLookupError::find_in(&error).expect("the lookup failure is a cause");
+    assert_eq!(lookup.name(), NAME);
+    assert_eq!(lookup.failure(), DnsLookupFailure::NameNotFound);
+}
+
+#[tokio::test]
+async fn smithy_hook_answers_every_address_and_fails_with_the_typed_lookup_failure() {
+    const MISSING: &str = "missing.nervix.test";
+    let fixture = Fixture::start().await;
+    let addresses = vec![
+        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+    ];
+    fixture.answer(addresses.clone(), Duration::from_secs(1));
+    fixture.authority.set(
+        MISSING,
+        DnsAnswer::NameNotFound {
+            negative_ttl: Duration::from_secs(1),
+        },
+    );
+
+    let resolved = fixture
+        .resolver
+        .resolve_dns(NAME)
+        .await
+        .assured("the fixture name resolves");
+    let error = fixture
+        .resolver
+        .resolve_dns(MISSING)
+        .await
+        .expect_err("a name that does not exist has no address");
+
+    assert_eq!(resolved, addresses);
+    let lookup = DnsLookupError::find_in(&error).expect("the lookup failure is a cause");
+    assert_eq!(lookup.name(), MISSING);
+    assert_eq!(lookup.failure(), DnsLookupFailure::NameNotFound);
+}
+
+#[tokio::test]
+async fn reqwest_failures_keep_the_typed_lookup_failure() {
+    let fixture = Fixture::start().await;
+    fixture.answer_name_not_found();
+    let client = reqwest::Client::builder()
+        .dns_resolver(fixture.resolver.clone())
+        .timeout(Duration::from_secs(3))
+        .build()
+        .assured("the test HTTP client is valid");
+
+    let error = client
+        .get(format!("http://{NAME}:12345/test"))
+        .send()
+        .await
+        .expect_err("a name that does not exist cannot be connected");
+
+    let lookup = DnsLookupError::find_in(&error).expect("the lookup failure is a cause");
+    assert_eq!(lookup.failure(), DnsLookupFailure::NameNotFound);
 }

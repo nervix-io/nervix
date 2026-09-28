@@ -1451,7 +1451,8 @@ mod tests {
         AckMode, BranchSelection, ClusterNodeName, CoordinationIdentity, CreateEmitter,
         CreateJunction, CreateRelay, DomainSchedule, EmitSink, EmitterName, EmitterPublishingMode,
         ErrorPolicies, IngestQuiesceMode, IngestorName, ModelKind, ModelName, NodeRef,
-        ProcessorInputs, ProcessorOutputs, RelayBranching, RelayName, RetryPolicy,
+        ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, RelayBranching, RelayName,
+        RetryPolicy,
     };
     use nonzero_ext::nonzero;
     use tokio::{
@@ -2084,7 +2085,14 @@ mod tests {
     fn emitter_entity_pause_gates_every_input_relay() {
         let emitter = CreateEmitter {
             name: named("combined_sink"),
-            from: ProcessorInputs::new(vec![named("source_b"), named("source_a")], Vec::new()),
+            from: ProcessorInputs::new(
+                vec![named("source_b"), named("source_a")],
+                vec![ProcessorInputWhere {
+                    relay: named("source_b"),
+                    where_clause: nervix_nspl::parse_expression("input.seq > 0")
+                        .expect("the source predicate is valid"),
+                }],
+            ),
             body: nervix_models::EmitterBody::Codec {
                 codec: named("event_codec"),
             },
@@ -2116,6 +2124,28 @@ mod tests {
         let mut schedule = DomainSchedule::new(
             domain("testing"),
             vec![
+                scheduled_model(nervix_models::Model::Schema(nervix_models::CreateSchema {
+                    name: named("event"),
+                    fields: vec![nervix_models::SchemaField {
+                        name: named("seq"),
+                        ty: nervix_models::ParseAsType::I64,
+                        optional: false,
+                        sensitive: false,
+                    }],
+                })),
+                scheduled_model(nervix_models::Model::Codec(nervix_models::CreateCodec {
+                    name: named("event_codec"),
+                    wire_format: nervix_models::CodecWireFormat::Syslog,
+                    schema: named("event"),
+                    encoding_rules: Vec::new(),
+                })),
+                scheduled_model(nervix_models::Model::ClientZeroMq(
+                    nervix_models::CreateClientZeroMq {
+                        name: named("sink"),
+                        mount: None,
+                        config: Vec::new(),
+                    },
+                )),
                 input_relay("source_a"),
                 input_relay("source_b"),
                 scheduled_model(nervix_models::Model::Emitter(emitter.clone())),
@@ -2138,9 +2168,29 @@ mod tests {
             crate::registry::entity_pause_relays_for_schedule(&schedule, &[entity]),
             vec![named("source_a"), named("source_b")]
         );
+        let activation =
+            DomainActivationPlan::from_scheduled_nodes(&domain("testing"), &schedule.nodes)
+                .expect("the test schedule has planned schemas and relays");
+        let emitter_plans =
+            EmitterExecutionPlans::from_scheduled_nodes(&schedule.nodes, &activation)
+                .expect("the test emitter has a matching client and inputs");
+        let planned = emitter_plans
+            .emitter(&emitter.name)
+            .expect("the scheduled emitter has one plan");
+        assert_eq!(
+            planned
+                .inputs
+                .iter()
+                .map(|input| input.relay.as_str())
+                .collect::<Vec<_>>(),
+            ["source_b", "source_a"]
+        );
+        assert!(planned.inputs[0].from_where.is_some());
+        assert!(planned.inputs[1].from_where.is_none());
         let remote_consumers = Runtime::remote_runtime_consumers_for_schedule(
             &schedule,
             &EntrypointPlans::default(),
+            &emitter_plans,
             &ClusterNodeName::parse("node-1").expect("valid name"),
         );
         assert_eq!(remote_consumers.len(), 2);

@@ -17,10 +17,11 @@ use std::{
 };
 
 use arrow_schema::{DataType, Field, TimeUnit};
+use error_stack::Report;
 use meticulous::OptionExt as _;
 
 use crate::{
-    CompileError, RegisterType,
+    CompileError, CompileErrorCode, RegisterType,
     extremum::Extremum,
     ip_address::NetworkSource,
     json::JsonOutput,
@@ -626,29 +627,29 @@ impl CastDescriptor {
         input_type: &DataType,
         target_type: &DataType,
         span: impl Into<std::ops::Range<usize>>,
-    ) -> Result<(), CompileError> {
+    ) -> error_stack::Result<(), CompileError> {
         if (input_type == &DataType::Binary || target_type == &DataType::Binary)
             && input_type != target_type
         {
-            return Err(CompileError {
-                code: "unsupported_cast",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::UnsupportedCast,
                 message: "BYTES conversions require bytes_from_utf8, bytes_to_utf8, base64 or hex \
                           functions"
                     .to_string(),
                 span: span.into().into(),
-            });
+            }));
         }
         if is_supported_type(input_type) && is_supported_type(target_type) {
             Ok(())
         } else {
-            Err(CompileError {
-                code: "unsupported_cast",
+            Err(Report::new(CompileError {
+                code: CompileErrorCode::UnsupportedCast,
                 message: format!(
                     "casts are only implemented for supported nervix VM types, found {:?} AS {:?}",
                     input_type, target_type
                 ),
                 span: span.into().into(),
-            })
+            }))
         }
     }
 }
@@ -665,7 +666,7 @@ impl BuiltinDescriptor {
         function: &FunctionName,
         arg_types: &[DataType],
         span: impl Into<std::ops::Range<usize>>,
-    ) -> Result<DataType, CompileError> {
+    ) -> error_stack::Result<DataType, CompileError> {
         builtin_output_type(function, &self.lowering, arg_types, span.into())
     }
 }
@@ -1336,17 +1337,17 @@ pub fn builtin_signature(
     function: &FunctionName,
     arg_types: &[DataType],
     span: impl Into<std::ops::Range<usize>>,
-) -> Result<DataType, CompileError> {
+) -> error_stack::Result<DataType, CompileError> {
     let Some(descriptor) = builtin_descriptor(function) else {
-        return Err(CompileError {
-            code: "unknown_function",
+        return Err(Report::new(CompileError {
+            code: CompileErrorCode::UnknownFunction,
             message: format!(
                 "unknown function '{}' with arity {}",
                 function.as_str(),
                 arg_types.len()
             ),
             span: span.into().into(),
-        });
+        }));
     };
     descriptor.output_type(function, arg_types, span)
 }
@@ -1356,7 +1357,7 @@ fn builtin_output_type(
     lowering: &BuiltinLowering,
     arg_types: &[DataType],
     span: std::ops::Range<usize>,
-) -> Result<DataType, CompileError> {
+) -> error_stack::Result<DataType, CompileError> {
     match lowering {
         BuiltinLowering::BytesFromUtf8
         | BuiltinLowering::Base64Decode
@@ -1502,8 +1503,8 @@ fn builtin_output_type(
             for arg_type in &arg_types[1..] {
                 require_supported_register_type(function, arg_type, span.clone())?;
                 if arg_type != &arg_types[0] {
-                    return Err(CompileError {
-                        code: "type_mismatch",
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::TypeMismatch,
                         message: format!(
                             "function '{}' requires matching operand types, found {:?} and {:?}",
                             function.as_str(),
@@ -1511,7 +1512,7 @@ fn builtin_output_type(
                             arg_type
                         ),
                         span: span.into(),
-                    });
+                    }));
                 }
             }
             Ok(arg_types[0].clone())
@@ -1526,8 +1527,8 @@ fn builtin_output_type(
             require_supported_register_type(function, &arg_types[0], span.clone())?;
             require_supported_register_type(function, &arg_types[1], span.clone())?;
             if arg_types[0] != arg_types[1] {
-                return Err(CompileError {
-                    code: "type_mismatch",
+                return Err(Report::new(CompileError {
+                    code: CompileErrorCode::TypeMismatch,
                     message: format!(
                         "function '{}' requires matching operand types, found {:?} and {:?}",
                         function.as_str(),
@@ -1535,7 +1536,7 @@ fn builtin_output_type(
                         arg_types[1]
                     ),
                     span: span.into(),
-                });
+                }));
             }
             Ok(arg_types[0].clone())
         }
@@ -1593,14 +1594,14 @@ fn builtin_output_type(
             if let RegisterType::Float32 | RegisterType::Float64 = input {
                 Ok(DataType::Boolean)
             } else {
-                Err(CompileError {
-                    code: "unsupported_function",
+                Err(Report::new(CompileError {
+                    code: CompileErrorCode::UnsupportedFunction,
                     message: format!(
                         "function '{}' requires floating-point input, found {input}",
                         function.as_str()
                     ),
                     span: span.into(),
-                })
+                }))
             }
         }
         BuiltinLowering::BitwiseAnd | BuiltinLowering::BitwiseOr | BuiltinLowering::BitwiseXor => {
@@ -1610,8 +1611,8 @@ fn builtin_output_type(
             require_integral_arg(function, left, span.clone())?;
             require_integral_arg(function, right, span.clone())?;
             if left != right {
-                return Err(CompileError {
-                    code: "type_mismatch",
+                return Err(Report::new(CompileError {
+                    code: CompileErrorCode::TypeMismatch,
                     message: format!(
                         "function '{}' requires matching operand types, found {:?} and {:?}",
                         function.as_str(),
@@ -1619,7 +1620,7 @@ fn builtin_output_type(
                         arg_types[1]
                     ),
                     span: span.into(),
-                });
+                }));
             }
             Ok(left.data_type())
         }
@@ -1648,15 +1649,15 @@ fn builtin_output_type(
             let input = require_matching_operand_types(function, arg_types, span.clone())?;
             // The extrema order the window MIN and MAX aggregates use, which also orders BOOL.
             if !input.is_scalar() {
-                return Err(CompileError {
-                    code: "unsupported_function",
+                return Err(Report::new(CompileError {
+                    code: CompileErrorCode::UnsupportedFunction,
                     message: format!(
                         "function '{}' requires numeric, BOOL, STRING or DATETIME input, found \
                          {input}",
                         function.as_str()
                     ),
                     span: span.into(),
-                });
+                }));
             }
             Ok(input.data_type())
         }
@@ -1664,14 +1665,14 @@ fn builtin_output_type(
             require_builtin_arity_exact(function, arg_types, 3, span.clone())?;
             let input = require_matching_operand_types(function, arg_types, span.clone())?;
             if !input.is_ordered() {
-                return Err(CompileError {
-                    code: "unsupported_function",
+                return Err(Report::new(CompileError {
+                    code: CompileErrorCode::UnsupportedFunction,
                     message: format!(
                         "function '{}' requires numeric, STRING or DATETIME input, found {input}",
                         function.as_str()
                     ),
                     span: span.into(),
-                });
+                }));
             }
             Ok(input.data_type())
         }
@@ -1690,8 +1691,8 @@ fn builtin_output_type(
                     let actual =
                         list_element_type(function, arg_type, ListElements::Any, span.clone())?;
                     if actual != element {
-                        return Err(CompileError {
-                            code: "type_mismatch",
+                        return Err(Report::new(CompileError {
+                            code: CompileErrorCode::TypeMismatch,
                             message: format!(
                                 "function '{}' requires exact matching element types, found {:?} \
                                  and {:?}",
@@ -1700,14 +1701,17 @@ fn builtin_output_type(
                                 actual
                             ),
                             span: span.into(),
-                        });
+                        }));
                     }
                     fixed_width = match (fixed_width, arg_type) {
                         (Some(total), DataType::FixedSizeList(_, width)) => {
-                            Some(total.checked_add(*width).ok_or_else(|| CompileError {
-                                code: "invalid_argument",
-                                message: "ARRAY concat exceeds Arrow's maximum width".to_string(),
-                                span: span.clone().into(),
+                            Some(total.checked_add(*width).ok_or_else(|| {
+                                Report::new(CompileError {
+                                    code: CompileErrorCode::InvalidArgument,
+                                    message: "ARRAY concat exceeds Arrow's maximum width"
+                                        .to_string(),
+                                    span: span.clone().into(),
+                                })
                             })?)
                         }
                         _ => None,
@@ -1748,11 +1752,11 @@ fn builtin_output_type(
             let element =
                 list_element_type(function, &arg_types[0], ListElements::Any, span.clone())?;
             if element != DataType::Utf8 {
-                return Err(CompileError {
-                    code: "type_mismatch",
+                return Err(Report::new(CompileError {
+                    code: CompileErrorCode::TypeMismatch,
                     message: format!("function '{}' requires a STRING list", function.as_str()),
                     span: span.into(),
-                });
+                }));
             }
             let separator = require_supported_register_type(function, &arg_types[1], span.clone())?;
             require_utf8_arg(function, separator, span)?;
@@ -1773,11 +1777,11 @@ fn builtin_output_type(
             let element =
                 list_element_type(function, &arg_types[1], ListElements::Any, span.clone())?;
             if element != DataType::Utf8 {
-                return Err(CompileError {
-                    code: "type_mismatch",
+                return Err(Report::new(CompileError {
+                    code: CompileErrorCode::TypeMismatch,
                     message: format!("function '{}' requires a STRING list", function.as_str()),
                     span: span.into(),
-                });
+                }));
             }
             Ok(DataType::Boolean)
         }
@@ -1793,8 +1797,8 @@ fn builtin_output_type(
             require_supported_register_type(function, element, span.clone())?;
             for arg_type in &arg_types[1..] {
                 if arg_type != element {
-                    return Err(CompileError {
-                        code: "type_mismatch",
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::TypeMismatch,
                         message: format!(
                             "function '{}' requires exact matching element types, found {:?} and \
                              {:?}",
@@ -1803,15 +1807,17 @@ fn builtin_output_type(
                             arg_type
                         ),
                         span: span.into(),
-                    });
+                    }));
                 }
             }
             let field = Arc::new(Field::new("item", element.clone(), false));
             if let BuiltinLowering::ArrayConstruct = lowering {
-                let width = i32::try_from(arg_types.len()).map_err(|_| CompileError {
-                    code: "invalid_argument",
-                    message: "ARRAY constructor exceeds Arrow's maximum width".to_string(),
-                    span: span.into(),
+                let width = i32::try_from(arg_types.len()).map_err(|_| {
+                    Report::new(CompileError {
+                        code: CompileErrorCode::InvalidArgument,
+                        message: "ARRAY constructor exceeds Arrow's maximum width".to_string(),
+                        span: span.into(),
+                    })
                 })?;
                 Ok(DataType::FixedSizeList(field, width))
             } else {
@@ -1829,8 +1835,8 @@ fn builtin_output_type(
             let other =
                 list_element_type(function, &arg_types[1], ListElements::Scalar, span.clone())?;
             if element != other {
-                return Err(CompileError {
-                    code: "type_mismatch",
+                return Err(Report::new(CompileError {
+                    code: CompileErrorCode::TypeMismatch,
                     message: format!(
                         "function '{}' requires exact matching element types, found {:?} and {:?}",
                         function.as_str(),
@@ -1838,7 +1844,7 @@ fn builtin_output_type(
                         other
                     ),
                     span: span.into(),
-                });
+                }));
             }
             if let BuiltinLowering::Overlap = lowering {
                 return Ok(DataType::Boolean);
@@ -1872,15 +1878,15 @@ fn builtin_output_type(
             } else if input.is_ordered() || input == RegisterType::Boolean {
                 Ok(element)
             } else {
-                Err(CompileError {
-                    code: "unsupported_function",
+                Err(Report::new(CompileError {
+                    code: CompileErrorCode::UnsupportedFunction,
                     message: format!(
                         "function '{}' requires ordered scalar elements, found {:?}",
                         function.as_str(),
                         element
                     ),
                     span: span.into(),
-                })
+                }))
             }
         }
         BuiltinLowering::Count => {
@@ -1931,8 +1937,8 @@ fn builtin_output_type(
                 let element =
                     list_element_type(function, &arg_types[0], ListElements::Scalar, span.clone())?;
                 if arg_types[1] != element {
-                    return Err(CompileError {
-                        code: "type_mismatch",
+                    return Err(Report::new(CompileError {
+                        code: CompileErrorCode::TypeMismatch,
                         message: format!(
                             "function '{}' requires element type {:?}, found {:?}",
                             function.as_str(),
@@ -1940,7 +1946,7 @@ fn builtin_output_type(
                             arg_types[1]
                         ),
                         span: span.into(),
-                    });
+                    }));
                 }
                 return Ok(DataType::Boolean);
             }
@@ -2050,14 +2056,14 @@ fn builtin_output_type(
                 match operand {
                     DatetimeOperand::Datetime => {
                         if input != RegisterType::Datetime {
-                            return Err(CompileError {
-                                code: "unsupported_function",
+                            return Err(Report::new(CompileError {
+                                code: CompileErrorCode::UnsupportedFunction,
                                 message: format!(
                                     "function '{}' requires Datetime input, found {input}",
                                     function.as_str()
                                 ),
                                 span: span.into(),
-                            });
+                            }));
                         }
                     }
                     DatetimeOperand::UnitCount => {
@@ -2150,15 +2156,15 @@ fn invalid_builtin_arity_error(
     function: &FunctionName,
     actual: usize,
     span: std::ops::Range<usize>,
-) -> CompileError {
-    CompileError {
-        code: "unknown_function",
+) -> Report<CompileError> {
+    Report::new(CompileError {
+        code: CompileErrorCode::UnknownFunction,
         message: format!(
             "unknown function '{}' with arity {actual}",
             function.as_str()
         ),
         span: span.into(),
-    }
+    })
 }
 
 fn require_builtin_arity_exact(
@@ -2166,7 +2172,7 @@ fn require_builtin_arity_exact(
     arg_types: &[DataType],
     expected: usize,
     span: std::ops::Range<usize>,
-) -> Result<(), CompileError> {
+) -> error_stack::Result<(), CompileError> {
     if arg_types.len() == expected {
         Ok(())
     } else {
@@ -2179,7 +2185,7 @@ fn require_builtin_min_arity(
     arg_types: &[DataType],
     min: usize,
     span: std::ops::Range<usize>,
-) -> Result<(), CompileError> {
+) -> error_stack::Result<(), CompileError> {
     if arg_types.len() >= min {
         Ok(())
     } else {
@@ -2191,15 +2197,17 @@ fn require_supported_register_type(
     function: &FunctionName,
     data_type: &DataType,
     span: std::ops::Range<usize>,
-) -> Result<RegisterType, CompileError> {
-    RegisterType::from_data_type(data_type).ok_or_else(|| CompileError {
-        code: "unsupported_function",
-        message: format!(
-            "function '{}' does not support input type {:?}",
-            function.as_str(),
-            data_type
-        ),
-        span: span.into(),
+) -> error_stack::Result<RegisterType, CompileError> {
+    RegisterType::from_data_type(data_type).ok_or_else(|| {
+        Report::new(CompileError {
+            code: CompileErrorCode::UnsupportedFunction,
+            message: format!(
+                "function '{}' does not support input type {:?}",
+                function.as_str(),
+                data_type
+            ),
+            span: span.into(),
+        })
     })
 }
 
@@ -2208,15 +2216,15 @@ fn require_matching_operand_types(
     function: &FunctionName,
     arg_types: &[DataType],
     span: std::ops::Range<usize>,
-) -> Result<RegisterType, CompileError> {
+) -> error_stack::Result<RegisterType, CompileError> {
     let first = arg_types
         .first()
         .verified("the caller required at least one argument before asking for their shared type");
     let input = require_supported_register_type(function, first, span.clone())?;
     for arg_type in &arg_types[1..] {
         if arg_type != first {
-            return Err(CompileError {
-                code: "type_mismatch",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::TypeMismatch,
                 message: format!(
                     "function '{}' requires matching operand types, found {:?} and {:?}",
                     function.as_str(),
@@ -2224,7 +2232,7 @@ fn require_matching_operand_types(
                     arg_type
                 ),
                 span: span.into(),
-            });
+            }));
         }
     }
     Ok(input)
@@ -2246,34 +2254,34 @@ fn list_element_type(
     data_type: &DataType,
     elements: ListElements,
     span: std::ops::Range<usize>,
-) -> Result<DataType, CompileError> {
+) -> error_stack::Result<DataType, CompileError> {
     let element = match data_type {
         DataType::List(field) | DataType::FixedSizeList(field, _) => field.data_type().clone(),
         _ => {
-            return Err(CompileError {
-                code: "unsupported_function",
+            return Err(Report::new(CompileError {
+                code: CompileErrorCode::UnsupportedFunction,
                 message: format!(
                     "function '{}' requires ARRAY or VEC input, found {:?}",
                     function.as_str(),
                     data_type
                 ),
                 span: span.into(),
-            });
+            }));
         }
     };
     let element_register = require_supported_register_type(function, &element, span.clone())?;
     if let ListElements::Scalar = elements
         && let RegisterType::Generic = element_register
     {
-        return Err(CompileError {
-            code: "unsupported_function",
+        return Err(Report::new(CompileError {
+            code: CompileErrorCode::UnsupportedFunction,
             message: format!(
                 "function '{}' requires ARRAY or VEC elements of a scalar type, found {:?}",
                 function.as_str(),
                 element
             ),
             span: span.into(),
-        });
+        }));
     }
     Ok(element)
 }
@@ -2282,18 +2290,18 @@ fn require_utf8_arg(
     function: &FunctionName,
     input_type: RegisterType,
     span: std::ops::Range<usize>,
-) -> Result<(), CompileError> {
+) -> error_stack::Result<(), CompileError> {
     if input_type == RegisterType::Utf8 {
         Ok(())
     } else {
-        Err(CompileError {
-            code: "unsupported_function",
+        Err(Report::new(CompileError {
+            code: CompileErrorCode::UnsupportedFunction,
             message: format!(
                 "function '{}' requires Utf8 input, found {input_type}",
                 function.as_str()
             ),
             span: span.into(),
-        })
+        }))
     }
 }
 
@@ -2301,18 +2309,18 @@ fn require_binary_arg(
     function: &FunctionName,
     input_type: RegisterType,
     span: std::ops::Range<usize>,
-) -> Result<(), CompileError> {
+) -> error_stack::Result<(), CompileError> {
     if input_type == RegisterType::Binary {
         Ok(())
     } else {
-        Err(CompileError {
-            code: "unsupported_function",
+        Err(Report::new(CompileError {
+            code: CompileErrorCode::UnsupportedFunction,
             message: format!(
                 "function '{}' requires BYTES input, found {input_type}",
                 function.as_str()
             ),
             span: span.into(),
-        })
+        }))
     }
 }
 
@@ -2320,7 +2328,7 @@ fn require_numeric_arg(
     function: &FunctionName,
     input_type: RegisterType,
     span: std::ops::Range<usize>,
-) -> Result<(), CompileError> {
+) -> error_stack::Result<(), CompileError> {
     match input_type {
         RegisterType::UInt8
         | RegisterType::Int8
@@ -2332,14 +2340,14 @@ fn require_numeric_arg(
         | RegisterType::Int64
         | RegisterType::Float32
         | RegisterType::Float64 => Ok(()),
-        _ => Err(CompileError {
-            code: "unsupported_function",
+        _ => Err(Report::new(CompileError {
+            code: CompileErrorCode::UnsupportedFunction,
             message: format!(
                 "function '{}' requires numeric input, found {input_type}",
                 function.as_str()
             ),
             span: span.into(),
-        }),
+        })),
     }
 }
 
@@ -2347,18 +2355,18 @@ fn require_integral_arg(
     function: &FunctionName,
     input_type: RegisterType,
     span: std::ops::Range<usize>,
-) -> Result<(), CompileError> {
+) -> error_stack::Result<(), CompileError> {
     if is_integral_type(&input_type.data_type()) {
         Ok(())
     } else {
-        Err(CompileError {
-            code: "unsupported_function",
+        Err(Report::new(CompileError {
+            code: CompileErrorCode::UnsupportedFunction,
             message: format!(
                 "function '{}' requires integer input, found {input_type}",
                 function.as_str()
             ),
             span: span.into(),
-        })
+        }))
     }
 }
 
@@ -2475,14 +2483,16 @@ pub fn expr_semantics(expr: &SpannedExpr) -> Option<ExpressionSemantics> {
 
 #[cfg(test)]
 mod tests {
-    use arrow_schema::DataType;
+    use std::sync::Arc;
+
+    use arrow_schema::{DataType, Field};
     use meticulous::ResultExt as _;
 
     use super::{
         ArmExecution, BitwiseOperation, BuiltinLowering, DependencyScope, ExpressionSemantics,
         FloatClass, IntegerBits, NullPropagation, Volatility, binary_arm_execution,
         binary_op_semantics, builtin_arm_execution, builtin_descriptor, builtin_function_semantics,
-        cast_arm_execution, cast_semantics, expr_semantics, unary_arm_execution,
+        builtin_signature, cast_arm_execution, cast_semantics, expr_semantics, unary_arm_execution,
         unary_op_semantics,
     };
     use crate::{
@@ -2563,7 +2573,11 @@ mod tests {
             let Err(error) = descriptor.output_type(&function, &[wrong_input], 0..1) else {
                 panic!("{function:?} must reject the opposite text or BYTES type");
             };
-            assert_eq!(error.code, "unsupported_function", "{function:?}");
+            assert_eq!(
+                error.current_context().code(),
+                "unsupported_function",
+                "{function:?}"
+            );
         }
     }
 
@@ -2908,5 +2922,60 @@ mod tests {
             })),
             ArmExecution::SelectedRows
         );
+    }
+
+    #[test]
+    fn collection_signatures_report_exact_type_and_width_failures() {
+        let list = |element| DataType::List(Arc::new(Field::new("item", element, false)));
+        let cases = [
+            (
+                FunctionName::NullIf,
+                vec![DataType::Int64, DataType::Utf8],
+                "type_mismatch",
+            ),
+            (
+                FunctionName::Concat,
+                vec![list(DataType::Int64), list(DataType::Utf8)],
+                "type_mismatch",
+            ),
+            (
+                FunctionName::Join,
+                vec![list(DataType::Int64), DataType::Utf8],
+                "type_mismatch",
+            ),
+            (
+                FunctionName::Min,
+                vec![list(DataType::Binary)],
+                "unsupported_function",
+            ),
+            (
+                FunctionName::IsNull,
+                vec![DataType::Struct(Default::default())],
+                "unsupported_function",
+            ),
+        ];
+        for (function, args, code) in cases {
+            let report = builtin_signature(&function, &args, 4..9)
+                .expect_err("the fixed argument types violate this builtin contract");
+            assert_eq!(report.current_context().code(), code);
+            assert_eq!(report.current_context().span, (4..9).into());
+            assert!(report.current_context().message.contains(function.as_str()));
+        }
+
+        let huge = DataType::FixedSizeList(
+            Arc::new(Field::new("item", DataType::Int64, false)),
+            i32::MAX,
+        );
+        let report = builtin_signature(
+            &FunctionName::Concat,
+            &[
+                huge,
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Int64, false)), 1),
+            ],
+            4..9,
+        )
+        .expect_err("the concatenated fixed-width list cannot fit an Arrow width");
+        assert_eq!(report.current_context().code(), "invalid_argument");
+        assert!(report.current_context().message.contains("maximum width"));
     }
 }

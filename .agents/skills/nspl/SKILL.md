@@ -16,8 +16,9 @@ For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.htm
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
 completion status messages.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
-schemas, branches, relays, and session subscriptions; use the same web-console chapter for their
-typed fields, reference lookup, and transaction behavior.
+schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, and session subscriptions; use the same
+web-console chapter for their typed fields, resource versions, program editors, reference lookup,
+and transaction behavior.
 
 ## Gather the configuration contract
 
@@ -313,7 +314,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   [HTTP requests](../../../docs/src/emitters.md#http-requests). Complete valid `2xx` response
   headers deliver the record without waiting for the response body. `401`, `403`, `407`, `408`,
   `425`, `429`, and `5xx` retain it for retry; other `3xx`/`4xx` statuses and `101` reject that
-  record through `ON MESSAGE ERROR`.
+  record through `ON MESSAGE ERROR`. A retained request holds later records behind it, and an
+  `ATTACHED` emitter keeps every unresolved record's upstream acknowledgement open. One valid
+  `Retry-After`, in whole seconds or as an HTTP date, can lengthen the physical wait beyond `MAX`.
+  A lost response can repeat a request the endpoint applied, so give the endpoint a stable key
+  such as `write_header('Idempotency-Key', input.event_id)`; see
+  [HTTP retries](../../../docs/src/emitters.md#http-retries-and-acknowledgements).
 - Write a supported emitter's optional `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` after the complete
   sink clause and route construction, before `FLUSH`; it is required for ClickHouse, Postgres,
   MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a

@@ -38,6 +38,32 @@ Values a caller acts on belong in typed fields; display formatting happens when 
 reported. `anyhow` remains at integration and tooling boundaries whose caller has no domain choice
 to make, such as a foreign callback that only accepts a general error.
 
+Codec jaq transformations are compiled during registry validation for every declared direction.
+A syntax error names the codec, domain, and direction and rejects the transaction before the model
+is committed. The browser keeps the draft editable so the program can be corrected and submitted
+under the same name.
+
+The expression VM returns reports for compile, batch, and runtime failures. `CompileError` keeps
+its typed diagnostic code, stable code spelling, operation span, and safe message; validation adds
+the model and route context without losing that cause. Roto setup returns `UdfError` reports and
+Roto's VM injector returns runtime reports, so a failing Arrow operation can remain in the chain.
+Jaq returns `JaqProgramError` or `JaqFormatError` reports for compilation, evaluation, and format
+conversion. A codec or runtime caller retains that report under its operation context. VM row
+errors remain typed values in the batch outcome and are formatted only when a message error is
+reported; this conversion does not turn them into report allocations per row.
+
+The WASM FlatBuffers decoder reports protocol failures with their verified payload cause. The Rust
+guest SDK retains that report beneath its envelope or snapshot meaning, and its `Processor`
+callbacks return guest-error reports. It renders a failure only when returning an ABI code or
+global-error reason; rejected snapshot bytes and rejected application state keep their distinct
+codes and text. The host retains a typed guest-call cause beneath the failed operation, so its
+runtime caller can still distinguish a resource limit, invalid emission, and a saved-state verdict
+without classifying a rendered string. Callback and checkpoint acknowledgement decisions stay the
+same; [WASM State And Recovery](./wasm-state.md) owns those boundaries.
+
+HTTP request-field compilation retains the VM report beneath the emitter's request-field context
+and attaches its safe message for diagnostics; an invalid request program never starts the sink.
+
 Resource planning checks the committed lookup key and codec, generator materialized source,
 output branch and route construction, and WASM guest-state generation before runtime binding.
 These failures name the owning node and relevant relay, codec, or field. A missing
@@ -71,6 +97,19 @@ and `SourceError::Resume` while a WebSocket source connects or reconnects. The r
 missing-name, no-address, timeout, invalid-name or transport cause stays in the error report.
 Address, TLS and WebSocket-upgrade failures remain connection outcomes. None is a record rejection,
 and a DNS result by itself never marks a Syslog record delivered.
+
+ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
+driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
+cause of its connection error, and the connector finds it there by type and keeps it as the context
+beneath its existing infrastructure failure: `SinkPublishError::Publish` for a ClickHouse insert or
+an SQS send, `SinkStartError::Initialize` while an SQS sink looks up its queue, and the
+`SqsSourceError` of opening the queue, receiving or deleting beneath the source's `SourceError`.
+The failure's message names the host and the lookup failure, which `DESCRIBE EMITTER` and
+`DESCRIBE INGESTOR` show. Any other failure to reach the service, such as a refused connection or a
+certificate that does not name the configured host, is described by every cause of the driver's
+connection error, which describes the connection and carries neither credentials nor a record; a
+response from the service keeps its existing description. None is a record rejection, and none
+acknowledges input.
 
 A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar sink: a message
 larger than the maximum message size the broker announced, which carries the measured size of its
@@ -212,6 +251,14 @@ an unparseable flush or collection cadence, rather than restating it. Runtime in
 domain context to either report, and an ingestor that fails to start while its domain execution is
 built records that report as its transient error.
 
+Emitter execution planning has typed failures for missing source relays or codecs, an unresolved
+or mismatched client, unsupported publishing mode, an invalid source predicate or route, invalid
+HTTP request fields or SQS ordering group, empty or invalid row mappings, nonliteral OTEL resource
+attributes, and invalid Iceberg commit settings. Each report names the emitter and, for a source
+predicate, its relay. The decision fails before a new emitter plan or remote consumer edge is
+published. Binding a valid plan against installed schemas and UDFs may still fail during startup;
+opening an external sink may fail independently and follows the emitter's retry policy.
+
 Node startup validates execution memory limits before admitting any work. A Commands budget must
 hold both the bounded resident replication window and one bounded normalized command-state write;
 the larger requirement controls admission. Arithmetic that cannot represent either requirement is
@@ -266,6 +313,8 @@ authorization in their typed cause. DNS, connection, TLS, timeout, malformed or 
 headers, invalid final framing and loss before complete final headers are infrastructure failures
 as well. The connector reports them without a request URL or sensitive response value. The emitter
 host owns their retry schedule and keeps the prepared request and ACK lease while they are pending.
+A valid `Retry-After` on a retained status can only lengthen that schedule: it never turns a
+delivered or rejected record into a retry, and an invalid one is ignored rather than reported.
 
 `ON MESSAGE ERROR` belongs to the route and handles record-specific work. Ingestor and emitter
 `ON GENERAL ERROR` handles node-wide source and sink failures. A WASM processor's node-wide `ON
@@ -316,7 +365,11 @@ sequenceDiagram
 
 At the public edge, the session maps a typed validation or execution result to a command
 disposition, message, and diagnostics; a transaction's admitted and retained outcomes stay
-distinct from a new execution. [Command
+distinct from a new execution. Replicated admission preserves an expired execution reference and
+the kind of a conflicting reference as typed consensus conflicts. The session returns
+`ExecutionReferenceExpired` or `ExecutionReferenceConflict` from those variants, including when a
+leader change lets the replicated check discover the conflict after the leader's local check. A
+client never has to classify those refusals from message text. [Command
 Dispositions](./client-session-protocol.md#command-dispositions) defines each disposition, the phase
 that produces it, and what a client may conclude from it, and typed request rejections are covered
 in [Rejections](./client-session-protocol.md#rejections). `DESCRIBE TRANSACTION` and
@@ -362,6 +415,11 @@ stops waiting for still completes. Its caller rebuilds the typed session failure
 report, and recovers the session and sends the request again exactly as for any other call; only a
 failure a new session cannot remedy is returned, as `ClientError::SubscriptionOperation` carrying
 the report.
+
+If a paced clock cannot convert one period through its rate, the authority can still emit its
+already-due first tick. Scheduling a later tick then reports a rate-conversion or cadence error and
+stops production. A next-boundary overflow reports its own clock arithmetic error. None of these
+cases emits an early tick or silently clamps the interval.
 
 ## Sensitive Data And Observability
 

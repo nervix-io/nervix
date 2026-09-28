@@ -13,13 +13,17 @@
 //!
 //! Every request is captured in full before it is answered, and each one takes the next response
 //! from the script. Once the script is empty, requests take the receiver's standing response, which
-//! is a complete `200` without a body until a scenario replaces it. A response can complete
-//! normally, answer after a delay, precede its final response with an interim one, declare more body
-//! than it sends and then stall, never answer, close the connection without answering, or write
-//! arbitrary bytes. The last three are how a scenario loses a response the endpoint already acted
-//! on, holds an attempt past its timeout, and sends framing no valid endpoint would.
-//! Generated field counts and value bytes can be set independently for the interim and final
-//! block. Capture times precede the scripted response, so timing assertions need no silence window.
+//! is a complete `200` without a body until a scenario replaces it. A request for a target the
+//! scenario gave its own answer takes that answer instead, so requests whose order is not part of
+//! the contract, such as those of independent branches, can each be answered deliberately. A
+//! response can complete normally, answer after a delay, precede its final response with an interim
+//! one, declare more body than it sends and then stall, never answer, answer only once the scenario
+//! releases it, close the connection without answering, or write arbitrary bytes. The last four are
+//! how a scenario holds an attempt past its timeout, keeps an attempt unresolved for exactly as long
+//! as it needs to observe it, loses a response the endpoint already acted on, and sends framing no
+//! valid endpoint would. Generated field counts and value bytes can be set independently for the
+//! interim and final block, and a `Retry-After` date is computed when its response is written.
+//! Capture times precede the scripted response, so timing assertions need no silence window.
 //!
 //! # Bounds
 //!
@@ -31,7 +35,7 @@
 //! before it aborts and joins the ones that remain, and reports how many it had to force.
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     fmt, io,
     net::SocketAddr,
     num::ParseIntError,
@@ -97,6 +101,9 @@ pub(crate) const MAX_RECORDED_FAULTS: usize = 256;
 const MAX_SCRIPTED_HEADER_VALUE_BYTES: usize = 128 * 1024;
 /// Enough generated fields to exceed the emitter limit without unbounded fixture allocation.
 const MAX_SCRIPTED_HEADER_COUNT: usize = 512;
+/// The longest delay a scripted `Retry-After` date may ask for. A policy input: far longer than
+/// any scenario waits, and short enough that the date it produces is always representable.
+const MAX_SCRIPTED_RETRY_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 /// The bytes one read takes from a connection.
 const READ_CHUNK_BYTES: usize = 16 * 1024;
 
@@ -144,6 +151,10 @@ pub(crate) enum ReceiverResponse {
     LoseResponse,
     /// Capture the request, then write nothing until the client leaves or the receiver stops.
     HoldResponse,
+    /// Capture the request, then write nothing until the scenario releases held responses, and
+    /// answer with the response they are released with. Released as this form again, the request
+    /// is held like [`ReceiverResponse::HoldResponse`].
+    HoldUntilReleased,
     /// Capture the request, write these bytes, then close the connection.
     Raw(Vec<u8>),
 }
@@ -161,6 +172,8 @@ pub(crate) struct ScriptedResponse {
     body_delivery: BodyDelivery,
     extra_headers: usize,
     header_value_bytes: Option<usize>,
+    /// Write `Retry-After` as the HTTP date this long after the head is written.
+    retry_after_date_in: Option<Duration>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -189,6 +202,7 @@ impl ScriptedResponse {
             body_delivery: BodyDelivery::Complete,
             extra_headers: 0,
             header_value_bytes: None,
+            retry_after_date_in: None,
         }
     }
 
@@ -198,10 +212,16 @@ impl ScriptedResponse {
         !(informational || self.status == 204 || self.status == 304)
     }
 
+    /// The final head, built when it is written, so a `Retry-After` date is measured from then.
     fn head(&self) -> Vec<u8> {
         let mut head = status_line(self.status).into_bytes();
         for header in &self.headers {
             head.extend_from_slice(format!("{}: {}\r\n", header.name, header.value).as_bytes());
+        }
+        if let Some(delay) = self.retry_after_date_in {
+            head.extend_from_slice(
+                format!("retry-after: {}\r\n", http_date_after(delay)).as_bytes(),
+            );
         }
         Self::append_generated_headers(&mut head, self.extra_headers, self.header_value_bytes);
         if self.carries_content() {
@@ -263,6 +283,14 @@ impl ScriptedResponse {
             self.body = body.as_bytes().to_vec();
             return Ok(());
         }
+        if let Some(delay) = clause.strip_prefix("retry after date in ") {
+            let delay = Self::duration(delay)?;
+            if delay > MAX_SCRIPTED_RETRY_AFTER {
+                return Err(ReceiverScriptError::RetryAfterDelay { delay });
+            }
+            self.retry_after_date_in = Some(delay);
+            return Ok(());
+        }
         if let Some(count) = clause.strip_prefix("interim extra headers ") {
             self.interim_extra_headers = Self::header_count(count)?;
             return Ok(());
@@ -276,13 +304,7 @@ impl ScriptedResponse {
             return Ok(());
         }
         if let Some(delay) = clause.strip_prefix("after ") {
-            let delay = humantime::parse_duration(delay).map_err(|source| {
-                ReceiverScriptError::Duration {
-                    text: delay.to_string(),
-                    source,
-                }
-            })?;
-            self.delay = Some(delay);
+            self.delay = Some(Self::duration(delay)?);
             return Ok(());
         }
         if clause == "stall body" {
@@ -295,6 +317,13 @@ impl ScriptedResponse {
         }
         Err(ReceiverScriptError::UnknownClause {
             clause: clause.to_string(),
+        })
+    }
+
+    fn duration(text: &str) -> Result<Duration, ReceiverScriptError> {
+        humantime::parse_duration(text).map_err(|source| ReceiverScriptError::Duration {
+            text: text.to_string(),
+            source,
         })
     }
 
@@ -330,6 +359,26 @@ fn status_line(status: u16) -> String {
     format!("HTTP/1.1 {status} {reason}\r\n")
 }
 
+/// The IMF-fixdate `delay` after the current actual UTC, rounded up to a whole second, so the date
+/// never asks for less than `delay` however soon a client reads it.
+fn http_date_after(delay: Duration) -> String {
+    let delay = chrono::TimeDelta::from_std(delay)
+        .assured("a scripted Retry-After delay is at most one day, which a TimeDelta holds");
+    let at = chrono::Utc::now()
+        .checked_add_signed(delay)
+        .assured("one day after the current date is a representable date");
+    let mut seconds = at.timestamp();
+    if at.timestamp_subsec_nanos() > 0 {
+        seconds = seconds
+            .checked_add(1)
+            .assured("a representable date is far from the end of the i64 second range");
+    }
+    chrono::DateTime::from_timestamp(seconds, 0)
+        .assured("rounding a representable date up by less than a second stays representable")
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string()
+}
+
 fn parse_status(text: &str) -> Result<u16, ReceiverScriptError> {
     let invalid = || ReceiverScriptError::Status {
         text: text.to_string(),
@@ -349,18 +398,23 @@ fn parse_status(text: &str) -> Result<u16, ReceiverScriptError> {
 pub(crate) enum ReceiverScriptError {
     #[error(
         "receiver script line {line:?} is not one of `respond <status>`, `lose response`, `hold \
-         response`, or `raw <bytes>`"
+         response`, `hold response until released`, or `raw <bytes>`"
     )]
     UnknownForm { line: String },
     #[error("{text:?} is not a three-digit HTTP status")]
     Status { text: String },
     #[error(
-        "response clause {clause:?} is not one of `header <name>: <value>`, `body <text>`, \
-         `interim <status>`, `interim extra headers <count>`, `interim header value bytes \
-         <count>`, `after <duration>`, `stall body`, `extra headers <count>`, or `header value \
-         bytes <count>`"
+        "response clause {clause:?} is not one of `header <name>: <value>`, `body <text>`, `retry \
+         after date in <duration>`, `interim <status>`, `interim extra headers <count>`, `interim \
+         header value bytes <count>`, `after <duration>`, `stall body`, `extra headers <count>`, \
+         or `header value bytes <count>`"
     )]
     UnknownClause { clause: String },
+    #[error(
+        "a scripted Retry-After date {delay:?} ahead exceeds the receiver script limit of \
+         {MAX_SCRIPTED_RETRY_AFTER:?}"
+    )]
+    RetryAfterDelay { delay: Duration },
     #[error("header clause {clause:?} has no `:` between its name and value")]
     Header { clause: String },
     #[error("{text:?} is not a duration")]
@@ -387,7 +441,8 @@ impl FromStr for ReceiverResponse {
     type Err = ReceiverScriptError;
 
     /// Reads one script line: `respond <status>` followed by `;`-separated clauses,
-    /// `lose response`, `hold response`, or `raw <bytes>` with `\r`, `\n`, and `\\` escapes.
+    /// `lose response`, `hold response`, `hold response until released`, or `raw <bytes>` with
+    /// `\r`, `\n`, and `\\` escapes.
     fn from_str(line: &str) -> Result<Self, Self::Err> {
         let line = line.trim();
         if line == "lose response" {
@@ -395,6 +450,9 @@ impl FromStr for ReceiverResponse {
         }
         if line == "hold response" {
             return Ok(Self::HoldResponse);
+        }
+        if line == "hold response until released" {
+            return Ok(Self::HoldUntilReleased);
         }
         if let Some(raw) = line.strip_prefix("raw ") {
             return Ok(Self::Raw(unescape_raw(raw)?));
@@ -710,11 +768,17 @@ struct ReceiverState {
     faults: Mutex<RecordedFaults>,
     captured_count: watch::Sender<usize>,
     fault_count: watch::Sender<usize>,
+    /// The response every request held until released answers with, once a scenario releases
+    /// them. A release holds for every such request, including one held after it.
+    release: watch::Sender<Option<ReceiverResponse>>,
 }
 
 struct ReceiverScript {
     pending: VecDeque<ReceiverResponse>,
     standing: ReceiverResponse,
+    /// The answer every request for one exact target takes, ahead of the script, which it leaves
+    /// untouched.
+    by_target: BTreeMap<String, ReceiverResponse>,
 }
 
 #[derive(Default)]
@@ -735,16 +799,23 @@ impl ReceiverState {
             script: Mutex::new(ReceiverScript {
                 pending: VecDeque::new(),
                 standing: ReceiverResponse::Respond(ScriptedResponse::status(200)),
+                by_target: BTreeMap::new(),
             }),
             captured: Mutex::new(Vec::new()),
             faults: Mutex::new(RecordedFaults::default()),
             captured_count: watch::Sender::new(0),
             fault_count: watch::Sender::new(0),
+            release: watch::Sender::new(None),
         }
     }
 
-    fn next_response(&self) -> ReceiverResponse {
+    /// The response a request for `target` takes: the answer the scenario gave that target, or
+    /// else the next scripted response, or else the standing one.
+    fn next_response(&self, target: &str) -> ReceiverResponse {
         let mut script = self.script.lock();
+        if let Some(response) = script.by_target.get(target) {
+            return response.clone();
+        }
         match script.pending.pop_front() {
             Some(response) => response,
             None => script.standing.clone(),
@@ -891,6 +962,17 @@ impl HttpReceiver {
     /// Replaces the response every request takes once the script is empty.
     pub(crate) fn answer_unscripted_requests_with(&self, response: ReceiverResponse) {
         self.state.script.lock().standing = response;
+    }
+
+    /// Answers every request for exactly `target`, its path and query, with `response`, ahead of
+    /// the script, which such a request leaves untouched.
+    pub(crate) fn answer_requests_for(&self, target: String, response: ReceiverResponse) {
+        self.state.script.lock().by_target.insert(target, response);
+    }
+
+    /// Answers every request held until released, now and later, with `response`.
+    pub(crate) fn release_held_responses(&self, response: ReceiverResponse) {
+        self.state.release.send_replace(Some(response));
     }
 
     pub(crate) fn captured(&self) -> Vec<CapturedRequest> {
@@ -1173,6 +1255,7 @@ impl Connection {
                 Err(fault) => return ConnectionEnd::Faulted(fault),
             };
             let closes = request.closes;
+            let target = request.captured.target.clone();
             match self.state.capture(request.captured) {
                 Capture::Kept => {}
                 Capture::AtLimit => {
@@ -1182,10 +1265,17 @@ impl Connection {
                     });
                 }
             }
-            let answered = match self.state.next_response() {
+            let mut response = self.state.next_response(&target);
+            if let ReceiverResponse::HoldUntilReleased = response {
+                response = match self.hold_until_released(&mut stream).await {
+                    Ok(released) => released,
+                    Err(end) => return end,
+                };
+            }
+            let answered = match response {
                 ReceiverResponse::Respond(response) => self.respond(&mut stream, &response).await,
                 ReceiverResponse::LoseResponse => return ConnectionEnd::Closed,
-                ReceiverResponse::HoldResponse => {
+                ReceiverResponse::HoldResponse | ReceiverResponse::HoldUntilReleased => {
                     return self.hold(&mut stream).await;
                 }
                 ReceiverResponse::Raw(bytes) => {
@@ -1267,6 +1357,40 @@ impl Connection {
             match read {
                 Ok(0) | Err(_) => return ConnectionEnd::Closed,
                 Ok(_) => {}
+            }
+        }
+    }
+
+    /// Writes nothing, discarding whatever the client sends, until the scenario releases held
+    /// responses, and returns the response they are released with. The client leaving or the
+    /// receiver stopping ends the connection first.
+    async fn hold_until_released<S>(
+        &self,
+        stream: &mut S,
+    ) -> Result<ReceiverResponse, ConnectionEnd>
+    where
+        S: AsyncRead + Unpin,
+    {
+        let mut release = self.state.release.subscribe();
+        let mut discard = vec![0_u8; READ_CHUNK_BYTES];
+        loop {
+            tokio::task::consume_budget().await;
+            tokio::select! {
+                () = self.cancellation.cancelled() => return Err(ConnectionEnd::Closed),
+                released = release.wait_for(Option::is_some) => {
+                    let released = released.assured(
+                        "the connection keeps the receiver state, and with it the release sender, \
+                         alive",
+                    );
+                    let response = released
+                        .clone()
+                        .verified("wait_for returns only once the release holds a response");
+                    return Ok(response);
+                }
+                read = stream.read(&mut discard) => match read {
+                    Ok(0) | Err(_) => return Err(ConnectionEnd::Closed),
+                    Ok(_) => {}
+                },
             }
         }
     }

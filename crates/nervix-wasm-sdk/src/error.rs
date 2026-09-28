@@ -1,5 +1,6 @@
 use arrow_schema::ArrowError;
-use nervix_wasm_protocol::{ProtocolError, SavedStateRejection};
+use error_stack::Report;
+use nervix_wasm_protocol::SavedStateRejection;
 use thiserror::Error;
 
 pub(crate) const SUCCESS: i32 = 0;
@@ -21,8 +22,8 @@ pub enum GuestError {
     NotInitialized,
     #[error("Arrow IPC processing failed: {0}")]
     ArrowIpc(#[from] ArrowError),
-    #[error("envelope protocol violation: {0}")]
-    Protocol(#[from] ProtocolError),
+    #[error("envelope protocol violation")]
+    Protocol,
     #[error("{reason}")]
     Failed { reason: String },
 }
@@ -31,10 +32,10 @@ impl GuestError {
     /// Wraps a processor-defined fatal failure. The ABI adapter reports the
     /// reason through the global error channel and latches the guest into
     /// error state.
-    pub fn failed(reason: impl Into<String>) -> Self {
-        Self::Failed {
+    pub fn failed(reason: impl Into<String>) -> Report<Self> {
+        Report::new(Self::Failed {
             reason: reason.into(),
-        }
+        })
     }
 
     pub(crate) const fn abi_code(&self) -> i32 {
@@ -43,7 +44,7 @@ impl GuestError {
             Self::OutOfBounds => ERR_OUT_OF_BOUNDS,
             Self::NotInitialized => ERR_NOT_INITIALIZED,
             Self::ArrowIpc(_) => ERR_ARROW_IPC,
-            Self::Protocol(_) => ERR_ENVELOPE,
+            Self::Protocol => ERR_ENVELOPE,
             Self::Failed { .. } => ERR_ERROR_STATE,
         }
     }
@@ -56,15 +57,16 @@ impl GuestError {
 /// channel.
 #[derive(Debug, Error)]
 pub(crate) enum RejectedSnapshot {
-    #[error("saved state is not a guest snapshot envelope: {0}")]
-    UndecodableEnvelope(ProtocolError),
-    #[error("saved snapshot carries init metadata this guest cannot decode: {0}")]
-    UndecodableInitMetadata(ProtocolError),
+    #[error("saved state is not a guest snapshot envelope")]
+    UndecodableEnvelope,
+    #[error("saved snapshot carries init metadata this guest cannot decode")]
+    UndecodableInitMetadata,
     #[error("saved snapshot was taken under a different branch configuration")]
     OtherBranchConfiguration,
-    /// The processor refused the application state; its own error is the whole reason.
-    #[error("{0}")]
-    ApplicationState(GuestError),
+    /// The processor refused the application state; the guest report below this context is the
+    /// reason the ABI renders.
+    #[error("saved application state was rejected")]
+    ApplicationState,
 }
 
 impl RejectedSnapshot {
@@ -72,10 +74,10 @@ impl RejectedSnapshot {
     /// it carries is unusable.
     pub(crate) const fn verdict(&self) -> SavedStateRejection {
         match self {
-            Self::UndecodableEnvelope(_)
-            | Self::UndecodableInitMetadata(_)
+            Self::UndecodableEnvelope
+            | Self::UndecodableInitMetadata
             | Self::OtherBranchConfiguration => SavedStateRejection::SnapshotEnvelope,
-            Self::ApplicationState(_) => SavedStateRejection::ApplicationState,
+            Self::ApplicationState => SavedStateRejection::ApplicationState,
         }
     }
 }
@@ -93,26 +95,22 @@ mod tests {
             GuestError::ArrowIpc(ArrowError::ParseError("x".to_string())).abi_code(),
             -4
         );
-        assert_eq!(
-            GuestError::Protocol(ProtocolError::InvalidIdentifier).abi_code(),
-            -5
-        );
-        assert_eq!(GuestError::failed("fatal").abi_code(), -6);
+        assert_eq!(GuestError::Protocol.abi_code(), -5);
+        assert_eq!(GuestError::failed("fatal").current_context().abi_code(), -6);
     }
 
     #[test]
     fn a_rejected_envelope_and_a_rejected_application_state_report_their_own_verdicts() {
         let envelope_rejections = [
-            RejectedSnapshot::UndecodableEnvelope(ProtocolError::InvalidIdentifier),
-            RejectedSnapshot::UndecodableInitMetadata(ProtocolError::InvalidIdentifier),
+            RejectedSnapshot::UndecodableEnvelope,
+            RejectedSnapshot::UndecodableInitMetadata,
             RejectedSnapshot::OtherBranchConfiguration,
         ];
         for rejected in envelope_rejections {
             assert_eq!(rejected.verdict(), SavedStateRejection::SnapshotEnvelope);
         }
         assert_eq!(
-            RejectedSnapshot::ApplicationState(GuestError::failed("counters are truncated"))
-                .verdict(),
+            RejectedSnapshot::ApplicationState.verdict(),
             SavedStateRejection::ApplicationState
         );
     }

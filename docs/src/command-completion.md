@@ -29,8 +29,10 @@ at or before the fence, and one created too far ahead are refused before any eff
 An applying execution never expires. A terminal result is retained for the retry validity after the
 command finishes. The record then shrinks to a tombstone holding only the reference, and the
 tombstone is removed once the fence passes the reference's creation time. From then on the fence
-refuses the reference by itself, so a reclaimed reference reports that it has expired and never
-starts its effect again. Report retention is a separate contract: a transaction's report follows
+refuses the reference by itself, so a reclaimed reference returns the typed
+`ExecutionReferenceExpired` disposition and never starts its effect again. A conflicting reference
+found during replicated admission returns `ExecutionReferenceConflict` with the kind that differed.
+Report retention is a separate contract: a transaction's report follows
 the transaction tombstone retention, so inspection can still read it after its command reference
 has expired, and a report that inspection no longer knows does not make its reference executable.
 

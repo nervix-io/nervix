@@ -604,9 +604,11 @@ the drain until its timeout. When every node terminates at once, each node compl
 admitted work within its own drain timeout, and work that reaches a peer after that peer finished
 its drain is negatively acknowledged.
 
-`DROP NODE` records the stopped process incarnation before removing its Raft membership. Delayed
-gossip cannot admit that process again. Starting the node again creates a newer incarnation, which
-can join the cluster normally.
+`DROP NODE` records the stopped process incarnation before removing its Raft membership. It reads
+the newest identity from both live gossip and the failure detector's dead process identities, so a
+node can still be removed after Chitchat stops reporting it as live. Delayed gossip cannot admit
+that process again. Starting the node again creates a newer incarnation, which can join the cluster
+normally.
 
 Unexpected owner loss remains a termination and uses the failover path. The failed task and its
 volatile buffers disappear immediately, attached work is negatively acknowledged, and the scheduler

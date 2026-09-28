@@ -6,24 +6,25 @@
 //! - **Depends on.** The node resolver and Reqwest's public DNS traits.
 //! - **Must not know.** Connector configuration, HTTP requests, Iceberg tables, or retry policy.
 
-use std::{error::Error, net::SocketAddr, time::Duration};
+use std::{error::Error, net::SocketAddr};
 
 use crate::DnsResolver;
 
 type ResolveError = Box<dyn Error + Send + Sync>;
 type Addresses = Box<dyn Iterator<Item = SocketAddr> + Send>;
 
-/// An HTTP request's own timeout can cancel this lookup sooner. The bound also keeps clients
-/// without a configured request timeout from waiting indefinitely on a silent name server.
-const LOOKUP_BUDGET: Duration = Duration::from_secs(30);
-
 impl DnsResolver {
     async fn reqwest_addresses(&self, name: String) -> Result<Addresses, ResolveError> {
         let addresses = self
-            .resolve(&name, 0, LOOKUP_BUDGET)
+            .hook_addresses(&name)
             .await
             .map_err(|report| -> ResolveError { Box::new(report.current_context().clone()) })?;
-        Ok(Box::new(addresses.into_iter()))
+        let mut sockets = Vec::with_capacity(addresses.len());
+        for ip in addresses {
+            // Reqwest gives an address whose port is zero the URL's port, or its scheme's default.
+            sockets.push(SocketAddr::new(ip, 0));
+        }
+        Ok(Box::new(sockets.into_iter()))
     }
 }
 

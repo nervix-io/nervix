@@ -15,6 +15,7 @@
 use std::{fmt::Display, io, str::FromStr};
 
 use bytes::Bytes;
+use error_stack::Report;
 use jaq_core::{
     Compiler as JaqCompiler, Ctx as JaqCtx, Filter as JaqFilter, ValXs as JaqValXs,
     Vars as JaqVars, data,
@@ -124,11 +125,12 @@ impl From<serde_json::error::Category> for JsonNumberIssue {
 pub struct JaqInput(JaqVal);
 
 impl TryFrom<JsonValue> for JaqInput {
-    type Error = JaqProgramError;
+    type Error = Report<JaqProgramError>;
 
     fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
-        let value = serde_json::from_value(value).map_err(|error| JaqProgramError::Eval {
-            reason: error.to_string(),
+        let value = serde_json::from_value(value).map_err(|error| {
+            let reason = error.to_string();
+            Report::new(error).change_context(JaqProgramError::Eval { reason })
         })?;
         Ok(Self(value))
     }
@@ -139,7 +141,7 @@ impl TryFrom<JsonValue> for JaqInput {
 pub struct JaqOutput(JaqVal);
 
 impl TryFrom<JaqOutput> for JsonValue {
-    type Error = JaqProgramError;
+    type Error = Report<JaqProgramError>;
 
     fn try_from(output: JaqOutput) -> Result<Self, Self::Error> {
         jaq_value_to_json(output.0)
@@ -161,7 +163,7 @@ impl std::fmt::Debug for CompiledJaqProgram {
 }
 
 impl CompiledJaqProgram {
-    pub fn compile(source: &str) -> Result<Self, JaqProgramError> {
+    pub fn compile(source: &str) -> error_stack::Result<Self, JaqProgramError> {
         compile_filter(source, &[]).map(|filter| Self {
             source: source.to_string(),
             filter,
@@ -173,7 +175,7 @@ impl CompiledJaqProgram {
     }
 
     /// Run the program and require exactly one output.
-    pub fn run_single(&self, input: JsonValue) -> Result<JsonValue, JaqProgramError> {
+    pub fn run_single(&self, input: JsonValue) -> error_stack::Result<JsonValue, JaqProgramError> {
         run_single(&self.filter, JaqInput::try_from(input)?, Vec::new())
     }
 
@@ -181,7 +183,10 @@ impl CompiledJaqProgram {
     ///
     /// Matchers probe payloads they were not written for, so an absent output is an ordinary
     /// answer rather than a failure.
-    pub fn run_first(&self, input: JsonValue) -> Result<Option<JsonValue>, JaqProgramError> {
+    pub fn run_first(
+        &self,
+        input: JsonValue,
+    ) -> error_stack::Result<Option<JsonValue>, JaqProgramError> {
         run_first(&self.filter, JaqInput::try_from(input)?, Vec::new())
     }
 
@@ -215,7 +220,7 @@ impl std::fmt::Debug for StatefulJaqProgram {
 }
 
 impl StatefulJaqProgram {
-    pub fn compile(source: &str) -> Result<Self, JaqProgramError> {
+    pub fn compile(source: &str) -> error_stack::Result<Self, JaqProgramError> {
         compile_filter(source, &[STATE_VAR]).map(|filter| Self {
             source: source.to_string(),
             filter,
@@ -230,7 +235,7 @@ impl StatefulJaqProgram {
         &self,
         input: JsonValue,
         state: &JsonValue,
-    ) -> Result<JsonValue, JaqProgramError> {
+    ) -> error_stack::Result<JsonValue, JaqProgramError> {
         run_single(&self.filter, JaqInput::try_from(input)?, self.bind(state)?)
     }
 
@@ -238,15 +243,15 @@ impl StatefulJaqProgram {
         &self,
         input: JsonValue,
         state: &JsonValue,
-    ) -> Result<Option<JsonValue>, JaqProgramError> {
+    ) -> error_stack::Result<Option<JsonValue>, JaqProgramError> {
         run_first(&self.filter, JaqInput::try_from(input)?, self.bind(state)?)
     }
 
-    fn bind(&self, state: &JsonValue) -> Result<Vec<JaqVal>, JaqProgramError> {
-        let state: JaqVal =
-            serde_json::from_value(state.clone()).map_err(|error| JaqProgramError::Eval {
-                reason: error.to_string(),
-            })?;
+    fn bind(&self, state: &JsonValue) -> error_stack::Result<Vec<JaqVal>, JaqProgramError> {
+        let state: JaqVal = serde_json::from_value(state.clone()).map_err(|error| {
+            let reason = error.to_string();
+            Report::new(error).change_context(JaqProgramError::Eval { reason })
+        })?;
         Ok(vec![state])
     }
 }
@@ -254,7 +259,7 @@ impl StatefulJaqProgram {
 fn compile_filter(
     source: &str,
     global_vars: &[&str],
-) -> Result<JaqFilter<data::JustLut<JaqVal>>, JaqProgramError> {
+) -> error_stack::Result<JaqFilter<data::JustLut<JaqVal>>, JaqProgramError> {
     let defs = jaq_core::defs()
         .chain(jaq_std::defs())
         .chain(jaq_json::defs());
@@ -272,15 +277,19 @@ fn compile_filter(
                 path: (),
             },
         )
-        .map_err(|errors| JaqProgramError::Compile {
-            reason: format!("{errors:?}"),
+        .map_err(|errors| {
+            Report::new(JaqProgramError::Compile {
+                reason: format!("{errors:?}"),
+            })
         })?;
     JaqCompiler::default()
         .with_funs(funs)
         .with_global_vars(global_vars.iter().copied())
         .compile(modules)
-        .map_err(|errors| JaqProgramError::Compile {
-            reason: format!("{errors:?}"),
+        .map_err(|errors| {
+            Report::new(JaqProgramError::Compile {
+                reason: format!("{errors:?}"),
+            })
         })
 }
 
@@ -299,14 +308,14 @@ fn run_single(
     filter: &JaqFilter<data::JustLut<JaqVal>>,
     input: JaqInput,
     vars: Vec<JaqVal>,
-) -> Result<JsonValue, JaqProgramError> {
+) -> error_stack::Result<JsonValue, JaqProgramError> {
     let mut outputs = run(filter, input, vars);
     let Some(output) = outputs.next() else {
-        return Err(JaqProgramError::NoOutput);
+        return Err(Report::new(JaqProgramError::NoOutput));
     };
     let output = output?;
     if outputs.next().is_some() {
-        return Err(JaqProgramError::MultipleOutputs);
+        return Err(Report::new(JaqProgramError::MultipleOutputs));
     }
     JsonValue::try_from(output)
 }
@@ -315,7 +324,7 @@ fn run_first(
     filter: &JaqFilter<data::JustLut<JaqVal>>,
     input: JaqInput,
     vars: Vec<JaqVal>,
-) -> Result<Option<JsonValue>, JaqProgramError> {
+) -> error_stack::Result<Option<JsonValue>, JaqProgramError> {
     let Some(output) = run(filter, input, vars).next() else {
         return Ok(None);
     };
@@ -427,17 +436,25 @@ impl JaqNativeFormat {
     }
 
     /// Decode a payload into the single value it represents.
-    pub fn read_single_value(self, payload: &[u8]) -> Result<JsonValue, JaqFormatError> {
+    pub fn read_single_value(
+        self,
+        payload: &[u8],
+    ) -> error_stack::Result<JsonValue, JaqFormatError> {
         let bytes = Bytes::copy_from_slice(payload);
         let mut values = self.read_values(&bytes);
         let Some(value) = values.next() else {
-            return Err(self.decode("payload produced no input values"));
+            return Err(Report::new(self.decode("payload produced no input values")));
         };
         let value = value?;
         if values.next().is_some() {
-            return Err(self.decode("payload produced multiple input values"));
+            return Err(Report::new(
+                self.decode("payload produced multiple input values"),
+            ));
         }
-        jaq_value_to_json(value.0).map_err(|error| self.decode(error))
+        jaq_value_to_json(value.0).map_err(|report| {
+            let reason = report.current_context().to_string();
+            report.change_context(self.decode(reason))
+        })
     }
 
     /// Whether a value the reader produced is one of the payload's values.
@@ -472,7 +489,7 @@ impl JaqNativeFormat {
     }
 
     /// Encode one value as a payload of this format.
-    pub fn write_value(self, value: JsonValue) -> Result<Vec<u8>, JaqFormatError> {
+    pub fn write_value(self, value: JsonValue) -> error_stack::Result<Vec<u8>, JaqFormatError> {
         let mut encoded = Vec::new();
         self.write_value_into(&value, &mut encoded)?;
         Ok(encoded)
@@ -486,16 +503,22 @@ impl JaqNativeFormat {
         self,
         value: &JsonValue,
         output: &mut impl io::Write,
-    ) -> Result<(), JaqFormatError> {
+    ) -> error_stack::Result<(), JaqFormatError> {
         if self == Self::Raw {
             let JsonValue::String(value) = value else {
-                return Err(self.encode("RAW payloads require a string value"));
+                return Err(Report::new(
+                    self.encode("RAW payloads require a string value"),
+                ));
             };
-            return output
-                .write_all(value.as_bytes())
-                .map_err(|error| self.encode(error));
+            return output.write_all(value.as_bytes()).map_err(|error| {
+                let reason = error.to_string();
+                Report::new(error).change_context(self.encode(reason))
+            });
         }
-        let value = JaqVal::deserialize(value).map_err(|error| self.encode(error))?;
+        let value = JaqVal::deserialize(value).map_err(|error| {
+            let reason = error.to_string();
+            Report::new(error).change_context(self.encode(reason))
+        })?;
         let writer = JaqWriter {
             format: self.jaq_format(),
             // YAML reads `{1:2}` as the key `"1:2"`, so a space after the separator is required
@@ -506,7 +529,10 @@ impl JaqNativeFormat {
             },
             join: true,
         };
-        jaq_write::write(output, &writer, &value).map_err(|error| self.encode(error))
+        jaq_write::write(output, &writer, &value).map_err(|error| {
+            let reason = error.to_string();
+            Report::new(error).change_context(self.encode(reason))
+        })
     }
 
     fn decode(self, reason: impl Display) -> JaqFormatError {
@@ -536,13 +562,16 @@ pub struct JaqPayloadValues<'a> {
 }
 
 impl Iterator for JaqPayloadValues<'_> {
-    type Item = Result<JaqInput, JaqFormatError>;
+    type Item = error_stack::Result<JaqInput, JaqFormatError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let value = match self.values.next()? {
                 Ok(value) => value,
-                Err(error) => return Some(Err(self.format.read_failure(&error))),
+                Err(error) => {
+                    let context = self.format.read_failure(&error);
+                    return Some(Err(Report::new(error).change_context(context)));
+                }
             };
             if self.format.holds_value(&value) {
                 return Some(Ok(JaqInput(value)));
@@ -559,21 +588,21 @@ pub struct JaqOutputs<'a> {
 }
 
 impl Iterator for JaqOutputs<'_> {
-    type Item = Result<JaqOutput, JaqProgramError>;
+    type Item = error_stack::Result<JaqOutput, JaqProgramError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let output = self.outputs.next()?;
         match unwrap_valr(output) {
             Ok(value) => Some(Ok(JaqOutput(value))),
-            Err(error) => Some(Err(JaqProgramError::Eval {
+            Err(error) => Some(Err(Report::new(JaqProgramError::Eval {
                 reason: error.to_string(),
-            })),
+            }))),
         }
     }
 }
 
-fn jaq_value_to_json(value: JaqVal) -> Result<JsonValue, JaqProgramError> {
-    jaq_value_to_json_inner(value).map_err(|error| error.current_context().clone())
+fn jaq_value_to_json(value: JaqVal) -> error_stack::Result<JsonValue, JaqProgramError> {
+    jaq_value_to_json_inner(value)
 }
 
 fn jaq_value_to_json_inner(value: JaqVal) -> error_stack::Result<JsonValue, JaqProgramError> {
@@ -587,10 +616,10 @@ fn jaq_value_to_json_inner(value: JaqVal) -> error_stack::Result<JsonValue, JaqP
         JaqVal::TStr(value) => String::from_utf8(value.to_vec())
             .map(JsonValue::String)
             .map_err(|error| {
-                let error = error.utf8_error();
-                error_stack::Report::new(JaqProgramError::InvalidJsonText {
-                    valid_up_to: error.valid_up_to(),
-                    error_len: error.error_len(),
+                let utf8 = error.utf8_error();
+                error_stack::Report::new(utf8).change_context(JaqProgramError::InvalidJsonText {
+                    valid_up_to: utf8.valid_up_to(),
+                    error_len: utf8.error_len(),
                 })
             }),
         JaqVal::Arr(values) => values
@@ -604,11 +633,13 @@ fn jaq_value_to_json_inner(value: JaqVal) -> error_stack::Result<JsonValue, JaqP
             for (key, value) in values.iter() {
                 let key = match key {
                     JaqVal::TStr(key) => String::from_utf8(key.to_vec()).map_err(|error| {
-                        let error = error.utf8_error();
-                        error_stack::Report::new(JaqProgramError::InvalidJsonText {
-                            valid_up_to: error.valid_up_to(),
-                            error_len: error.error_len(),
-                        })
+                        let utf8 = error.utf8_error();
+                        error_stack::Report::new(utf8).change_context(
+                            JaqProgramError::InvalidJsonText {
+                                valid_up_to: utf8.valid_up_to(),
+                                error_len: utf8.error_len(),
+                            },
+                        )
                     })?,
                     _ => {
                         return Err(error_stack::Report::new(
@@ -631,41 +662,145 @@ fn jaq_num_to_json(value: JaqNum) -> error_stack::Result<JsonValue, JaqProgramEr
     serde_json::Number::from_str(&rendered)
         .map(JsonValue::Number)
         .map_err(|error| {
-            error_stack::Report::new(JaqProgramError::InvalidJsonNumber {
-                issue: error.classify().into(),
-                line: error.line(),
-                column: error.column(),
+            let issue = error.classify().into();
+            let line = error.line();
+            let column = error.column();
+            error_stack::Report::new(error).change_context(JaqProgramError::InvalidJsonNumber {
+                issue,
+                line,
+                column,
             })
         })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use serde_json::json;
 
     use super::*;
 
     #[test]
+    fn program_failures_keep_report_context() {
+        let compile =
+            CompiledJaqProgram::compile("invalid(").expect_err("invalid program should fail");
+        assert!(matches!(
+            compile.current_context(),
+            JaqProgramError::Compile { .. }
+        ));
+
+        let program = CompiledJaqProgram::compile("select(.ok)").expect("program should compile");
+        let execution = program
+            .run_single(json!({"ok": false}))
+            .expect_err("filtered program should produce no output");
+        assert!(matches!(
+            execution.current_context(),
+            JaqProgramError::NoOutput
+        ));
+    }
+
+    #[test]
+    fn evaluator_failures_remain_distinct_from_empty_output() {
+        let program = CompiledJaqProgram::compile("error(\"evaluation failed\")")
+            .expect("the error builtin is valid Jaq syntax");
+        let report = program
+            .run_single(json!(null))
+            .expect_err("the program deliberately raises an evaluation error");
+        assert!(matches!(
+            report.current_context(),
+            JaqProgramError::Eval { reason } if reason.contains("evaluation failed")
+        ));
+    }
+
+    #[test]
+    fn single_value_decoding_rejects_empty_and_multi_value_payloads() {
+        let empty = JaqNativeFormat::Json
+            .read_single_value(b"")
+            .expect_err("a JSON payload must contain one value");
+        assert!(matches!(
+            empty.current_context(),
+            JaqFormatError::Decode { format: "JSON", reason }
+                if reason.contains("no input values")
+        ));
+        let multiple = JaqNativeFormat::Json
+            .read_single_value(b"1\n2")
+            .expect_err("two JSON values are not one payload value");
+        assert!(matches!(
+            multiple.current_context(),
+            JaqFormatError::Decode { format: "JSON", reason }
+                if reason.contains("multiple input values")
+        ));
+    }
+
+    #[test]
+    fn writer_failures_keep_format_and_io_source() {
+        struct RejectWriter;
+
+        impl io::Write for RejectWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("output limit reached"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        for (format, value) in [
+            (JaqNativeFormat::Raw, json!("raw bytes")),
+            (JaqNativeFormat::Json, json!({"value": 1})),
+        ] {
+            let report = format
+                .write_value_into(&value, &mut RejectWriter)
+                .expect_err("the writer rejects encoded bytes");
+            assert!(matches!(
+                report.current_context(),
+                JaqFormatError::Encode { format: name, reason }
+                    if *name == format.name() && reason.contains("output limit reached")
+            ));
+            assert!(report.contains::<io::Error>());
+        }
+    }
+
+    #[test]
     fn json_conversion_failures_keep_typed_value_details() {
         assert_eq!(
             jaq_value_to_json(JaqVal::byte_str(Bytes::from_static(b"\xff")))
-                .expect_err("binary strings are outside JSON"),
-            JaqProgramError::BinaryStringNotJson
+                .expect_err("binary strings are outside JSON")
+                .current_context(),
+            &JaqProgramError::BinaryStringNotJson
         );
         assert_eq!(
             jaq_value_to_json(JaqVal::utf8_str(Bytes::from_static(b"\xff")))
-                .expect_err("invalid UTF-8 is outside JSON"),
-            JaqProgramError::InvalidJsonText {
+                .expect_err("invalid UTF-8 is outside JSON")
+                .current_context(),
+            &JaqProgramError::InvalidJsonText {
                 valid_up_to: 0,
                 error_len: Some(1),
             }
         );
 
+        let mut invalid_key = jaq_json::Map::default();
+        invalid_key.insert(JaqVal::utf8_str(Bytes::from_static(b"\xff")), JaqVal::Null);
+        let report = jaq_value_to_json(JaqVal::obj(invalid_key))
+            .expect_err("JSON object keys must contain valid UTF-8");
+        assert_eq!(
+            report.current_context(),
+            &JaqProgramError::InvalidJsonText {
+                valid_up_to: 0,
+                error_len: Some(1),
+            }
+        );
+        assert!(report.contains::<std::str::Utf8Error>());
+
         let mut object = jaq_json::Map::default();
         object.insert(JaqVal::Bool(true), JaqVal::Null);
         assert_eq!(
-            jaq_value_to_json(JaqVal::obj(object)).expect_err("JSON object keys must be strings"),
-            JaqProgramError::JsonObjectKeyType {
+            jaq_value_to_json(JaqVal::obj(object))
+                .expect_err("JSON object keys must be strings")
+                .current_context(),
+            &JaqProgramError::JsonObjectKeyType {
                 expected: JaqValueKind::TextString,
                 found: JaqValueKind::Bool,
             }
@@ -726,7 +861,7 @@ mod tests {
 
         assert!(matches!(
             program.run_single(json!([1, 2])),
-            Err(JaqProgramError::MultipleOutputs)
+            Err(error) if matches!(error.current_context(), JaqProgramError::MultipleOutputs)
         ));
     }
 
@@ -736,7 +871,7 @@ mod tests {
 
         assert!(matches!(
             program.run_single(json!({"ok": false})),
-            Err(JaqProgramError::NoOutput)
+            Err(error) if matches!(error.current_context(), JaqProgramError::NoOutput)
         ));
     }
 
@@ -799,7 +934,7 @@ mod tests {
     fn a_stateless_program_cannot_reference_state() {
         assert!(matches!(
             CompiledJaqProgram::compile("$state.token"),
-            Err(JaqProgramError::Compile { .. })
+            Err(error) if matches!(error.current_context(), JaqProgramError::Compile { .. })
         ));
     }
 
@@ -807,7 +942,7 @@ mod tests {
     fn rejects_an_invalid_program() {
         assert!(matches!(
             CompiledJaqProgram::compile(".["),
-            Err(JaqProgramError::Compile { .. })
+            Err(error) if matches!(error.current_context(), JaqProgramError::Compile { .. })
         ));
     }
 
@@ -868,7 +1003,7 @@ mod tests {
     fn rejects_a_non_string_raw_payload() {
         assert!(matches!(
             JaqNativeFormat::Raw.write_value(json!({"id": 1})),
-            Err(JaqFormatError::Encode { .. })
+            Err(error) if matches!(error.current_context(), JaqFormatError::Encode { .. })
         ));
     }
 
@@ -932,7 +1067,7 @@ mod tests {
         assert!(matches!(values.next(), Some(Ok(_))));
         assert!(matches!(
             values.next(),
-            Some(Err(JaqFormatError::Decode { .. }))
+            Some(Err(error)) if matches!(error.current_context(), JaqFormatError::Decode { .. })
         ));
     }
 
@@ -969,7 +1104,7 @@ mod tests {
         assert!(matches!(values.next(), Some(Ok(_))));
         assert!(matches!(
             values.next(),
-            Some(Err(JaqFormatError::Decode { .. }))
+            Some(Err(error)) if matches!(error.current_context(), JaqFormatError::Decode { .. })
         ));
     }
 
@@ -993,7 +1128,7 @@ mod tests {
 
         assert!(matches!(
             values.next(),
-            Some(Err(JaqFormatError::Decode { .. }))
+            Some(Err(error)) if matches!(error.current_context(), JaqFormatError::Decode { .. })
         ));
         assert!(values.next().is_none());
     }

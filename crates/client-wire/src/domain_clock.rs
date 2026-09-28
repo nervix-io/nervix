@@ -1,5 +1,5 @@
-//! Domain clock attachment: the observed clock, the replies to attach and detach, and the frames an
-//! attached session receives.
+//! Domain clock attachment: observed state and tick progress, attach and detach replies, and the
+//! frames an attached session receives.
 
 use std::fmt;
 
@@ -8,7 +8,8 @@ use flatbuffers::WIPOffset;
 use meticulous::OptionExt as _;
 use nervix_models::{
     DomainClockObservation, DomainClockObservedState, DomainClockPeriod, DomainClockSkew,
-    DomainClockState, DomainName, DomainTimeRate, PacedDomainClock, Timestamp,
+    DomainClockState, DomainClockTickObservation, DomainName, DomainTimeRate, PacedDomainClock,
+    Timestamp,
 };
 
 use crate::{
@@ -373,6 +374,58 @@ impl DomainClockObserved {
         Ok(Self {
             domain: decoder.name("DomainClockObserved.domain", observed.domain())?,
             clock: decode_observation(decoder, observed.clock())?,
+        })
+    }
+}
+
+/// The newest accepted tick of an attached domain's paced clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainClockTicked {
+    pub domain: DomainName,
+    pub tick: DomainClockTickObservation,
+}
+
+impl DomainClockTicked {
+    pub fn encode(
+        &self,
+        limits: &SessionLimits,
+    ) -> Result<EncodedFrame<ServerFrame>, Report<WireEncodeError>> {
+        let mut encoder = Encoder::new(limits.frame_bytes(), limits);
+        let domain = encoder.text("DomainClockTicked.domain", self.domain.as_str())?;
+        let ticked = wire::DomainClockTicked::create(
+            encoder.fbb(),
+            &wire::DomainClockTickedArgs {
+                domain: Some(domain),
+                generation: self.tick.generation,
+                tick_id: self.tick.tick_id,
+                logical_boundary_unix_nanos: self.tick.logical_boundary.unix_nanos(),
+                authority_utc_unix_nanos: self.tick.authority_utc.unix_nanos(),
+                serving_logical_unix_nanos: self.tick.serving_logical.unix_nanos(),
+            },
+        );
+        finish_server_message(
+            encoder,
+            EncodedUnion::new(wire::ServerBody::DomainClockTicked, ticked),
+        )
+    }
+
+    pub(crate) fn decode(
+        decoder: Decoder<'_>,
+        ticked: wire::DomainClockTicked<'_>,
+    ) -> Result<Self, Report<WireDecodeError>> {
+        Ok(Self {
+            domain: decoder.name("DomainClockTicked.domain", ticked.domain())?,
+            tick: DomainClockTickObservation {
+                generation: decoder
+                    .non_zero("DomainClockTicked.generation", ticked.generation())?
+                    .get(),
+                tick_id: decoder
+                    .non_zero("DomainClockTicked.tick_id", ticked.tick_id())?
+                    .get(),
+                logical_boundary: Timestamp::from_unix_nanos(ticked.logical_boundary_unix_nanos()),
+                authority_utc: Timestamp::from_unix_nanos(ticked.authority_utc_unix_nanos()),
+                serving_logical: Timestamp::from_unix_nanos(ticked.serving_logical_unix_nanos()),
+            },
         })
     }
 }
