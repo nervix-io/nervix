@@ -54,7 +54,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto;
 use nervix_bounded_write::{BoundedWrite, BoundedWriter};
 use nervix_columnar_json::{FieldNulls, JsonColumnSpec, JsonColumns, NestedNulls};
-use nervix_jaq::{CompiledJaqProgram, JaqNativeFormat};
+use nervix_jaq::{CompiledJaqProgram, JaqFormatError, JaqNativeFormat, JaqProgramError};
 use nervix_models::{
     AvroType, CodecEncodingRule, CodecJaqTransformations, CodecName, CreateCodec, CreateSchema,
     CreateWireSchema, JsonType, ModelName, ParseAsType, PayloadSizeLimit,
@@ -196,6 +196,7 @@ impl CompiledJaqTransformations {
                         .map_err(|error| CodecError::InvalidJaqTransformation {
                             codec: codec.as_str().to_string(),
                             reason: error.to_string(),
+                            report: error,
                         })
                 })
                 .transpose()
@@ -416,12 +417,14 @@ pub enum CodecError {
         codec: String,
         format: &'static str,
         reason: String,
+        report: error_stack::Report<JaqFormatError>,
     },
     #[error("failed to encode {format} payload for codec '{codec}': {reason}")]
     JaqNativeEncode {
         codec: String,
         format: &'static str,
         reason: String,
+        report: error_stack::Report<JaqFormatError>,
     },
     #[error("failed to write the encoded payload for codec '{codec}': {source}")]
     PayloadWrite {
@@ -431,6 +434,12 @@ pub enum CodecError {
     },
     #[error("failed to parse protobuf payload for codec '{codec}': {reason}")]
     ProtobufDecode { codec: String, reason: String },
+    #[error("failed to parse protobuf payload for codec '{codec}': {reason}")]
+    ProtobufJaqInput {
+        codec: String,
+        reason: String,
+        report: error_stack::Report<JaqProgramError>,
+    },
     #[error("failed to encode protobuf payload for codec '{codec}': {reason}")]
     ProtobufEncode { codec: String, reason: String },
     #[error("failed to parse syslog payload for codec '{codec}': {reason}")]
@@ -440,7 +449,11 @@ pub enum CodecError {
     #[error("codec '{codec}' expected an object")]
     ExpectedObject { codec: String },
     #[error("codec '{codec}' has invalid jaq transformation: {reason}")]
-    InvalidJaqTransformation { codec: String, reason: String },
+    InvalidJaqTransformation {
+        codec: String,
+        reason: String,
+        report: error_stack::Report<JaqProgramError>,
+    },
     #[error(
         "protobuf codec '{codec}' declares no BATCH MESSAGE, which a batching emitter publishes in"
     )]
@@ -455,9 +468,18 @@ pub enum CodecError {
         message: String,
     },
     #[error("codec '{codec}' jaq transformation failed: {reason}")]
-    JaqTransform { codec: String, reason: String },
+    JaqTransform {
+        codec: String,
+        reason: String,
+        report: error_stack::Report<JaqProgramError>,
+    },
     #[error("codec '{codec}' ON INGESTION program evaluation failed")]
-    JaqIngestionEvaluation { codec: String },
+    JaqIngestionEvaluation {
+        codec: String,
+        /// The evaluator may quote input values, so the typed report is retained for trace-level
+        /// diagnosis but excluded from the public error's display and source chain.
+        report: error_stack::Report<JaqProgramError>,
+    },
     #[error("{cause} ({position})")]
     Unfold {
         position: UnfoldPosition,
@@ -914,6 +936,7 @@ impl CompiledCodecBatchEncoder<'_> {
                             codec: codec.to_string(),
                             format: native.format.name(),
                             reason: error.to_string(),
+                            report: error,
                         })
                     })?;
             }
@@ -2139,12 +2162,8 @@ pub enum RuntimeSchemaError {
         #[source]
         source: ArrowError,
     },
-    #[error("failed to {operation}: {source}")]
-    VmOperation {
-        operation: RuntimeVmOperation,
-        #[source]
-        source: nervix_vm::RuntimeError,
-    },
+    #[error("failed to {operation}")]
+    VmOperation { operation: RuntimeVmOperation },
     #[error("failed to {operation} for field '{field}'")]
     VmProjection {
         operation: RuntimeVmOperation,
@@ -3636,6 +3655,7 @@ fn run_jaq_transformation(
         .map_err(|error| CodecError::JaqTransform {
             codec: codec.name.as_str().to_string(),
             reason: error.to_string(),
+            report: error,
         })
 }
 

@@ -81,7 +81,9 @@ The cluster owns the transaction, not the TCP or WebSocket connection. Its owner
 state, structured semantic statements, and commit progress are replicated. The original statement
 source is retained for display, but execution never reparses that text. `BEGIN`, queueing,
 `COMMIT`, and `REVERT` are leader operations; clients transparently follow the normal leader
-redirect, including for the initial `BEGIN`.
+redirect, including for the initial `BEGIN`. [Transactions Over The
+Protocol](./client-session-protocol.md#transactions-over-the-protocol) describes how a transaction
+travels over the client session protocol and how clients recover its requests exactly.
 
 A transaction is `OPEN`, `COMMITTING`, or finished as `COMMITTED`, `FAILED`, `REVERTED`, or
 `EXPIRED`. A client retains the transaction id and attaches it after reconnecting. Attach is
@@ -91,8 +93,8 @@ The transaction reports the domain it is bound to, and an attaching or reconnect
 that domain as its selected domain. An unclean transport loss or leadership change leaves an open
 transaction available for attach. Binding is leader-local soft state, so a leader that does not
 hold it reports the session as detached; clients treat that as a routing condition, attach the
-transaction again, and replay the command. A clean end of the session reverts a bound open
-transaction.
+transaction again, and replay the command. A session that its client closes cleanly, with no
+request in flight, reverts the open transaction bound to it on the leader.
 
 Only the bound domain's replicated configuration effects may be queued:
 
@@ -296,7 +298,10 @@ state, pending count, progress, age, and idle time for live transactions and ret
 It also runs on its own beside an attached transaction without entering its queue or changing its
 session binding.
 
-An unbound `OPEN` transaction expires after its idle timeout; a bound transaction does not, and a
+An `OPEN` transaction expires once it has been inactive for its idle timeout, whether or not a
+session is bound to it. Attaching it, appending to it, and a commit's admission or failure renew
+that deadline; an open connection, a session binding, and reads of the transaction do not. The
+deadline is a durable UTC instant, so time the cluster spends stopped counts toward it. A
 `COMMITTING` transaction never expires. Defaults and server settings are:
 
 | Setting | Environment variable | Default |
@@ -599,9 +604,11 @@ the drain until its timeout. When every node terminates at once, each node compl
 admitted work within its own drain timeout, and work that reaches a peer after that peer finished
 its drain is negatively acknowledged.
 
-`DROP NODE` records the stopped process incarnation before removing its Raft membership. Delayed
-gossip cannot admit that process again. Starting the node again creates a newer incarnation, which
-can join the cluster normally.
+`DROP NODE` records the stopped process incarnation before removing its Raft membership. It reads
+the newest identity from both live gossip and the failure detector's dead process identities, so a
+node can still be removed after Chitchat stops reporting it as live. Delayed gossip cannot admit
+that process again. Starting the node again creates a newer incarnation, which can join the cluster
+normally.
 
 Unexpected owner loss remains a termination and uses the failover path. The failed task and its
 volatile buffers disappear immediately, attached work is negatively acknowledged, and the scheduler

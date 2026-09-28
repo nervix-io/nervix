@@ -146,7 +146,9 @@ Session replies carry typed command purpose and outcomes. An upload failure can 
 assigned nonzero resource version; before assignment, the version is absent. Diagnostic spans can
 be absent, while a present span beginning at offset zero is still present. The web console uses
 the typed outcome for domain-selection dispatch instead of matching reply message text. The
-FlatBuffers encoding preserves these optional fields and typed variants across the session edge.
+FlatBuffers encoding preserves these optional fields and typed variants across the session edge;
+[Client Session Protocol](./client-session-protocol.md#verification-before-reading) defines how a
+receiver keeps an absent optional value distinct from a present zero.
 
 Completion replies likewise carry a `SuggestionStatus` variant for ready, missing, stale, or failed
 context and an optional continuation. The server resolves typed semantic references from one

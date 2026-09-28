@@ -145,15 +145,15 @@ fn compile_sql_values_program(
     values: &[ClickHouseValueMapping],
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
-) -> Result<CompiledSqlValuesProgram, RuntimeError> {
+) -> error_stack::Result<CompiledSqlValuesProgram, RuntimeError> {
     if values.is_empty() {
-        return Err(RuntimeError::BuildDomainExecution {
+        return Err(Report::new(RuntimeError::BuildDomainExecution {
             domain: domain.as_str().to_string(),
             reason: format!(
                 "{label} emitter '{}' requires at least one VALUES mapping",
                 emitter.as_str()
             ),
-        });
+        }));
     }
     let mut assignments = Vec::with_capacity(values.len());
     for (index, mapping) in values.iter().enumerate() {
@@ -172,12 +172,15 @@ fn compile_sql_values_program(
         },
         nervix_vm::SemanticScopePolicy::read_write("input", namespace),
     )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "{label} VALUES for '{}' is invalid: {reason}",
+    .map_err(|error| {
+        let reason = format!(
+            "{label} VALUES for '{}' is invalid: {error}",
             emitter.as_str()
-        ),
+        );
+        error.change_context(RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason,
+        })
     })?;
     let empty_sink_schema =
         StdArc::new(arrow_schema::Schema::new(Vec::<arrow_schema::Field>::new()));
@@ -191,13 +194,16 @@ fn compile_sql_values_program(
         infer_bindings,
         runtime_udf_signatures(udfs),
     )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
+    .map_err(|error| {
+        let reason = format!(
             "{label} VALUES type inference failed for '{}': {}",
             emitter.as_str(),
-            error.message
-        ),
+            error.current_context().message
+        );
+        error.change_context(RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason,
+        })
     })?;
     let output_schema = StdArc::new(arrow_schema::Schema::new(
         inferred_fields
@@ -217,12 +223,15 @@ fn compile_sql_values_program(
         &vec![MessageErrorOperation::Values; parsed.inner.set.len()],
         None,
     )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "{label} VALUES message-error metadata for '{}' is invalid: {reason}",
+    .map_err(|error| {
+        let reason = format!(
+            "{label} VALUES message-error metadata for '{}' is invalid: {error}",
             emitter.as_str()
-        ),
+        );
+        error.change_context(RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason,
+        })
     })?;
     for site in error_sites.values_mut() {
         if site.operation != MessageErrorOperation::Values {
@@ -263,13 +272,16 @@ fn compile_sql_values_program(
             },
         ),
     )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
+    .map_err(|error| {
+        let reason = format!(
             "{label} VALUES compile failed for '{}': {}",
             emitter.as_str(),
-            error.message
-        ),
+            error.current_context().message
+        );
+        error.change_context(RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason,
+        })
     })?;
     Ok(CompiledSqlValuesProgram {
         program: Arc::new(compiled),
@@ -311,7 +323,7 @@ pub(in crate::runtime) struct MappedValuesProjection {
 impl MappedValuesProjection {
     pub(in crate::runtime) fn compile(
         init: MappedValuesProjectionInit<'_>,
-    ) -> Result<Self, RuntimeError> {
+    ) -> error_stack::Result<Self, RuntimeError> {
         let MappedValuesProjectionInit {
             label,
             namespace,
@@ -337,7 +349,7 @@ impl MappedValuesProjection {
             .collect::<Vec<_>>();
         let output_fields = program.program.output_schema.fields();
         if output_fields.len() != target_columns.len() {
-            return Err(RuntimeError::BuildDomainExecution {
+            return Err(Report::new(RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
                     "{label} VALUES for '{}' produced {} columns for {} mappings",
@@ -345,7 +357,7 @@ impl MappedValuesProjection {
                     output_fields.len(),
                     target_columns.len()
                 ),
-            });
+            }));
         }
         let fields = output_fields
             .iter()
@@ -453,7 +465,14 @@ impl MappedValuesProjection {
             },
             None,
         )
-        .map_err(|error| Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(error))?;
+        .map_err(|error| {
+            error
+                .change_context(EmitterRuntimeError::EncodeBatch)
+                .attach_printable(format!(
+                    "{} VALUES input projection failed",
+                    self.program.label
+                ))
+        })?;
         let result = execute_program_with_selection_in_context(
             &self.program.program,
             &input,
@@ -464,10 +483,9 @@ impl MappedValuesProjection {
         )
         .await
         .map_err(|error| {
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                "{} VALUES execution failed: {error}",
-                self.program.label
-            ))
+            error
+                .change_context(EmitterRuntimeError::EncodeBatch)
+                .attach_printable(format!("{} VALUES execution failed", self.program.label))
         })?;
         let row_count = batch.batch.batch().num_rows();
         if result.batch.row_count() != row_count {
@@ -679,6 +697,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn projection_failure_keeps_the_schema_report_under_sink_context() {
+        let projection = test_projection(None);
+        let schema = test_schema(&[("other", ParseAsType::I64)]);
+        let batch = RelayRecordBatch::from_messages(
+            schema,
+            vec![RelayMessage {
+                key: None,
+                record: test_runtime_row([("other".to_string(), RuntimeValue::I64(1))]),
+                acks: AckSet::empty(),
+            }],
+        )
+        .expect("the unrelated relay batch still has a valid schema");
+        let report = projection
+            .execute(&batch, Timestamp::from_unix_nanos(7))
+            .await
+            .expect_err("the VALUES program requires fields the relay batch lacks");
+        assert!(matches!(
+            report.current_context(),
+            EmitterRuntimeError::EncodeBatch
+        ));
+        assert!(report.contains::<RuntimeSchemaError>());
+        assert!(format!("{report:?}").contains("ClickHouse VALUES input projection failed"));
+    }
+
     /// The projection evaluates one program and builds one Arrow batch, so its allocation count is
     /// a property of the batch and not of the rows inside it.
     #[tokio::test]
@@ -769,5 +812,34 @@ mod tests {
                     .contains("requires at least one VALUES mapping")
             );
         }
+    }
+
+    #[test]
+    fn sql_value_type_failure_keeps_emitter_and_vm_compile_context() {
+        let domain: DomainName = named("test_domain");
+        let emitter: EmitterName = named("test_emitter");
+        let schema = test_schema(&[("value", ParseAsType::I64)]);
+        let values = [mapping("external_id", "input.missing")];
+        let report = MappedValuesProjection::compile(MappedValuesProjectionInit {
+            label: "ClickHouse",
+            namespace: "clickhouse",
+            domain: &domain,
+            emitter: &emitter,
+            values: &values,
+            input_schema: schema.arrow_schema(),
+            udfs: None,
+            max_batch: None,
+        })
+        .err()
+        .assured("the mapping refers to a field absent from the declared input schema");
+        assert!(matches!(
+            report.current_context(),
+            RuntimeError::BuildDomainExecution { domain, reason }
+                if domain == "test_domain"
+                    && reason.contains("ClickHouse VALUES type inference failed")
+                    && reason.contains("test_emitter")
+                    && reason.contains("missing")
+        ));
+        assert!(report.contains::<nervix_vm::CompileError>());
     }
 }
