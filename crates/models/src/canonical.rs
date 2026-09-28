@@ -12,7 +12,7 @@ use meticulous::OptionExt as _;
 use thiserror::Error;
 
 use crate::{
-    AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter, AlterEmitterOperation,
+    AckWindow, AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter, AlterEmitterOperation,
     AlterGenerator, AlterGeneratorOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
     AlterPlacement, AlterPlacementOperation, AlterProcessorOperation, AlterReingestor, AlterRelay,
     AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
@@ -30,9 +30,9 @@ use crate::{
     CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
     CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
     CreateWindowProcessor, CreateWireSchema, DescribeTransaction, DomainPace, DomainStartPoint,
-    EmitSink, EmitterAckWindow, EmitterBatchPolicy, EmitterBody, EmitterPublishingMode,
-    EndpointIngestMode, Expression, FieldName, FieldScope, Float64Literal, FlushPolicy,
-    GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration, InferencerTensorDimension,
+    EmitSink, EmitterBatchPolicy, EmitterBody, EmitterPublishingMode, EndpointIngestMode,
+    Expression, FieldName, FieldScope, Float64Literal, FlushPolicy, GeneralErrorPolicy,
+    IcebergCatalog, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorMapping, IngestSource, IngestTimestampSource, Inheritance, InputCollectPolicy,
     InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode, Literal,
     MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy,
@@ -3148,10 +3148,10 @@ fn retry_policy_to_nspl(policy: &RetryPolicy) -> String {
     format!("BACKOFF {} MAX {}", policy.backoff, policy.max_backoff)
 }
 
-fn emitter_ack_window_to_nspl(window: &EmitterAckWindow) -> String {
+fn ack_window_to_nspl(window: &AckWindow) -> String {
     match window {
-        EmitterAckWindow::Sequential => "SEQUENTIAL".to_string(),
-        EmitterAckWindow::Parallel { max } => format!("PARALLEL MAX {max}"),
+        AckWindow::Sequential => "SEQUENTIAL".to_string(),
+        AckWindow::Parallel { max } => format!("PARALLEL MAX {max}"),
     }
 }
 
@@ -3159,10 +3159,10 @@ impl EmitterPublishingMode {
     pub fn to_canonical_nspl(&self) -> String {
         let retry = |policy: &RetryPolicy| format!("RETRY POLICY {}", retry_policy_to_nspl(policy));
         let confirmed =
-            |prefix: &str, window: &EmitterAckWindow, ack_timeout: &str, policy: &RetryPolicy| {
+            |prefix: &str, window: &AckWindow, ack_timeout: &str, policy: &RetryPolicy| {
                 format!(
                     "{prefix} {} ACK TIMEOUT {ack_timeout} {}",
-                    emitter_ack_window_to_nspl(window),
+                    ack_window_to_nspl(window),
                     retry(policy)
                 )
             };

@@ -1427,9 +1427,9 @@ mod tests {
     use std::fs;
 
     use nervix_models::{
-        AckMode, AlterEmitter, AlterEmitterOperation, ClientConfigEntry, ClientName, CodecName,
-        CodecWireFormat, ConsumerGroupName, CreateClientHttp, CreateClientSqs, CreateWireSchema,
-        EmitterAckWindow, EmitterPublishingMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
+        AckMode, AckWindow, AlterEmitter, AlterEmitterOperation, ClientConfigEntry, ClientName,
+        CodecName, CodecWireFormat, ConsumerGroupName, CreateClientHttp, CreateClientSqs,
+        CreateWireSchema, EmitterPublishingMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
         IngestorName, JsonType, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState,
         MessageErrorPolicy, MqttIngestMode, MqttQos, MqttSession, OtelMetric, OutputBranch,
         ProcessorInputs, ProcessorOutputs, RetryPolicy, SignalingProtobufConfig, TopicName,
@@ -1582,7 +1582,7 @@ mod tests {
         assert!(format!("{error:#}").contains("BACKOFF must be greater than zero"));
 
         emitter.publishing_mode = EmitterPublishingMode::BrokerAck {
-            window: EmitterAckWindow::Sequential,
+            window: AckWindow::Sequential,
             ack_timeout: "0s".to_string(),
             retry_policy: RetryPolicy {
                 backoff: "10ms".to_string(),

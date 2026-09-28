@@ -8,8 +8,14 @@ version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The Arrow data type each schema type is represented as.
+arrow = ["dep:arrow-schema"]
+default = []
+
 [dependencies]
 ahash-compile-time = { workspace = true }
+arrow-schema = { workspace = true, optional = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
 error-stack = { workspace = true }

@@ -5,7 +5,8 @@
 //! - **Owns.** Every NSPL Model, validated name and HTTP request-field types, `Timestamp`, branch
 //!   and node references, the index that keys a domain's Models by the node each one configures,
 //!   structured message errors, and the canonical NSPL rendering of a Model.
-//! - **Depends on.** Serialization and primitive crates.
+//! - **Depends on.** Serialization and primitive crates, and Arrow's schema types behind the
+//!   `arrow` feature for the one Arrow data type each schema type is represented as.
 //! - **Must not know.** How a Model was parsed, validated, scheduled or executed. No parser span,
 //!   no registry state, no Arrow array and no Tokio type belongs here.
 //!
@@ -14,6 +15,8 @@
 //! consensus, and the interconnect's wire values in `remote`, which belong to the transport.
 //! `RemoteRuntimeRecord` is row-oriented besides, which the columnar rule forbids of a payload.
 
+#[cfg(feature = "arrow")]
+mod arrow_types;
 mod canonical;
 mod cluster_node;
 mod command;
@@ -138,10 +141,10 @@ pub use schema::{
 };
 pub use schema_fingerprint::SchemaFingerprint;
 pub use statement::{
-    AckMode, AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation, AlterDomain,
-    AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterGenerator, AlterGeneratorError,
-    AlterGeneratorOperation, AlterIngestor, AlterIngestorError, AlterIngestorOperation,
-    AlterJunction, AlterJunctionError, AlterPlacement, AlterPlacementError,
+    AckMode, AckWindow, AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation,
+    AlterDomain, AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterGenerator,
+    AlterGeneratorError, AlterGeneratorOperation, AlterIngestor, AlterIngestorError,
+    AlterIngestorOperation, AlterJunction, AlterJunctionError, AlterPlacement, AlterPlacementError,
     AlterPlacementOperation, AlterProcessorError, AlterProcessorOperation, AlterReingestor,
     AlterReingestorError, AlterRelay, AlterRelayError, AlterRelayOperation, AlterReorderer,
     AlterReordererError, AlterReordererOperation, AzureBlobConfigEntry, BranchEviction,
@@ -165,20 +168,19 @@ pub use statement::{
     DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
     DescribeWindowProcessor, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint,
     DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EmitSink, EmitSinkKind,
-    EmitterAckWindow, EmitterBatchContractError, EmitterBody, EmitterPublishingMode,
-    EndpointIngestMode, EndpointType, ErrorPolicies, FlushPolicy, GcsConfigEntry,
-    GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, IcebergRestConfigEntry,
-    IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
-    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
-    InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
-    InferencerTensorSchemaError, IngestAcknowledgement, IngestQuiesceMode, IngestQuiesceOverflow,
-    IngestSource, IngestSourceKind, IngestTimestampSource, InputCollectPolicy, InspectionFormat,
-    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery,
-    MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, MongoDbConfigEntry,
-    MongoDbConflictAction, MongoDbValueMapping, MqttConfigEntry, MqttIngestMode, MqttQos,
-    MqttSession, MySqlConfigEntry, MySqlConflictAction, MySqlValueMapping, NatsConfigEntry,
-    NatsIngestMode, OtelAggregationTemporality, OtelConfigEntry, OtelMetric, OtelMetricKind,
-    OtelScope, OtelSignal, OtelValueMapping, OwnershipStateComponent,
+    EmitterBatchContractError, EmitterBody, EmitterPublishingMode, EndpointIngestMode,
+    EndpointType, ErrorPolicies, FlushPolicy, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry,
+    IcebergCatalog, IcebergRestConfigEntry, IcebergStorageBackend, IcebergValueMapping,
+    InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
+    InferencerTensorSchema, InferencerTensorSchemaError, IngestAcknowledgement, IngestQuiesceMode,
+    IngestQuiesceOverflow, IngestSource, IngestSourceKind, IngestTimestampSource,
+    InputCollectPolicy, InspectionFormat, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode,
+    KafkaPartitionSchedule, LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model,
+    ModelKind, MongoDbConfigEntry, MongoDbConflictAction, MongoDbValueMapping, MqttConfigEntry,
+    MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry, MySqlConflictAction, MySqlValueMapping,
+    NatsConfigEntry, NatsIngestMode, OtelAggregationTemporality, OtelConfigEntry, OtelMetric,
+    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OwnershipStateComponent,
     OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
     OwnershipTransition, PlacementGroupSchedule, PlacementPolicy, PostgresConfigEntry,
     PostgresConflictAction, PostgresValueMapping, ProcessorInputWhere, ProcessorInputs,

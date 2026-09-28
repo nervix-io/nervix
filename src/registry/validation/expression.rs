@@ -29,8 +29,7 @@ use crate::registry::{
     error::RegistryError,
     graph::{ActiveNode, EdgeKind},
     validation::{
-        materialized_state::model_materialized_state_dependencies,
-        schema::arrow_data_type_for_parse_as, wire::schema_for_lookup_model,
+        materialized_state::model_materialized_state_dependencies, wire::schema_for_lookup_model,
     },
 };
 
@@ -412,7 +411,7 @@ fn rewrite_lookup_hash_map_expr(
                 // Matches the runtime's identity for the same call: the key expression itself,
                 // compared without its source spans.
                 let key = key_arg.inner.clone();
-                let data_type = arrow_data_type_for_parse_as(&schema_field.ty);
+                let data_type = schema_field.ty.arrow_data_type();
                 let existing = calls.iter().find(|call| {
                     call.lookup == lookup && call.lookup_field == lookup_field && call.key == key
                 });

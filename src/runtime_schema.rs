@@ -37,8 +37,8 @@ use arrow_array::{
 };
 use arrow_data::transform::MutableArrayData;
 use arrow_schema::{
-    ArrowError, DataType as ArrowDataType, Field as ArrowField, FieldRef as ArrowFieldRef,
-    Schema as ArrowSchema, TimeUnit as ArrowTimeUnit,
+    ArrowError, DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
+    TimeUnit as ArrowTimeUnit,
 };
 use arrow_select::{
     concat::concat as concat_arrow_arrays,
@@ -526,7 +526,7 @@ impl CompiledSchema {
             builders: self
                 .fields
                 .iter()
-                .map(|field| make_builder(&arrow_data_type(&field.ty), capacity))
+                .map(|field| make_builder(&field.ty.arrow_data_type(), capacity))
                 .collect(),
             keep: Vec::with_capacity(capacity),
             abandoned: 0,
@@ -681,7 +681,7 @@ fn test_runtime_value_arrow_type(
                 })
             })?;
             Ok(ArrowDataType::FixedSizeList(
-                ArrowFieldRef::new(ArrowField::new(
+                arrow_schema::FieldRef::new(ArrowField::new(
                     "item",
                     test_runtime_value_arrow_type(element)?,
                     false,
@@ -695,11 +695,9 @@ fn test_runtime_value_arrow_type(
                     kind: RuntimeValueKind::Vec,
                 })
             })?;
-            Ok(ArrowDataType::List(ArrowFieldRef::new(ArrowField::new(
-                "item",
-                test_runtime_value_arrow_type(element)?,
-                false,
-            ))))
+            Ok(ArrowDataType::List(arrow_schema::FieldRef::new(
+                ArrowField::new("item", test_runtime_value_arrow_type(element)?, false),
+            )))
         }
     }
 }
@@ -2615,7 +2613,7 @@ pub fn compile_schema(schema: &CreateSchema) -> CompiledSchema {
         .collect::<Vec<_>>();
     let arrow_fields = fields
         .iter()
-        .map(|field| ArrowField::new(&field.name, arrow_data_type(&field.ty), field.optional))
+        .map(|field| ArrowField::new(&field.name, field.ty.arrow_data_type(), field.optional))
         .collect::<Vec<_>>();
     CompiledSchema {
         fields,
@@ -2905,7 +2903,7 @@ impl<'a> ArrowCodecValue<'a> {
                     field: self.field.to_string(),
                     elements: Vec::new(),
                 },
-                expected: arrow_data_type(self.ty),
+                expected: self.ty.arrow_data_type(),
                 found: self.array.data_type().clone(),
             })
         })
@@ -3979,7 +3977,7 @@ fn sequence_element_data_type<'a>(
         | (ParseAsType::Vec { .. }, ArrowDataType::List(field)) => Ok(field.data_type()),
         _ => Err(Report::new(RuntimeSchemaError::ExactTypeMismatch {
             location: location.to_runtime_location(),
-            expected: arrow_data_type(ty),
+            expected: ty.arrow_data_type(),
             found: expected.clone(),
         })),
     }
@@ -4003,7 +4001,7 @@ fn append_avro_value_to_arrow(
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
             let parsed = ($parsed).ok_or_else(&incompatible)?;
-            typed_arrow_builder::<$builder>(builder, &arrow_data_type(ty), location)?
+            typed_arrow_builder::<$builder>(builder, &ty.arrow_data_type(), location)?
                 .append_value(parsed);
             Ok(())
         }};
@@ -4103,7 +4101,7 @@ fn append_avro_value_to_arrow(
             }
             let builder = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
                 builder,
-                &arrow_data_type(ty),
+                &ty.arrow_data_type(),
                 location,
             )?;
             for (index, value) in values.iter().enumerate() {
@@ -4130,7 +4128,7 @@ fn append_avro_value_to_arrow(
             };
             let builder = typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
                 builder,
-                &arrow_data_type(ty),
+                &ty.arrow_data_type(),
                 location,
             )?;
             for (index, value) in values.iter().enumerate() {
@@ -4180,39 +4178,6 @@ fn avro_value_is_null(value: &AvroValue) -> bool {
     matches!(avro_value_payload(value), AvroValue::Null)
 }
 
-pub(crate) fn arrow_data_type(ty: &ParseAsType) -> ArrowDataType {
-    match ty {
-        ParseAsType::U8 => ArrowDataType::UInt8,
-        ParseAsType::I8 => ArrowDataType::Int8,
-        ParseAsType::U16 => ArrowDataType::UInt16,
-        ParseAsType::I16 => ArrowDataType::Int16,
-        ParseAsType::U32 => ArrowDataType::UInt32,
-        ParseAsType::I32 => ArrowDataType::Int32,
-        ParseAsType::U64 => ArrowDataType::UInt64,
-        ParseAsType::I64 => ArrowDataType::Int64,
-        ParseAsType::Bool => ArrowDataType::Boolean,
-        ParseAsType::String => ArrowDataType::Utf8,
-        ParseAsType::Bytes => ArrowDataType::Binary,
-        ParseAsType::Datetime => {
-            ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, Some("+00:00".into()))
-        }
-        ParseAsType::F32 => ArrowDataType::Float32,
-        ParseAsType::F64 => ArrowDataType::Float64,
-        ParseAsType::Array { element, len } => ArrowDataType::FixedSizeList(
-            ArrowFieldRef::new(ArrowField::new("item", arrow_data_type(element), false)),
-            i32::try_from(len.get()).verified(
-                "the schema parser rejects an array length that does not fit an Arrow fixed-size \
-                 list",
-            ),
-        ),
-        ParseAsType::Vec { element } => ArrowDataType::List(ArrowFieldRef::new(ArrowField::new(
-            "item",
-            arrow_data_type(element),
-            false,
-        ))),
-    }
-}
-
 /// Closes the fixed-size list value an element append failed part-way through.
 ///
 /// A fixed-size list builder demands `len` child values for every value it holds, so the elements
@@ -4251,7 +4216,7 @@ fn append_placeholder_to_arrow(
 ) -> error_stack::Result<(), RuntimeSchemaError> {
     macro_rules! append {
         ($builder:ty, $value:expr) => {{
-            typed_arrow_builder::<$builder>(builder, &arrow_data_type(ty), location)?
+            typed_arrow_builder::<$builder>(builder, &ty.arrow_data_type(), location)?
                 .append_value($value);
         }};
     }
@@ -4273,7 +4238,7 @@ fn append_placeholder_to_arrow(
         ParseAsType::Array { element, len } => {
             let list = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
                 builder,
-                &arrow_data_type(ty),
+                &ty.arrow_data_type(),
                 location,
             )?;
             for _ in 0..len.get() {
@@ -4284,7 +4249,7 @@ fn append_placeholder_to_arrow(
         ParseAsType::Vec { .. } => {
             typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
                 builder,
-                &arrow_data_type(ty),
+                &ty.arrow_data_type(),
                 location,
             )?
             .append(true);
@@ -4301,7 +4266,8 @@ fn append_runtime_value_to_arrow(
 ) -> error_stack::Result<(), RuntimeSchemaError> {
     macro_rules! append_primitive {
         ($builder:ty, $variant:path, $map:expr) => {{
-            let builder = typed_arrow_builder::<$builder>(builder, &arrow_data_type(ty), location)?;
+            let builder =
+                typed_arrow_builder::<$builder>(builder, &ty.arrow_data_type(), location)?;
             match value {
                 Some($variant(value)) => builder.append_value($map(value).ok_or_else(|| {
                     Report::new(RuntimeSchemaError::RuntimeValueOutOfRange {
@@ -4363,7 +4329,7 @@ fn append_runtime_value_to_arrow(
                     data_type: ArrowDataType::Binary,
                 }));
             }
-            typed_arrow_builder::<BinaryBuilder>(builder, &arrow_data_type(ty), location)?
+            typed_arrow_builder::<BinaryBuilder>(builder, &ty.arrow_data_type(), location)?
                 .append_null();
             Ok(())
         }
@@ -4389,7 +4355,7 @@ fn append_runtime_value_to_arrow(
         ParseAsType::Array { element, len } => {
             let builder = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
                 builder,
-                &arrow_data_type(ty),
+                &ty.arrow_data_type(),
                 location,
             )?;
             let values = match value {
@@ -4435,7 +4401,7 @@ fn append_runtime_value_to_arrow(
         ParseAsType::Vec { element } => {
             let builder = typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
                 builder,
-                &arrow_data_type(ty),
+                &ty.arrow_data_type(),
                 location,
             )?;
             let values = match value {
@@ -4611,7 +4577,7 @@ fn typed_arrow_array<'a, T: 'static>(
                 field: field.to_string(),
                 elements: Vec::new(),
             },
-            expected: arrow_data_type(ty),
+            expected: ty.arrow_data_type(),
             found: array.data_type().clone(),
         })
     })

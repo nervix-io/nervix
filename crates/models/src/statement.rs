@@ -4411,10 +4411,12 @@ pub struct RetryPolicy {
     pub max_backoff: String,
 }
 
+/// How many acknowledgements an acknowledging mode keeps outstanding at once: one for
+/// `ACK SEQUENTIAL`, and up to `max` for `ACK PARALLEL MAX <max>`.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub enum EmitterAckWindow {
+pub enum AckWindow {
     Sequential,
     Parallel { max: NonZeroU64 },
 }
@@ -4427,7 +4429,7 @@ pub enum EmitterPublishingMode {
         retry_policy: RetryPolicy,
     },
     BrokerAck {
-        window: EmitterAckWindow,
+        window: AckWindow,
         ack_timeout: String,
         retry_policy: RetryPolicy,
     },
@@ -4435,17 +4437,17 @@ pub enum EmitterPublishingMode {
         retry_policy: RetryPolicy,
     },
     MqttQos1 {
-        window: EmitterAckWindow,
+        window: AckWindow,
         ack_timeout: String,
         retry_policy: RetryPolicy,
     },
     MqttQos2 {
-        window: EmitterAckWindow,
+        window: AckWindow,
         ack_timeout: String,
         retry_policy: RetryPolicy,
     },
     NatsJetStream {
-        window: EmitterAckWindow,
+        window: AckWindow,
         ack_timeout: String,
         retry_policy: RetryPolicy,
     },
