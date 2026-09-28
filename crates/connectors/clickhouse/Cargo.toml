@@ -17,10 +17,7 @@ shuttle = [
 ]
 
 [dependencies]
-arrow-array = { workspace = true }
-arrow-schema = { workspace = true }
 async-trait = { workspace = true }
-chrono = { workspace = true }
 clickhouse = { workspace = true, features = ["inserter", "chrono"] }
 error-stack = { workspace = true }
 hyper-rustls = { workspace = true, features = ["http1"] }
@@ -30,9 +27,9 @@ hyper-util = { workspace = true, features = [
   "tokio",
 ] }
 meticulous = { workspace = true }
+nervix-columnar-json = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-models = { workspace = true }
-serde_json = { workspace = true }
 shuttle-tokio = { workspace = true, features = [
   "macros",
   "rt",
@@ -42,3 +39,7 @@ shuttle-tokio = { workspace = true, features = [
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing = { workspace = true }
+
+[dev-dependencies]
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }

@@ -22,6 +22,7 @@ mod placement;
 mod processor_plan;
 mod reingestor_plan;
 mod relocation;
+mod resource_plan;
 mod schedule_delta;
 mod scheduler;
 mod storage;
@@ -68,6 +69,10 @@ pub(crate) use processor_plan::{PlannedModel, branched_node_specs_from_models};
 pub(crate) use reingestor_plan::{ReingestorInputPlan, ReingestorPlan};
 pub(crate) use relocation::{
     RelocationCoverage, RelocationMemberReason, RelocationPlanError, RelocationUnit,
+};
+pub(crate) use resource_plan::{
+    GeneratorExecutionPlan, GeneratorRoutePlan, LookupResourcePlan, ResourceExecutionPlans,
+    WasmModulePlan, udf_program,
 };
 pub(crate) use schedule_delta::ScheduleDelta;
 #[cfg(feature = "testing")]
