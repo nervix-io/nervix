@@ -34,6 +34,35 @@ Feature: Interconnect health coordination
     When gossip exchanges involving node "node-2" are restored
     And consensus connectivity for node "node-2" is restored
 
+  Scenario: A stopped peer does not evict connected peers or move their work
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And node "node-1" eventually reports leader "node-1"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA stop_event ( id I64 );
+      CREATE RELAY stop_events_1 SCHEMA stop_event UNBRANCHED;
+      CREATE RELAY stop_events_2 SCHEMA stop_event UNBRANCHED;
+      CREATE RELAY stop_events_3 SCHEMA stop_event UNBRANCHED;
+      CREATE RELAY stop_events_4 SCHEMA stop_event UNBRANCHED;
+      CREATE RELAY stop_events_5 SCHEMA stop_event UNBRANCHED;
+      CREATE RELAY stop_events_6 SCHEMA stop_event UNBRANCHED;
+      CREATE RELAY stop_events_7 SCHEMA stop_event UNBRANCHED;
+      CREATE RELAY stop_events_8 SCHEMA stop_event UNBRANCHED;
+      CREATE RELAY stop_events_9 SCHEMA stop_event UNBRANCHED;
+      CREATE RELAY stop_events_10 SCHEMA stop_event UNBRANCHED;
+      CREATE RELAY stop_events_11 SCHEMA stop_event UNBRANCHED;
+      CREATE RELAY stop_events_12 SCHEMA stop_event UNBRANCHED;
+      START;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status schedules nodes on at least 3 distinct owners
+    And the last cluster status work on healthy nodes "node-1,node-3" is saved
+    When node "node-2" is stopped
+    Then for "20s" healthy nodes "node-1,node-3" keep each other live and their scheduled work after node "node-2" stops
+    And within "30s" node "node-1" reports no scheduled work on "node-2"
+
   Scenario: A silent peer does not delay peer health or control-plane work
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started

@@ -2062,6 +2062,7 @@ mod tests {
         let gossip_miss = || GossipState {
             live_nodes: Vec::new(),
             dead_node_ids: BTreeSet::from([node_id.clone()]),
+            dead_node_identities: BTreeSet::from([node.identity()]),
         };
 
         let mut available = gossip_miss();

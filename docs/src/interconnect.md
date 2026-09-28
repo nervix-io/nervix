@@ -97,7 +97,8 @@ destinations. A restarted process has a new incarnation and does not inherit the
 
 The failure detector retains dead process identities separately from the live peer view. Explicit
 Raft member removal uses the newest observed live or dead identity to fence the stopped process;
-dead identities never make a peer eligible for admission, transport, or placement.
+dead identities alone never make a peer eligible for membership admission. Scheduling can retain an
+already established health target while gossip liveness lapses, as described below.
 
 Connections are directed. Both nodes in a pair build their own outbound connections because some
 operations, including relay acknowledgements and cluster events, travel back over the receiver's
@@ -644,6 +645,10 @@ worker per destination drives its interconnect requests in order, under the one-
 deadline; an unreachable peer therefore cannot hold the gossip loop while it receives from or sends
 to healthy peers. A full destination queue drops its newest datagram, and the next gossip round
 retries. Closing the transport cancels queued work and exchanges in flight.
+
+Each node's Chitchat live set is its own failure-detector estimate. An isolated peer can remain
+listed live until its missing heartbeats are observed, even after its links stop carrying requests;
+application probes provide the separate signal that eventually makes its work eligible for failover.
 
 Admission to consensus membership requires an available interconnect endpoint. A discovered node
 without one is not an admission candidate, so it is neither added as a learner nor promoted to

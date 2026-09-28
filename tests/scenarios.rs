@@ -16925,11 +16925,42 @@ async fn then_healthy_nodes_keep_their_work(
     let duration = humantime::parse_duration(&duration).assured("the scenario duration is valid");
     let minimum_failover_delay = humantime::parse_duration(&minimum_failover_delay)
         .assured("the scenario failover delay is valid");
-    let node_ids = expand_placeholders(world, &node_ids);
-    let unavailable_node = expand_placeholders(world, &unavailable_node);
     let health_fault_started_at = world
         .health_fault_started_at
         .expect("the health fault must start before observing failover timing");
+    observe_healthy_peers(
+        world,
+        duration,
+        node_ids,
+        unavailable_node,
+        Some((health_fault_started_at, minimum_failover_delay)),
+    )
+    .await;
+}
+
+#[then(
+    expr = "for {string} healthy nodes {string} keep each other live and their scheduled work \
+            after node {string} stops"
+)]
+async fn then_stopped_peer_does_not_move_healthy_work(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_ids: String,
+    stopped_node: String,
+) {
+    let duration = humantime::parse_duration(&duration).assured("the scenario duration is valid");
+    observe_healthy_peers(world, duration, node_ids, stopped_node, None).await;
+}
+
+async fn observe_healthy_peers(
+    world: &mut ScenarioWorld,
+    duration: Duration,
+    node_ids: String,
+    unavailable_node: String,
+    minimum_failover_delay: Option<(Instant, Duration)>,
+) {
+    let node_ids = expand_placeholders(world, &node_ids);
+    let unavailable_node = expand_placeholders(world, &unavailable_node);
     let nodes = node_ids.split(',').collect::<Vec<_>>();
     assert_eq!(nodes.len(), 2, "the scenario names the two connected peers");
     assert!(
@@ -16959,10 +16990,13 @@ async fn then_healthy_nodes_keep_their_work(
                 assert_eq!(
                     current.map(|(owner, _)| owner),
                     Some(placement.owner.as_str()),
-                    "'{source}' moved healthy work while another peer was partitioned: {status}"
+                    "'{source}' moved healthy work while another peer was unavailable: {status}"
                 );
             }
-            if source == nodes[0] {
+            if source == nodes[0]
+                && let Some((health_fault_started_at, minimum_failover_delay)) =
+                    minimum_failover_delay
+            {
                 let placements = scheduled_placements_for_domain(&status, &world.domain);
                 let isolated_work_remains = placements
                     .iter()
