@@ -338,10 +338,31 @@ pub(crate) enum PeerHealthResultDisposition {
 /// The effective state of one current peer-health target at a particular monotonic instant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PeerHealthStatus {
-    Unknown,
+    /// No probe of the current target has completed.
+    Unobserved,
+    /// The latest observation is older than the node-unavailability interval.
+    Stale,
+    /// A recent observation decided nothing, such as a probe refused for local capacity.
+    Inconclusive,
+    /// The latest recent probe reached the peer's application.
     Healthy,
+    /// Recent probes have failed for less than the node-unavailability interval.
     Failure,
+    /// Probes have failed continuously for the node-unavailability interval.
     Unavailable,
+}
+
+impl PeerHealthStatus {
+    /// Whether this status is recent evidence that keeps a peer available while Chitchat has
+    /// stopped listing it live. A healthy, briefly failing, or capacity-refused observation from
+    /// the current interval does; a peer with no observation in that interval, or one that failed
+    /// for the whole interval, falls back to its gossip liveness.
+    const fn bridges_gossip_lapse(self) -> bool {
+        match self {
+            Self::Healthy | Self::Failure | Self::Inconclusive => true,
+            Self::Unobserved | Self::Stale | Self::Unavailable => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -394,9 +415,13 @@ impl PeerHealthSnapshot {
     }
 
     /// A previously discovered incarnation keeps its established health target while Chitchat
-    /// briefly stops calling it live. A replacement incarnation or endpoint needs fresh discovery.
+    /// briefly stops calling it live, for as long as application health observed it within the
+    /// node-unavailability interval. A replacement incarnation or endpoint needs fresh discovery.
     pub(crate) fn retains_known_node(&self, node: &GossipNode) -> bool {
-        self.status(&node.node_id) != Some(PeerHealthStatus::Unavailable)
+        let Some(status) = self.status(&node.node_id) else {
+            return false;
+        };
+        status.bridges_gossip_lapse()
             && self
                 .targets
                 .get(&node.node_id)
@@ -680,23 +705,24 @@ impl PeerHealthStateSnapshot {
 impl RetainedPeerHealth {
     fn effective_status(&self, now: Instant, observation_freshness: Duration) -> PeerHealthStatus {
         let Some(observation) = self.observation.as_ref() else {
-            return PeerHealthStatus::Unknown;
+            return PeerHealthStatus::Unobserved;
         };
+        // An observation completed after `now` was read is recent but not yet evaluable.
         let Some(age) = now.checked_duration_since(observation.observed_at) else {
-            return PeerHealthStatus::Unknown;
+            return PeerHealthStatus::Inconclusive;
         };
         if age >= observation_freshness {
-            return PeerHealthStatus::Unknown;
+            return PeerHealthStatus::Stale;
         }
         match observation.outcome {
             PeerHealthObservationKind::Healthy => PeerHealthStatus::Healthy,
-            PeerHealthObservationKind::CapacityExhausted => PeerHealthStatus::Unknown,
+            PeerHealthObservationKind::CapacityExhausted => PeerHealthStatus::Inconclusive,
             PeerHealthObservationKind::Failure => {
                 let Some(failure_since) = observation.failure_since else {
-                    return PeerHealthStatus::Unknown;
+                    return PeerHealthStatus::Inconclusive;
                 };
                 let Some(failure_age) = now.checked_duration_since(failure_since) else {
-                    return PeerHealthStatus::Unknown;
+                    return PeerHealthStatus::Inconclusive;
                 };
                 if failure_age >= observation_freshness {
                     PeerHealthStatus::Unavailable
@@ -1720,7 +1746,12 @@ impl ClusterHandle {
                     Some(PeerHealthStatus::Healthy) => "connected",
                     Some(PeerHealthStatus::Failure) => "probe-failed",
                     Some(PeerHealthStatus::Unavailable) => "unavailable",
-                    Some(PeerHealthStatus::Unknown) | None => "unknown",
+                    Some(
+                        PeerHealthStatus::Unobserved
+                        | PeerHealthStatus::Stale
+                        | PeerHealthStatus::Inconclusive,
+                    )
+                    | None => "unknown",
                 };
                 let outcome = match effective.latest_outcome(node_id) {
                     Some(PeerHealthObservationKind::Healthy) => "healthy",
@@ -2135,6 +2166,94 @@ mod tests {
     }
 
     #[test]
+    fn a_gossip_lapse_is_bridged_only_while_health_was_observed_within_the_interval() {
+        let timeout = Duration::from_secs(10);
+        let healthy_at = Instant::now();
+        let capacity_at = healthy_at
+            .checked_add(Duration::from_secs(9))
+            .assured("the test observation time fits in the monotonic clock range");
+        let healthy_stale_at = healthy_at
+            .checked_add(timeout)
+            .assured("the test observation time fits in the monotonic clock range");
+        let capacity_stale_at = capacity_at
+            .checked_add(timeout)
+            .assured("the test observation time fits in the monotonic clock range");
+        let endpoint = "node-2.example:7001";
+        let mut health = PeerHealthStateSnapshot::default();
+        let target = health
+            .replace_endpoints(
+                [health_endpoint("node-2", 7, endpoint)],
+                healthy_at,
+                timeout,
+            )
+            .into_iter()
+            .next()
+            .assured("one endpoint produces one health target");
+        health.record_result(
+            PeerHealthProbeResult::new(
+                target.clone(),
+                PeerHealthProbeOutcome::Healthy(health_identity("node-2", 7)),
+                healthy_at,
+            ),
+            timeout,
+        );
+
+        let mut gossip_state = NodeState::for_test();
+        gossip_state.set(KEY_INTERCONNECT_ADVERTISE_ADDR, endpoint);
+        let node = to_gossip_node(&gossip_id("node-2", 7), &gossip_state)
+            .assured("the test gossip identity is valid");
+        let node_id = node.node_id.clone();
+        let known_nodes = BTreeMap::from([(node_id.clone(), node.clone())]);
+        let gossip_miss = || GossipState {
+            live_nodes: Vec::new(),
+            dead_node_ids: BTreeSet::from([node_id.clone()]),
+            dead_node_identities: BTreeSet::from([node.identity()]),
+        };
+
+        let mut recently_healthy = gossip_miss();
+        health
+            .effective_snapshot(capacity_at, timeout)
+            .retain_known_nodes(&mut recently_healthy, &known_nodes);
+        assert_eq!(
+            recently_healthy.live_node_ids(),
+            BTreeSet::from([node_id.clone()])
+        );
+
+        // No probe completed after the healthy one, as when no probe to a stopped peer finishes:
+        // the observation ages out and gossip's verdict applies.
+        let mut stale = gossip_miss();
+        health
+            .effective_snapshot(healthy_stale_at, timeout)
+            .retain_known_nodes(&mut stale, &known_nodes);
+        assert!(stale.live_node_ids().is_empty());
+        assert_eq!(stale.dead_node_ids, BTreeSet::from([node_id.clone()]));
+
+        health.record_result(
+            PeerHealthProbeResult::new(
+                target,
+                PeerHealthProbeOutcome::CapacityExhausted,
+                capacity_at,
+            ),
+            timeout,
+        );
+        let mut inconclusive = gossip_miss();
+        health
+            .effective_snapshot(healthy_stale_at, timeout)
+            .retain_known_nodes(&mut inconclusive, &known_nodes);
+        assert_eq!(
+            inconclusive.live_node_ids(),
+            BTreeSet::from([node_id.clone()])
+        );
+
+        let mut inconclusive_stale = gossip_miss();
+        health
+            .effective_snapshot(capacity_stale_at, timeout)
+            .retain_known_nodes(&mut inconclusive_stale, &known_nodes);
+        assert!(inconclusive_stale.live_node_ids().is_empty());
+        assert_eq!(inconclusive_stale.dead_node_ids, BTreeSet::from([node_id]));
+    }
+
+    #[test]
     fn gossip_endpoints_arrive_field_by_field() {
         let id = gossip_id("node-2", 7);
         let mut state = NodeState::for_test();
@@ -2413,7 +2532,7 @@ mod tests {
             state
                 .effective_snapshot(started_at, timeout)
                 .status(&ClusterNodeName::parse("node-2").assured("the test node name is valid")),
-            Some(PeerHealthStatus::Unknown)
+            Some(PeerHealthStatus::Unobserved)
         );
 
         assert!(matches!(
@@ -2535,7 +2654,7 @@ mod tests {
         let stale = state.effective_snapshot(stale_at, timeout);
         assert_eq!(
             stale.status(&ClusterNodeName::parse("node-2").assured("the test node name is valid")),
-            Some(PeerHealthStatus::Unknown)
+            Some(PeerHealthStatus::Stale)
         );
         assert!(stale.unavailable_nodes().is_empty());
     }
@@ -2576,7 +2695,7 @@ mod tests {
         assert_eq!(
             capacity
                 .status(&ClusterNodeName::parse("node-2").assured("the test node name is valid")),
-            Some(PeerHealthStatus::Unknown)
+            Some(PeerHealthStatus::Inconclusive)
         );
         assert_eq!(
             capacity.latest_outcome(

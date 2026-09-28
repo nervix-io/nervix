@@ -54,6 +54,9 @@ URL so HTTPS verifies that name. The CLI normally reads the system resolver and 
 its `--dns-resolver-config`, `--dns-hosts-file`, and repeatable `--dns-name-server` options only
 when the session needs an explicitly configured resolver. Browser sessions use browser DNS.
 
+Use the CLI's `subscribe` and `domain-clock` subcommands for shell streams of relay records and
+the selected domain's clock. See the Command Line Client chapter for their line formats.
+
 Build configuration in dependency order:
 
 1. Create the domain, then select it with `USE <domain>;` as a separate client command. `BEGIN`

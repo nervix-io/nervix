@@ -262,6 +262,13 @@ struct SavedHealthyPlacement {
     owner: String,
 }
 
+/// One long-running CLI clock follower and the bounded stdout lines its assertions inspect.
+struct CliClockProcess {
+    child: tokio::process::Child,
+    lines: StdArc<StdMutex<VecDeque<String>>>,
+    _reader: AbortOnDropHandle<()>,
+}
+
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
     scenario_execution_permit: Option<ScenarioExecutionPermit>,
@@ -303,6 +310,7 @@ struct ScenarioWorld {
     cli_subscription_process: Option<tokio::process::Child>,
     cli_subscription_lines: Option<StdArc<StdMutex<VecDeque<String>>>>,
     cli_subscription_reader: Option<AbortOnDropHandle<()>>,
+    cli_clock_process: Option<CliClockProcess>,
     /// The whole outcome of the last command a named client ran, for assertions that read more
     /// than its message.
     last_client_outcome: Option<ClientCommandOutcome>,
@@ -3344,6 +3352,301 @@ async fn then_cli_subscription_output_contains(world: &mut ScenarioWorld, expect
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+#[when(expr = "the CLI follows the clock of domain {string} on node {string}")]
+fn when_cli_follows_domain_clock(world: &mut ScenarioWorld, domain: String, node: String) {
+    let domain = expand_placeholders(world, &domain);
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    start_cli_clock_process(world, &domain, &grpc_uri);
+}
+
+#[given(expr = "the CLI clock connection to node {string} is forwarded")]
+async fn given_cli_clock_connection_is_forwarded(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    let mut url = url::Url::parse(&grpc_uri).assured("a cluster gRPC endpoint is a URL");
+    let target_host = url
+        .host_str()
+        .assured("a cluster gRPC endpoint names a host")
+        .parse::<std::net::IpAddr>()
+        .assured("a cluster gRPC endpoint uses a literal IP address");
+    let target_port = url.port().assured("a cluster gRPC endpoint names a port");
+    let local_host = std::net::IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let forwarders = TcpForwarders::start(
+        &[local_host],
+        std::net::SocketAddr::new(target_host, target_port),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("the CLI clock forwarder could not start: {error}"));
+    url.set_host(Some("127.0.0.1"))
+        .assured("the loopback host is valid in a URL");
+    url.set_port(Some(forwarders.port()))
+        .assured("a reserved TCP port is valid in a URL");
+    world
+        .placeholders
+        .insert("cli_clock_forwarded_server".to_string(), url.to_string());
+    world.tcp_forwarders = Some(forwarders);
+}
+
+#[when(expr = "the CLI follows the clock of domain {string} through its TCP forwarder")]
+fn when_cli_follows_domain_clock_through_forwarder(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let grpc_uri = world
+        .placeholders
+        .get("cli_clock_forwarded_server")
+        .verified("the preceding step forwarded the CLI clock connection")
+        .clone();
+    start_cli_clock_process(world, &domain, &grpc_uri);
+}
+
+fn start_cli_clock_process(world: &mut ScenarioWorld, domain: &str, grpc_uri: &str) {
+    let mut child = tokio::process::Command::new(scenario_cli_binary())
+        .args([
+            "--server",
+            grpc_uri,
+            "--domain",
+            domain,
+            "--username",
+            TEST_AUTH_USERNAME,
+            "--password",
+            TEST_AUTH_PASSWORD,
+            "domain-clock",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap_or_else(|error| panic!("the CLI clock process failed to start: {error}"));
+    let stdout = child
+        .stdout
+        .take()
+        .verified("the CLI clock process was started with piped stdout");
+    let lines = StdArc::new(StdMutex::new(VecDeque::new()));
+    let reader_lines = lines.clone();
+    let reader = tokio::spawn(async move {
+        let mut stdout = tokio::io::BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = stdout.next_line().await {
+            tokio::task::consume_budget().await;
+            let mut retained = reader_lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if retained.len() == 2048 {
+                retained.pop_front();
+            }
+            retained.push_back(line);
+        }
+    });
+    world.cli_clock_process = Some(CliClockProcess {
+        child,
+        lines,
+        _reader: AbortOnDropHandle::new(reader),
+    });
+}
+
+async fn wait_for_cli_clock_output(
+    world: &ScenarioWorld,
+    duration: Duration,
+    described: &str,
+    matches: impl Fn(&VecDeque<String>) -> bool,
+) {
+    let lines = &world
+        .cli_clock_process
+        .as_ref()
+        .verified("the preceding step started the CLI clock process")
+        .lines;
+    let deadline = Instant::now() + duration;
+    loop {
+        tokio::task::consume_budget().await;
+        {
+            let retained = lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if matches(&retained) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("CLI clock output did not show {described}: {retained:?}");
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(expr = "within {string} the CLI clock output contains {string}")]
+async fn then_cli_clock_output_contains(
+    world: &mut ScenarioWorld,
+    duration: String,
+    expected: String,
+) {
+    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let expected = expand_placeholders(world, &expected);
+    wait_for_cli_clock_output(world, duration, &expected, |lines| {
+        lines.iter().any(|line| line.contains(&expected))
+    })
+    .await;
+}
+
+fn cli_clock_tick_id(line: &str, domain: &str, generation: u64) -> Option<u64> {
+    let prefix = format!("[events] domain clock [{domain}] tick: generation {generation}, id ");
+    let (id, fields) = line.strip_prefix(&prefix)?.split_once(", boundary ")?;
+    if !fields.contains(", authority UTC ") || !fields.contains(", node logical ") {
+        return None;
+    }
+    id.parse().ok()
+}
+
+#[then(
+    expr = "within {string} the CLI clock output has {int} increasing ticks for generation {int} \
+            of domain {string}"
+)]
+async fn then_cli_clock_ticks_increase(
+    world: &mut ScenarioWorld,
+    duration: String,
+    count: usize,
+    generation: u64,
+    domain: String,
+) {
+    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let domain = expand_placeholders(world, &domain);
+    wait_for_cli_clock_output(world, duration, "increasing clock ticks", |lines| {
+        let ids: Vec<_> = lines
+            .iter()
+            .filter_map(|line| cli_clock_tick_id(line, &domain, generation))
+            .collect();
+        ids.len() >= count && ids.windows(2).all(|pair| pair[0] < pair[1])
+    })
+    .await;
+}
+
+#[then(
+    expr = "within {string} the CLI clock output has a tick for generation {int} after its state \
+            of domain {string}"
+)]
+async fn then_cli_clock_tick_follows_state(
+    world: &mut ScenarioWorld,
+    duration: String,
+    generation: u64,
+    domain: String,
+) {
+    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let domain = expand_placeholders(world, &domain);
+    let state = format!("[events] domain clock [{domain}]: generation {generation}, paced:");
+    wait_for_cli_clock_output(world, duration, "a tick after its clock state", |lines| {
+        let Some(state_index) = lines.iter().rposition(|line| line.starts_with(&state)) else {
+            return false;
+        };
+        lines
+            .iter()
+            .skip(state_index + 1)
+            .any(|line| cli_clock_tick_id(line, &domain, generation).is_some())
+    })
+    .await;
+}
+
+#[then(
+    expr = "within {string} the CLI clock output has a fresh state for generation {int} after \
+            interruption of domain {string}"
+)]
+async fn then_cli_clock_state_follows_interruption(
+    world: &mut ScenarioWorld,
+    duration: String,
+    generation: u64,
+    domain: String,
+) {
+    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let domain = expand_placeholders(world, &domain);
+    let interrupted =
+        format!("[events] domain clock [{domain}] notice: the session was interrupted;");
+    let state = format!("[events] domain clock [{domain}]: generation {generation}, paced:");
+    wait_for_cli_clock_output(
+        world,
+        duration,
+        "a restored state after interruption",
+        |lines| {
+            let Some(interruption_index) =
+                lines.iter().position(|line| line.starts_with(&interrupted))
+            else {
+                return false;
+            };
+            lines
+                .iter()
+                .skip(interruption_index + 1)
+                .any(|line| line.starts_with(&state))
+        },
+    )
+    .await;
+}
+
+#[when(expr = "the CLI clock process receives Ctrl-C")]
+fn when_cli_clock_receives_ctrl_c(world: &mut ScenarioWorld) {
+    let process = world
+        .cli_clock_process
+        .as_ref()
+        .verified("the preceding step started the CLI clock process");
+    let raw_pid = process
+        .child
+        .id()
+        .verified("the CLI clock process is still running");
+    let pid = nix::unistd::Pid::from_raw(
+        i32::try_from(raw_pid).assured("a process id fits the operating system pid type"),
+    );
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT)
+        .unwrap_or_else(|error| panic!("failed to interrupt the CLI clock process: {error}"));
+}
+
+#[then(expr = "the CLI clock process exits successfully")]
+async fn then_cli_clock_exits_successfully(world: &mut ScenarioWorld) {
+    let process = world
+        .cli_clock_process
+        .as_mut()
+        .verified("the preceding step started the CLI clock process");
+    let status = tokio::time::timeout(Duration::from_secs(10), process.child.wait())
+        .await
+        .unwrap_or_else(|_| panic!("the CLI clock process did not stop after Ctrl-C"))
+        .unwrap_or_else(|error| panic!("the CLI clock process could not be reaped: {error}"));
+    assert!(
+        status.success(),
+        "the CLI clock process exited with {status}"
+    );
+    world.cli_clock_process = None;
+}
+
+#[when(expr = "the CLI attempts to follow the clock of missing domain {string} on node {string}")]
+async fn when_cli_follows_missing_domain(world: &mut ScenarioWorld, domain: String, node: String) {
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new(scenario_cli_binary())
+            .args([
+                "--server",
+                &grpc_uri,
+                "--domain",
+                &domain,
+                "--username",
+                TEST_AUTH_USERNAME,
+                "--password",
+                TEST_AUTH_PASSWORD,
+                "domain-clock",
+            ])
+            .output(),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("the CLI missing-domain request did not finish"))
+    .unwrap_or_else(|error| panic!("the CLI missing-domain process did not start: {error}"));
+    world.last_cli_output = Some(output);
 }
 
 /// The directory holding the NSPL files a formatter scenario writes.
@@ -6535,6 +6838,20 @@ async fn when_the_tcp_forwarder_stops(world: &mut ScenarioWorld, address: String
         .stop(address)
         .await
         .unwrap_or_else(|error| panic!("the forwarder at {address} could not stop: {error}"));
+}
+
+#[when(expr = "the TCP forwarder at {string} restarts")]
+async fn when_the_tcp_forwarder_restarts(world: &mut ScenarioWorld, address: String) {
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .assured("the scenario names a TCP forwarder address");
+    world
+        .tcp_forwarders
+        .as_mut()
+        .verified("the scenario started TCP forwarders")
+        .restart(address)
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder at {address} could not restart: {error}"));
 }
 
 #[then(expr = "the TCP forwarder at {string} eventually accepts a connection")]
@@ -24945,6 +25262,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.cli_subscription_reader = None;
                 world.cli_subscription_process = None;
                 world.cli_subscription_lines = None;
+                world.cli_clock_process = None;
                 world.server_process_http_load = None;
                 world.held_resource_upload = None;
                 world.server_process = None;

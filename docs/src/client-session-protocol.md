@@ -1039,6 +1039,11 @@ the gap as an interruption. The web console does not follow domain clocks, and t
 does not expose them. Both requests are refused while the session holds a transaction, like every
 other session-local request.
 
+The CLI's `domain-clock` subcommand uses the Rust client's typed attach reply and clock event
+stream. It prints the reply and then the same state, tick, interruption, and end lines as its REPL,
+including the fresh state after the client restores an attachment. Ctrl-C sends a detach request
+before the process exits; an attach refusal exits nonzero with its typed reason.
+
 ## Resource Uploads
 
 A resource archive travels on its own gRPC call, `UploadResource`, beside the session rather than

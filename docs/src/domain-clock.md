@@ -116,9 +116,10 @@ already-armed deadlines continue through the quiesce cycle.
 The current consensus leader reconciles authority ownership whenever domain state, Raft topology,
 or effective node availability changes. Candidate identities are the intersection of effectively
 available node incarnations and current Raft voters. Effective availability retains an established
-incarnation through a temporary gossip loss while its application-health probes continue; it
-removes that incarnation after continuous, fresh probe failures reach the node-unavailability
-interval. Duplicate observations for one node name collapse to the newest incarnation.
+incarnation through a gossip loss while its latest application-health observation remains within
+the node-unavailability interval and has not marked it unavailable. If that observation becomes
+stale, the node follows gossip's liveness verdict. Duplicate observations for one node name
+collapse to the newest incarnation.
 
 Selection is deterministic. Candidates are ordered by node name, the domain name is hashed, and
 the hash selects one position in that ordered set. Every leader presented with the same domain and
@@ -134,6 +135,10 @@ Leadership transfer alone does not alter the mapping or authority. Losing the au
 node incarnation causes the leader to select and commit another eligible incarnation. If none is
 eligible, the authority becomes unassigned and the paced clock is unavailable for execution until
 an owner is committed again; the mapping itself remains replicated.
+
+Application-health probes finish their bounded attempts despite concurrent gossip updates. This
+allows continuous failures to exclude a stopped authority even after its advertised endpoint has
+changed; a stale healthy observation must not leave it indefinitely eligible for clock production.
 
 On each node, a producer task exists only when all of these values agree with committed runtime
 state:

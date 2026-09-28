@@ -136,6 +136,24 @@ cluster_settled() {
     printf '%s\n' "${leader}" >"${output_dir}/leader.txt"
 }
 
+# Settled as above, and every node also reports no warnings and a healthy application probe to each
+# of its peers.
+cluster_settled_and_connected() {
+    local output_dir="$1"
+    cluster_settled "${output_dir}" || return 1
+    local host peer
+    for host in "${node_hosts[@]}"; do
+        local status_file="${output_dir}/status-${host}.attempt.txt"
+        awk '/^\[warnings\]$/ { found = 1; getline; if ($0 == "- none") clean = 1 }
+             END { exit !(found && clean) }' "${status_file}" || return 1
+        for peer in "${node_hosts[@]}"; do
+            [[ "${peer}" == "${host}" ]] && continue
+            grep -Eq "^- node-${peer##*-}: .* status=connected$" "${status_file}" \
+                || return 1
+        done
+    done
+}
+
 survivors_settled() {
     local target="$1"
     local output_dir="$2"

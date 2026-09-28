@@ -1689,11 +1689,10 @@ impl Application {
                 }))
                 .buffer_unordered(MAX_CONCURRENT_HEALTH_PROBES);
                 tokio::pin!(probe_results);
-                // Finish this bounded probe round even if Chitchat changes while it runs. A
-                // stopped peer's probe can take its full deadline; cancelling the round on each
-                // gossip update prevents the failures from ever accumulating long enough to
-                // mark that peer unavailable. The watch receiver retains a topology change for
-                // the next round, and a result for a replaced target is discarded by generation.
+                // Let each bounded probe finish even when gossip publishes another update.
+                // Cancelling the round on every update can indefinitely hide an unreachable
+                // peer's one-second timeout. Publication checks the current incarnation and
+                // endpoint, so a result superseded by discovery is still discarded.
                 loop {
                     tokio::task::consume_budget().await;
                     tokio::select! {
@@ -1705,7 +1704,7 @@ impl Application {
                             None => break,
                         }
                     }
-                };
+                }
                 tokio::select! {
                     _ = health_shutdown.cancelled() => break,
                     changed = health_topology.changed() => {
