@@ -342,6 +342,9 @@ and takes subscription frames only while the control lane is empty. A reply, inc
 the unsubscribe that stops a subscription, therefore never waits behind rows the client has not
 read. The lanes never reorder what the transport already took: a frame handed to the transport stays
 ahead of every frame queued after it.
+An attached clock's tick holds one replaceable control slot per domain. Its delivery task can
+overwrite the slot while the lane is full or after queueing it, until the transport takes it; a
+changed clock state withdraws a superseded tick still in that slot.
 
 Because every frame is at most the frame limit, the two lanes bound what a session holds for a
 client that reads slowly. Backpressure reaches the client's requests too: a rejection or a
@@ -993,29 +996,43 @@ A session can follow the clock of a domain. `ATTACH DOMAIN CLOCK;` and `DETACH D
 the server as `AttachDomainClockRequest` and `DetachDomainClockRequest` naming the active domain,
 and the reply to an attach carries the `START` generation and the clock as the serving node has it
 installed. [Sessions](./sessions.md#domain-clock-attachment) owns the public contract and [Domain
-Clock](./domain-clock.md#session-observation) owns how an installation maps to the observed clock;
-this section places the attachment in the protocol.
+Clock](./domain-clock.md#session-observation) owns how an installation and accepted progress become
+observations; this section places the attachment in the protocol.
 
 An attachment is not a subscription, and the protocol keeps the two apart end to end. It reads no
 relay, takes no interest lease, and has no name or generation of its own: it is keyed by its domain,
 so a session follows each domain clock at most once, and every frame about it names the domain. Its
-frames travel on the control lane rather than the subscription lane, because a clock frame is a
-small replaceable observation rather than data that must wait its turn behind rows. Attach and
-detach run on the ordered lane, in order with the session's commands. The attach reply is queued
-before delivery starts, so the clock it carries precedes every `DomainClockObserved` frame, and
-detach stops delivery before its reply is queued, so nothing about the domain follows that reply. A
-frame waits for room on the control lane instead of buffering, and changes published meanwhile
-collapse into the newest installation, so a slow client holds at most one pending frame per attached
-domain and never receives an older clock after a newer one. When the serving node no longer has the
-domain, `DomainClockAttachmentEnded` with reason `DomainRemoved` is the last frame about the
-attachment.
+frames travel on the control lane rather than the subscription lane. Attach and detach run on the
+ordered lane, in order with the session's commands. The attach reply is queued before delivery
+starts, so its state precedes every frame. If the node already holds a tick of that installed
+generation, its newest tick is the first frame after the reply. Each changed installation arrives
+as `DomainClockObserved` before any tick of its generation. A committed unassigned authority
+produces uninstalled and then the same mapping on reassignment; a direct authority move retains the
+mapping and produces no state frame.
+
+`DomainClockTicked` carries the domain, generation, nonzero tick id, logical boundary, the
+authority's UTC observation, and the serving node's logical reading from a clock snapshot taken
+when the frame is built. The three timestamps use signed Unix nanoseconds. The serving reading lets
+a client anchor itself even when its local UTC differs from the cluster's. The runtime publishes
+only accepted progress, fenced by generation and authority; a late attachment reads the newest
+accepted tick without waiting for another one. Tick ids can skip when the authority coalesces
+missed periods or a slow client's pending tick is replaced.
+
+A state frame waits for room on the control lane, and changes published meanwhile collapse into
+the newest installation. A tick occupies one replaceable slot per attached domain, including while
+the control lane is full, so a slow client never accumulates a tick backlog. Delivery withdraws a
+pending tick when state changes and rechecks installation before selecting another. Detach stops
+delivery before its reply is queued, so nothing about the domain follows that reply. When the
+serving node no longer has the domain, `DomainClockAttachmentEnded` with reason `DomainRemoved` is
+the last frame about the attachment.
 
 Every node serves attachments from its own installation, which it derives from the same committed
-revision as every other node, so an attachment adds no interconnect traffic and survives nothing: it
-ends silently with its session. The Rust client attaches every clock it followed again on its next
-session and reports the gap as an interruption. The web console does not follow domain clocks, and
-the shared binding does not expose them. Both requests are refused while the session holds a
-transaction, like every other session-local request.
+revision as every other node, and from progress it already accepted, so an attachment adds no
+interconnect traffic and survives nothing: it ends silently with its session. The Rust client
+attaches every clock it followed again on its next session, clears its previous tick, and reports
+the gap as an interruption. The web console does not follow domain clocks, and the shared binding
+does not expose them. Both requests are refused while the session holds a transaction, like every
+other session-local request.
 
 ## Resource Uploads
 

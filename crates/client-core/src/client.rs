@@ -1161,7 +1161,7 @@ impl Client {
     ///
     /// An attached outcome carries the clock as the serving node has it installed.
     /// [`Client::domain_clock`] answers from the latest clock from then on, and
-    /// [`Client::next_domain_clock_event`] reports every change the server sends after the reply.
+    /// [`Client::next_domain_clock_event`] reports state changes and accepted ticks after the reply.
     pub async fn attach_domain_clock(
         &self,
         domain: DomainName,
@@ -1200,10 +1200,10 @@ impl Client {
 
     /// Waits for the next event about the domain clocks the session follows.
     ///
-    /// Events are coalesced per domain, so a caller that reads late receives the newest clock of
-    /// each domain rather than every change in between. When the session holding an attachment
-    /// ends, this reopens a session, which attaches every followed clock again. A client that
-    /// follows no clock waits until it attaches to one.
+    /// Events are coalesced per domain, so a caller that reads late receives the newest state and
+    /// tick, with the state first, rather than every intermediate observation. When the session
+    /// holding an attachment ends, this reopens a session and attaches every followed clock again.
+    /// A client that follows no clock waits until it attaches to one.
     pub async fn next_domain_clock_event(
         &self,
     ) -> error_stack::Result<DomainClockEvent, ClientError> {

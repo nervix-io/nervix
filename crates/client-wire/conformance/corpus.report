@@ -69,6 +69,8 @@ REPLY 15 DOMAIN_CLOCK_DETACH not_attached domain=tenant message=str:746869732073
 FRAME server_domain_clock_stopped.nxsm
 EVENT DOMAIN_CLOCK domain=tenant
 CLOCK generation=0 state=stopped
+FRAME server_domain_clock_ticked.nxsm
+EVENT DOMAIN_CLOCK_TICK domain=tenant generation=7 id=42 boundary=1000 authority_utc=2000 serving_logical=3000
 FRAME server_domain_clock_uninstalled.nxsm
 EVENT DOMAIN_CLOCK domain=tenant
 CLOCK generation=7 state=uninstalled

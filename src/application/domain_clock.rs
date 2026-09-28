@@ -20,7 +20,7 @@ use nervix_models::{
 };
 use tokio::{
     sync::watch,
-    time::{Duration, sleep},
+    time::{Duration, Instant, sleep},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -37,6 +37,17 @@ struct DomainClockTaskSpec {
     generation: u64,
     authority_revision: nervix_models::DomainClockAuthorityRevision,
     authority: ClusterNodeIdentity,
+}
+
+impl DomainClockTaskSpec {
+    /// The physical interval represented by one logical period, rounded up by the same clock
+    /// arithmetic used for all logical deadlines.
+    fn minimum_tick_wall_spacing(
+        &self,
+    ) -> error_stack::Result<Duration, nervix_models::DomainClockError> {
+        self.clock
+            .wall_duration_for_logical_delta(self.period.as_duration())
+    }
 }
 
 pub(in crate::application) struct DomainClockTask {
@@ -436,7 +447,11 @@ async fn run_domain_clock(
         }
     }
 
+    // A valid rate may make the next physical interval unrepresentable. Tick one is already due
+    // at START and must still be emitted before scheduling a later interval can fail.
+    let mut minimum_tick_wall_spacing = None;
     let mut next_tick_id = 1;
+    let mut last_emitted_at: Option<Instant> = None;
     let mut latest_progress = None;
     let mut deliveries = DomainClockProgressDeliveries::default();
     loop {
@@ -474,6 +489,37 @@ async fn run_domain_clock(
             }
         };
         if let Some(advancement) = due {
+            if let Some(last) = last_emitted_at {
+                let spacing = match minimum_tick_wall_spacing {
+                    Some(spacing) => spacing,
+                    None => match spec.minimum_tick_wall_spacing() {
+                        Ok(spacing) => {
+                            minimum_tick_wall_spacing = Some(spacing);
+                            spacing
+                        }
+                        Err(error) => {
+                            service.inner.runtime.report_error(format!(
+                                "domain clock cadence for '{}' failed: {error}",
+                                domain_id.as_str()
+                            ));
+                            warn!(domain = domain_id.as_str(), error = %error, "domain clock cadence failed");
+                            break;
+                        }
+                    },
+                };
+                if let Some(remaining) = spacing.checked_sub(last.elapsed())
+                    && !remaining.is_zero()
+                {
+                    let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
+                    tokio::pin!(cluster_change);
+                    tokio::select! {
+                        _ = shutdown.cancelled() => break,
+                        _ = sleep(remaining) => {},
+                        _ = &mut cluster_change => {},
+                    }
+                    continue;
+                }
+            }
             let progress = emit_domain_clock_progress(
                 &service,
                 &domain_id,
@@ -487,6 +533,7 @@ async fn run_domain_clock(
             let Some(progress) = progress else {
                 break;
             };
+            last_emitted_at = Some(Instant::now());
             latest_progress = Some(progress);
             continue;
         }
