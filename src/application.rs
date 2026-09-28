@@ -1689,27 +1689,23 @@ impl Application {
                 }))
                 .buffer_unordered(MAX_CONCURRENT_HEALTH_PROBES);
                 tokio::pin!(probe_results);
-                let topology_changed = loop {
+                // Finish this bounded probe round even if Chitchat changes while it runs. A
+                // stopped peer's probe can take its full deadline; cancelling the round on each
+                // gossip update prevents the failures from ever accumulating long enough to
+                // mark that peer unavailable. The watch receiver retains a topology change for
+                // the next round, and a result for a replaced target is discarded by generation.
+                loop {
                     tokio::task::consume_budget().await;
                     tokio::select! {
                         _ = health_shutdown.cancelled() => return,
-                        changed = health_topology.changed() => {
-                            changed.assured(
-                                "the cluster handle retains its Chitchat state sender for the server lifetime",
-                            );
-                            break true;
-                        }
                         result = probe_results.next() => match result {
                             Some(result) => {
                                 cluster_for_health.record_peer_health_result(result).await;
                             }
-                            None => break false,
+                            None => break,
                         }
                     }
                 };
-                if topology_changed {
-                    continue;
-                }
                 tokio::select! {
                     _ = health_shutdown.cancelled() => break,
                     changed = health_topology.changed() => {

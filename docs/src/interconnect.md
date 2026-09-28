@@ -902,7 +902,10 @@ advertised endpoint must establish a new target.
 Each health round has at most one probe in flight for each peer and at most 32 probes across the
 node. A probe has a one-second total deadline. Results are published as they complete, so a silent
 peer occupies only its own concurrency slot. The next regular round begins roughly one second after
-the previous round finishes.
+the previous round finishes. A gossip change observed during a round is handled when its bounded
+probes finish. The round does not cancel probes for a peer that has gone missing from gossip: those
+failures must reach the health detector for the peer to become unavailable. A result for a target
+replaced in the meantime is ignored by its exact target generation.
 
 Every result is bound to the exact certificate node identifier, discovery incarnation, endpoint
 generation, advertised address, and observation time that were targeted. A healthy response must
