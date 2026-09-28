@@ -160,6 +160,35 @@ follows the interruption as an `Observed` event; changes in between are not repo
 the next event reopens a closed session when a followed clock waits for it. A detach, or an end,
 stops following the domain, and `domain_clock` returns `None` for it afterwards.
 
+### Through The Shared C Binding
+
+The shared C binding reads the same events for C, C++, Python, JVM and Ruby hosts; its header is
+`crates/client-ffi/include/nervix_client.h`. `ATTACH DOMAIN CLOCK;` and `DETACH DOMAIN CLOCK;` run
+through `nx_session_prepare` and `nx_session_execute` like any statement, for the session's selected
+domain. `nx_session_next_clock_event` waits for the next event, bounded by the same `nx_cancel`
+tokens and deadlines as every blocking call, and hands out an `nx_clock_event` reference. The events
+are the Rust client's, coalesced the same way:
+
+- `nx_clock_event_kind_of` tells an `NX_CLOCK_EVENT_STATE`, `NX_CLOCK_EVENT_TICK`,
+  `NX_CLOCK_EVENT_ENDED` or `NX_CLOCK_EVENT_INTERRUPTED` event apart, and `nx_clock_event_domain`
+  borrows the name of the domain it concerns.
+- `nx_clock_event_generation` reads the `START` generation of a state or tick event,
+  `nx_clock_event_state` the installation state of a state event, `nx_clock_event_paced` the period,
+  skew, logical origin, UTC anchor and time rate of a paced one, `nx_clock_event_tick` the id,
+  logical boundary, authority UTC observation and serving node's logical reading of a tick, and
+  `nx_clock_event_end_reason` why the server ended an attachment. Each fails with `NX_ERROR_TYPE`
+  for an event whose kind does not carry what it reads.
+- Instants are signed nanoseconds since the Unix epoch, the period and skew unsigned nanoseconds,
+  and the time rate a `double`. Every field is written to an out-parameter the host provides, so
+  reading an event allocates nothing on the host's side.
+- `nx_clock_event_retain` and `nx_clock_event_release` count references the way `nx_event_retain`
+  and `nx_event_release` do, and a reference may be released on any thread.
+
+The binding exposes the events, not `AttachedDomainClock`: a host projects logical time, physical
+waits and admission windows from the paced fields itself. The outcome of an attach carries its
+disposition and message, not the clock, so a host that attaches to a running clock paces on the
+ticks' logical readings until the next state event reports the committed mapping.
+
 ## Transaction Handles And Attach
 
 `CommandOutcome::transaction` describes the session's transaction binding. Its `TransactionStatus`

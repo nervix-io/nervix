@@ -303,7 +303,7 @@ jobs:
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
       NERVIX_TEST_CONCURRENCY_FACTOR: "2"
-      # Nineteen scenarios finish in a few minutes. A short budget leaves the builds before them
+      # Twenty-nine scenarios finish in a few minutes. A short budget leaves the builds before them
       # up to 40 minutes of the job limit instead of the suite job's 18.
       NERVIX_TEST_SUITE_BUDGET: "15m"
     steps:

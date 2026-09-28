@@ -95,7 +95,10 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uuid::Uuid;
 
 use crate::common::{
-    client_conformance::{ClientProbe, ProbeRuntime, ProbeTarget, SUBSCRIBED_LINE, corpus_report},
+    client_conformance::{
+        ATTACHED_LINE, ClientProbe, ProbeExercise, ProbeRuntime, ProbeTarget, SUBSCRIBED_LINE,
+        corpus_report,
+    },
     cluster::{
         BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
         HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
@@ -2720,9 +2723,59 @@ fn then_client_wire_command_transport_artifact_exists(world: &mut ScenarioWorld)
     );
 }
 
-/// How long a probe may take to open its session and subscription. Starting a JVM or compiling
-/// nothing still costs seconds on a loaded machine, so this bounds a wait, not a race.
+/// How long a probe may take to open its session and subscription or attachment. Starting a JVM
+/// or compiling nothing still costs seconds on a loaded machine, so this bounds a wait, not a race.
 const CLIENT_PROBE_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Where a probe of the scenario's domain connects when it starts on `node_id`.
+fn client_probe_target(
+    world: &ScenarioWorld,
+    node_id: &str,
+    exercise: ProbeExercise,
+) -> ProbeTarget {
+    let cluster = world.cluster();
+    let grpc_uri = cluster
+        .grpc_uri(node_id)
+        .expect("the probe's node belongs to the cluster");
+    let console = cluster
+        .web_console_url(node_id)
+        .expect("the probe's node belongs to the cluster");
+    let mut websocket_uri =
+        url::Url::parse(&console).expect("the harness builds a valid console URL");
+    websocket_uri
+        .set_scheme("ws")
+        .expect("an http URL can take the ws scheme");
+    websocket_uri.set_path("/console/ws");
+    ProbeTarget {
+        grpc_uri,
+        websocket_uri: websocket_uri.to_string(),
+        username: TEST_AUTH_USERNAME.to_string(),
+        password: TEST_AUTH_PASSWORD.to_string(),
+        domain: world.domain.clone(),
+        exercise,
+    }
+}
+
+/// Starts a probe and waits until it prints `ready_line`, the point a scenario continues from.
+async fn start_client_probe(
+    world: &mut ScenarioWorld,
+    runtime: ProbeRuntime,
+    node_id: &str,
+    target: ProbeTarget,
+    ready_line: &str,
+) {
+    append_cucumber_log_line(&format!(
+        "client probe {runtime:?}: node={node_id} target={target:?}"
+    ));
+    let mut probe = ClientProbe::start(runtime, target)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    probe
+        .wait_for_line(ready_line, CLIENT_PROBE_SUBSCRIBE_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    world.client_probe = Some(probe);
+}
 
 #[when(
     expr = "the {string} client probe subscribes as {string} to relay {string} on node {string} \
@@ -2740,40 +2793,27 @@ async fn when_client_probe_subscribes(
         .parse()
         .expect("the step names a known probe runtime");
     let node_id = expand_placeholders(world, &node_id);
-    let cluster = world.cluster();
-    let grpc_uri = cluster
-        .grpc_uri(&node_id)
-        .expect("the probe's node belongs to the cluster");
-    let console = cluster
-        .web_console_url(&node_id)
-        .expect("the probe's node belongs to the cluster");
-    let mut websocket_uri =
-        url::Url::parse(&console).expect("the harness builds a valid console URL");
-    websocket_uri
-        .set_scheme("ws")
-        .expect("an http URL can take the ws scheme");
-    websocket_uri.set_path("/console/ws");
-    let target = ProbeTarget {
-        grpc_uri,
-        websocket_uri: websocket_uri.to_string(),
-        username: TEST_AUTH_USERNAME.to_string(),
-        password: TEST_AUTH_PASSWORD.to_string(),
-        domain: world.domain.clone(),
+    let exercise = ProbeExercise::Subscription {
         relay: expand_placeholders(world, &relay),
         subscription: expand_placeholders(world, &subscription),
         rows,
     };
-    append_cucumber_log_line(&format!(
-        "client probe {runtime:?}: node={node_id} target={target:?}"
-    ));
-    let mut probe = ClientProbe::start(runtime, target)
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-    probe
-        .wait_for_line(SUBSCRIBED_LINE, CLIENT_PROBE_SUBSCRIBE_TIMEOUT)
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-    world.client_probe = Some(probe);
+    let target = client_probe_target(world, &node_id, exercise);
+    start_client_probe(world, runtime, &node_id, target, SUBSCRIBED_LINE).await;
+}
+
+#[when(expr = "the {string} client probe attaches to the domain clock on node {string}")]
+async fn when_client_probe_attaches_to_the_domain_clock(
+    world: &mut ScenarioWorld,
+    runtime: String,
+    node_id: String,
+) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .expect("the step names a known probe runtime");
+    let node_id = expand_placeholders(world, &node_id);
+    let target = client_probe_target(world, &node_id, ProbeExercise::DomainClock);
+    start_client_probe(world, runtime, &node_id, target, ATTACHED_LINE).await;
 }
 
 #[when(expr = "the {string} client probe decodes the conformance corpus")]
