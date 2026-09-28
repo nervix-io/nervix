@@ -45,6 +45,7 @@ compile_error!(
 pub mod application;
 pub mod cluster;
 mod domain_clock_authority;
+mod emitter_start_plan;
 #[cfg(feature = "testing")]
 mod fault_injection;
 pub mod memory_pressure;

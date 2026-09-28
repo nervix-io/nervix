@@ -16,7 +16,11 @@
 //! [`EmitterStartPlan::resolve_clients`] binds the resolved paths into the plan that the emitter
 //! task and its sink constructors receive. Neither of them sees a Model.
 
+use std::{num::NonZeroUsize, time::Duration};
+
+use arch_into::ArchInto as _;
 use error_stack::Report;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     AckConfirmation, BrokerPublishingMode, ParsedRetryPolicy, ResolvedClientConfig,
     optional_client_config_value,
@@ -31,11 +35,14 @@ use nervix_connector_otel::{
 use nervix_connector_postgres::PostgresConflictAction;
 use nervix_connector_sqs::SqsPublishingMode;
 use nervix_models::{
-    ChannelName, CollectionName, EmitterBatchPolicy, Expression, HttpOrigin, Invocation, QueueName,
+    ChannelName, ClickHouseValueMapping, ClientConfigEntry, ClientName, ClientPoolBounds,
+    ClientResourceMount, CollectionName, CreateEmitter, EmitSink, EmitterAckWindow,
+    EmitterBatchPolicy, EmitterPublishingMode, Expression, HttpOrigin, IcebergCatalog,
+    IcebergStorageBackend, IcebergValueMapping, Invocation, Model, MongoDbValueMapping,
+    MySqlValueMapping, OtelValueMapping, PostgresValueMapping, QueueName, RetryPolicy,
     SqsFifoGroup, SubjectName, TableName, TopicName,
 };
-
-use super::*;
+use thiserror::Error;
 
 /// A duration an emitter's publishing mode declares, named the way its diagnostics read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
@@ -1273,7 +1280,8 @@ fn decide_ack_confirmation(
     }
     let max_in_flight = match window {
         EmitterAckWindow::Sequential => NonZeroUsize::MIN,
-        EmitterAckWindow::Parallel { max } => addressable_count(*max),
+        EmitterAckWindow::Parallel { max } => NonZeroUsize::new(max.get().arch_into())
+            .assured("the configured non-zero ACK window fits the supported target pointer width"),
     };
     Ok(AckConfirmation {
         max_in_flight,
@@ -1361,13 +1369,26 @@ fn decide_sqs_publishing_mode(
 #[cfg(test)]
 mod tests {
     use nervix_models::{
-        BatchMessageLimit, CreateClientClickHouse, CreateClientMongoDb, CreateClientMySql,
-        CreateClientPostgres, EmitterBatchRequirement, ProcessorInputs,
+        AckMode, BatchMessageLimit, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs,
+        CreateClientHttp, CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb,
+        CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
+        CreateClientPostgres, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
+        CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+        CreateClientZeroMq, EmitterBatchRequirement, ErrorPolicies, FlushPolicy, ProcessorInputs,
+        RouteConstruction,
     };
     use nonzero_ext::nonzero;
     use rstest::rstest;
 
     use super::*;
+
+    fn expression(raw: &str) -> Expression {
+        nervix_nspl::parse_expression(raw).expect("valid semantic expression")
+    }
+
+    fn construction(raw: &str) -> RouteConstruction {
+        nervix_nspl::parse_route_construction(raw).expect("valid route construction")
+    }
 
     fn named<T>(value: &str) -> T
     where

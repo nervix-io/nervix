@@ -66,31 +66,27 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     AckMode, Assignment, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClickHouseValueMapping,
-    ClientConfigEntry, ClientName, ClientPoolBounds, ClientResourceMount, ClusterNodeIncarnation,
-    ClusterNodeName, ClusterSchedule, CodecName, CommandExecutionReference, CoordinationIdentity,
+    ClientConfigEntry, ClientName, ClientResourceMount, ClusterNodeIncarnation, ClusterNodeName,
+    ClusterSchedule, CodecName, CommandExecutionReference, CoordinationIdentity,
     CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateEmitter, CreateRelay,
     DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef, DomainSchedule, DomainState,
-    EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName, EndpointType,
-    ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName,
-    IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
+    EmitSink, EmitterName, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
+    FlushPolicy, GeneralErrorPolicy, GeneratorName, InferencerExecutionMode,
     InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestTimestampSource,
     IngestorName, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
     MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
-    ModelIndex, ModelKind, ModelName, MongoDbValueMapping, MySqlValueMapping, NodeRef,
-    OtelValueMapping, OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
-    OwnershipStateResetCause, ParseAsType, PostgresValueMapping, ProcessorOutput, RelayName,
-    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
-    ResolvedBranching, ResourceId, ResourceName, RetryPolicy, RouteConstruction, ScheduledModel,
-    ScheduledNode, ScheduledNodes, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
-    StructuredMessageError, SubscriptionName, Timestamp, WasmCheckpointInspection,
-    WasmRejectedStatePolicy, WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
+    ModelIndex, ModelKind, ModelName, NodeRef, OtelValueMapping, OwnershipStateComponent,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
+    ProcessorOutput, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
+    RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName, RetryPolicy,
+    RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes, SchemaFingerprint,
+    SignalingProtocolName, SignalingWireFormat, StructuredMessageError, SubscriptionName,
+    Timestamp, WasmCheckpointInspection, WasmRejectedStatePolicy, WasmSavedStateRejection,
+    WasmStateGeneration, WasmStateResetScope,
 };
 #[cfg(test)]
 use nervix_models::{
-    CreateClientAzureBlob, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
-    CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientOtel,
-    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientZeroMq,
+    CreateClientHttp, CreateClientPrometheus, CreateClientRabbitMq, EmitterPublishingMode,
 };
 #[cfg(test)]
 use nervix_models::{CreateIngestor, CreateReingestor, IngestSource, OutputBranch};
@@ -148,6 +144,7 @@ use upon::Engine as TemplateEngine;
 use crate::runtime_schema::test_runtime_row;
 use crate::{
     ConfiguredFaultInjection, cluster,
+    emitter_start_plan::*,
     metrics::{
         BatchMetricsHandle, BranchEvictionReason, IngestorQuiesceMetricLabels,
         MessageMetricsHandle, NodeBatchMetricsSpec, NodeInputMetricsHandle, RelayMetricRecorders,
@@ -203,7 +200,6 @@ mod emitter_publishing;
 mod emitter_record_writes;
 mod emitter_retry;
 mod emitter_sinks;
-mod emitter_start_plan;
 mod emitter_supervision;
 mod emitter_task;
 mod emitter_values;
@@ -342,7 +338,6 @@ use emitter_retry::{
     emitter_retry_delay,
 };
 use emitter_sinks::EmitterSinkStarter;
-use emitter_start_plan::*;
 use emitter_supervision::{
     EmitterRetryKind, EmitterRetryStatus, EmitterTaskCommand, ScheduledEmitterTask,
     clear_emitter_stop_signal,
