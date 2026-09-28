@@ -4,6 +4,8 @@ FRAME client_cancel.nxcm
 REQUEST 14 CANCEL target=18446744073709551615
 FRAME client_choice.nxcm
 REQUEST 15 CHOICE target=PlacementPolicy dependencies=[pace:Paced] search=str:636f page_size=2 cursor=choice-page-two
+FRAME client_choice_relay_field.nxcm
+REQUEST 18 CHOICE target=RelayField dependencies=[domain:tenant,model:relay/orders] search=str:616d6f page_size=100 cursor=none
 FRAME client_command.nxcm
 REQUEST 1 COMMAND query=str:43524541544520534348454d41206f726465727320282069642055363420293b204352454154452052454c4159206f726465727320534348454d41206f726465727320554e4252414e434845443b domain=tenant reference=0192d4e4-7b36-7c3e.9f00_5b2d8c3a1e44 expected_position=0 expected_preview=none
 FRAME client_command_bare.nxcm
@@ -23,6 +25,7 @@ CHOICE value=placement:PreferColocation label=str:50524546455220434f4c4f43415449
 CHOICE value=domain:tenant label=str:74656e616e74 detail=none group=none
 CHOICE value=resource:bundle label=str:62756e646c65 detail=none group=none
 CHOICE value=model:relay/orders label=str:6f7264657273 detail=str:52454c4159 group=str:4d6f64656c73
+CHOICE value=field:amount label=str:616d6f756e74 detail=str:493634204f5054494f4e414c group=str:52656c6179206669656c64
 FRAME server_command_failed.nxsm
 REPLY 1 COMMAND failed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
 DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927

@@ -71,10 +71,16 @@ placement, so every live node can receive every class of interconnect operation.
 confidentiality and integrity as well as peer authentication.
 
 Cluster discovery supplies the current node identity, incarnation, and advertised endpoint for each
-peer. A configured bootstrap endpoint is the one exception: the initiating node knows the endpoint
-before it knows the remote node identifier, then obtains and authenticates that identifier from the
-peer certificate. Once discovered, a peer is addressed by its authenticated identity rather than by
-an unverified endpoint claim.
+peer. A bootstrap seed, configured or recovered, is the exception: the initiating node knows the
+endpoint before it knows the remote node identifier, then obtains and authenticates that identifier
+from the peer certificate. Once discovered, a peer is addressed by its authenticated identity
+rather than by an unverified endpoint claim.
+
+On restart, the node also uses the peer endpoints in its recovered Raft membership as gossip seeds,
+excluding its own endpoint. These are contact hints, not current discovery advertisements: the
+bootstrap exchange authenticates the answering node, and gossip then replaces the hint with that
+node's current incarnation and advertised endpoint. This lets a former bootstrap node contact
+survivors even when its deployment has no configured bootstrap host.
 
 A peer advertises three endpoints independently: its interconnect endpoint as a host and port, and
 its client and web-console endpoints as URLs. Discovery converges field by field, so each one is
@@ -149,9 +155,13 @@ A host resolves in this order:
 ### Where The Interconnect Resolves
 
 At startup a node resolves its own advertised interconnect endpoint, whose first address becomes
-its gossip identity address, and its bootstrap endpoint, every address of which becomes a gossip
-seed. Each lookup has the connection setup timeout, five seconds by default, and a lookup that fails
-fails startup.
+its gossip identity address, and its configured bootstrap endpoint, every address of which becomes a
+gossip seed. Each lookup has the connection setup timeout, five seconds by default; failure of
+either required lookup fails startup. It also resolves the recovered Raft members' advertised
+endpoints in parallel. Their successful answers become additional gossip seeds; an unavailable
+recovered endpoint is reported and skipped so it does not prevent the node from starting or using
+another reachable member. Once gossip discovers a live peer, the interconnect replaces the
+recovery hint with that peer's current advertised endpoint.
 
 A discovered peer is registered at the interconnect endpoint it advertised, and every attempt to
 open one of its pool connections resolves that endpoint again, inside the attempt's connection setup

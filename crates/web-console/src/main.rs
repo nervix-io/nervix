@@ -38,10 +38,10 @@ use nervix_dataflow_graph::{
     DataflowStatistics,
 };
 use nervix_models::{
-    CommandExecutionReference, DomainName, DomainPace, DomainStatus, ModelKind,
-    ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
+    CommandExecutionReference, CreateSubscription, DomainName, DomainPace, DomainStatus, ModelKind,
+    RelayName, ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
     ResourceVersionDescription, ResourceVersionEntries, Statement, SubscriptionName,
-    TransactionLifecycle, TransactionStatus,
+    TransactionLifecycle, TransactionStatus, expression_to_nspl,
 };
 use nervix_nspl::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
@@ -60,8 +60,8 @@ mod create_dialog;
 mod transaction_inspector;
 
 use create_dialog::{
-    ChoiceControl, ChoiceRequestContext, CreateCommandContext, CreateDialog, CreateKind,
-    CreateMenu, CreateSignals, CreateSubmission,
+    ChoiceControl, ChoiceRequestContext, CommandDispatch, CreateCommandContext, CreateDialog,
+    CreateDispatch, CreateKind, CreateMenu, CreateSignals, CreateSubmission, SubscriptionDispatch,
 };
 use transaction_inspector::{InspectorSignals, TransactionInspector};
 
@@ -202,6 +202,7 @@ enum ConsoleRequest {
     SubscriptionStart {
         tab_id: u64,
         request: SubscribeRequest,
+        origin: SubscriptionOrigin,
     },
     /// Closes the subscription of a tab the operator closed.
     SubscriptionStop {
@@ -221,6 +222,16 @@ enum ConsoleRequest {
     AttachTransaction(AttachTransactionRequest),
     /// Reads an impact report without binding the inspected transaction.
     InspectTransaction(InspectTransactionRequest),
+}
+
+/// Who asked for a subscription, and so who reads its outcome besides its tab.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SubscriptionOrigin {
+    /// Typed in the REPL, or restored on a later connection: the tab and the terminal show the
+    /// outcome.
+    Console,
+    /// Submitted by the Create form, whose attempt completes or fails with the outcome.
+    Create { attempt: u64, draft_revision: u64 },
 }
 
 /// Who reads the outcome of a command.
@@ -588,16 +599,16 @@ enum ConnectionEnd {
     ConsoleClosed,
 }
 
+/// A subscription the console shows as a tab. Its name is unique among the console's tabs, which
+/// are the session's subscriptions, so a name also finds the tab of a typed `DELETE SUBSCRIPTION`.
 #[derive(Clone)]
 struct SubscriptionTabView {
     id: u64,
     state: SubscriptionTabState,
     name: SubscriptionName,
     domain: DomainName,
-    relay: String,
-    filter: String,
-    sample_rate_index: usize,
     title: String,
+    /// The canonical statement that opens the subscription, sent again to restore the tab.
     subscribe_command: String,
     lines: TermLineHistory,
 }
@@ -870,6 +881,82 @@ fn App() -> impl IntoView {
         });
     };
 
+    let subscription_request_tx = web_console_session.request_tx;
+    // The one dispatcher of subscription statements: a Create form submission and a statement
+    // typed in the REPL both open a tab here, which the subscription lifecycle then owns.
+    let open_subscription = move |dispatch: SubscriptionDispatch, origin: SubscriptionOrigin| {
+        let SubscriptionDispatch {
+            domain,
+            subscription,
+            statement,
+        } = dispatch;
+        // Bounded by the subscription tabs the operator has open in this console.
+        let name_taken = subscription_tabs
+            .with_untracked(|tabs| tabs.iter().any(|tab| tab.name == subscription.name));
+        if name_taken {
+            let reason = format!(
+                "a subscription tab named '{}' is already open",
+                subscription.name
+            );
+            terminal_lines.update(|lines| lines.push(TermLine::error(reason.clone())));
+            fail_subscription_origin(signals, origin, reason);
+            return;
+        }
+        let tab_id = next_subscription_tab_id.get_untracked();
+        let next_tab_id = tab_id
+            .checked_add(1)
+            .assured("a console session cannot open 2^64 subscription tabs");
+        next_subscription_tab_id.set(next_tab_id);
+        subscription_tabs.update(|tabs| {
+            tabs.push(SubscriptionTabView {
+                id: tab_id,
+                state: SubscriptionTabState::Pending,
+                name: subscription.name.clone(),
+                domain: domain.clone(),
+                title: subscription_tab_title(&subscription),
+                subscribe_command: statement.clone(),
+                lines: TermLineHistory::default(),
+            });
+        });
+        let request = SubscribeRequest {
+            domain,
+            statement,
+            subscription_type: SubscriptionType::Row,
+        };
+        let start = ConsoleRequest::SubscriptionStart {
+            tab_id,
+            request,
+            origin,
+        };
+        let reason = match subscription_request_tx.get_untracked() {
+            Some(request_tx) => match request_tx.unbounded_send(start) {
+                Ok(()) => return,
+                Err(_) => "websocket command channel is closed",
+            },
+            None => "websocket session is not available",
+        };
+        fail_subscription_start(signals, tab_id, vec![TermLine::error(reason)]);
+        fail_subscription_origin(signals, origin, reason.to_string());
+    };
+    let stop_subscription_session = web_console_session.clone();
+    let stop_subscription = move |tab_id: u64| {
+        let Some(request) = signals.begin_subscription_close(tab_id) else {
+            return;
+        };
+        if let Some(request_tx) = stop_subscription_session.request_tx.get_untracked()
+            && request_tx
+                .unbounded_send(ConsoleRequest::SubscriptionStop { tab_id, request })
+                .is_ok()
+        {
+            return;
+        }
+        restore_failed_unsubscribe(
+            subscription_tabs,
+            tab_id,
+            "websocket session is not available".to_string(),
+        );
+    };
+
     let run_command = move |next_command: Option<String>| {
         suggestion_request_sequence.update(|sequence| {
             *sequence = sequence
@@ -945,6 +1032,38 @@ fn App() -> impl IntoView {
                     )));
                 });
             }
+        } else if let Ok(ClientStatement::CreateSubscription(subscription)) =
+            parse_client_statement(&command)
+        {
+            match active_domain.get_untracked() {
+                Some(domain) => match SubscriptionDispatch::new(domain, subscription) {
+                    Ok(dispatch) => open_subscription(dispatch, SubscriptionOrigin::Console),
+                    Err(error) => {
+                        let reason = error.current_context().to_string();
+                        terminal_lines.update(|lines| lines.push(TermLine::error(reason)));
+                    }
+                },
+                None => {
+                    terminal_lines
+                        .update(|lines| lines.push(TermLine::error("no active domain selected")));
+                }
+            }
+        } else if let Ok(ClientStatement::DeleteSubscription(delete)) =
+            parse_client_statement(&command)
+        {
+            // Bounded by the subscription tabs the operator has open in this console.
+            let tab_id = subscription_tabs.with_untracked(|tabs| {
+                tabs.iter()
+                    .find(|tab| tab.name == delete.name)
+                    .map(|tab| tab.id)
+            });
+            match tab_id {
+                Some(tab_id) => stop_subscription(tab_id),
+                None => {
+                    let reason = format!("no subscription tab named '{}'", delete.name);
+                    terminal_lines.update(|lines| lines.push(TermLine::error(reason)));
+                }
+            }
         } else {
             // The server decides which statements need a selected domain, and answers one sent
             // without it with a failed outcome.
@@ -1011,107 +1130,34 @@ fn App() -> impl IntoView {
     };
     let create_request_tx = web_console_session.request_tx;
     let submit_create = move |submission: CreateSubmission, attempt: u64, draft_revision: u64| {
-        submit_create_request(
-            create,
-            terminal_lines,
-            transaction_status,
-            create_request_tx,
-            submission,
-            attempt,
-            draft_revision,
-        );
-    };
-    let subscription_session = web_console_session.clone();
-    let start_subscription = move |relay: String, filter: String, sample_rate_index: usize| {
-        let Some(domain) = active_domain.get_untracked() else {
-            active_subscription_tab.set(None);
-            terminal_lines.update(|lines| lines.push(TermLine::error("no active domain selected")));
-            return;
-        };
-        let title = subscription_tab_title(&relay, &filter);
-        // Bounded by the subscription tabs the operator has open in this console, and the tab
-        // strip renders them in this order.
-        if let Some(existing) = subscription_tabs.get_untracked().into_iter().find(|tab| {
-            tab.domain == domain
-                && tab.relay == relay
-                && tab.filter == filter
-                && tab.sample_rate_index == sample_rate_index
-        }) {
-            if matches!(
-                existing.state,
-                SubscriptionTabState::Open(_)
-                    | SubscriptionTabState::Interrupted
-                    | SubscriptionTabState::Restoring
-                    | SubscriptionTabState::Closing(Some(_))
-            ) {
-                active_subscription_tab.set(Some(existing.id));
+        let CreateSubmission {
+            kind,
+            presentation,
+            dispatch,
+        } = submission;
+        match dispatch {
+            CreateDispatch::Command(command) => submit_create_command(
+                signals,
+                create_request_tx,
+                kind,
+                presentation,
+                command,
+                attempt,
+                draft_revision,
+            ),
+            CreateDispatch::Subscription(subscription) => {
+                let prompt_transaction = transaction_status
+                    .with_untracked(|status| ActiveTransaction::of(status.as_ref()));
+                terminal_lines.update(|lines| {
+                    lines.push(TermLine::prompt(presentation, prompt_transaction));
+                });
+                let origin = SubscriptionOrigin::Create {
+                    attempt,
+                    draft_revision,
+                };
+                open_subscription(subscription, origin);
             }
-            return;
         }
-        let tab_id = next_subscription_tab_id.get_untracked();
-        let next_tab_id = tab_id
-            .checked_add(1)
-            .assured("a console session cannot open 2^64 subscription tabs");
-        next_subscription_tab_id.set(next_tab_id);
-        let name = SubscriptionName::parse(&format!("web_console_subscription_{tab_id}"))
-            .assured("lower-case letters, underscores and at most 20 digits form a valid name");
-        let subscribe_command =
-            subscribe_session_command(name.as_str(), &relay, &filter, sample_rate_index);
-        subscription_tabs.update(|tabs| {
-            tabs.push(SubscriptionTabView {
-                id: tab_id,
-                state: SubscriptionTabState::Pending,
-                name,
-                domain: domain.clone(),
-                relay,
-                filter,
-                sample_rate_index,
-                title,
-                subscribe_command: subscribe_command.clone(),
-                lines: TermLineHistory::default(),
-            });
-        });
-        let request = SubscribeRequest {
-            domain,
-            statement: subscribe_command,
-            subscription_type: SubscriptionType::Row,
-        };
-        if let Some(request_tx) = subscription_session.request_tx.get_untracked() {
-            if request_tx
-                .unbounded_send(ConsoleRequest::SubscriptionStart { tab_id, request })
-                .is_err()
-            {
-                append_subscription_tab_line(
-                    subscription_tabs,
-                    tab_id,
-                    TermLine::error("websocket command channel is closed"),
-                );
-            }
-        } else {
-            append_subscription_tab_line(
-                subscription_tabs,
-                tab_id,
-                TermLine::error("websocket session is not available"),
-            );
-        }
-    };
-    let stop_subscription_session = web_console_session.clone();
-    let stop_subscription = move |tab_id: u64| {
-        let Some(request) = signals.begin_subscription_close(tab_id) else {
-            return;
-        };
-        if let Some(request_tx) = stop_subscription_session.request_tx.get_untracked()
-            && request_tx
-                .unbounded_send(ConsoleRequest::SubscriptionStop { tab_id, request })
-                .is_ok()
-        {
-            return;
-        }
-        restore_failed_unsubscribe(
-            subscription_tabs,
-            tab_id,
-            "websocket session is not available".to_string(),
-        );
     };
 
     view! {
@@ -1149,7 +1195,7 @@ fn App() -> impl IntoView {
                             websocket_state=web_console_session.state
                             domain=active_graph
                             run_command=run_command
-                            start_subscription=start_subscription
+                            create=create
                         />
                         <ReplPanel
                             domain=active_domain_name
@@ -1181,26 +1227,28 @@ fn App() -> impl IntoView {
     }
 }
 
-fn submit_create_request(
-    create: CreateSignals,
-    terminal_lines: RwSignal<TermLineHistory>,
-    transaction_status: RwSignal<Option<TransactionStatus>>,
+/// Sends a Create form's persistent statement on the durable command path the REPL uses, echoing
+/// its masked presentation in the terminal.
+fn submit_create_command(
+    signals: WebConsoleSignals,
     request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
-    submission: CreateSubmission,
+    kind: CreateKind,
+    presentation: String,
+    command: CommandDispatch,
     attempt: u64,
     draft_revision: u64,
 ) {
-    let CreateSubmission {
-        kind,
+    let CommandDispatch {
         query,
-        presentation,
         domain,
         resource,
         created_domain,
-    } = submission;
+    } = command;
+    let create = signals.create;
+    let transaction_status = signals.transaction_status;
     let prompt_transaction =
         transaction_status.with_untracked(|status| ActiveTransaction::of(status.as_ref()));
-    terminal_lines.update(|lines| {
+    signals.terminal_lines.update(|lines| {
         lines.push(TermLine::prompt(presentation.clone(), prompt_transaction));
     });
     let transaction = transaction_status.get_untracked();
@@ -1696,7 +1744,11 @@ fn queue_subscription_restorations(signals: WebConsoleSignals, requests: &mut Se
         }
     });
     for (tab_id, request) in restore {
-        let issued = requests.issue(ConsoleRequest::SubscriptionStart { tab_id, request });
+        let issued = requests.issue(ConsoleRequest::SubscriptionStart {
+            tab_id,
+            request,
+            origin: SubscriptionOrigin::Console,
+        });
         requests.hold_again(issued);
     }
 }
@@ -2115,8 +2167,20 @@ fn apply_reply(
                 }
             }
         }
-        (ConsoleRequest::SubscriptionStart { tab_id, request }, ReplyBody::Subscribe(outcome)) => {
-            apply_subscribe_outcome(signals, requests, tab_id, &request.statement, outcome);
+        (
+            ConsoleRequest::SubscriptionStart {
+                tab_id,
+                request,
+                origin,
+            },
+            ReplyBody::Subscribe(outcome),
+        ) => {
+            let started = SubscriptionStarted {
+                tab_id,
+                statement: &request.statement,
+                origin,
+            };
+            apply_subscribe_outcome(signals, requests, started, outcome);
             SessionStep::Continue
         }
         (ConsoleRequest::SubscriptionStop { tab_id, request }, ReplyBody::Unsubscribe(outcome)) => {
@@ -2364,15 +2428,28 @@ fn apply_attach_outcome(
     }
 }
 
-/// Applies the outcome of opening a tab's subscription. The tab opens either way: an opened
-/// subscription streams its rows into it, and a failure is shown in it.
+/// A subscription start whose outcome arrived: the tab it opens, the statement it sent, and who
+/// asked for it.
+struct SubscriptionStarted<'a> {
+    tab_id: u64,
+    statement: &'a str,
+    origin: SubscriptionOrigin,
+}
+
+/// Applies the outcome of opening a tab's subscription. An opened subscription streams its rows
+/// into its tab, and a failure removes a tab that never opened and shows why. A Create form that
+/// submitted the subscription completes or fails with the same outcome.
 fn apply_subscribe_outcome(
     signals: WebConsoleSignals,
     requests: &mut SessionRequests,
-    tab_id: u64,
-    statement: &str,
+    started: SubscriptionStarted<'_>,
     outcome: SubscribeOutcome,
 ) {
+    let SubscriptionStarted {
+        tab_id,
+        statement,
+        origin,
+    } = started;
     let SubscribeOutcome {
         disposition,
         message,
@@ -2420,11 +2497,36 @@ fn apply_subscribe_outcome(
             } else if opened {
                 signals.active_subscription_tab.set(Some(tab_id));
             }
+            if let SubscriptionOrigin::Create {
+                attempt,
+                draft_revision,
+            } = origin
+            {
+                signals.create.completed(attempt, draft_revision);
+            }
         }
         SubscribeDisposition::Failed => {
+            let reason = message.clone();
             let lines = failed_lines(message, diagnostics, statement);
             fail_subscription_start(signals, tab_id, lines);
+            fail_subscription_origin(signals, origin, reason);
         }
+    }
+}
+
+/// Fails the Create form attempt that submitted a subscription which could not open. A statement
+/// typed in the REPL or a restored tab reports only through its tab and the terminal.
+fn fail_subscription_origin(
+    signals: WebConsoleSignals,
+    origin: SubscriptionOrigin,
+    reason: String,
+) {
+    if let SubscriptionOrigin::Create {
+        attempt,
+        draft_revision,
+    } = origin
+    {
+        signals.create.failed(attempt, draft_revision, reason);
     }
 }
 
@@ -2513,8 +2615,9 @@ fn fail_request(
                 details.insert(resource, detail);
             });
         }
-        ConsoleRequest::SubscriptionStart { tab_id, .. } => {
-            fail_subscription_start(signals, tab_id, vec![TermLine::error(reason)]);
+        ConsoleRequest::SubscriptionStart { tab_id, origin, .. } => {
+            fail_subscription_start(signals, tab_id, vec![TermLine::error(reason.clone())]);
+            fail_subscription_origin(signals, origin, reason);
         }
         ConsoleRequest::SubscriptionStop { tab_id, .. } => {
             restore_failed_unsubscribe(signals.subscription_tabs, tab_id, reason.clone());
@@ -2741,26 +2844,6 @@ fn cancellation_reason(cancelled: RequestCancelled) -> String {
     }
 }
 
-fn append_subscription_tab_line(
-    subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
-    tab_id: u64,
-    line: TermLine,
-) {
-    append_subscription_tab_lines(subscription_tabs, tab_id, vec![line]);
-}
-
-fn append_subscription_tab_lines(
-    subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
-    tab_id: u64,
-    lines: Vec<TermLine>,
-) {
-    subscription_tabs.update(|tabs| {
-        if let Some(tab) = tabs.iter_mut().find(|tab| tab.id == tab_id) {
-            tab.lines.extend(lines);
-        }
-    });
-}
-
 /// A creation failure leaves no live tab. A failed restoration keeps the acknowledged tab visible
 /// and interrupted, so it can be restored on the next connection.
 fn fail_subscription_start(signals: WebConsoleSignals, tab_id: u64, lines: Vec<TermLine>) {
@@ -2868,55 +2951,15 @@ fn append_subscription_line(
     });
 }
 
-fn subscribe_session_command(
-    name: &str,
-    relay: &str,
-    filter: &str,
-    sample_rate_index: usize,
-) -> String {
-    let mut command = format!("CREATE SUBSCRIPTION {name} TO {relay}");
-    if let Some(sample_rate) = subscription_sample_rate(sample_rate_index) {
-        command.push_str(" BATCH SAMPLE RATE ");
-        command.push_str(sample_rate);
-    }
-    let filter = filter.trim();
-    if !filter.is_empty() {
-        command.push(' ');
-        command.push_str(&subscription_where_clause(filter));
-    }
-    command.push(';');
-    command
-}
-
-fn subscription_tab_title(relay: &str, filter: &str) -> String {
-    let filter = filter.trim();
-    if filter.is_empty() {
-        relay.to_string()
-    } else {
-        format!("{relay} {filter}")
-    }
-}
-
-fn subscription_where_clause(filter: &str) -> String {
-    let trimmed = filter.trim();
-    let Some(first_word) = trimmed.split_ascii_whitespace().next() else {
-        return String::new();
+/// A tab names the relay it reads, followed by its filter when it has one.
+fn subscription_tab_title(subscription: &CreateSubscription) -> String {
+    let relay = subscription.relay.to_string();
+    let Some(filter) = &subscription.where_clause else {
+        return relay;
     };
-    if first_word.eq_ignore_ascii_case("WHERE") {
-        trimmed.to_string()
-    } else {
-        format!("WHERE {trimmed}")
-    }
-}
-
-fn subscription_sample_rate(index: usize) -> Option<&'static str> {
-    match index {
-        0 => None,
-        1 => Some("0.1"),
-        2 => Some("0.01"),
-        3 => Some("0.001"),
-        _ => None,
-    }
+    let filter = expression_to_nspl(filter)
+        .assured("an expression the NSPL parser produced renders back to NSPL");
+    format!("{relay} {filter}")
 }
 
 fn domain_list_lines(domains: &[DomainView]) -> Vec<TermLine> {
@@ -4038,13 +4081,10 @@ fn GraphPanel(
     websocket_state: RwSignal<ConsoleConnectionState>,
     domain: impl Fn() -> Option<GraphView> + Copy + Send + Sync + 'static,
     run_command: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
-    start_subscription: impl Fn(String, String, usize) + Copy + Send + Sync + 'static,
+    create: CreateSignals,
 ) -> impl IntoView {
-    let selected_relay = RwSignal::new(None::<GraphViewRelay>);
     let selected_action_target = RwSignal::new(None::<GraphActionTarget>);
     let selected_branch_group = RwSignal::new(None::<String>);
-    let subscribe_filter = RwSignal::new(String::new());
-    let sample_rate = RwSignal::new(0_usize);
     let graph_zoom = RwSignal::new(1.0_f64);
     let graph_pan_x = RwSignal::new(0.0_f64);
     let graph_pan_y = RwSignal::new(0.0_f64);
@@ -4230,6 +4270,7 @@ fn GraphPanel(
                     <div class="graph-search">
                         <SidebarIcon kind="search" />
                         <input
+                            id="graph-search"
                             type="search"
                             aria-label="Search graph nodes"
                             placeholder="Search graph"
@@ -4626,7 +4667,7 @@ fn GraphPanel(
                                     on:mouseleave=move |_| graph_hover.set(None)
                                     on:click=move |_| {
                                         if !graph_moved.get() {
-                                            selected_action_target.set(Some(GraphActionTarget::relay(click_relay.clone())));
+                                            selected_action_target.set(Some(GraphActionTarget::relay(&click_relay)));
                                         }
                                     }
                                 >
@@ -4809,11 +4850,10 @@ fn GraphPanel(
                                     on:click=move |_| {
                                         if let Some(target) = selected_action_target.get()
                                             && let Some(relay) = target.relay
+                                            && let Some(domain) = active_domain.get_untracked()
                                         {
-                                            selected_relay.set(Some(relay));
-                                            subscribe_filter.set(String::new());
-                                            sample_rate.set(0);
                                             selected_action_target.set(None);
+                                            create.open_subscription(domain, relay, "graph-search");
                                         }
                                     }
                                 >
@@ -4821,104 +4861,6 @@ fn GraphPanel(
                                 </button>
                             </Show>
                         </div>
-                    </section>
-                </div>
-            </Show>
-            <Show when=move || selected_relay.get().is_some() fallback=|| ()>
-                <div
-                    class="modal-scrim"
-                    on:click=move |_| selected_relay.set(None)
-                >
-                    <section
-                        class="subscribe-dialog"
-                        on:click=|event| event.stop_propagation()
-                    >
-                        <header class="subscribe-head">
-                            <span class="live-dot"></span>
-                            <span>"SUBSCRIBE"</span>
-                            <strong>{move || match selected_relay.get() {
-                                Some(relay) => relay.label,
-                                None => String::new(),
-                            }}</strong>
-                        </header>
-                        <div class="subscribe-block">
-                            <p>
-                                "SCHEMA"
-                                <em>{move || match selected_relay.get() {
-                                    Some(relay) => relay.schema.unwrap_or_default(),
-                                    None => String::new(),
-                                }}</em>
-                            </p>
-                            <For
-                                each=move || match selected_relay.get() {
-                                    Some(relay) => relay.schema_fields,
-                                    None => Vec::new(),
-                                }
-                                key=|field| field.name.clone()
-                                children={move |field| {
-                                    let subscribe_filter = subscribe_filter;
-                                    let field_name = field.name.clone();
-                                    let ty = schema_field_type_label(&field);
-                                    view! {
-                                        <button
-                                            type="button"
-                                            class="schema-row schema-field-button"
-                                            on:click=move |_| {
-                                                let reference = format!("input.{field_name}");
-                                                append_filter_reference(subscribe_filter, &reference);
-                                            }
-                                        >
-                                            <span>{field.name}</span>
-                                            <em>{ty}</em>
-                                        </button>
-                                    }
-                                }}
-                            />
-                        </div>
-                        <label class="subscribe-block">
-                            <p>"WHERE " <em>"(optional)"</em></p>
-                            <input
-                                type="text"
-                                placeholder="e.g. tier = \"premium\""
-                                prop:value=move || subscribe_filter.get()
-                                on:input=move |event| subscribe_filter.set(event_target_value(&event))
-                            />
-                        </label>
-                        <div class="subscribe-block">
-                            <p>"SAMPLE RATE"</p>
-                            <div class="sample-options">
-                                <For
-                                    each={|| ["100%", "10%", "1%", "0.1%"].into_iter().enumerate().collect::<Vec<_>>()}
-                                    key=|(index, _)| *index
-                                    children={move |(index, label)| {
-                                        view! {
-                                            <button
-                                                type="button"
-                                                class=move || if sample_rate.get() == index { "active" } else { "" }
-                                                on:click=move |_| sample_rate.set(index)
-                                            >
-                                                {label}
-                                            </button>
-                                        }
-                                    }}
-                                />
-                            </div>
-                        </div>
-                        <footer class="subscribe-actions">
-                            <button type="button" on:click=move |_| selected_relay.set(None)>"CANCEL"</button>
-                            <button
-                                type="button"
-                                on:click=move |_| {
-                                    if let Some(relay) = selected_relay.get() {
-                                        let filter = subscribe_filter.get().trim().to_string();
-                                        start_subscription(relay.label, filter, sample_rate.get());
-                                        selected_relay.set(None);
-                                    }
-                                }
-                            >
-                                "SUBSCRIBE"
-                            </button>
-                        </footer>
                     </section>
                 </div>
             </Show>
@@ -5149,6 +5091,7 @@ fn ReplPanel(
                     children={move |tab| {
                         let tab_id = tab.id;
                         let title = tab.title.clone();
+                        let name = tab.name.to_string();
                         let state = move || subscription_tabs.with(|tabs| {
                             // The operator controls the number of visible subscription tabs.
                             match tabs.iter().find(|tab| tab.id == tab_id) {
@@ -5160,6 +5103,7 @@ fn ReplPanel(
                             <div
                                 class=move || if active_subscription_tab.get() == Some(tab_id) { "tab active subscription-tab" } else { "tab subscription-tab" }
                                 data-subscription-state=move || state().label()
+                                data-subscription-name=name
                             >
                                 <button
                                     type="button"
@@ -5838,7 +5782,8 @@ struct GraphActionTarget {
     name: String,
     describe_command: Option<String>,
     show_create_command: String,
-    relay: Option<GraphViewRelay>,
+    /// The relay a SUBSCRIBE action opens the subscription form for.
+    relay: Option<RelayName>,
 }
 
 impl GraphActionTarget {
@@ -5854,14 +5799,16 @@ impl GraphActionTarget {
         }
     }
 
-    fn relay(relay: GraphViewRelay) -> Self {
+    /// A relay's actions. SUBSCRIBE is offered for a relay whose drawn label names it, which is
+    /// every relay the server draws.
+    fn relay(relay: &GraphViewRelay) -> Self {
         let name = relay.label.clone();
         Self {
             kind: "RELAY",
             name: name.clone(),
             describe_command: Some(format!("DESCRIBE RELAY {name};")),
             show_create_command: format!("SHOW CREATE RELAY {name};"),
-            relay: Some(relay),
+            relay: RelayName::parse(&name).ok(),
         }
     }
 }
@@ -6738,26 +6685,6 @@ fn format_bytes_metric(value: f64) -> String {
     }
 }
 
-fn schema_field_type_label(field: &GraphSchemaField) -> String {
-    let mut parts = vec![field.ty.clone()];
-    if field.optional {
-        parts.push("OPTIONAL".to_string());
-    }
-    if field.sensitive {
-        parts.push("SENSITIVE".to_string());
-    }
-    parts.join(" ")
-}
-
-fn append_filter_reference(filter: RwSignal<String>, reference: &str) {
-    filter.update(|value| {
-        if !value.trim().is_empty() && !value.ends_with(char::is_whitespace) {
-            value.push(' ');
-        }
-        value.push_str(reference);
-    });
-}
-
 #[derive(Clone, Copy)]
 struct GraphDrag {
     client_x: i32,
@@ -7132,6 +7059,15 @@ mod tests {
         });
     }
 
+    /// A subscription start typed in the REPL for the tab `tab_id`.
+    fn console_start(tab_id: u64) -> SubscriptionStarted<'static> {
+        SubscriptionStarted {
+            tab_id,
+            statement: "CREATE SUBSCRIPTION live TO orders;",
+            origin: SubscriptionOrigin::Console,
+        }
+    }
+
     fn subscription_signals(state: SubscriptionTabState) -> WebConsoleSignals {
         let name = SubscriptionName::parse("live").assured("the test subscription name is valid");
         let domain = DomainName::parse("tenant").assured("the test domain name is valid");
@@ -7153,11 +7089,8 @@ mod tests {
                 state,
                 name,
                 domain,
-                relay: "orders".to_string(),
-                filter: String::new(),
-                sample_rate_index: 0,
                 title: "orders".to_string(),
-                subscribe_command: "SUBSCRIBE live TO orders;".to_string(),
+                subscribe_command: "CREATE SUBSCRIPTION live TO orders;".to_string(),
                 lines: TermLineHistory::default(),
             }]),
             active_subscription_tab: RwSignal::new(Some(1)),
@@ -7473,7 +7406,7 @@ mod tests {
             let ClientRequest::Subscribe(request) = &messages[0].request else {
                 panic!("the held request restores the subscription");
             };
-            assert_eq!(request.statement, "SUBSCRIBE live TO orders;");
+            assert_eq!(request.statement, "CREATE SUBSCRIPTION live TO orders;");
         });
     }
 
@@ -7730,8 +7663,7 @@ mod tests {
             apply_subscribe_outcome(
                 signals,
                 &mut requests,
-                1,
-                "SUBSCRIBE live TO orders;",
+                console_start(1),
                 SubscribeOutcome {
                     disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
                         subscription: stream.subscription.clone(),
@@ -7760,8 +7692,7 @@ mod tests {
             apply_subscribe_outcome(
                 signals,
                 &mut requests,
-                1,
-                "SUBSCRIBE live TO orders;",
+                console_start(1),
                 SubscribeOutcome {
                     disposition: SubscribeDisposition::Failed,
                     message: "relay is unavailable".to_string(),
@@ -7787,8 +7718,7 @@ mod tests {
             apply_subscribe_outcome(
                 signals,
                 &mut requests,
-                1,
-                "SUBSCRIBE live TO orders;",
+                console_start(1),
                 SubscribeOutcome {
                     disposition: SubscribeDisposition::Failed,
                     message: "leader is changing".to_string(),
@@ -7820,8 +7750,7 @@ mod tests {
             apply_subscribe_outcome(
                 signals,
                 &mut requests,
-                1,
-                "SUBSCRIBE live TO orders;",
+                console_start(1),
                 SubscribeOutcome {
                     disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
                         subscription: handle.clone(),
@@ -7867,9 +7796,10 @@ mod tests {
                 tab_id: 1,
                 request: SubscribeRequest {
                     domain: domain.clone(),
-                    statement: "SUBSCRIBE live TO orders;".to_string(),
+                    statement: "CREATE SUBSCRIPTION live TO orders;".to_string(),
                     subscription_type: SubscriptionType::Row,
                 },
+                origin: SubscriptionOrigin::Console,
             });
             let opened = SubscribeOutcome {
                 disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
@@ -7933,8 +7863,7 @@ mod tests {
             apply_subscribe_outcome(
                 signals,
                 &mut requests,
-                1,
-                "SUBSCRIBE live TO orders;",
+                console_start(1),
                 SubscribeOutcome {
                     disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
                         subscription: late.clone(),
@@ -7971,9 +7900,10 @@ mod tests {
                     tab_id: 1,
                     request: SubscribeRequest {
                         domain: DomainName::parse("tenant").assured("the test domain is valid"),
-                        statement: "SUBSCRIBE live TO orders;".to_string(),
+                        statement: "CREATE SUBSCRIPTION live TO orders;".to_string(),
                         subscription_type: SubscriptionType::Row,
                     },
+                    origin: SubscriptionOrigin::Console,
                 });
                 let step = apply_reply(
                     signals,
@@ -9244,42 +9174,20 @@ mod tests {
     }
 
     #[test]
-    fn subscription_command_accepts_full_where_clause() {
+    fn a_tab_title_names_the_relay_and_its_canonical_filter() {
+        let parse = |statement: &str| match parse_client_statement(statement) {
+            Ok(ClientStatement::CreateSubscription(subscription)) => subscription,
+            _ => panic!("the test statement is a subscription"),
+        };
         assert_eq!(
-            subscribe_session_command(
-                "live_notifications",
-                "notifications",
-                "WHERE input.user_id = 42",
-                0,
-            ),
-            "CREATE SUBSCRIPTION live_notifications TO notifications WHERE input.user_id = 42;"
+            subscription_tab_title(&parse("CREATE SUBSCRIPTION live TO orders;")),
+            "orders"
         );
-    }
-
-    #[test]
-    fn subscription_command_wraps_bare_filter_as_where_clause() {
         assert_eq!(
-            subscribe_session_command(
-                "live_notifications",
-                "notifications",
-                "input.user_id = 42",
-                0,
-            ),
-            "CREATE SUBSCRIPTION live_notifications TO notifications WHERE input.user_id = 42;"
-        );
-    }
-
-    #[test]
-    fn subscription_command_keeps_non_filter_syntax_inside_where_scope() {
-        assert_eq!(
-            subscribe_session_command(
-                "live_notifications",
-                "notifications",
-                "SET normalized = input.user_id",
-                0,
-            ),
-            "CREATE SUBSCRIPTION live_notifications TO notifications WHERE SET normalized = \
-             input.user_id;"
+            subscription_tab_title(&parse(
+                "CREATE SUBSCRIPTION live TO orders DROPPING WHERE input.user_id=42;"
+            )),
+            "orders input.user_id = 42"
         );
     }
 
@@ -9342,7 +9250,12 @@ mod tests {
         let target = match control {
             ChoiceControl::DomainPace => nervix_client_wire::ChoiceTarget::DomainPace,
             ChoiceControl::PlacementPolicy => nervix_client_wire::ChoiceTarget::PlacementPolicy,
-            ChoiceControl::BranchSchema => nervix_client_wire::ChoiceTarget::Schema,
+            ChoiceControl::BranchSchema | ChoiceControl::RelaySchema => {
+                nervix_client_wire::ChoiceTarget::Schema
+            }
+            ChoiceControl::RelayBranch => nervix_client_wire::ChoiceTarget::Branch,
+            ChoiceControl::SubscriptionRelay => nervix_client_wire::ChoiceTarget::Relay,
+            ChoiceControl::SubscriptionField => nervix_client_wire::ChoiceTarget::RelayField,
         };
         ConsoleRequest::Choice {
             request: ChoiceLookupRequest::new(target, Vec::new(), String::new()),
@@ -9437,15 +9350,13 @@ mod tests {
             .assured("the test transaction has two accepted, unapplied operations");
             signals.transaction_status.set(Some(transaction));
             let (sender, mut receiver) = unbounded();
-            submit_create_request(
-                signals.create,
-                signals.terminal_lines,
-                signals.transaction_status,
+            submit_create_command(
+                signals,
                 RwSignal::new(Some(sender)),
-                CreateSubmission {
-                    kind: CreateKind::User,
+                CreateKind::User,
+                "CREATE USER operator WITH PASSWORD '********';".to_string(),
+                CommandDispatch {
                     query: "CREATE USER operator WITH PASSWORD 'actual-secret';".to_string(),
-                    presentation: "CREATE USER operator WITH PASSWORD '********';".to_string(),
                     domain: None,
                     resource: None,
                     created_domain: None,
@@ -9474,15 +9385,13 @@ mod tests {
             signals.create.open(CreateKind::User, None, "trigger");
             let (attempt, revision) = signals.create.begin_submission(false);
             signals.transaction_status.set(None);
-            submit_create_request(
-                signals.create,
-                signals.terminal_lines,
-                signals.transaction_status,
+            submit_create_command(
+                signals,
                 RwSignal::new(None),
-                CreateSubmission {
-                    kind: CreateKind::User,
+                CreateKind::User,
+                "CREATE USER unavailable WITH PASSWORD '********';".to_string(),
+                CommandDispatch {
                     query: "CREATE USER unavailable WITH PASSWORD 'secret';".to_string(),
-                    presentation: "CREATE USER unavailable WITH PASSWORD '********';".to_string(),
                     domain: None,
                     resource: None,
                     created_domain: None,
@@ -9495,15 +9404,13 @@ mod tests {
             drop(closed_receiver);
             signals.create.open(CreateKind::User, None, "trigger");
             let (attempt, revision) = signals.create.begin_submission(true);
-            submit_create_request(
-                signals.create,
-                signals.terminal_lines,
-                signals.transaction_status,
+            submit_create_command(
+                signals,
                 RwSignal::new(Some(closed_sender)),
-                CreateSubmission {
-                    kind: CreateKind::User,
+                CreateKind::User,
+                "CREATE USER closed WITH PASSWORD '********';".to_string(),
+                CommandDispatch {
                     query: "CREATE USER closed WITH PASSWORD 'secret';".to_string(),
-                    presentation: "CREATE USER closed WITH PASSWORD '********';".to_string(),
                     domain: None,
                     resource: None,
                     created_domain: None,

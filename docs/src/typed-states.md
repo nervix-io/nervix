@@ -161,16 +161,23 @@ candidate set, so a changed context cannot silently reuse a page.
 
 Structured-control lookups use a separate typed choice boundary. A request names its semantic
 target and carries each dependency as a `ChoiceValue`; a placement choice therefore depends on a
-domain-pace variant rather than on the text `PACED`, while an internal-schema choice depends on a
-typed domain reference and returns a kind-qualified Model reference. Results keep the same typed union for enum
-variants and domain, resource, or model references, with label, detail, and group held separately
-as presentation. The FlatBuffers discriminant selects behavior. A missing typed dependency is
-`MissingContext`, and a page cursor binds the dependencies, revision, candidate values, and
-presentation so changed form state is `StaleContext` rather than a silently retargeted page.
-Incomplete schema and branch form values stay in browser drafts. The completed conversion creates
-the current schema or branch Model, with field order, optionality, sensitivity, wire format and
-mode intact. A branch schema selection retained after its captured domain changes is explicitly
-invalid until reselected; no empty name or fabricated Model stands for a missing selection.
+domain-pace variant rather than on the text `PACED`. An internal-schema, branch, or relay choice
+depends on a typed domain reference and returns a kind-qualified Model reference, and a relay-field
+choice depends on the domain and relay references and returns a typed field reference. Results keep
+the same typed union for enum variants and domain, resource, model, or field references, with
+label, detail, and group held separately as presentation. The FlatBuffers discriminant selects
+behavior. A missing typed dependency is `MissingContext`, and a page cursor binds the dependencies,
+revision, candidate values, and presentation so changed form state is `StaleContext` rather than a
+silently retargeted page.
+
+Incomplete schema, branch, relay, and subscription form values stay in browser drafts. The
+completed conversion creates the current schema, branch, or relay Model, with field order,
+optionality, sensitivity, wire format and mode intact, or the current subscription client
+statement. A relay draft's branching starts unselected, a state distinct from unbranched execution,
+so a completed relay is never unbranched by omission; its materialized state is absent until
+`LAST BY TIMESTAMP` is chosen, because a relay without one is itself valid. A schema, branch, or
+relay selection retained after its captured domain changes is explicitly invalid until reselected;
+no empty name or fabricated Model stands for a missing selection.
 
 ## Validation And Failure Boundaries
 
