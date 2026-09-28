@@ -289,6 +289,7 @@ impl EmitterSinkStarter {
                 SyslogSink::new(
                     SyslogSinkConfig {
                         config: sink.client.config.entries.clone(),
+                        dns: context.dns()?,
                     },
                     context.sink_host(),
                 )

@@ -18,6 +18,7 @@ use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpSocket, TcpStream},
     task::JoinHandle,
+    time::Instant,
 };
 
 use super::*;
@@ -455,14 +456,18 @@ fn every_runtime_connects_through_the_resolver_it_was_given() {
 }
 
 #[test]
-fn an_exhausted_deadline_leaves_nothing_to_share() {
-    let started = Instant::now()
-        .checked_sub(Duration::from_secs(1))
-        .assured("the monotonic clock has run for more than a second");
-    let deadline = ConnectDeadline {
-        started,
-        total: Duration::from_millis(500),
-    };
+fn a_zero_connection_budget_leaves_nothing_for_address_attempts() {
+    let deadline = ConnectionBudget::start(Duration::ZERO);
+    let addresses = [
+        SocketAddr::new(loopback(1), 5672),
+        SocketAddr::new(loopback(2), 5672),
+    ];
     assert_eq!(deadline.remaining(), Duration::ZERO);
-    assert_eq!(deadline.share(2), Duration::ZERO);
+    assert_eq!(
+        deadline
+            .attempts(&addresses)
+            .map(|attempt| attempt.budget)
+            .collect::<Vec<_>>(),
+        vec![Duration::ZERO, Duration::ZERO]
+    );
 }

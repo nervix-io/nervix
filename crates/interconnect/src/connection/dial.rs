@@ -2,18 +2,18 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** How a registered peer endpoint is dialled, the setup budget name resolution and every
-//!   address attempt share, and the order and share in which resolved addresses are tried.
-//! - **Depends on.** The parent connection state's registered targets and peer resolver, and the
-//!   socket seam.
+//! - **Owns.** How a registered peer endpoint is dialled through a resolved address.
+//! - **Depends on.** The parent connection state's registered targets and peer resolver, the shared
+//!   DNS setup budget, and the socket seam.
 //! - **Must not know.** TLS, HTTP/2, or the operations a connection will carry.
 
-use std::{net::SocketAddr, time::Duration};
+use std::net::SocketAddr;
 
 use error_stack::Report;
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
+use nervix_dns::ConnectionBudget;
 use nervix_models::NodeEndpoint;
-use tokio::time::{Instant, timeout};
+use tokio::time::timeout;
 use tracing::debug;
 use triomphe::Arc;
 
@@ -27,39 +27,6 @@ pub(super) enum OutboundDial {
     Advertised,
     /// Dial the one address a bootstrap exchange authenticated for the endpoint.
     Authenticated(SocketAddr),
-}
-
-/// What remains of one connection attempt's setup deadline, which name resolution and every
-/// address the attempt dials spend together.
-pub(super) struct SetupBudget {
-    started: Instant,
-    total: Duration,
-}
-
-impl SetupBudget {
-    pub(super) fn start(total: Duration) -> Self {
-        Self {
-            started: Instant::now(),
-            total,
-        }
-    }
-
-    /// The time left before the deadline, or zero once it has passed.
-    fn remaining(&self) -> Duration {
-        match self.total.checked_sub(self.started.elapsed()) {
-            Some(remaining) => remaining,
-            None => Duration::ZERO,
-        }
-    }
-
-    /// An equal share of the remaining time for the next of `untried` addresses.
-    fn share(&self, untried: usize) -> Duration {
-        let untried = u32::try_from(untried)
-            .assured("a DNS answer fits in one message and holds far fewer than 2^32 addresses");
-        self.remaining()
-            .checked_div(untried)
-            .verified("the address about to be dialled is itself untried")
-    }
 }
 
 /// A TCP stream to one of an endpoint's addresses, and which address it reached.
@@ -78,7 +45,7 @@ impl TransportState {
     pub(super) async fn dial(
         &self,
         key: &ConnectionSlotKey,
-        budget: &SetupBudget,
+        budget: &ConnectionBudget,
     ) -> Result<DialedStream, Report<TransportError>> {
         let dial = self.current_dial(key)?;
         let addresses = match dial {
@@ -101,18 +68,13 @@ impl TransportState {
             }
         };
         let mut last_failure = None;
-        for (index, addr) in addresses.iter().enumerate() {
-            let untried = addresses
-                .len()
-                .checked_sub(index)
-                .verified("the index enumerates the addresses it is subtracted from");
-            let share = budget.share(untried);
-            match timeout(share, TcpStream::connect(*addr)).await {
+        for attempt in budget.attempts(&addresses) {
+            tokio::task::consume_budget().await;
+            let addr = attempt.address;
+            let share = attempt.budget;
+            match timeout(share, TcpStream::connect(addr)).await {
                 Ok(Ok(stream)) => {
-                    return Ok(DialedStream {
-                        stream,
-                        addr: *addr,
-                    });
+                    return Ok(DialedStream { stream, addr });
                 }
                 Ok(Err(error)) => {
                     debug!(%error, endpoint = %key.endpoint, %addr, "interconnect address refused");
@@ -121,7 +83,7 @@ impl TransportState {
                 Err(_) => {
                     debug!(endpoint = %key.endpoint, %addr, "interconnect address did not connect");
                     last_failure = Some(TransportError::ConnectionSetupTimeout {
-                        peer: NodeEndpoint::from(*addr),
+                        peer: NodeEndpoint::from(addr),
                         timeout: share,
                     });
                 }

@@ -56,6 +56,13 @@ resolver's own lookup error. The sink changes it into a configuration failure fo
 address or CA file and an initialization failure otherwise, leading with the connection error's
 message, which `DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
 
+Syslog emission and WebSocket-client ingestion retain DNS failures from the node resolver beneath
+their existing infrastructure contexts: `SinkStartError::Initialize` while a Syslog sender opens
+and `SourceError::Resume` while a WebSocket source connects or reconnects. The resolver's typed
+missing-name, no-address, timeout, invalid-name or transport cause stays in the error report.
+Address, TLS and WebSocket-upgrade failures remain connection outcomes. None is a record rejection,
+and a DNS result by itself never marks a Syslog record delivered.
+
 A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar sink: a message
 larger than the maximum message size the broker announced, which carries the measured size of its
 metadata and payload and the limit as typed fields, or a message the broker answered with

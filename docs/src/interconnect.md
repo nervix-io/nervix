@@ -151,11 +151,13 @@ fails startup.
 A discovered peer is registered at the interconnect endpoint it advertised, and every attempt to
 open one of its pool connections resolves that endpoint again, inside the attempt's connection setup
 deadline. The attempt dials the resolved addresses in order, giving each an equal share of the time
-that remains, so an address that refuses or never answers leaves time for the next one. The first
-address that accepts carries the TLS handshake. The advertised host stays the TLS server name, which
-the peer's certificate must name, and the authority of every request on the connection; a literal
-IPv6 host is written in brackets there. A bootstrap exchange is the one exception: it dials the
-exact seed address it was given, and the node it authenticates is dialled at that address until
+that remains, so an address that refuses or never answers leaves time for the next one. The
+connection budget and ordered address-attempt policy are owned by `nervix-dns` and shared with
+outbound connector transports; interconnect retains its socket and peer failure classification.
+The first address that accepts carries the TLS handshake. The advertised host stays the TLS server
+name, which the peer's certificate must name, and the authority of every request on the connection;
+a literal IPv6 host is written in brackets there. A bootstrap exchange is the one exception: it
+dials the exact seed address it was given, and the node it authenticates is dialled there until
 discovery publishes the node's own endpoint.
 
 Answers are cached for their DNS TTL, bounded above by one hour for addresses and thirty seconds for
