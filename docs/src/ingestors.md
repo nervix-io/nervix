@@ -448,6 +448,12 @@ Kafka client configuration is passed through to librdkafka. Nervix does not over
 `auto.offset.reset`; set it explicitly, for example to `earliest`, when a new consumer group must
 read records that may already exist.
 
+In an ACK mode, Nervix commits a Kafka position only after its downstream acknowledgement
+completes. If downstream work rejects a record and Kafka cannot seek back to it, the ingestor
+stops polling, refreshes its assignment, and retries that seek. It cannot commit a later offset
+while the rejected position remains unresolved. Replays after a crash or assignment change may
+repeat records whose output was already written.
+
 `OFFSET BY DOMAIN` is at-least-once. A commit records the partition's next offset in memory. Nervix persists the offsets on the runtime state snapshot interval and whenever a node stops executing the domain, and when the ingestor has state replicas, a commit completes only after every replica has acknowledged it. Crash recovery may therefore restart from a slightly stale persisted offset snapshot. The leader watches Kafka partition topology and commits any rebalance through the strongly consistent domain schedule, which is persisted through the control-plane Raft/Fjall path. Executing ingestors consume only the committed partition assignment.
 
 Offset recovery details:
@@ -632,6 +638,17 @@ ON QUIESCE SUSPEND
 Suspension stops polling. Messages remain only for the queue's configured retention period. An
 already received message remains invisible until its visibility timeout and may then be redelivered
 as a duplicate; the ingestor resumes by polling past anything the service expired.
+
+The source resolves the host of its client's `endpoint` through the node's asynchronous resolver
+each time it opens a connection, and tries the answers in order. Every request is still signed for
+the configured host, and over HTTPS the service certificate must name that host. Without
+`tls_ca_file` the client trusts the platform's native roots and follows the `HTTP_PROXY`,
+`HTTPS_PROXY` and `NO_PROXY` environment variables; with it, the client trusts that CA alone and
+connects directly. A missing name, a silent name server or an unreachable answer fails opening the
+queue, a poll, or a deletion. The AWS SDK's standard retry mode makes up to three attempts at each
+such request; after that the failure is a transient source failure that `DESCRIBE INGESTOR` shows
+and the source retries on its `RETRY POLICY`. A message is deleted only once it is acknowledged, so a
+lookup failure never removes one from the queue.
 
 ### Prometheus
 

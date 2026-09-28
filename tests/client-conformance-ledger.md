@@ -99,7 +99,8 @@ preview fingerprint, and the largest request identity. It also covers the domain
 the attach and detach requests, a paced clock attached at the largest generation with the extreme
 signed timestamps and a time rate read by its bits, clock frames in the stopped, uninstalled and
 unpaced states, every refusal of an attach and a detach, and the end of an attachment with its
-typed reason.
+typed reason. A tick frame carries its generation, id, boundary, authority UTC observation, and
+serving node logical reading through the Rust, Go, and TypeScript readers.
 
 `A <runtime> client reads every frame of the conformance corpus the Rust encoder wrote` holds the Go
 reader and the TypeScript reader on Node.js and Bun to the same report. Together with the live

@@ -107,6 +107,7 @@ nervix-approx-into = { workspace = true }
 nervix-bounded-write = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-client-wire = { workspace = true }
+nervix-columnar-json = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-connector-clickhouse = { workspace = true }
 nervix-connector-http = { workspace = true }
@@ -290,6 +291,7 @@ members = [
   "crates/client-core",
   "crates/client-ffi",
   "crates/client-wire",
+  "crates/columnar-json",
   "crates/connector",
   "crates/connectors/clickhouse",
   "crates/connectors/http",
@@ -327,6 +329,7 @@ members = [
   "crates/nspl-format",
   "crates/models",
   "crates/recovery",
+  "crates/simd-kernels",
   "crates/test-environment",
   "crates/nervix-cli",
 ]
@@ -393,6 +396,8 @@ aws-sdk-sqs = { version = "1.76", default-features = false, features = [
   "rt-tokio",
 ] }
 aws-smithy-http-client = "1.1.12"
+# The DNS hook trait a Smithy HTTP client resolves hosts through, implemented by nervix-dns.
+aws-smithy-runtime-api = { version = "1.18", features = ["client"] }
 base64 = "0.22"
 base64-simd = "0.8"
 bb8 = "0.9.1"
@@ -415,6 +420,7 @@ dashmap = "6"
 error-stack = "0.5"
 faster-hex = "0.10"
 fastrand = "2.4.1"
+fearless_simd = { version = "1.0", features = ["force_support_fallback"] }
 fjall = "3.0.4"
 flatbuffers = "25.12.19"
 flatc-rust = "0.2.0"
@@ -438,6 +444,7 @@ hickory-resolver = { version = "0.26.3", default-features = false, features = [
 http = "1"
 http-body-util = "0.1"
 httparse = "1"
+httpdate = "1"
 humantime = "2"
 hyper = "1"
 hyper-rustls = "0.27"
@@ -453,6 +460,7 @@ ignore = "0.4.33"
 imbl = { version = "7.0.2", features = ["serde", "triomphe"] }
 indexmap = "2"
 intrusive-collections = "0.10.3"
+itoa = "1"
 jaq-core = "3"
 jaq-fmts = "0.1"
 jaq-json = "2"
@@ -488,6 +496,7 @@ nervix-bounded-write = { package = "nervix-bounded-write", path = "crates/bounde
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-client-ffi = { package = "nervix-client-ffi", path = "crates/client-ffi" }
 nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wire" }
+nervix-columnar-json = { package = "nervix-columnar-json", path = "crates/columnar-json" }
 nervix-connector = { package = "nervix-connector", path = "crates/connector" }
 nervix-connector-clickhouse = { package = "nervix-connector-clickhouse", path = "crates/connectors/clickhouse" }
 nervix-connector-http = { package = "nervix-connector-http", path = "crates/connectors/http" }
@@ -521,6 +530,7 @@ nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
 ] }
 nervix-recovery = { package = "nervix-recovery", path = "crates/recovery" }
 nervix-roto = { package = "nervix-roto", path = "crates/nervix-roto" }
+nervix-simd-kernels = { package = "nervix-simd-kernels", path = "crates/simd-kernels" }
 nervix-test-environment = { package = "nervix-test-environment", path = "crates/test-environment" }
 nervix-vm = { package = "nervix-vm", path = "crates/nervix-vm" }
 nervix-wasm = { package = "nervix-wasm", path = "crates/nervix-wasm" }
@@ -615,6 +625,7 @@ rustls = { version = "0.23", default-features = false, features = [
 rustls-native-certs = "0.8"
 rustls-pki-types = "1"
 rustyline = "17"
+ryu = "1"
 sentry-types = "0.48.5"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
@@ -656,6 +667,8 @@ tokio-stream = "0.1"
 tokio-tungstenite = "0.24"
 tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.8"
+# The resolver service `hyper-util`'s connector resolves hosts through, implemented by nervix-dns.
+tower-service = "0.3"
 # Keep tonic/build on 0.13 for the workspace's Prost 0.13 API while selecting AWS-LC TLS.
 any_spawner = "0.3.0"
 tonic = { version = "0.13", features = ["tls-aws-lc", "tls-webpki-roots"] }

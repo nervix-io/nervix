@@ -7,6 +7,7 @@
 //! - **Must not know.** NSPL parsing, placement policy or external connector clients.
 
 use error_stack::{Report, ResultExt as _};
+use nervix_wasm::WasmGuestReportExt as _;
 
 use super::{state_replication::StateReplicationError, *};
 
@@ -130,8 +131,8 @@ impl WasmLifecycleStage {
 
     /// The stage a failed guest operation belongs to. A verdict on saved state and output the host
     /// cannot decode are stages of their own; every other failure belongs to its operation.
-    pub(super) fn of_guest_failure(failure: &nervix_wasm::WasmGuestError) -> Self {
-        match failure.saved_state_rejection() {
+    pub(super) fn of_guest_failure(failure: &Report<nervix_wasm::WasmGuestError>) -> Self {
+        match failure.current_context().saved_state_rejection() {
             Some(nervix_wasm::SavedStateRejection::SnapshotEnvelope) => {
                 return Self::SnapshotEnvelopeDecoding;
             }
@@ -143,7 +144,7 @@ impl WasmLifecycleStage {
         if failure.is_invalid_emission() {
             return Self::OutputEmission;
         }
-        Self::Guest(failure.operation())
+        Self::Guest(failure.current_context().operation())
     }
 
     /// The stage a failed save of guest state belongs to once the guest produced the state.
@@ -192,8 +193,8 @@ impl WasmBranchModule {
         failure: Report<nervix_wasm::WasmGuestError>,
         revision: Option<u64>,
     ) -> Report<WasmInstanceError> {
-        let stage = WasmLifecycleStage::of_guest_failure(failure.current_context());
-        let export = failure.current_context().export();
+        let stage = WasmLifecycleStage::of_guest_failure(&failure);
+        let export = failure.export();
         failure.change_context(WasmInstanceError::Lifecycle {
             module: self.clone(),
             stage,
@@ -697,17 +698,16 @@ impl Runtime {
     /// so a batch discovered to be unusable after publication has already invalidated the saved
     /// state of the binding it replaced. Compiling first keeps the previous model and its guest
     /// state the current ones, and the module this check compiles is the one activation installs.
-    pub(crate) async fn prepare_candidate_wasm_module(
+    pub(crate) async fn prepare_wasm_module(
         &self,
-        domain: &DomainName,
-        processor: &CreateWasmProcessor,
+        plan: &WasmModulePlan,
     ) -> error_stack::Result<(), WasmInstanceError> {
         self.compile_wasm_processor_module(
-            domain,
-            &processor.name,
-            &processor.resource,
-            processor.resource_version,
-            &processor.file,
+            &plan.resource.domain,
+            &plan.processor,
+            &plan.resource.identifier,
+            plan.resource.version,
+            &plan.file,
         )
         .await?;
         Ok(())
@@ -722,24 +722,11 @@ impl Runtime {
         schedule: &ClusterSchedule,
     ) {
         let mut assigned = HashSet::default();
-        for domain in schedule.domains.values() {
-            for node in domain.nodes.values() {
-                let Some(processor) = node.wasm_processor() else {
-                    continue;
-                };
-                if !node.is_assigned_to(local_node_id) {
-                    continue;
-                }
-                let resource = ResourceId::new(
-                    domain.domain.clone(),
-                    processor.resource.clone(),
-                    processor.resource_version,
-                );
-                assigned.insert(WasmModuleFile {
-                    resource,
-                    file: processor.file.clone(),
-                });
-            }
+        for module in WasmModulePlan::assigned_in_cluster(schedule, local_node_id) {
+            assigned.insert(WasmModuleFile {
+                resource: module.resource,
+                file: module.file,
+            });
         }
         self.inner
             .compiled_wasm_modules
@@ -937,8 +924,10 @@ mod tests {
 
     #[test]
     fn a_rejected_saved_state_is_a_stage_of_its_own() {
-        let envelope = nervix_wasm::WasmGuestError::SnapshotEnvelopeRejected { reason: None };
-        let application = nervix_wasm::WasmGuestError::ApplicationStateRejected { reason: None };
+        let envelope =
+            Report::new(nervix_wasm::WasmGuestError::SnapshotEnvelopeRejected { reason: None });
+        let application =
+            Report::new(nervix_wasm::WasmGuestError::ApplicationStateRejected { reason: None });
 
         assert_eq!(
             WasmLifecycleStage::of_guest_failure(&envelope),
@@ -952,19 +941,19 @@ mod tests {
 
     #[test]
     fn a_failed_restore_without_a_verdict_stays_with_its_operation() {
-        let exhausted = nervix_wasm::WasmGuestError::Failed {
+        let exhausted = Report::new(nervix_wasm::WasmGuestCallError::FuelExhausted {
+            limit: nonzero!(1_000u64),
+            export: Some("nervix_load_state"),
+        })
+        .change_context(nervix_wasm::WasmGuestError::Failed {
             operation: nervix_wasm::WasmGuestOperation::StateRestore,
-            cause: nervix_wasm::WasmGuestCallError::FuelExhausted {
-                limit: nonzero!(1_000u64),
-                export: Some("nervix_load_state"),
-            },
-        };
-        let refused_init = nervix_wasm::WasmGuestError::Failed {
+        });
+        let refused_init = Report::new(nervix_wasm::WasmGuestCallError::GlobalError {
+            reason: "unsupported schema".to_string(),
+        })
+        .change_context(nervix_wasm::WasmGuestError::Failed {
             operation: nervix_wasm::WasmGuestOperation::Initialization,
-            cause: nervix_wasm::WasmGuestCallError::GlobalError {
-                reason: "unsupported schema".to_string(),
-            },
-        };
+        });
 
         assert_eq!(
             WasmLifecycleStage::of_guest_failure(&exhausted),
@@ -980,10 +969,11 @@ mod tests {
     fn output_the_host_cannot_decode_is_an_emission_failure() {
         let decode_failure =
             WasmEnvelope::decode(&[0xa0]).expect_err("a single byte is not an envelope");
-        let emission = nervix_wasm::WasmGuestError::Failed {
-            operation: nervix_wasm::WasmGuestOperation::BatchProcessing,
-            cause: nervix_wasm::WasmGuestCallError::InvalidEmission(decode_failure),
-        };
+        let emission = decode_failure
+            .change_context(nervix_wasm::WasmGuestCallError::InvalidEmission)
+            .change_context(nervix_wasm::WasmGuestError::Failed {
+                operation: nervix_wasm::WasmGuestOperation::BatchProcessing,
+            });
 
         assert_eq!(
             WasmLifecycleStage::of_guest_failure(&emission),
@@ -1044,12 +1034,12 @@ mod tests {
 
     #[test]
     fn an_unbranched_guest_failure_diagnostic_renders_every_cause_once() {
-        let exhausted = Report::new(nervix_wasm::WasmGuestError::Failed {
+        let exhausted = Report::new(nervix_wasm::WasmGuestCallError::FuelExhausted {
+            limit: nonzero!(1_000u64),
+            export: Some("nervix_process_batch"),
+        })
+        .change_context(nervix_wasm::WasmGuestError::Failed {
             operation: nervix_wasm::WasmGuestOperation::BatchProcessing,
-            cause: nervix_wasm::WasmGuestCallError::FuelExhausted {
-                limit: nonzero!(1_000u64),
-                export: Some("nervix_process_batch"),
-            },
         });
 
         let failure = sessionizer_module(None).guest_failure(exhausted, None);

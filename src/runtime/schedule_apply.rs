@@ -725,9 +725,22 @@ impl Runtime {
     ) -> Result<(), RuntimeError> {
         let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
             .map_err(|report| RuntimeError::activation_plan(domain, report))?;
+        let resource_plans =
+            ResourceExecutionPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
+                .map_err(|report| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to plan domain resources: {report:#}"),
+                })?;
         let entrypoints = Arc::new(
             EntrypointPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
                 .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
+        );
+        let emitter_plans = Arc::new(
+            EmitterExecutionPlans::from_scheduled_nodes(&schedule.nodes, &activation_plan)
+                .map_err(|report| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to plan emitters: {report:#}"),
+                })?,
         );
         let dispatcher = self.inner.remote_dispatcher.load_full();
         let local_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
@@ -744,6 +757,29 @@ impl Runtime {
         )
         .into_vec();
         let entities = entities.as_slice();
+        for entity in entities {
+            if entity.kind != ModelKind::WasmProcessor {
+                continue;
+            }
+            let Some(wasm) = resource_plans.wasm.get(&entity.identifier) else {
+                return Err(RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("missing desired WASM processor '{}'", entity.identifier),
+                });
+            };
+            let assigned_here = match local_node_id {
+                Some(local) => wasm.assignment.is_assigned_to(local),
+                None => wasm.assignment.executes_on(None),
+            };
+            if assigned_here {
+                self.prepare_wasm_module(&wasm.module)
+                    .await
+                    .map_err(|error| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: format!("failed to prepare WASM processor: {error:#}"),
+                    })?;
+            }
+        }
         let desired_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         // Fence the relays feeding every entity this activation replaces, and the relays feeding
         // every reassigned node, so producers pause instead of dispatching into an owner that is
@@ -1000,16 +1036,22 @@ impl Runtime {
                 continue;
             }
             if entity.kind == ModelKind::Emitter {
-                let ScheduledModel {
-                    config: desired_emitter,
-                    node: desired_node,
-                } = schedule
-                    .scheduled::<CreateEmitter>(entity.identifier.clone())
-                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!("missing desired emitter '{}'", entity.identifier.as_str()),
-                    })?;
-                let desired_emitter = desired_emitter.clone();
+                let emitter_name = EmitterName::from(&entity.identifier);
+                let desired_emitter =
+                    emitter_plans
+                        .emitter(&emitter_name)
+                        .cloned()
+                        .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!(
+                                "missing desired emitter '{}'",
+                                entity.identifier.as_str()
+                            ),
+                        })?;
+                let desired_node = schedule
+                    .nodes
+                    .get(entity)
+                    .assured("the emitter plan was decided from this same schedule");
                 let (old_emitter, old_task) = {
                     let mut execution = self.inner.executions.get_mut(domain).ok_or_else(|| {
                         RuntimeError::BuildDomainExecution {
@@ -1017,10 +1059,10 @@ impl Runtime {
                             reason: "domain execution is unavailable for emitter swap".to_string(),
                         }
                     })?;
-                    let old_node = execution
-                        .schedule
-                        .nodes
-                        .get(&NodeRef::new(ModelKind::Emitter, entity.identifier.clone()))
+                    let old_emitter = execution
+                        .emitter_plans
+                        .emitter(&emitter_name)
+                        .cloned()
                         .ok_or_else(|| RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
                             reason: format!(
@@ -1028,16 +1070,6 @@ impl Runtime {
                                 entity.identifier.as_str()
                             ),
                         })?;
-                    let Model::Emitter(old_emitter) = old_node.config.as_ref() else {
-                        return Err(RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "missing existing emitter '{}'",
-                                entity.identifier.as_str()
-                            ),
-                        });
-                    };
-                    let old_emitter = old_emitter.clone();
                     let old_task = execution.emitter_tasks.remove(entity);
                     (old_emitter, old_task)
                 };
@@ -1065,7 +1097,6 @@ impl Runtime {
                 struct EmitterSpawnInputs {
                     shutdown: watch::Sender<bool>,
                     codecs: HashMap<CodecName, Arc<CompiledCodec>>,
-                    clients: HashMap<ClientName, Arc<Model>>,
                     deps: EmitterTaskDeps,
                     inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
                 }
@@ -1078,8 +1109,8 @@ impl Runtime {
                         }
                     })?;
                     if had_old_task {
-                        for input_relay in old_emitter.from.relays() {
-                            if let Some(services) = execution.relay_services.get(input_relay) {
+                        for input in &old_emitter.inputs {
+                            if let Some(services) = execution.relay_services.get(&input.relay) {
                                 services.remove_local_runtime_consumer(old_emitter.mode);
                             }
                         }
@@ -1088,22 +1119,21 @@ impl Runtime {
                         None
                     } else {
                         let inputs = desired_emitter
-                            .from
-                            .relays()
+                            .inputs
                             .iter()
-                            .map(|input_relay| {
-                                let Some(services) = execution.relay_services.get(input_relay)
+                            .map(|input| {
+                                let Some(services) = execution.relay_services.get(&input.relay)
                                 else {
                                     return Err(RuntimeError::BuildDomainExecution {
                                         domain: domain.as_str().to_string(),
                                         reason: format!(
                                             "missing relay services for swapped emitter input '{}'",
-                                            input_relay.as_str()
+                                            input.relay.as_str()
                                         ),
                                     });
                                 };
                                 Ok((
-                                    input_relay.clone(),
+                                    input.relay.clone(),
                                     services.add_local_runtime_consumer(desired_emitter.mode),
                                 ))
                             })
@@ -1115,7 +1145,6 @@ impl Runtime {
                         Some(EmitterSpawnInputs {
                             shutdown: execution.shutdown.clone(),
                             codecs: execution.codecs.clone(),
-                            clients: execution.clients.clone(),
                             deps,
                             inputs,
                         })
@@ -1129,8 +1158,7 @@ impl Runtime {
                             codecs: &spawn.codecs,
                             deps: spawn.deps,
                         },
-                        &spawn.clients,
-                        desired_emitter,
+                        desired_emitter.as_ref().clone(),
                         spawn.inputs,
                     )?;
                     self.inner
@@ -1269,29 +1297,13 @@ impl Runtime {
                 continue;
             }
             if entity.kind == ModelKind::Generator {
-                let desired_node = schedule
-                    .nodes
-                    .get(&NodeRef::new(
-                        ModelKind::Generator,
-                        entity.identifier.clone(),
-                    ))
-                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "missing desired generator '{}'",
-                            entity.identifier.as_str()
-                        ),
-                    })?;
-                let Model::Generator(desired_generator) = desired_node.config.as_ref() else {
+                let name = GeneratorName::from(&entity.identifier);
+                let Some(generator) = resource_plans.generators.get(&name) else {
                     return Err(RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "desired generator '{}' has the wrong model kind",
-                            entity.identifier.as_str()
-                        ),
+                        reason: format!("missing desired generator '{}'", entity.identifier),
                     });
                 };
-                let desired_generator = desired_generator.clone();
                 let old_task = self
                     .inner
                     .executions
@@ -1307,7 +1319,7 @@ impl Runtime {
                     task.join_after_shutdown("generator").await;
                 }
 
-                if Self::scheduled_node_executes_locally(desired_node, local_node_id) {
+                if generator.assignment.executes_on(local_node_id) {
                     let (shutdown, spec) = {
                         let execution = self.inner.executions.get(domain).ok_or_else(|| {
                             RuntimeError::BuildDomainExecution {
@@ -1316,94 +1328,20 @@ impl Runtime {
                                     .to_string(),
                             }
                         })?;
-                        let source_schema = execution
-                            .relay_schemas
-                            .get(&desired_generator.materialized_relay)
-                            .cloned()
-                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "missing generator source relay schema '{}'",
-                                    desired_generator.materialized_relay.as_str()
-                                ),
-                            })?;
-                        let source_branching = execution
-                            .relay_branchings
-                            .get(&desired_generator.materialized_relay)
-                            .cloned()
-                            .assured("the generator's validated source relay has branch routing");
-                        let source_branch_schema =
-                            RuntimeVmSchema::from_branching(&source_branching);
-                        let mut routes =
-                            Vec::with_capacity(desired_generator.output_routes.routes.len());
-                        for output in desired_generator.output_routes.outputs() {
-                            let output_schema = execution
-                                .relay_schemas
-                                .get(&output.relay)
-                                .cloned()
-                                .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                    domain: domain.as_str().to_string(),
-                                    reason: format!(
-                                        "missing generator output relay schema '{}'",
-                                        output.relay.as_str()
-                                    ),
-                                })?;
-                            let output_registry = execution
-                                .relay_registries
-                                .get(&output.relay)
-                                .cloned()
-                                .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                    domain: domain.as_str().to_string(),
-                                    reason: format!(
-                                        "missing generator output relay '{}'",
-                                        output.relay.as_str()
-                                    ),
-                                })?;
-                            let output_services = execution
-                                .relay_services
-                                .get(&output.relay)
-                                .cloned()
-                                .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                    domain: domain.as_str().to_string(),
-                                    reason: format!(
-                                        "missing generator output relay services '{}'",
-                                        output.relay.as_str()
-                                    ),
-                                })?;
-                            let program = compile_generator_set_program(
-                                domain,
-                                &desired_generator,
-                                output,
-                                GeneratorSetProgramSchemas {
-                                    output: RuntimeVmSchema {
-                                        schema: output_schema.arrow_schema(),
-                                        sensitivity: output_schema.vm_sensitivity(),
-                                    },
-                                    source: RuntimeVmSchema {
-                                        schema: source_schema.arrow_schema(),
-                                        sensitivity: source_schema.vm_sensitivity(),
-                                    },
-                                    branch: source_branch_schema.clone(),
-                                },
-                                Some(&execution.udfs),
-                            )?;
-                            routes.push(GeneratorTaskRouteSpec::new(
-                                output.clone(),
-                                program,
-                                output_schema,
-                                output_registry,
-                                output_services,
-                            ));
-                        }
-                        (
-                            execution.shutdown.clone(),
-                            GeneratorTaskSpec::new(
-                                desired_generator.clone(),
-                                source_schema,
-                                source_branching,
-                                routes,
-                            ),
+                        let spec = GeneratorTaskSpec::bind(
+                            domain,
+                            generator,
+                            &execution.relay_registries,
+                            &execution.relay_services,
+                            &execution.udfs,
                         )
+                        .map_err(|report| {
+                            RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!("generator binding failed: {report:#}"),
+                            }
+                        })?;
+                        (execution.shutdown.clone(), spec)
                     };
                     let task = self.spawn_generator_task(domain, &shutdown, spec)?;
                     self.inner
@@ -1603,6 +1541,7 @@ impl Runtime {
                 let remote_consumers = Self::remote_runtime_consumers_for_schedule(
                     &schedule,
                     &entrypoints,
+                    &emitter_plans,
                     local_node_id,
                 );
                 for (relay, services) in &execution.relay_services {
@@ -1623,6 +1562,7 @@ impl Runtime {
             }
             execution.schedule = schedule;
             execution.entrypoints = entrypoints;
+            execution.emitter_plans = emitter_plans;
             execution.routing.processor_plans = processor_plans;
             execution.routing.publish();
             routing_published = true;
@@ -1660,6 +1600,13 @@ impl Runtime {
             EntrypointPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
                 .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
         );
+        let emitter_plans = Arc::new(
+            EmitterExecutionPlans::from_scheduled_nodes(&schedule.nodes, &activation_plan)
+                .map_err(|report| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to plan emitters: {report:#}"),
+                })?,
+        );
         let graph = ActiveGraph::from_scheduled_models(&schedule).map_err(|error| {
             RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
@@ -1674,6 +1621,7 @@ impl Runtime {
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
             execution.schedule = schedule;
             execution.entrypoints = entrypoints;
+            execution.emitter_plans = emitter_plans;
             execution.routing.processor_plans = processor_plans;
             execution.routing.publish();
         } else {
@@ -1763,12 +1711,17 @@ impl Runtime {
                         None
                     };
                     if let Some(commands) = commands {
-                        ScheduledEmitterTask::reconfigure_via(&commands, config.clone())
-                            .await
-                            .map_err(|error| RuntimeError::BuildDomainExecution {
+                        ScheduledEmitterTask::reconfigure_via(
+                            &commands,
+                            config.flush_policy.clone(),
+                        )
+                        .await
+                        .map_err(|error| {
+                            RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
                                 reason: error.to_string(),
-                            })?;
+                            }
+                        })?;
                     }
                 }
             }

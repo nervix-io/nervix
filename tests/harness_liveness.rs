@@ -2882,6 +2882,130 @@ mod http_receiver_tests {
     }
 
     #[tokio::test]
+    async fn a_scripted_retry_after_date_is_measured_from_when_its_response_is_written() {
+        let receiver = start(ReceiverTransport::Plain).await;
+        receiver.script(script("respond 503; after 1s; retry after date in 2s"));
+        let sent_at = chrono::Utc::now();
+
+        let response = reqwest::Client::new()
+            .get(format!("{}/limited", receiver.origin()))
+            .send()
+            .await
+            .assured("the receiver answers a scripted request");
+        let received_at = chrono::Utc::now();
+
+        assert_eq!(response.status(), 503);
+        let retry_after = response.headers()["retry-after"]
+            .to_str()
+            .assured("an HTTP date is ASCII");
+        let date = chrono::DateTime::parse_from_rfc2822(retry_after)
+            .assured("the receiver writes an IMF-fixdate");
+        let at_least = sent_at + chrono::TimeDelta::seconds(3);
+        let at_most = received_at + chrono::TimeDelta::seconds(3);
+        // The date is taken once the one-second response delay has passed and is rounded up to a
+        // whole second, so it asks for at least two seconds from then and at most three from when
+        // the response arrived.
+        assert!(
+            date >= at_least,
+            "{retry_after} is before {at_least}, so it asks for less than the scripted delay"
+        );
+        assert!(
+            date <= at_most,
+            "{retry_after} is after {at_most}, so it was not measured from the response"
+        );
+        assert!(!receiver.stop().await.was_forced());
+    }
+
+    #[tokio::test]
+    async fn a_request_held_until_released_answers_with_the_released_response() {
+        let receiver = start(ReceiverTransport::Plain).await;
+        receiver.script(script(
+            "hold response until released\nhold response until released",
+        ));
+        let client = reqwest::Client::new();
+        let held = tokio::spawn({
+            let client = client.clone();
+            let target = format!("{}/held", receiver.origin());
+            async move { client.get(target).send().await }
+        });
+        receiver
+            .wait_for_requests(1, WITHIN)
+            .await
+            .assured("the held request is captured before it is held");
+        assert!(
+            !held.is_finished(),
+            "nothing answers a held request before the release"
+        );
+
+        receiver.release_held_responses(
+            "respond 202; body released"
+                .parse()
+                .assured("the released response is valid"),
+        );
+        let released = tokio::time::timeout(WITHIN, held)
+            .await
+            .assured("the release answers the held request")
+            .assured("the held client does not panic")
+            .assured("the released response is complete");
+        assert_eq!(released.status(), 202);
+        assert_eq!(
+            released
+                .text()
+                .await
+                .assured("the released body is complete"),
+            "released"
+        );
+        let later = client
+            .get(format!("{}/later", receiver.origin()))
+            .send()
+            .await
+            .assured("a request held after the release takes the released response at once");
+        assert_eq!(later.status(), 202);
+        assert!(!receiver.stop().await.was_forced());
+    }
+
+    #[tokio::test]
+    async fn a_target_with_its_own_answer_leaves_the_script_to_other_requests() {
+        let receiver = start(ReceiverTransport::Plain).await;
+        receiver.script(script("respond 503"));
+        receiver.answer_requests_for(
+            "/tenants/north?attempt=1".to_string(),
+            "respond 404"
+                .parse()
+                .assured("the targeted response is valid"),
+        );
+        let client = reqwest::Client::new();
+
+        let targeted = client
+            .get(format!("{}/tenants/north?attempt=1", receiver.origin()))
+            .send()
+            .await
+            .assured("the receiver answers a targeted request");
+        let scripted = client
+            .get(format!("{}/tenants/south", receiver.origin()))
+            .send()
+            .await
+            .assured("the receiver answers a scripted request");
+        let repeated = client
+            .get(format!("{}/tenants/north?attempt=1", receiver.origin()))
+            .send()
+            .await
+            .assured("a targeted answer holds for every request for its target");
+        let standing = client
+            .get(format!("{}/tenants/north", receiver.origin()))
+            .send()
+            .await
+            .assured("the receiver answers with its standing response");
+
+        assert_eq!(targeted.status(), 404);
+        assert_eq!(scripted.status(), 503);
+        assert_eq!(repeated.status(), 404);
+        assert_eq!(standing.status(), 200);
+        assert_eq!(receiver.captured().len(), 4);
+        assert!(!receiver.stop().await.was_forced());
+    }
+
+    #[tokio::test]
     async fn chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted() {
         let receiver = start(ReceiverTransport::Plain).await;
         receiver.script(script(
@@ -3115,18 +3239,23 @@ mod http_receiver_tests {
             "respond 200",
             "respond 204; header X-A: b; body text; interim 100; after 250ms; extra headers 129",
             "respond 200; stall body",
+            "respond 429; retry after date in 3s",
             "lose response",
             "hold response",
+            "hold response until released",
             "raw HTTP/1.1 999 Odd\\r\\n\\r\\n",
         ] {
             assert!(line.parse::<ReceiverResponse>().is_ok(), "{line}");
         }
         let refused = [
             ("answer 200", "UnknownForm"),
+            ("hold response until later", "UnknownForm"),
             ("respond 20", "Status"),
             ("respond 099", "Status"),
             ("respond 200; header nocolon", "Header"),
             ("respond 200; after soon", "Duration"),
+            ("respond 503; retry after date in soon", "Duration"),
+            ("respond 503; retry after date in 2days", "RetryAfterDelay"),
             ("respond 200; extra headers many", "Count"),
             ("respond 200; teapot", "UnknownClause"),
             ("raw trailing\\", "Escape"),

@@ -8,9 +8,9 @@ node resolver only once its delivery has merged, and later deliveries extend the
 starting another.
 
 Run the named Cucumber evidence with `just test-scenarios --input <feature>`, the resolver's checks
-with `just test-dns`, the interconnect's with `just test-interconnect`, the RabbitMQ, Syslog and
-WebSocket connectors' with `just test-package-lib <package>`, the dependency graphs with
-`just validate-dns-dependencies`, and the simulation with `just test-turmoil`.
+with `just test-dns`, the interconnect's with `just test-interconnect`, the RabbitMQ, Syslog,
+WebSocket, ClickHouse and SQS connectors' with `just test-package-lib <package>`, the dependency
+graphs with `just validate-dns-dependencies`, and the simulation with `just test-turmoil`.
 
 ## The node resolver
 
@@ -38,7 +38,8 @@ Resolution](../docs/src/interconnect.md#peer-name-resolution) is the public acco
 | RabbitMQ source and sink (Lapin) | Node resolver, again for every connection: each answer dialled in order within a 30 second budget shared with TLS, and the transport handed to Lapin's `Connection::connector`. Lapin's `hickory-dns` feature, a process-wide resolver read from `/etc/resolv.conf`, stays off | [Hickory DNS 03](https://app.clickup.com/t/86bc7zpnc) | `runtime/rabbitmq_dns_resolution.feature`, every scenario, one and three nodes; `just test-package-lib nervix-connector-rabbitmq`; `just validate-dns-dependencies` |
 | Syslog UDP, TCP and TLS emission | Node resolver on each new sender, inside a 30-second budget shared with UDP setup or ordered TCP/TLS address attempts and the TLS handshake | [Hickory DNS 04](https://app.clickup.com/t/86bc7zpnf) | `runtime/syslog_dns_resolution.feature`, one and three nodes; `just validate-dns-dependencies` |
 | WebSocket `ws` and `wss` client ingestion | Node resolver on every initial connection and resume, inside a 30-second budget shared with ordered TCP/TLS and upgrade attempts; the configured URL remains the request authority | [Hickory DNS 04](https://app.clickup.com/t/86bc7zpnf) | `runtime/websocket_client_ingestion.feature`, `runtime/websocket_client_tls_resource_mounts.feature`, and `runtime/websocket_dns_resolution.feature`, one and three nodes; `just validate-dns-dependencies` |
-| ClickHouse and SQS | Hyper's default connector and the AWS SDK's default client | [Hickory DNS 05](https://app.clickup.com/t/86bc7zpng) | Not yet on the node resolver |
+| ClickHouse emission, plain HTTP and TLS clients (Hyper `HttpConnector`) | Node resolver injected as the connector's resolver service on every new connection, in both the plain-HTTP client that replaces the driver's default and the TLS client; the insert's `timeout_ms` wait covers the connection | [Hickory DNS 05](https://app.clickup.com/t/86bc7zpng) | `runtime/clickhouse_dns_resolution.feature`, one and three nodes; `just test-package-lib nervix-connector-clickhouse`; `just validate-dns-dependencies` |
+| SQS source and sink, default-root and custom-CA clients (Smithy HTTP client) | Node resolver injected through Smithy's `ResolveDns` with `build_with_resolver` on every new connection, in both the default-root client, which keeps the SDK default's proxy environment, and the custom-CA client; static credentials and region leave `aws-config`'s default provider chains unused, and its SSO token chain, never asked by SigV4 SQS, shares the same client | [Hickory DNS 05](https://app.clickup.com/t/86bc7zpng) | `runtime/sqs_dns_resolution.feature`, one and three nodes; `just test-package-lib nervix-connector-sqs`; `just validate-dns-dependencies` |
 | Native client sessions and OTEL gRPC export (Tonic) | Tonic's default connector | [Hickory DNS 06](https://app.clickup.com/t/86bc7zpnk) | Not yet on the node resolver |
 | Redis pool and Pub/Sub | The driver's default resolver | [Hickory DNS 07](https://app.clickup.com/t/86bc7zpnn) | Not yet on the node resolver |
 | MongoDB | Hickory for SRV and TXT discovery inside the driver, through its `dns-resolver` feature; Tokio's `lookup_host` for the addresses it connects to | Residual driver boundary | `just validate-dns-dependencies` keeps the discovery feature selected; the address lookups are not replaceable without a supported injection contract |
@@ -107,3 +108,29 @@ host as `localhost`, so the connector reads the host with the URL grammar.
 | Numeric IPv4 and IPv6 endpoints, typed DNS failures, TLS failures and the budget | `hosts_are_read_with_the_url_grammar`, `ipv6_literals_are_dialled_as_written`, `names_that_do_not_resolve_keep_their_dns_failure`, `amqps_handshakes_that_fail_or_stall_are_tls_failures`, `invalid_addresses_and_ca_files_are_configuration_failures`, `failed_connections_keep_their_typed_cause_and_leave_the_source_to_resume` |
 | No leaked connections or threads | A connection that fails before the AMQP handshake has started no Lapin thread; the stand-in brokers of the connector checks observe the client close its socket once the handshake fails; the outage scenarios count consumers exactly |
 | The isolated connector and the server select the node resolver, keep AWS-LC, and keep production free of simulation schedulers | `just validate-dns-dependencies`, `just validate-shuttle-dependencies`, `just validate-turmoil-dependencies`; `just check-package nervix-connector-rabbitmq` |
+
+## Hickory DNS 05 acceptance
+
+ClickHouse and SQS keep their drivers' HTTP clients and install the node resolver at each driver's
+own DNS hook: `nervix-dns` implements Hyper's resolver service for `hyper-util`'s `HttpConnector`
+and Smithy's `ResolveDns`. The ClickHouse connector builds that connector for both of its clients,
+the plain HTTP client that replaces the driver's default, with the driver's keepalive and idle pool
+timeout, and the TLS client. The SQS connector builds its Smithy client with `build_with_resolver`
+for both of its clients: the default-root client keeps the SDK default's AWS-LC, native roots and
+proxy environment, and the custom-CA client trusts that CA alone with no proxy. The SDK signs a
+request before the connector resolves its host. The static credentials and region leave
+`aws-config`'s default credential and region chains unused; its SSO token chain, which SigV4 SQS
+never asks, would share the same HTTP client. A failed lookup reaches each connector as a cause of
+the driver's error, where `DnsLookupError::find_in` recovers it as the report's typed context.
+
+| Acceptance item | Evidence |
+| --- | --- |
+| ClickHouse inserts into an explicitly provisioned table through a fixture name over HTTP and over HTTPS with a custom CA | `runtime/clickhouse_dns_resolution.feature`: *ClickHouse emitters insert through a host named by the node DNS fixture over HTTP* and *over HTTPS*, one and three nodes |
+| SQS sources and sinks consume and send through a fixture name over HTTP with the default-root client and over HTTPS with the custom-CA client | `runtime/sqs_dns_resolution.feature`: *SQS sources and sinks reach a service named by the node DNS fixture over HTTP* and *over HTTPS*, one and three nodes, `SINGLE` and `BATCH` |
+| Certificate checks name the configured host, whichever address was dialled | *An HTTPS ClickHouse client rejects a certificate that does not name the host it resolved* and *An HTTPS SQS client rejects a certificate that does not name the host it resolved*: the scenario certificate names `*.nervix.test` and `127.0.0.1`, so only the host name can fail it |
+| Signed SQS requests keep the configured host while connecting to a resolved address | `just test-package-lib nervix-connector-sqs`: `requests_reach_the_answer_that_accepts_signed_for_the_configured_host` reads the `Host` header and the SigV4 signed headers of the sink's and the source's requests |
+| Multiple answers, typed lookup failures, transport failures, literal addresses and the default client's plain-HTTP boundary | `just test-package-lib nervix-connector-clickhouse`: `inserts_reach_the_answer_that_accepts_and_keep_the_configured_authority`, `literal_addresses_are_dialled_without_a_lookup`, `a_host_that_does_not_resolve_is_the_typed_cause_of_the_insert_failure`, `a_refused_connection_is_described_by_its_causes`, `a_client_without_tls_entries_speaks_plain_http_only`; `just test-package-lib nervix-connector-sqs`: `a_literal_endpoint_is_dialled_without_a_lookup`, `a_host_that_does_not_resolve_is_the_typed_cause_of_the_queue_lookup_failure`, `a_refused_connection_is_described_by_its_causes`, `a_service_response_keeps_its_short_description`; `just test-dns`: `hyper_connector_uses_all_answers_and_keeps_the_url_authority`, `hyper_connector_failures_keep_the_typed_lookup_failure`, `smithy_hook_answers_every_address_and_fails_with_the_typed_lookup_failure`, `reqwest_failures_keep_the_typed_lookup_failure` |
+| DNS outage and silence hold the input offset, survive a restart and follow a changed answer | *ClickHouse inserts wait out name not found for their host name, through a restart, and follow the next answer* and *wait out silence*: the first answer refuses and the second accepts, `DESCRIBE EMITTER` shows the lookup failure while the Kafka offset stays below the record, a restart keeps it there, and the record lands through the next answer; *SQS sends hold the input offset while the service name does not resolve* |
+| SQS sources resume after a failed lookup without deleting or losing a message | *SQS sources resume once their service name resolves again after name not found* and *after silence*: `DESCRIBE INGESTOR` shows the lookup failure, and the message published meanwhile is delivered through the next answer |
+| Request deadlines include the lookup, and SDK retries stay as configured | `configured_timeout_bounds_clickhouse_insert_completion`; `client_timeout_bounds_each_request_while_sdk_retries_stay_disabled`; `request_timeout_cancels_a_silent_dns_lookup` for the shared hook budget |
+| The isolated connectors select the node resolver and AWS-LC | `just validate-dns-dependencies`; `just check-package nervix-connector-clickhouse`, `just check-package nervix-connector-sqs` |

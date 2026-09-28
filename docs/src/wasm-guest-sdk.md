@@ -30,6 +30,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 arrow-array = "58"
+error-stack = "0.5"
 nervix-wasm-sdk = { git = "https://github.com/nervix-io/nervix", rev = "<commit>" }
 
 [profile.release]
@@ -60,6 +61,7 @@ fields first and a required `bucket STRING` field last:
 use std::sync::Arc;
 
 use arrow_array::{Array, ArrayRef, Int32Array, StringArray};
+use error_stack::{Report, Result};
 use nervix_wasm_sdk::{
     BranchContext, GuestContext, GuestError, InputBatch, OutputColumnRef, OutputEnvelope,
     Processor,
@@ -100,7 +102,7 @@ impl Processor for SeverityBucketer {
             false,
         );
         let input_fields = u32::try_from(ctx.branch().input_schema().fields.len())
-            .map_err(|_| GuestError::InvalidSize)?;
+            .map_err(|_| Report::new(GuestError::InvalidSize))?;
         let mut columns = (0..input_fields)
             .map(|column_index| OutputColumnRef::Input { column_index })
             .collect::<Vec<_>>();
@@ -174,6 +176,12 @@ for non-trivial destination fields.
 
 Three error levels map onto the processor's declared policies:
 
+The `Processor` callbacks and fallible SDK methods return
+`error_stack::Result<T, GuestError>`. Create a report where a failure occurs;
+keep a source error in that report and add context when the guest gives it a
+processor-specific meaning. The SDK renders the report only when it crosses the
+guest ABI, so its Rust callers can still inspect typed causes.
+
 - Message errors are lineage: route the affected tokens through the
   `message_errors` sidecar of an emitted envelope. The host applies
   `ON MESSAGE ERROR`.
@@ -182,8 +190,9 @@ Three error levels map onto the processor's declared policies:
   `ON GLOBAL ERROR` and the guest latches into error state.
 - Returning `Err(GuestError::failed(reason))` from a callback reports the
   reason through the global-error channel, fails the callback, and latches the
-  guest into error state. Other `GuestError` variants return their negative
-  ABI code without latching.
+  guest into error state. `GuestError::failed` creates the report for that
+  failure. Other `GuestError` variants return their negative ABI code without
+  latching.
 
 Panics are converted into latched global errors; with `panic = "abort"` they
 surface as Wasmtime traps, which the host also treats as global errors.

@@ -13,8 +13,9 @@ use std::{fmt::Write as _, fs, path::PathBuf};
 use bytes::Bytes;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    DomainClockObservation, DomainClockObservedState, ModelKind, ModelName, NodeRef, ParseAsType,
-    PlacementPolicy, SchemaField,
+    DomainClockObservation, DomainClockObservedState, DomainClockTickObservation, ModelKind,
+    ModelName, NodeRef, ParseAsType, PlacementPolicy, RequestedResourceVersion, SchemaField,
+    Timestamp,
 };
 
 use super::{
@@ -28,11 +29,12 @@ use crate::{
     CellView, CellsView, Choice, ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceValue,
     ClientFrame, ClientMessage, ClientRequest, CommandDisposition, DomainClockAttachDisposition,
     DomainClockAttachOutcome, DomainClockAttachmentEndReason, DomainClockAttachmentEnded,
-    DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainPaceChoice,
-    LeaderRedirect, Reply, ReplyBody, ReplyDelivery, RequestRejected, RequestRejection,
-    ServerEvent, ServerFrame, ServerMessage, SubscribeDisposition, SubscribeOutcome,
-    SubscriptionEndReason, SubscriptionEnded, SubscriptionOpened, SubscriptionType, SuggestOutcome,
-    Suggestion, SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause, VerifiedFrame,
+    DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked,
+    DomainPaceChoice, LeaderRedirect, Reply, ReplyBody, ReplyDelivery, RequestRejected,
+    RequestRejection, ServerEvent, ServerFrame, ServerMessage, SubscribeDisposition,
+    SubscribeOutcome, SubscriptionEndReason, SubscriptionEnded, SubscriptionOpened,
+    SubscriptionType, SuggestOutcome, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
+    UnknownOutcomeCause, VerifiedFrame,
 };
 
 const UPDATE_ENV: &str = "NERVIX_UPDATE_CLIENT_WIRE_CORPUS";
@@ -120,6 +122,18 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
     }
     .encode(&limits())
     .assured("a corpus clock frame fits the default limits");
+    let clock_ticked = DomainClockTicked {
+        domain: name("tenant"),
+        tick: DomainClockTickObservation {
+            generation: 7,
+            tick_id: 42,
+            logical_boundary: Timestamp::from_unix_nanos(1_000),
+            authority_utc: Timestamp::from_unix_nanos(2_000),
+            serving_logical: Timestamp::from_unix_nanos(3_000),
+        },
+    }
+    .encode(&limits())
+    .assured("a corpus tick frame fits the default limits");
     vec![
         ("client_attach_domain_clock.nxcm", client(15)),
         ("client_cancel.nxcm", client(13)),
@@ -168,6 +182,24 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                                 label: "bundle".to_string(),
                                 detail: None,
                                 group: None,
+                            },
+                        },
+                        Choice {
+                            value: ChoiceValue::ResourceVersion(RequestedResourceVersion::Latest),
+                            presentation: ChoicePresentation {
+                                label: "LATEST".to_string(),
+                                detail: Some("Highest completed version".to_string()),
+                                group: Some("Resource version".to_string()),
+                            },
+                        },
+                        Choice {
+                            value: ChoiceValue::ResourceVersion(RequestedResourceVersion::Number(
+                                3,
+                            )),
+                            presentation: ChoicePresentation {
+                                label: "3".to_string(),
+                                detail: Some("Completed version".to_string()),
+                                group: Some("Resource version".to_string()),
                             },
                         },
                         Choice {
@@ -277,6 +309,7 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             "server_domain_clock_stopped.nxsm",
             clock_observed(0, DomainClockObservedState::Stopped),
         ),
+        ("server_domain_clock_ticked.nxsm", clock_ticked.into_bytes()),
         (
             "server_domain_clock_uninstalled.nxsm",
             clock_observed(7, DomainClockObservedState::Uninstalled),
@@ -436,6 +469,7 @@ fn choice_value(value: &ChoiceValue) -> String {
         ChoiceValue::PlacementPolicy(value) => format!("placement:{value:?}"),
         ChoiceValue::Domain(domain) => format!("domain:{}", domain.as_str()),
         ChoiceValue::Resource(resource) => format!("resource:{}", resource.as_str()),
+        ChoiceValue::ResourceVersion(version) => format!("resource-version:{version}"),
         ChoiceValue::Model(node) => {
             format!("model:{}/{}", node.kind.as_str(), node.identifier.as_str())
         }
@@ -667,6 +701,18 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                 observed.domain.as_str()
             ));
             lines.push(clock_line(&observed.clock));
+        }
+        ServerMessage::Event(ServerEvent::DomainClockTicked(ticked)) => {
+            lines.push(format!(
+                "EVENT DOMAIN_CLOCK_TICK domain={} generation={} id={} boundary={} \
+                 authority_utc={} serving_logical={}",
+                ticked.domain.as_str(),
+                ticked.tick.generation,
+                ticked.tick.tick_id,
+                ticked.tick.logical_boundary.unix_nanos(),
+                ticked.tick.authority_utc.unix_nanos(),
+                ticked.tick.serving_logical.unix_nanos(),
+            ));
         }
         ServerMessage::Event(ServerEvent::DomainClockAttachmentEnded(ended)) => {
             lines.push(format!(

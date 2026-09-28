@@ -370,3 +370,54 @@ Feature: Web console visual relay and subscription creation
     When selector ".create-submit" is clicked
     Then selector ".create-validation" contains "Select a domain"
     And selector ".subscription-tab" does not exist
+
+  @visual_choice_states
+  Scenario: Missing form prerequisites appear as neutral choice hints
+    Given a 1 node nervix cluster is started
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='branch']" is clicked
+    Then selector ".create-schema-ref .create-choice-state.create-choice-missing" contains "Select a domain before choosing a schema"
+    When selector ".create-close" is clicked
+    And selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='relay']" is clicked
+    Then selector ".create-schema-ref .create-choice-state.create-choice-missing" contains "Select a domain before choosing a schema"
+    When selector ".create-close" is clicked
+    And selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='subscription']" is clicked
+    Then selector ".create-relay-ref .create-choice-state.create-choice-missing" contains "Select a domain before choosing a relay"
+    And selector ".create-field-refs .create-choice-state.create-choice-missing" contains "Select a domain before choosing a relay"
+
+  @visual_choice_states
+  Scenario: Subscription fields name the missing relay after a domain is selected
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE DOMAIN {{domain}};
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='subscription']" is clicked
+    Then selector ".create-field-refs .create-choice-state.create-choice-missing" contains "Select a relay to list the fields of its records"
+
+  @visual_choice_states
+  Scenario: A stale choice page offers a neutral retry that loads current choices
+    Given a 1 node nervix cluster is started
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='domain']" is clicked
+    Then selector ".create-placement-options .create-choice-more" exists
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE DOMAIN visual_choice_revision;
+      """
+    And selector ".create-placement-options .create-choice-more" is clicked
+    Then selector ".create-placement-options .create-choice-state.create-choice-stale" contains "The form context changed"
+    And selector ".create-placement-options .create-choice-retry" exists
+    When selector ".create-placement-options .create-choice-retry" is clicked
+    Then selector ".create-placement-options [data-value='PREFER COLOCATION']" exists
+    And selector ".create-placement-options .create-choice-more" exists

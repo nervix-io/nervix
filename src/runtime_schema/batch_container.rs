@@ -161,6 +161,7 @@ impl CompiledCodecBatchEncoder<'_> {
                                 codec: codec.name.as_str().to_string(),
                                 format: native.format.name(),
                                 reason: error.to_string(),
+                                report: error,
                             })
                         })?;
                 }
@@ -403,7 +404,10 @@ fn run_batch_transformation(
     }
     program
         .run_single(JsonValue::Array(values))
-        .map_err(|error| Report::new(BatchContainerError::from(&error)))
+        .map_err(|error| {
+            let context = BatchContainerError::from(error.current_context());
+            error.change_context(context)
+        })
 }
 
 /// The default container of a jaq-native format: an array for the formats with a top-level

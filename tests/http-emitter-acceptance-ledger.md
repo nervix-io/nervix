@@ -103,10 +103,14 @@ records its bounds and its cleanup.
 | `Given node "<node>" has the TLS files of HTTP receiver "<name>" in resource directory "<placeholder>"` | Places `ca.pem`, `client.pem` and `client-key.pem` where the node can upload and mount them. |
 | `Given HTTP receiver "<name>" answers with` | Appends one scripted response per docstring line, taken by the next requests in order. |
 | `Given HTTP receiver "<name>" answers unscripted requests with "<response>"` | Replaces the standing response, a `200` without a body until replaced. |
+| `Given HTTP receiver "<name>" answers requests for "<target>" with "<response>"` | Answers every request for one exact path and query with its own response, ahead of the script, for requests of independent branches or relays whose order is not part of the contract. |
+| `When HTTP receiver "<name>" releases its held responses with "<response>"` | Answers every request held until released, and every one held later, with the named response. |
 | `Then HTTP receiver "<name>" eventually receives at least <n> requests` | Waits up to 60 seconds for the capture count. |
 | `Then HTTP receiver "<name>" request <i> is` | Compares one captured request: request line, the named headers exactly, and the exact body. |
 | `Then HTTP receiver "<name>" captured one request that is` | Finds the one captured request with the docstring's request line, wherever it arrived, and compares it the same way, for requests of independent branches or relays. |
 | `Then HTTP receiver "<name>" request <i> repeats request <j>` | Compares two captures byte for byte: request line, every header field in arrival order, and body. |
+| `Then HTTP receiver "<name>" request <i> arrived at least "<duration>" after request <j>` | Measures the two capture times to prove an attempt timeout, retry backoff, or sequential request wait without a silence window. |
+| `Then HTTP receiver "<name>" request <i> has no header "<header>"` | Checks that the transport did not add an undeclared request header. |
 | `Then HTTP receiver "<name>" request <i> carries header "<header>" and a body containing "<text>"` | Checks a generated header and body that cannot be named in advance. |
 | `Then HTTP receiver "<name>" has captured exactly <n> requests` | Counts the captures when the step runs, after the expected requests arrived and every request that must never be sent would have preceded them. |
 | `Then HTTP receiver "<name>" eventually records a failed TLS handshake` | Waits up to 60 seconds for a client to fail its handshake. |
@@ -117,23 +121,29 @@ Script lines cover every receiver behavior the specification's criteria depend o
 | --- | --- |
 | `respond <status>` | Any three-digit status, complete, with `Content-Length` except where the status carries no content |
 | `; header <name>: <value>` | Response headers such as `Retry-After`, `Location` or `Set-Cookie` |
+| `; retry after date in <duration>` | A `Retry-After` HTTP date that long after the head is written, rounded up to a whole second, so it asks for at least that delay |
 | `; body <text>` | A response body |
 | `; after <duration>` | A delayed response, for timeouts measured against `timeout_ms` |
 | `; interim <status>` | An interim response before the final one |
 | `; stall body` | Complete successful headers, then a body that never finishes |
 | `; extra headers <n>` | More response header fields than any bound, for excessive-header failures |
+| `; header value bytes <n>` | A generated final field value of exactly `n` bytes, for the 64 KiB boundary |
+| `; interim extra headers <n>` | Generated fields in the interim block, independent of the final fields |
+| `; interim header value bytes <n>` | A generated interim field value of exactly `n` bytes |
 | `lose response` | The request is read in full and the connection closes without an answer: an applied request whose response is lost |
 | `hold response` | The request is read in full and never answered: a physical timeout |
+| `hold response until released` | The request is read in full and answered only once the scenario releases it: an attempt that stays unresolved for exactly as long as a scenario observes it |
 | `raw <bytes>` | Arbitrary bytes with `\r`, `\n` and `\\` escapes, for malformed framing and invalid statuses |
 
 Two receivers in one scenario give an `ALTER` a second destination, so a scenario can prove that
 admitted requests never move to the replacement.
 
 The fixture is qualified two ways. `just test-harness-liveness http_receiver` runs focused
-regressions on real loopback sockets: scripted order, lost and held responses, stalled bodies,
-chunked request bodies, interim and raw responses, request bounds recorded as faults, mutual TLS,
-hostname verification, and a stop that ends held connections inside its budget without forcing
-them.
+regressions on real loopback sockets: scripted order, lost and held responses, responses held until
+released, answers by target, `Retry-After` dates measured from when their response is written,
+stalled bodies, chunked request bodies, interim and raw responses, request bounds recorded as
+faults, mutual TLS, hostname verification, and a stop that ends held connections inside its budget
+without forcing them.
 `tests/features/runtime/http_receiver.feature` drives the receiver with the HTTP client Nervix
 already has, the polling ingestor's, over HTTP with a `503` then `200` status sequence, over
 mutual TLS with the receiver's files mounted as a resource, and against a client that does not trust
@@ -166,6 +176,61 @@ excludes an expected-failure tag.
 
 ## Acceptance matrix
 
+### HTTP Emitter 05 transport qualification
+
+`tests/features/runtime/http_emitter_responses.feature` covers terminal and retryable statuses,
+complete `200`, `202`, and `204` headers, stalled bodies, exact and exceeded interim/final field
+counts and value-byte limits, and malformed final framing. Its 58 one- and three-node cases pass.
+`tests/features/runtime/http_emitter_transport.feature` covers mounted mutual TLS, untrusted and
+wrong-host TLS handshakes, physical timeout and lost-response retries, a manually supplied
+`Accept`, startup without a probe, and one awaiting request across two source relays. Its 12
+one- and three-node cases pass. The status-`400` response case was red against the HTTP Emitter 04
+sink because it retried the refusal instead of routing its message error, then green after the
+connector change.
+
+The sink uses a bounded HTTP/1.1 exchange per request. This permits inspecting every interim
+header block before the final one, while the existing HTTP polling source keeps its shared
+reqwest client. The sink uses the shared node DNS resolver and rustls TLS configuration, adds
+`Accept: */*` only when the application has not supplied `Accept`, and sends no default
+`Accept-Encoding` or `Content-Type`. The connector has no separate retry mechanism; the host
+retains the prepared request and owns every resend.
+
+### HTTP Emitter 06 retries, acknowledgements and backpressure
+
+`tests/features/runtime/http_emitter_retries.feature` covers, on one and three nodes:
+
+- a flush whose first request is delivered and whose second answers `503`, where the retry resends
+  only the unresolved requests, byte for byte and with the same generated header, ahead of a record
+  that arrived on another source relay meanwhile;
+- `Retry-After` in whole seconds on `503` and on an authentication failure, and as an HTTP date on
+  `429`, each extending the wait beyond the declared `MAX`, and a past date, fractional seconds,
+  two fields and a value beyond every representable delay, each adding nothing;
+- the declared backoff doubling up to `MAX` across five consecutive failures, without an attempt
+  limit;
+- an `ATTACHED` emitter whose Kafka source keeps its offset uncommitted, past its one-second
+  `ACK TIMEOUT`, while a retried request is held unresolved, and a `DETACHED` emitter whose source
+  commits while the same request is held, both delivering exactly the expected requests afterwards;
+- terminal `404`, `409`, `413` and `308` responses routed with the original input, the captured
+  materialized state and the attempted codec record, followed by the next record, with no request
+  to the `Location` receiver and no wait for the response's `Retry-After`;
+- terminal responses in two interleaved branches, answered by target, whose error records stay in
+  their own branch while the other records are delivered;
+- a paced domain at `TIME RATE 100` whose `FLUSH EACH 300s` and `now()` follow domain time while
+  the retry backoff, a `Retry-After` delay and the request timeout stay physical;
+- an endpoint that applied a request whose response was lost, receiving the identical request
+  again with its stable `Idempotency-Key`.
+
+On 27 September 2026, run with `--retry 0` against the fixture and scenarios alone, 14 of its 40
+cases failed, every one at a measured gap: each retry the server asked to delay arrived 120 to
+150 milliseconds after the response, because the sink did not read `Retry-After`. The other 26
+passed, since the host already retried only unresolved requests, held later work, kept attached
+leases, routed terminal records and kept its waits physical. With the sink reading `Retry-After`,
+all 40 pass, and so do the 102 cases of `http_emitter.feature`, `http_emitter_responses.feature`,
+`http_emitter_transport.feature` and `http_receiver.feature`.
+
+No completion or cancellation ownership changed, so the Shuttle checks of prepared payloads and
+their answers stay as HTTP Emitter 04 and Emitter Batching 06 left them.
+
 Every criterion runs through NSPL against the HTTP receiver on one and three nodes unless its row
 names a topology. The owning task adds the criterion's scenarios red, turns them green, and keeps
 them in the ordinary suite; HTTP Emitter 09 composes the complete matrix and closes it.
@@ -179,10 +244,10 @@ them in the ordinary suite; HTTP Emitter 09 composes the complete matrix and clo
 | 5. Header names compare without case, later writes replace earlier ones, invalid and reserved fields, CR/LF, edge whitespace and every envelope limit reject the record, and empty values and internal spaces stay valid | Records exercising each header rule and the 128-header and 32 KiB bounds | Replaced and empty values in captured requests; message errors with operation `invoke` and the invocation index for each rejection; no request for a rejected record | Capture | 04 |
 | 6. Path normalization keeps encoded separators and query order, rejects the listed targets before sending, and matches the specification's target table | One record per row of the target table, plus fragment, backslash and 8 KiB cases | Exact captured targets for the accepted rows; message errors with operation `publish` and field `path` for the rejected ones, with no request | Capture | 04 |
 | 7. `200`, `202` and `204` complete delivery; a stalled body after successful headers neither delays completion nor causes a duplicate; malformed or excessive final headers fail the attempt even with `200` | One case per success status; a stalled-body case followed by a second record; malformed and excessive header cases | The next record reaches the receiver while the stalled body is open; exactly one capture of the stalled record; a transient failure in `DESCRIBE EMITTER` for the bad framing, then delivery when the receiver recovers | `respond 202`, `respond 204`, `stall body`, `extra headers 129`, `raw` | 05 |
-| 8. A flush of several records delivers the first, receives `503` or `429` for the next, and retries only that request with identical method, target, body and headers, including a generated header value | A three-record flush against `respond 200`, `respond 503`, then `respond 200`, with a header computed from a nondeterministic function | Four captures in total, the retried one byte-identical to its first attempt, the first record captured once | Scripted status sequence | 06 |
-| 9. Timeout, connection loss, authentication failure and each retryable status keep the work and expose a transient failure; `Retry-After` seconds and dates extend the delay, invalid values do not, and domain acceleration does not shorten the waits | One case per retryable class; `Retry-After` in seconds, as a future date, as a past date and malformed; the same on a paced domain | A transient failure in `DESCRIBE EMITTER` while work is pending; the measured gap between two captured attempts at least the required delay, asserted as a delay rather than a silence | `hold response`, `lose response`, `respond 401`, `respond 408`, `respond 429`, `respond 503; header Retry-After: ...` | 05 classifies, 06 retries and paces |
-| 10. Terminal `400`, `404`, `409`, `413` and redirects reach the message-error route with safe diagnostics and the original branch, other records continue, and no request follows `Location` | One case per terminal status and a redirect whose `Location` names a second receiver, on a branched relay | Error records on the route with code `external`, operation `publish` and the numeric status, in the source branch; the next record captured; the second receiver captures nothing | `respond 404`, `respond 301; header Location: ...`, a second receiver | 05 classifies, 06 routes |
+| 8. A flush of several records delivers the first, receives `503` or `429` for the next, and retries only that request with identical method, target, body and headers, including a generated header value | `http_emitter_retries.feature`: a three-record flush against `respond 200`, then `respond 503; header Retry-After: 3`, with a `uuid_v4()` header, and a record from a second source relay arriving during the wait | Five captures: the retried request byte-identical to its first attempt and at least three seconds after it, the first record captured once, and the later relay's record after the retried flush | Scripted status sequence | 06 |
+| 9. Timeout, connection loss, authentication failure and each retryable status keep the work and expose a transient failure; `Retry-After` seconds and dates extend the delay, invalid values do not, and domain acceleration does not shorten the waits | `http_emitter_retries.feature`: `Retry-After` in seconds on `503` and `401`, as a future date on `429`, as a past date, fractional, repeated and unrepresentable; the backoff doubling across five failures; the backoff, a `Retry-After` delay and a timeout on a paced domain. The retryable classes and transport failures are `http_emitter_responses.feature` and `http_emitter_transport.feature` | The measured gap between two captured attempts at least the required delay, asserted as a delay rather than a silence; a prompt retry for every ignored value. `DESCRIBE EMITTER`'s transient status while work is pending belongs to 08 | `hold response`, `lose response`, `respond 401`, `respond 429`, `respond 503; header Retry-After: ...`, `retry after date in ...` | 05 classifies, 06 retries and paces, 08 reports the status |
+| 10. Terminal `400`, `404`, `409`, `413` and redirects reach the message-error route with safe diagnostics and the original branch, other records continue, and no request follows `Location` | `http_emitter_retries.feature`: `404`, `409`, `413` and `308` whose `Location` names a second receiver, with the original input, captured state and attempted body; `404` and `409` in two interleaved branches, answered by target. `http_emitter_responses.feature` covers `101`, `301`, `304` and `400` | Error records with code `external`, operation `publish`, the numeric status, the input-only tenant, the captured state and the attempted body, in the source branch; the next record captured; the second receiver captures nothing | `respond 404`, `respond 308; header Location: ...`, answers by target, a second receiver | 05 classifies, 06 routes |
 | 11. HTTPS trust, hostname verification and mounted client certificates follow the configuration, and an invalid certificate never produces an acknowledged request | Mutual TLS with mounted receiver files; an untrusted receiver; a certificate for `localhost` dialed as `127.0.0.1` | Captures over mutual TLS; a failed handshake and a transient failure, with no capture and no acknowledgement, for the untrusted and mismatched cases | HTTPS receivers, client certificate required, `{{http_receiver_port.<name>}}` | 03 validates, 05 connects |
-| 12. Interleaved branches and several eligible source relays keep independent collection and request values, and error routes keep the exact branch | Two concrete branches and two source relays interleaved, with one rejected record per branch | Per-branch captured values, and error records only in their own branch | Capture, `respond 404` | 04 prepares, 06 routes, 09 composes |
+| 12. Interleaved branches and several eligible source relays keep independent collection and request values, and error routes keep the exact branch | `http_emitter.feature`: two concrete branches with one rejected request field per branch; `http_emitter_retries.feature`: terminal responses in two interleaved branches, and two source relays sharing one retried emitter | Per-branch captured values, and error records only in their own branch | Capture, `respond 404`, answers by target | 04 prepares, 06 routes, 09 composes |
 | 13. Create, inspect, formatting and `ALTER` keep expressions and body mode; invalid body-mode replacements leave the emitter unchanged; a replacement drains under the admitted configuration; a transactional replacement validates everything first | `SHOW CREATE`, `DESCRIBE` and formatting round trips for both body modes; invalid `SET TO`; `SET TO` with a held request to a second receiver; `DROP` and `CREATE` in one transaction | Round-tripped text; the unchanged emitter still delivering; the held request completing at the first receiver, not the second; transaction inspection | Two receivers, `hold response` | 02 grammar, 07 lifecycle, 08 inspection |
-| 14. A graceful drain completes eligible requests; a forced ending leaves unresolved attached work to source recovery; a lost successful response causes the permitted duplicate | Graceful shutdown with requests pending; forced ending with a held request and an acknowledged source; `lose response` then `respond 200` | Captured requests before shutdown completes; the source redelivers after restart; the applied record captured twice | `lose response`, `hold response` | 06 duplicate, 07 drain and recovery |
+| 14. A graceful drain completes eligible requests; a forced ending leaves unresolved attached work to source recovery; a lost successful response causes the permitted duplicate | Graceful shutdown with requests pending; forced ending with a held request and an acknowledged source; `http_emitter_retries.feature`: `lose response` then `respond 204` with a stable `Idempotency-Key` | Captured requests before shutdown completes; the source redelivers after restart; the applied record captured twice, identically | `lose response`, `hold response` | 06 duplicate, 07 drain and recovery |

@@ -29,8 +29,10 @@ at or before the fence, and one created too far ahead are refused before any eff
 An applying execution never expires. A terminal result is retained for the retry validity after the
 command finishes. The record then shrinks to a tombstone holding only the reference, and the
 tombstone is removed once the fence passes the reference's creation time. From then on the fence
-refuses the reference by itself, so a reclaimed reference reports that it has expired and never
-starts its effect again. Report retention is a separate contract: a transaction's report follows
+refuses the reference by itself, so a reclaimed reference returns the typed
+`ExecutionReferenceExpired` disposition and never starts its effect again. A conflicting reference
+found during replicated admission returns `ExecutionReferenceConflict` with the kind that differed.
+Report retention is a separate contract: a transaction's report follows
 the transaction tombstone retention, so inspection can still read it after its command reference
 has expired, and a report that inspection no longer knows does not make its reference executable.
 
@@ -92,8 +94,11 @@ flowchart LR
 ```
 
 Commands in different domains and independent resource uploads have separate execution ownership.
-Conflicting work in one domain uses that domain's alteration or handoff ownership. Reads, health,
-subscription delivery, and transport control frames continue while a command waits.
+Conflicting work in one domain uses that domain's alteration or handoff ownership. Other sessions,
+health, subscription delivery, and transport control frames continue while a command waits, and so
+do the waiting session's completion, choice, domain, and inspection requests. That session's later
+commands wait for it, because a session runs its commands in order; see [Requests, Lanes, And
+Cancellation](./client-session-protocol.md#requests-lanes-and-cancellation).
 
 `REBIND RESOURCE` completes only after its entire selected model set has been validated, committed,
 and activated under this same barrier. The successful response is therefore the boundary at which
@@ -271,8 +276,10 @@ waits for membership and all resulting schedules to become authoritative and usa
 
 The gRPC and WebSocket transport loops keep control frames, server events, subscription delivery,
 and close detection moving while an ordered command worker waits. Disconnecting either transport
-drops its binding and waiter. Service-owned command, commit, and fully admitted upload tasks keep
-running.
+ends the session's waiters. An unclean end releases the session's transaction binding, and a clean
+close with no request in flight reverts the open transaction bound to it. Service-owned command,
+commit, and fully admitted upload tasks keep running. [Client Session
+Protocol](./client-session-protocol.md) defines how a client recovers each of them by its identity.
 
 ```mermaid
 sequenceDiagram

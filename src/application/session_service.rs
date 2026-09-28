@@ -790,6 +790,13 @@ impl ChoicePageBasis {
             ChoiceTarget::Branch => 3,
             ChoiceTarget::Relay => 4,
             ChoiceTarget::RelayField => 5,
+            ChoiceTarget::WireJsonSchema => 6,
+            ChoiceTarget::WireCborSchema => 7,
+            ChoiceTarget::WireAvroSchema => 8,
+            ChoiceTarget::Resource => 9,
+            ChoiceTarget::CompletedResourceVersion => 10,
+            ChoiceTarget::Vhost => 11,
+            ChoiceTarget::SignalingProtocol => 12,
         }]);
         hash_choice_text(&mut hasher, request.search());
         for dependency in request.dependencies() {
@@ -917,6 +924,10 @@ fn hash_choice_value(hasher: &mut blake3::Hasher, value: &ChoiceValue) {
             hasher.update(&[3]);
             hash_choice_text(hasher, resource.as_str());
         }
+        ChoiceValue::ResourceVersion(version) => {
+            hasher.update(&[6]);
+            hash_choice_text(hasher, &version.to_string());
+        }
         ChoiceValue::Model(node) => {
             hasher.update(&[4]);
             hash_choice_text(hasher, node.kind.as_str());
@@ -1004,6 +1015,16 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         | ChoiceTarget::Branch
         | ChoiceTarget::Relay
         | ChoiceTarget::RelayField => {
+            return Err(ChoiceStatus::MissingContext);
+        }
+        ChoiceTarget::WireJsonSchema
+        | ChoiceTarget::WireCborSchema
+        | ChoiceTarget::WireAvroSchema
+        | ChoiceTarget::Resource
+        | ChoiceTarget::CompletedResourceVersion => {
+            return Err(ChoiceStatus::MissingContext);
+        }
+        ChoiceTarget::Vhost | ChoiceTarget::SignalingProtocol => {
             return Err(ChoiceStatus::MissingContext);
         }
     };
@@ -1217,7 +1238,17 @@ impl SessionServiceImpl {
             ChoiceTarget::Schema
             | ChoiceTarget::Branch
             | ChoiceTarget::Relay
-            | ChoiceTarget::RelayField => self.configured_choices_for(&request, session).await,
+            | ChoiceTarget::RelayField
+            | ChoiceTarget::WireJsonSchema
+            | ChoiceTarget::WireCborSchema
+            | ChoiceTarget::WireAvroSchema
+            | ChoiceTarget::Resource
+            | ChoiceTarget::CompletedResourceVersion => {
+                self.configured_choices_for(&request, session).await
+            }
+            ChoiceTarget::Vhost | ChoiceTarget::SignalingProtocol => {
+                self.configured_choices_for(&request, session).await
+            }
         };
         let (choices, content_digest) = match resolved {
             Ok(resolved) => resolved,
@@ -1263,7 +1294,10 @@ impl SessionServiceImpl {
             .registry
             .resulting_models(domain, &queued.models)
             .map_err(|_| ChoiceStatus::LookupFailed)?;
-        let resolved = ConfiguredChoices::new(models).resolve(&question, request.search())?;
+        let resources = self.inner.consensus.current_resources().await;
+        let staged_resources = queued.resource_suggestions("");
+        let resolved = ConfiguredChoices::new(domain.clone(), models, resources, staged_resources)
+            .resolve(&question, request.search())?;
         Ok((resolved.choices, Some(resolved.content_digest)))
     }
 
@@ -1725,7 +1759,9 @@ impl SessionServiceImpl {
 }
 
 /// The answer to a request whose execution reference aged out of execution history.
-fn expired_reference(reference: &CommandExecutionReference) -> CommandResult {
+pub(in crate::application) fn expired_reference(
+    reference: &CommandExecutionReference,
+) -> CommandResult {
     let message = format!("command execution reference '{reference}' has expired");
     CommandResult {
         diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],

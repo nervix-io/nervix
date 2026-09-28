@@ -1,3 +1,5 @@
+use error_stack::ResultExt as _;
+
 use super::*;
 
 pub(super) struct VmInputProjectionSources<'a> {
@@ -153,11 +155,8 @@ pub(super) fn project_vm_input_batch(
             shared.as_deref_mut(),
         )?);
     }
-    VmTypedBatch::try_new(schema.clone(), columns).map_err(|source| {
-        Report::new(RuntimeSchemaError::VmOperation {
-            operation: RuntimeVmOperation::BuildInputBatch,
-            source,
-        })
+    VmTypedBatch::try_new(schema.clone(), columns).change_context(RuntimeSchemaError::VmOperation {
+        operation: RuntimeVmOperation::BuildInputBatch,
     })
 }
 
@@ -453,11 +452,8 @@ pub(super) async fn compute_lookup_hash_map_columns(
             },
         )
         .await
-        .map_err(|source| {
-            Report::new(RuntimeSchemaError::VmOperation {
-                operation: RuntimeVmOperation::ExecuteKeyProjection,
-                source,
-            })
+        .change_context(RuntimeSchemaError::VmOperation {
+            operation: RuntimeVmOperation::ExecuteKeyProjection,
         })?;
         let key_column = result
             .batch
@@ -538,12 +534,11 @@ pub(super) fn vm_output_value(
 pub(super) fn vm_typed_batch_to_runtime_batch(
     batch: &VmTypedBatch,
 ) -> error_stack::Result<RuntimeRecordBatch, RuntimeSchemaError> {
-    let record_batch = batch.to_record_batch().map_err(|source| {
-        Report::new(RuntimeSchemaError::VmOperation {
+    let record_batch = batch
+        .to_record_batch()
+        .change_context(RuntimeSchemaError::VmOperation {
             operation: RuntimeVmOperation::BuildInputBatch,
-            source,
-        })
-    })?;
+        })?;
     RuntimeRecordBatch::from_record_batch(batch.schema().clone(), record_batch)
 }
 

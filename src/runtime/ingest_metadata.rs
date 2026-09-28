@@ -471,21 +471,21 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
         _span: nervix_vm::program::Span,
         _now: Timestamp,
         _prior_error_rows: nervix_vm::RowErrorMask<'_>,
-    ) -> Result<nervix_vm::InjectedResult, nervix_vm::RuntimeError> {
+    ) -> error_stack::Result<nervix_vm::InjectedResult, nervix_vm::RuntimeError> {
         let [VmTypedArray::Utf8(names)] = arguments else {
-            return Err(nervix_vm::RuntimeError::InvalidBatch {
+            return Err(Report::new(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
                     "function '{}' requires one STRING argument",
                     function.as_str()
                 ),
-            });
+            }));
         };
         let metadata_row_count = match self.metadata.as_ref() {
             Some(metadata) => metadata.len(),
             None => self.row_count,
         };
         if !rows.fits(metadata_row_count) || names.len() != rows.len() {
-            return Err(nervix_vm::RuntimeError::InvalidBatch {
+            return Err(Report::new(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
                     "function '{}' header context has {} rows for a call over {} rows of a batch \
                      selected as {rows:?}",
@@ -493,7 +493,7 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
                     metadata_row_count,
                     names.len()
                 ),
-            });
+            }));
         }
         if let FunctionName::ReadHeader = function {
             let mut values = Vec::with_capacity(names.len());
@@ -528,14 +528,10 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
                 StdArc::new(builder.finish()),
             )));
         }
-        Err(nervix_vm::RuntimeError::InvalidBatch {
+        Err(Report::new(nervix_vm::RuntimeError::InvalidBatch {
             message: format!("function '{}' is not injectable", function.as_str()),
-        })
+        }))
     }
-}
-
-pub(super) fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
-    sink.capabilities().writes_headers()
 }
 
 #[cfg(test)]
@@ -951,7 +947,7 @@ mod tests {
             nervix_vm::RowErrorMask::none(1),
         );
         assert!(
-            matches!(beyond, Err(nervix_vm::RuntimeError::InvalidBatch { .. })),
+            matches!(beyond, Err(error) if matches!(error.current_context(), nervix_vm::RuntimeError::InvalidBatch { .. })),
             "a row past the header context is refused"
         );
         let short = injector.inject_with_context(
@@ -963,7 +959,7 @@ mod tests {
             nervix_vm::RowErrorMask::none(1),
         );
         assert!(
-            matches!(short, Err(nervix_vm::RuntimeError::InvalidBatch { .. })),
+            matches!(short, Err(error) if matches!(error.current_context(), nervix_vm::RuntimeError::InvalidBatch { .. })),
             "a batch of another size than the header context is refused"
         );
     }

@@ -29,7 +29,7 @@ Nodes](./processors.md#wasm-processor) owns the NSPL statements.
 | Engines and infrastructure | The guest SDK | The guest side of the ABI: the snapshot envelope, strict restore verdicts, and keeping its own execution state out of every save. |
 | Engines and infrastructure | The runtime state store | Writing a checkpoint under its placement, and the durability barrier that synchronizes the node's storage for every writer waiting on it. |
 | Engines and infrastructure | The interconnect | Replica synchronization and acknowledgements, and the coordination requests a reset and a recovery send. |
-| Decisions | Registry and scheduling | Planning a reset as a transaction step, and deciding which schedule publication starts a new generation. |
+| Decisions | Registry and scheduling | Planning a reset as a transaction step, deciding which schedule publication starts a new generation, and binding the pinned module and generation identity to that scheduled processor revision. |
 | Data plane | The branch task | Running guest callbacks one at a time, holding back the acknowledgements each callback decides, and checkpointing the instance the callback leaves behind. |
 | Data plane | The processor supervisor | Fencing the scope of an unfinished reset, and preparing, aborting, and committing a reset on the owner. |
 | Control plane | The reset coordinator on the leader | Validating a reset, gating its scope, preparing it, and publishing it through its `Publishing` and `Ready` phases. |
@@ -118,6 +118,14 @@ Instantiation, initialization, restore, each callback, and each save are separat
 emit reads after a callback share that callback's budget. See [Execution
 Limits](./wasm-processor-guests.md#execution-limits) and [Execution-Time
 Snapshots](./domain-clock.md#execution-time-snapshots).
+
+The FlatBuffers protocol decoder, Rust guest SDK callbacks, and Wasmtime host return typed
+`error-stack` reports within their Rust layers. The guest SDK preserves protocol and application
+causes through snapshot decoding and restore, then renders a reason at the ABI boundary. The host
+keeps the typed call cause beneath the failed guest operation, including its export and execution
+limit classification. Rendering does not change the ABI return codes, the global-error latch, or
+the rejection verdicts; the same restore reason reaches the host, and a failed callback still
+reaches the checkpoint and ACK decisions described below.
 
 A zero-length save means the guest has no state: the next instance is initialized without a
 `nervix_load_state` call. The Rust SDK wraps every save in a `GuestSnapshot` envelope that also
@@ -535,8 +543,12 @@ and the replacement instances initialize from the new module without guest state
 migrated between module versions. A change of the execution limits, the global error policy, or the
 rejected-state policy, and a rebinding that leaves the version unchanged, keep every generation.
 
-The leader compiles the candidate module before the change commits, and activation installs that
-same compiled module. A module that does not compile rejects the whole statement before any effect,
+The leader compiles the candidate module before the change commits, and activation prepares the
+same pinned module from the committed schedule's typed resource plan. Running builds and entity
+swaps prepare it before replacing execution; a retained compiled module is reused. The prepared
+processor revision also includes the schedule's guest-state generations, so a reset or rebinding
+cannot reuse a plan from the previous lifetime. A module that does not compile rejects the whole
+statement before any effect,
 while the previous binding and its checkpoints are still current. A rebinding is `ENTITY_PAUSE` for
 a running domain: the processor and its downstream pause and each branch is flushed. A rebinding in
 a stopped domain publishes the new generations as well, so the processor starts without guest state.
