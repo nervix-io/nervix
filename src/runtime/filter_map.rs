@@ -2290,10 +2290,16 @@ mod tests {
             ),
             materialized_state: Vec::new(),
         };
+        let route = EmitterExecutionPlan::route(
+            &emitter,
+            input_schema.arrow_schema().as_ref(),
+            output_schema.arrow_schema().as_ref(),
+        )
+        .expect("emitter route must lower");
         let program = compile_emitter_filter_map_program(
             &domain("default"),
-            &emitter,
-            EmitterRoute::Declared,
+            &emitter.name,
+            route.as_ref(),
             RuntimeVmSchemaPair {
                 input: input_schema.arrow_schema(),
                 input_sensitivity: VmSchemaSensitivity::default(),
@@ -2313,25 +2319,13 @@ mod tests {
         *unsupported_emitter.sink = EmitSink::ZeroMq {
             client: named("zeromq_main"),
         };
-        let error = compile_emitter_filter_map_program(
-            &domain("default"),
+        let error = EmitterExecutionPlan::route(
             &unsupported_emitter,
-            EmitterRoute::Declared,
-            RuntimeVmSchemaPair {
-                input: input_schema.arrow_schema(),
-                input_sensitivity: VmSchemaSensitivity::default(),
-                output: output_schema.arrow_schema(),
-                output_sensitivity: VmSchemaSensitivity::default(),
-            },
-            RuntimeVmCompileContext {
-                available_materialized_streams: &HashMap::default(),
-                available_lookups: &HashMap::default(),
-                current_branching: &ResolvedBranching::unbranched(),
-                udfs: None,
-            },
+            input_schema.arrow_schema().as_ref(),
+            output_schema.arrow_schema().as_ref(),
         )
         .expect_err("ZeroMQ emitters must reject write_header");
-        assert!(error.to_string().contains("ZEROMQ emitters do not support"));
+        assert!(error.to_string().contains("ZEROMQ emitter"));
         let messages = [true, false]
             .into_iter()
             .map(|active| {

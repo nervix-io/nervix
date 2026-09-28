@@ -65,32 +65,28 @@ use nervix_interconnect::{
     Transport, WasmStateResetTarget,
 };
 use nervix_models::{
-    AckMode, Assignment, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClickHouseValueMapping,
-    ClientConfigEntry, ClientName, ClientPoolBounds, ClientResourceMount, ClusterNodeIncarnation,
-    ClusterNodeName, ClusterSchedule, CodecName, CommandExecutionReference, CoordinationIdentity,
-    CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateEmitter, CreateRelay,
-    DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef, DomainSchedule, DomainState,
-    EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName, EndpointType,
+    AckMode, Assignment, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClientConfigEntry,
+    ClientName, ClientResourceMount, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
+    CodecName, CommandExecutionReference, CoordinationIdentity, CorrelationTimeoutAction,
+    CorrelatorMatchPolicy, CreateRelay, DomainClockAuthority, DomainConfig, DomainName,
+    DomainNodeRef, DomainSchedule, DomainState, EmitterName, EndpointName, EndpointType,
     ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName,
-    IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
-    InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestTimestampSource,
-    IngestorName, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
-    MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
-    ModelIndex, ModelKind, ModelName, MongoDbValueMapping, MySqlValueMapping, NodeRef,
-    OtelValueMapping, OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
-    OwnershipStateResetCause, ParseAsType, PostgresValueMapping, ProcessorOutput, RelayName,
-    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
-    ResolvedBranching, ResourceId, ResourceName, RetryPolicy, RouteConstruction, ScheduledModel,
-    ScheduledNode, ScheduledNodes, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
-    StructuredMessageError, SubscriptionName, Timestamp, WasmCheckpointInspection,
-    WasmRejectedStatePolicy, WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
+    InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestTimestampSource, IngestorName, KafkaPartitionSchedule, Literal as ModelLiteral,
+    LookupName, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation,
+    MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName, NodeRef, OwnershipStateComponent,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
+    ProcessorOutput, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
+    RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName, RetryPolicy,
+    RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes, SchemaFingerprint,
+    SignalingProtocolName, SignalingWireFormat, StructuredMessageError, SubscriptionName,
+    Timestamp, WasmCheckpointInspection, WasmRejectedStatePolicy, WasmSavedStateRejection,
+    WasmStateGeneration, WasmStateResetScope,
 };
 #[cfg(test)]
 use nervix_models::{
-    CreateClientAzureBlob, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
-    CreateClientKafka, CreateClientMqtt, CreateClientNats, CreateClientOtel,
-    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog, CreateClientZeroMq,
+    CreateClientHttp, CreateClientPrometheus, CreateClientRabbitMq, CreateEmitter,
+    EmitterPublishingMode,
 };
 #[cfg(test)]
 use nervix_models::{CreateIngestor, CreateReingestor, IngestSource, OutputBranch};
@@ -148,6 +144,10 @@ use upon::Engine as TemplateEngine;
 use crate::runtime_schema::test_runtime_row;
 use crate::{
     ConfiguredFaultInjection, cluster,
+    emitter_execution_plan::{
+        EmitterExecutionPlan, EmitterExecutionPlans, EmitterOrderingGroupPlan, EmitterRoutePlan,
+    },
+    emitter_start_plan::*,
     metrics::{
         BatchMetricsHandle, BranchEvictionReason, IngestorQuiesceMetricLabels,
         MessageMetricsHandle, NodeBatchMetricsSpec, NodeInputMetricsHandle, RelayMetricRecorders,
@@ -203,7 +203,6 @@ mod emitter_publishing;
 mod emitter_record_writes;
 mod emitter_retry;
 mod emitter_sinks;
-mod emitter_start_plan;
 mod emitter_supervision;
 mod emitter_task;
 mod emitter_values;
@@ -343,7 +342,6 @@ use emitter_retry::{
     emitter_retry_delay,
 };
 use emitter_sinks::EmitterSinkStarter;
-use emitter_start_plan::*;
 use emitter_supervision::{
     EmitterRetryKind, EmitterRetryStatus, EmitterTaskCommand, ScheduledEmitterTask,
     clear_emitter_stop_signal,
@@ -394,7 +392,7 @@ use ingest_group::{
 pub(in crate::runtime) use ingest_metadata::IngestMetadataKind;
 use ingest_metadata::{
     BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, IngestHeaderFunctionInjector,
-    IngestMetadataBuilders, emit_sink_supports_headers,
+    IngestMetadataBuilders,
 };
 pub(in crate::runtime) use ingestor_quiesce::{
     BufferedIngestMetadata, BufferedIngestPayload, IngestorQuiesceCause, IngestorQuiesceControl,
@@ -532,9 +530,9 @@ use test_fixtures::{
     with_inherit_all,
 };
 pub(in crate::runtime) use vm_compile::{
-    CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, EmitterRoute,
-    KeyProjectionKind, MaterializedFieldInterest, MaterializedLookupKeyMode,
-    compile_emitter_filter_map_program, compile_key_projection_program,
+    CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, KeyProjectionKind,
+    MaterializedFieldInterest, MaterializedLookupKeyMode, compile_emitter_filter_map_program,
+    compile_key_projection_program,
 };
 use vm_compile::{
     CompiledMessageErrorSite, CompiledMessageErrorSites, GeneratorSetProgramSchemas,

@@ -133,11 +133,13 @@ impl ElapsedLayout {
         });
         // The lanes divide `2 × elapsed + unit` by `2 × unit` in `f64`. With the elapsed time
         // clamped to the highest unit, that numerator is at most `(2 × highest + 1) × unit`.
-        let Some(largest_numerator) = highest_units
-            .checked_mul(2)
-            .and_then(|doubled| doubled.checked_add(1))
-            .and_then(|numerator_units| numerator_units.checked_mul(unit_nanos))
-        else {
+        let Some(doubled_highest) = highest_units.checked_mul(2) else {
+            return Err(inexact);
+        };
+        let Some(numerator_units) = doubled_highest.checked_add(1) else {
+            return Err(inexact);
+        };
+        let Some(largest_numerator) = numerator_units.checked_mul(unit_nanos) else {
             return Err(inexact);
         };
         if largest_numerator >= EXACT_F64_INTEGERS {

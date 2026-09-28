@@ -53,6 +53,11 @@ The HTTPS listener runs on every live node, independent of Raft leadership and g
 like every other entity that binds a configured listening port. It presents the TLS VHOSTs of the
 runtime revision its node applied.
 
+Visual client-mount and VHOST-TLS forms select a resource and one of its completed versions through
+typed session choices. Their drafts may submit `LATEST`; neither form resolves it locally or
+creates resource content. The server applies the same version validation and pinning as the NSPL
+command path, so the rendered stored Model and every listener use a concrete version.
+
 ## Version Lifecycle
 
 ### Assignment
@@ -77,7 +82,9 @@ recorded under that identity, with the number already assigned; the same identit
 digest is rejected as a digest conflict. An upload admitted through the client protocol keeps
 installing when the uploading connection closes. The identity rules and client retries are covered
 in [Resources](./resources.md#lifecycle) and
-[Command Completion](./command-completion.md#lifecycle-and-ownership).
+[Command Completion](./command-completion.md#lifecycle-and-ownership), and the upload stream, its
+typed failures, and its recovery in
+[Resource Uploads](./client-session-protocol.md#resource-uploads).
 
 ### Installing One Copy
 
@@ -155,7 +162,9 @@ If an applying upload loses the task that was installing it, because leadership 
 upload's connection was aborted, the leader resumes it at its next reconciliation. An upload whose
 version was never published fails with
 `the admitted archive is unavailable before durable version installation`, because only the node
-that admitted it held the archive. A published version keeps waiting for the live set as above.
+that admitted it held the archive. A retry of the same upload identity that reaches the leader
+before that reconciliation carries the archive again, so it installs the version and completes the
+upload instead. A published version keeps waiting for the live set as above.
 
 A node that joins after completion does not change the outcome. Its reconciliation installs every
 published version it does not hold from a live node that holds it, and

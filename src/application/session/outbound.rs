@@ -15,6 +15,8 @@
 //! behind rows the client has not read, and a blocking subscription whose client reads slowly
 //! holds only its own relay. The lanes cannot reorder what the transport already took: a frame
 //! handed to the transport stays ahead of every frame queued after it.
+//! An attached clock's tick occupies one replaceable control slot. Its producer can overwrite
+//! that slot until transport takes it, or withdraw it when the clock state changes.
 //!
 //! Rows follow their subscription's opening reply, because a subscription queues rows only after
 //! that reply is queued and the transport takes the reply first. A subscription's notices share
@@ -71,7 +73,7 @@ struct SessionEnding {
 }
 
 struct OutboundInner {
-    control: mpsc::Sender<EncodedFrame<ServerFrame>>,
+    control: mpsc::Sender<ControlFrame>,
     subscriptions: mpsc::Sender<LaneFrame>,
     /// Also held by the transport's [`SessionFrames`], which writes the ending last.
     ending: Arc<SessionEnding>,
@@ -81,6 +83,57 @@ struct OutboundInner {
 #[derive(Clone)]
 pub(in crate::application) struct SessionOutbound {
     inner: Arc<OutboundInner>,
+}
+
+/// A control frame whose producer may replace its contents until the transport takes it. One
+/// queued slot therefore holds only the newest tick of an attached domain.
+#[derive(Clone)]
+pub(in crate::application) struct ReplaceableControlFrame {
+    frame: Arc<Mutex<Option<EncodedFrame<ServerFrame>>>>,
+}
+
+impl ReplaceableControlFrame {
+    pub(in crate::application) fn new(frame: EncodedFrame<ServerFrame>) -> Self {
+        Self {
+            frame: Arc::new(Mutex::new(Some(frame))),
+        }
+    }
+
+    /// Replaces a queued frame. Returns the supplied frame once the transport has taken the slot.
+    pub(in crate::application) fn replace(
+        &self,
+        frame: EncodedFrame<ServerFrame>,
+    ) -> Result<(), EncodedFrame<ServerFrame>> {
+        let mut pending = self.frame.lock();
+        if pending.is_none() {
+            return Err(frame);
+        }
+        *pending = Some(frame);
+        Ok(())
+    }
+
+    fn take(&self) -> Option<EncodedFrame<ServerFrame>> {
+        self.frame.lock().take()
+    }
+
+    /// Removes a superseded frame still waiting on the control lane.
+    pub(in crate::application) fn withdraw(&self) {
+        drop(self.frame.lock().take());
+    }
+}
+
+enum ControlFrame {
+    Direct(EncodedFrame<ServerFrame>),
+    Replaceable(ReplaceableControlFrame),
+}
+
+impl ControlFrame {
+    fn take(self) -> Option<EncodedFrame<ServerFrame>> {
+        match self {
+            Self::Direct(frame) => Some(frame),
+            Self::Replaceable(slot) => slot.take(),
+        }
+    }
 }
 
 /// One frame on the subscription lane, with the generation that queued it.
@@ -113,7 +166,7 @@ pub(in crate::application) struct SubscriptionWithdrawal {
 
 /// The frames a session's transport writes, in the order it writes them.
 pub(in crate::application) struct SessionFrames {
-    control: mpsc::Receiver<EncodedFrame<ServerFrame>>,
+    control: mpsc::Receiver<ControlFrame>,
     subscriptions: mpsc::Receiver<LaneFrame>,
     ending: Arc<SessionEnding>,
     control_open: bool,
@@ -159,7 +212,20 @@ impl SessionOutbound {
         tokio::select! {
             biased;
             _ = self.inner.ending.ended.cancelled() => Err(LaneClosed),
-            sent = self.inner.control.send(frame) => sent.map_err(|_| LaneClosed),
+            sent = self.inner.control.send(ControlFrame::Direct(frame)) => sent.map_err(|_| LaneClosed),
+        }
+    }
+
+    /// Queues a replaceable slot on the control lane. The producer retains its handle and may
+    /// update the slot while this send waits for room or until the transport takes it.
+    pub(in crate::application) async fn send_replaceable(
+        &self,
+        slot: ReplaceableControlFrame,
+    ) -> Result<(), LaneClosed> {
+        tokio::select! {
+            biased;
+            _ = self.inner.ending.ended.cancelled() => Err(LaneClosed),
+            sent = self.inner.control.send(ControlFrame::Replaceable(slot)) => sent.map_err(|_| LaneClosed),
         }
     }
 
@@ -282,7 +348,12 @@ impl SessionFrames {
             }
             if self.control_open {
                 match self.control.try_recv() {
-                    Ok(frame) => return Some(frame),
+                    Ok(frame) => {
+                        if let Some(frame) = frame.take() {
+                            return Some(frame);
+                        }
+                        continue;
+                    }
                     Err(TryRecvError::Empty) => {}
                     Err(TryRecvError::Disconnected) => self.control_open = false,
                 }
@@ -312,7 +383,11 @@ impl SessionFrames {
             tokio::select! {
                 biased;
                 frame = self.control.recv(), if self.control_open => match frame {
-                    Some(frame) => return Some(frame),
+                    Some(frame) => {
+                        if let Some(frame) = frame.take() {
+                            return Some(frame);
+                        }
+                    }
                     None => self.control_open = false,
                 },
                 _ = ended.cancelled() => {}
@@ -393,6 +468,58 @@ mod tests {
             None,
             "the frames end once every producer is gone and nothing is left"
         );
+    }
+
+    #[tokio::test]
+    async fn replaceable_control_slot_keeps_the_newest_frame_while_the_lane_is_full() {
+        let (outbound, mut frames) = channel(CancellationToken::new());
+        for _ in 0..SESSION_CONTROL_CAPACITY {
+            outbound
+                .send(frame("filler"))
+                .await
+                .assured("the control lane has exactly this many places");
+        }
+        let slot = ReplaceableControlFrame::new(frame("tick 1"));
+        let sending = {
+            let outbound = outbound.clone();
+            let slot = slot.clone();
+            tokio::spawn(async move { outbound.send_replaceable(slot).await })
+        };
+        tokio::task::yield_now().await;
+        slot.replace(frame("tick 2"))
+            .assured("the transport has not taken the slot");
+        assert_eq!(next_text(&mut frames).await.as_deref(), Some("filler"));
+        sending
+            .await
+            .assured("the send task completes")
+            .assured("the lane remains open");
+        slot.replace(frame("tick 3"))
+            .assured("the queued slot is still replaceable");
+        for _ in 1..SESSION_CONTROL_CAPACITY {
+            assert_eq!(next_text(&mut frames).await.as_deref(), Some("filler"));
+        }
+        assert_eq!(next_text(&mut frames).await.as_deref(), Some("tick 3"));
+        assert!(slot.replace(frame("tick 4")).is_err());
+    }
+
+    #[tokio::test]
+    async fn withdrawn_tick_slot_does_not_precede_the_new_state() {
+        let (outbound, mut frames) = channel(CancellationToken::new());
+        let lane = outbound.subscription_lane();
+        let slot = ReplaceableControlFrame::new(frame("superseded tick"));
+        outbound
+            .send_replaceable(slot.clone())
+            .await
+            .assured("the control lane has room");
+        outbound
+            .send(frame("new state"))
+            .await
+            .assured("the control lane has room");
+        lane.send(frame("row")).await.assured("the lane has room");
+        slot.withdraw();
+        assert_eq!(next_text(&mut frames).await.as_deref(), Some("new state"));
+        assert_eq!(next_text(&mut frames).await.as_deref(), Some("row"));
+        assert!(slot.replace(frame("later tick")).is_err());
     }
 
     #[tokio::test]

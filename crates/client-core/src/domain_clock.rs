@@ -1,7 +1,7 @@
-//! The domain clocks a client follows across exchange replacements, the events a caller reads about
-//! them, and the arithmetic a participant in a domain's time runs against the latest clock.
+//! The domain clocks a client follows across exchange replacements, their observed states and
+//! ticks, and the arithmetic a participant in a domain's time runs against the latest clock.
 //!
-//! - **Owns.** The domains the client asked to follow, the latest clock each attachment reported,
+//! - **Owns.** The domains the client asked to follow, their latest clock and accepted tick,
 //!   which attachments wait to be restored on a new exchange, the pending clock events coalesced
 //!   per domain, and the helper that projects an attached clock.
 //! - **Depends on.** The vocabulary's clock models and arithmetic, and the wire contract's clock
@@ -12,8 +12,8 @@
 //! The exchange reader applies every clock reply and frame here before it routes a later frame, so
 //! the frames of an attachment always find it. A caller that reads no events never holds the
 //! reader up: pending events are coalesced per domain, so they are bounded by the domains the
-//! client follows. The newest observation of a domain replaces an older one the caller has not
-//! read, and an interruption or an end replaces the observations before it.
+//! client follows. The newest state and tick of a domain replace older unread ones, and an
+//! interruption or an end replaces the observations before it.
 
 use std::time::Duration;
 
@@ -23,11 +23,11 @@ use meticulous::OptionExt as _;
 use nervix_client_wire::{
     DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachmentEndReason,
     DomainClockAttachmentEnded, DomainClockDetachDisposition, DomainClockDetachOutcome,
-    DomainClockObserved,
+    DomainClockObserved, DomainClockTicked,
 };
 use nervix_models::{
-    DomainAdmissionWindow, DomainClockObservation, DomainClockObservedState, DomainName,
-    PacedDomainClock, Timestamp,
+    DomainAdmissionWindow, DomainClockObservation, DomainClockObservedState,
+    DomainClockTickObservation, DomainName, PacedDomainClock, Timestamp,
 };
 use nervix_recovery::Discarded as _;
 use parking_lot::Mutex;
@@ -41,6 +41,8 @@ pub enum DomainClockEvent {
     /// The serving node's installation of the clock changed, or the attachment was restored on a
     /// new session and reported the clock again.
     Observed(DomainClockObserved),
+    /// The newest tick accepted by the serving node for an installed paced generation.
+    Ticked(DomainClockTicked),
     /// The server ended the attachment. Nothing more follows about it unless the client attaches
     /// to the domain's clock again.
     Ended(DomainClockAttachmentEnded),
@@ -55,6 +57,7 @@ impl DomainClockEvent {
     pub fn domain(&self) -> &DomainName {
         match self {
             Self::Observed(observed) => &observed.domain,
+            Self::Ticked(ticked) => &ticked.domain,
             Self::Ended(ended) => &ended.domain,
             Self::Interrupted(interrupted) => &interrupted.domain,
         }
@@ -88,6 +91,7 @@ pub enum DomainClockReadError {
 pub struct AttachedDomainClock {
     domain: DomainName,
     clock: DomainClockObservation,
+    tick: Option<DomainClockTickObservation>,
 }
 
 impl AttachedDomainClock {
@@ -98,6 +102,16 @@ impl AttachedDomainClock {
     /// The clock as the serving node last reported it installed.
     pub fn clock(&self) -> &DomainClockObservation {
         &self.clock
+    }
+
+    /// The latest accepted tick, if this node has one for the installed generation.
+    pub fn latest_tick(&self) -> Option<&DomainClockTickObservation> {
+        self.tick.as_ref()
+    }
+
+    /// The logical boundary of the latest accepted tick.
+    pub fn frontier(&self) -> Option<Timestamp> {
+        self.tick.as_ref().map(|tick| tick.logical_boundary)
     }
 
     /// The domain's logical time at the UTC instant `utc`. An unpaced domain reads UTC itself.
@@ -190,6 +204,7 @@ enum ReadableClock<'clock> {
 struct FollowedClock {
     /// The clock the attachment last reported.
     clock: DomainClockObservation,
+    tick: Option<DomainClockTickObservation>,
     /// The exchange the attachment is held on.
     generation: Arc<()>,
     /// The exchange holding the attachment ended, and the attachment waits to be restored.
@@ -204,6 +219,8 @@ struct PendingClockEvents {
     interrupted: bool,
     /// The newest observation.
     observed: Option<DomainClockObservation>,
+    /// The newest tick of the pending observation's generation, taken after that observation.
+    tick: Option<DomainClockTickObservation>,
 }
 
 impl PendingClockEvents {
@@ -221,15 +238,21 @@ impl PendingClockEvents {
                 domain: domain.clone(),
             }));
         }
-        let clock = self.observed.take()?;
-        Some(DomainClockEvent::Observed(DomainClockObserved {
+        if let Some(clock) = self.observed.take() {
+            return Some(DomainClockEvent::Observed(DomainClockObserved {
+                domain: domain.clone(),
+                clock,
+            }));
+        }
+        let tick = self.tick.take()?;
+        Some(DomainClockEvent::Ticked(DomainClockTicked {
             domain: domain.clone(),
-            clock,
+            tick,
         }))
     }
 
     fn is_empty(&self) -> bool {
-        self.ended.is_none() && !self.interrupted && self.observed.is_none()
+        self.ended.is_none() && !self.interrupted && self.observed.is_none() && self.tick.is_none()
     }
 }
 
@@ -281,6 +304,7 @@ impl DomainClockAttachments {
         Some(AttachedDomainClock {
             domain: domain.clone(),
             clock: followed.clock.clone(),
+            tick: followed.tick.clone(),
         })
     }
 
@@ -330,6 +354,7 @@ impl DomainClockAttachments {
                     domain.clone(),
                     FollowedClock {
                         clock: clock.clone(),
+                        tick: None,
                         generation: generation.clone(),
                         interrupted: false,
                     },
@@ -337,7 +362,9 @@ impl DomainClockAttachments {
                 if !reported {
                     return;
                 }
-                state.pending(domain).observed = Some(clock.clone());
+                let pending = state.pending(domain);
+                pending.tick = None;
+                pending.observed = Some(clock.clone());
             }
             DomainClockAttachDisposition::DomainNotFound(domain) => {
                 // A followed clock is attached again only when the client moves to a new
@@ -363,10 +390,13 @@ impl DomainClockAttachments {
             | DomainClockDetachDisposition::NotAttached(domain) => domain,
             DomainClockDetachDisposition::Failed => return,
         };
-        let removed = self.inner.state.lock().followed.shift_remove(domain);
+        let mut state = self.inner.state.lock();
+        let removed = state.followed.shift_remove(domain);
         if removed.is_none() {
             return;
         }
+        state.pending.shift_remove(domain);
+        drop(state);
         self.inner.changed.send_replace(());
     }
 
@@ -379,8 +409,39 @@ impl DomainClockAttachments {
         if !Arc::ptr_eq(&followed.generation, generation) || followed.interrupted {
             return;
         }
+        if followed.clock.generation != observed.clock.generation
+            || !matches!(observed.clock.state, DomainClockObservedState::Paced(_))
+        {
+            followed.tick = None;
+        }
         followed.clock = observed.clock.clone();
-        state.pending(&observed.domain).observed = Some(observed.clock);
+        let pending = state.pending(&observed.domain);
+        pending.tick = None;
+        pending.observed = Some(observed.clock);
+        drop(state);
+        self.inner.changed.send_replace(());
+    }
+
+    /// Applies newer progress from the exchange holding this attachment. A slow event reader
+    /// keeps one tick per domain; the observation of its generation is read first.
+    pub(crate) fn apply_ticked(&self, ticked: DomainClockTicked, generation: &Arc<()>) {
+        let mut state = self.inner.state.lock();
+        let Some(followed) = state.followed.get_mut(&ticked.domain) else {
+            return;
+        };
+        if !Arc::ptr_eq(&followed.generation, generation)
+            || followed.interrupted
+            || followed.clock.generation != ticked.tick.generation
+            || !matches!(followed.clock.state, DomainClockObservedState::Paced(_))
+            || followed
+                .tick
+                .as_ref()
+                .is_some_and(|latest| latest.tick_id >= ticked.tick.tick_id)
+        {
+            return;
+        }
+        followed.tick = Some(ticked.tick.clone());
+        state.pending(&ticked.domain).tick = Some(ticked.tick);
         drop(state);
         self.inner.changed.send_replace(());
     }
@@ -416,12 +477,14 @@ impl DomainClockAttachments {
         for (domain, followed) in &mut state.followed {
             if Arc::ptr_eq(&followed.generation, generation) && !followed.interrupted {
                 followed.interrupted = true;
+                followed.tick = None;
                 interrupted.push(domain.clone());
             }
         }
         for domain in interrupted {
             let pending = state.pending(&domain);
             pending.observed = None;
+            pending.tick = None;
             pending.interrupted = true;
         }
         // Bounded by the domains the client follows.
@@ -472,6 +535,7 @@ mod tests {
         AttachedDomainClock {
             domain: domain(domain_name),
             clock,
+            tick: None,
         }
     }
 
@@ -620,6 +684,54 @@ mod tests {
         }
     }
 
+    fn ticked(domain_name: &str, generation: u64, tick_id: u64) -> DomainClockTicked {
+        DomainClockTicked {
+            domain: domain(domain_name),
+            tick: DomainClockTickObservation {
+                generation,
+                tick_id,
+                logical_boundary: Timestamp::from_unix_nanos(
+                    i64::try_from(tick_id).assured("fixture ids fit in timestamps"),
+                ),
+                authority_utc: Timestamp::from_unix_nanos(5_000),
+                serving_logical: Timestamp::from_unix_nanos(6_000),
+            },
+        }
+    }
+
+    #[test]
+    fn ticks_coalesce_per_domain_and_follow_their_generations_state() {
+        let clocks = DomainClockAttachments::new();
+        let exchange = Arc::new(());
+        clocks.apply_attach(&attach_reply("sim", paced(1, 1.0)), &exchange);
+        clocks.apply_ticked(ticked("sim", 1, 1), &exchange);
+        clocks.apply_ticked(ticked("sim", 1, 3), &exchange);
+        clocks.apply_ticked(ticked("sim", 1, 2), &exchange);
+        assert_eq!(
+            clocks.take_event(),
+            Some(DomainClockEvent::Ticked(ticked("sim", 1, 3)))
+        );
+        let helper = clocks
+            .latest(&domain("sim"))
+            .assured("the clock is followed");
+        assert_eq!(helper.latest_tick(), Some(&ticked("sim", 1, 3).tick));
+        assert_eq!(helper.frontier(), Some(Timestamp::from_unix_nanos(3)));
+
+        clocks.apply_ticked(ticked("sim", 1, 4), &exchange);
+        clocks.apply_observed(observed("sim", paced(2, 1.0)), &exchange);
+        clocks.apply_ticked(ticked("sim", 1, 5), &exchange);
+        clocks.apply_ticked(ticked("sim", 2, 1), &exchange);
+        assert_eq!(
+            clocks.take_event(),
+            Some(DomainClockEvent::Observed(observed("sim", paced(2, 1.0))))
+        );
+        assert_eq!(
+            clocks.take_event(),
+            Some(DomainClockEvent::Ticked(ticked("sim", 2, 1)))
+        );
+        assert!(clocks.take_event().is_none());
+    }
+
     #[test]
     fn events_are_coalesced_per_domain_and_follow_the_attachment() {
         let clocks = DomainClockAttachments::new();
@@ -681,6 +793,17 @@ mod tests {
         );
         assert!(clocks.take_event().is_none(), "nothing follows a detach");
 
+        clocks.apply_ticked(ticked("sim", 2, 1), &generation);
+        clocks.apply_detach(&DomainClockDetachOutcome {
+            disposition: DomainClockDetachDisposition::Detached(domain("sim")),
+            message: String::new(),
+        });
+        assert!(
+            clocks.take_event().is_none(),
+            "an unread tick is withdrawn by detach"
+        );
+        clocks.apply_attach(&attach_reply("sim", paced(2, 3.0)), &generation);
+
         clocks.apply_observed(observed("sim", paced(3, 1.0)), &generation);
         clocks.apply_ended(
             DomainClockAttachmentEnded {
@@ -708,10 +831,22 @@ mod tests {
         clocks.apply_attach(&attach_reply("sim", paced(1, 1.0)), &first);
         clocks.apply_attach(&attach_reply("gone", paced(1, 1.0)), &first);
         clocks.apply_attach(&attach_reply("same", paced(1, 1.0)), &first);
+        clocks.apply_ticked(ticked("sim", 1, 1), &first);
+        assert!(
+            clocks
+                .latest(&domain("sim"))
+                .is_some_and(|clock| clock.frontier().is_some())
+        );
         clocks.apply_observed(observed("sim", paced(2, 1.0)), &first);
         clocks.exchange_ended(&first);
         clocks.exchange_ended(&first);
         assert!(clocks.awaits_restoration());
+        assert_eq!(
+            clocks
+                .latest(&domain("sim"))
+                .and_then(|clock| clock.frontier()),
+            None
+        );
 
         let second = Arc::new(());
         clocks.apply_observed(observed("sim", paced(5, 1.0)), &second);

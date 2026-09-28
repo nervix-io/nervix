@@ -2,13 +2,22 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** ClickHouse client and TLS configuration, the `JSONEachRow` encoding of each mapped
-//!   row, insert chunking into single rows after a rejected write, and insert-error
-//!   classification.
-//! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio
-//!   and the `clickhouse` driver.
+//! - **Owns.** ClickHouse client and TLS configuration, the HTTP connector every connection of the
+//!   client is made through, the `JSONEachRow` encoding of each mapped row, insert chunking into
+//!   single rows after a rejected write, and insert-error classification.
+//! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio,
+//!   the node resolver, and the `clickhouse` driver with its Hyper client.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
+//!
+//! # Connections
+//!
+//! The client makes every connection through Hyper's `HttpConnector` with the node resolver as its
+//! DNS service, so each new connection resolves the host of `addr` again, tries the answers in
+//! order, and dials a literal address as written. The request keeps `addr` as its URL and
+//! authority, and a TLS client verifies the server certificate against that host whichever address
+//! accepted the connection. The insert's request timeout covers the connection, lookup included,
+//! because the driver makes it while the insert waits for its result.
 
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
@@ -28,15 +37,23 @@ use nervix_connector::{
     SinkHost, SinkLifecycle, SinkPublishError, SinkRecordPosition, SinkStartError, SinkStartResult,
     client_config_value, optional_client_config_value,
 };
+use nervix_dns::{DnsLookupError, DnsResolver};
 use nervix_models::{ClientConfigEntry, TableName};
 use tracing::trace;
 
 const CLICKHOUSE: &str = "clickhouse";
+/// The TCP keepalive of every connection, the driver's own default.
+const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
+/// How long an idle pooled connection may be reused, the driver's own default. ClickHouse closes an
+/// idle HTTP connection after three seconds, so the client stops reusing one a second earlier.
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What one ClickHouse emitter inserts through, from its typed sink plan.
 pub struct ClickHouseSinkConfig {
     pub config: Vec<ClientConfigEntry>,
     pub table: TableName,
+    /// The node resolver every connection of the client resolves the host of `addr` through.
+    pub dns: DnsResolver,
 }
 
 /// The ClickHouse sink, which encodes each mapped row as one `JSONEachRow` line.
@@ -84,19 +101,55 @@ impl ClickHouseWriteError {
         }
     }
 
-    fn into_report(self) -> Report<SinkPublishError> {
-        let reason = match self.record_error_name() {
-            Some(name) => format!("ClickHouse insert request failed with {name}"),
-            None => "ClickHouse insert request failed".to_string(),
+    /// The failed lookup of the ClickHouse host, when resolving it is what failed the request.
+    fn lookup_failure(&self) -> Option<&DnsLookupError> {
+        let ClickHouseError::Network(error) = &self.0 else {
+            return None;
         };
-        Report::new(SinkPublishError::Publish { sink: CLICKHOUSE }).attach_printable(reason)
+        DnsLookupError::find_in(error.as_ref())
+    }
+
+    /// A request that never reached ClickHouse, described by the error and every cause under it.
+    ///
+    /// Those causes describe the connection, never a row, and carry no credentials. A response from
+    /// ClickHouse is not described this way, because its text can repeat values of the rows.
+    fn transport_failure(&self) -> Option<String> {
+        let ClickHouseError::Network(error) = &self.0 else {
+            return None;
+        };
+        let mut description = error.to_string();
+        let mut cause = error.source();
+        while let Some(current) = cause {
+            description.push_str(": ");
+            description.push_str(&current.to_string());
+            cause = current.source();
+        }
+        Some(description)
+    }
+
+    fn into_report(self) -> Report<SinkPublishError> {
+        let publish = SinkPublishError::Publish { sink: CLICKHOUSE };
+        if let Some(lookup) = self.lookup_failure() {
+            let reason = format!("ClickHouse insert request failed: {lookup}");
+            return Report::new(lookup.clone())
+                .change_context(publish)
+                .attach_printable(reason);
+        }
+        let reason = if let Some(name) = self.record_error_name() {
+            format!("ClickHouse insert request failed with {name}")
+        } else if let Some(transport) = self.transport_failure() {
+            format!("ClickHouse insert request failed: {transport}")
+        } else {
+            "ClickHouse insert request failed".to_string()
+        };
+        Report::new(publish).attach_printable(reason)
     }
 }
 
 impl ClickHouseSink {
     pub fn new(config: ClickHouseSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
-        let ClickHouseSinkConfig { config, table } = config;
-        let (client, request_timeout) = Self::client_from_config(&config)?;
+        let ClickHouseSinkConfig { config, table, dns } = config;
+        let (client, request_timeout) = Self::client_from_config(&config, dns)?;
         Ok(Self {
             client,
             request_timeout,
@@ -104,8 +157,14 @@ impl ClickHouseSink {
         })
     }
 
+    /// The client `config` describes, whose every connection resolves through `dns`, and the
+    /// request timeout of its inserts.
+    ///
+    /// Without TLS entries the client speaks plain HTTP only, as the driver's own default client
+    /// does in a build without its TLS features; an `https` address needs the TLS entries.
     pub fn client_from_config(
         config: &[ClientConfigEntry],
+        dns: DnsResolver,
     ) -> SinkStartResult<(ClickHouseClient, Option<Duration>)> {
         let invalid = || Report::new(SinkStartError::InvalidConfiguration { sink: CLICKHOUSE });
         let addr = client_config_value(config, "addr", "ClickHouse")
@@ -125,23 +184,23 @@ impl ClickHouseSink {
         let tls_config = RustlsClientConfigSource::new(config)
             .build()
             .map_err(|error| invalid().attach_printable(error.to_string()))?;
-        let mut client = if let Some(tls_config) = tls_config {
-            let mut connector = HttpConnector::new();
-            connector.set_keepalive(Some(Duration::from_secs(60)));
-            connector.enforce_http(false);
-            let connector = hyper_rustls::HttpsConnectorBuilder::new()
-                .with_tls_config((*tls_config).clone())
-                .https_or_http()
-                .enable_http1()
-                .wrap_connector(connector);
-            let http_client = HyperClient::builder(HyperTokioExecutor::new())
-                .pool_idle_timeout(Duration::from_secs(2))
-                .build(connector);
-            ClickHouseClient::with_http_client(http_client)
-        } else {
-            ClickHouseClient::default()
-        }
-        .with_url(addr);
+        let mut connector = HttpConnector::new_with_resolver(dns);
+        connector.set_keepalive(Some(TCP_KEEPALIVE));
+        let mut pool = HyperClient::builder(HyperTokioExecutor::new());
+        pool.pool_idle_timeout(POOL_IDLE_TIMEOUT);
+        let client = match tls_config {
+            Some(tls_config) => {
+                connector.enforce_http(false);
+                let connector = hyper_rustls::HttpsConnectorBuilder::new()
+                    .with_tls_config((*tls_config).clone())
+                    .https_or_http()
+                    .enable_http1()
+                    .wrap_connector(connector);
+                ClickHouseClient::with_http_client(pool.build(connector))
+            }
+            None => ClickHouseClient::with_http_client(pool.build(connector)),
+        };
+        let mut client = client.with_url(addr);
         if let Some(user) = optional_client_config_value(config, "user") {
             client = client.with_user(user);
         }
@@ -306,6 +365,9 @@ impl RowSink for ClickHouseSink {
 }
 
 #[cfg(test)]
+mod connection_tests;
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc as StdArc;
 
@@ -315,6 +377,7 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
 
     use super::*;
+    use crate::connection_tests::Fixture;
 
     fn client_config(addr: impl Into<String>, timeout_ms: &str) -> Vec<ClientConfigEntry> {
         vec![
@@ -433,12 +496,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn client_rejects_an_invalid_request_timeout() {
-        let error = match ClickHouseSink::client_from_config(&client_config(
-            "http://127.0.0.1:8123",
-            "later",
-        )) {
+    #[tokio::test]
+    async fn client_rejects_an_invalid_request_timeout() {
+        let fixture = Fixture::start().await;
+        let error = match ClickHouseSink::client_from_config(
+            &client_config("http://127.0.0.1:8123", "later"),
+            fixture.dns(),
+        ) {
             Ok(_) => panic!("invalid ClickHouse timeout should fail client initialization"),
             Err(error) => error,
         };
@@ -449,17 +513,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn client_parses_the_request_timeout() {
-        let (_, request_timeout) =
-            ClickHouseSink::client_from_config(&client_config("http://127.0.0.1:8123", "275"))
-                .expect("ClickHouse client config should be valid");
+    #[tokio::test]
+    async fn client_parses_the_request_timeout() {
+        let fixture = Fixture::start().await;
+        let (_, request_timeout) = ClickHouseSink::client_from_config(
+            &client_config("http://127.0.0.1:8123", "275"),
+            fixture.dns(),
+        )
+        .expect("ClickHouse client config should be valid");
 
         assert_eq!(request_timeout, Some(Duration::from_millis(275)));
     }
 
     #[tokio::test]
     async fn configured_timeout_bounds_clickhouse_insert_completion() {
+        let fixture = Fixture::start().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test listener should bind");
@@ -470,7 +538,7 @@ mod tests {
                 .expect("test listener should have an address")
         );
         let (client, request_timeout) =
-            ClickHouseSink::client_from_config(&client_config(addr, "30"))
+            ClickHouseSink::client_from_config(&client_config(addr, "30"), fixture.dns())
                 .expect("ClickHouse client config should be valid");
 
         let result = tokio::time::timeout(
@@ -492,18 +560,22 @@ mod tests {
         );
     }
 
-    #[test]
-    fn clickhouse_client_config_validates_tls_ca_file() {
-        let error = match ClickHouseSink::client_from_config(&[
-            ClientConfigEntry {
-                key: "addr".to_string(),
-                value: "https://127.0.0.1:8124".to_string(),
-            },
-            ClientConfigEntry {
-                key: "tls_ca_file".to_string(),
-                value: "/tmp/nervix-missing-clickhouse-ca.pem".to_string(),
-            },
-        ]) {
+    #[tokio::test]
+    async fn clickhouse_client_config_validates_tls_ca_file() {
+        let fixture = Fixture::start().await;
+        let error = match ClickHouseSink::client_from_config(
+            &[
+                ClientConfigEntry {
+                    key: "addr".to_string(),
+                    value: "https://127.0.0.1:8124".to_string(),
+                },
+                ClientConfigEntry {
+                    key: "tls_ca_file".to_string(),
+                    value: "/tmp/nervix-missing-clickhouse-ca.pem".to_string(),
+                },
+            ],
+            fixture.dns(),
+        ) {
             Ok(_) => panic!("missing ClickHouse TLS CA should fail"),
             Err(error) => error,
         };

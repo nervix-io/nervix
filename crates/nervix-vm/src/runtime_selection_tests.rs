@@ -67,7 +67,7 @@ impl FunctionInjector for ProbeInjector {
         span: Span,
         _now: Timestamp,
         prior_error_rows: RowErrorMask<'_>,
-    ) -> Result<InjectedResult, RuntimeError> {
+    ) -> error_stack::Result<InjectedResult, RuntimeError> {
         assert_eq!(*function, FunctionName::Udf("probe".to_string()));
         let [TypedArray::Int64(values)] = arguments else {
             panic!("probe must receive one Int64 argument");
@@ -133,7 +133,7 @@ impl FunctionInjector for ListingHeaderInjector {
         _span: Span,
         _now: Timestamp,
         _prior_error_rows: RowErrorMask<'_>,
-    ) -> Result<InjectedResult, RuntimeError> {
+    ) -> error_stack::Result<InjectedResult, RuntimeError> {
         assert_eq!(*function, FunctionName::ReadHeaders);
         let [TypedArray::Utf8(names)] = arguments else {
             panic!("read_headers must receive one Utf8 argument");
@@ -229,7 +229,7 @@ impl FunctionInjector for StdArc<ProbeInjector> {
         span: Span,
         now: Timestamp,
         prior_error_rows: RowErrorMask<'_>,
-    ) -> Result<InjectedResult, RuntimeError> {
+    ) -> error_stack::Result<InjectedResult, RuntimeError> {
         self.as_ref()
             .inject_with_context(function, arguments, rows, span, now, prior_error_rows)
     }
@@ -244,7 +244,7 @@ impl FunctionInjector for StdArc<ListingHeaderInjector> {
         span: Span,
         now: Timestamp,
         prior_error_rows: RowErrorMask<'_>,
-    ) -> Result<InjectedResult, RuntimeError> {
+    ) -> error_stack::Result<InjectedResult, RuntimeError> {
         self.as_ref()
             .inject_with_context(function, arguments, rows, span, now, prior_error_rows)
     }

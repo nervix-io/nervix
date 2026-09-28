@@ -153,6 +153,8 @@ mod schedule_planning;
 mod scheduling;
 mod service_tasks;
 mod session;
+#[cfg(test)]
+pub(crate) use session::{ClockDeliveryOrder, NextClockFrame};
 mod session_service;
 mod shutdown;
 mod startup;
@@ -1004,6 +1006,7 @@ impl Application {
             recovery_endpoints,
             interconnect: interconnect.clone(),
             node_unavailability_timeout,
+            fault_injection: fault_injection.clone(),
         })
         .await
         .change_context(AppError::StartCluster);
@@ -1315,11 +1318,8 @@ impl Application {
                             .collect::<HashSet<_>>();
                         let health_snapshot = cluster_for_reconcile.peer_health_snapshot();
                         let health_scheduling_revision = health_snapshot.scheduling_revision();
-                        let mut scheduling_availability =
-                            cluster_for_reconcile.gossip_state().await;
-                        scheduling_availability
-                            .dead_node_ids
-                            .extend(health_snapshot.unavailable_nodes());
+                        let scheduling_availability =
+                            cluster_for_reconcile.availability_state().await;
                         let live_node_ids = scheduling_availability.live_node_ids();
                         let placement_candidate_node_ids =
                             scheduling_availability.placement_candidate_node_ids();
@@ -1602,17 +1602,26 @@ impl Application {
                 }
                 drop(health_topology.borrow_and_update());
                 let gossip = cluster_for_health.gossip_state().await;
-                let live_node_ids = gossip
+                let mut probed_nodes = gossip
                     .live_nodes
-                    .iter()
-                    .map(|node| node.node_id.clone())
-                    .collect::<std::collections::BTreeSet<_>>();
-                // A peer whose interconnect endpoint discovery has not established is neither
-                // observable nor reachable, so it becomes neither a health target nor an outbound
-                // target until a later round publishes one.
+                    .into_iter()
+                    .map(|node| (node.node_id.clone(), node))
+                    .collect::<BTreeMap<_, _>>();
+                let previous_health = cluster_for_health.peer_health_snapshot();
+                for (node_id, node) in cluster_for_health.known_nodes().await {
+                    if !probed_nodes.contains_key(&node_id)
+                        && previous_health.retains_known_node(&node)
+                    {
+                        probed_nodes.insert(node_id, node);
+                    }
+                }
+                let live_node_ids = probed_nodes.keys().cloned().collect::<BTreeSet<_>>();
+                // A peer whose interconnect endpoint has never been discovered is neither
+                // observable nor reachable. A previously established target stays reachable
+                // while application health determines whether a gossip miss is a real failure.
                 let mut reachable_peers = Vec::new();
                 let mut health_endpoints = Vec::new();
-                for node in gossip.live_nodes {
+                for node in probed_nodes.into_values() {
                     if node.node_id == local_node_id {
                         continue;
                     }

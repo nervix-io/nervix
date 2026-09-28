@@ -1,3 +1,13 @@
+//! Emitter task commands, supervision and startup against its typed execution plan.
+//!
+//! Layer: data plane.
+//! - **Owns.** The task's stop and reconfigure commands, lifecycle guards, and node-local plan
+//!   binding before a task starts.
+//! - **Depends on.** Typed emitter plans, relay fan-in, resolved resource mounts, and runtime
+//!   services.
+//! - **Must not know.** Semantic emitter or client Models, connector-specific sink construction,
+//!   or placement decisions.
+
 use super::*;
 
 pub(super) type EmitterReconfigureResult<T> = Result<T, Report<EmitterReconfigureError>>;
@@ -40,7 +50,7 @@ impl Drop for EmitterConfirmationWaitGuard {
 
 pub(super) enum EmitterTaskCommand {
     Reconfigure {
-        config: Box<CreateEmitter>,
+        flush_policy: FlushPolicy,
         response: oneshot::Sender<()>,
     },
     Stop {
@@ -106,12 +116,15 @@ impl ScheduledEmitterStopError {
 impl ScheduledEmitterTask {
     pub(super) async fn reconfigure_via(
         commands: &mpsc::Sender<EmitterTaskCommand>,
-        config: Box<CreateEmitter>,
+        flush_policy: FlushPolicy,
     ) -> EmitterReconfigureResult<()> {
         let (response, receiver) = oneshot::channel();
         tokio::time::timeout(
             PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE,
-            commands.send(EmitterTaskCommand::Reconfigure { config, response }),
+            commands.send(EmitterTaskCommand::Reconfigure {
+                flush_policy,
+                response,
+            }),
         )
         .await
         .map_err(|_| Report::new(EmitterReconfigureError::AcceptTimeout))?
@@ -191,9 +204,9 @@ impl Runtime {
     pub(in crate::runtime) fn emitter_task_deps(
         &self,
         deps: ExecutionBuildDeps<'_>,
-        emitter: &CreateEmitter,
+        emitter: &EmitterExecutionPlan,
     ) -> Result<EmitterTaskDeps, RuntimeError> {
-        let Some(input_relay) = emitter.from.first() else {
+        let Some(input_relay) = emitter.inputs.first().map(|input| &input.relay) else {
             return Err(RuntimeError::BuildDomainExecution {
                 domain: deps.domain.as_str().to_string(),
                 reason: format!("emitter '{}' has no input relay", emitter.name.as_str()),
@@ -388,38 +401,15 @@ impl Runtime {
             })
     }
 
-    /// Plans `emitter`'s sink from the client Models it names, resolves the mounts those clients
-    /// declare, and starts the emitter's task on the resulting plan.
-    ///
-    /// The Models are read here, once, by the start-plan decision; the task and its sink
-    /// constructors receive only the plan.
+    /// Resolves the mounts in an already decided emitter plan, then starts its task.
     pub(in crate::runtime) fn spawn_emitter_task(
         &self,
         build: EmitterTaskBuildDeps<'_>,
-        clients: &HashMap<ClientName, Arc<Model>>,
-        emitter: CreateEmitter,
+        emitter: EmitterExecutionPlan,
         inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
     ) -> Result<ScheduledEmitterTask, RuntimeError> {
         let domain = build.domain;
-        let client = clients
-            .get(emitter.sink.client())
-            .map(|model| model.as_ref());
-        let catalog_client = match emitter.sink.catalog_client() {
-            Some(catalog) => clients.get(catalog).map(|model| model.as_ref()),
-            None => None,
-        };
-        let decided = EmitterStartPlan::decide(
-            &emitter,
-            EmitterClientModels {
-                client,
-                catalog_client,
-            },
-        )
-        .map_err(|error| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!("cannot plan emitter '{}': {error}", emitter.name.as_str()),
-        })?;
-        let plan = decided.resolve_clients(|client| {
+        let plan = emitter.sink.clone().resolve_clients(|client| {
             self.resolve_client_config(domain, client.config.mount.as_ref(), &client.config.entries)
                 .map_err(|error| RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),

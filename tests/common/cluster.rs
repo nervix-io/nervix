@@ -2185,6 +2185,16 @@ impl Cluster {
             .fail_health_responses_from(node_name(responding_node_id));
     }
 
+    pub(crate) fn block_gossip_for_node(&self, node_id: &str, send_delay: Duration) {
+        self.fault_injection
+            .block_gossip_for_node(node_name(node_id), send_delay);
+    }
+
+    pub(crate) fn restore_gossip_for_node(&self, node_id: &str) {
+        self.fault_injection
+            .restore_gossip_for_node(&node_name(node_id));
+    }
+
     pub(crate) async fn wait_for_health_response_pause(
         &self,
         probing_node_id: &str,

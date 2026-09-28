@@ -1261,6 +1261,7 @@ impl Runtime {
     pub(in crate::runtime) fn remote_runtime_consumers_for_schedule(
         schedule: &DomainSchedule,
         entrypoints: &EntrypointPlans,
+        emitter_plans: &EmitterExecutionPlans,
         local_node_id: &ClusterNodeName,
     ) -> HashMap<RelayName, Vec<RemoteRuntimeConsumer>> {
         let mut consumers = HashMap::<RelayName, Vec<RemoteRuntimeConsumer>>::new();
@@ -1294,22 +1295,27 @@ impl Runtime {
                 );
             }
         }
-        for node in schedule.nodes.values() {
+        for emitter in emitter_plans.emitters() {
+            let node = schedule
+                .nodes
+                .get(&NodeRef::new(
+                    ModelKind::Emitter,
+                    ModelName::from(&emitter.name),
+                ))
+                .assured("the emitter plans were decided from this same schedule");
             let Some(target_node) = node.execution_node() else {
                 continue;
             };
-            if let Model::Emitter(emitter) = node.config.as_ref() {
-                for relay in emitter.from.relays() {
-                    if !owned_relays.contains(relay) || node.executes_on(local_node_id) {
-                        continue;
-                    }
-                    push_remote_runtime_consumer(
-                        consumers.entry(relay.clone()).or_default(),
-                        target_node,
-                        relay,
-                        emitter.mode,
-                    );
+            for input in &emitter.inputs {
+                if !owned_relays.contains(&input.relay) || node.executes_on(local_node_id) {
+                    continue;
                 }
+                push_remote_runtime_consumer(
+                    consumers.entry(input.relay.clone()).or_default(),
+                    target_node,
+                    &input.relay,
+                    emitter.mode,
+                );
             }
         }
         for plan in entrypoints.reingestors() {
@@ -1417,7 +1423,12 @@ mod tests {
             Vec::new(),
         );
 
-        let owned = Runtime::remote_runtime_consumers_for_schedule(&schedule, &plans, &owner);
+        let owned = Runtime::remote_runtime_consumers_for_schedule(
+            &schedule,
+            &plans,
+            &EmitterExecutionPlans::default(),
+            &owner,
+        );
         let consumers = owned
             .get(&named::<RelayName>("incoming"))
             .assured("the remote reingestor reads the relay this node owns");
@@ -1426,8 +1437,12 @@ mod tests {
         assert_eq!(consumers[0].mode, AckMode::Detached);
         assert!(!owned.contains_key(&named::<RelayName>("outgoing")));
 
-        let executing =
-            Runtime::remote_runtime_consumers_for_schedule(&schedule, &plans, &executor);
+        let executing = Runtime::remote_runtime_consumers_for_schedule(
+            &schedule,
+            &plans,
+            &EmitterExecutionPlans::default(),
+            &executor,
+        );
         assert!(executing.is_empty());
     }
 

@@ -2,11 +2,12 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The SQS client a configuration declares, queue-URL lookup, long polling and
-//!   message deletion on the source side, protocol validation of each message body,
-//!   attribute and FIFO group, request batching, and per-entry response classification.
-//! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio and the AWS
-//!   SQS SDK.
+//! - **Owns.** The SQS client a configuration declares and the connections it makes, queue-URL
+//!   lookup, long polling and message deletion on the source side, protocol validation of each
+//!   message body, attribute and FIFO group, request batching, and per-entry response
+//!   classification.
+//! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio, the node
+//!   resolver, and the AWS SQS SDK with its Smithy HTTP client.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation. A FIFO message group arrives already evaluated for its record, so
 //!   the expression behind it stays with the host.
@@ -14,9 +15,10 @@
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
 
+mod connection;
 mod source;
 
-use std::time::Duration;
+use std::{fmt::Debug, time::Duration};
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use async_trait::async_trait;
@@ -24,8 +26,11 @@ use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_sqs::{
     Client as SqsClient,
+    error::SdkError,
+    operation::get_queue_url::GetQueueUrlError,
     types::{MessageAttributeValue, SendMessageBatchRequestEntry},
 };
+use connection::{FailedRequest, SqsTrust};
 use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_connector::{
@@ -33,6 +38,7 @@ use nervix_connector::{
     SinkRecord, SinkRecordId, SinkStartError, SinkStartResult, client_config_value,
     client_tls_paths, optional_client_config_value, read_tls_file,
 };
+use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, Timestamp};
 pub use source::{
     SqsMessageAttributes, SqsSource, SqsSourceError, SqsSourceMessage, SqsSourcePlan,
@@ -56,6 +62,8 @@ pub struct SqsSinkConfig {
     pub config: Vec<ClientConfigEntry>,
     pub queue: String,
     pub mode: SqsPublishingMode,
+    /// The node resolver every connection of the client resolves the endpoint host through.
+    pub dns: DnsResolver,
 }
 
 pub struct SqsSink {
@@ -201,16 +209,25 @@ impl PreparedSqsRecord {
 
 impl SqsSink {
     pub async fn new(config: SqsSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
-        let client = Self::client_from_config(&config.config).await?;
-        let queue_url = Self::queue_url(&client, &config.queue).await?;
+        let SqsSinkConfig {
+            config,
+            queue,
+            mode,
+            dns,
+        } = config;
+        let client = Self::client_from_config(&config, dns).await?;
+        let queue_url = Self::queue_url(&client, &queue).await?;
         Ok(Self {
             client,
             queue_url,
-            mode: config.mode,
+            mode,
         })
     }
 
-    async fn client_from_config(config: &[ClientConfigEntry]) -> SinkStartResult<SqsClient> {
+    async fn client_from_config(
+        config: &[ClientConfigEntry],
+        dns: DnsResolver,
+    ) -> SinkStartResult<SqsClient> {
         let endpoint = Self::config_value(config, "endpoint")?;
         let region = optional_client_config_value(config, "region")
             .unwrap_or("us-east-1")
@@ -252,58 +269,50 @@ impl SqsSink {
                     .build(),
             );
         }
-        if let Some(ca_file) = client_tls_paths(config).ca_file.as_ref() {
-            let ca_pem = read_tls_file(ca_file, "TLS CA certificate").map_err(|error| {
-                let message = error.current_context().to_string();
-                error
-                    .change_context(SinkStartError::InvalidConfiguration { sink: SQS })
-                    .attach_printable(message)
-            })?;
-            let tls_context = aws_smithy_http_client::tls::TlsContext::builder()
-                .with_trust_store(
-                    aws_smithy_http_client::tls::TrustStore::empty().with_pem_certificate(ca_pem),
-                )
-                .build()
-                .map_err(Self::start_error)?;
-            let http_client = aws_smithy_http_client::Builder::new()
-                .tls_provider(aws_smithy_http_client::tls::Provider::Rustls(
-                    aws_smithy_http_client::tls::rustls_provider::CryptoMode::AwsLc,
-                ))
-                .tls_context(tls_context)
-                .build_https();
-            loader = loader.http_client(http_client);
-        }
-        let sdk_config = loader.load().await;
+        let trust = match client_tls_paths(config).ca_file.as_ref() {
+            Some(ca_file) => {
+                let ca_pem = read_tls_file(ca_file, "TLS CA certificate").map_err(|error| {
+                    let message = error.current_context().to_string();
+                    error
+                        .change_context(SinkStartError::InvalidConfiguration { sink: SQS })
+                        .attach_printable(message)
+                })?;
+                SqsTrust::ca(ca_pem).map_err(Self::start_error)?
+            }
+            None => SqsTrust::Platform,
+        };
+        let sdk_config = loader.http_client(trust.http_client(dns)).load().await;
         Ok(SqsClient::new(&sdk_config))
     }
 
     async fn queue_url(client: &SqsClient, queue: &str) -> SinkStartResult<String> {
-        let queue_url = client
-            .get_queue_url()
-            .queue_name(queue)
-            .send()
-            .await
-            .map_err(|source| {
-                let missing = source
-                    .as_service_error()
-                    .is_some_and(|error| error.is_queue_does_not_exist());
-                Self::queue_lookup_error(queue, missing, source.to_string())
-            })?
-            .queue_url()
-            .map(ToOwned::to_owned);
-        Self::require_queue_url(queue, queue_url)
+        let response = match client.get_queue_url().queue_name(queue).send().await {
+            Ok(response) => response,
+            Err(error) => return Err(Self::queue_lookup_error(queue, &error)),
+        };
+        Self::require_queue_url(queue, response.queue_url().map(ToOwned::to_owned))
     }
 
-    fn queue_lookup_error(queue: &str, missing: bool, reason: String) -> Report<SinkStartError> {
+    fn queue_lookup_error<R: Debug + 'static>(
+        queue: &str,
+        error: &SdkError<GetQueueUrlError, R>,
+    ) -> Report<SinkStartError> {
+        let failure = FailedRequest::new(error);
+        let missing = error
+            .as_service_error()
+            .is_some_and(GetQueueUrlError::is_queue_does_not_exist);
         if missing {
             return Report::new(SinkStartError::MissingExternalEntity {
                 sink: SQS,
                 kind: "SQS queue",
                 name: queue.to_string(),
             })
-            .attach_printable(reason);
+            .attach_printable(failure.description());
         }
-        Self::start_error(reason)
+        failure.report(
+            SinkStartError::Initialize { sink: SQS },
+            "SQS GetQueueUrl failed",
+        )
     }
 
     fn require_queue_url(queue: &str, queue_url: Option<String>) -> SinkStartResult<String> {
@@ -342,9 +351,10 @@ impl SqsSink {
                     outcome.reject(record.rejected(format!("SQS rejected the record: {error}")));
                 }
                 Err(error) => {
-                    outcome.fail(Self::publish_error(format!(
-                        "SQS SendMessage failed: {error}"
-                    )));
+                    outcome.fail(FailedRequest::new(&error).report(
+                        SinkPublishError::Publish { sink: SQS },
+                        "SQS SendMessage failed",
+                    ));
                     return;
                 }
             }
@@ -384,9 +394,10 @@ impl SqsSink {
             let response = match request.send().await {
                 Ok(response) => response,
                 Err(error) => {
-                    outcome.fail(Self::publish_error(format!(
-                        "SQS SendMessageBatch failed: {error}"
-                    )));
+                    outcome.fail(FailedRequest::new(&error).report(
+                        SinkPublishError::Publish { sink: SQS },
+                        "SQS SendMessageBatch failed",
+                    ));
                     return;
                 }
             };
@@ -666,8 +677,14 @@ impl RecordSink for SqsSink {
 }
 
 #[cfg(test)]
+mod connection_tests;
+
+#[cfg(test)]
 mod tests {
+    use aws_sdk_sqs::{error::ConnectorError, types::error::QueueDoesNotExist};
+
     use super::*;
+    use crate::connection_tests::Fixture;
 
     fn client_config(timeout_ms: &str) -> Vec<ClientConfigEntry> {
         vec![
@@ -795,11 +812,11 @@ mod tests {
 
     #[test]
     fn sqs_queue_lookup_distinguishes_missing_entities_from_connection_failures() {
-        let missing = SqsSink::queue_lookup_error(
-            "missing-queue",
-            true,
-            "service reported a missing queue".to_string(),
+        let missing = SdkError::<GetQueueUrlError, ()>::service_error(
+            GetQueueUrlError::QueueDoesNotExist(QueueDoesNotExist::builder().build()),
+            (),
         );
+        let missing = SqsSink::queue_lookup_error("missing-queue", &missing);
         assert!(matches!(
             missing.current_context(),
             SinkStartError::MissingExternalEntity {
@@ -809,11 +826,20 @@ mod tests {
             } if name == "missing-queue"
         ));
 
-        let connection =
-            SqsSink::queue_lookup_error("orders", false, "connection refused".to_string());
+        let refused = SdkError::<GetQueueUrlError, ()>::dispatch_failure(ConnectorError::io(
+            "connection refused".into(),
+        ));
+        let connection = SqsSink::queue_lookup_error("orders", &refused);
         assert_eq!(
             connection.current_context(),
             &SinkStartError::Initialize { sink: SQS }
+        );
+        let message = connection
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<String>());
+        assert_eq!(
+            message.map(String::as_str),
+            Some("SQS GetQueueUrl failed: dispatch failure: io error: connection refused")
         );
 
         assert_eq!(
@@ -1004,7 +1030,8 @@ mod tests {
 
     #[tokio::test]
     async fn client_timeout_bounds_each_request_while_sdk_retries_stay_disabled() {
-        let client = SqsSink::client_from_config(&client_config("275"))
+        let fixture = Fixture::start().await;
+        let client = SqsSink::client_from_config(&client_config("275"), fixture.dns())
             .await
             .expect("SQS client config should be valid");
         let timeout = client
@@ -1032,7 +1059,8 @@ mod tests {
 
     #[tokio::test]
     async fn client_rejects_an_invalid_request_timeout() {
-        let error = SqsSink::client_from_config(&client_config("later"))
+        let fixture = Fixture::start().await;
+        let error = SqsSink::client_from_config(&client_config("later"), fixture.dns())
             .await
             .expect_err("invalid SQS timeout should fail client initialization");
 

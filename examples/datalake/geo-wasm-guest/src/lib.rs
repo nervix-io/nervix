@@ -15,6 +15,7 @@ use arrow_array::{
     Array, ArrayRef, RecordBatch, StringArray,
     builder::{Float64Builder, StringBuilder},
 };
+use error_stack::{Report, Result, ResultExt as _};
 use geo::{Distance, Haversine, Point};
 use geohash::{Coord, encode};
 use maxminddb::{Reader, geoip2};
@@ -92,7 +93,10 @@ struct GeoIpResolver {
 impl Processor for GeoIpResolver {
     fn create(branch: &BranchContext) -> Result<Self, GuestError> {
         let reader = Reader::from_source(DBIP_MMDB)
-            .map_err(|error| GuestError::failed(format!("embedded GeoIP database is unusable: {error}")))?;
+            .map_err(Report::new)
+            .change_context(GuestError::Failed {
+                reason: "embedded GeoIP database is unusable".to_string(),
+            })?;
         let input_schema = branch.input_schema();
         let source_ip_column = input_schema
             .fields
@@ -156,7 +160,7 @@ impl Processor for GeoIpResolver {
             .map(|column_index| {
                 Ok(OutputColumnRef::Input {
                     column_index: u32::try_from(column_index)
-                        .map_err(|_| GuestError::InvalidSize)?,
+                        .map_err(|_| Report::new(GuestError::InvalidSize))?,
                 })
             })
             .collect::<Result<Vec<_>, GuestError>>()?;
@@ -167,7 +171,10 @@ impl Processor for GeoIpResolver {
                 column_index: output.add_generated_column(array, false),
             })
             .collect::<Vec<_>>();
-        let columns = input_columns.into_iter().chain(generated_columns).collect();
+        let columns: Vec<OutputColumnRef> = input_columns
+            .into_iter()
+            .chain(generated_columns)
+            .collect();
 
         // Every destination receives the same rows, but only the first carries the ACK, NACK, and
         // message-error sets so one input row is never settled twice.

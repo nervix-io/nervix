@@ -151,7 +151,9 @@ Session replies carry typed command purpose and outcomes. An upload failure can 
 assigned nonzero resource version; before assignment, the version is absent. Diagnostic spans can
 be absent, while a present span beginning at offset zero is still present. The web console uses
 the typed outcome for domain-selection dispatch instead of matching reply message text. The
-FlatBuffers encoding preserves these optional fields and typed variants across the session edge.
+FlatBuffers encoding preserves these optional fields and typed variants across the session edge;
+[Client Session Protocol](./client-session-protocol.md#verification-before-reading) defines how a
+receiver keeps an absent optional value distinct from a present zero.
 
 Completion replies likewise carry a `SuggestionStatus` variant for ready, missing, stale, or failed
 context and an optional continuation. The server resolves typed semantic references from one
@@ -218,6 +220,11 @@ message on every hot-path operation. Diagnostics contain the relevant identity, 
 field names, while sensitive payload values stay out of errors and logs. A truly optional value
 continues as `Option` until its consumer decides whether absence is valid. A label or rendered
 string is only a presentation of the state and never an input to execution.
+
+Replicated command admission distinguishes a reference that has expired from one bound to a
+different owner, domain, transaction position, or content in its typed conflict result. The
+session carries that distinction into the public command disposition; rendering its message does
+not choose the disposition.
 
 Error-route branch validation carries the node, source route, error relay, and both branch
 declarations as typed data. Direct emitter `VALUES` validation identifies a sensitive external
