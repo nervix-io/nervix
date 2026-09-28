@@ -41,6 +41,11 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
+The OpenTelemetry Collector dependency exposes its stdout and stderr to scenario assertions. A
+batching scenario reads the Collector's debug exporter output to check the number and order of
+records in each received export request, using unique test markers to distinguish simultaneous
+scenarios sharing that container.
+
 `tests-deps` builds the CLI and NSPL formatter in the normal target directory. The full and focused
 client coverage recipes build a standalone instrumented CLI beside their instrumented server binary
 and place the normal NSPL formatter there. The scenario runner selects the covered CLI through

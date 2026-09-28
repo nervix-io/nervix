@@ -54,7 +54,7 @@ Sidebar entries are counted per kind and each group collapses. Selecting an endp
 The **Cluster** footer stays independent of the selected domain: it reports the number of running
 domains, non-relay graph nodes, and relays across the current cluster graph.
 
-## Creating Domains, Users, Resources, Schemas, And Branches
+## Creating Entities From Forms
 
 The top bar's **Create** menu opens keyboard-accessible forms for domains, users, and resource
 catalogs. The resource group in the sidebar also provides a contextual create action. A form keeps
@@ -100,6 +100,17 @@ selection visible but marks it invalid until it is selected again. An invalid br
 including one containing `BYTES`, is rejected by registry validation and shown inline with the
 branch and field named. These domain-owned drafts keep their captured scope when reopened; **Use
 current domain** changes it explicitly.
+
+A relay form selects the relay's internal schema from the same kind of list, then states its
+branching explicitly: **UNBRANCHED**, or **BRANCHED BY** with a branch chosen from a searchable,
+paged list of the captured domain's branches. A new draft has chosen neither, and it cannot be
+submitted until one is chosen, so a relay is never unbranched by omission. Capacity starts from the
+default relay buffer and must be a positive count. Materialized state is **NONE** or `LAST BY
+TIMESTAMP`. Both lists read the attached transaction prefix, so a schema or branch staged earlier in
+the transaction is selectable, and a relay created while a transaction is attached is queued in it
+like the other forms' creates. Changing the captured domain keeps the selected schema and branch
+visible but invalid until each is selected again. The preview is the canonical `CREATE RELAY`
+statement, which always states its capacity.
 
 ## The Execution Graph
 
@@ -166,7 +177,8 @@ into the REPL and runs it, so the console never does anything you could not have
 
 - **DESCRIBE** — the runtime view of the item, where the item has a `DESCRIBE` form
 - **SHOW CREATE** — the NSPL that declares it
-- **SUBSCRIBE** — relays only; opens the subscription dialog described below
+- **SUBSCRIBE** — relays only; opens the subscription form described below for that relay, whose
+  tab runs the same `CREATE SUBSCRIPTION` the REPL accepts
 
 ### Node Health
 
@@ -178,24 +190,45 @@ endpoint rather than here — see
 
 ## Subscribing To A Relay
 
-![The subscription dialog with a field reference and sample rate selected](images/console-subscribe-dialog.png)
+![The subscription form with a typed field reference, a filter, and a sample rate](images/console-subscribe-dialog.png)
 
-The subscription dialog builds a read-only session subscription against a relay. The relay's schema
-is listed field by field; clicking a field inserts an `input.<field>` reference into the `WHERE`
-box, so a filter can be written without retyping field names. A sample rate of 100%, 10%, 1%, or
-0.1% limits how many arriving batches are delivered.
+The **Create** menu's subscription form opens a read-only session subscription as a tab beside the
+REPL. A relay's **SUBSCRIBE** action opens the same form as a new draft for that relay in the
+graph's domain, while the **Create** menu reopens the retained draft. A draft starts under a
+generated name such as `web_console_subscription_2`, which can be edited; names are unique among the
+console's tabs.
 
-The subscription opens as a tab beside the REPL and streams records into it. Closing the tab ends
-the subscription. Subscriptions are read-only views: they cannot construct, inherit, or produce
-side effects. See [Sessions](sessions.md).
+The relay is selected from a searchable, paged list of the captured domain's relays. The selected
+relay's fields are listed in declaration order with their exact types, `OPTIONAL`, and `SENSITIVE`;
+selecting one inserts a typed `input.<field>` reference into the filter. The filter is the `WHERE`
+predicate over the relay's record. While it is edited, the form shows its canonical reading, and it
+refuses to submit text that is not an expression. Checking the fields, scopes, and types the
+predicate uses belongs to the server, which reports a failure such as a string compared with an
+integer field when the subscription is created. Delivery is `BLOCKING` or `DROPPING`, and batch
+sampling takes a rate from 0 through 1. The preview is the canonical `CREATE SUBSCRIPTION`
+statement the tab sends.
+
+Submitting opens the tab through the same subscription lifecycle as a `CREATE SUBSCRIPTION` typed in
+the REPL. The tab waits until the session can serve it, opens and becomes active once the server
+announces the schema of its rows, and streams records into it. The form reports **Completed** once
+the tab is open. It reports **Failed** with the server's reason, such as a relay that no longer
+exists, a filter the server cannot compile, or an open transaction, and then no tab remains and the
+draft stays editable. A name an open tab already uses fails before anything is sent. After a
+reconnect or leader change, the console restores each open tab once under its name; the form does
+not submit it again.
+
+Closing the tab ends the subscription. Subscriptions are read-only views: they cannot construct,
+inherit, or produce side effects. See [Sessions](sessions.md).
 
 ## The NSPL REPL
 
 ![The REPL with server-driven completions offered for a partial statement](images/console-repl.png)
 
 The REPL accepts the same NSPL as the command line client, including the client-local statements
-`USE`, `LIST DOMAINS`, `BEGIN`, `COMMIT`, `REVERT`, and the subscription statements. The prompt
-shows the active domain, and marks an open transaction the same way the terminal client does:
+`USE`, `LIST DOMAINS`, `BEGIN`, `COMMIT`, `REVERT`, and the subscription statements. A typed
+`CREATE SUBSCRIPTION` opens a tab in the selected domain exactly as the subscription form does, and
+`DELETE SUBSCRIPTION <name>` closes the open tab of that name. The prompt shows the active domain,
+and marks an open transaction the same way the terminal client does:
 
 ```text
 nervix[quickstart]>

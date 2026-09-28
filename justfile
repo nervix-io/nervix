@@ -542,8 +542,9 @@ coverage-clients-units:
         --package nervix-web-console --package nervix-cli
     just coverage-clients-report
 
-# Measure the visual schema/branch patch across its Model, language, wire, browser, and server
-# owners, including the public browser scenarios that exercise the attached transaction prefix.
+# Measure the visual create patch across its Model, language, wire, browser, and server owners,
+# including the public browser scenarios that exercise the attached transaction prefix and the
+# subscription tab lifecycle.
 coverage-visual-create output="target/visual-create.lcov": tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
@@ -553,10 +554,19 @@ coverage-visual-create output="target/visual-create.lcov": tests-deps
         --package nervix-models --package nervix-client-wire --package nervix-nspl
     cargo llvm-cov --no-report --bin nervix-web-console --package nervix-web-console
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
-    cargo llvm-cov --no-report --features testing --package nervix-server \
-        --test scenarios -- --input tests/features/web-console/visual_create_schema.feature \
-        --concurrency 1 --retry 0
-    cargo llvm-cov report --workspace --lcov --output-path {{ quote(output) }}
+    for feature in visual_create_schema visual_create_relay; do
+        cargo llvm-cov --no-report --features testing --package nervix-server \
+            --test scenarios -- --input "tests/features/web-console/${feature}.feature" \
+            --concurrency 1 --retry 0
+    done
+    just coverage-visual-create-report {{ quote(output) }}
+
+# Write the LCOV report of the profiles `coverage-visual-create` collected, over the packages the
+# visual create forms span.
+coverage-visual-create-report output="target/visual-create.lcov":
+    cargo llvm-cov report --lcov --output-path {{ quote(output) }} \
+        --package nervix-models --package nervix-client-wire --package nervix-nspl \
+        --package nervix-web-console --package nervix-server
 
 # Write the line coverage of the unit tests of the packages named in `args`, such as
 # `--package nervix-vm --package nervix-nspl`, as LCOV to `output`. It checks the patch coverage of

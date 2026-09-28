@@ -286,14 +286,18 @@ async function captureConsole(page, output) {
   await waitForText(page, ".graph-action-menu", "SUBSCRIBE");
   await capture(page, output, "console-graph-actions.png", ".graph-action-menu");
 
-  // The guided subscription dialog reached from that menu.
+  // The subscription form that menu opens for the relay, with a typed field reference inserted
+  // into its filter and batch sampling chosen.
   await page.click(".graph-action-list button:has-text('SUBSCRIBE')");
-  await waitForText(page, ".subscribe-dialog", "order_record");
-  await page.click(".schema-field-button:has-text('amount')");
-  await page.fill(".subscribe-dialog input", "input.amount >= 1000");
-  await page.click(".sample-options button:has-text('10%')");
-  await capture(page, output, "console-subscribe-dialog.png", ".subscribe-dialog");
-  await page.click(".subscribe-actions button:has-text('CANCEL')");
+  await waitForText(page, ".create-selected-relay", "orders");
+  await waitForText(page, ".create-field-refs", "amount");
+  await page.click(".create-field-refs [data-value='amount']");
+  await page.fill(".create-filter", "input.amount >= 1000");
+  await page.click(".create-sample");
+  await page.fill(".create-sample-rate", "0.1");
+  await waitForText(page, ".create-preview", "BATCH SAMPLE RATE 0.1");
+  await capture(page, output, "console-subscribe-dialog.png", ".create-dialog");
+  await page.click(".create-close");
 
   // The REPL with server-driven completion offered for a partial statement.
   await page.fill(".prompt-row input", "DESCRIBE RELAY ");

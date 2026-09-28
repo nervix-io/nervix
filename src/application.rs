@@ -131,6 +131,7 @@ mod cluster_status;
 mod command_execution;
 mod command_result;
 mod completion;
+mod configured_choices;
 mod describe_output;
 mod domain_clock;
 mod domain_lifecycle;
@@ -971,7 +972,27 @@ impl Application {
                 return Err(error);
             }
         };
+        let recovered_members = consensus.observer().stored_membership_nodes();
         startup.consensus = Some(consensus);
+        let mut recovery_endpoints = BTreeSet::new();
+        for (member, address) in recovered_members {
+            if member == node_id {
+                continue;
+            }
+            let endpoint = match address.parse::<NodeEndpoint>() {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    let report = Report::new(error)
+                        .change_context(AppError::StartCluster)
+                        .attach_printable(format!("persisted Raft endpoint for node '{member}'"));
+                    startup.terminate().await;
+                    return Err(report);
+                }
+            };
+            recovery_endpoints.insert(endpoint);
+        }
+        let has_bootstrap_candidates =
+            cluster_bootstrap_host.is_some() || !recovery_endpoints.is_empty();
         let cluster_result = cluster::start_cluster(cluster::ClusterSettings {
             cluster_id,
             node_id: node_id.clone(),
@@ -980,6 +1001,7 @@ impl Application {
             console_advertise_url: web_console_advertise_url.clone(),
             interconnect_advertise_addr,
             bootstrap_host: cluster_bootstrap_host.clone(),
+            recovery_endpoints,
             interconnect: interconnect.clone(),
             node_unavailability_timeout,
         })
@@ -1569,7 +1591,7 @@ impl Application {
         let cluster_for_health = cluster.clone();
         let mut health_topology = cluster.subscribe_live_node_states().await;
         let local_node_id = node_id;
-        let mut awaiting_initial_bootstrap_peer = cluster_bootstrap_host.is_some();
+        let mut awaiting_initial_bootstrap_peer = has_bootstrap_candidates;
         let health_shutdown = shutdown.clone();
         background_tasks.push(tokio::spawn(async move {
             sleep(Duration::from_millis(500)).await;

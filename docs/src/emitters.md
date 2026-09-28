@@ -303,7 +303,8 @@ The complete contract for batch payloads — packing, containers per wire format
 measurement and failure attribution for every sink — is defined in
 [Optional emitter batching](https://github.com/nervix-io/nervix/blob/main/docs/specifications/emitter-batching.md).
 The database sinks bound every sequential insert or bulk write by `MAX MESSAGES`, as their sections
-below describe, and OTEL and Iceberg emitters keep their current request and data-file grouping.
+below describe. An OTEL emitter with the clause bounds each export request; without it, OTEL keeps
+one request per pending Arrow batch. Iceberg keeps its data-file and commit boundaries.
 
 ### Batch payloads
 
@@ -776,6 +777,11 @@ Success is local socket acceptance and flush, not remote delivery confirmation. 
 a codec and rejects header writes. See [Syslog](syslog.md) for client configuration, framing,
 message errors, retry behavior, and limits.
 
+With `BATCH`, a `SYSLOG` codec encodes one RFC 5424 frame whose `MSG` is a JSON array of the
+members' complete RFC 5424 messages. Members must share every header field except timestamp; the
+outer frame uses the first member's timestamp. The same frame travels as one UDP datagram, one
+octet-counted TCP/TLS frame, or one non-transparent TCP frame when it contains no LF.
+
 ### SQS
 
 ```nspl,ignore
@@ -858,6 +864,13 @@ route-local encoding error.
 Sentry sends one event per envelope and acknowledges the successful HTTP response. On `429` or
 `503`, Nervix honors `Retry-After` and `X-Sentry-Rate-Limits`; the server interval extends the
 declared retry delay when it is longer.
+
+With `BATCH`, `ON EMITTING BATCH` builds one event from the candidate array, usually placing its
+members under `extra`. The envelope still has exactly one `event` item. `MAX SIZE` measures the
+transformed event JSON; Nervix also checks the final serialized event, after default fields are
+added, against Sentry's 1 MB decompressed event limit before sending the envelope. An oversized
+event follows the emitter's message error policy. The envelope header, item header, and newline
+framing are outside `MAX SIZE`.
 
 Use a JSON wire codec or a JAQ-native codec with JSON output. Sentry emitters require `ENCODE
 USING`, do not accept `write_header`, and still require explicit leakage for sensitive event
@@ -973,10 +986,14 @@ or `F64` array `explicit_bounds`. Optional keys are `start_time`, numeric `sum`,
 `len(bucket_counts)` must equal `len(explicit_bounds) + 1`. Exponential histograms and summaries
 are not supported.
 
-For each pending Arrow batch, Nervix builds one Export request containing one resource, one scope,
-and all successfully converted records. `FLUSH ... MAX BATCH SIZE` measures the Arrow batch before
-protobuf encoding, so the encoded request can be larger than the configured boundary and must fit
-the receiver's request-size limit. Nervix stamps log `observed_time_unix_nano` at emission.
+Without `BATCH`, each pending Arrow batch becomes one Export request containing one resource, one
+scope, and all successfully converted records. With `BATCH`, the connector keeps that resource and
+scope in every request, takes successfully converted records in source order, and divides them by
+`MAX MESSAGES` and the exact protobuf size of each Export request. When a candidate exceeds `MAX
+SIZE`, it is halved until each request fits or a singleton is rejected through `ON MESSAGE ERROR`.
+The byte limit measures the uncompressed protobuf request before optional gzip; HTTP and gRPC
+framing and headers are outside it. `FLUSH ... MAX BATCH SIZE` continues to measure the Arrow batch.
+Nervix stamps log `observed_time_unix_nano` at emission.
 
 Connection failures, HTTP `429` and `5xx`, and gRPC `UNAVAILABLE` or `RESOURCE_EXHAUSTED` retry with
 backpressure. `Retry-After` and gRPC `RetryInfo` can extend the declared retry delay. Bad IDs, enum

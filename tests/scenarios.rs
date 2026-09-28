@@ -21943,6 +21943,69 @@ async fn then_otel_collector_eventually_contains(world: &mut ScenarioWorld, expe
     }
 }
 
+#[then(
+    expr = "OpenTelemetry Collector receives a two-member {string} export followed by a \
+            one-member export"
+)]
+async fn then_otel_collector_receives_split_exports(
+    world: &mut ScenarioWorld,
+    signal: String,
+    #[step] step: &Step,
+) {
+    let (heading, count_key) = match signal.as_str() {
+        "logs" => ("Logs", "log records"),
+        "traces" => ("Traces", "spans"),
+        "metrics" => ("Metrics", "data points"),
+        _ => panic!("unsupported OTEL signal {signal}"),
+    };
+    let expected = expand_placeholders(world, docstring(step));
+    let members = expected
+        .lines()
+        .map(str::trim)
+        .filter(|member| !member.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(members.len(), 3, "the step names exactly three members");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let export_boundary = format!("\tinfo\t{heading}\t");
+    loop {
+        tokio::task::consume_budget().await;
+        let logs = world
+            .dependencies
+            .otel_collector_logs()
+            .await
+            .expect("OpenTelemetry Collector logs must be readable");
+        let mut two_record_export = None;
+        let mut one_record_export = None;
+        for (index, block) in logs.split(export_boundary.as_str()).enumerate() {
+            let count = block
+                .lines()
+                .next()
+                .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .and_then(|header| header[count_key].as_u64());
+            if count == Some(2)
+                && block.find(members[0]).is_some_and(|first| {
+                    block.find(members[1]).is_some_and(|second| first < second)
+                })
+            {
+                two_record_export = Some(index);
+            }
+            if count == Some(1) && block.contains(members[2]) {
+                one_record_export = Some(index);
+            }
+        }
+        if let (Some(first), Some(second)) = (two_record_export, one_record_export)
+            && first < second
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for ordered two-member and one-member {signal} exports"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[then("the last observed broker payload contains")]
 async fn then_last_observed_broker_payload_contains(
     world: &mut ScenarioWorld,
