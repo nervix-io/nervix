@@ -70,18 +70,20 @@ pub(crate) struct LoadReport {
     warmup_generation_seconds: f64,
     warmup_parity_stability_seconds: f64,
     generation_seconds: f64,
-    drain_seconds: f64,
+    producer_flush_seconds: f64,
+    completion_seconds: f64,
     end_to_end_seconds: f64,
     pub(crate) wire_bytes_per_message: u64,
     partitions: u32,
     warmup_messages: u64,
     pub(crate) max_backlog_messages: u64,
     pub(crate) peak_backlog_messages: u64,
+    backlog_messages_at_generation_end: u64,
+    backlog_messages_at_flush: u64,
     input_messages: u64,
     expected_output_records: u64,
     output_records: u64,
     output_validation: OutputValidation,
-    output_records_per_second_during_generation: f64,
     pub(crate) end_to_end_messages_per_second: f64,
     end_to_end_payload_mib_per_second: f64,
 }
@@ -424,16 +426,6 @@ impl BenchmarkRuns {
             .iter()
             .map(|run| run.report.end_to_end_payload_mib_per_second)
             .fold(f64::NEG_INFINITY, f64::max);
-        let best_generation = self
-            .runs
-            .iter()
-            .map(|run| run.report.output_records_per_second_during_generation)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let best_drain = self
-            .runs
-            .iter()
-            .map(|run| run.report.drain_seconds)
-            .fold(f64::INFINITY, f64::min);
         let first = &self.runs[0];
 
         let mut markdown = format!(
@@ -449,21 +441,17 @@ impl BenchmarkRuns {
             format_count(first.manifest.max_backlog_messages),
         );
         markdown.push_str(&format!(
-            "| Implementation | End-to-end | Payload | During generation | Drain ↓ | Output check \
-             | Peak backlog | vs. {baseline_name} |\n"
+            "| Implementation | End-to-end | Payload | Completion tail | Output check | Backlog \
+             peak / after send | vs. {baseline_name} |\n"
         ));
-        markdown.push_str("|:--|--:|--:|--:|--:|--:|--:|--:|\n");
+        markdown.push_str("|:--|--:|--:|--:|--:|--:|--:|\n");
         for (index, run) in self.runs.iter().enumerate() {
             let end_to_end = format!(
                 "{} msg/s",
                 format_rounded_count(run.report.end_to_end_messages_per_second)
             );
             let payload = format!("{:.2} MiB/s", run.report.end_to_end_payload_mib_per_second);
-            let generation = format!(
-                "{} rec/s",
-                format_rounded_count(run.report.output_records_per_second_during_generation)
-            );
-            let drain = format!("{:.3} s", run.report.drain_seconds);
+            let completion = format!("{:.3} s", run.report.completion_seconds);
             let validation = match run.report.output_validation {
                 OutputValidation::IdsAndValues => "✅ IDs and values",
                 OutputValidation::AggregateCount => "⚠️ aggregate count only",
@@ -491,7 +479,8 @@ impl BenchmarkRuns {
                 )
             };
             markdown.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} | {}{} ({backlog_percentage:.1}%) | {relative} |\n",
+                "| {} | {} | {} | {} | {} | {}{} / {} ({backlog_percentage:.1}% peak) | \
+                 {relative} |\n",
                 display_name(&run.manifest.implementation),
                 rank(
                     end_to_end,
@@ -503,15 +492,11 @@ impl BenchmarkRuns {
                     run.report.end_to_end_payload_mib_per_second,
                     best_payload
                 ),
-                rank(
-                    generation,
-                    run.report.output_records_per_second_during_generation,
-                    best_generation,
-                ),
-                rank(drain, run.report.drain_seconds, best_drain),
+                completion,
                 parity,
                 cap_marker,
                 format_count(run.report.peak_backlog_messages),
+                format_count(run.report.backlog_messages_at_generation_end),
             ));
         }
 
@@ -541,8 +526,13 @@ impl BenchmarkRuns {
             }
         }
         markdown.push_str(
-            "\n> [!NOTE]\n> Single-host end-to-end rates include Kafka and the load driver. \
-             Implementations retain their native delivery and batch-size semantics.\n",
+            "\n> [!NOTE]\n> Completion tail starts when input generation ends and includes \
+             producer flush, input visibility checks, and output catch-up. Its duration reflects \
+             how much work remained in that run when generation stopped. Backlog is sampled \
+             between send batches; the cap throttles the producer. A run below the cap can still \
+             accumulate substantial backlog and does not establish maximum capacity. Single-host \
+             end-to-end rates include Kafka and the load driver. Implementations retain their \
+             native delivery and batch-size semantics.\n",
         );
         markdown.push_str("\n<details>\n<summary>Parameters and provenance</summary>\n\n");
         markdown.push_str(&format!(
@@ -743,12 +733,9 @@ fn validate_report(
             report.warmup_parity_stability_seconds,
         ),
         ("generation_seconds", report.generation_seconds),
-        ("drain_seconds", report.drain_seconds),
+        ("producer_flush_seconds", report.producer_flush_seconds),
+        ("completion_seconds", report.completion_seconds),
         ("end_to_end_seconds", report.end_to_end_seconds),
-        (
-            "output_records_per_second_during_generation",
-            report.output_records_per_second_during_generation,
-        ),
         (
             "end_to_end_messages_per_second",
             report.end_to_end_messages_per_second,
@@ -765,6 +752,19 @@ fn validate_report(
     if report.generation_seconds == 0.0 || report.end_to_end_seconds == 0.0 {
         return Err(invalid(
             "generation and end-to-end durations must be positive".to_string(),
+        ));
+    }
+    const TIMING_ROUNDING_TOLERANCE: f64 = 0.000_002;
+    if report.completion_seconds + TIMING_ROUNDING_TOLERANCE < report.producer_flush_seconds {
+        return Err(invalid(
+            "completion tail is shorter than producer flush".to_string(),
+        ));
+    }
+    if report.generation_seconds + report.completion_seconds
+        > report.end_to_end_seconds + TIMING_ROUNDING_TOLERANCE
+    {
+        return Err(invalid(
+            "generation plus completion exceeds end-to-end duration".to_string(),
         ));
     }
     if (report.target_duration_seconds - manifest.duration_seconds.approx_into::<f64>()).abs()
@@ -805,6 +805,16 @@ fn validate_report(
     if report.peak_backlog_messages > report.max_backlog_messages {
         return Err(invalid(
             "peak backlog exceeds its configured cap".to_string(),
+        ));
+    }
+    if report.backlog_messages_at_generation_end > report.peak_backlog_messages {
+        return Err(invalid(
+            "backlog after generation exceeds observed peak".to_string(),
+        ));
+    }
+    if report.backlog_messages_at_flush > report.backlog_messages_at_generation_end {
+        return Err(invalid(
+            "backlog increased after producer flush".to_string(),
         ));
     }
     if report.input_messages == 0 {

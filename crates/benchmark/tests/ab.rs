@@ -61,8 +61,8 @@ warmup_generation_seconds=10.000001
 warmup_parity_stability_seconds=0.500000
 generation_seconds=30.000000
 producer_flush_seconds=0.100000
-drain_seconds=1.500000
-end_to_end_seconds=30.500000
+completion_seconds=1.500000
+end_to_end_seconds=31.500000
 parity_stability_seconds=0.500000
 wire_bytes_per_message=164
 partitions=16
@@ -79,15 +79,11 @@ backlog_messages_at_generation_end=0
 output_records_at_flush=36000
 backlog_messages_at_flush=0
 input_messages_per_second={:.3}
-output_records_per_second_during_generation={:.3}
 end_to_end_messages_per_second={:.3}
 input_payload_mib_per_second=0.160
 end_to_end_payload_mib_per_second=0.160
 "#,
-            fixture.peak_backlog,
-            fixture.end_to_end_rate,
-            fixture.end_to_end_rate,
-            fixture.end_to_end_rate,
+            fixture.peak_backlog, fixture.end_to_end_rate, fixture.end_to_end_rate,
         ),
     );
     write(&directory.join("status.txt"), "pass\n");

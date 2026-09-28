@@ -14,7 +14,7 @@ just benchmark list
 
 `kafka-filter-map` decodes JSON from Kafka, retains records for which `contains(value, "x")` is
 true, uppercases `value`, and publishes JSON to another topic in the same Kafka broker. Every input
-message produces one output message.
+cycle sends one retained and one filtered input, producing one output message.
 
 `kafka-dedup-window` is the stateful-processor workload: decode JSON from Kafka, retain the three
 quarters of records whose value carries the retain marker, drop the duplicate of every key,
@@ -143,8 +143,21 @@ The uniform shapes send a unique `id` per cycle. `uniform-passthrough` expects o
 per input, `uniform-uppercase` expects one uppercase output, and `uniform-fanout` expects the
 declared number of unchanged copies. `uniform-filter-map` sends one retained `x` value and one
 filtered `y` value per cycle and expects one uppercase `X` output. Kafka high watermarks drive the
-timed drain; afterward, a separate consumer verifies every expected ID, copy count, and value
+timed completion; afterward, a separate consumer verifies every expected ID, copy count, and value
 across warm-up and measured records. The audit runs after the end-to-end timer stops.
+
+`completion_seconds` starts immediately after measured input generation ends. It includes the
+producer flush, delivery acknowledgements, input topic visibility check, and wait for the full
+expected output count. `end_to_end_messages_per_second` divides measured input messages by the
+generation plus that completion time. A short completion tail means that most work finished while
+input was still being generated; it does not mean that the whole workload took that tail time.
+
+`peak_backlog_messages` is the largest sampled difference between accepted input and output work
+accounted for between send batches. The cap is a producer throttling ceiling, not a target or a
+measurement of a product's internal queue. Staying below the cap only means that the ceiling was
+not reached; backlog can still grow substantially during a short run. The reported rate is
+achieved throughput, not a measured maximum. The comparison also shows the first backlog sample
+after generation stops and the raw report keeps the samples taken after producer flush.
 
 `keyed-windowed` sends cycles of `keys_per_cycle` distinct keys, each produced `copies_per_key`
 times as one pass over the key list per copy. The first `retained_keys` keys of a cycle carry the
@@ -172,7 +185,7 @@ interval before it establishes the measured-phase baseline. The catalog uses ten
 network, allocator, processor, and output paths reach steady state before measurement begins.
 
 The window that is still filling when generation stops closes on its duration bound, so the
-reported `drain_seconds` for a windowed workload includes up to one `window_max_delay` of waiting
+reported `completion_seconds` for a windowed workload includes up to one `window_max_delay` of waiting
 that is not backlog.
 
 ## Making `MAX BATCH SIZE` bind

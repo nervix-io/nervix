@@ -672,7 +672,7 @@ struct BenchmarkReport {
     warmup_parity_stability_elapsed: Duration,
     generation_elapsed: Duration,
     producer_flush_elapsed: Duration,
-    drain_elapsed: Duration,
+    completion_elapsed: Duration,
     end_to_end_elapsed: Duration,
     parity_stability_elapsed: Duration,
     wire_bytes_per_message: usize,
@@ -698,8 +698,6 @@ impl BenchmarkReport {
         let input_messages = self.input_messages.approx_into::<f64>();
         let input_rate = input_messages / generation_seconds;
         let end_to_end_rate = input_messages / end_to_end_seconds;
-        let output_rate_during_generation =
-            self.output_records_at_generation_end.approx_into::<f64>() / generation_seconds;
         let input_mib =
             input_messages * self.wire_bytes_per_message.approx_into::<f64>() / (1024.0 * 1024.0);
 
@@ -724,7 +722,10 @@ impl BenchmarkReport {
             "producer_flush_seconds={:.6}",
             self.producer_flush_elapsed.as_secs_f64()
         );
-        println!("drain_seconds={:.6}", self.drain_elapsed.as_secs_f64());
+        println!(
+            "completion_seconds={:.6}",
+            self.completion_elapsed.as_secs_f64()
+        );
         println!("end_to_end_seconds={end_to_end_seconds:.6}");
         println!(
             "parity_stability_seconds={:.6}",
@@ -754,7 +755,6 @@ impl BenchmarkReport {
             self.backlog_messages_at_flush
         );
         println!("input_messages_per_second={input_rate:.3}");
-        println!("output_records_per_second_during_generation={output_rate_during_generation:.3}");
         println!("end_to_end_messages_per_second={end_to_end_rate:.3}");
         println!(
             "input_payload_mib_per_second={:.3}",
@@ -915,6 +915,7 @@ impl BenchmarkRunner {
                     target_duration,
                 },
             )?;
+            let completion_started = Instant::now();
             let expected_output_records = self
                 .shape
                 .expected_output_records(measured.cycles())
@@ -985,7 +986,6 @@ impl BenchmarkRunner {
             );
             let backlog_messages_at_flush =
                 self.backlog_messages(at_flush, measured.accepted_messages)?;
-            let drain_started = Instant::now();
             let drained = self.wait_for_output_records(
                 &meter,
                 &output_partitions,
@@ -994,7 +994,7 @@ impl BenchmarkRunner {
                     .context("expected output record count overflowed")?,
                 "benchmark output",
             )?;
-            let drain_elapsed = drain_started.elapsed();
+            let completion_elapsed = completion_started.elapsed();
             let end_to_end_elapsed = measured.started.elapsed();
             let parity_stability_elapsed =
                 self.ensure_output_stable(&meter, &output_partitions, drained, "benchmark output")?;
@@ -1020,7 +1020,7 @@ impl BenchmarkRunner {
                 warmup_parity_stability_elapsed,
                 generation_elapsed: measured.elapsed,
                 producer_flush_elapsed,
-                drain_elapsed,
+                completion_elapsed,
                 end_to_end_elapsed,
                 parity_stability_elapsed,
                 wire_bytes_per_message,
