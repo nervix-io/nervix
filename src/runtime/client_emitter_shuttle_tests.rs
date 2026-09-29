@@ -46,12 +46,12 @@ fn shuttle_competing_consumer_grants_never_exceed_the_node_budget() {
             let mut workers = Vec::new();
             for _ in 0..3 {
                 let budget = budget.clone();
-                workers.push(tokio::spawn(async move {
+                workers.push(nervix_primitives::task::spawn(async move {
                     if let Some(grant) = budget.try_grant(bytes) {
                         assert!(
                             budget.granted.load(Ordering::Acquire) <= CLIENT_CONSUMER_NODE_BYTES
                         );
-                        tokio::task::yield_now().await;
+                        nervix_primitives::task::yield_now().await;
                         assert!(
                             budget.granted.load(Ordering::Acquire) <= CLIENT_CONSUMER_NODE_BYTES
                         );
@@ -105,7 +105,7 @@ fn shuttle_consumer_loss_and_ack_race_release_one_retained_delivery() {
             let closer = first.responder.clone();
             let mut first_deliveries = first.deliveries;
             let publishing = endpoint.clone();
-            let publisher = tokio::spawn(async move {
+            let publisher = nervix_primitives::task::spawn(async move {
                 publishing
                     .publish(ClientEmitterPayload {
                         identity: Uuid::from_u128(1),
@@ -122,11 +122,10 @@ fn shuttle_consumer_loss_and_ack_race_release_one_retained_delivery() {
                 .await
                 .expect("first worker receives attempt");
             let reference = attempt.reference;
-            let ack =
-                tokio::spawn(
-                    async move { answerer.answer(reference, ClientEmitterAnswer::Ack).await },
-                );
-            let close = tokio::spawn(async move {
+            let ack = nervix_primitives::task::spawn(async move {
+                answerer.answer(reference, ClientEmitterAnswer::Ack).await
+            });
+            let close = nervix_primitives::task::spawn(async move {
                 closer.close();
             });
             let ack_result = ack.await.expect("ACK task completes");
@@ -197,7 +196,7 @@ fn shuttle_publish_cancellation_and_ack_race_release_one_reservation() {
                 .expect("consumer opens");
             let responder = consumer.responder.clone();
             let publishing = endpoint.clone();
-            let publisher = tokio::spawn(async move {
+            let publisher = nervix_primitives::task::spawn(async move {
                 publishing
                     .publish(ClientEmitterPayload {
                         identity: Uuid::from_u128(1),
@@ -214,7 +213,7 @@ fn shuttle_publish_cancellation_and_ack_race_release_one_reservation() {
                 .recv()
                 .await
                 .expect("consumer receives attempt");
-            let ack = tokio::spawn(async move {
+            let ack = nervix_primitives::task::spawn(async move {
                 responder
                     .answer(attempt.reference, ClientEmitterAnswer::Ack)
                     .await

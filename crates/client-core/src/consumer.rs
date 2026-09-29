@@ -16,9 +16,11 @@ use nervix_client_wire::{
 use nervix_models::{
     ClientConsumerLimits, DomainName, EmitterName, RelayName, SchemaField, Timestamp,
 };
-use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
+use nervix_primitives::sync::{
+    atomic::{AtomicBool, Ordering},
+    oneshot,
+};
 use nervix_recovery::Discarded as _;
-use tokio::sync::oneshot;
 use triomphe::Arc;
 use uuid::Uuid;
 
@@ -72,11 +74,11 @@ impl Client {
         });
         let opened = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
             for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let exchange = self.inner.exchange.lock().await.requests();
                 let (answer, answered) = oneshot::channel();
                 let request = request.clone();
-                tokio::spawn(async move {
+                nervix_primitives::task::spawn(async move {
                     let result = async {
                         let reply =
                             request_on_exchange(&exchange, request, RequestKind::OpenEmitter)
@@ -201,7 +203,7 @@ impl Drop for EmitterConsumer {
         }
         let exchange = self.inner.exchange.clone();
         let id = self.inner.id;
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        if let Ok(runtime) = nervix_primitives::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 request_on_exchange(
                     &exchange,

@@ -19,9 +19,12 @@ use nervix_client_wire::{
 use nervix_models::{
     CLIENT_CONSUMER_SESSION_BYTES, DomainStatus, EmitSink, MAX_CLIENT_CONSUMERS_PER_SESSION,
 };
-use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
-use parking_lot::Mutex;
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use nervix_primitives::sync::{
+    Mutex as AsyncMutex,
+    atomic::{AtomicBool, Ordering},
+    blocking::Mutex,
+    mpsc,
+};
 use triomphe::Arc;
 
 use super::{QueuedReply, SessionShared};

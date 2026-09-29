@@ -20,14 +20,16 @@ use nervix_models::{
     ClientConsumerLimits, ClusterNodeName, DomainName, EmitterName, RelayName, SchemaField,
     Timestamp,
 };
-use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
+use nervix_primitives::{
+    stream::wrappers::ReceiverStream,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, oneshot,
+    },
+};
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use tokio::{
-    sync::{mpsc, oneshot},
-    time::Instant,
-};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::time::Instant;
 use triomphe::Arc;
 use uuid::Uuid;
 
@@ -172,7 +174,7 @@ impl ClientConsumerRouter {
                         )));
                     }
                     let (answers, received) = mpsc::channel(64);
-                    tokio::spawn(serve_owner(runtime, request, items, answers));
+                    nervix_primitives::task::spawn(serve_owner(runtime, request, items, answers));
                     Ok(DuplexResponses::new(ReceiverStream::new(received).map(Ok)))
                 }
             },
@@ -202,7 +204,7 @@ impl ClientConsumerRouter {
                 .map_err(refusal_for)?;
             let (responder, mut local) = consumer.split();
             let (deliveries, received) = mpsc::unbounded_channel();
-            tokio::spawn(async move {
+            nervix_primitives::task::spawn(async move {
                 while let Some(delivery) = local.recv().await {
                     let payload = delivery.payload;
                     let forwarded = ConsumerDelivery {
@@ -255,7 +257,7 @@ impl ClientConsumerRouter {
         };
         let (commands, incoming) = mpsc::unbounded_channel();
         let (deliveries, received) = mpsc::unbounded_channel();
-        tokio::spawn(serve_forwarded(
+        nervix_primitives::task::spawn(serve_forwarded(
             sender,
             receiver,
             incoming,
@@ -386,12 +388,13 @@ async fn serve_owner(
         return;
     }
     let (responder, deliveries) = consumer.split();
-    let mut forward = tokio::spawn(forward_deliveries(deliveries, answers.clone()));
+    let mut forward =
+        nervix_primitives::task::spawn(forward_deliveries(deliveries, answers.clone()));
     let mut heartbeat = tokio::time::interval(HEARTBEAT_EACH);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_heard = Instant::now();
     loop {
-        tokio::select! {
+        nervix_primitives::select! {
             item = items.next() => match item {
                 Ok(Some(ChargedItem { item: ConsumerItem::Settle { key, reference, answer }, .. })) => {
                     last_heard = Instant::now();
@@ -476,7 +479,7 @@ async fn serve_forwarded(
     grant: NonZeroU64,
 ) {
     let (outbound, mut queued) = mpsc::channel::<ConsumerItem>(64);
-    let mut writer = tokio::spawn(async move {
+    let mut writer = nervix_primitives::task::spawn(async move {
         let mut sender = sender;
         while let Some(item) = queued.recv().await {
             if sender.send(item).await.is_err() {
@@ -492,7 +495,7 @@ async fn serve_forwarded(
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_heard = Instant::now();
     loop {
-        tokio::select! {
+        nervix_primitives::select! {
             event = receiver.next() => {
                 let Ok(Some(event)) = event else { break; };
                 last_heard = Instant::now();

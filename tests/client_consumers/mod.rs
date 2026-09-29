@@ -88,7 +88,7 @@ async fn then_leader_describes_emitter_with(
     let emitter = expand_placeholders(world, &emitter);
     let deadline = Instant::now() + within;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let leader = running_leader_node(world).await;
         let output = world
             .cluster()
@@ -376,7 +376,7 @@ async fn when_consumer_starts_read(world: &mut ScenarioWorld, consumer: String, 
         panic!("the concurrent read check uses a native client");
     };
     let client = client.clone();
-    let wait = tokio::spawn(async move {
+    let wait = nervix_primitives::task::spawn(async move {
         tokio::time::timeout(OPEN_WAIT, client.next_batch())
             .await
             .expect("consumer read deadline")

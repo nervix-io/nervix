@@ -3,8 +3,8 @@
 //! Layer: data plane.
 //! - **Owns.** Competing consumer assignments, attempt revocation, physical retry deadlines,
 //!   bounded retained Arrow bytes, and the application result that releases source work.
-//! - **Depends on.** Typed emitter plans, Arrow schema contracts, Tokio channels and time, and
-//!   the node's execution-sensitive atomic boundary.
+//! - **Depends on.** Typed emitter plans, Arrow schema contracts, the execution-sensitive
+//!   primitive boundary, and physical time.
 //! - **Must not know.** Sessions, their wire format, NSPL text, or a client's transport.
 
 use std::{collections::VecDeque, num::NonZeroU64};
@@ -16,13 +16,14 @@ use nervix_models::{
     AckWindow, CLIENT_CONSUMER_NODE_BYTES, CLIENT_CONSUMER_SESSION_BYTES, DomainName, EmitterName,
     ModelKind, RelayName, SchemaField, Timestamp,
 };
-use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use nervix_primitives::sync::{
+    Notify,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc, oneshot,
+};
 use nervix_recovery::NoReceiver as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use tokio::{
-    sync::{Notify, mpsc, oneshot},
-    time::{Duration, Instant, sleep_until},
-};
+use tokio::time::{Duration, Instant, sleep_until};
 use triomphe::Arc;
 use uuid::Uuid;
 
@@ -296,7 +297,7 @@ impl ClientEmitterEndpoint {
     {
         series.reset_gauges();
         let (commands, receiver) = mpsc::unbounded_channel();
-        tokio::spawn(
+        nervix_primitives::task::spawn(
             Owner {
                 commands: receiver,
                 deliveries: HashMap::default(),
@@ -557,7 +558,7 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
             self.dispatch();
             let wake = self.next_wake();
             let command = match wake {
-                Some(wake) => tokio::select! {
+                Some(wake) => nervix_primitives::select! {
                     command = self.commands.recv() => command,
                     _ = sleep_until(wake) => continue,
                 },
@@ -981,7 +982,7 @@ mod tests {
         )
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn consumers_require_the_exact_output_contract_and_enough_credit() {
         let budget = ClientEmitterBudget::default();
         let endpoint = ClientEmitterEndpoint::new(
@@ -1020,7 +1021,7 @@ mod tests {
         assert!(budget.try_grant(credit).is_some());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn rejecting_a_live_attempt_returns_the_application_reason_to_the_source() {
         let endpoint = ClientEmitterEndpoint::new(
             description(AckWindow::Sequential, Duration::from_secs(2)),
@@ -1036,7 +1037,7 @@ mod tests {
             )
             .await
             .expect("consumer opens");
-        let publisher = tokio::spawn(async move {
+        let publisher = nervix_primitives::task::spawn(async move {
             endpoint
                 .publish(ClientEmitterPayload {
                     identity: Uuid::now_v7(),
@@ -1081,7 +1082,7 @@ mod tests {
             .expect("duplicate rejection is confirmed while retained");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_retry_revokes_the_first_worker_and_keeps_the_payload_until_ack() {
         let budget = ClientEmitterBudget::default();
         let endpoint = ClientEmitterEndpoint::new(
@@ -1100,7 +1101,7 @@ mod tests {
             .expect("second consumer opens");
         let body = Bytes::from_static(b"arrow ipc test bytes");
         let identity = Uuid::now_v7();
-        let producer = tokio::spawn(async move {
+        let producer = nervix_primitives::task::spawn(async move {
             endpoint
                 .publish(ClientEmitterPayload {
                     identity,
@@ -1153,7 +1154,7 @@ mod tests {
             .expect("duplicate ACK remains idempotent while retained");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn sequential_output_blocks_only_its_own_source_and_branch() {
         let endpoint = Arc::new(ClientEmitterEndpoint::new(
             description(AckWindow::Sequential, Duration::from_secs(2)),
@@ -1171,7 +1172,7 @@ mod tests {
             .expect("second consumer opens");
         let publish = |source: &'static str| {
             let endpoint = endpoint.clone();
-            tokio::spawn(async move {
+            nervix_primitives::task::spawn(async move {
                 endpoint
                     .publish(ClientEmitterPayload {
                         identity: Uuid::now_v7(),
@@ -1226,7 +1227,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn sequential_output_assigns_distinct_branches_independently() {
         let endpoint = Arc::new(ClientEmitterEndpoint::new(
             description(AckWindow::Sequential, Duration::from_secs(2)),
@@ -1244,7 +1245,7 @@ mod tests {
             .expect("second consumer opens");
         let publish = |tenant: &'static str| {
             let endpoint = endpoint.clone();
-            tokio::spawn(async move {
+            nervix_primitives::task::spawn(async move {
                 endpoint
                     .publish(ClientEmitterPayload {
                         identity: Uuid::now_v7(),
@@ -1292,7 +1293,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn parallel_window_and_timeout_reassignment_keep_one_live_attempt_per_delivery() {
         let endpoint = Arc::new(ClientEmitterEndpoint::new(
             description(
@@ -1315,7 +1316,7 @@ mod tests {
             .expect("second consumer opens");
         let publish = || {
             let endpoint = endpoint.clone();
-            tokio::spawn(async move {
+            nervix_primitives::task::spawn(async move {
                 endpoint
                     .publish(ClientEmitterPayload {
                         identity: Uuid::now_v7(),
@@ -1339,7 +1340,7 @@ mod tests {
             .expect("second attempt arrives")
             .expect("second consumer stays open");
         let third_publisher = publish();
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         assert!(matches!(
             first.deliveries.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
