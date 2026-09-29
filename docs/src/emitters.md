@@ -1129,8 +1129,8 @@ Without `BATCH`, each pending Arrow batch becomes one Export request containing 
 scope, and all successfully converted records. With `BATCH`, the connector keeps that resource and
 scope in every request, takes successfully converted records in source order, and divides them by
 `MAX MESSAGES` and the exact protobuf size of each Export request. When a candidate exceeds `MAX
-SIZE`, it is halved until each request fits or a singleton is rejected through `ON MESSAGE ERROR`.
-The byte limit measures the uncompressed protobuf request before optional gzip; HTTP and gRPC
+SIZE`, it is halved until each request fits, and a record whose request alone exceeds it follows
+`ON MESSAGE ERROR` as a `validation` error of the `encode` operation. The byte limit measures the uncompressed protobuf request before optional gzip; HTTP and gRPC
 framing and headers are outside it. `FLUSH ... MAX BATCH SIZE` continues to measure the Arrow batch.
 
 Nervix prepares each Export request once. It stamps log `observed_time_unix_nano` from the node's

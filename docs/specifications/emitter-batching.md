@@ -269,11 +269,12 @@ the encoder having tried to encode it alone.
 
 A payload that fits the emitter's `MAX SIZE` but whose message does not fit the destination's own
 limit is rejected with every member it carries, through `ON MESSAGE ERROR` with one shared
-reference. A row sink divides its own writes, so a limit of its destination it knows narrows that
-division instead, as the [native limits](#byte-boundary-and-native-limits) describe. Where the connector learns that limit, it measures the complete message, framing
+reference. Where the connector learns that limit, it measures the complete message, framing
 outside the bound included, and rejects it before writing anything, as the
 [native limits](#byte-boundary-and-native-limits) below list. Where it cannot, the destination's
-own answer decides the outcome exactly as it does for a single record.
+own answer decides the outcome exactly as it does for a single record. A database sink, which
+divides mapped rows into its own requests, instead narrows that division by a limit of its
+destination it knows, as the same native limits describe.
 
 ### Working memory is not wire size
 
