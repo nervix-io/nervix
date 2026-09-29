@@ -2,6 +2,9 @@
 
 The data plane is the runtime execution engine.
 
+It executes the typed revision of a committed schedule. [Execution Plans](./execution-plans.md)
+describes the decisions, local binding, and publication that prepare its tasks.
+
 [Connector Crates And The Connector Contract](./connector-contract.md) defines how the host
 admits external source messages and publishes through external sinks, including their ACK and
 commit boundaries. This chapter follows the Arrow batches those boundaries hand to the graph.
@@ -27,7 +30,8 @@ remain volatile here.
 [Errors And Diagnostics](./errors-and-diagnostics.md) defines how branch-local failures,
 materialized-state outcomes, message errors, and recovery classes reach their reporting boundary.
 
-Decoded rows are processed in memory and are usually carried between runtime nodes as Apache Arrow batches rather than as individually serialized documents. That gives the runtime a columnar format suitable for fast vectorized processing and cheap batch serialization/deserialization.
+Decoded messages are processed in memory as Apache Arrow batches, including batches with one row.
+That gives the runtime a columnar format suitable for vectorized processing and batch transfer.
 
 Nervix has three separate persistence boundaries:
 
