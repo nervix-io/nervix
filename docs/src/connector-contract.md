@@ -303,6 +303,11 @@ source batch through the emitter's message error policy. Stop requests retain th
 deadline-bounded final flush and transport finish, and a stopped interaction performs its final
 drain before the loop exits.
 
+When that policy sends a failed emitter record to a DLQ, the host executes the message-error SET
+program bound during domain installation or replacement. The prepared route retains the input and
+optional attempted codec-record schemas, the source branch, relay target and flush cadence. The
+connector receives no error-record Model or VM program and makes no DLQ routing decision.
+
 For a record sink using the emitter `BATCH` clause, the host selects rows from successive
 Arc-backed Arrow carriers released by one flush. It retains each carrier's source relay, exact
 branch key, execution time and original batch and row position. The host prepares members in

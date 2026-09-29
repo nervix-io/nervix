@@ -6433,6 +6433,23 @@ name = "nervix-approx-into"
 version = "0.1.0-dev"
 
 [[package]]
+name = "nervix-backup"
+version = "0.1.0-dev"
+dependencies = [
+ "arch-into",
+ "blake3",
+ "bolero",
+ "error-stack",
+ "meticulous",
+ "nervix-models",
+ "rkyv",
+ "rstest",
+ "strum 0.26.3",
+ "tar",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "nervix-benchmark"
 version = "0.1.0-dev"
 dependencies = [
@@ -6484,6 +6501,7 @@ dependencies = [
  "clap_complete",
  "error-stack",
  "meticulous",
+ "nervix-backup",
  "nervix-client-core",
  "nervix-models",
  "nervix-nspl",
@@ -6491,6 +6509,7 @@ dependencies = [
  "reedline",
  "rpassword",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "triomphe",
@@ -6505,6 +6524,7 @@ dependencies = [
  "arch-into",
  "async-tar",
  "base64 0.22.1",
+ "blake3",
  "error-stack",
  "indexmap 2.14.2",
  "meticulous",
@@ -7253,6 +7273,7 @@ dependencies = [
  "humantime",
  "meticulous",
  "nervix-approx-into",
+ "nervix-backup",
  "nervix-models",
  "nervix-vm",
  "nonzero_ext",
@@ -7380,6 +7401,7 @@ dependencies = [
  "multer",
  "mysql_async",
  "nervix-approx-into",
+ "nervix-backup",
  "nervix-bounded-write",
  "nervix-client-core",
  "nervix-client-ffi",

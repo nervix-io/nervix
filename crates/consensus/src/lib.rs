@@ -567,6 +567,26 @@ pub struct UserCredentials {
     pub password_hash: String,
 }
 
+/// The replicated configuration of the cluster as one applied revision left it.
+#[derive(Debug, Clone)]
+pub struct ConfigurationCapture {
+    /// The log entry the capture reflects.
+    pub applied: AppliedLogPosition,
+    pub domains: BTreeMap<DomainName, DomainState>,
+    /// Every domain's Models, as its schedule places them.
+    pub schedule: ClusterSchedule,
+    pub users: BTreeMap<UserName, UserCredentials>,
+    pub resources: ResourceVersionStatus,
+}
+
+/// An applied Raft log entry: the term of the leader that wrote it and its index, which is also
+/// the revision every read at that point reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppliedLogPosition {
+    pub term: u64,
+    pub index: u64,
+}
+
 impl std::fmt::Display for ConsensusCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2554,6 +2574,24 @@ impl Observer {
             last_log_index: metrics.last_log_index,
             retained_bytes: self.inner.store.retained_log_bytes(),
         }
+    }
+
+    /// Capture the replicated configuration a backup reads, every part of it from one applied
+    /// revision, so no change committed while the backup runs can show in some parts and not in
+    /// others. Absent until the state machine has applied its first log entry.
+    pub async fn configuration_capture(&self) -> Option<ConfigurationCapture> {
+        let state = self.inner.store.inner.state();
+        let applied = state.last_applied_log_id.as_ref()?;
+        Some(ConfigurationCapture {
+            applied: AppliedLogPosition {
+                term: applied.leader_id.term,
+                index: applied.index,
+            },
+            domains: (&state.domains).into(),
+            schedule: (&state.schedule).into(),
+            users: (&state.users).into(),
+            resources: (&state.resources).into(),
+        })
     }
 
     pub async fn current_users(&self) -> BTreeMap<UserName, UserCredentials> {
@@ -7153,6 +7191,7 @@ mod tests {
             statements: Vec::new(),
             transaction: None,
             transaction_admission: None,
+            backup: None,
         };
         for terminal in [result.clone(), result.clone()] {
             let response = apply_consensus_command(
@@ -7431,6 +7470,7 @@ mod tests {
                     statements: Vec::new(),
                     transaction: None,
                     transaction_admission: None,
+                    backup: None,
                 }),
             },
         );

@@ -2,7 +2,8 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** Incomplete and context-invalidated resource pins for client mounts and VHOST TLS.
+//! - **Owns.** Incomplete and context-invalidated resource pins for clients, VHOSTs, codecs,
+//!   signaling protocols, and hash maps.
 //! - **Depends on.** Typed resource names and requested resource versions.
 //! - **Must not know.** Resource storage, upload execution, or version resolution at apply time.
 

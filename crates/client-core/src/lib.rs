@@ -4,8 +4,8 @@
 //!
 //! - **Owns.** Connecting to the session service, TLS selection, the dispatcher that pairs every
 //!   reply of a session exchange with the request it answers, submitting statements, transaction
-//!   state, completion suggestions, subscription streams, the domain clocks the session follows and
-//!   resource upload.
+//!   state, completion suggestions, subscription streams, the domain clocks the session follows,
+//!   resource upload and backup download.
 //! - **Depends on.** The session wire contract, the language layer — an edge may name the parser,
 //!   and this one does so for client-side parsing and completion — and the vocabulary.
 //! - **Must not know.** The registry, the runtime, or anything else inside the server. Everything
@@ -16,6 +16,7 @@ extern crate shuttle_tokio as tokio;
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio_stream as tokio_stream;
 
+mod backup;
 mod client;
 mod connection;
 mod domain_clock;
@@ -26,6 +27,7 @@ mod outcome;
 mod subscriptions;
 mod upload;
 
+pub use backup::BackupDownloadError;
 pub use client::{Client, ExecutionHandle};
 pub use connection::{ConnectOptions, TlsRequirement};
 pub use domain_clock::{
@@ -50,6 +52,7 @@ pub use nervix_client_wire::{
     SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause, UploadFailure,
 };
 pub use nervix_models::{
+    ArchiveDigest, BackupArchiveSummary, BackupDomainSummary, BackupResources,
     CommandExecutionReference, DomainAdmissionWindow, DomainClockObservation,
     DomainClockObservedState, DomainClockTickObservation, DomainName, ImpactPlanningBasis,
     PacedDomainClock, ResourceUploadIdentity, SubscriptionDeliveryBehavior, Timestamp,

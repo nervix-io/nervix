@@ -1,0 +1,11 @@
+// The request that asks for a retained backup archive.
+//
+// This file declares a frame root for code generators; every shape it names lives in session.fbs.
+
+include "session.fbs";
+
+namespace nervix.session;
+
+root_type BackupDownloadRequest;
+file_identifier "NXBQ";
+file_extension "nxbq";

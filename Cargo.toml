@@ -104,6 +104,7 @@ indexmap = { workspace = true }
 meticulous = { workspace = true }
 multer = { workspace = true }
 nervix-approx-into = { workspace = true }
+nervix-backup = { workspace = true }
 nervix-bounded-write = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-client-wire = { workspace = true }
@@ -287,6 +288,7 @@ required-features = ["benchmarks"]
 members = [
   ".",
   "crates/approx-into",
+  "crates/backup",
   "crates/benchmark",
   "crates/bounded-write",
   "crates/client-core",
@@ -493,6 +495,7 @@ mongodb = { version = "3.6.0", default-features = false, features = [
 multer = "3"
 mysql_async = "0.36.2"
 nervix-approx-into = { package = "nervix-approx-into", path = "crates/approx-into" }
+nervix-backup = { package = "nervix-backup", path = "crates/backup" }
 nervix-bounded-write = { package = "nervix-bounded-write", path = "crates/bounded-write" }
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-client-ffi = { package = "nervix-client-ffi", path = "crates/client-ffi" }
@@ -754,6 +757,8 @@ opt-level = 3
 [profile.dev.package."arrow-string"]
 opt-level = 3
 [profile.dev.package."roto"]
+opt-level = 3
+[profile.dev.package."blake3"]
 opt-level = 3
 [profile.dev.package."cranelift-codegen"]
 opt-level = 3
