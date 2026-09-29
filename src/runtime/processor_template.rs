@@ -737,7 +737,6 @@ impl BranchInstanceTemplate {
                         runtime: runtime.clone(),
                         domain: domain.clone(),
                         relay: relay.clone(),
-                        registry: template.registry.clone(),
                         services: template.services.clone(),
                         key: key.clone(),
                     }),

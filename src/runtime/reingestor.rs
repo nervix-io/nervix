@@ -1265,12 +1265,17 @@ mod tests {
         ));
         let mut fan_in =
             RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
-        let services = Arc::new(RelayBoundaryServices::new(fanout, 1, 0, Vec::new(), None));
-        let registry = RelayRegistry::new();
+        let services = Arc::new(RelayBoundaryServices::new(
+            fanout,
+            1,
+            0,
+            Vec::new(),
+            None,
+            RelayRegistry::new(),
+        ));
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,
             &root_relay,
-            registry.clone(),
             services.clone(),
             RelayRetention::default(),
         );
@@ -1287,7 +1292,6 @@ mod tests {
             relays: [(
                 root_relay.clone(),
                 RelayProcessorRelayTemplate {
-                    registry,
                     services: services.clone(),
                 },
             )]
@@ -1424,12 +1428,11 @@ mod tests {
             0,
             Vec::new(),
             None,
+            RelayRegistry::new(),
         ));
-        let registry = RelayRegistry::new();
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,
             &root_relay,
-            registry.clone(),
             services.clone(),
             RelayRetention::default(),
         );
@@ -1446,7 +1449,6 @@ mod tests {
             relays: [(
                 root_relay.clone(),
                 RelayProcessorRelayTemplate {
-                    registry,
                     services: services.clone(),
                 },
             )]
@@ -1526,12 +1528,10 @@ mod tests {
         let domain = domain("default");
         install_unpaced_test_domain(&runtime, &domain);
         let relay = named("tenant_orders");
-        let output_registry = RelayRegistry::new();
         let output_services = test_relay_boundary_services();
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,
             &relay,
-            output_registry.clone(),
             output_services.clone(),
             RelayRetention::default(),
         );
@@ -1597,7 +1597,6 @@ mod tests {
                     relays: [(
                         relay.clone(),
                         RelayProcessorRelayTemplate {
-                            registry: output_registry.clone(),
                             services: output_services.clone(),
                         },
                     )]

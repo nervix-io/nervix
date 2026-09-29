@@ -23,7 +23,6 @@ pub(super) struct BoundMessageErrorRoute {
 }
 
 pub(super) struct MessageErrorRouteBindingContext<'a> {
-    pub(super) relay_registries: &'a HashMap<RelayName, RelayRegistry>,
     pub(super) relay_services: &'a HashMap<RelayName, Arc<RelayBoundaryServices>>,
     pub(super) materialized_stream_specs: &'a HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     pub(super) lookups: &'a HashMap<LookupName, Arc<LookupRuntime>>,
@@ -39,18 +38,8 @@ impl BoundMessageErrorRoutes {
         for spec in specs.routes {
             let key = spec.key;
             let relay = &key.error_relay;
-            let registry = context
-                .relay_registries
-                .get(relay)
-                .cloned()
-                .ok_or_else(|| {
-                    error_stack::Report::new(MessageErrorHandlingError::DlqRelayNotInstantiated {
-                        domain: key.domain.clone(),
-                        relay: relay.clone(),
-                    })
-                })?;
             let services = context.relay_services.get(relay).cloned().ok_or_else(|| {
-                error_stack::Report::new(MessageErrorHandlingError::DlqServicesNotInstantiated {
+                error_stack::Report::new(MessageErrorHandlingError::DlqRelayNotInstantiated {
                     domain: key.domain.clone(),
                     relay: relay.clone(),
                 })
@@ -95,7 +84,7 @@ impl BoundMessageErrorRoutes {
             let route = Arc::new(BoundMessageErrorRoute {
                 key: key.clone(),
                 schema: spec.output_schema,
-                target: MessageErrorRouteTarget { registry, services },
+                target: MessageErrorRouteTarget { services },
                 branching: spec.target_branching,
                 program,
                 flush_policy,
@@ -171,22 +160,21 @@ mod tests {
             0,
             Vec::new(),
             None,
+            RelayRegistry::new(),
         ))
     }
 
     #[test]
     fn binding_classifies_missing_relay_services_and_invalid_route_contracts() {
         let relay = named::<RelayName>("errors");
-        let registries = HashMap::default();
         let relay_services = HashMap::default();
         let materialized = HashMap::default();
         let lookups = HashMap::default();
         let udfs = UdfExecutor::default();
-        let bind = |spec, registries: &HashMap<_, _>, relay_services: &HashMap<_, _>| {
+        let bind = |spec, relay_services: &HashMap<_, _>| {
             BoundMessageErrorRoutes::bind(
                 MessageErrorRouteSpecs { routes: vec![spec] },
                 MessageErrorRouteBindingContext {
-                    relay_registries: registries,
                     relay_services,
                     materialized_stream_specs: &materialized,
                     lookups: &lookups,
@@ -195,21 +183,12 @@ mod tests {
             )
         };
 
-        let Err(error) = bind(spec(None), &registries, &relay_services) else {
-            panic!("a missing relay registry must fail binding");
+        let Err(error) = bind(spec(None), &relay_services) else {
+            panic!("a relay without boundary services must fail binding");
         };
         assert!(matches!(
             error.current_context(),
             MessageErrorHandlingError::DlqRelayNotInstantiated { .. }
-        ));
-
-        let registries = HashMap::from_iter([(relay.clone(), RelayRegistry::new())]);
-        let Err(error) = bind(spec(None), &registries, &relay_services) else {
-            panic!("missing relay services must fail binding");
-        };
-        assert!(matches!(
-            error.current_context(),
-            MessageErrorHandlingError::DlqServicesNotInstantiated { .. }
         ));
 
         let relay_services = HashMap::from_iter([(relay, services())]);
@@ -217,7 +196,7 @@ mod tests {
             interval: "not-a-duration".to_string(),
             max_batch_size: "1MiB".to_string(),
         };
-        let Err(error) = bind(spec(Some(invalid_flush)), &registries, &relay_services) else {
+        let Err(error) = bind(spec(Some(invalid_flush)), &relay_services) else {
             panic!("invalid flush policy must fail binding");
         };
         assert!(matches!(
@@ -231,7 +210,7 @@ mod tests {
                 .expect("the test assignment parses")
                 .assignments,
         );
-        let Err(error) = bind(invalid_set, &registries, &relay_services) else {
+        let Err(error) = bind(invalid_set, &relay_services) else {
             panic!("an invalid SET must fail VM compilation at binding");
         };
         assert!(matches!(
@@ -239,12 +218,8 @@ mod tests {
             MessageErrorHandlingError::ProgramCompilation { .. }
         ));
 
-        let plan = bind(
-            spec(Some(FlushPolicy::Immediate)),
-            &registries,
-            &relay_services,
-        )
-        .expect("a valid route is bound once");
+        let plan = bind(spec(Some(FlushPolicy::Immediate)), &relay_services)
+            .expect("a valid route is bound once");
         let key = spec(None).key;
         assert!(plan.get(&key).is_some());
         let Err(error) = BoundMessageErrorRoutes::bind(
@@ -252,7 +227,6 @@ mod tests {
                 routes: vec![spec(None), spec(None)],
             },
             MessageErrorRouteBindingContext {
-                relay_registries: &registries,
                 relay_services: &relay_services,
                 materialized_stream_specs: &materialized,
                 lookups: &lookups,

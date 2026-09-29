@@ -592,10 +592,9 @@ pub(super) fn push_remote_runtime_consumer(
     });
 }
 
-/// The instantiated relay a remote payload is delivered into: the registry that accepts it, the
-/// boundary services that own it, and the schema its Arrow batch must decode against.
+/// The instantiated relay a remote payload is delivered into: the boundary services that own it,
+/// and the schema its Arrow batch must decode against.
 pub(in crate::runtime) struct RemoteRelayTarget {
-    pub(super) registry: RelayRegistry,
     pub(super) services: Arc<RelayBoundaryServices>,
     pub(super) schema: Arc<CompiledSchema>,
 }
@@ -771,12 +770,6 @@ impl Runtime {
                 relay: relay.as_str().to_string(),
             });
         }
-        let Some(registry) = routing.relay_registries.get(relay).cloned() else {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: relay.as_str().to_string(),
-            });
-        };
         let Some(services) = routing.relay_services.get(relay).cloned() else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
@@ -789,11 +782,7 @@ impl Runtime {
                 relay: relay.as_str().to_string(),
             });
         };
-        Ok(RemoteRelayTarget {
-            registry,
-            services,
-            schema,
-        })
+        Ok(RemoteRelayTarget { services, schema })
     }
 
     pub(in crate::runtime) async fn wait_for_remote_stream_target(
@@ -842,11 +831,7 @@ impl Runtime {
         routing: &mut DomainRoutingCache,
         admission: Option<RemoteRelayAdmissionContext<'_>>,
     ) -> Result<(), RuntimeError> {
-        let RemoteRelayTarget {
-            registry,
-            services,
-            schema,
-        } = self
+        let RemoteRelayTarget { services, schema } = self
             .wait_for_remote_stream_target(routing, &remote.domain, &remote.relay)
             .await?;
         if owner_ingress && !self.owns_relay(&services) {
@@ -922,7 +907,6 @@ impl Runtime {
                 self.ingest_stream_boundary_message(
                     &remote.domain,
                     &remote.relay,
-                    &registry,
                     &services,
                     &batch,
                 )

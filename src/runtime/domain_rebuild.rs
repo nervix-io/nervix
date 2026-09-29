@@ -451,7 +451,7 @@ impl Runtime {
                 RelaySubscriptionDefinition::new(relay.schema.clone(), relay.branching.clone()),
             ))
             .await;
-            let registry = match expiring_state.as_ref() {
+            let branch_presence = match expiring_state.as_ref() {
                 Some(state) => state.registry.clone(),
                 None => RelayRegistry::new(),
             };
@@ -461,7 +461,7 @@ impl Runtime {
                     fanout,
                     attached_runtime_consumer_count: 0,
                     detached_runtime_consumer_count: 0,
-                    registry,
+                    branch_presence,
                     remote_runtime_consumers: Vec::new(),
                 },
             );
@@ -676,11 +676,7 @@ impl Runtime {
                 .unwrap_or_default();
         }
 
-        let relay_registries = relay_builders
-            .iter()
-            .map(|(identifier, relay)| (identifier.clone(), relay.registry.clone()))
-            .collect::<HashMap<_, _>>();
-        for relay in relay_registries.keys() {
+        for relay in relay_builders.keys() {
             if !revision
                 .nodes
                 .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
@@ -703,6 +699,7 @@ impl Runtime {
                         relay.detached_runtime_consumer_count,
                         relay.remote_runtime_consumers,
                         remote_dispatcher.clone(),
+                        relay.branch_presence,
                     )),
                 )
             })
@@ -730,18 +727,11 @@ impl Runtime {
                 .verified(
                     "these maps were built from the same scheduled relay nodes this loop walks",
                 );
-            let registry = relay_registries
-                .get(&RelayName::from(&node.identifier))
-                .cloned()
-                .verified(
-                    "these maps were built from the same scheduled relay nodes this loop walks",
-                );
             relay_owner_tasks.insert(
                 RelayName::from(&node.identifier),
                 self.spawn_relay_owner_task(
                     domain,
                     &RelayName::from(&node.identifier),
-                    registry,
                     services,
                     activation_plan
                         .relays
@@ -764,7 +754,6 @@ impl Runtime {
                 runtime: self,
                 domain,
                 relay_schemas: &relay_schemas,
-                relay_registries: &relay_registries,
                 relay_services: &relay_services,
                 relay_branchings: &relay_branchings,
                 materialized_stream_specs: &materialized_stream_specs,
@@ -782,7 +771,6 @@ impl Runtime {
             BoundMessageErrorRoutes::bind(
                 revision.message_errors.clone(),
                 MessageErrorRouteBindingContext {
-                    relay_registries: &relay_registries,
                     relay_services: &relay_services,
                     materialized_stream_specs: &materialized_stream_specs,
                     lookups: &lookup_runtimes,
@@ -831,14 +819,8 @@ impl Runtime {
             if !generator.assignment.executes_on(Some(local_node_id)) {
                 continue;
             }
-            let spec = GeneratorTaskSpec::bind(
-                domain,
-                generator,
-                &relay_registries,
-                &relay_services,
-                &udf_executor,
-            )
-            .map_err(|report| RuntimeError::BuildDomainExecution {
+            let spec = GeneratorTaskSpec::bind(domain, generator, &relay_services, &udf_executor)
+                .map_err(|report| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!("generator binding failed: {report:#}"),
             })?;
@@ -884,7 +866,6 @@ impl Runtime {
                 execution_build_deps,
                 &shutdown_tx,
                 RelayRuntimeHandles {
-                    registries: &relay_registries,
                     services: &relay_services,
                 },
                 reingestor_inputs,
@@ -902,7 +883,6 @@ impl Runtime {
                     domain,
                     DomainRoutingSnapshot {
                         passive_only: false,
-                        relay_registries,
                         relay_schemas,
                         relay_services,
                         lookups: lookup_runtimes,
@@ -999,7 +979,7 @@ impl Runtime {
                     fanout,
                     attached_runtime_consumer_count: 0,
                     detached_runtime_consumer_count: 0,
-                    registry: RelayRegistry::new(),
+                    branch_presence: RelayRegistry::new(),
                     remote_runtime_consumers: Vec::new(),
                 },
             );
@@ -1044,10 +1024,6 @@ impl Runtime {
         }
 
         let (shutdown, _) = watch::channel(false);
-        let relay_registries = relay_builders
-            .iter()
-            .map(|(identifier, relay)| (identifier.clone(), relay.registry.clone()))
-            .collect::<HashMap<_, _>>();
         let relay_services = relay_builders
             .into_iter()
             .map(|(identifier, relay)| {
@@ -1059,6 +1035,7 @@ impl Runtime {
                         relay.detached_runtime_consumer_count,
                         relay.remote_runtime_consumers,
                         None,
+                        relay.branch_presence,
                     )),
                 )
             })
@@ -1067,7 +1044,6 @@ impl Runtime {
             BoundMessageErrorRoutes::bind(
                 revision.message_errors.clone(),
                 MessageErrorRouteBindingContext {
-                    relay_registries: &relay_registries,
                     relay_services: &relay_services,
                     materialized_stream_specs: &materialized_stream_specs,
                     lookups: &lookups,
@@ -1092,7 +1068,6 @@ impl Runtime {
                 domain,
                 DomainRoutingSnapshot {
                     passive_only: true,
-                    relay_registries,
                     relay_schemas,
                     relay_services,
                     lookups,

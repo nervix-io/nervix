@@ -79,15 +79,6 @@ pub(super) enum MessageErrorHandlingError {
         domain: DomainName,
         relay: RelayName,
     },
-    #[error(
-        "DLQ relay '{}' services are not instantiated in domain '{}'",
-        .relay.as_str(),
-        .domain.as_str()
-    )]
-    DlqServicesNotInstantiated {
-        domain: DomainName,
-        relay: RelayName,
-    },
     #[error("message-error route is not prepared for {} '{}' to relay '{}'", .route.node.kind.as_str(), .route.node.identifier.as_str(), .route.error_relay.as_str())]
     PreparedRouteUnavailable { route: MessageErrorRouteKey },
     #[error("duplicate prepared message-error route for {} '{}' to relay '{}'", .route.node.kind.as_str(), .route.node.identifier.as_str(), .route.error_relay.as_str())]
@@ -815,21 +806,15 @@ impl Runtime {
             )
             .await?;
         } else {
-            self.ingest_stream_boundary_message(
-                domain,
-                relay,
-                &route_plan.target.registry,
-                &route_plan.target.services,
-                &batch,
-            )
-            .await
-            .map_err(|_| {
-                error_stack::Report::new(MessageErrorHandlingError::RelayRejected {
-                    domain: domain.clone(),
-                    node: route_key.node,
-                    relay: relay.clone(),
-                })
-            })?;
+            self.ingest_stream_boundary_message(domain, relay, &route_plan.target.services, &batch)
+                .await
+                .map_err(|_| {
+                    error_stack::Report::new(MessageErrorHandlingError::RelayRejected {
+                        domain: domain.clone(),
+                        node: route_key.node,
+                        relay: relay.clone(),
+                    })
+                })?;
             message.acks.ack_success();
         }
         Ok(())

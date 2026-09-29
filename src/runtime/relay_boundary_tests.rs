@@ -253,12 +253,10 @@ async fn relay_dispatch_detaches_subscription_delivery_from_ack_chain() {
     install_unpaced_test_domain(&runtime, &domain);
     let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("customer_id", ParseAsType::String)]);
-    let registry = RelayRegistry::new();
     let services = test_relay_boundary_services();
     let owner_task = runtime.spawn_relay_owner_task(
         &domain,
         &relay,
-        registry.clone(),
         services.clone(),
         RelayRetention::default(),
     );
@@ -280,7 +278,7 @@ async fn relay_dispatch_detaches_subscription_delivery_from_ack_chain() {
     .expect("batch should build");
 
     runtime
-        .ingest_stream_boundary_message(&domain, &relay, &registry, &services, &batch)
+        .ingest_stream_boundary_message(&domain, &relay, &services, &batch)
         .await
         .expect("dispatch should succeed");
 
@@ -320,12 +318,10 @@ async fn relay_dispatch_detaches_detached_runtime_consumers_from_ack_chain() {
     install_unpaced_test_domain(&runtime, &domain);
     let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
-    let registry = RelayRegistry::new();
     let services = test_relay_boundary_services();
     let owner_task = runtime.spawn_relay_owner_task(
         &domain,
         &relay,
-        registry.clone(),
         services.clone(),
         RelayRetention::default(),
     );
@@ -342,7 +338,7 @@ async fn relay_dispatch_detaches_detached_runtime_consumers_from_ack_chain() {
     .expect("batch should build");
 
     runtime
-        .ingest_stream_boundary_message(&domain, &relay, &registry, &services, &batch)
+        .ingest_stream_boundary_message(&domain, &relay, &services, &batch)
         .await
         .expect("dispatch should succeed");
 
@@ -372,12 +368,10 @@ async fn relay_runtime_consumer_broadcast_fans_out_to_multiple_attached_receiver
     install_unpaced_test_domain(&runtime, &domain);
     let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
-    let registry = RelayRegistry::new();
     let services = test_relay_boundary_services();
     let owner_task = runtime.spawn_relay_owner_task(
         &domain,
         &relay,
-        registry.clone(),
         services.clone(),
         RelayRetention::default(),
     );
@@ -398,7 +392,7 @@ async fn relay_runtime_consumer_broadcast_fans_out_to_multiple_attached_receiver
     .expect("batch should build");
 
     runtime
-        .ingest_stream_boundary_message(&domain, &relay, &registry, &services, &batch)
+        .ingest_stream_boundary_message(&domain, &relay, &services, &batch)
         .await
         .expect("dispatch should succeed");
     acks.ack_success();
@@ -434,7 +428,6 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
     install_unpaced_test_domain(&runtime, &domain);
     let relay = RelayName::parse("notifications").expect("valid identifier");
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
-    let registry = RelayRegistry::new();
     let branch_collapse = Arc::new(BranchCollapseNode::with_capacity(
         STUPID_CHANNEL_CAPACITY_REMOVE_ME,
     ));
@@ -450,11 +443,11 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
         0,
         Vec::new(),
         None,
+        RelayRegistry::new(),
     ));
     let owner_task = runtime.spawn_relay_owner_task(
         &domain,
         &relay,
-        registry.clone(),
         services.clone(),
         RelayRetention::default(),
     );
@@ -462,7 +455,6 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
         runtime: runtime.clone(),
         domain: domain.clone(),
         relay: relay.clone(),
-        registry,
         services,
         key: Some(concrete_branch_key([(
             named("user_id"),
@@ -817,11 +809,15 @@ async fn owner_ingress_touches_expiring_stream_state() {
     let expiring_state = runtime
         .expiring_stream_state(&domain, &relay_id)
         .expect("the relay's state identity is published");
-    let registry = expiring_state.registry.clone();
-    let services = test_relay_boundary_services();
+    let services = Arc::new(RelayBoundaryServices::new(
+        RelayBoundaryFanout::direct_with_capacity(STUPID_CHANNEL_CAPACITY_REMOVE_ME),
+        0,
+        0,
+        Vec::new(),
+        None,
+        expiring_state.registry.clone(),
+    ));
     let (shutdown, _) = watch::channel(false);
-    let mut relay_registries = HashMap::default();
-    relay_registries.insert(relay_id.clone(), registry);
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let mut relay_schemas = HashMap::default();
     relay_schemas.insert(relay_id.clone(), schema.clone());
@@ -837,7 +833,6 @@ async fn owner_ingress_touches_expiring_stream_state() {
             routing: runtime.stage_domain_routing(
                 &domain,
                 DomainRoutingSnapshot {
-                    relay_registries,
                     relay_schemas,
                     relay_services,
                     ..DomainRoutingSnapshot::default()
@@ -864,13 +859,8 @@ async fn owner_ingress_touches_expiring_stream_state() {
         .expect("batch ipc should serialize");
 
     let key = u32_branch_key("user_id", 42);
-    let owner_task = runtime.spawn_relay_owner_task(
-        &domain,
-        &relay_id,
-        expiring_state.registry.clone(),
-        services,
-        RelayRetention::default(),
-    );
+    let owner_task =
+        runtime.spawn_relay_owner_task(&domain, &relay_id, services, RelayRetention::default());
     runtime
         .handle_remote_stream_payload_with_owner_ingress(
             RelayPayload {
@@ -939,7 +929,6 @@ async fn a_routed_attached_delivery_fails_on_a_node_that_no_longer_runs_its_cons
         &domain,
         Vec::new(),
         DomainRoutingSnapshot {
-            relay_registries: HashMap::from_iter([(relay.clone(), RelayRegistry::new())]),
             relay_schemas: HashMap::from_iter([(relay.clone(), schema.clone())]),
             relay_services: HashMap::from_iter([(relay.clone(), services)]),
             ..DomainRoutingSnapshot::default()
@@ -1055,12 +1044,10 @@ async fn relay_owner_enforces_branch_capacity_across_batches() {
     let domain = domain("default");
     install_unpaced_test_domain(&runtime, &domain);
     let relay = named("orders");
-    let registry = RelayRegistry::new();
     let services = test_relay_boundary_services();
     let owner_task = runtime.spawn_relay_owner_task(
         &domain,
         &relay,
-        registry.clone(),
         services.clone(),
         RelayRetention {
             branch_ttl: None,
@@ -1091,9 +1078,9 @@ async fn relay_owner_enforces_branch_capacity_across_batches() {
     timeout(Duration::from_secs(1), async {
         loop {
             nervix_primitives::task::consume_budget().await;
-            if !registry.contains_key(&keys[0])
-                && registry.contains_key(&keys[1])
-                && registry.contains_key(&keys[2])
+            if !services.branch_presence.contains_key(&keys[0])
+                && services.branch_presence.contains_key(&keys[1])
+                && services.branch_presence.contains_key(&keys[2])
             {
                 break;
             }
@@ -1126,12 +1113,10 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
     install_unpaced_test_domain(&runtime, &domain);
     let relay = named("orders");
     let key = string_branch_key("tenant", "acme");
-    let registry = RelayRegistry::new();
     let services = test_relay_boundary_services();
     let owner_task = runtime.spawn_relay_owner_task(
         &domain,
         &relay,
-        registry.clone(),
         services.clone(),
         RelayRetention {
             branch_ttl: Some(Duration::from_millis(20)),
@@ -1151,7 +1136,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
         .expect("owner should admit the batch");
 
     timeout(Duration::from_secs(1), async {
-        while !registry.contains_key(&key) {
+        while !services.branch_presence.contains_key(&key) {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
         }
@@ -1161,7 +1146,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
     timeout(Duration::from_secs(1), async {
         loop {
             nervix_primitives::task::consume_budget().await;
-            if !registry.contains_key(&key) {
+            if !services.branch_presence.contains_key(&key) {
                 break;
             }
             sleep(Duration::from_millis(5)).await;

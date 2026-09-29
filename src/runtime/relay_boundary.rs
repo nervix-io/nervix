@@ -80,7 +80,6 @@ pub(super) struct ConcreteRelayRuntime {
     pub(super) runtime: Runtime,
     pub(super) domain: DomainName,
     pub(super) relay: RelayName,
-    pub(super) registry: RelayRegistry,
     pub(super) services: Arc<RelayBoundaryServices>,
 }
 
@@ -89,7 +88,6 @@ pub(super) struct ConcreteRelayRuntimeBuild {
     pub(super) runtime: Runtime,
     pub(super) domain: DomainName,
     pub(super) relay: RelayName,
-    pub(super) registry: RelayRegistry,
     pub(super) services: Arc<RelayBoundaryServices>,
 }
 
@@ -101,6 +99,9 @@ pub(super) struct RelayBoundaryServices {
     pub(super) remote_runtime_consumers: ArcSwap<Vec<RemoteRuntimeConsumer>>,
     pub(super) remote_dispatcher: Option<StdArc<RemoteDispatcher>>,
     pub(super) owner_node: ArcSwapOption<ClusterNodeName>,
+    /// The concrete branches this node's owner of the relay holds, as `DESCRIBE` and materialized
+    /// reads observe them.
+    pub(super) branch_presence: RelayRegistry,
     pub(super) ingress_slots: DashMap<Option<BranchKey>, Arc<RelayOutboundSlot>, RandomState>,
     pub(super) outbound_slots: DashMap<RelayOutboundChannel, Arc<RelayOutboundSlot>, RandomState>,
 }
@@ -201,7 +202,7 @@ pub(super) struct RelayBoundaryBuilder {
     pub(super) fanout: RelayBoundaryFanout,
     pub(super) attached_runtime_consumer_count: usize,
     pub(super) detached_runtime_consumer_count: usize,
-    pub(super) registry: RelayRegistry,
+    pub(super) branch_presence: RelayRegistry,
     pub(super) remote_runtime_consumers: Vec<RemoteRuntimeConsumer>,
 }
 
@@ -1112,6 +1113,7 @@ impl RelayBoundaryServices {
         detached_runtime_consumer_count: usize,
         remote_runtime_consumers: Vec<RemoteRuntimeConsumer>,
         remote_dispatcher: Option<StdArc<RemoteDispatcher>>,
+        branch_presence: RelayRegistry,
     ) -> Self {
         Self {
             fanout,
@@ -1120,6 +1122,7 @@ impl RelayBoundaryServices {
             remote_runtime_consumers: ArcSwap::from_pointee(remote_runtime_consumers),
             remote_dispatcher,
             owner_node: ArcSwapOption::empty(),
+            branch_presence,
             ingress_slots: DashMap::default(),
             outbound_slots: DashMap::default(),
         }
@@ -1534,14 +1537,12 @@ impl ConcreteRelayRuntime {
             runtime,
             domain,
             relay,
-            registry,
             services,
         } = build;
         Self {
             runtime,
             domain,
             relay,
-            registry,
             services,
             key,
         }
@@ -1553,13 +1554,7 @@ impl ConcreteRelayRuntime {
     ) -> RelayDispatchResult {
         debug_assert_eq!(&self.key, &batch.key);
         self.runtime
-            .ingest_stream_boundary_message(
-                &self.domain,
-                &self.relay,
-                &self.registry,
-                &self.services,
-                batch,
-            )
+            .ingest_stream_boundary_message(&self.domain, &self.relay, &self.services, batch)
             .await
     }
 }
@@ -1728,12 +1723,6 @@ impl Runtime {
             });
         };
         let routing = routing.load();
-        if !routing.relay_registries.contains_key(relay) {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: relay.as_str().to_string(),
-            });
-        }
         let Some(services) = routing.relay_services.get(relay) else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
@@ -1757,7 +1746,6 @@ impl Runtime {
         &self,
         domain: &DomainName,
         relay: &RelayName,
-        registry: RelayRegistry,
         services: Arc<RelayBoundaryServices>,
         retention: RelayRetention,
     ) -> RelayOwnerTask {
@@ -1783,6 +1771,7 @@ impl Runtime {
             branch_capacity,
         } = retention;
         let expiration_scan_interval = self.inner.branch_instance_expiration_scan_interval;
+        let registry = services.branch_presence.clone();
         let task = nervix_primitives::task::spawn(async move {
             let mut branches = RelayOwnerBranchState {
                 registry,

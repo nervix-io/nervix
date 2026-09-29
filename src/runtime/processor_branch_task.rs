@@ -2020,7 +2020,6 @@ mod tests {
             relays: [(
                 named("projected_orders"),
                 RelayProcessorRelayTemplate {
-                    registry: RelayRegistry::new(),
                     services: test_relay_boundary_services(),
                 },
             )]
@@ -2303,20 +2302,24 @@ mod tests {
         let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(2));
         let mut downstream =
             RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
-        let services = Arc::new(RelayBoundaryServices::new(fanout, 1, 0, Vec::new(), None));
-        let registry = RelayRegistry::new();
+        let services = Arc::new(RelayBoundaryServices::new(
+            fanout,
+            1,
+            0,
+            Vec::new(),
+            None,
+            RelayRegistry::new(),
+        ));
         let owner = runtime.spawn_relay_owner_task(
             &domain,
             &output,
-            registry.clone(),
             services.clone(),
             RelayRetention::default(),
         );
         let mut template = junction_branch_template(processor.as_str(), "orders");
-        template.relays.insert(
-            output.clone(),
-            RelayProcessorRelayTemplate { registry, services },
-        );
+        template
+            .relays
+            .insert(output.clone(), RelayProcessorRelayTemplate { services });
         let junction = template
             .processors
             .get_mut(&processor)

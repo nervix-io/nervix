@@ -1126,7 +1126,7 @@ mod tests {
                 )
             })
             .collect();
-        let relay_registries = [(named("input"), RelayRegistry::new())]
+        let relay_services = [(named("input"), test_relay_boundary_services())]
             .into_iter()
             .collect();
         runtime.install_domain_execution(
@@ -1139,7 +1139,7 @@ mod tests {
                 routing: runtime.stage_domain_routing(
                     &domain,
                     DomainRoutingSnapshot {
-                        relay_registries,
+                        relay_services,
                         materialized_stream_specs,
                         ..DomainRoutingSnapshot::default()
                     },
@@ -1339,7 +1339,7 @@ mod tests {
                 timeout(Duration::from_millis(50), &mut resolution)
                     .await
                     .is_err(),
-                "an empty non-owner relay registry must not evict retained branch work"
+                "an empty non-owner relay presence must not evict retained branch work"
             );
             shutdown_tx.send_replace(true);
             assert!(

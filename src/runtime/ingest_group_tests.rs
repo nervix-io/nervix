@@ -983,12 +983,10 @@ async fn branched_root_without_children_acks_success() {
     let root_domain = domain("default");
     install_unpaced_test_domain(&runtime, &root_domain);
     let root_relay = named("tenant_orders");
-    let root_registry = RelayRegistry::new();
     let root_services = test_relay_boundary_services();
     let owner_task = runtime.spawn_relay_owner_task(
         &root_domain,
         &root_relay,
-        root_registry.clone(),
         root_services.clone(),
         RelayRetention::default(),
     );
@@ -1026,7 +1024,6 @@ async fn branched_root_without_children_acks_success() {
                 runtime,
                 domain: root_domain,
                 relay: root_relay,
-                registry: root_registry,
                 services: root_services,
                 key: root_key,
             }),
@@ -1081,12 +1078,17 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
     let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(1));
     let mut fan_in =
         RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
-    let services = Arc::new(RelayBoundaryServices::new(fanout, 1, 0, Vec::new(), None));
-    let registry = RelayRegistry::new();
+    let services = Arc::new(RelayBoundaryServices::new(
+        fanout,
+        1,
+        0,
+        Vec::new(),
+        None,
+        RelayRegistry::new(),
+    ));
     let owner_task = runtime.spawn_relay_owner_task(
         &domain,
         &root_relay,
-        registry.clone(),
         services.clone(),
         RelayRetention::default(),
     );
@@ -1107,7 +1109,6 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
             relays: [(
                 root_relay,
                 RelayProcessorRelayTemplate {
-                    registry,
                     services: services.clone(),
                 },
             )]
@@ -1169,12 +1170,17 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
         let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(4));
         let mut fan_in =
             RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
-        let services = Arc::new(RelayBoundaryServices::new(fanout, 1, 0, Vec::new(), None));
-        let registry = RelayRegistry::new();
+        let services = Arc::new(RelayBoundaryServices::new(
+            fanout,
+            1,
+            0,
+            Vec::new(),
+            None,
+            RelayRegistry::new(),
+        ));
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,
             &root_relay,
-            registry.clone(),
             services.clone(),
             RelayRetention::default(),
         );
@@ -1216,7 +1222,6 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
                     relays: [(
                         root_relay,
                         RelayProcessorRelayTemplate {
-                            registry,
                             services: services.clone(),
                         },
                     )]

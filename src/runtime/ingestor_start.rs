@@ -283,7 +283,6 @@ impl Runtime {
             .bind_ingestor(ingestor, &input_schema)
             .map_err(|report| RuntimeError::entrypoint_binding(domain, report))?;
         let relays = RelayRuntimeHandles {
-            registries: &routing.relay_registries,
             services: &routing.relay_services,
         };
         let branched_templates = relays
