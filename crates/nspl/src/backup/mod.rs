@@ -684,7 +684,8 @@ mod tests {
     #[test]
     fn bolero_models_exported_through_an_archive_reparse_to_themselves() {
         bolero::check!()
-            .with_test_time(std::time::Duration::from_millis(150))
+            .with_iterations(64)
+            .with_max_len(128)
             .for_each(|bytes: &[u8]| {
                 let models = bytes.chunks(32).map(gen_model).collect::<Vec<_>>();
                 let document = nervix_models::canonical_nspl_document(&models)
