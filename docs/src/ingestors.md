@@ -388,6 +388,8 @@ The request timeout covers name resolution, connection establishment, TLS, and t
 The endpoint name remains the HTTP authority and HTTPS certificate name after resolution.
 RabbitMQ resolves the host of its `addr` the same way and verifies an `amqps` broker certificate
 against that host; see [RabbitMQ](#rabbitmq).
+Redis Pub/Sub also resolves its `addr` hostname through the node resolver for each dedicated
+subscription connection; see [Redis Pub/Sub](#redis-pubsub).
 
 Example Kafka TLS client:
 
@@ -718,6 +720,11 @@ Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both modes
 keep the subscriber healthy; payloads are either retained locally within the declared bound or
 discarded and counted. A `TYPE REDIS` client declares connection-pool bounds even when only
 ingestors reference it; see [Database Client Connection Pools](database-client-pools.md).
+Each subscription owns a separate connection. It resolves the `addr` hostname through the node's
+asynchronous DNS resolver on initial subscribe and every resume after a disconnect; it does not
+consume a pooled command connection. For `rediss://`, TLS verifies the original hostname and
+uses the configured CA and optional client identity. DNS and connection failures follow the
+source's existing retry cadence; Redis Pub/Sub does not replay messages missed while disconnected.
 
 ### MQTT
 

@@ -107,6 +107,15 @@ missing-name, no-address, timeout, invalid-name or transport cause stays in the 
 Address, TLS and WebSocket-upgrade failures remain connection outcomes. None is a record rejection,
 and a DNS result by itself never marks a Syslog record delivered.
 
+Redis command connections receive the node resolver through the driver's DNS hook. A failed
+initial or later pool connection keeps the resolver's typed failure in
+`RedisClientError::Resolve`; a later failure sits beneath `SinkPublishError::Publish` for the
+emitter host to retry.
+A Pub/Sub source resolves before opening its dedicated stream and retains `DnsLookupError` beneath
+`RedisPubSubSourceError::Resolve` and `SourceError::Resume`. A refused address, failed TLS name
+check or failed Redis protocol setup is also a connection failure. None rejects an input message
+or changes Redis Pub/Sub's server-acceptance boundary for `PUBLISH`.
+
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
 cause of its connection error, and the connector finds it there by type and keeps it as the context

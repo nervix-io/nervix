@@ -30,7 +30,12 @@ impl RedisPubSubIngestorStartPlan {
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .map_err(|error| ingestor.start_failure(error.to_string()))?;
-        let connector = RedisPubSubSourcePlan::new(resolved.entries, channel)
+        let Some(dns) = runtime.dns() else {
+            return Err(
+                ingestor.start_failure("the node DNS resolver is not installed".to_string())
+            );
+        };
+        let connector = RedisPubSubSourcePlan::new(resolved.entries, channel, dns.clone())
             .map_err(|error| ingestor.start_failure(format!("{error:#}")))?;
         BrokerSourceStart {
             connector,
