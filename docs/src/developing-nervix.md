@@ -238,6 +238,35 @@ normal verification. Use `SHUTTLE_REPORT_STEPS=1` to inspect the highest explore
 setting a check's iteration and step budgets. [Data-Plane Concurrency](./data-plane-concurrency.md)
 defines what these checks model, their limits, and the invariant held by each protocol.
 
+### Memory-ordering models
+
+Explore every registered Loom model of a production owner to exhaustion, each in its own process:
+
+```bash
+just test-loom
+```
+
+A substring of a model's test name or invariant selects it, and a filter that selects nothing
+fails:
+
+```bash
+just test-loom cancellation.publication
+```
+
+The run fails when a registered invariant is missing, ignored or did not complete its exploration,
+and when a `loom_*` test is not registered in `crates/model-harness/loom-inventory.toml`. A failed
+model leaves its Loom checkpoint, output and `metadata.json` below
+`target/loom-failures/<package>/<test>/`; replay it with location tracking and tracing enabled:
+
+```bash
+just test-loom-replay target/loom-failures/<package>/<test>
+```
+
+`just test-loom-qualification` applies each registered weakening to a copy of the working tree and
+requires its model to fail, and `just test-primitives` runs the primitive boundary's conformance
+checks once per execution mode. [Data-Plane Concurrency](./data-plane-concurrency.md) defines the
+primitive boundary, what each mode observes, and every model's claim.
+
 ### Deterministic network simulation
 
 Run the interconnect's seeded Turmoil simulation, its library checks, and every scenario over its

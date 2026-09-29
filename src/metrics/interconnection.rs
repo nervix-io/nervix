@@ -17,10 +17,7 @@
 //! standing state behind — a connection that failed, a stream that reset, a request that finished
 //! — are counted as they happen.
 
-use std::{
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
+use std::time::Duration;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
@@ -30,6 +27,7 @@ use nervix_interconnect::{
     ConnectionDirection, ConnectionFailureReason, PoolClass, RelayAdmissionOutcome, RequestOutcome,
     RequestSubquota, StreamResetReason, TransferDirection, Transport, TransportSnapshot,
 };
+use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::RwLock;
 use prometheus::{
     CounterVec, GaugeVec, Opts,

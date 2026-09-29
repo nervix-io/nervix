@@ -1,0 +1,47 @@
+# The Loom models of production owners, by invariant.
+#
+# `just test-loom` discovers every library test named `loom_*` in the packages listed below, built
+# with their `loom` feature, and runs each in its own process. A run over the whole inventory fails
+# when a registered invariant's test is missing, ignored or did not explore its model to exhaustion,
+# and when a discovered model is not registered here. An invariant keeps its `id` when its test is
+# renamed; update `test` in the same change.
+#
+# `just test-loom-qualification` applies each `[[qualification]]` weakening to a copy of the working
+# tree and requires the named invariant's model to fail with the stated message. It proves the model
+# detects the ordering fault it exists for, rather than passing because something else synchronizes
+# its threads. A qualification whose `original` text no longer appears exactly once fails too, so
+# changing the owner's ordering means revisiting its qualification.
+
+[[invariant]]
+claim = "A job that observes its cancellation also observes every write its awaiting caller made before the cancellation: raising the flag releases and observing it acquires."
+id = "execution.cancellation.publication"
+package = "nervix-execution"
+test = "cancellation::loom_models::loom_a_job_that_observes_cancellation_observes_every_write_made_before_it"
+
+[[invariant]]
+claim = "Dropping an armed obligation cancels its job: once the drop is ordered before a check, every clone of the job's signal reports the cancellation, and a check never loses a cancellation an earlier check observed."
+id = "execution.cancellation.cancel-on-drop"
+package = "nervix-execution"
+test = "cancellation::loom_models::loom_dropping_the_obligation_cancels_every_later_check_of_the_job"
+
+[[invariant]]
+claim = "A disarmed obligation never cancels its job, whether the job checks while it is disarmed or after it is dropped. Disarming writes nothing, so the model has one schedule and fails if disarming or the drop that follows it ever raises the flag."
+id = "execution.cancellation.disarm"
+package = "nervix-execution"
+test = "cancellation::loom_models::loom_a_disarmed_obligation_never_cancels_its_job"
+
+[[qualification]]
+failure = "the job observed its cancellation without the write made before it"
+id = "execution.cancellation.relaxed-cancel"
+invariant = "execution.cancellation.publication"
+original = "self.cancelled.store(true, Ordering::Release);"
+path = "crates/execution/src/cancellation.rs"
+weakened = "self.cancelled.store(true, Ordering::Relaxed);"
+
+[[qualification]]
+failure = "the job observed its cancellation without the write made before it"
+id = "execution.cancellation.relaxed-observation"
+invariant = "execution.cancellation.publication"
+original = "self.cancelled.load(Ordering::Acquire)"
+path = "crates/execution/src/cancellation.rs"
+weakened = "self.cancelled.load(Ordering::Relaxed)"

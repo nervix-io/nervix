@@ -28,10 +28,9 @@
 //! control lane already holds, then the ending if the session said why it ended, and nothing after
 //! it.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use futures_util::{Stream, stream};
 use nervix_client_wire::{EncodedFrame, ServerFrame};
+use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::Mutex;
 use tokio::sync::mpsc::{
     self,

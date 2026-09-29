@@ -7,20 +7,18 @@
 //!   timeout triggers of Shuttle's Tokio.
 //! - **Must not know.** Relays, branches, batches, acknowledgements, or what a dispatch delivers.
 
-// The standard library's atomics are not Shuttle scheduling points, so each gate and wake record
-// below changes in the same scheduling step as the operation it records.
+// Unmodeled atomics are not Shuttle scheduling points, so each gate and wake record below changes
+// in the same scheduling step as the operation it records.
 use std::{
     future::Future,
     num::NonZeroUsize,
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
+    sync::Arc as StdArc,
     task::{Context, Wake, Waker},
     time::Duration,
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_primitives::unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use shuttle::rand::{Rng as _, thread_rng};
 use tokio::{sync::oneshot, time::Instant};
 use triomphe::Arc;

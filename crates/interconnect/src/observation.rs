@@ -15,12 +15,10 @@
 //! drift from what the transport is actually doing. Only events that leave no standing state
 //! behind are counted here.
 
-use std::{
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
+use std::time::Duration;
 
 use meticulous::ResultExt as _;
+use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use strum::{AsRefStr, EnumCount, EnumIter, FromRepr};
 
 use crate::{PoolClass, RequestSubquota, TransportError};

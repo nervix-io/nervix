@@ -18,13 +18,13 @@ use std::{
     panic::{self, AssertUnwindSafe, PanicHookInfo},
     sync::{
         Arc as StdArc, Once,
-        atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use nervix_recovery::Discarded as _;
 use parking_lot::Mutex;
 use rustls::{pki_types::UnixTime, time_provider::TimeProvider};

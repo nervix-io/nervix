@@ -14,7 +14,7 @@
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
 
-use std::{num::NonZeroUsize, ops::Range, path::PathBuf, sync::atomic::Ordering, time::Duration};
+use std::{num::NonZeroUsize, ops::Range, path::PathBuf, time::Duration};
 
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeListArray, Float32Array, Float64Array,
@@ -37,6 +37,7 @@ use nervix_connector::{
     optional_client_config_value,
 };
 use nervix_models::{ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, TableName};
+use nervix_primitives::sync::atomic::Ordering;
 use tracing::{debug, trace};
 
 const MYSQL: &str = "mysql";
