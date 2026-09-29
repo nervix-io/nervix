@@ -74,9 +74,9 @@ compilation with the production or Shuttle builds.
 
 | Build | Selected by | Sockets and DNS | CPU jobs | Synchronization primitives | Tokio configuration |
 | --- | --- | --- | --- | --- | --- |
-| Normal | Default features | Tokio's operating-system sockets and the node's Hickory resolver | Tokio's blocking pool | Tokio, `parking_lot`, `dashmap`, `tokio-util`, and the standard library's atomics | Stable |
-| Shuttle | The `shuttle` feature of each owning package, forwarded to `nervix-primitives` | Not driven by the checks | `spawn_blocking` of Shuttle's modeled Tokio | Shuttle's modeled `tokio`, `parking_lot`, `dashmap`, `tokio-util`, and atomics | Stable |
-| Turmoil | The `turmoil` feature of `nervix-interconnect`, which enables `nervix-execution/turmoil` and `nervix-primitives/turmoil` | `turmoil::net` | A task on the simulated host's scheduler; storage jobs stay on the blocking pool | Real | `--cfg tokio_unstable` |
+| Normal | Default features | Tokio's operating-system sockets and the node's Hickory resolver | Tokio's blocking pool | The ordinary primitives `nervix-primitives` re-exports: Tokio, Tokio Util, `parking_lot`, DashMap and the standard library's | Stable |
+| Shuttle | The `shuttle` feature of each owning package, forwarded to `nervix-primitives` | Not driven by the checks | `spawn_blocking` of Shuttle's modeled Tokio | The modeled primitives `nervix-primitives` selects: Shuttle's Tokio, Tokio Util, `parking_lot`, DashMap and atomics, and its own scheduler-visible `Notify` and `watch` | Stable |
+| Turmoil | The `turmoil` feature of `nervix-interconnect`, which enables `nervix-execution/turmoil` and `nervix-primitives/turmoil` | `turmoil::net` | A task on the simulated host's scheduler; storage jobs stay on the blocking pool | The ordinary primitives, on the simulated host that runs the caller | `--cfg tokio_unstable` |
 | Turmoil with Shuttle or Loom | Both modes in one dependency graph, from one package or two | Fails to compile in `nervix-primitives` with a diagnostic naming both modes | | | |
 
 Only the Turmoil recipes pass `--cfg tokio_unstable`. With it, Turmoil seeds each host runtime's
@@ -654,9 +654,9 @@ A new case follows the same contract as the existing ones.
    hosts, run each host body under `HostSupervisor::run`, and have the `observer` client wait for
    every host to finish.
 6. **Stay inside the simulated boundary.** Use Tokio time for every wait, and call
-   `tokio::task::consume_budget().await` at the top of every loop. Never sleep a real thread, read
-   the wall clock, open an operating-system socket, touch the filesystem, or submit storage or
-   unbounded CPU work.
+   `nervix_primitives::task::consume_budget().await` at the top of every loop. Never sleep a real
+   thread, read the wall clock, open an operating-system socket, touch the filesystem, or submit
+   storage or unbounded CPU work.
 7. **Inject faults at protocol points.** Apply link controls from inside a host when the host
    reaches a decision, or apply host controls from the control closure when a host publishes a
    milestone.

@@ -690,7 +690,7 @@ The VM's entry point alone decides where a program runs:
 | Condition | Where it runs |
 | --- | --- |
 | At most `SPAWN_BLOCKING_ROW_THRESHOLD` (1,024) rows, and no injected function asks for the blocking pool | Inline, on the caller's task |
-| More than 1,024 rows | On `tokio::task::spawn_blocking` |
+| More than 1,024 rows | On the runtime's blocking pool, through `nervix_primitives::task::spawn_blocking` |
 | Any `Inject` instruction whose injector's `FunctionExecutionPolicy` is `SpawnBlocking` | On the blocking pool, whatever the batch size. Every UDF call does this. |
 
 A caller only awaits the result, and chooses no executor.
