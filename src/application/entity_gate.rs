@@ -986,7 +986,7 @@ mod tests {
         *,
     };
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn unavailable_gate_participants_preserve_request_context() {
         use super::super::test_fixtures::named;
 

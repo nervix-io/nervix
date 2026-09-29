@@ -707,6 +707,10 @@ build and the existing tests, and nothing in it changes behavior.
   only holds on an idle machine is a defect in the test, not a flake to retry. Waiting for
   something to happen is therefore bounded generously: raising that bound costs nothing under
   parallelism, because the wait ends when the condition holds.
+- Every scenario runs beside the rest of the suite. Do not add a tag, lock, or harness mode that
+  runs a scenario alone or stops other scenarios from starting while it runs, such as an @exclusive
+  tag. A scenario that passes only on an idle machine is a defect in that scenario: fix its timing
+  assumption, and rely on the suite’s retries for what load remains.
 - An assertion that something has **not** happened yet is the opposite, and no choice of window
   makes it reliable. Its window opens when the step starts, while the cadence it races started at
   the event before it, so the margin between them is consumed by whatever delayed the step

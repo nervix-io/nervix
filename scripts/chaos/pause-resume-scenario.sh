@@ -24,22 +24,6 @@ pause_topic_progressed() {
     [[ "${pause_observed_offset}" =~ ^[0-9]+$ ]] && ((pause_observed_offset > before))
 }
 
-pause_cluster_settled() {
-    local output_dir="$1"
-    cluster_settled "${output_dir}" || return 1
-    local host peer
-    for host in "${node_hosts[@]}"; do
-        local status_file="${output_dir}/status-${host}.attempt.txt"
-        awk '/^\[warnings\]$/ { found = 1; getline; if ($0 == "- none") clean = 1 }
-             END { exit !(found && clean) }' "${status_file}" || return 1
-        for peer in "${node_hosts[@]}"; do
-            [[ "${peer}" == "${host}" ]] && continue
-            grep -Eq "^- node-${peer##*-}: .* status=connected$" "${status_file}" \
-                || return 1
-        done
-    done
-}
-
 wait_for_pause_state() {
     local container_id="$1"
     local expected="$2"
@@ -58,7 +42,7 @@ select_pause_target() {
     local role="$1"
     local output_dir="$2"
     mkdir -p "${output_dir}"
-    pause_cluster_settled "${output_dir}" || return 1
+    cluster_settled_and_connected "${output_dir}" || return 1
     local leader ingestor_owner relay_owner emitter_owner
     leader="$(<"${output_dir}/leader.txt")"
     ingestor_owner="$(owner_from_description "${output_dir}/ingestor.attempt.txt")"
@@ -336,7 +320,7 @@ pause_one_node() {
         wait_for "${host} listeners available after resume" 30 probe_node "${host}"
     done
     wait_for 'all public cluster and placement observations settled after resume' 150 \
-        pause_cluster_settled "${round_dir}/recovered"
+        cluster_settled_and_connected "${round_dir}/recovered"
     local settled_ms="$(( $(epoch_ms) - resumed_ms ))"
     local recovered_leader
     recovered_leader="$(<"${round_dir}/recovered/leader.txt")"
