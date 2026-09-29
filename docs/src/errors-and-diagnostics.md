@@ -478,12 +478,20 @@ serving node has no such domain, or `Failed` when the request could not run; a d
 session holds a transaction, both fail with the session-local refusal that other session-scoped
 statements receive. The server ends an attachment with a frame whose typed reason is
 `DomainRemoved`, and the Rust client reports a lost session as an interruption of each clock it
-follows before it attaches again. Each disposition's message is display text for a client that
-prints it; a client decides from the variant. The Rust client's `execute` turns any disposition but
-`Attached` or `Detached` into a `Failed` command outcome carrying that message, and its clock helper
-reports a stopped or uninstalled clock, or a projection outside the timestamp range, as a typed
-`DomainClockReadError`. See
-[Domain Clock Attachment](./sessions.md#domain-clock-attachment).
+follows before it attaches again. An attach the new session refuses or leaves unanswered is not an
+error of any call: the Rust client reports it as a typed restoration failure carrying the refusal's
+message and the wait before it tries again, and reports a refused subscription reopening the same
+way. Each disposition's message is display text for a client that prints it; a client decides from
+the variant. The Rust client's `execute` turns any disposition but `Attached` or `Detached` into a
+`Failed` command outcome carrying that message, and its clock helper reports a stopped or
+uninstalled clock, or a projection outside the timestamp range, as a typed `DomainClockReadError`.
+See [Domain Clock Attachment](./sessions.md#domain-clock-attachment).
+
+A Rust client subscribe or unsubscribe runs on a task of its own, so that an attempt its caller
+stops waiting for still completes. Its caller rebuilds the typed session failure from that task's
+report, and recovers the session and sends the request again exactly as for any other call; only a
+failure a new session cannot remedy is returned, as `ClientError::SubscriptionOperation` carrying
+the report.
 
 The shared C binding converts a clock-event wait's `error_stack::Report<ClientError>` at its
 reporting boundary. It classifies the typed current context as an `NX_ERROR_*` kind and retains

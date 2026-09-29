@@ -161,7 +161,10 @@ typedef enum nx_event_kind {
     /* The session was lost, leaving a gap before the subscription is restored. */
     NX_EVENT_INTERRUPTED = 5,
     /* The session could not retain more events for this subscription. */
-    NX_EVENT_CONSUMER_OVERFLOW = 6
+    NX_EVENT_CONSUMER_OVERFLOW = 6,
+    /* The session refused to open the interrupted subscription again, or did not answer; the
+       subscription stays interrupted and the session tries again later. */
+    NX_EVENT_RESTORATION_FAILED = 7
 } nx_event_kind;
 
 /* What a domain clock event reports. */
@@ -178,7 +181,10 @@ typedef enum nx_clock_event_kind {
     /* The session holding the attachment ended. The library attaches to the clock again on its
        next session, and the clock that attachment reports follows as a STATE event; changes in
        between are not reported. */
-    NX_CLOCK_EVENT_INTERRUPTED = 4
+    NX_CLOCK_EVENT_INTERRUPTED = 4,
+    /* The session refused to attach the interrupted clock again, or did not answer; the
+       attachment stays interrupted and the session tries again later. */
+    NX_CLOCK_EVENT_RESTORATION_FAILED = 5
 } nx_clock_event_kind;
 
 /* The installation state of one domain clock generation on the serving node. */

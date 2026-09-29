@@ -341,6 +341,7 @@ static const char *clock_kind_name(nx_clock_event_kind kind) {
     case NX_CLOCK_EVENT_TICK: return "TICK";
     case NX_CLOCK_EVENT_ENDED: return "ENDED";
     case NX_CLOCK_EVENT_INTERRUPTED: return "INTERRUPTED";
+    case NX_CLOCK_EVENT_RESTORATION_FAILED: return "RESTORATION_FAILED";
     }
     fail("unknown clock event kind");
     return NULL;

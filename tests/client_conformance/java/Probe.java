@@ -44,7 +44,9 @@ public class Probe {
     static final int CELL_NULL = 2;
     static final int CELL_REDACTED = 3;
     static final int EVENT_ROWS = 1;
-    static final String[] CLOCK_KINDS = {null, "STATE", "TICK", "ENDED", "INTERRUPTED"};
+    static final String[] CLOCK_KINDS = {
+        null, "STATE", "TICK", "ENDED", "INTERRUPTED", "RESTORATION_FAILED",
+    };
     static final int CLOCK_PACED = 4;
     static final String[] DISPOSITIONS = {
         null, "completed", "failed", "not_leader", "transaction_detached",

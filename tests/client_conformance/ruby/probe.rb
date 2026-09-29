@@ -29,7 +29,7 @@ module Probe
   CELL_NULL = 2
   CELL_REDACTED = 3
   EVENT_ROWS = 1
-  CLOCK_KINDS = [nil, 'STATE', 'TICK', 'ENDED', 'INTERRUPTED'].freeze
+  CLOCK_KINDS = [nil, 'STATE', 'TICK', 'ENDED', 'INTERRUPTED', 'RESTORATION_FAILED'].freeze
   CLOCK_PACED = 4
   DISPOSITIONS = [nil, 'completed', 'failed', 'not_leader', 'transaction_detached',
                   'transaction_taken_over', 'outcome_unknown', 'execution_reference_conflict',

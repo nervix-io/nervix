@@ -13,6 +13,7 @@ Usage:
   just chaos run follower-crash|ingestor-owner-crash|emitter-owner-crash --image IMAGE [--records N]
   just chaos run pause-resume --image IMAGE [--records N]
   just chaos run partition-recovery --image IMAGE [--case CASE] [--partition-seconds N] [--records N]
+  just chaos run degraded-links --image IMAGE [--profile PROFILE] [--records N]
   just chaos cleanup --run-id RUN_ID
   just chaos self-test
 
@@ -20,6 +21,7 @@ Run `just chaos run baseline --help` for all baseline options.
 Run `just chaos run rolling-restart --help` for rolling-restart options.
 Run `just chaos run pause-resume --help` for pause-resume options.
 Run `just chaos run partition-recovery --help` for partition-recovery options.
+Run `just chaos run degraded-links --help` for degradation profiles and thresholds.
 EOF
 }
 
@@ -37,6 +39,8 @@ emitter-owner-crash  Observed emitter owner SIGKILL and placement recovery (thre
 pause-resume  Short and failover-length Pumba pauses of the observed leader and execution owner (three-node)
 partition-recovery  Verified Pumba network partitions, healing and quorum recovery (three-node)
                     cases: follower, asymmetric, leader, quorum-loss (--case, default all)
+degraded-links  Measured delay, jitter, random and burst loss, rate limits, and combined effects
+                against one directed cluster link (three-node; --profile, default all)
 EOF
 }
 
@@ -75,6 +79,9 @@ case "${command_name}" in
                 ;;
             partition-recovery)
                 exec "${script_dir}/run-partition-recovery.sh" "$@"
+                ;;
+            degraded-links)
+                exec "${script_dir}/run-degraded-links.sh" "$@"
                 ;;
             *)
                 printf 'unknown chaos scenario: %s\n' "${scenario}" >&2

@@ -738,6 +738,113 @@ Feature: Client wire failure regressions
       payload={"sequence":2,"tenant":"beta"}
       """
 
+  @client_wire_subscription_restore
+  Scenario Outline: A native client deletes a subscription its lost session held and opens the name again
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA wire_record (
+        tenant STRING,
+        sequence I64
+      );
+      CREATE WIRE JSON SCHEMA wire_record_json MODE STRICT (
+        tenant string,
+        sequence integer
+      );
+      CREATE CODEC wire_record_codec
+        FROM WIRE JSON SCHEMA wire_record_json
+        TO SCHEMA wire_record;
+      CREATE RELAY wire_records SCHEMA wire_record UNBRANCHED;
+      CREATE VHOST edge client-wire-{{test_id}}.example.com;
+      CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
+      CREATE INGESTOR wire_source
+        FROM ENDPOINT wire_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
+        TO wire_records INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    And client "subscriber" is connected to "{{forwarded_grpc}}" with cluster seeds
+    When client "subscriber" executes these NSPL commands
+      """
+      CREATE SUBSCRIPTION wire_seen TO wire_records;
+      """
+    And the TCP forwarder at "127.0.0.1" stops
+    Then within "30s" client "subscriber" observes subscription "wire_seen" interrupted
+    When client "subscriber" executes these NSPL commands
+      """
+      DELETE SUBSCRIPTION wire_seen;
+      """
+    Then client "subscriber" no longer holds subscription "wire_seen"
+    When client "subscriber" executes these NSPL commands
+      """
+      CREATE SUBSCRIPTION wire_seen TO wire_records;
+      """
+    Then client "subscriber" subscription "wire_seen" is active
+    When within "30s" client "subscriber" receives a subscription payload from repeated http posts to node "{{leader}}" with host "client-wire-{{test_id}}.example.com" path "/records"
+      """
+      {"tenant":"acme","sequence":1}
+      """
+    Then the last relay subscription payload contains
+      """
+      {"sequence":1,"tenant":"acme"}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @client_wire_subscription_restore
+  Scenario Outline: A native client reports a refused subscription restoration and deletes the subscription without the server
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA watched_record (
+        value STRING
+      );
+      CREATE RELAY watched SCHEMA watched_record UNBRANCHED;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    And client "subscriber" is connected to "{{forwarded_grpc}}" with cluster seeds
+    When client "subscriber" executes these NSPL commands
+      """
+      CREATE SUBSCRIPTION watching TO watched;
+      """
+    And the TCP forwarder at "127.0.0.1" stops
+    Then within "30s" client "subscriber" observes subscription "watching" interrupted
+    When these NSPL commands are executed on the leader node
+      """
+      DROP RELAY watched;
+      """
+    And client "subscriber" executes these NSPL commands
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then within "30s" client "subscriber" observes a failed restoration of subscription "watching"
+      """
+      stream 'watched' does not exist in domain '{{domain}}'
+      """
+    And client "subscriber" subscription "watching" is interrupted
+    When client "subscriber" executes these NSPL commands
+      """
+      DELETE SUBSCRIPTION watching;
+      """
+    Then client "subscriber" no longer holds subscription "watching"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @client_wire_wide_rows
   Scenario Outline: A native client keeps a subscription active while it receives a row that fills most of a frame
     Given a <cluster_size> node nervix cluster is started

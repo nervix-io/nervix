@@ -157,6 +157,17 @@ what is waiting and why, and the client keeps trying:
 [events] notice: subscription events could not resume yet: failed to connect to server; the client keeps trying
 ```
 
+After a reconnect the CLI opens every subscription and attaches every clock again. When the new
+session refuses one, a notice line reports the server's message and when the next attempt follows:
+
+```text
+[events] subscription [watch] notice: opening the subscription again failed: stream 'orders' does not exist in domain 'quickstart'; the next attempt follows in 2s
+[events] domain clock [simulation] notice: attaching the clock again failed: session-scoped and client-local statements cannot be queued in a transaction; the next attempt follows in 1s
+```
+
+`DELETE SUBSCRIPTION` of a subscription no open session holds, because its session ended or the new
+session refused to open it again, completes at once and frees the name.
+
 If server notices arrive faster than the CLI reads them, the client drops the ones it held and
 `[events] notice: server notices were dropped because they arrived faster than they were read`
 marks the gap; the notices after it keep printing.
@@ -318,7 +329,9 @@ The domain and generation identify each state. A paced state includes its period
 origin, UTC anchor, and rate. A tick includes its id, logical boundary, the authority's UTC
 observation, and the serving node's logical reading. Tick ids increase within a generation but may
 skip when the client or server coalesces progress. After a redirect or transport loss, an
-interruption line reports the gap and the client's restored attachment prints the fresh state.
+interruption line reports the gap and the client's restored attachment prints the fresh state. When
+the new session refuses to attach the clock again, a notice line reports the refusal and when the
+next attempt follows.
 The server may end an attachment when the domain disappears; the end line is the last clock line
 and the command exits. Ctrl-C detaches the clock and exits successfully. A refused attach,
 including a missing domain, prints the typed reason on stderr and exits nonzero.
