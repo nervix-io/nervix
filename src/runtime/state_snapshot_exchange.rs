@@ -378,3 +378,38 @@ impl SealedChunks {
         Some(Ok(chunk))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use meticulous::OptionExt as _;
+    use nervix_models::{DomainName, ModelKind, ModelName, SchemaFingerprint};
+
+    use super::*;
+    use crate::runtime::RuntimeState;
+
+    #[tokio::test]
+    async fn snapshot_stream_refuses_a_placement_this_node_does_not_own() {
+        let placement = RuntimeStatePlacement {
+            domain: DomainName::parse("snapshot_test").assured("the test domain name is valid"),
+            state: RuntimeState::MaterializedRelay {
+                schema: SchemaFingerprint::from_digest([7; 32]),
+            },
+            kind: ModelKind::Relay,
+            identifier: ModelName::parse("unassigned_relay")
+                .assured("the test relay name is valid"),
+            branch_key: None,
+        };
+        let error = Runtime::new()
+            .stream_sealed_materialized_snapshot(FetchStateSnapshot {
+                placement: placement.to_remote(),
+                revision: 1,
+            })
+            .await
+            .err()
+            .assured("a fresh runtime owns no materialized state");
+
+        let message = error.current_context().to_string();
+        assert!(message.contains("not currently assigned materialized state"));
+        assert!(message.contains("unassigned_relay"));
+    }
+}
