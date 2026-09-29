@@ -1078,7 +1078,10 @@ interconnect traffic and survives nothing: it ends silently with its session. Th
 attaches every clock it followed again on its next session, clears its previous tick, and reports
 the gap as an interruption. The shared binding exposes this event stream through
 `nx_session_next_clock_event` and a dedicated retained `nx_clock_event` handle. The web console
-does not follow domain clocks. Both requests are refused while the session holds a transaction,
+attaches the selected domain clock once per session, detaches it on selection changes, and restores
+it on reconnect; its REPL sends the same typed requests for explicit attach and detach statements.
+These requests enter the console's bounded session hand-off; a local refusal is shown to the
+operator and sends no request. Both requests are refused while the session holds a transaction,
 like every other session-local request.
 
 The CLI's `domain-clock` subcommand uses the Rust client's typed attach reply and clock event

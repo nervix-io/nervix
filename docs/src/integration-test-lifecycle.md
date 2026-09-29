@@ -74,11 +74,12 @@ limit or run slot a waiting scenario needs. No scenario runs alone or prevents u
 from starting.
 
 The coordinated WASM state-reset feature runs one scenario at a time. The web console REPL,
-execution graph, and transaction inspector features share a limit of two. Both limits affect only
-their named features. The parser takes these limited features up before the bulk of the suite, and
+execution graph, transaction inspector, and domain clock features share a limit of two. Both limits
+affect only their named features. The parser takes these limited features up before the bulk of the
+suite, and
 available run slots favor a queued limited successor over queued ordinary work. The web console
 group grants its two slots to the feature with the fewest prior grants, so one feature cannot keep
-the other two waiting behind its whole queue. Their chains can therefore make progress throughout
+the other three waiting behind its whole queue. Their chains can therefore make progress throughout
 the suite rather than after it. Cucumber retries a failed
 scenario twice; `--retry 0` turns retries off for a focused run.
 

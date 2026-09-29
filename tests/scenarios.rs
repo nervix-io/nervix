@@ -14673,6 +14673,71 @@ async fn then_selector_contains_text(
     }
 }
 
+async fn wait_for_selector_to_advance<T>(world: &ScenarioWorld, selector: &str, bound: Duration)
+where
+    T: std::str::FromStr + PartialOrd + Copy + fmt::Debug,
+{
+    let page = world
+        .browser_page
+        .as_ref()
+        .assured("the scenario opened the console before observing its clock");
+    let selector = expand_placeholders(world, selector);
+    let locator = page.locator(&selector);
+    let deadline = Instant::now() + bound;
+    let mut first: Option<T> = None;
+    loop {
+        tokio::task::consume_budget().await;
+        let text = locator
+            .all_inner_texts()
+            .await
+            .assured("the browser clock selector is readable")
+            .join("\n");
+        if let Ok(value) = text.trim().parse::<T>() {
+            if let Some(first_value) = &first {
+                if value > *first_value {
+                    return;
+                }
+            } else {
+                first = Some(value);
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "selector '{selector}' did not advance from {first:?} within {bound:?}; last text: \
+             '{text}'"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(expr = "selector {string} advances as a timestamp within {int} milliseconds")]
+async fn then_selector_timestamp_advances(
+    world: &mut ScenarioWorld,
+    selector: String,
+    bound_milliseconds: usize,
+) {
+    wait_for_selector_to_advance::<nervix_models::Timestamp>(
+        world,
+        &selector,
+        Duration::from_millis(bound_milliseconds.arch_into()),
+    )
+    .await;
+}
+
+#[then(expr = "selector {string} advances as a number within {int} milliseconds")]
+async fn then_selector_number_advances(
+    world: &mut ScenarioWorld,
+    selector: String,
+    bound_milliseconds: usize,
+) {
+    wait_for_selector_to_advance::<u64>(
+        world,
+        &selector,
+        Duration::from_millis(bound_milliseconds.arch_into()),
+    )
+    .await;
+}
+
 #[then(regex = r#"^selector "([^"]+)" contains$"#)]
 async fn then_selector_contains_docstring(
     world: &mut ScenarioWorld,

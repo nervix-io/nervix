@@ -544,6 +544,7 @@ test-coverage-clients: tests-deps
     for feature in \
         tests/features/web-console/connection_status.feature \
         tests/features/web-console/nspl_repl.feature \
+        tests/features/web-console/domain_clock.feature \
         tests/features/tools/cli_session.feature; do
         cargo llvm-cov --no-report --features testing --package nervix-server \
             --test scenarios -- --input "${feature}" --concurrency 1
@@ -553,6 +554,12 @@ test-coverage-clients: tests-deps
 coverage-clients-report:
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
+
+# Refresh the native console's coverage after a focused change without rebuilding the server
+# browser scenario harness; its recorded browser and CLI coverage remains in the same target.
+coverage-web-console-unit:
+    cargo llvm-cov --no-report --bins --package nervix-web-console
+    just coverage-clients-report
 
 # Build the standalone CLI with the same coverage flags as its binary unit tests. Cargo's
 # all-targets test pass alone leaves only the test executable, which public scenarios do not run.
