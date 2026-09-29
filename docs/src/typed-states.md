@@ -58,6 +58,14 @@ buffered row is one of three states: pending, carried by a batch payload or prep
 emitter retains, or resolved. A retained payload's members are therefore neither packed or prepared
 again nor mistaken for resolved rows, which a delivered flag could not express.
 
+A client emitter's consumer, delivery identity and ACK attempt are separate typed identities.
+The optional concrete branch remains an internal `BranchKey`; the client sees only its opaque
+fingerprint, never its key values. An attempt is pending or assigned to one consumer with one
+reference and deadline. Retry, timeout or detach makes that reference stale before another
+attempt becomes live. Confirmed ACK, retry and rejection results have bounded retention for
+idempotence and expire independently of the delivery identity. An absent consumer is not encoded
+as an empty consumer id, and an unbranched batch has no synthetic branch fingerprint.
+
 **Expression scopes and errors.** The VM frontend receives a scope policy that says whether a
 bare field may be read, written, both, or neither. A generated or set-only route reports an
 unavailable `message` or `input` scope during lowering, rather than inventing a namespace that

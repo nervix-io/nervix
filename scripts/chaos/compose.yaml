@@ -30,7 +30,7 @@ x-run-labels: &run-labels
 
 services:
   broker:
-    image: ${CHAOS_KAFKA_IMAGE:-apache/kafka:3.9.1}
+    image: ${CHAOS_KAFKA_IMAGE:?CHAOS_KAFKA_IMAGE is required}
     hostname: broker
     restart: "no"
     labels:
@@ -152,7 +152,7 @@ services:
       - chaos
 
   broker-admin:
-    image: ${CHAOS_KAFKA_IMAGE:-apache/kafka:3.9.1}
+    image: ${CHAOS_KAFKA_IMAGE:?CHAOS_KAFKA_IMAGE is required}
     profiles:
       - tools
     entrypoint: []
@@ -163,7 +163,7 @@ services:
       - chaos
 
   kcat:
-    image: ${CHAOS_KCAT_IMAGE:-edenhill/kcat:1.7.1}
+    image: ${CHAOS_KCAT_IMAGE:?CHAOS_KCAT_IMAGE is required}
     profiles:
       - tools
     entrypoint:
@@ -175,7 +175,7 @@ services:
       - chaos
 
   probe:
-    image: ${CHAOS_PROBE_IMAGE:-alpine:3.22}
+    image: ${CHAOS_PROBE_IMAGE:?CHAOS_PROBE_IMAGE is required}
     profiles:
       - tools
     entrypoint: []
@@ -186,7 +186,7 @@ services:
       - chaos
 
   load:
-    image: ${CHAOS_KCAT_IMAGE:-edenhill/kcat:1.7.1}
+    image: ${CHAOS_KCAT_IMAGE:?CHAOS_KCAT_IMAGE is required}
     profiles:
       - rolling
     entrypoint:
@@ -210,7 +210,7 @@ services:
       - chaos
 
   observer:
-    image: ${CHAOS_PROBE_IMAGE:-alpine:3.22}
+    image: ${CHAOS_PROBE_IMAGE:?CHAOS_PROBE_IMAGE is required}
     profiles:
       - rolling
     entrypoint:

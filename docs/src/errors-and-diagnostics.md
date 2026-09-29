@@ -603,6 +603,15 @@ validate a batch answers `Busy` rather than holding the batch, and a batch that 
 dispatched resolves its acknowledgement root negatively, which the producer receives as
 `ProcessingFailed` with `Rejected`.
 
+A consumer open is either `Opened` or a typed `EmitterOpenRefusal` for the domain, emitter kind,
+schema, execution availability or capacity. A settlement is an ordinary typed outcome:
+`Confirmed`, `StaleReference`, `WrongConsumer`, `InvalidReason`, or `ConsumerEnded`. It is never
+inferred from a timeout or from reading a batch. A bounded application rejection reason is
+treated as non-sensitive display text and applies the emitter route's message error policy to
+each member. IPC encoding failures and an output row above the declared byte limit follow that
+policy, without quoting the row. Owner or forwarder loss revokes the attempt; the delivery remains
+volatile, and a client must not interpret a lost ACK reply as successful processing.
+
 If a paced clock cannot convert one period through its rate, the authority can still emit its
 already-due first tick. Scheduling a later tick then reports a rate-conversion or cadence error and
 stops production. A next-boundary overflow reports its own clock arithmetic error. None of these

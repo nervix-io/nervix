@@ -41,6 +41,10 @@ answers each request with one terminal `Reply`, possibly delivered as transfer p
 | `OpenIngestorRequest` | Ordered lane | Any node | `OpenIngestorOutcome` |
 | `SubmitBatchRequest` | The producer's task | The session's node | `SubmissionOutcome` |
 | `CloseIngestorRequest` | The producer's task | The session's node | `CloseIngestorOutcome` |
+| `OpenEmitterRequest` | Ordered lane | Any node | `OpenEmitterOutcome` |
+| `ReadEmitterBatchRequest` | Concurrently | The session's node | `ReadEmitterBatchOutcome` |
+| `SettleEmitterBatchRequest` | Concurrently | The session's node | `SettleEmitterBatchOutcome` |
+| `CloseEmitterRequest` | Concurrently | The session's node | `CloseEmitterOutcome` |
 | `SuggestRequest` | Concurrently | Any node | `SuggestOutcome` |
 | `ChoiceLookupRequest` | Concurrently | Any node | `ChoiceOutcome` |
 | `ListDomainsRequest` | Concurrently | Any node | `DomainList` |
@@ -501,6 +505,34 @@ payload, infinity, and nullable and sensitive branch key fields.
   outcome before the close's reply. When its session is lost, it MUST report every batch sent without
   an outcome as of unknown outcome, MUST NOT report any of them as not admitted, and MUST open a new
   producer on the next session; no producer survives a session.
+
+## Emitter Consumers
+
+- **E-1.** A client MUST open a `TO CLIENT` emitter with `OpenEmitterRequest`, naming its domain,
+  emitter and exact ordered output fields, including optionality and sensitivity. It MUST supply
+  nonzero batch and byte limits; the requested byte limit MUST hold one maximum-sized IPC batch.
+  An open inside a transaction is refused. The open's `request_id` becomes its `ConsumerId`.
+- **E-2.** A client MUST continue reading transport frames while an application waits for
+  consumer credit or processes an output batch. A pending `ReadEmitterBatchRequest` does not
+  acknowledge delivery and MUST NOT block command replies, producer outcomes, domain clock
+  frames, or `SettleEmitterBatchRequest` replies.
+- **E-3.** A `Batch` outcome is one Arrow IPC stream with exactly the opened schema and one batch.
+  The client MUST check its row count against `members`, and treat the source relay and optional
+  32-byte branch fingerprint as metadata, never as extra fields. The fingerprint does not carry
+  raw branch key values. A read may instead return `Ended` when its attachment is gone.
+- **E-4.** A client MUST settle only the current attempt reference with `Ack`, `Retry`, or
+  `Reject`. The rejection reason is nonempty, at most 1024 UTF-8 bytes, and MUST NOT contain
+  sensitive values. It MUST await `Confirmed` before treating an ACK as confirmed. A stale
+  reference cannot settle a replacement; repeating a confirmed ACK is idempotent only while the
+  server retains that bounded result.
+- **E-5.** A retry or timeout can deliver the same stable identity and IPC bytes with a new
+  reference, possibly to a different worker. The client MUST design its application side effects
+  for this duplicate window. There is no durable consumer cursor; an owner or session loss ends
+  the attachment and the application opens a new consumer on a new session.
+- **E-6.** `CloseEmitterRequest` releases the attachment. Closing, losing the session, or losing
+  the forwarding stream revokes its unresolved references. Producers and consumers may share one
+  session; an application may read and ACK output while a submitted producer batch waits for its
+  graph outcome.
 
 ## Resource Uploads
 

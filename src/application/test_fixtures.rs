@@ -268,6 +268,11 @@ fn test_session_service(
         interconnect.clone(),
         consensus.proposer().local_node_id().clone(),
     );
+    let client_consumers = super::client_consumers::ClientConsumerRouter::new(
+        runtime.clone(),
+        interconnect.clone(),
+        consensus.proposer().local_node_id().clone(),
+    );
     SessionServiceImpl {
         inner: Arc::new(SessionServiceInner {
             cluster: cluster.clone(),
@@ -285,6 +290,7 @@ fn test_session_service(
             subscription_interests,
             subscription_sampler: SubscriptionSampler::default(),
             client_producers,
+            client_consumers,
             interconnect,
             service_tasks: super::service_tasks::ServiceTasks::default(),
             configured_basic_auth: None,

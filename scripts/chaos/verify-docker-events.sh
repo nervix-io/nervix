@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Verifies windows of a chaos run's live Docker event recording and the node lifecycle a window
-# holds. The recording holds, in arrival order, every event of the run's labeled containers
+# Verifies windows of a chaos run's live Docker event recording, the node lifecycle a window holds,
+# and the images the run's containers were created from. The recording holds, in arrival order,
+# every event of the run's labeled containers
 # together with the creation of the labeled marker containers the controller places while the
 # subscriber runs. A marker reaches the recording only while the subscriber is live and caught up,
 # so a window is covered only when one recorded marker precedes its start and another follows its
@@ -16,6 +17,7 @@ usage:
   verify-docker-events.sh window --recording FILE --from NS --to NS --bounds FILE
       [--output FILE] [--container ID | --role ROLE] [--max-bytes N] [--recorder-exit-code N]
   verify-docker-events.sh lifecycle --events FILE [--target ID] [--expect ACTION[:DETAIL]]...
+  verify-docker-events.sh images --recording FILE --manifest FILE --output FILE
 
 window writes the recording's bounds and its verdict for the window to --bounds and exits 1 unless
 recorded markers bracket the window. Only a covered window writes --output: every recorded event
@@ -24,6 +26,11 @@ from --from through --to, excluding markers, of one container or of one io.nervi
 lifecycle requires the create, start, restart, stop, kill, die, oom, pause, unpause and destroy
 events in --events to belong to --target and to be exactly the --expect list, where a kill carries
 its signal and a die its exit code, as in kill:9 and die:137. Without --expect none may occur.
+
+images requires every container creation in --recording, markers included, to name an image the
+run --manifest records: the resolved Nervix image ID, or a tool image's pinned reference or image
+ID. It writes each image with the manifest entry it matches, its container count and its roles to
+--output, and exits 1 when any image is not recorded.
 EOF
 }
 
@@ -236,6 +243,59 @@ lifecycle() {
     fi
 }
 
+images() {
+    local recording="" manifest="" output=""
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --recording | --manifest | --output)
+                [[ "$#" -ge 2 ]] || { usage; exit 2; }
+                case "$1" in
+                    --recording) recording="$2" ;;
+                    --manifest) manifest="$2" ;;
+                    --output) output="$2" ;;
+                esac
+                shift 2
+                ;;
+            *)
+                printf 'unknown images argument: %s\n' "$1" >&2
+                usage
+                exit 2
+                ;;
+        esac
+    done
+    [[ -n "${output}" ]] || { usage; exit 2; }
+    [[ -f "${recording}" ]] || { printf 'recording does not exist: %s\n' "${recording}" >&2; exit 2; }
+    [[ -f "${manifest}" ]] || { printf 'manifest does not exist: %s\n' "${manifest}" >&2; exit 2; }
+
+    # The Nervix image is recorded by its resolved ID; a tool image is started by its pinned
+    # reference or by its image ID.
+    if ! jq -n --slurpfile manifest "${manifest}" '
+        $manifest[0] as $run
+        | ([{image: $run.resolved_image_id, recorded_as: "nervix"}]
+           + [$run.tool_images | to_entries[]
+              | {image: .value.reference, recorded_as: .key},
+                {image: .value.image_id, recorded_as: .key}]
+           | map(select(.image != null))) as $recorded
+        | [inputs | select(.Type == "container" and .Action == "create")]
+        | group_by(.Actor.Attributes.image)
+        | map(.[0].Actor.Attributes.image as $image
+              | {image: $image,
+                 recorded_as: first(($recorded[] | select(.image == $image) | .recorded_as), null),
+                 containers: length,
+                 roles: (map(.Actor.Attributes["io.nervix.chaos.role"]) | unique)})
+        | {verdict: (if all(.[]; .recorded_as != null) then "recorded" else "unrecorded" end),
+           images: .}
+    ' "${recording}" >"${output}"; then
+        printf 'could not read the recording %s against the manifest %s\n' "${recording}" "${manifest}" >&2
+        exit 1
+    fi
+    if ! jq -e '.verdict == "recorded"' "${output}" >/dev/null; then
+        printf 'the run created containers from images its manifest does not record: %s\n' \
+            "$(jq -c '[.images[] | select(.recorded_as == null) | {image, roles}]' "${output}")" >&2
+        exit 1
+    fi
+}
+
 command_name="${1:-}"
 [[ -n "${command_name}" ]] || { usage; exit 2; }
 shift
@@ -245,6 +305,9 @@ case "${command_name}" in
         ;;
     lifecycle)
         lifecycle "$@"
+        ;;
+    images)
+        images "$@"
         ;;
     -h | --help)
         usage
