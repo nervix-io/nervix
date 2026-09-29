@@ -22,14 +22,13 @@ use nervix_client_wire::{
     websocket::{ServerWebSocketCodec, WebSocketData, WebSocketError},
 };
 use nervix_models::UserName;
+use nervix_primitives::sync::{CancellationToken, oneshot};
 use nervix_recovery::{Discarded as _, Reported as _};
-use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::{
     self, Message,
     error::CapacityError,
     protocol::{CloseFrame, WebSocketConfig, frame::coding::CloseCode},
 };
-use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use super::{
@@ -169,7 +168,7 @@ async fn write_frames<S, E>(
     E: std::fmt::Display,
 {
     while let Some(frame) = frames.next().await {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let payload = Vec::from(codec.encode(frame));
         if let Err(error) = sink.send(Message::Binary(payload)).await {
             debug!(error = %error, "a console session connection stopped taking frames");

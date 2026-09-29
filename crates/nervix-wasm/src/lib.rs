@@ -10,17 +10,11 @@
 //! - **Must not know.** NSPL, the registry, the execution graph, or where a guest's output is
 //!   routed. It calls a guest and returns what the guest produced.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_parking_lot as parking_lot;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 use std::{
     convert::Infallible,
     num::NonZeroU64,
     ops::{Deref, DerefMut},
     sync::Arc as StdArc,
-    thread,
     time::Duration,
 };
 
@@ -30,6 +24,7 @@ use error_stack::{Report, Result as StackResult, ResultExt as _};
 use flatbuffers::{Allocator, FlatBufferBuilder};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{ParseAsType, Timestamp, WasmProcessorLimits};
+use nervix_primitives::sync::mpsc;
 // The epoch driver is an operating-system thread that no model runs, so the flag that stops it is a
 // real atomic in every mode.
 use nervix_primitives::unmodeled::sync::atomic::{AtomicBool, Ordering};
@@ -37,7 +32,6 @@ use nervix_recovery::NoReceiver as _;
 use nervix_wasm_protocol as protocol;
 pub use nervix_wasm_protocol::SavedStateRejection;
 use thiserror::Error;
-use tokio::sync::mpsc;
 #[cfg(test)]
 use triomphe::Arc;
 use wasmtime::{
@@ -54,7 +48,7 @@ const DEFAULT_EPOCH_DEADLINE_TICKS: u64 = 1;
 const DEFAULT_MAX_GUEST_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 pub const ABI_SERIALIZATION_NAME: &str = protocol::SERIALIZATION_NAME;
 
-tokio::task_local! {
+nervix_primitives::unmodeled::task_local! {
     static INVOCATION_NOW: Timestamp;
 }
 
@@ -71,7 +65,7 @@ pub enum WasmProcessorError {
     #[error("failed to compile wasm module")]
     Compile(#[source] wasmtime::Error),
     #[error("failed to join wasm compilation task")]
-    CompileTask(#[source] tokio::task::JoinError),
+    CompileTask(#[source] nervix_primitives::task::JoinError),
     #[error("failed to link wasm module")]
     Link(#[source] wasmtime::Error),
 }
@@ -568,7 +562,7 @@ impl WasmRuntime {
     ) -> StackResult<CompiledWasmProcessor, WasmProcessorError> {
         let engine = self.engine.clone();
         let wasm = wasm.as_ref().to_vec();
-        let instance_pre = tokio::task::spawn_blocking(move || {
+        let instance_pre = nervix_primitives::task::spawn_blocking(move || {
             let module = Module::new(&engine, wasm)
                 .map_err(|source| Report::new(WasmProcessorError::Compile(source)))?;
             let mut linker = Linker::<BranchStore>::new(&engine);
@@ -602,11 +596,13 @@ fn spawn_epoch_driver(
     interval: Duration,
 ) -> std::io::Result<()> {
     let weak_stop = StdArc::downgrade(&stop);
-    thread::Builder::new()
+    // The epoch driver is an operating-system thread no model runs, beside the runtime rather than
+    // part of any protocol a check explores.
+    nervix_primitives::unmodeled::thread::Builder::new()
         .name("nervix-wasm-epoch".to_string())
         .spawn(move || {
             loop {
-                thread::sleep(interval);
+                nervix_primitives::unmodeled::thread::sleep(interval);
                 let Some(stop) = weak_stop.upgrade() else {
                     break;
                 };
@@ -2221,7 +2217,7 @@ impl WasmBranchInstance {
     async fn read_pending_emit(&mut self) -> StackResult<Vec<WasmEnvelope>, WasmGuestCallError> {
         let mut batches = Vec::new();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let size = self
                 .read_emit
                 .call_async(&mut self.store, ())
@@ -2762,7 +2758,7 @@ mod tests {
         assert_eq!(&spill_allocator[spill_start..], expected);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn underestimated_guest_capacity_grows_and_copies_finished_spill() {
         let runtime = runtime();
         let compiled = runtime
@@ -3020,7 +3016,7 @@ mod tests {
             .expect("a failed guest operation keeps its typed call cause")
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_application_state_rejection_carries_the_guest_reason() {
         let wasm = lifecycle_wasm(
             "i32.const 0",
@@ -3047,7 +3043,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_snapshot_envelope_rejection_is_its_own_verdict() {
         let wasm = lifecycle_wasm("i32.const 0", "i32.const 0", "i32.const -7");
 
@@ -3063,7 +3059,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_negative_restore_code_that_is_not_a_verdict_is_a_failed_restore() {
         let wasm = lifecycle_wasm("i32.const 0", "i32.const 0", "i32.const -1");
 
@@ -3083,7 +3079,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_trap_while_restoring_is_a_failed_restore() {
         let wasm = lifecycle_wasm("i32.const 0", "i32.const 0", "unreachable");
 
@@ -3103,7 +3099,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn exhausting_fuel_while_restoring_is_a_failed_restore() {
         let wasm = lifecycle_wasm(
             "i32.const 0",
@@ -3123,7 +3119,7 @@ mod tests {
         assert_eq!(failure.operation(), WasmGuestOperation::StateRestore);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_guest_that_cannot_serialize_its_state_reports_why() {
         let wasm = lifecycle_wasm(
             "i32.const 0",
@@ -3156,7 +3152,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_failed_initialization_is_reported_under_initialization_with_its_reason() {
         let wasm = lifecycle_wasm(
             "i32.const 32 global.set $reason_len i32.const -6",
@@ -3252,7 +3248,7 @@ mod tests {
     }
 
     /// A callback that asks is answered, and the host reads that request back exactly once.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_callback_that_asks_for_a_new_state_lifetime_is_accepted_once() {
         let mut branch =
             state_reset_branch(state_reset_wasm("call $request_state_reset", "i32.const 0")).await;
@@ -3275,7 +3271,7 @@ mod tests {
 
     /// Asking repeatedly inside one callback is one request, because the host replaces the
     /// lifetime once.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn repeated_requests_in_one_callback_are_one_request() {
         let mut branch = state_reset_branch(state_reset_wasm(
             "call $request_state_reset drop call $request_state_reset drop call              \
@@ -3301,7 +3297,7 @@ mod tests {
 
     /// A callback that asks and then fails is still asking: its uncommitted effects are exactly
     /// what the reset discards.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_failed_callback_that_asked_still_asks() {
         let mut branch = state_reset_branch(state_reset_wasm(
             "call $request_state_reset drop i32.const -6",
@@ -3323,7 +3319,7 @@ mod tests {
 
     /// Saving is not a callback: it owns no uncommitted effects, so the host refuses the request
     /// and schedules nothing.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_request_outside_a_callback_is_refused() {
         let mut branch =
             state_reset_branch(state_reset_wasm("i32.const 0", "call $request_state_reset")).await;
@@ -3346,7 +3342,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn oversized_guest_input_is_rejected_before_calling_guest() {
         let runtime = WasmRuntime::new(WasmRuntimeConfig {
             optimize: false,
@@ -3383,7 +3379,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_batch_negative_guest_code_is_reported() {
         let runtime = runtime();
         let compiled = runtime
@@ -3414,7 +3410,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn timeout_negative_guest_code_is_reported() {
         let runtime = runtime();
         let compiled = runtime
@@ -3445,7 +3441,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn flush_negative_guest_code_is_reported() {
         let runtime = runtime();
         let compiled = runtime
@@ -3476,7 +3472,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_guest_that_never_buffers_stays_usable_across_a_quiesce_flush() {
         let runtime = runtime();
         let compiled = runtime
@@ -3506,7 +3502,7 @@ mod tests {
             .expect("the branch must keep processing after a quiesce flush that emitted nothing");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn flush_trap_is_reported_with_its_trap_code() {
         let wasm = r#"
             (module
@@ -3553,7 +3549,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_global_error_raised_while_flushing_is_reported() {
         let wasm = r#"
             (module
@@ -3607,7 +3603,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn flushing_a_guest_that_holds_nothing_yields_no_output() {
         let runtime = runtime();
         let compiled = runtime
@@ -3634,7 +3630,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_guest_without_the_flush_export_cannot_instantiate() {
         let wasm = r#"
             (module
@@ -3672,7 +3668,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn missing_required_export_is_reported() {
         let wasm = r#"
             (module
@@ -3802,12 +3798,12 @@ mod tests {
         assert_eq!(outputs[0].acks.acked, vec![token_set(10), token_set(30)]);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn rust_guest_interoperates_with_host_flatbuffer_format() {
         guest_emits_flatbuffer_input_reference_output(&rust_guest_path()).await;
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn rust_guest_output_omits_unchanged_string_payloads() {
         const SENTINEL: &str = "UNCHANGED_PAYLOAD_SENTINEL";
 
@@ -3872,7 +3868,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn rust_guest_timeout_shares_one_generated_column_across_routes() {
         let runtime = runtime();
         let compiled = runtime
@@ -3941,7 +3937,7 @@ mod tests {
         assert_eq!(reader.collect::<Result<Vec<_>, _>>().unwrap().len(), 1);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn quiesce_flush_releases_the_batch_the_guest_still_buffers() {
         let runtime = runtime();
         let compiled = runtime
@@ -4008,7 +4004,7 @@ mod tests {
     /// flush is where the guest releases the batch it buffers, because its snapshot holds only the
     /// row ordinal: the replacement numbers its rows after the released batch and emits only the
     /// input it receives itself.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_quiesce_flush_releases_buffered_input_before_the_handoff_snapshot() {
         let runtime = runtime();
         let compiled = runtime
@@ -4095,7 +4091,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_timeout_after_a_quiesce_flush_emits_nothing() {
         let runtime = runtime();
         let compiled = runtime
@@ -4149,7 +4145,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_go_guest_releases_its_buffered_batch_on_quiesce_flush() {
         let runtime = runtime();
         let compiled = runtime
@@ -4202,7 +4198,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn repeated_read_emit_calls_return_multiple_output_groups() {
         let runtime = runtime();
         let compiled = runtime
@@ -4331,12 +4327,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_rust_guest_restores_its_row_ordinal_without_the_input_it_buffered() {
         guest_restores_its_row_ordinal_without_the_input_it_buffered(&rust_guest_path()).await;
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_go_guest_restores_its_row_ordinal_without_the_input_it_buffered() {
         guest_restores_its_row_ordinal_without_the_input_it_buffered(&go_guest_path()).await;
     }
@@ -4379,12 +4375,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_rust_guest_reports_why_it_cannot_serialize_its_state() {
         guest_that_cannot_serialize_its_state_reports_why(&rust_guest_path()).await;
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_go_guest_reports_why_it_cannot_serialize_its_state() {
         guest_that_cannot_serialize_its_state_reports_why(&go_guest_path()).await;
     }
@@ -4392,7 +4388,7 @@ mod tests {
     /// A callback that fails latches the SDK guest into error state, which refuses every later
     /// callback of that instance. The error state belongs to the instance: its snapshot still holds
     /// the application state, and a replacement restored from it processes input again.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_rust_guest_restored_after_its_error_state_processes_input() {
         let runtime = runtime();
         let compiled = runtime
@@ -4506,17 +4502,17 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_rust_guest_rejects_a_snapshot_of_another_branch_configuration() {
         guest_rejects_a_snapshot_of_another_branch_configuration(&rust_guest_path()).await;
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_go_guest_rejects_a_snapshot_of_another_branch_configuration() {
         guest_rejects_a_snapshot_of_another_branch_configuration(&go_guest_path()).await;
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_rust_guest_rejects_bytes_that_are_not_a_snapshot_envelope() {
         let guest = read_guest(&rust_guest_path());
 
@@ -4565,17 +4561,17 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_rust_guest_rejects_application_state_its_processor_cannot_restore() {
         guest_rejects_application_state_that_is_not_a_row_ordinal(&rust_guest_path()).await;
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_go_guest_rejects_application_state_it_cannot_restore() {
         guest_rejects_application_state_that_is_not_a_row_ordinal(&go_guest_path()).await;
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_go_guest_rejects_bytes_that_are_not_a_snapshot_envelope() {
         let guest = read_guest(&go_guest_path());
 
@@ -4592,12 +4588,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn go_guest_interoperates_with_host_flatbuffer_format() {
         guest_emits_flatbuffer_input_reference_output(&go_guest_path()).await;
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn branch_instances_reuse_compiled_module_with_isolated_stores() {
         let runtime = runtime();
         let compiled = runtime
@@ -4657,7 +4653,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn every_guest_invocation_uses_its_explicit_context() {
         let runtime = runtime();
         let compiled = runtime
@@ -4694,7 +4690,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn saved_state_loads_into_new_branch_store() {
         let runtime = runtime();
         let compiled = runtime
@@ -4728,7 +4724,7 @@ mod tests {
         assert_eq!(restored_state, 1_i64.to_le_bytes());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn resetting_a_guest_clears_its_saved_computation_state() {
         let runtime = runtime();
         let compiled = runtime
@@ -4766,7 +4762,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn emitted_batches_can_be_streamed_to_integration_owner() {
         let runtime = runtime();
         let compiled = runtime
@@ -4799,7 +4795,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[nervix_primitives::test(flavor = "current_thread")]
     async fn module_compilation_yields_to_async_executor() {
         let runtime = runtime();
         let mut wasm = String::from("(module");
@@ -4813,14 +4809,14 @@ mod tests {
 
         let ticks = Arc::new(AtomicU64::new(0));
         let task_ticks = Arc::clone(&ticks);
-        let progress_task = tokio::spawn(async move {
+        let progress_task = nervix_primitives::task::spawn(async move {
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 task_ticks.fetch_add(1, Ordering::Relaxed);
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
             }
         });
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         let ticks_before_compile = ticks.load(Ordering::Relaxed);
 
         runtime
@@ -4836,7 +4832,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn max_fuel_traps_a_cpu_bound_guest() {
         let runtime = runtime();
         let compiled = runtime
@@ -4871,7 +4867,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn max_fuel_is_reset_for_each_logical_guest_operation() {
         let runtime = runtime();
         let compiled = runtime
@@ -4907,7 +4903,7 @@ mod tests {
         assert_eq!(second_remaining, first_remaining);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn max_memory_traps_guest_linear_memory_growth() {
         let runtime = runtime();
         let compiled = runtime
@@ -4947,7 +4943,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn max_memory_rejects_guest_initial_linear_memory() {
         let runtime = runtime();
         let compiled = runtime
@@ -4983,7 +4979,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn epoch_driver_yields_cpu_bound_guest_to_async_executor() {
         let runtime = WasmRuntime::new(WasmRuntimeConfig {
             optimize: true,
@@ -5008,10 +5004,10 @@ mod tests {
 
         let ticks = Arc::new(AtomicU64::new(0));
         let task_ticks = Arc::clone(&ticks);
-        let progress_task = tokio::spawn(async move {
+        let progress_task = nervix_primitives::task::spawn(async move {
             loop {
                 task_ticks.fetch_add(1, Ordering::Relaxed);
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
             }
         });
 

@@ -6,13 +6,14 @@
 //! following what it followed, several domains, a detach, an end and an interruption. The
 //! projections are held to the arithmetic the ingestor admits by, with exact values.
 
-use std::{ptr, slice, thread};
+use std::{ptr, slice};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
     DomainClockAttachDisposition, DomainClockAttachmentEndReason, DomainClockAttachmentEnded,
     DomainClockObservation, DomainClockObserved, DomainClockObservedState, wire::SessionLimits,
 };
+use nervix_primitives::thread;
 
 use super::{
     clock_events::{

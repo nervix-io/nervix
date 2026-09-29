@@ -10,13 +10,7 @@ workspace = true
 
 [features]
 default = []
-shuttle = [
-  "dep:shuttle-parking-lot",
-  "dep:shuttle-tokio",
-  "nervix-primitives/shuttle",
-  "shuttle-parking-lot/shuttle",
-  "shuttle-tokio/shuttle",
-]
+shuttle = ["nervix-primitives/shuttle"]
 
 [dependencies]
 arch-into = { workspace = true }
@@ -25,18 +19,10 @@ error-stack = { workspace = true }
 flatbuffers = { workspace = true }
 meticulous = { workspace = true }
 nervix-models = { workspace = true }
-nervix-primitives = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
 nervix-wasm-protocol = { workspace = true }
 nonzero_ext = { workspace = true }
-parking_lot = { workspace = true }
-shuttle-parking-lot = { workspace = true, optional = true }
-shuttle-tokio = { workspace = true, features = [
-  "macros",
-  "rt",
-  "sync",
-  "time",
-], optional = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }

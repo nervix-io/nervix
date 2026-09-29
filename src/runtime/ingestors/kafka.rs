@@ -192,8 +192,8 @@ impl KafkaPartitionWatch {
             }
         };
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
                         break;
@@ -331,7 +331,7 @@ impl KafkaIngestorStartPlan {
         let mut opened: Vec<Box<dyn SourceInstance>> =
             Vec::with_capacity(source_plan.capabilities.instances().get().arch_into());
         for instance_index in 0..source_plan.capabilities.instances().get() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let source = KafkaSource::open(&source_plan.connector, instance_index)
                 .await
                 .map_err(|error| ingestor.start_failure(error.to_string()))?;

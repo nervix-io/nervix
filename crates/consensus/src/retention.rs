@@ -102,7 +102,7 @@ impl RetentionTask {
         let mut ticks = interval(RETENTION_INTERVAL);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             ticks.tick().await;
             if self.raft.is_initialized().await.is_err() {
                 return;

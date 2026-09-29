@@ -426,20 +426,18 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use tokio::{
-        sync::{mpsc, watch},
-        time::{Duration, Instant},
-    };
+    use nervix_primitives::sync::{mpsc, watch};
+    use tokio::time::{Duration, Instant};
 
     use super::*;
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_emitter_stop_keeps_a_failed_drain_task_available_for_retry() {
         let grace = Duration::from_millis(50);
         let started = Instant::now();
         let (commands, mut command_rx) = mpsc::channel(2);
         let (stop_signal, _stop_rx) = watch::channel(None);
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let Some(EmitterTaskCommand::Stop { deadline, response }) = command_rx.recv().await
             else {
                 panic!("expected the first emitter stop command");
@@ -482,11 +480,11 @@ mod tests {
             .expect("the retained emitter task must accept a later successful stop");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_emitter_stop_clears_signal_when_the_response_is_dropped() {
         let (commands, mut command_rx) = mpsc::channel(1);
         let (stop_signal, _stop_rx) = watch::channel(None);
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let Some(EmitterTaskCommand::Stop { response, .. }) = command_rx.recv().await else {
                 panic!("expected an emitter stop command");
             };
@@ -517,13 +515,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_emitter_stop_returns_final_flush_failure_as_recoverable() {
         let (commands, mut command_rx) = mpsc::channel(1);
         let (stop_signal, _stop_rx) = watch::channel(None);
         let finished = Arc::new(AtomicBool::new(false));
         let task_finished = finished.clone();
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let Some(EmitterTaskCommand::Stop { response, .. }) = command_rx.recv().await else {
                 panic!("scheduled emitter must receive its stop command")
             };
@@ -553,7 +551,7 @@ mod tests {
         assert!(finished.load(Ordering::Acquire));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_emitter_stop_retains_a_task_that_drops_its_response() {
         struct Dropped(Arc<AtomicBool>);
 
@@ -567,7 +565,7 @@ mod tests {
         let (stop_signal, _) = watch::channel(None);
         let dropped = Arc::new(AtomicBool::new(false));
         let task_dropped = dropped.clone();
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let _dropped = Dropped(task_dropped);
             let Some(EmitterTaskCommand::Stop { response, .. }) = command_rx.recv().await else {
                 panic!("scheduled emitter must receive its stop command")
@@ -599,7 +597,7 @@ mod tests {
         assert!(dropped.load(Ordering::Acquire));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_emitter_stop_timeout_retains_the_task() {
         struct Dropped(Arc<AtomicBool>);
 
@@ -613,7 +611,7 @@ mod tests {
         let (stop_signal, _) = watch::channel(None);
         let dropped = Arc::new(AtomicBool::new(false));
         let task_dropped = dropped.clone();
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let _dropped = Dropped(task_dropped);
             let Some(EmitterTaskCommand::Stop { response, .. }) = command_rx.recv().await else {
                 panic!("scheduled emitter must receive its stop command")

@@ -40,15 +40,17 @@ use std::{
 };
 
 use meticulous::OptionExt as _;
+use nervix_primitives::{
+    sync::{blocking::Mutex, mpsc},
+    task::AbortOnDropHandle,
+};
 use nix::{
     fcntl::{FcntlArg, FdFlag, OFlag, fcntl},
     pty::{Winsize, openpty},
     sys::termios::Termios,
 };
-use parking_lot::Mutex;
 use tempfile::TempDir;
-use tokio::{io::unix::AsyncFd, process::Child, sync::mpsc};
-use tokio_util::task::AbortOnDropHandle;
+use tokio::{io::unix::AsyncFd, process::Child};
 
 /// The newest bytes of terminal output a fixture retains for its assertions.
 const DISPLAY_RETAINED_BYTES: usize = 256 * 1024;
@@ -145,7 +147,7 @@ impl CliTerminal {
         let master = AsyncFd::new(terminal.master)?;
         let (keys, typed) = mpsc::channel(PENDING_KEY_SEQUENCES);
         let display = StdArc::new(Mutex::new(TerminalDisplay::default()));
-        let player = tokio::spawn(play_terminal(master, typed, display.clone()));
+        let player = nervix_primitives::task::spawn(play_terminal(master, typed, display.clone()));
         Ok(Self {
             keys,
             display,
@@ -171,7 +173,7 @@ impl CliTerminal {
     ) -> Result<(), DisplayWaitError> {
         let deadline = Instant::now() + within;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self.display.lock().contains(expected) {
                 return Ok(());
             }
@@ -322,8 +324,8 @@ async fn play_terminal(
 ) {
     let mut requests = CursorRequests::default();
     loop {
-        tokio::task::consume_budget().await;
-        tokio::select! {
+        nervix_primitives::task::consume_budget().await;
+        nervix_primitives::select! {
             output = read_output(&master) => {
                 let Some(output) = output else {
                     return;
@@ -351,7 +353,7 @@ async fn play_terminal(
 async fn read_output(master: &AsyncFd<OwnedFd>) -> Option<Vec<u8>> {
     let mut buffer = [0_u8; 4096];
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let Ok(mut ready) = master.readable().await else {
             return None;
         };
@@ -377,7 +379,7 @@ async fn read_output(master: &AsyncFd<OwnedFd>) -> Option<Vec<u8>> {
 async fn write_keys(master: &AsyncFd<OwnedFd>, keys: &[u8]) -> io::Result<()> {
     let mut remaining = keys;
     while !remaining.is_empty() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let mut ready = master.writable().await?;
         let written = ready.try_io(|descriptor| {
             nix::unistd::write(descriptor.get_ref(), remaining).map_err(io::Error::from)

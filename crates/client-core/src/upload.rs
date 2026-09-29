@@ -20,13 +20,12 @@ use nervix_client_wire::{
     grpc::{ClientUploadCodec, UPLOAD_RESOURCE_PATH},
 };
 use nervix_models::{DomainName, ResourceName, ResourceUploadIdentity};
+use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc};
 use tempfile::TempPath;
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    sync::mpsc,
 };
-use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, codegen::http::uri::PathAndQuery, transport::Channel};
 
 use crate::{
@@ -91,7 +90,7 @@ impl Client {
         let archive = UploadArchive::build(directory.as_ref()).await?;
         let result = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
             for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let start = UploadStart {
                     request_id: UPLOAD_REQUEST_ID,
                     domain: domain.clone(),
@@ -243,7 +242,7 @@ impl UploadArchive {
         let mut result = Ok(());
 
         for entry in entries {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut header = Header::new_ustar();
             header.set_mtime(0);
             header.set_uid(0);
@@ -351,14 +350,14 @@ impl UploadAttempt {
             mut archive,
         } = self;
         let (frames, outbound) = mpsc::channel(UPLOAD_FRAME_CAPACITY);
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             if frames.send(start).await.is_err() {
                 // The call ended before it took the start frame, and its status says why.
                 return;
             }
             let mut buffer = vec![0_u8; UPLOAD_CHUNK_BYTES];
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let read = match archive.read(&mut buffer).await {
                     Ok(read) => read,
                     // Ending the stream early leaves the archive short of its declared size,

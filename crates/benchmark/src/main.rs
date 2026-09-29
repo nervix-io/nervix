@@ -192,7 +192,7 @@ struct Subject {
 
 fn main() -> Result<()> {
     configure_process_lifecycle(ContainerMode::Ephemeral);
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("failed to build the benchmark runtime")?;
@@ -267,7 +267,7 @@ async fn run_all_benchmarks(
             .cloned()
             .collect::<Vec<_>>();
         for implementation in implementations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let result = run_benchmark(
                 repository_root,
                 catalog,
@@ -445,7 +445,7 @@ async fn run_ab_benchmark(
     let runs = args.runs.get();
     for index in 0..runs {
         for arm in &mut arms {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             println!(
                 "A/B run {}/{runs} for the {} arm ({})",
                 index + 1,
@@ -656,7 +656,7 @@ async fn capture_container_diagnostics(
     let directory = run_directory.join("container-diagnostics");
     fs::create_dir_all(&directory).context("failed to create container diagnostics directory")?;
     for (index, container_id) in container_ids.iter().enumerate() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let short_id = container_id.chars().take(12).collect::<String>();
         ensure!(
             !short_id.is_empty() && short_id.bytes().all(|byte| byte.is_ascii_alphanumeric()),
@@ -710,7 +710,7 @@ async fn start_declared_dependencies(
     dependencies: &[BenchmarkDependency],
 ) -> Result<()> {
     for dependency in dependencies {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = match dependency {
             BenchmarkDependency::Kafka => environment.start_kafka().await,
         };
@@ -847,7 +847,7 @@ async fn start_nervix(
             let bootstrap_addr = format!("127.0.0.1:{}", ports[0].interconnect);
             let mut children = Vec::with_capacity(node_count);
             for index in 0..node_count {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let node_id = &node_names[index];
                 let state_directory = resolved
                     .run_directory
@@ -925,7 +925,7 @@ async fn start_nervix(
             let bootstrap_addr = format!("{}:{NERVIX_INTERCONNECT_PORT}", container_names[0]);
             let mut infos = Vec::with_capacity(node_count);
             for index in 0..node_count {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let node_id = node_names[index].clone();
                 let container_name = container_names[index].clone();
                 let server_args = container_server_arguments(
@@ -1092,7 +1092,7 @@ impl Subject {
     ) -> Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
         let client = loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let connection = async {
                 let client = self.connect_client(DEFAULT_DOMAIN).await?;
                 let outcome = client
@@ -1270,7 +1270,7 @@ impl Subject {
             .context("failed to build the benchmark metrics client")?;
         let mut prometheus_scrapes = Vec::with_capacity(self.metrics_urls.len());
         for metrics_url in &self.metrics_urls {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let response = client
                 .get(metrics_url.clone())
                 .send()
@@ -1309,7 +1309,7 @@ impl Subject {
             return Ok(());
         };
         for (index, info) in infos.iter().enumerate() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let output = Command::new("docker")
                 .args(["logs", info.id()])
                 .output()
@@ -1333,7 +1333,7 @@ impl Subject {
     async fn stop(&mut self) -> Result<()> {
         if let SubjectRuntime::Local { children } = &mut self.runtime {
             for child in children.iter_mut().rev() {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if child.try_wait()?.is_none() {
                     child.start_kill()?;
                     child.wait().await?;
@@ -1413,7 +1413,7 @@ async fn run_load_driver(
 
     let ready_deadline = tokio::time::Instant::now() + resolved.wait_timeout;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if ready_file.exists() {
             break;
         }
@@ -1448,7 +1448,7 @@ async fn run_load_driver(
     );
     let completion_deadline = tokio::time::Instant::now() + completion_timeout;
     let status = loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if let Some(status) = child.try_wait()? {
             break status;
         }
@@ -1705,7 +1705,7 @@ async fn wait_for_local_nervix(
     let client = reqwest::Client::new();
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if let Some(status) = child.try_wait()? {
             bail!("local nervix-server exited before readiness with {status}");
         }

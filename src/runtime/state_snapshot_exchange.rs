@@ -289,7 +289,7 @@ impl Runtime {
                     placement: placement.clone(),
                 })?
         {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             staged.write_chunk(chunk).await.change_context(
                 MaterializedSnapshotExchangeError::WriteChunk {
                     target: target_node_id.clone(),
@@ -387,7 +387,7 @@ mod tests {
     use super::*;
     use crate::runtime::RuntimeState;
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn snapshot_stream_refuses_a_placement_this_node_does_not_own() {
         let placement = RuntimeStatePlacement {
             domain: DomainName::parse("snapshot_test").assured("the test domain name is valid"),

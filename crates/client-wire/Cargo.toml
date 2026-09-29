@@ -32,6 +32,7 @@ meticulous = { workspace = true }
 
 [dev-dependencies]
 futures-util = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 strum = { workspace = true }
 tokio = { workspace = true, features = [
   "macros",
@@ -40,7 +41,6 @@ tokio = { workspace = true, features = [
   "sync",
   "time",
 ] }
-tokio-stream = { workspace = true, features = ["net"] }
 tokio-tungstenite = { workspace = true }
 
 [[test]]

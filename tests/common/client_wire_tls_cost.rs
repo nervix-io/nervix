@@ -59,7 +59,7 @@ pub(crate) async fn capture(grpc_uri: &str, domain: &str) -> Result<PathBuf> {
     ensure!(warmup.succeeded(), "TLS cost warm-up command failed");
     let mut command_microseconds = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let started = Instant::now();
         let outcome = timeout(OPERATION_TIMEOUT, client.execute(COMMAND))
             .await
@@ -73,7 +73,7 @@ pub(crate) async fn capture(grpc_uri: &str, domain: &str) -> Result<PathBuf> {
     let mut prepare_microseconds = Vec::with_capacity(SAMPLES);
     let mut prepared_execution_microseconds = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let started = Instant::now();
         let prepared = client.prepare_execution(COMMAND).await;
         prepare_microseconds.push(

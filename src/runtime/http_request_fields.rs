@@ -1129,7 +1129,7 @@ mod tests {
         fields: Vec<&'a str>,
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn each_row_is_rejected_at_its_first_failed_field_and_the_rest_keep_their_requests() {
         let compiled = compile(
             &sink(
@@ -1327,7 +1327,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_codec_request_reads_its_source_row_and_its_finalized_record() {
         let output = test_schema(&[
             ("id", ParseAsType::String),

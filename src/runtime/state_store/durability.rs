@@ -11,8 +11,10 @@ use error_stack::{Report, ResultExt as _};
 use fjall::PersistMode;
 use meticulous::OptionExt as _;
 use nervix_execution::{MemoryClass, StorageClass};
-use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tokio::sync::Notify;
+use nervix_primitives::sync::{
+    Notify,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use super::{RuntimePersistenceError, RuntimeStateStore};
 
@@ -115,7 +117,7 @@ impl DurabilityBarrier {
     {
         let ticket = self.issue();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let finished = self.finished.notified();
             tokio::pin!(finished);
             finished.as_mut().enable();
@@ -207,7 +209,7 @@ mod tests {
     /// Writers that ask for durability at the same time share synchronizations instead of each
     /// queuing one behind the storage workers. A writer that asks while a synchronization runs is
     /// covered by the next one at the latest.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn concurrent_writers_share_synchronizations() {
         let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
         let store = open_store(&dir);
@@ -228,7 +230,7 @@ mod tests {
     /// A synchronization that fails leaves every write it covered, and every later one, without a
     /// durability promise: the database refuses later synchronizations, and none of them could
     /// prove that writes the failed one did not flush reached storage.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_failed_synchronization_refuses_every_later_durability_promise() {
         let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
         let store = open_store(&dir);
@@ -250,7 +252,7 @@ mod tests {
 
     /// Cancelling the writer that runs a synchronization frees the barrier for the others: the next
     /// writer runs its own synchronization instead of waiting for one nobody will finish.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_cancelled_synchronization_frees_the_barrier() {
         let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
         let store = open_store(&dir);

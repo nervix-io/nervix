@@ -39,15 +39,13 @@ use std::{
 
 use bytes::Bytes;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_recovery::Discarded as _;
-use parking_lot::Mutex;
-use thiserror::Error;
-use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::watch,
-    task::JoinSet,
+use nervix_primitives::{
+    sync::{CancellationToken, blocking::Mutex, watch},
+    task::{AbortOnDropHandle, JoinSet},
 };
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
+use nervix_recovery::Discarded as _;
+use thiserror::Error;
+use tokio::net::{TcpListener, TcpStream};
 use triomphe::Arc;
 
 use super::http_receiver::{
@@ -341,7 +339,7 @@ impl GrpcReceiver {
             address,
             state,
             cancellation,
-            accept_loop: AbortOnDropHandle::new(tokio::spawn(accept_loop.run())),
+            accept_loop: AbortOnDropHandle::new(nervix_primitives::task::spawn(accept_loop.run())),
         })
     }
 
@@ -477,8 +475,8 @@ impl GrpcAcceptLoop {
         let mut summary = ConnectionSummary::default();
         let mut next_connection = 0_u64;
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 biased;
                 () = self.cancellation.cancelled() => break,
                 Some(joined) = connections.join_next(), if !connections.is_empty() => {
@@ -509,14 +507,14 @@ impl GrpcAcceptLoop {
         }
         let deadline = tokio::time::Instant::now() + RECEIVER_CONNECTION_STOP_BUDGET;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match tokio::time::timeout_at(deadline, connections.join_next()).await {
                 Ok(Some(joined)) => summary.joined(joined),
                 Ok(None) => break,
                 Err(_) => {
                     connections.abort_all();
                     while let Some(joined) = connections.join_next().await {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         summary.joined(joined);
                     }
                     break;
@@ -539,7 +537,7 @@ impl GrpcConnection {
     /// receiver stops. The connection is dropped at the end, which closes its socket without
     /// flushing anything more to the client.
     async fn serve(self, stream: TcpStream) {
-        let handshake = tokio::select! {
+        let handshake = nervix_primitives::select! {
             () = self.cancellation.cancelled() => return,
             handshake = h2::server::handshake(stream) => handshake,
         };
@@ -556,8 +554,8 @@ impl GrpcConnection {
         let lost = CancellationToken::new();
         let mut calls = JoinSet::new();
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 biased;
                 () = self.cancellation.cancelled() => break,
                 () = lost.cancelled() => break,
@@ -596,7 +594,7 @@ impl GrpcConnection {
         // unanswered stream is never flushed, because the connection is not polled again.
         calls.abort_all();
         while calls.join_next().await.is_some() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
         }
         drop(connection);
     }
@@ -660,7 +658,7 @@ impl GrpcCall {
                 std::future::pending::<()>().await;
             }
             GrpcAnswer::HoldResponse => {
-                tokio::select! {
+                nervix_primitives::select! {
                     () = self.cancellation.cancelled() => {}
                     _ = std::future::poll_fn(|context| respond.poll_reset(context)) => {}
                 }
@@ -676,8 +674,8 @@ impl GrpcCall {
         let mut received = Vec::new();
         let mut declared = None;
         loop {
-            tokio::task::consume_budget().await;
-            let chunk = tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            let chunk = nervix_primitives::select! {
                 () = self.cancellation.cancelled() => return Ok(None),
                 chunk = body.data() => chunk,
             };

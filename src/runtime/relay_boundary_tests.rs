@@ -17,11 +17,9 @@ use nervix_models::{
     CreateSchema, DomainName, DomainSchedule, ModelKind, ModelName, NodeRef, ParseAsType,
     RelayBranching, RelayName, RemoteAckRegistration, SchemaName, Timestamp,
 };
+use nervix_primitives::sync::watch;
 use nonzero_ext::nonzero;
-use tokio::{
-    sync::watch,
-    time::{Duration, sleep, timeout},
-};
+use tokio::time::{Duration, sleep, timeout};
 use triomphe::Arc;
 
 use super::*;
@@ -40,12 +38,12 @@ fn relay_metrics(runtime: &Runtime, domain: &DomainName, relay: &RelayName) -> R
     )
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn relay_task_stops_classify_join_failures_by_task_kind() {
     let (state_shutdown, _state_shutdown_rx) = watch::channel(false);
     let state = RelayStateTask {
         shutdown: state_shutdown,
-        task: tokio::spawn(async { panic!("state task fixture failed") }),
+        task: nervix_primitives::task::spawn(async { panic!("state task fixture failed") }),
     };
     let state_error = state
         .stop(Duration::from_secs(1))
@@ -57,12 +55,12 @@ async fn relay_task_stops_classify_join_failures_by_task_kind() {
             task: RelayTaskKind::State,
         }
     ));
-    assert!(state_error.contains::<tokio::task::JoinError>());
+    assert!(state_error.contains::<nervix_primitives::task::JoinError>());
 
     let (owner_shutdown, _owner_shutdown_rx) = watch::channel(false);
     let owner = RelayOwnerTask {
         shutdown: owner_shutdown,
-        task: tokio::spawn(async { panic!("owner task fixture failed") }),
+        task: nervix_primitives::task::spawn(async { panic!("owner task fixture failed") }),
     };
     let owner_error = owner
         .stop(Duration::from_secs(1))
@@ -74,16 +72,16 @@ async fn relay_task_stops_classify_join_failures_by_task_kind() {
             task: RelayTaskKind::Owner,
         }
     ));
-    assert!(owner_error.contains::<tokio::task::JoinError>());
+    assert!(owner_error.contains::<nervix_primitives::task::JoinError>());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn relay_task_stops_classify_drain_timeouts_by_task_kind() {
     let grace = Duration::from_millis(1);
     let (state_shutdown, _state_shutdown_rx) = watch::channel(false);
     let state = RelayStateTask {
         shutdown: state_shutdown,
-        task: tokio::spawn(std::future::pending()),
+        task: nervix_primitives::task::spawn(std::future::pending()),
     };
     let state_error = state
         .stop(grace)
@@ -100,7 +98,7 @@ async fn relay_task_stops_classify_drain_timeouts_by_task_kind() {
     let (owner_shutdown, _owner_shutdown_rx) = watch::channel(false);
     let owner = RelayOwnerTask {
         shutdown: owner_shutdown,
-        task: tokio::spawn(std::future::pending()),
+        task: nervix_primitives::task::spawn(std::future::pending()),
     };
     let owner_error = owner
         .stop(grace)
@@ -177,7 +175,7 @@ fn branch_eviction_cancels_and_reopens_relay_channel_generations() {
     assert_eq!(reopened_delivery.sequence, 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
     let runtime = Runtime::default();
     let domain = domain("default");
@@ -204,7 +202,7 @@ async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
     assert!(!status.is_drained());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn relay_owner_buffer_retains_the_upstream_ack_until_fanout() {
     let runtime = Runtime::default();
     let domain = domain("default");
@@ -248,7 +246,7 @@ async fn relay_owner_buffer_retains_the_upstream_ack_until_fanout() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn relay_dispatch_detaches_subscription_delivery_from_ack_chain() {
     let runtime = Runtime::default();
     let domain = DomainName::parse("default").expect("valid domain");
@@ -315,7 +313,7 @@ async fn relay_dispatch_detaches_subscription_delivery_from_ack_chain() {
         .expect("relay owner should stop");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn relay_dispatch_detaches_detached_runtime_consumers_from_ack_chain() {
     let runtime = Runtime::default();
     let domain = DomainName::parse("default").expect("valid domain");
@@ -367,7 +365,7 @@ async fn relay_dispatch_detaches_detached_runtime_consumers_from_ack_chain() {
         .expect("relay owner should stop");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn relay_runtime_consumer_broadcast_fans_out_to_multiple_attached_receivers() {
     let runtime = Runtime::default();
     let domain = DomainName::parse("default").expect("valid domain");
@@ -429,7 +427,7 @@ async fn relay_runtime_consumer_broadcast_fans_out_to_multiple_attached_receiver
         .expect("relay owner should stop");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
     let runtime = Runtime::default();
     let domain = DomainName::parse("default").expect("valid domain");
@@ -514,7 +512,7 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
         .expect("relay owner should stop");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn unbranched_relay_uses_direct_fanout_without_branch_collapse() {
     let runtime = Runtime::default();
     let domain = domain("default");
@@ -532,7 +530,7 @@ async fn unbranched_relay_uses_direct_fanout_without_branch_collapse() {
     assert!(!fanout.uses_branch_collapse());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
     let runtime = Runtime::default();
     let domain = domain("default");
@@ -586,7 +584,7 @@ async fn execution_builder_uses_direct_fanout_for_unbranched_relay() {
     assert!(!services.fanout.uses_branch_collapse());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn inbound_subscription_wait_does_not_hold_domain_execution() {
     let runtime = Runtime::default();
     let domain = domain("default");
@@ -672,7 +670,7 @@ async fn inbound_subscription_wait_does_not_hold_domain_execution() {
 
     let inbound_runtime = runtime.clone();
     let inbound_domain = domain.clone();
-    let inbound = tokio::spawn(async move {
+    let inbound = nervix_primitives::task::spawn(async move {
         inbound_runtime
             .handle_remote_subscription_payload(RelayPayload {
                 delivery: RelayDelivery {
@@ -692,7 +690,7 @@ async fn inbound_subscription_wait_does_not_hold_domain_execution() {
     });
     timeout(Duration::from_secs(1), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if subscription_fanout
                 .subscriptions
                 .receivers()
@@ -701,7 +699,7 @@ async fn inbound_subscription_wait_does_not_hold_domain_execution() {
             {
                 break;
             }
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -810,7 +808,7 @@ fn relay_fanout_shares_arrow_columns_and_exposes_row_views() {
     assert_eq!(row_value(&row, "user_id"), Some(RuntimeValue::U32(43)));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn owner_ingress_touches_expiring_stream_state() {
     let runtime = Runtime::default();
     let domain = DomainName::parse("default").expect("valid domain");
@@ -900,14 +898,14 @@ async fn owner_ingress_touches_expiring_stream_state() {
         .expect("remote relay payload should dispatch");
     timeout(Duration::from_secs(1), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if runtime
                 .describe_local_stream_exists(&domain, &relay_id, &key)
                 .expect("stream existence should be queryable")
             {
                 break;
             }
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -929,7 +927,7 @@ fn routed_test_batch(schema: Arc<CompiledSchema>, acks: AckSet) -> RelayRecordBa
     .expect("the routed test batch matches its schema")
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_routed_attached_delivery_fails_on_a_node_that_no_longer_runs_its_consumer() {
     let runtime = Runtime::default();
     let domain = domain("default");
@@ -986,7 +984,7 @@ async fn a_routed_attached_delivery_fails_on_a_node_that_no_longer_runs_its_cons
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_routed_attached_batch_fails_its_acknowledgement_without_an_attached_consumer() {
     let services = test_relay_boundary_services();
     let (acks, completion) = AckSet::root();
@@ -1006,7 +1004,7 @@ async fn a_routed_attached_batch_fails_its_acknowledgement_without_an_attached_c
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_routed_attached_batch_completes_when_its_attached_consumer_does() {
     let services = test_relay_boundary_services();
     let mut consumer = services.add_local_runtime_consumer(AckMode::Attached);
@@ -1041,7 +1039,7 @@ async fn a_routed_attached_batch_completes_when_its_attached_consumer_does() {
     services.remove_local_runtime_consumer(AckMode::Attached);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_routed_detached_batch_needs_no_attached_consumer() {
     let services = test_relay_boundary_services();
 
@@ -1051,7 +1049,7 @@ async fn a_routed_detached_batch_needs_no_attached_consumer() {
         .expect("a detached routed batch carries no acknowledgement to complete");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn relay_owner_enforces_branch_capacity_across_batches() {
     let runtime = Runtime::default();
     let domain = domain("default");
@@ -1076,7 +1074,7 @@ async fn relay_owner_enforces_branch_capacity_across_batches() {
         string_branch_key("tenant", "initech"),
     ];
     for key in &keys {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let batch = RelayRecordBatch::single(
             schema.clone(),
             key.clone(),
@@ -1092,14 +1090,14 @@ async fn relay_owner_enforces_branch_capacity_across_batches() {
 
     timeout(Duration::from_secs(1), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if !registry.contains_key(&keys[0])
                 && registry.contains_key(&keys[1])
                 && registry.contains_key(&keys[2])
             {
                 break;
             }
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -1111,7 +1109,7 @@ async fn relay_owner_enforces_branch_capacity_across_batches() {
 }
 
 #[cfg(feature = "testing")]
-#[tokio::test]
+#[nervix_primitives::test]
 async fn relay_owner_expires_branch_presence_by_ttl() {
     let fault_injection = ConfiguredFaultInjection::default();
     fault_injection.set_branch_instance_expiration_scan_interval(Duration::from_millis(5));
@@ -1154,15 +1152,15 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
 
     timeout(Duration::from_secs(1), async {
         while !registry.contains_key(&key) {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
     .expect("relay owner should observe branch presence");
     timeout(Duration::from_secs(1), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if !registry.contains_key(&key) {
                 break;
             }
@@ -1177,7 +1175,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
         .expect("relay owner should stop");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
     let runtime = Runtime::default();
     let domain = domain("default");
@@ -1219,7 +1217,7 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
     assert!(expiring_state.registry.contains_key(&branch));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn relay_state_shutdown_drains_every_ready_batch() {
     let runtime = Runtime::default();
     let domain = domain("default");
@@ -1261,7 +1259,7 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
     let acme = string_branch_key("tenant", "acme");
     let beta = string_branch_key("tenant", "beta");
     for (key, value) in [(acme.clone(), 1), (beta.clone(), 2)] {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         broadcast
             .broadcast(
                 RelayRecordBatch::single(
@@ -1291,7 +1289,7 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn direct_fanout_owner_buffer_uses_configured_capacity() {
     let runtime = Runtime::default();
     let domain = domain("default");
@@ -1322,7 +1320,7 @@ async fn direct_fanout_owner_buffer_uses_configured_capacity() {
         .await
         .expect("first send should succeed");
 
-    let pending_send = tokio::spawn({
+    let pending_send = nervix_primitives::task::spawn({
         let owner_buffer = owner_buffer.clone();
         async move {
             owner_buffer
@@ -1364,7 +1362,7 @@ async fn direct_fanout_owner_buffer_uses_configured_capacity() {
     assert_eq!(key_label(&second.key), r#"{"branch":"second"}"#);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn relay_boundary_fanout_resize_preserves_existing_owner_receiver() {
     let runtime = Runtime::default();
     let domain = domain("default");
@@ -1473,7 +1471,7 @@ fn relay_batch_estimated_bytes_counts_arrow_payload_buffers() {
 /// the decoded bound a peer's body is measured against. The two numbers diverge widely for
 /// string columns, so a guard that compared the allocated capacity against a payload limit
 /// refused bodies the relay had itself produced, and the caller dropped the whole batch.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_decoded_body_is_bounded_by_the_payload_it_carries() {
     use nervix_execution::{ExecutionConfig, OperationLimits};
     use ubyte::ByteUnit;
@@ -1542,7 +1540,7 @@ async fn a_decoded_body_is_bounded_by_the_payload_it_carries() {
 /// The body every destination carries is the same allocation, not three copies of the same
 /// bytes, and it decodes back to exactly the fields, nulls and branch the source batch had.
 /// Only the target relay and the acknowledgement obligations differ per destination.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_three_destination_fanout_shares_one_encoded_body() {
     let executor = Executor::default();
     let schema = Arc::new(compile_schema(&CreateSchema {
@@ -1702,7 +1700,7 @@ fn notification_definition(sensitive: bool) -> RelaySubscriptionDefinition {
     RelaySubscriptionDefinition::new(Arc::new(schema), ResolvedBranching::unbranched())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn relay_rebuilds_end_subscribers_only_when_the_relay_rows_change() {
     let runtime = Runtime::default();
     let domain = domain("default");

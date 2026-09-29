@@ -53,7 +53,8 @@ use hickory_resolver::{
 };
 use indexmap::IndexSet;
 use meticulous::ResultExt as _;
-use tokio::{sync::Semaphore, time::timeout};
+use nervix_primitives::sync::Semaphore;
+use tokio::time::timeout;
 use triomphe::Arc;
 
 mod configuration;
@@ -105,7 +106,7 @@ impl DnsResolver {
     pub async fn load(
         configuration: DnsConfiguration,
     ) -> Result<Self, Report<DnsConfigurationError>> {
-        let reading = tokio::task::spawn_blocking(move || configuration.read()).await;
+        let reading = nervix_primitives::task::spawn_blocking(move || configuration.read()).await;
         let loaded = match reading {
             Ok(loaded) => loaded?,
             Err(error) => {

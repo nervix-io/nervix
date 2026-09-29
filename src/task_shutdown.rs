@@ -18,7 +18,7 @@
 //! Dropping the join result with `let _` collapses the two into silence. These methods keep them
 //! apart.
 
-use tokio::task::{JoinError, JoinHandle};
+use nervix_primitives::task::{JoinError, JoinHandle};
 use tracing::error;
 
 /// Joining a task the node is stopping on purpose.
@@ -80,12 +80,9 @@ fn report_join_failure(error: &JoinError, task: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io,
-        sync::{Arc, Mutex},
-    };
+    use std::{io, sync::Arc};
 
-    use meticulous::ResultExt as _;
+    use nervix_primitives::sync::blocking::Mutex;
     use tracing_subscriber::fmt::MakeWriter;
 
     use super::*;
@@ -96,23 +93,13 @@ mod tests {
 
     impl CapturedLogs {
         fn contents(&self) -> String {
-            String::from_utf8_lossy(
-                &self
-                    .0
-                    .lock()
-                    .verified("no test holds this lock across a panic")
-                    .clone(),
-            )
-            .into_owned()
+            String::from_utf8_lossy(&self.0.lock().clone()).into_owned()
         }
     }
 
     impl io::Write for CapturedLogs {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .verified("no test holds this lock across a panic")
-                .extend_from_slice(buf);
+            self.0.lock().extend_from_slice(buf);
             Ok(buf.len())
         }
 
@@ -146,7 +133,7 @@ mod tests {
             .with_writer(logs.clone())
             .with_ansi(false)
             .finish();
-        // `#[tokio::test]` runs the whole future on the calling thread, so the thread-local
+        // `#[nervix_primitives::test]` runs the whole future on the calling thread, so the thread-local
         // default the guard installs stays in force across the await.
         let guard = tracing::subscriber::set_default(subscriber);
         let output = join.await;
@@ -161,9 +148,9 @@ mod tests {
         capture(handle.join_after_shutdown(task)).await.logs
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_aborted_task_is_joined_without_a_report() {
-        let handle = tokio::spawn(async {
+        let handle = nervix_primitives::task::spawn(async {
             std::future::pending::<()>().await;
         });
         handle.abort();
@@ -171,9 +158,9 @@ mod tests {
         assert_eq!(join_capturing(handle, "aborted task").await, "");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_panicking_task_is_reported_when_it_is_joined() {
-        let handle = tokio::spawn(async {
+        let handle = nervix_primitives::task::spawn(async {
             panic!("the task broke its own invariant");
         });
 
@@ -188,21 +175,21 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_task_that_finished_is_joined_without_a_report() {
-        let handle = tokio::spawn(async {});
+        let handle = nervix_primitives::task::spawn(async {});
 
         assert_eq!(join_capturing(handle, "completed task").await, "");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_joined_task_yields_what_it_finished_with_and_nothing_once_aborted() {
-        let finished = tokio::spawn(async { 7_u8 });
+        let finished = nervix_primitives::task::spawn(async { 7_u8 });
         let finished = capture(finished.output_after_shutdown("finished task")).await;
         assert_eq!(finished.output, Some(7));
         assert_eq!(finished.logs, "");
 
-        let aborted = tokio::spawn(async {
+        let aborted = nervix_primitives::task::spawn(async {
             std::future::pending::<u8>().await;
         });
         aborted.abort();
@@ -213,7 +200,7 @@ mod tests {
         fn broken_invariant() -> u8 {
             panic!("the task broke its own invariant");
         }
-        let panicking = tokio::spawn(async { broken_invariant() });
+        let panicking = nervix_primitives::task::spawn(async { broken_invariant() });
         let panicking = capture(panicking.output_after_shutdown("panicking task")).await;
         assert_eq!(panicking.output, None);
         assert!(

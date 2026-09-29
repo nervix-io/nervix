@@ -29,10 +29,14 @@ use nervix_client_wire::{
     DomainClockObserved, DomainClockTicked, EncodedFrame, ReplyBody, RequestId, ServerFrame,
 };
 use nervix_models::{DomainClockObservation, DomainClockTickObservation, DomainName};
-use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
+use nervix_primitives::{
+    sync::{
+        CancellationToken, DropGuard,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::JoinHandle,
+};
 use nervix_recovery::Discarded as _;
-use tokio::task::JoinHandle;
-use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::{debug, warn};
 use triomphe::Arc;
 
@@ -99,7 +103,7 @@ impl ClockAttachments {
         // A node holds no domain until it installs the committed ones after it starts, so before
         // that it cannot tell a domain the cluster lacks from one it has not installed yet, as
         // right after a restart. The answer waits for that installation, or for the session to end.
-        tokio::select! {
+        nervix_primitives::select! {
             () = runtime.committed_domains_installed() => {}
             () = shared.ended() => return,
         }
@@ -198,7 +202,7 @@ impl ClockAttachments {
             deliveries.push(delivery);
         }
         for delivery in deliveries {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             delivery.join_after_shutdown("domain clock delivery").await;
         }
     }
@@ -243,7 +247,7 @@ impl ClockAttachment {
         Self {
             stop: stop.drop_guard(),
             ending,
-            delivery: tokio::spawn(delivery.run()),
+            delivery: nervix_primitives::task::spawn(delivery.run()),
         }
     }
 
@@ -370,7 +374,7 @@ impl ClockDeliveryOrder {
 impl ClockDelivery {
     async fn run(mut self) -> DeliveryEnd {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self.stop.is_cancelled() {
                 return DeliveryEnd::Stopped;
             }
@@ -418,7 +422,7 @@ impl ClockDelivery {
     }
 
     async fn wait_change(&mut self) -> bool {
-        tokio::select! {
+        nervix_primitives::select! {
             biased;
             () = self.stop.cancelled() => false,
             () = self.shared.ended() => false,
@@ -473,8 +477,8 @@ impl ClockDelivery {
         tokio::pin!(sending);
         self.order.tick_queued(&tick);
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 biased;
                 () = self.stop.cancelled() => return false,
                 () = self.shared.ended() => return false,
@@ -536,7 +540,7 @@ impl ClockDelivery {
     /// Queues a frame on the control lane unless delivery stops first. `false` means it stopped,
     /// and the frame was not queued.
     async fn send(&self, frame: EncodedFrame<ServerFrame>) -> bool {
-        tokio::select! {
+        nervix_primitives::select! {
             biased;
             () = self.stop.cancelled() => false,
             sent = self.shared.send_frame(frame) => sent.is_ok(),

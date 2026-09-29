@@ -16,7 +16,7 @@ use std::{future::Future, ptr};
 use nervix_client_core::{
     AutocompleteOutcome, Client, ConnectOptions, DomainName, ExecutionHandle,
 };
-use tokio::runtime::Runtime;
+use nervix_primitives::unmodeled::runtime::Runtime;
 
 use crate::{
     abi,
@@ -78,7 +78,7 @@ impl Session {
         if let Some(credentials) = credentials {
             options = options.with_basic_auth(credentials.username, credentials.password);
         }
-        let runtime = tokio::runtime::Builder::new_multi_thread()
+        let runtime = nervix_primitives::unmodeled::runtime::Builder::new_multi_thread()
             .worker_threads(RUNTIME_THREADS)
             .thread_name("nervix-client")
             .enable_all()

@@ -222,7 +222,7 @@ impl SharedClient {
 pub(in crate::runtime) struct SharedClientSlot {
     /// Built once however many users race to be first, so a burst of emitters starting together
     /// opens one pool rather than one pool each.
-    instance: StdArc<tokio::sync::OnceCell<StdArc<SharedClient>>>,
+    instance: StdArc<nervix_primitives::sync::OnceCell<StdArc<SharedClient>>>,
     users: usize,
 }
 
@@ -306,7 +306,7 @@ impl Runtime {
                 .shared_clients
                 .entry(key.clone())
                 .or_insert_with(|| SharedClientSlot {
-                    instance: StdArc::new(tokio::sync::OnceCell::new()),
+                    instance: StdArc::new(nervix_primitives::sync::OnceCell::new()),
                     users: 0,
                 });
             slot.users = slot
@@ -478,7 +478,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn redis_pool_reports_a_missing_node_resolver_before_opening() {
         let client = ClientName::try_from("cache".to_string()).assured("the fixture name is valid");
         let error = Runtime::default()

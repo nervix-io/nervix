@@ -8,7 +8,7 @@
 
 use super::*;
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn coordination_identity_is_unique_and_bound_to_the_authenticated_process() {
     let ConnectedTransports {
         _authority: authority,
@@ -129,7 +129,7 @@ async fn coordination_identity_is_unique_and_bound_to_the_authenticated_process(
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn typed_rkyv_requests_reuse_an_authenticated_http2_pool() {
     let ConnectedTransports {
         transport_a,
@@ -150,11 +150,11 @@ async fn typed_rkyv_requests_reuse_an_authenticated_http2_pool() {
 
     timeout(Duration::from_secs(5), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if transport_a.is_connected_to(&node_b) {
                 break;
             }
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -190,7 +190,7 @@ async fn typed_rkyv_requests_reuse_an_authenticated_http2_pool() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn process_epoch_comes_from_the_configured_entropy() {
     let authority = TestCertificateAuthority::new();
     let node = ClusterNodeName::parse("node-entropy").expect("test node name should be valid");

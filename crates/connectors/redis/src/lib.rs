@@ -335,7 +335,7 @@ impl RecordSink for RedisSink {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         let pool = self.pool.pool();
         for record in records {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             // Borrowed per publish and returned with the guard: an emitter between publishes, or
             // waiting out a flush interval, holds no connection at all.
             let mut connection = match Self::connection(&pool, &self.pool).await {
@@ -392,7 +392,7 @@ mod tests {
         assert!(!RedisSink::is_record_failure(&disconnected));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn command_connections_receive_all_answers_from_the_node_resolver() {
         let fixture = Fixture::start().await;
         let name = "redis.nervix.test";
@@ -418,7 +418,7 @@ mod tests {
         assert!(fixture.authority.questions_for(name) > 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_command_connection_failure_keeps_the_typed_dns_cause() {
         let fixture = Fixture::start().await;
         let name = "missing.nervix.test";
@@ -458,7 +458,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn command_connections_classify_empty_and_silent_answers() {
         let fixture = Fixture::start().await;
         for (name, answer, expected) in [
@@ -493,20 +493,20 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn cancelling_a_command_lookup_does_not_hold_the_next_connection() {
         let fixture = Fixture::start().await;
         let name = "changing.nervix.test";
         fixture.authority.set(name, DnsAnswer::Silent);
         let dns = RedisDns(fixture.dns.clone());
-        let attempting = tokio::spawn(async move {
+        let attempting = nervix_primitives::task::spawn(async move {
             dns.resolve(name, 6379)
                 .await
                 .map(|answers| answers.collect::<Vec<_>>())
         });
         tokio::time::timeout(Duration::from_secs(2), async {
             while fixture.authority.questions_for(name) == 0 {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })

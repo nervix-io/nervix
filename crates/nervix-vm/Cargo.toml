@@ -14,7 +14,6 @@ benchmark-allocations = []
 [dependencies]
 ahash = { workspace = true }
 aho-corasick = { workspace = true }
-arc-swap = { workspace = true }
 arch-into = { workspace = true }
 arrow-arith = { workspace = true }
 arrow-array = { workspace = true }
@@ -41,7 +40,7 @@ regex-automata = { workspace = true }
 sha2 = { workspace = true }
 # Integers beyond 64 bits read as the nearest F64, so a document holding one is still valid JSON
 # and an extraction reports the number as out of range rather than the document as malformed.
-nervix-primitives = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 simd-json = { workspace = true, features = ["big-int-as-float"] }
 sorted-vec = { workspace = true }
 strum = { workspace = true, features = ["derive"] }

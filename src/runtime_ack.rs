@@ -10,11 +10,13 @@
 //!   hot-path memory that is never persisted.
 
 use meticulous::OptionExt as _;
-use nervix_primitives::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use nervix_primitives::sync::{
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+    blocking::Mutex,
+    oneshot, watch,
+};
 use nervix_recovery::NoReceiver as _;
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{oneshot, watch};
 use triomphe::Arc;
 
 const ACK_SHARES_FIT_IN_MEMORY: &str =
@@ -290,7 +292,7 @@ impl AckRootTracker {
 
 impl AckCompletion {
     pub async fn wait_for_progress(&mut self) -> AckProgress {
-        tokio::select! {
+        nervix_primitives::select! {
             biased;
             result = &mut self.receiver => {
                 let outcome = match result {
@@ -766,7 +768,7 @@ mod tests {
 
     use super::{AckOutcome, AckProgress, AckRootTracker, AckSet};
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn root_completes_after_manual_ack() {
         let (acks, completion) = AckSet::root();
 
@@ -775,7 +777,7 @@ mod tests {
         assert_eq!(completion.wait().await, AckOutcome::Ack);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn tracked_root_counts_until_terminal_completion() {
         let tracker = Arc::new(AckRootTracker::default());
         let (acks, completion) = AckSet::tracked_root(tracker.clone());
@@ -789,7 +791,7 @@ mod tests {
         assert_eq!(tracker.outstanding(), 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn tracked_root_updates_domain_and_ingestor_counters_together() {
         let domain = Arc::new(AckRootTracker::default());
         let ingestor = Arc::new(AckRootTracker::default());
@@ -807,7 +809,7 @@ mod tests {
         assert_eq!(ingestor.outstanding(), 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn required_wait_only_root_does_not_block_ownership_handoff() {
         let tracker = Arc::new(AckRootTracker::default());
         let (waiting, completion) = AckSet::tracked_root(tracker.clone());
@@ -845,7 +847,7 @@ mod tests {
         assert_eq!(tracker.outstanding(), 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn split_shares_resolve_the_set_only_once_every_share_has() {
         let tracker = Arc::new(AckRootTracker::default());
         let (acks, completion) = AckSet::tracked_root(tracker.clone());
@@ -862,7 +864,7 @@ mod tests {
         assert_eq!(tracker.outstanding(), 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_negative_acknowledgement_of_one_split_share_resolves_the_set_negatively() {
         let (acks, completion) = AckSet::root();
         let mut shares = Vec::new();
@@ -877,7 +879,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn splitting_into_no_shares_resolves_the_set() {
         let tracker = Arc::new(AckRootTracker::default());
         let (acks, completion) = AckSet::tracked_root(tracker.clone());
@@ -890,7 +892,7 @@ mod tests {
         assert_eq!(tracker.outstanding(), 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn attached_clone_requires_both_acks() {
         let (acks, completion) = AckSet::root();
         let derived = acks.attached();
@@ -901,7 +903,7 @@ mod tests {
         assert_eq!(completion.wait().await, AckOutcome::Ack);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn merged_sets_complete_all_roots() {
         let (left, left_completion) = AckSet::root();
         let (right, right_completion) = AckSet::root();
@@ -915,7 +917,7 @@ mod tests {
         assert_eq!(right_completion.wait().await, AckOutcome::Ack);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn no_ack_resolves_completion_with_error() {
         let (acks, completion) = AckSet::root();
 
@@ -927,7 +929,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn repeated_ack_success_is_idempotent() {
         let (acks, completion) = AckSet::root();
 
@@ -937,7 +939,7 @@ mod tests {
         assert_eq!(completion.wait().await, AckOutcome::Ack);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn no_ack_wins_over_later_ack_success() {
         let (acks, completion) = AckSet::root();
         let derived = acks.attached();
@@ -951,7 +953,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn root_ack_waits_for_attached_branch() {
         let (acks, completion) = AckSet::root();
         let derived = acks.attached();
@@ -975,7 +977,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn ack_alive_keeps_completion_pending_without_completing() {
         let (acks, mut completion) = AckSet::root();
 
@@ -990,7 +992,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn ack_alive_is_transitive_through_attached_branches() {
         let (acks, mut completion) = AckSet::root();
         let derived = acks.attached();
@@ -1004,8 +1006,7 @@ mod tests {
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
     use meticulous::{OptionExt as _, ResultExt as _};
-    use shuttle::thread;
-    use tokio::sync::oneshot::error::TryRecvError;
+    use nervix_primitives::{sync::oneshot::error::TryRecvError, thread};
     use triomphe::Arc;
 
     use super::{

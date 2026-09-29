@@ -857,7 +857,7 @@ mod tests {
         test_fixtures::{input_batch, input_batch_with, input_schema, named, sink_context},
     };
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn cancelled_message_error_delivery_keeps_the_record_pending() {
         let schema = Arc::new(compile_schema(&nervix_models::CreateSchema {
             name: named("events"),
@@ -907,7 +907,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn rejected_record_ack_remains_held_for_message_error_delivery() {
         let schema = Arc::new(compile_schema(&nervix_models::CreateSchema {
             name: named("events"),
@@ -1208,7 +1208,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_row_resolves_once_however_often_it_is_answered() {
         let (root, mut completion) = AckSet::root();
         let mut batch = EmitterPublishBatch::from_batch(
@@ -1351,7 +1351,7 @@ mod tests {
         );
         assert_eq!(unavailable.estimated_bytes(), batch_bytes);
     }
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn publish_batch_ack_helpers_preserve_and_complete_all_roots() {
         let (acks, completion) = AckSet::root();
         let batch = EmitterPublishBatch::from_batch(
@@ -1619,7 +1619,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_sink_that_commits_separately_takes_the_rows_it_accepted() {
         let (first_acks, mut first_completion) = AckSet::root();
         let (second_acks, second_completion) = AckSet::root();
@@ -1737,7 +1737,7 @@ mod tests {
         assert_eq!(reported_messages.load(Ordering::Acquire), 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn batch_buffer_ack_helpers_merge_and_complete_pending_batches() {
         let (first_acks, first_completion) = AckSet::root();
         let (second_acks, second_completion) = AckSet::root();
@@ -1769,7 +1769,7 @@ mod tests {
         assert_eq!(second_completion.wait().await, AckOutcome::Ack);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn retained_batch_clone_owns_exactly_one_attached_ack_share() {
         let (root, mut completion) = AckSet::root();
         let attached = root.attached();
@@ -1797,7 +1797,7 @@ mod tests {
         drop(batch);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn batch_buffer_drop_no_acks_every_retained_batch() {
         let (first_acks, first_completion) = AckSet::root();
         let (second_acks, second_completion) = AckSet::root();
