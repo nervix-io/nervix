@@ -153,6 +153,10 @@ fn add_derived_parameters(parameters: &mut toml::Table) -> Result<(), SettingsEr
                 reason: "duration exceeds the template integer range".to_string(),
             })?;
         parameters.insert(
+            "window_max_delay_seconds".to_string(),
+            toml::Value::Float(duration.as_secs_f64()),
+        );
+        parameters.insert(
             "window_max_delay_ms".to_string(),
             toml::Value::Integer(milliseconds),
         );

@@ -6,11 +6,10 @@
 //! - **Depends on.** The production stream-slot quotas and the interconnect Shuttle runner.
 //! - **Must not know.** Connections, sockets, or what a leased stream carries.
 
-// The standard library's atomics are not Shuttle scheduling points, so each record below changes in
-// the same step as the lease or drain operation it records.
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
+// Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
+// step as the lease or drain operation it records.
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_primitives::unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use shuttle::rand::{Rng as _, thread_rng};
 use tokio::sync::Notify;
 use triomphe::Arc;

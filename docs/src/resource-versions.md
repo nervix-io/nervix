@@ -265,6 +265,12 @@ certificate/key settings before its candidate graph activates. A TLS path render
 version or probe the remote HTTP endpoint. Client instantiation reads the mounted CA or identity
 files at the existing load boundary above.
 
+Replacing only the emitter's client reference takes an entity pause: admitted requests finish
+through the existing client's pinned mount before the replacement opens the newly selected
+client. Changing that client's definition or rebinding its mounted resource takes the ordinary
+configuration-entity domain pause. If the drain cannot complete, the candidate definition and
+its resource binding are not installed.
+
 ### The Pinning Invariant
 
 Three rules together guarantee that a consumer uses exactly the version its model names:

@@ -285,17 +285,12 @@ impl<A> RestoreArchives<A> {
 pub(super) mod test_staging {
     //! A staging area in memory that counts every reservation it makes and every release of one.
 
-    use std::{
-        collections::BTreeMap,
-        sync::{
-            Arc as StdArc,
-            atomic::{AtomicUsize, Ordering},
-        },
-    };
+    use std::{collections::BTreeMap, sync::Arc as StdArc};
 
     use arch_into::ArchInto as _;
     use bytes::Bytes;
     use error_stack::Report;
+    use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
     use parking_lot::Mutex;
 
     use super::{RestoreStaging, RestoreStagingWriter, StagingFailure, StagingRefusal};
@@ -412,6 +407,7 @@ mod tests {
     use futures_util::stream;
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::ArchiveDigest;
+    use nervix_primitives::sync::atomic::Ordering;
 
     use super::{test_staging::*, *};
 
@@ -556,7 +552,7 @@ mod tests {
         };
         let refused = refusal(stage(&staging, declared(ARCHIVE), chunks(ARCHIVE)).await);
         assert_eq!(refused, StagingRefusal::StagingFull { declared: 33 });
-        assert_eq!(quota.reserved.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(quota.reserved.load(Ordering::SeqCst), 0);
     }
 
     async fn staged(quota: &StdArc<Quota>) -> StagedMemory {

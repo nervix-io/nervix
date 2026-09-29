@@ -11,7 +11,6 @@
 
 use std::{
     net::{IpAddr, SocketAddr},
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::Duration,
 };
 
@@ -24,6 +23,7 @@ use nervix_models::{
     DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RemoteRuntimeField,
     RestoreStep,
 };
+use nervix_primitives::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -89,6 +89,7 @@ struct FaultInjectionState {
     startup_consensus_faults: DashMap<ClusterNodeName, StartupConsensusFault, RandomState>,
     bulk_executions: DashMap<ClusterNodeName, NodeBulkExecution, RandomState>,
     failed_health_responders: DashMap<ClusterNodeName, (), RandomState>,
+    failed_health_links: DashMap<HealthResponsePauseKey, (), RandomState>,
     /// A blocked peer drops gossip requests until the scenario restores its links.
     blocked_gossip_nodes: DashMap<ClusterNodeName, Duration, RandomState>,
     /// Application health handlers clone a pause so it remains alive after its map guard drops.
@@ -230,6 +231,7 @@ struct EntityScheduleSwapFailureKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
     Admission(ClusterNodeName),
+    RuntimePreparation(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
     RelocationPublication(DomainName),
@@ -306,6 +308,7 @@ impl Default for FaultInjection {
                 startup_consensus_faults: DashMap::default(),
                 bulk_executions: DashMap::default(),
                 failed_health_responders: DashMap::default(),
+                failed_health_links: DashMap::default(),
                 blocked_gossip_nodes: DashMap::default(),
                 health_response_pauses: DashMap::default(),
                 command_pauses: DashMap::default(),
@@ -778,6 +781,33 @@ impl FaultInjection {
             .insert(responding_node, ());
     }
 
+    pub fn fail_health_responses_between(
+        &self,
+        probing_node: ClusterNodeName,
+        responding_node: ClusterNodeName,
+    ) {
+        self.inner.failed_health_links.insert(
+            HealthResponsePauseKey {
+                probing_node,
+                responding_node,
+            },
+            (),
+        );
+    }
+
+    pub fn restore_health_responses_between(
+        &self,
+        probing_node: &ClusterNodeName,
+        responding_node: &ClusterNodeName,
+    ) {
+        self.inner
+            .failed_health_links
+            .remove(&HealthResponsePauseKey {
+                probing_node: probing_node.clone(),
+                responding_node: responding_node.clone(),
+            });
+    }
+
     pub fn block_gossip_for_node(&self, node: ClusterNodeName, send_delay: Duration) {
         self.inner.blocked_gossip_nodes.insert(node, send_delay);
     }
@@ -830,6 +860,19 @@ impl FaultInjection {
 
     pub fn pause_command_admission_on(&self, node_id: ClusterNodeName) {
         self.arm_command_pause(CommandPausePoint::Admission(node_id));
+    }
+
+    pub fn pause_runtime_preparation_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::RuntimePreparation(node_id));
+    }
+
+    pub async fn wait_for_runtime_preparation_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::RuntimePreparation(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_runtime_preparation_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::RuntimePreparation(node_id.clone()));
     }
 
     pub async fn wait_for_command_admission_pause(&self, node_id: &ClusterNodeName) {
@@ -1508,6 +1551,11 @@ impl FaultInjection {
             .await;
     }
 
+    pub(crate) async fn pause_runtime_preparation_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::RuntimePreparation(node_id.clone()))
+            .await;
+    }
+
     pub(crate) async fn pause_command_reference_lookup_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::ReferenceLookup(node_id.clone()))
             .await;
@@ -1572,12 +1620,18 @@ impl FaultInjection {
 
     pub(crate) fn health_response_identity(
         &self,
+        probing_node: &ClusterNodeName,
         responding_node: ClusterNodeIdentity,
     ) -> ClusterNodeIdentity {
-        if !self
-            .inner
-            .failed_health_responders
-            .contains_key(responding_node.node_id())
+        let link = HealthResponsePauseKey {
+            probing_node: probing_node.clone(),
+            responding_node: responding_node.node_id().clone(),
+        };
+        if !self.inner.failed_health_links.contains_key(&link)
+            && !self
+                .inner
+                .failed_health_responders
+                .contains_key(responding_node.node_id())
         {
             return responding_node;
         }

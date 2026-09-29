@@ -6,15 +6,15 @@
 //! - **Depends on.** The production durability barrier and the server Shuttle runner.
 //! - **Must not know.** The database a synchronization flushes, or what the writes hold.
 
-// The standard library's atomics are not Shuttle scheduling points, so each record below changes in
-// the same scheduling step as the operation it records.
-use std::sync::{
-    Arc as StdArc,
-    atomic::{AtomicBool as StdAtomicBool, AtomicU64 as StdAtomicU64, Ordering as StdOrdering},
-};
+// Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
+// scheduling step as the operation it records.
+use std::sync::Arc as StdArc;
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_primitives::unmodeled::sync::atomic::{
+    AtomicBool as StdAtomicBool, AtomicU64 as StdAtomicU64, Ordering as StdOrdering,
+};
 use nervix_recovery::Discarded as _;
 
 use super::DurabilityBarrier;

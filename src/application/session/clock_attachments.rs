@@ -19,8 +19,6 @@
 //! it differs from the one the client last received. It then sends the newest accepted tick of
 //! that installation. State frames wait for room; each tick holds one replaceable control slot.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use ahash::HashMap;
 use meticulous::OptionExt as _;
 use nervix_client_wire::{
@@ -29,6 +27,7 @@ use nervix_client_wire::{
     DomainClockObserved, DomainClockTicked, EncodedFrame, ReplyBody, RequestId, ServerFrame,
 };
 use nervix_models::{DomainClockObservation, DomainClockTickObservation, DomainName};
+use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
 use nervix_recovery::Discarded as _;
 use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};

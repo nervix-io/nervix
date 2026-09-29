@@ -3,26 +3,29 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** The invariants the members of a batch payload are held to while the sink's answers,
-//!   a retry, a cancelled attempt, a sibling emitter and a drain race one another: every member
-//!   resolves once, no source acknowledgement completes before every attached emitter confirmed
-//!   it, a retry writes a retained payload with exactly the bytes it was first written with, and a
-//!   drain never reads the emitter empty while one of its members is unresolved.
+//!   a retry, a cancelled attempt, terminal shutdown, a sibling emitter and a drain race one
+//!   another: every member resolves once, no source acknowledgement completes before every
+//!   attached emitter confirmed it, a retry writes a retained payload with exactly the bytes it
+//!   was first written with, and a drain never reads the emitter empty while one of its members
+//!   is unresolved.
 //! - **Depends on.** The emitter's buffer, its buffered batches and their row states, its retained
 //!   batch payloads and the answers applied to them, acknowledgement sets, and the server Shuttle
 //!   runner.
 //! - **Must not know.** Which connector writes a payload, how rows are encoded or packed, or how the
 //!   emitter task schedules its attempts.
 
-// The standard library's atomics are not Shuttle scheduling points, so each record below changes in
-// the same scheduling step as the operation it records.
-use std::sync::{
-    Arc as StdArc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+// Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
+// scheduling step as the operation it records. The emitter's own counts are the production owner's
+// state, so they are the selected, modeled atomics.
+use std::sync::Arc as StdArc;
 
 use futures_util::FutureExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::SinkPublishError;
+use nervix_primitives::{
+    sync::atomic as selected,
+    unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use nervix_recovery::NoReceiver as _;
 
 use super::*;
@@ -422,12 +425,62 @@ fn shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once() {
     check_interleavings(a_cancelled_attempt_leaves_each_member_to_resolve_once);
 }
 
+/// Terminal teardown can arrive after a request entered its connector await. The emitter's
+/// shutdown signal must end that await, drop its prepared request, and leave its attached source
+/// share unconfirmed. The source may then redeliver after restart.
+fn terminal_shutdown_drops_an_unanswered_request_without_source_ack() {
+    shuttle::future::block_on(async {
+        let (source, completion) = AckSet::root();
+        let emitter_share = source.attached();
+        let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let (entered_attempt, attempt_started) = tokio::sync::oneshot::channel();
+
+        let emitter = tokio::spawn(async move {
+            let mut batches = vec![one_batch(vec![emitter_share])];
+            let mut prepared = PreparedPayloads::default();
+            prepared
+                .retain(payload(&[0], b"/events/1"), &mut batches)
+                .assured("the prepared request has one pending source member");
+            tokio::select! {
+                biased;
+                _ = crate::runtime::emitter_publishing::wait_for_emitter_work_cancel(&mut shutdown_rx) => {}
+                _ = async {
+                    entered_attempt.send(()).means_peer_left(
+                        "the modeled connector attempt has not been canceled yet"
+                    );
+                    std::future::pending::<()>().await;
+                } => unreachable!("the modeled connector never answers"),
+            }
+            drop(prepared);
+            drop(batches);
+        });
+
+        attempt_started
+            .await
+            .assured("the modeled emitter enters its connector await before shutdown");
+        source.ack_success();
+        drop(source);
+        shutdown.send_replace(true);
+        emitter.await.assured(MODEL_TASK_JOINS);
+        assert_eq!(
+            completion.wait().await,
+            AckOutcome::NoAck("ack completion sender dropped".to_string()),
+            "terminal cancellation cannot confirm an unanswered attached request"
+        );
+    });
+}
+
+#[test]
+fn shuttle_terminal_shutdown_leaves_an_unanswered_request_unacknowledged() {
+    check_interleavings(terminal_shutdown_drops_an_unanswered_request_without_source_ack);
+}
+
 /// A drain reads the emitter's buffered count while the emitter's first write of a payload stalls
 /// and a force flush writes it again. The drain never reads the emitter empty while a member of the
 /// retained payload is unresolved: the members resolve before the buffer lets its batch go.
 fn a_drain_never_finds_the_emitter_empty_while_a_member_is_retained() {
     shuttle::future::block_on(async {
-        let reported = Arc::new(AtomicUsize::new(0));
+        let reported = Arc::new(selected::AtomicUsize::new(0));
         let buffered = Arc::new(EmitterBufferedMessages::new(reported.clone()));
         let mut shares = Vec::with_capacity(2);
         let mut completions = Vec::with_capacity(2);

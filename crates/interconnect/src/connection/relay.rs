@@ -176,7 +176,7 @@ impl TransportState {
         &self,
         node_id: &ClusterNodeName,
         payload: RelayPayload,
-    ) -> Result<(), TransportError> {
+    ) -> Result<(), Report<TransportError>> {
         let timeout_duration = self.options.request_timeout;
         let deadline = Instant::now()
             .checked_add(timeout_duration)
@@ -223,7 +223,7 @@ impl TransportState {
                 if *entry.get() != management.connection.peer_epoch {
                     drop(entry);
                     self.retire_outbound_relay(&outbound_key);
-                    return Err(TransportError::RelayIndeterminate);
+                    return Err(Report::new(TransportError::RelayIndeterminate));
                 }
             }
             Entry::Vacant(entry) => {
@@ -242,9 +242,9 @@ impl TransportState {
         match self.outbound_relay_admissions.entry(admission_key.clone()) {
             Entry::Occupied(entry) => {
                 if entry.get() != &outbound_key {
-                    return Err(TransportError::RelayGrant(
+                    return Err(Report::new(TransportError::RelayGrant(
                         "relay admission acknowledgement names another delivery".to_string(),
-                    ));
+                    )));
                 }
             }
             Entry::Vacant(entry) => {
@@ -274,7 +274,7 @@ impl TransportState {
         .into_value();
         if grant.receiver_epoch != management.connection.peer_epoch {
             self.retire_outbound_relay(&outbound_key);
-            return Err(TransportError::RelayIndeterminate);
+            return Err(Report::new(TransportError::RelayIndeterminate));
         }
         let grant_id = match grant.disposition {
             RelayGrantDisposition::SendBody { grant_id } => grant_id,
@@ -295,15 +295,15 @@ impl TransportState {
             }
             RelayGrantDisposition::Rejected(reason) => {
                 self.retire_outbound_relay(&outbound_key);
-                return Err(TransportError::RelayRejected(reason));
+                return Err(Report::new(TransportError::RelayRejected(reason)));
             }
             RelayGrantDisposition::Cancelled => {
                 self.retire_outbound_relay(&outbound_key);
-                return Err(TransportError::RelayCancelled);
+                return Err(Report::new(TransportError::RelayCancelled));
             }
             RelayGrantDisposition::Retired => {
                 self.retire_outbound_relay(&outbound_key);
-                return Err(TransportError::RelayIndeterminate);
+                return Err(Report::new(TransportError::RelayIndeterminate));
             }
         };
         let path = format!("{RELAY_PATH_PREFIX}{grant_id}");
@@ -1063,7 +1063,7 @@ impl TransportState {
         grant_id: u64,
         request: Request<RecvStream>,
         mut respond: server::SendResponse<Bytes>,
-    ) -> Result<(), TransportError> {
+    ) -> Result<(), Report<TransportError>> {
         let sender_epoch = header_u64(&request, "x-nervix-sender-epoch")?;
         let receiver_epoch = header_u64(&request, "x-nervix-receiver-epoch")?;
         let claimed = self.grants.remove_if(&grant_id, |_, grant| {
@@ -1085,7 +1085,7 @@ impl TransportState {
         let (encoded_reservation, overlap) = grant
             .reservation
             .split(encoded_bytes)
-            .map_err(|error| TransportError::RelayGrant(error.to_string()))?;
+            .map_err(|error| TransportError::with_cause(error, TransportError::RelayGrant))?;
         let mut buffer = BudgetedBuffer::with_limit(encoded_reservation, encoded_limit);
         {
             let reading = read_body_into(
@@ -1108,15 +1108,15 @@ impl TransportState {
             .assured("an in-memory allocation length fits in u64");
         if actual != grant.admission.body_bytes {
             respond.send_reset(Reason::ENHANCE_YOUR_CALM);
-            return Err(TransportError::RelayGrant(format!(
+            return Err(Report::new(TransportError::RelayGrant(format!(
                 "relay body length {actual} differs from granted length {}",
                 grant.admission.body_bytes
-            )));
+            ))));
         }
         let (body, body_reservation) = buffer.into_parts();
         let operation_reservation = body_reservation
             .merge(overlap)
-            .map_err(|error| TransportError::RelayGrant(error.to_string()))?;
+            .map_err(|error| TransportError::with_cause(error, TransportError::RelayGrant))?;
         let body = ChargedBytes::from_owned(body, operation_reservation);
         let payload = grant
             .admission
@@ -1140,7 +1140,7 @@ impl TransportState {
                 .admission
                 .reject("the application ingress queue is full".to_string());
             respond.send_reset(Reason::ENHANCE_YOUR_CALM);
-            return Err(TransportError::IncomingQueueFull);
+            return Err(Report::new(TransportError::IncomingQueueFull));
         }
         body_completion.complete();
         send_response(
@@ -1150,5 +1150,70 @@ impl TransportState {
             self.options.progress_timeout,
         )
         .await
+    }
+}
+
+fn header_u64<B>(request: &Request<B>, name: &'static str) -> Result<u64, Report<TransportError>> {
+    let value = request
+        .headers()
+        .get(name)
+        .ok_or_else(|| TransportError::RelayGrant(format!("missing {name} header")))?;
+    let value = value.to_str().map_err(|error| {
+        TransportError::with_cause(Report::new(error), TransportError::RelayGrant)
+    })?;
+    let parsed = value.parse().map_err(|error| {
+        TransportError::with_cause(Report::new(error), |reason| {
+            TransportError::RelayGrant(format!("invalid {name} header: {reason}"))
+        })
+    })?;
+    Ok(parsed)
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    #[test]
+    fn relay_grant_headers_report_missing_invalid_and_non_text_values() {
+        let missing = Request::new(());
+        let error = header_u64(&missing, "x-relay-count").expect_err("the header is required");
+        assert!(matches!(
+            error.current_context(),
+            TransportError::RelayGrant(_)
+        ));
+
+        let invalid = Request::builder()
+            .header("x-relay-count", "not-a-number")
+            .body(())
+            .expect("test request should be valid");
+        let error = header_u64(&invalid, "x-relay-count").expect_err("a number is required");
+        assert!(matches!(
+            error.current_context(),
+            TransportError::RelayGrant(_)
+        ));
+        assert!(error.contains::<std::num::ParseIntError>());
+
+        let non_text = Request::builder()
+            .header(
+                "x-relay-count",
+                http::HeaderValue::from_bytes(&[0xff]).expect("obs-text is a valid header value"),
+            )
+            .body(())
+            .expect("test request should be valid");
+        let error = header_u64(&non_text, "x-relay-count").expect_err("text is required");
+        assert!(matches!(
+            error.current_context(),
+            TransportError::RelayGrant(_)
+        ));
+        assert!(error.contains::<http::header::ToStrError>());
+
+        let valid = Request::builder()
+            .header("x-relay-count", "42")
+            .body(())
+            .expect("test request should be valid");
+        let Ok(parsed) = header_u64(&valid, "x-relay-count") else {
+            panic!("a valid numeric grant header must parse");
+        };
+        assert_eq!(parsed, 42);
     }
 }

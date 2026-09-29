@@ -27,6 +27,18 @@ Options:
   --case CASE            partition-recovery case: all, follower, asymmetric, leader,
                          or quorum-loss (default: ${partition_case}).
   --partition-seconds N  Minimum verified partition window, 20..600 (default: ${partition_seconds}).
+  --profile NAME         degraded-links profile: all, delay, jitter, random-loss,
+                         burst-loss, rate-limit, combined (default: ${degradation_profile}).
+  --load-interval-ms N   Fixed producer interval, 100..5000 (default: ${load_interval_ms}).
+  --baseline-seconds N   Independent healthy measurement window, 10..120 (default: ${baseline_seconds}).
+  --degrade-seconds N    Hold each fault for 10..120 seconds (default: ${degrade_seconds}).
+  --drain-seconds N      Per-profile recovery deadline, 10..180 (default: ${drain_seconds}).
+  --max-backlog N        Maximum accepted-minus-emitted records (default: ${max_backlog}).
+  --max-recovery-backlog N  Maximum backlog after each heal (default: ${max_recovery_backlog}).
+  --max-memory-bytes N   Maximum Docker memory per node (default: ${max_memory_bytes}).
+  --max-pending N        Maximum public interconnect pending operations (default: ${max_pending}).
+  --min-throughput-pct N Minimum recovered output rate as percent of healthy baseline
+                         for three consecutive intervals (default: ${min_throughput_pct}).
   --keep                 Retain labeled Docker resources after diagnostics.
   -h, --help             Show this help.
 EOF
@@ -50,6 +62,17 @@ outage_option_set=false
 partition_case=all
 partition_seconds=45
 partition_option_set=false
+degradation_profile=all
+degradation_option_set=false
+load_interval_ms=750
+baseline_seconds=15
+degrade_seconds=20
+drain_seconds=90
+max_backlog=200
+max_recovery_backlog=20
+max_memory_bytes=1073741824
+max_pending=128
+min_throughput_pct=50
 keep_resources=false
 
 while [[ "$#" -gt 0 ]]; do
@@ -62,6 +85,10 @@ while [[ "$#" -gt 0 ]]; do
         --scenario)
             [[ "$#" -ge 2 ]] || setup_error '--scenario requires a value'
             scenario="$2"
+            if [[ "${scenario}" == degraded-links ]]; then
+                record_count=1000
+                overall_timeout=2400
+            fi
             shift 2
             ;;
         --nodes)
@@ -107,6 +134,23 @@ while [[ "$#" -gt 0 ]]; do
             partition_option_set=true
             shift 2
             ;;
+        --profile | --load-interval-ms | --baseline-seconds | --degrade-seconds | --drain-seconds | --max-backlog | --max-recovery-backlog | --max-memory-bytes | --max-pending | --min-throughput-pct)
+            [[ "$#" -ge 2 ]] || setup_error "$1 requires a value"
+            case "$1" in
+                --profile) degradation_profile="$2" ;;
+                --load-interval-ms) load_interval_ms="$2" ;;
+                --baseline-seconds) baseline_seconds="$2" ;;
+                --degrade-seconds) degrade_seconds="$2" ;;
+                --drain-seconds) drain_seconds="$2" ;;
+                --max-backlog) max_backlog="$2" ;;
+                --max-recovery-backlog) max_recovery_backlog="$2" ;;
+                --max-memory-bytes) max_memory_bytes="$2" ;;
+                --max-pending) max_pending="$2" ;;
+                --min-throughput-pct) min_throughput_pct="$2" ;;
+            esac
+            degradation_option_set=true
+            shift 2
+            ;;
         --keep)
             keep_resources=true
             shift
@@ -123,7 +167,7 @@ done
 
 [[ -n "${image_ref}" ]] || setup_error '--image is required and must name an already-built Nervix image'
 case "${scenario}" in
-    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery) ;;
+    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links) ;;
     *) setup_error "unknown scenario: ${scenario}" ;;
 esac
 [[ "${node_count}" == "1" || "${node_count}" == "3" ]] \
@@ -140,6 +184,25 @@ fi
 if [[ "${scenario}" != partition-recovery && "${partition_option_set}" == true ]]; then
     setup_error '--case and --partition-seconds apply only to partition-recovery'
 fi
+if [[ "${scenario}" != degraded-links && "${degradation_option_set}" == true ]]; then
+    setup_error 'degradation profiles and thresholds apply only to degraded-links'
+fi
+case "${degradation_profile}" in
+    all | delay | jitter | random-loss | burst-loss | rate-limit | combined) ;;
+    *) setup_error "unknown degradation profile: ${degradation_profile}" ;;
+esac
+for numeric_setting in load_interval_ms baseline_seconds degrade_seconds drain_seconds max_backlog max_recovery_backlog max_memory_bytes max_pending min_throughput_pct; do
+    [[ "${!numeric_setting}" =~ ^[0-9]+$ ]] || setup_error "${numeric_setting} must be an integer"
+done
+((load_interval_ms >= 100 && load_interval_ms <= 5000)) || setup_error '--load-interval-ms must be 100..5000'
+((baseline_seconds >= 10 && baseline_seconds <= 120)) || setup_error '--baseline-seconds must be 10..120'
+((degrade_seconds >= 10 && degrade_seconds <= 120)) || setup_error '--degrade-seconds must be 10..120'
+((drain_seconds >= 10 && drain_seconds <= 180)) || setup_error '--drain-seconds must be 10..180'
+((max_backlog >= 1 && max_backlog <= 1000)) || setup_error '--max-backlog must be 1..1000'
+((max_recovery_backlog >= 0 && max_recovery_backlog <= max_backlog)) || setup_error '--max-recovery-backlog must be 0..max-backlog'
+((max_memory_bytes >= 1048576)) || setup_error '--max-memory-bytes must be at least 1048576'
+((max_pending >= 1)) || setup_error '--max-pending must be positive'
+((min_throughput_pct >= 1 && min_throughput_pct <= 100)) || setup_error '--min-throughput-pct must be 1..100'
 case "${partition_case}" in
     all | follower | asymmetric | leader | quorum-loss) ;;
     *) setup_error "--case must be all, follower, asymmetric, leader, or quorum-loss, not ${partition_case}" ;;
@@ -222,6 +285,10 @@ fi
 if [[ "${scenario}" == partition-recovery ]]; then
     # One record every two seconds keeps the bounded fixture flowing through all four cases.
     export CHAOS_LOAD_INTERVAL=2.0
+fi
+if [[ "${scenario}" == degraded-links ]]; then
+    CHAOS_LOAD_INTERVAL="$(awk -v ms="${load_interval_ms}" 'BEGIN {printf "%.3f", ms / 1000}')"
+    export CHAOS_LOAD_INTERVAL
 fi
 
 jq -n \
@@ -462,19 +529,27 @@ finish() {
             fi
         fi
     fi
-    if [[ "${scenario}" == partition-recovery ]]; then
+    if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links ]]; then
         if [[ -n "${partition_event_recorder_pid:-}" ]]; then
             kill "${partition_event_recorder_pid}" 2>/dev/null
             wait "${partition_event_recorder_pid}" 2>/dev/null
+        fi
+        if [[ -n "${degradation_event_recorder_pid:-}" ]]; then
+            kill "${degradation_event_recorder_pid}" 2>/dev/null
+            wait "${degradation_event_recorder_pid}" 2>/dev/null
+        fi
+        local heal_prefix=network
+        if [[ "${scenario}" == partition-recovery ]]; then
+            heal_prefix=partition
         fi
         # Heal before anything else so neither retained resources nor diagnostics stay partitioned.
         timeout --foreground --kill-after=5s 180s \
             "${script_dir}/network-faults.sh" heal --run-id "${run_id}" \
             --nettools "${CHAOS_NETTOOLS_IMAGE}" \
-            --output "${artifact_dir}/diagnostics/partition-heal.txt" \
-            >"${artifact_dir}/diagnostics/partition-heal-status.txt" 2>&1 \
+            --output "${artifact_dir}/diagnostics/${heal_prefix}-heal.txt" \
+            >"${artifact_dir}/diagnostics/${heal_prefix}-heal-status.txt" 2>&1 \
             || printf 'network fault healing on exit reported a failure\n' \
-                >>"${artifact_dir}/diagnostics/partition-heal-status.txt"
+                >>"${artifact_dir}/diagnostics/${heal_prefix}-heal-status.txt"
         if [[ -n "${partition_restart_id:-}" && "${partition_restart_started:-true}" != true \
             && "$(timeout --foreground --kill-after=5s 20s docker inspect --format '{{.State.Running}}' "${partition_restart_id}" 2>/dev/null)" == false ]]; then
             timeout --foreground --kill-after=5s 30s docker start "${partition_restart_id}" \
@@ -492,7 +567,7 @@ finish() {
     fi
     capture_diagnostics
 
-    if [[ "${status}" -ne 0 && ( "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery ) ]]; then
+    if [[ "${status}" -ne 0 && ( "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links ) ]]; then
         local reproducer_image="${image_id:-${image_ref}}"
         if [[ "${image_ref}" == *@sha256:* ]]; then
             reproducer_image="${image_ref}"
@@ -506,6 +581,9 @@ finish() {
         elif [[ "${scenario}" == partition-recovery ]]; then
             reproducer="$(printf 'just chaos run %q --image %q --records %q --case %q --partition-seconds %q' \
                 "${scenario}" "${reproducer_image}" "${record_count}" "${partition_case}" "${partition_seconds}")"
+        elif [[ "${scenario}" == degraded-links ]]; then
+            reproducer="$(printf 'just chaos run %q --image %q --records %q --profile %q --load-interval-ms %q --baseline-seconds %q --degrade-seconds %q --drain-seconds %q --max-backlog %q --max-recovery-backlog %q --max-memory-bytes %q --max-pending %q --min-throughput-pct %q' \
+                "${scenario}" "${reproducer_image}" "${record_count}" "${degradation_profile}" "${load_interval_ms}" "${baseline_seconds}" "${degrade_seconds}" "${drain_seconds}" "${max_backlog}" "${max_recovery_backlog}" "${max_memory_bytes}" "${max_pending}" "${min_throughput_pct}")"
         else
             reproducer="$(printf 'just chaos run %q --image %q --nodes %q --records %q --outage-seconds %q' \
                 "${scenario}" "${reproducer_image}" "${node_count}" "${record_count}" "${outage_seconds}")"
@@ -551,6 +629,23 @@ finish() {
                 -o -name '*-netem.log' -o -name '*-iptables.log' -o -name 'control-*.json' \
                 -o -name 'consumer-group-*.json' -o -name 'node-events.ndjson' \
                 -o -name 'isolation-boundary.json' -o -name 'observer.log' \) \
+                -size +0c 2>/dev/null | sort)
+        fi
+        if [[ "${scenario}" == degraded-links ]]; then
+            for evidence_path in results/degraded-progress.json results/degraded-links.json \
+                degraded/samples.ndjson degraded/actions.ndjson \
+                degraded/findings.ndjson degraded/docker-events.ndjson \
+                degraded/baseline.json diagnostics/network-heal.txt; do
+                if [[ -s "${artifact_dir}/${evidence_path}" ]]; then
+                    evidence_paths+=("${evidence_path}")
+                fi
+            done
+            while IFS= read -r evidence_path; do
+                evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
+            done < <(find "${artifact_dir}/degraded" -type f \
+                \( -name 'effect-verdict.txt' -o -name 'rules-installed.txt' \
+                -o -name 'ping-fault.json' -o -name 'rate-fault.json' \
+                -o -name 'recovery-deadline.json' \) \
                 -size +0c 2>/dev/null | sort)
         fi
         local evidence_json
@@ -901,7 +996,7 @@ if [[ "${scenario}" != "baseline" ]]; then
         pumba_preflight=(kill --signal SIGKILL impossible-chaos-preflight-target)
     elif [[ "${scenario}" == pause-resume ]]; then
         pumba_preflight=(pause --duration 1s impossible-chaos-preflight-target)
-    elif [[ "${scenario}" == partition-recovery ]]; then
+    elif [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links ]]; then
         pumba_preflight=(netem --duration 1s --target 192.0.2.1 loss --percent 100 impossible-chaos-preflight-target)
     fi
     run_bounded 30 docker run --rm \
@@ -911,7 +1006,7 @@ if [[ "${scenario}" != "baseline" ]]; then
         >"${artifact_dir}/diagnostics/pumba-docker-preflight.txt" 2>&1 \
         || setup_error 'Pumba cannot access the selected Docker daemon'
 fi
-if [[ "${scenario}" == partition-recovery ]]; then
+if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links ]]; then
     ensure_tool_image "${CHAOS_NETTOOLS_IMAGE}"
     nettools_image_id="$(run_bounded 30 docker image inspect --format '{{.Id}}' "${CHAOS_NETTOOLS_IMAGE}")"
     # Pumba's netem and iptables faults must take effect on this worker's kernel and heal on SIGTERM.
@@ -936,6 +1031,24 @@ if [[ "${scenario}" == partition-recovery ]]; then
     update_manifest '.nettools_image_id = $image_id | .nettools_image = $image | .partition = {case: $case, minimum_window_seconds: ($seconds | tonumber)}' \
         --arg image_id "${nettools_image_id}" --arg image "${CHAOS_NETTOOLS_IMAGE}" \
         --arg case "${partition_case}" --arg seconds "${partition_seconds}"
+fi
+if [[ "${scenario}" == degraded-links ]]; then
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.nettools_image_id = $image_id | .nettools_image = $image | .degradation = $settings' \
+        --arg image_id "${nettools_image_id}" --arg image "${CHAOS_NETTOOLS_IMAGE}" \
+        --argjson settings "$(jq -n \
+            --arg profile "${degradation_profile}" \
+            --argjson load_interval_ms "${load_interval_ms}" \
+            --argjson baseline_seconds "${baseline_seconds}" \
+            --argjson degrade_seconds "${degrade_seconds}" \
+            --argjson drain_seconds "${drain_seconds}" \
+            --argjson max_backlog "${max_backlog}" \
+            --argjson max_recovery_backlog "${max_recovery_backlog}" \
+            --argjson max_memory_bytes "${max_memory_bytes}" \
+            --argjson max_pending "${max_pending}" \
+            --argjson min_throughput_pct "${min_throughput_pct}" \
+            '{profile:$profile,load_interval_ms:$load_interval_ms,baseline_seconds:$baseline_seconds,degrade_seconds:$degrade_seconds,drain_seconds:$drain_seconds,max_backlog:$max_backlog,max_recovery_backlog:$max_recovery_backlog,max_memory_bytes:$max_memory_bytes,max_pending:$max_pending,min_throughput_pct:$min_throughput_pct}')"
 fi
 
 phase "verifier self-check"
@@ -1068,6 +1181,10 @@ if [[ "${scenario}" != "baseline" ]]; then
         # shellcheck source=partition-scenario.sh
         source "${script_dir}/partition-scenario.sh"
         run_partition_recovery
+    elif [[ "${scenario}" == "degraded-links" ]]; then
+        # shellcheck source=degraded-links-scenario.sh
+        source "${script_dir}/degraded-links-scenario.sh"
+        run_degraded_links
     else
         # shellcheck source=crash-scenario.sh
         source "${script_dir}/crash-scenario.sh"
@@ -1114,8 +1231,12 @@ wait_for "Nervix consumer offsets at source boundary ${input_end}" 120 \
 cp "${artifact_dir}/traffic/consumer-group.attempt.txt" \
     "${artifact_dir}/traffic/consumer-group-final.txt"
 output_wait_timed_out=false
-if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery ]]; then
-    if ! wait_for "output topic to contain at least ${input_end} records" 120 \
+if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links ]]; then
+    output_wait_seconds=120
+    if [[ "${scenario}" == degraded-links ]]; then
+        output_wait_seconds="${drain_seconds}"
+    fi
+    if ! wait_for "output topic to contain at least ${input_end} records" "${output_wait_seconds}" \
         output_has_all_records "${input_end}"; then
         output_wait_timed_out=true
     fi
@@ -1142,7 +1263,7 @@ observed_count="$(wc -l <"${artifact_dir}/traffic/observed-output.ndjson")"
 
 phase "external ledger verification"
 ledger_args=()
-if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery ]]; then
+if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links ]]; then
     ledger_args+=(--allow-replay-duplicates)
 fi
 "${script_dir}/verify-ledger.sh" \
@@ -1151,7 +1272,7 @@ fi
     "${artifact_dir}/results/ledger.json" "${ledger_args[@]}" \
     >"${artifact_dir}/results/ledger.txt"
 if [[ "${output_wait_timed_out}" == true ]]; then
-    printf 'sink output exceeded the 120-second accepted-input boundary\n' >&2
+    printf 'sink output exceeded the %s-second accepted-input boundary\n' "${output_wait_seconds:-120}" >&2
     exit 124
 fi
 
@@ -1267,6 +1388,28 @@ elif [[ "${scenario}" == "partition-recovery" ]]; then
         printf 'partition-recovery recorded %d product finding(s):\n' \
             "$(jq '.findings | length' "${artifact_dir}/results/partition-recovery.json")" >&2
         jq -r '.findings[] | "- \(.case): \(.message)"' "${artifact_dir}/results/partition-recovery.json" >&2
+        exit 1
+    fi
+elif [[ "${scenario}" == "degraded-links" ]]; then
+    jq -n \
+        --arg run_id "${run_id}" --arg image_id "${image_id}" \
+        --arg pumba_image_id "${pumba_image_id}" --arg nettools_image_id "${nettools_image_id}" \
+        --arg profile "${degradation_profile}" \
+        --argjson accepted_records "${input_end}" --argjson observed_records "${output_end}" \
+        --slurpfile progress "${artifact_dir}/results/degraded-progress.json" \
+        --slurpfile ledger "${artifact_dir}/results/ledger.json" \
+        --slurpfile findings <(cat "${artifact_dir}/degraded/findings.ndjson" 2>/dev/null || true) \
+        '{verdict:(if ($findings|length)==0 then "pass" else "fail" end),run_id:$run_id,
+          image_id:$image_id,pumba_image_id:$pumba_image_id,nettools_image_id:$nettools_image_id,
+          profile:$profile,topology_nodes:3,accepted_source_records:$accepted_records,
+          observed_output_records:$observed_records,replay_duplicates:$ledger[0].duplicate_records,
+          source_offsets_committed:true,ledger:"results/ledger.json",progress:$progress[0],findings:$findings}' \
+        >"${artifact_dir}/results/degraded-links.json"
+    if [[ "$(jq -r '.verdict' "${artifact_dir}/results/degraded-links.json")" != pass ]]; then
+        failure_category=product
+        current_phase='degraded-links threshold findings'
+        jq -r '.findings[] | "\(.profile) \(.stage) \(.metric): \(.observed) > \(.limit) at \(.at_ms)"' \
+            "${artifact_dir}/results/degraded-links.json" >&2
         exit 1
     fi
 else

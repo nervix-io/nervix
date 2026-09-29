@@ -99,10 +99,9 @@ pub(in crate::application) async fn run_restore_steps<S: RestoreSteps>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use meticulous::ResultExt as _;
     use nervix_models::DomainName;
+    use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
     use parking_lot::Mutex;
 
     use super::*;

@@ -19,17 +19,19 @@ use leptos::{ev, mount::mount_to_body, prelude::*};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_client_wire::{
-    AttachDisposition, AttachOutcome, AttachTransactionRequest, CancellationStage,
-    ChoiceLookupRequest, ClientMessage, ClientRequest, ClusterObserved, CommandDisposition,
-    CommandOutcome, CommandRequest, Diagnostic, DomainEntity, DomainInfo, DomainSelection,
-    DomainSnapshotObserved, InspectTransactionRequest, InspectionOutcome, LeaderRedirect,
-    Leadership, MAX_IN_FLIGHT_REQUESTS, NoticeLevel, ReplyBody, RequestCancelled, RequestId,
-    RowBatchView, RowSchema, SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage,
-    ServerNotice, SessionEndReason, SessionLimits, StatementDisposition, StatementOutcome,
-    SubscribeDisposition, SubscribeOutcome, SubscribeRequest, SubscriptionEnded,
-    SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionType, SuggestRequest,
-    Suggestion as WireSuggestion, SuggestionKind, SuggestionStatus, TextEdit, TransferAssembly,
-    TransferPart, UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame,
+    AttachDisposition, AttachDomainClockRequest, AttachOutcome, AttachTransactionRequest,
+    CancellationStage, ChoiceLookupRequest, ClientMessage, ClientRequest, ClusterObserved,
+    CommandDisposition, CommandOutcome, CommandRequest, DetachDomainClockRequest, Diagnostic,
+    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockDetachDisposition,
+    DomainClockDetachOutcome, DomainEntity, DomainInfo, DomainSelection, DomainSnapshotObserved,
+    InspectTransactionRequest, InspectionOutcome, LeaderRedirect, Leadership,
+    MAX_IN_FLIGHT_REQUESTS, NoticeLevel, ReplyBody, RequestCancelled, RequestId, RowBatchView,
+    RowSchema, SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage, ServerNotice,
+    SessionEndReason, SessionLimits, StatementDisposition, StatementOutcome, SubscribeDisposition,
+    SubscribeOutcome, SubscribeRequest, SubscriptionEnded, SubscriptionHandle, SubscriptionOpened,
+    SubscriptionRows, SubscriptionType, SuggestRequest, Suggestion as WireSuggestion,
+    SuggestionKind, SuggestionStatus, TextEdit, TransferAssembly, TransferPart,
+    UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame,
     websocket::{ClientWebSocketCodec, WebSocketData},
 };
 use nervix_dataflow_graph::{
@@ -40,7 +42,7 @@ use nervix_dataflow_graph::{
 use nervix_models::{
     CommandExecutionReference, CreateSubscription, DomainName, DomainPace, DomainStatus, ModelKind,
     RelayName, ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
-    ResourceVersionDescription, ResourceVersionEntries, Statement, SubscriptionName,
+    ResourceVersionDescription, ResourceVersionEntries, Statement, SubscriptionName, Timestamp,
     TransactionLifecycle, TransactionStatus, expression_to_nspl,
 };
 use nervix_nspl::client_statement::{
@@ -57,10 +59,12 @@ use url::Url;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
+mod clock_display;
 mod create_dialog;
 mod request_handoff;
 mod transaction_inspector;
 
+use clock_display::{ClockDisplay, ClockPanel, ClockSelection, ClockSelectionChange, ClockStatus};
 use create_dialog::{
     ChoiceControl, ChoiceRequestContext, CommandDispatch, CreateCommandContext, CreateDialog,
     CreateDispatch, CreateKind, CreateMenu, CreateSignals, CreateSubmission, SubscriptionDispatch,
@@ -127,12 +131,27 @@ enum ConsoleConnectionState {
     Waiting,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct WebConsoleSession {
     state: RwSignal<ConsoleConnectionState>,
     request_tx: RwSignal<Option<RequestSender>>,
     upload_base_url: RwSignal<Option<String>>,
     auth_token: RwSignal<Option<String>>,
+}
+
+impl WebConsoleSession {
+    /// Sends on the active connection. A disconnected session returns `Ok(false)`; a full
+    /// hand-off returns its refusal so the control can explain why the request was not sent.
+    fn send_when_connected(&self, request: ConsoleRequest) -> Result<bool, Report<RequestRefusal>> {
+        if self.state.get_untracked() != ConsoleConnectionState::Connected {
+            return Ok(false);
+        }
+        let Some(request_tx) = self.request_tx.get_untracked() else {
+            return Ok(false);
+        };
+        request_tx.send(request)?;
+        Ok(true)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -148,6 +167,7 @@ struct WebConsoleSignals {
     domain_snapshot: RwSignal<Option<DomainSnapshotView>>,
     cluster_counters: RwSignal<ClusterCounters>,
     active_domain: RwSignal<Option<DomainName>>,
+    clock_display: RwSignal<ClockDisplay>,
     transaction_status: RwSignal<Option<TransactionStatus>>,
     inspector: InspectorSignals,
     domains: RwSignal<Vec<DomainView>>,
@@ -164,10 +184,62 @@ struct WebConsoleSignals {
 }
 
 impl WebConsoleSignals {
+    /// Keep detach ahead of attach on the session's ordered request lane. The selected clock is
+    /// marked before this call, so a refused request stays refused until selection or connection
+    /// changes instead of being queued again by a later render.
+    fn queue_clock_transition(
+        self,
+        change: ClockSelectionChange,
+        connection_generation: u64,
+        request_tx: &RequestSender,
+    ) {
+        if let Some(previous) = change.detach {
+            let request = ConsoleRequest::DomainClockDetach {
+                request: DetachDomainClockRequest {
+                    domain: previous.clone(),
+                },
+                connection_generation,
+                origin: ClockRequestOrigin::Automatic,
+            };
+            if let Err(error) = request_tx.send(request) {
+                self.terminal_lines.update(|lines| {
+                    lines.push(TermLine::error(format!(
+                        "domain clock [{previous}]: detach could not be queued: {}",
+                        error.current_context()
+                    )));
+                });
+            }
+        }
+        if let Some(selected) = change.attach {
+            let request = ConsoleRequest::DomainClockAttach {
+                request: AttachDomainClockRequest {
+                    domain: selected.clone(),
+                },
+                connection_generation,
+                origin: ClockRequestOrigin::Automatic,
+            };
+            if let Err(error) = request_tx.send(request) {
+                self.clock_display.update(|display| {
+                    display.refuse(
+                        &selected,
+                        format!("attach could not be queued: {}", error.current_context()),
+                    );
+                });
+                self.terminal_lines.update(|lines| {
+                    lines.push(TermLine::error(format!(
+                        "domain clock [{selected}]: attach could not be queued: {}",
+                        error.current_context()
+                    )));
+                });
+            }
+        }
+    }
+
     /// A replacement credential starts a separate view of the cluster. No tab, suggestion, or
     /// observed graph from the previous identity may remain visible to the new session.
     fn clear_authenticated_view(self) {
         self.active_domain.set(None);
+        self.clock_display.set(ClockDisplay::NoDomain);
         self.transaction_status.set(None);
         self.inspector.clear();
         self.domains.set(Vec::new());
@@ -185,6 +257,67 @@ impl WebConsoleSignals {
         self.create.connection_lost();
         self.selected_resource.set(None);
         self.upload_status.set(String::new());
+    }
+
+    fn apply_clock_attach_outcome(
+        self,
+        requested: &DomainName,
+        origin: ClockRequestOrigin,
+        outcome: DomainClockAttachOutcome,
+    ) {
+        let attached = matches!(
+            &outcome.disposition,
+            DomainClockAttachDisposition::Attached { domain, .. } if domain == requested
+        );
+        self.clock_display.update(|display| {
+            display.attach_outcome(requested, &outcome, origin == ClockRequestOrigin::Automatic);
+        });
+        let line = if attached {
+            TermLine::info(format!(
+                "domain clock [{requested}] attached: {}",
+                outcome.message
+            ))
+        } else {
+            TermLine::error(format!(
+                "domain clock [{requested}] attach refused: {}",
+                outcome.message
+            ))
+        };
+        self.terminal_lines.update(|lines| lines.push(line));
+    }
+
+    fn apply_clock_detach_outcome(
+        self,
+        requested: &DomainName,
+        origin: ClockRequestOrigin,
+        outcome: DomainClockDetachOutcome,
+    ) {
+        let detached = matches!(
+            &outcome.disposition,
+            DomainClockDetachDisposition::Detached(domain) if domain == requested
+        );
+        let already_detached = matches!(
+            &outcome.disposition,
+            DomainClockDetachDisposition::NotAttached(domain) if domain == requested
+        );
+        if detached && origin == ClockRequestOrigin::Repl {
+            self.clock_display
+                .update(|display| display.detached(requested));
+        }
+        let line = if detached {
+            TermLine::info(format!(
+                "domain clock [{requested}] detached: {}",
+                outcome.message
+            ))
+        } else if already_detached && origin == ClockRequestOrigin::Automatic {
+            TermLine::info(format!("domain clock [{requested}] was already detached"))
+        } else {
+            TermLine::error(format!(
+                "domain clock [{requested}] detach refused: {}",
+                outcome.message
+            ))
+        };
+        self.terminal_lines.update(|lines| lines.push(line));
     }
 
     /// Closing a pending start waits for its reply before deleting that subscription. An opened
@@ -345,6 +478,18 @@ enum ConsoleRequest {
     },
     /// Selects the domain whose observations the session receives.
     SelectDomain(SelectDomainRequest),
+    /// Follows the selected domain clock on the current session.
+    DomainClockAttach {
+        request: AttachDomainClockRequest,
+        connection_generation: u64,
+        origin: ClockRequestOrigin,
+    },
+    /// Releases a clock when its domain is deselected or the operator requests it.
+    DomainClockDetach {
+        request: DetachDomainClockRequest,
+        connection_generation: u64,
+        origin: ClockRequestOrigin,
+    },
     /// Asks for completions of the REPL input.
     Suggest(SuggestRequest),
     /// Resolves a structured form control into typed choices.
@@ -372,6 +517,12 @@ enum SubscriptionOrigin {
     Create { attempt: u64, draft_revision: u64 },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClockRequestOrigin {
+    Automatic,
+    Repl,
+}
+
 /// Who reads the outcome of a command.
 #[derive(Clone)]
 enum CommandPurpose {
@@ -395,6 +546,8 @@ impl ConsoleRequest {
             | Self::SubscriptionStart { .. }
             | Self::SubscriptionStop { .. }
             | Self::SelectDomain(_)
+            | Self::DomainClockAttach { .. }
+            | Self::DomainClockDetach { .. }
             | Self::Suggest(_)
             | Self::Choice { .. }
             | Self::AttachTransaction(_) => false,
@@ -412,7 +565,9 @@ impl ConsoleRequest {
             Self::Command { .. }
             | Self::ListDomains
             | Self::SubscriptionStart { .. }
-            | Self::SubscriptionStop { .. } => true,
+            | Self::SubscriptionStop { .. }
+            | Self::DomainClockAttach { .. }
+            | Self::DomainClockDetach { .. } => true,
             Self::InspectTransaction(_) => true,
             Self::SelectDomain(_)
             | Self::Suggest(_)
@@ -421,12 +576,13 @@ impl ConsoleRequest {
         }
     }
 
-    /// Whether the request belongs to the connection it was sent on: the deletion of a
-    /// subscription that ended with that connection's session, or the restoration of a tab into
-    /// that session. The next connection issues its own.
+    /// Whether the request belongs to the connection it was sent on: a session-local deletion,
+    /// clock attachment, or restoration. The next connection issues its own.
     fn belongs_to_connection(&self) -> bool {
         match self {
             Self::SubscriptionStop { .. }
+            | Self::DomainClockAttach { .. }
+            | Self::DomainClockDetach { .. }
             | Self::SubscriptionStart {
                 origin: SubscriptionOrigin::Restoration,
                 ..
@@ -437,22 +593,6 @@ impl ConsoleRequest {
             }
             | Self::Command { .. }
             | Self::ListDomains
-            | Self::SelectDomain(_)
-            | Self::Suggest(_)
-            | Self::Choice { .. }
-            | Self::AttachTransaction(_)
-            | Self::InspectTransaction(_) => false,
-        }
-    }
-
-    /// Whether the request was issued in the session's transaction: a command that expects the
-    /// transaction's accepted position. It cannot be served once that transaction is gone.
-    fn belongs_to_transaction(&self) -> bool {
-        match self {
-            Self::Command { request, .. } => request.expected_transaction_position.is_some(),
-            Self::ListDomains
-            | Self::SubscriptionStart { .. }
-            | Self::SubscriptionStop { .. }
             | Self::SelectDomain(_)
             | Self::Suggest(_)
             | Self::Choice { .. }
@@ -473,6 +613,8 @@ impl ConsoleRequest {
             Self::Choice { request, .. } => request.search().len(),
             Self::ListDomains
             | Self::SubscriptionStop { .. }
+            | Self::DomainClockAttach { .. }
+            | Self::DomainClockDetach { .. }
             | Self::SelectDomain(_)
             | Self::AttachTransaction(_)
             | Self::InspectTransaction(_) => 0,
@@ -487,10 +629,30 @@ impl ConsoleRequest {
             Self::SubscriptionStart { request, .. } => ClientRequest::Subscribe(request.clone()),
             Self::SubscriptionStop { request, .. } => ClientRequest::Unsubscribe(request.clone()),
             Self::SelectDomain(request) => ClientRequest::SelectDomain(request.clone()),
+            Self::DomainClockAttach { request, .. } => {
+                ClientRequest::AttachDomainClock(request.clone())
+            }
+            Self::DomainClockDetach { request, .. } => {
+                ClientRequest::DetachDomainClock(request.clone())
+            }
             Self::Suggest(request) => ClientRequest::Suggest(request.clone()),
             Self::Choice { request, .. } => ClientRequest::Choice(request.clone()),
             Self::AttachTransaction(request) => ClientRequest::AttachTransaction(request.clone()),
             Self::InspectTransaction(request) => ClientRequest::InspectTransaction(request.clone()),
+        }
+    }
+
+    fn belongs_to_connection_generation(&self, connection_generation: u64) -> bool {
+        match self {
+            Self::DomainClockAttach {
+                connection_generation: issued,
+                ..
+            }
+            | Self::DomainClockDetach {
+                connection_generation: issued,
+                ..
+            } => *issued == connection_generation,
+            _ => true,
         }
     }
 }
@@ -733,7 +895,9 @@ impl SessionRequests {
             | ConsoleRequest::InspectTransaction(_)
             | ConsoleRequest::SubscriptionStart { .. }
             | ConsoleRequest::SubscriptionStop { .. }
-            | ConsoleRequest::SelectDomain(_) => {}
+            | ConsoleRequest::SelectDomain(_)
+            | ConsoleRequest::DomainClockAttach { .. }
+            | ConsoleRequest::DomainClockDetach { .. } => {}
         }
         let message = ClientMessage {
             request_id,
@@ -767,15 +931,6 @@ impl SessionRequests {
     /// Drops every held request, because the session they were issued for is over.
     fn clear_held(&mut self) {
         self.held.clear();
-    }
-
-    /// Drops the held commands issued in the session's transaction, which cannot be served once
-    /// that transaction is gone. Everything else held, such as a subscription start or deletion, a
-    /// domain listing, an inspection, or a command issued outside the transaction, does not depend
-    /// on it and keeps its place until the session is ready.
-    fn drop_transaction_commands(&mut self) {
-        self.held
-            .retain(|_, request| !request.belongs_to_transaction());
     }
 
     /// Pairs a server message with the request it answers. An event answers no request.
@@ -1080,6 +1235,18 @@ fn initialize_test_executor() {
 #[component]
 fn App() -> impl IntoView {
     let active_domain = RwSignal::new(None::<DomainName>);
+    let clock_display = RwSignal::new(ClockDisplay::NoDomain);
+    let clock_now = RwSignal::new(clock_display::browser_utc_now());
+    let clock_interval = set_interval_with_handle(
+        move || clock_now.set(clock_display::browser_utc_now()),
+        clock_display::CLOCK_REFRESH,
+    )
+    .ok();
+    on_cleanup(move || {
+        if let Some(interval) = clock_interval {
+            interval.clear();
+        }
+    });
     let domains = RwSignal::new(Vec::<DomainView>::new());
     let active_theme = RwSignal::new(0_usize);
     let input = RwSignal::new(String::new());
@@ -1112,6 +1279,7 @@ fn App() -> impl IntoView {
         domain_snapshot,
         cluster_counters,
         active_domain,
+        clock_display,
         transaction_status,
         inspector,
         domains,
@@ -1157,7 +1325,7 @@ fn App() -> impl IntoView {
             Some(_) | None => Vec::new(),
         }
     };
-    let active_domain_session = web_console_session.clone();
+    let active_domain_session = web_console_session;
     Effect::new(move |_| {
         let Some(domain) = active_domain.get() else {
             return;
@@ -1170,8 +1338,34 @@ fn App() -> impl IntoView {
             terminal_lines.update(|lines| lines.push(TermLine::error(reason)));
         }
     });
+    let clock_session = web_console_session;
+    let clock_selection = RwSignal::new(ClockSelection::default());
+    Effect::new(move |_| {
+        let domain = active_domain.get();
+        let connected = clock_session.state.get() == ConsoleConnectionState::Connected;
+        let generation = session_generation.get_untracked();
+        let mut selection = clock_selection.get_untracked();
+        let change = selection.change(connected, generation, domain.clone());
+        clock_selection.set(selection);
+        if !change.refresh_display {
+            return;
+        }
+        clock_display.set(ClockDisplay::selected(domain, connected));
+        if !connected {
+            return;
+        }
+        let Some(request_tx) = clock_session.request_tx.get_untracked() else {
+            if let Some(selected) = change.attach {
+                clock_display.update(|display| {
+                    display.refuse(&selected, "attach could not be queued".to_string());
+                });
+            }
+            return;
+        };
+        signals.queue_clock_transition(change, generation, &request_tx);
+    });
     let suggestion_request_sequence = RwSignal::new(0_u64);
-    let suggestion_session = web_console_session.clone();
+    let suggestion_session = web_console_session;
     let request_suggestions = move |value: String, cursor: usize, continuation: Option<String>| {
         suggestion_request_sequence.update(|sequence| {
             *sequence = sequence
@@ -1341,6 +1535,62 @@ fn App() -> impl IntoView {
                     )));
                 });
             }
+        } else if let Ok(ClientStatement::AttachDomainClock) = parse_client_statement(&command) {
+            if transaction_active {
+                terminal_lines.update(|lines| {
+                    lines.push(TermLine::error(
+                        "client-local commands are not allowed while a transaction is active",
+                    ));
+                });
+                return;
+            }
+            if let Some(domain) = active_domain.get_untracked() {
+                let request = ConsoleRequest::DomainClockAttach {
+                    request: AttachDomainClockRequest { domain },
+                    connection_generation: session_generation.get_untracked(),
+                    origin: ClockRequestOrigin::Repl,
+                };
+                match web_console_session.send_when_connected(request) {
+                    Ok(true) => {}
+                    Ok(false) => terminal_lines.update(|lines| {
+                        lines.push(TermLine::error("websocket session is not connected"));
+                    }),
+                    Err(reason) => terminal_lines.update(|lines| {
+                        lines.push(TermLine::error(reason.current_context().to_string()));
+                    }),
+                }
+            } else {
+                terminal_lines
+                    .update(|lines| lines.push(TermLine::error("no active domain selected")));
+            }
+        } else if let Ok(ClientStatement::DetachDomainClock) = parse_client_statement(&command) {
+            if transaction_active {
+                terminal_lines.update(|lines| {
+                    lines.push(TermLine::error(
+                        "client-local commands are not allowed while a transaction is active",
+                    ));
+                });
+                return;
+            }
+            if let Some(domain) = active_domain.get_untracked() {
+                let request = ConsoleRequest::DomainClockDetach {
+                    request: DetachDomainClockRequest { domain },
+                    connection_generation: session_generation.get_untracked(),
+                    origin: ClockRequestOrigin::Repl,
+                };
+                match web_console_session.send_when_connected(request) {
+                    Ok(true) => {}
+                    Ok(false) => terminal_lines.update(|lines| {
+                        lines.push(TermLine::error("websocket session is not connected"));
+                    }),
+                    Err(reason) => terminal_lines.update(|lines| {
+                        lines.push(TermLine::error(reason.current_context().to_string()));
+                    }),
+                }
+            } else {
+                terminal_lines
+                    .update(|lines| lines.push(TermLine::error("no active domain selected")));
+            }
         } else if let Ok(ClientStatement::CreateSubscription(subscription)) =
             parse_client_statement(&command)
         {
@@ -1493,6 +1743,7 @@ fn App() -> impl IntoView {
                     active_theme=active_theme
                     websocket_state=web_console_session.state
                     active_domain=active_domain
+                    clock_display=clock_display
                     domains=domains
                     run_command=run_command
                     transaction_status=transaction_status
@@ -1500,7 +1751,7 @@ fn App() -> impl IntoView {
                     create=create
                 />
                 <div class="console-body">
-                    <Sidebar active_domain=active_domain domains=domains domains_loaded=domains_loaded active_graph=active_graph active_entities=active_entities cluster_counters=cluster_counters resource_details=resource_details selected_resource=selected_resource upload_status=upload_status create=create web_console_session=web_console_session.clone() run_command=run_command />
+                    <Sidebar active_domain=active_domain clock_display=clock_display clock_now=clock_now domains=domains domains_loaded=domains_loaded active_graph=active_graph active_entities=active_entities cluster_counters=cluster_counters resource_details=resource_details selected_resource=selected_resource upload_status=upload_status create=create web_console_session=web_console_session run_command=run_command />
                     <section class="main-pane">
                         <TransactionInspector
                             inspector=inspector
@@ -2007,6 +2258,9 @@ async fn serve_connection(
                 let Some(request) = request else {
                     return ConnectionEnd::ConsoleClosed;
                 };
+                if !request.belongs_to_connection_generation(signals.session_generation.get_untracked()) {
+                    continue;
+                }
                 let issued = requests.issue(request);
                 if issued.request.inspects_transaction() {
                     signals.inspector.requested(issued.order.0);
@@ -2020,7 +2274,7 @@ async fn serve_connection(
                     Admission::Held => {}
                     Admission::Refused(refused) => {
                         let RefusedRequest { request, refusal } = *refused;
-                        fail_request(signals, requests, request, refusal.to_string());
+                        fail_request(signals, request, refusal.to_string());
                     }
                 }
                 SessionStep::Continue
@@ -2153,7 +2407,7 @@ async fn send_message(
         Err(error) => {
             if let Some(unsent) = requests.answer(message.request_id) {
                 let reason = format!("the request cannot be sent: {}", error.current_context());
-                fail_request(signals, requests, unsent.request, reason);
+                fail_request(signals, unsent.request, reason);
             }
             return true;
         }
@@ -2191,7 +2445,7 @@ fn receive_frame(
                 None => None,
             };
             match answered {
-                Some(unread) => fail_request(signals, requests, unread.request, reason),
+                Some(unread) => fail_request(signals, unread.request, reason),
                 None => {
                     signals
                         .terminal_lines
@@ -2206,7 +2460,7 @@ fn receive_frame(
         Routed::Reply(answered) => apply_reply(signals, requests, *answered),
         Routed::Unreadable(unreadable) => {
             let UnreadableReply { request, reason } = *unreadable;
-            fail_request(signals, requests, request.request, reason);
+            fail_request(signals, request.request, reason);
             SessionStep::Continue
         }
         Routed::Untracked | Routed::Pending => SessionStep::Continue,
@@ -2414,6 +2668,9 @@ fn apply_event(
             SessionStep::Continue
         }
         ServerEvent::DomainClockObserved(observed) => {
+            signals.clock_display.update(|display| {
+                display.observed(&observed.domain, observed.clock.clone());
+            });
             let line = TermLine::info(format!(
                 "domain clock [{}]: {}",
                 observed.domain, observed.clock
@@ -2422,6 +2679,9 @@ fn apply_event(
             SessionStep::Continue
         }
         ServerEvent::DomainClockTicked(ticked) => {
+            signals.clock_display.update(|display| {
+                display.ticked(&ticked.domain, ticked.tick.clone());
+            });
             let line = TermLine::info(format!(
                 "domain clock [{}] tick: generation {}, id {}, boundary {}, authority UTC {}, \
                  node logical {}",
@@ -2436,6 +2696,9 @@ fn apply_event(
             SessionStep::Continue
         }
         ServerEvent::DomainClockAttachmentEnded(ended) => {
+            signals.clock_display.update(|display| {
+                display.ended(&ended.domain, ended.reason.to_string());
+            });
             let line = TermLine::error(format!(
                 "domain clock [{}]: the attachment ended because {}",
                 ended.domain, ended.reason
@@ -2473,11 +2736,11 @@ fn apply_reply(
     let IssuedRequest { order, request } = request;
     match (request, body) {
         (request, ReplyBody::Rejected(rejected)) => {
-            fail_request(signals, requests, request, rejected.message);
+            fail_request(signals, request, rejected.message);
             SessionStep::Continue
         }
         (request, ReplyBody::Cancelled(cancelled)) => {
-            fail_request(signals, requests, request, cancellation_reason(cancelled));
+            fail_request(signals, request, cancellation_reason(cancelled));
             SessionStep::Continue
         }
         (ConsoleRequest::Command { request, purpose }, ReplyBody::Command(outcome)) => {
@@ -2499,6 +2762,24 @@ fn apply_reply(
         (ConsoleRequest::SelectDomain(_), ReplyBody::DomainSelection(selection)) => {
             let line = domain_selection_line(selection);
             signals.terminal_lines.update(|lines| lines.push(line));
+            SessionStep::Continue
+        }
+        (
+            ConsoleRequest::DomainClockAttach {
+                request, origin, ..
+            },
+            ReplyBody::DomainClockAttach(outcome),
+        ) => {
+            signals.apply_clock_attach_outcome(&request.domain, origin, outcome);
+            SessionStep::Continue
+        }
+        (
+            ConsoleRequest::DomainClockDetach {
+                request, origin, ..
+            },
+            ReplyBody::DomainClockDetach(outcome),
+        ) => {
+            signals.apply_clock_detach_outcome(&request.domain, origin, outcome);
             SessionStep::Continue
         }
         (ConsoleRequest::Suggest(request), ReplyBody::Suggest(outcome)) => {
@@ -2537,7 +2818,7 @@ fn apply_reply(
             SessionStep::Continue
         }
         (ConsoleRequest::AttachTransaction(_), ReplyBody::Attach(outcome)) => {
-            apply_attach_outcome(signals, requests, outcome)
+            apply_attach_outcome(signals, outcome)
         }
         (ConsoleRequest::InspectTransaction(request), ReplyBody::Inspection(outcome)) => {
             match outcome {
@@ -2584,7 +2865,7 @@ fn apply_reply(
             SessionStep::Continue
         }
         (request, _) => {
-            fail_request(signals, requests, request, UNEXPECTED_REPLY.to_string());
+            fail_request(signals, request, UNEXPECTED_REPLY.to_string());
             SessionStep::Continue
         }
     }
@@ -2775,15 +3056,10 @@ fn show_command_outcome(
 
 /// Applies the outcome of attaching the session's transaction.
 ///
-/// Once the transaction is attached, the requests held for it are released. A transaction that
-/// already finished, or that could not be attached, ends the commands issued in it; the other
-/// held requests, such as the start of a new subscription tab, go out once the session is
-/// ready.
-fn apply_attach_outcome(
-    signals: WebConsoleSignals,
-    requests: &mut SessionRequests,
-    outcome: AttachOutcome,
-) -> SessionStep {
+/// Once the attach ends, every held command keeps its issue order and execution reference. The
+/// server recovers a recorded outcome even when the transaction finished, or returns a failure for
+/// a command it never admitted. The other held requests also go out once the session is ready.
+fn apply_attach_outcome(signals: WebConsoleSignals, outcome: AttachOutcome) -> SessionStep {
     let AttachOutcome {
         disposition,
         message,
@@ -2796,7 +3072,6 @@ fn apply_attach_outcome(
             let active = status.lifecycle().is_active();
             adopt_transaction(signals, status);
             if !active {
-                requests.drop_transaction_commands();
                 let lines = completed_lines(message);
                 signals
                     .terminal_lines
@@ -2806,7 +3081,6 @@ fn apply_attach_outcome(
         }
         AttachDisposition::AlreadyFinished(status) => {
             adopt_transaction(signals, status);
-            requests.drop_transaction_commands();
             let lines = failed_lines(message, diagnostics, query);
             signals
                 .terminal_lines
@@ -2815,7 +3089,6 @@ fn apply_attach_outcome(
         }
         AttachDisposition::Failed => {
             signals.transaction_status.set(None);
-            requests.drop_transaction_commands();
             let lines = failed_lines(message, diagnostics, query);
             signals
                 .terminal_lines
@@ -2976,12 +3249,7 @@ fn apply_unsubscribe_outcome(
 
 /// Ends a request that gets no usable reply, showing `reason` where its reply would have been
 /// shown.
-fn fail_request(
-    signals: WebConsoleSignals,
-    requests: &mut SessionRequests,
-    request: ConsoleRequest,
-    reason: String,
-) {
+fn fail_request(signals: WebConsoleSignals, request: ConsoleRequest, reason: String) {
     match request {
         ConsoleRequest::Command {
             purpose: CommandPurpose::Repl,
@@ -3026,6 +3294,29 @@ fn fail_request(
                 .terminal_lines
                 .update(|lines| lines.push(TermLine::error(reason)));
         }
+        ConsoleRequest::DomainClockAttach {
+            request, origin, ..
+        } => {
+            if origin == ClockRequestOrigin::Automatic {
+                signals.clock_display.update(|display| {
+                    display.refuse(&request.domain, reason.clone());
+                });
+            }
+            signals.terminal_lines.update(|lines| {
+                lines.push(TermLine::error(format!(
+                    "domain clock [{}] attach failed: {reason}",
+                    request.domain
+                )));
+            });
+        }
+        ConsoleRequest::DomainClockDetach { request, .. } => {
+            signals.terminal_lines.update(|lines| {
+                lines.push(TermLine::error(format!(
+                    "domain clock [{}] detach failed: {reason}",
+                    request.domain
+                )));
+            });
+        }
         ConsoleRequest::Suggest(_) => {
             // An empty list alone would read as no matches.
             signals.suggestions.set(Vec::new());
@@ -3040,10 +3331,9 @@ fn fail_request(
         }
         ConsoleRequest::InspectTransaction(_) => signals.inspector.error.set(Some(reason)),
         ConsoleRequest::AttachTransaction(_) => {
-            // Without its transaction attached, the session cannot serve the commands issued in
-            // it. The other held requests do not depend on it.
+            // Held commands keep their references so the server can recover a recorded outcome
+            // or report that a command was never admitted.
             signals.transaction_status.set(None);
-            requests.drop_transaction_commands();
             signals
                 .terminal_lines
                 .update(|lines| lines.push(TermLine::error(reason)));
@@ -3545,6 +3835,7 @@ fn Header(
     active_theme: RwSignal<usize>,
     websocket_state: RwSignal<ConsoleConnectionState>,
     active_domain: RwSignal<Option<DomainName>>,
+    clock_display: RwSignal<ClockDisplay>,
     domains: RwSignal<Vec<DomainView>>,
     run_command: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
     transaction_status: RwSignal<Option<TransactionStatus>>,
@@ -3635,6 +3926,7 @@ fn Header(
                         </span>
                     </button>
                 </Show>
+                <ClockStatus display=clock_display />
                 <span>{RUNTIME_VERSION_LABEL}</span>
                 <div class="menu-wrap">
                     <button
@@ -3690,6 +3982,8 @@ fn Header(
 #[component]
 fn Sidebar(
     active_domain: RwSignal<Option<DomainName>>,
+    clock_display: RwSignal<ClockDisplay>,
+    clock_now: RwSignal<Timestamp>,
     domains: RwSignal<Vec<DomainView>>,
     domains_loaded: RwSignal<bool>,
     active_graph: impl Fn() -> Option<GraphView> + Copy + Send + Sync + 'static,
@@ -3803,6 +4097,7 @@ fn Sidebar(
                         }}
                     />
                 </div>
+                <ClockPanel display=clock_display now=clock_now />
             </div>
             <div class="summary-block">
                 <div class="summary-row">
@@ -7610,6 +7905,7 @@ mod tests {
             domain_snapshot: RwSignal::new(None),
             cluster_counters: RwSignal::new(ClusterCounters::default()),
             active_domain: RwSignal::new(Some(domain.clone())),
+            clock_display: RwSignal::new(ClockDisplay::selected(Some(domain.clone()), true)),
             transaction_status: RwSignal::new(None),
             inspector: InspectorSignals::new(),
             domains: RwSignal::new(Vec::new()),
@@ -8278,6 +8574,385 @@ mod tests {
                  logical 1970-01-01T00:00:00.000003Z"
             );
         });
+    }
+
+    #[test]
+    fn clock_replies_follow_the_selected_domain_and_manual_detach() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let domain = domain_name("tenant");
+            signals.apply_clock_attach_outcome(
+                &domain,
+                ClockRequestOrigin::Automatic,
+                DomainClockAttachOutcome {
+                    disposition: DomainClockAttachDisposition::Attached {
+                        domain: domain.clone(),
+                        clock: DomainClockObservation {
+                            generation: 0,
+                            state: DomainClockObservedState::Stopped,
+                        },
+                    },
+                    message: "following the clock".to_string(),
+                },
+            );
+            assert!(matches!(
+                signals.clock_display.get_untracked(),
+                ClockDisplay::Following { .. }
+            ));
+            signals.apply_clock_attach_outcome(
+                &domain,
+                ClockRequestOrigin::Repl,
+                DomainClockAttachOutcome {
+                    disposition: DomainClockAttachDisposition::AlreadyAttached(domain.clone()),
+                    message: "already attached".to_string(),
+                },
+            );
+            assert!(matches!(
+                signals.clock_display.get_untracked(),
+                ClockDisplay::Following { .. }
+            ));
+            signals.apply_clock_detach_outcome(
+                &domain,
+                ClockRequestOrigin::Repl,
+                DomainClockDetachOutcome {
+                    disposition: DomainClockDetachDisposition::Detached(domain.clone()),
+                    message: "detached".to_string(),
+                },
+            );
+            assert_eq!(
+                signals.clock_display.get_untracked(),
+                ClockDisplay::Detached(domain.clone())
+            );
+            let lines = signals.terminal_lines.get_untracked().into_lines();
+            assert!(
+                lines[0]
+                    .line
+                    .text
+                    .contains("domain clock [tenant] attached")
+            );
+            assert!(lines[1].line.text.contains("already attached"));
+            assert!(
+                lines[2]
+                    .line
+                    .text
+                    .contains("domain clock [tenant] detached")
+            );
+        });
+    }
+
+    #[test]
+    fn typed_clock_replies_update_the_selected_clock_and_event_log() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let domain = domain_name("tenant");
+            let mut requests = SessionRequests::new();
+            let attach = requests.issue(ConsoleRequest::DomainClockAttach {
+                request: AttachDomainClockRequest {
+                    domain: domain.clone(),
+                },
+                connection_generation: 1,
+                origin: ClockRequestOrigin::Automatic,
+            });
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: attach,
+                    body: ReplyBody::DomainClockAttach(DomainClockAttachOutcome {
+                        disposition: DomainClockAttachDisposition::Attached {
+                            domain: domain.clone(),
+                            clock: DomainClockObservation {
+                                generation: 3,
+                                state: DomainClockObservedState::Stopped,
+                            },
+                        },
+                        message: "following".to_string(),
+                    }),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert!(matches!(
+                signals.clock_display.get_untracked(),
+                ClockDisplay::Following { clock, .. } if clock.generation == 3
+            ));
+
+            let detach = requests.issue(ConsoleRequest::DomainClockDetach {
+                request: DetachDomainClockRequest {
+                    domain: domain.clone(),
+                },
+                connection_generation: 1,
+                origin: ClockRequestOrigin::Repl,
+            });
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: detach,
+                    body: ReplyBody::DomainClockDetach(DomainClockDetachOutcome {
+                        disposition: DomainClockDetachDisposition::Detached(domain.clone()),
+                        message: "detached".to_string(),
+                    }),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert_eq!(
+                signals.clock_display.get_untracked(),
+                ClockDisplay::Detached(domain)
+            );
+            let lines = signals.terminal_lines.get_untracked().into_lines();
+            assert!(lines[0].line.text.contains("attached: following"));
+            assert!(lines[1].line.text.contains("detached: detached"));
+        });
+    }
+
+    #[test]
+    fn rejected_clock_requests_report_failure_and_refuse_automatic_following() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let domain = domain_name("tenant");
+            let mut requests = SessionRequests::new();
+            let attach = requests.issue(ConsoleRequest::DomainClockAttach {
+                request: AttachDomainClockRequest {
+                    domain: domain.clone(),
+                },
+                connection_generation: 1,
+                origin: ClockRequestOrigin::Automatic,
+            });
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: attach,
+                    body: ReplyBody::Rejected(nervix_client_wire::RequestRejected {
+                        rejection: nervix_client_wire::RequestRejection::InvalidRequest,
+                        field: None,
+                        message: "attachment refused".to_string(),
+                    }),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert!(matches!(
+                signals.clock_display.get_untracked(),
+                ClockDisplay::Refused { domain: selected, reason }
+                    if selected == domain && reason == "attachment refused"
+            ));
+
+            let detach = requests.issue(ConsoleRequest::DomainClockDetach {
+                request: DetachDomainClockRequest {
+                    domain: domain.clone(),
+                },
+                connection_generation: 1,
+                origin: ClockRequestOrigin::Automatic,
+            });
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: detach,
+                    body: ReplyBody::Rejected(nervix_client_wire::RequestRejected {
+                        rejection: nervix_client_wire::RequestRejection::InvalidRequest,
+                        field: None,
+                        message: "detachment refused".to_string(),
+                    }),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert!(matches!(
+                signals.clock_display.get_untracked(),
+                ClockDisplay::Refused { .. }
+            ));
+            let lines = signals.terminal_lines.get_untracked().into_lines();
+            assert!(
+                lines[0]
+                    .line
+                    .text
+                    .contains("attach failed: attachment refused")
+            );
+            assert!(
+                lines[1]
+                    .line
+                    .text
+                    .contains("detach failed: detachment refused")
+            );
+        });
+    }
+
+    #[test]
+    fn automatic_clock_transition_orders_requests_and_reports_a_closed_queue() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let previous = domain_name("tenant");
+            let selected = domain_name("other");
+            signals
+                .clock_display
+                .set(ClockDisplay::selected(Some(selected.clone()), true));
+            let (sender, mut receiver) = request_handoff();
+            signals.queue_clock_transition(
+                ClockSelectionChange {
+                    detach: Some(previous.clone()),
+                    attach: Some(selected.clone()),
+                    refresh_display: true,
+                },
+                7,
+                &sender,
+            );
+            let ConsoleRequest::DomainClockDetach {
+                request,
+                connection_generation,
+                origin,
+            } = receiver
+                .try_take()
+                .assured("the transition queues a detach before its attach")
+            else {
+                panic!("the first clock request detaches the previous domain");
+            };
+            assert_eq!(request.domain, previous);
+            assert_eq!(connection_generation, 7);
+            assert!(origin == ClockRequestOrigin::Automatic);
+            let ConsoleRequest::DomainClockAttach {
+                request,
+                connection_generation,
+                origin,
+            } = receiver
+                .try_take()
+                .assured("the transition queues the selected clock after detaching")
+            else {
+                panic!("the second clock request attaches the selected domain");
+            };
+            assert_eq!(request.domain, selected);
+            assert_eq!(connection_generation, 7);
+            assert!(origin == ClockRequestOrigin::Automatic);
+            assert!(receiver.try_take().is_none());
+
+            drop(receiver);
+            signals.queue_clock_transition(
+                ClockSelectionChange {
+                    detach: Some(previous),
+                    attach: Some(selected.clone()),
+                    refresh_display: true,
+                },
+                7,
+                &sender,
+            );
+            assert!(matches!(
+                signals.clock_display.get_untracked(),
+                ClockDisplay::Refused { domain, .. } if domain == selected
+            ));
+            let lines = signals.terminal_lines.get_untracked().into_lines();
+            assert!(lines[0].line.text.contains("detach could not be queued"));
+            assert!(lines[1].line.text.contains("attach could not be queued"));
+        });
+    }
+
+    #[test]
+    fn clock_requests_only_enter_an_open_connected_session() {
+        Owner::new().with(|| {
+            let (sender, mut receiver) = request_handoff();
+            let state = RwSignal::new(ConsoleConnectionState::Connected);
+            let request_tx = RwSignal::new(Some(sender));
+            let session = WebConsoleSession {
+                state,
+                request_tx,
+                upload_base_url: RwSignal::new(None),
+                auth_token: RwSignal::new(None),
+            };
+            assert!(matches!(
+                session.send_when_connected(ConsoleRequest::ListDomains),
+                Ok(true)
+            ));
+            assert!(matches!(
+                receiver.try_take(),
+                Some(ConsoleRequest::ListDomains)
+            ));
+            for _ in 0..request_handoff::MAX_WAITING_REQUESTS {
+                assert!(matches!(
+                    session.send_when_connected(ConsoleRequest::ListDomains),
+                    Ok(true)
+                ));
+            }
+            let Err(refusal) = session.send_when_connected(ConsoleRequest::ListDomains) else {
+                panic!("a full hand-off refuses another request");
+            };
+            assert_eq!(
+                refusal.current_context(),
+                &RequestRefusal::TooManyWaiting {
+                    limit: request_handoff::MAX_WAITING_REQUESTS
+                }
+            );
+            receiver.discard_waiting();
+            state.set(ConsoleConnectionState::Waiting);
+            assert!(matches!(
+                session.send_when_connected(ConsoleRequest::ListDomains),
+                Ok(false)
+            ));
+            state.set(ConsoleConnectionState::Connected);
+            request_tx.set(None);
+            assert!(matches!(
+                session.send_when_connected(ConsoleRequest::ListDomains),
+                Ok(false)
+            ));
+        });
+    }
+
+    #[test]
+    fn automatic_detach_already_released_by_server_is_informational() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let domain = domain_name("tenant");
+            signals.apply_clock_detach_outcome(
+                &domain,
+                ClockRequestOrigin::Automatic,
+                DomainClockDetachOutcome {
+                    disposition: DomainClockDetachDisposition::NotAttached(domain.clone()),
+                    message: "not attached".to_string(),
+                },
+            );
+            assert_eq!(
+                signals.clock_display.get_untracked(),
+                ClockDisplay::selected(Some(domain), true)
+            );
+            let lines = signals.terminal_lines.get_untracked().into_lines();
+            assert!(lines[0].line.text.contains("was already detached"));
+        });
+    }
+
+    #[test]
+    fn clock_requests_are_connection_scoped_even_while_waiting_for_the_leader() {
+        let domain = domain_name("tenant");
+        let attach = ConsoleRequest::DomainClockAttach {
+            request: AttachDomainClockRequest {
+                domain: domain.clone(),
+            },
+            connection_generation: 5,
+            origin: ClockRequestOrigin::Automatic,
+        };
+        assert!(attach.is_ordered());
+        assert!(attach.belongs_to_connection_generation(5));
+        assert!(!attach.belongs_to_connection_generation(6));
+        assert!(matches!(
+            attach.client_request(),
+            ClientRequest::AttachDomainClock(_)
+        ));
+        let mut requests = SessionRequests::new();
+        let issued = requests.issue(attach);
+        assert!(matches!(requests.accept(issued), Admission::Held));
+        assert_eq!(requests.held.len(), 1);
+        requests.end_connection();
+        assert!(requests.held.is_empty());
+
+        let detach = ConsoleRequest::DomainClockDetach {
+            request: DetachDomainClockRequest { domain },
+            connection_generation: 5,
+            origin: ClockRequestOrigin::Automatic,
+        };
+        assert!(matches!(
+            detach.client_request(),
+            ClientRequest::DetachDomainClock(_)
+        ));
+        let issued = requests.issue(detach);
+        requests.dispatch(issued);
+        requests.end_connection();
+        assert!(requests.held.is_empty());
     }
 
     #[test]
@@ -8992,23 +9667,29 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_or_failed_attach_ends_only_the_commands_issued_in_its_transaction() {
+    fn a_finished_or_failed_attach_releases_commands_under_their_original_references() {
         let attach_endings: [fn(WebConsoleSignals, &mut SessionRequests); 4] = [
             |signals, requests| {
-                apply_attach_outcome(
+                let attach = requests
+                    .answer(request_id(1))
+                    .verified("the attach was dispatched above");
+                let step = apply_reply(
                     signals,
                     requests,
-                    AttachOutcome {
-                        disposition: AttachDisposition::AlreadyFinished(reverted_transaction()),
-                        message: "transaction already finished".to_string(),
-                        diagnostics: Vec::new(),
+                    AnsweredRequest {
+                        request: attach,
+                        body: ReplyBody::Attach(AttachOutcome {
+                            disposition: AttachDisposition::AlreadyFinished(reverted_transaction()),
+                            message: "transaction already finished".to_string(),
+                            diagnostics: Vec::new(),
+                        }),
                     },
                 );
+                assert!(matches!(step, SessionStep::Continue));
             },
-            |signals, requests| {
+            |signals, _requests| {
                 apply_attach_outcome(
                     signals,
-                    requests,
                     AttachOutcome {
                         disposition: AttachDisposition::Attached(reverted_transaction()),
                         message: "transaction reverted".to_string(),
@@ -9016,10 +9697,9 @@ mod tests {
                     },
                 );
             },
-            |signals, requests| {
+            |signals, _requests| {
                 apply_attach_outcome(
                     signals,
-                    requests,
                     AttachOutcome {
                         disposition: AttachDisposition::Failed,
                         message: "transaction is not retained".to_string(),
@@ -9027,16 +9707,11 @@ mod tests {
                     },
                 );
             },
-            |signals, requests| {
+            |signals, _requests| {
                 let attach = ConsoleRequest::AttachTransaction(AttachTransactionRequest {
                     transaction_id: "transaction".to_string(),
                 });
-                fail_request(
-                    signals,
-                    requests,
-                    attach,
-                    "the attach was rejected".to_string(),
-                );
+                fail_request(signals, attach, "the attach was rejected".to_string());
             },
         ];
         for end_attach in attach_endings {
@@ -9071,6 +9746,10 @@ mod tests {
                 });
                 assert!(matches!(requests.accept(new_tab), Admission::Held));
                 let in_transaction = requests.issue(transaction_command("REVERT;"));
+                let ConsoleRequest::Command { request, .. } = &in_transaction.request else {
+                    panic!("the test issued a transaction command");
+                };
+                let reference = request.execution_reference.clone();
                 assert!(matches!(requests.accept(in_transaction), Admission::Held));
                 let outside = requests.issue(resource_description("bundle"));
                 assert!(matches!(requests.accept(outside), Admission::Held));
@@ -9078,13 +9757,18 @@ mod tests {
                 end_attach(signals, &mut requests);
                 requests.answer(request_id(1));
                 let released = requests.release_held();
-                assert_eq!(released.len(), 2, "only the command issued in it ended");
+                assert_eq!(released.len(), 3);
                 let ClientRequest::Subscribe(start) = &released[0].request else {
                     panic!("the tab's start goes out first, in its place");
                 };
                 assert_eq!(start.statement, "CREATE SUBSCRIPTION live TO orders;");
+                assert_eq!(sent_queries(&released[1..2]), vec!["REVERT;"]);
                 assert_eq!(
-                    sent_queries(&released[1..]),
+                    sent_commands(&released[1..2])[0].execution_reference,
+                    reference
+                );
+                assert_eq!(
+                    sent_queries(&released[2..]),
                     vec!["DESCRIBE RESOURCE bundle;"]
                 );
             });
@@ -9114,7 +9798,7 @@ mod tests {
                 }
             );
             let RefusedRequest { request, refusal } = *refused;
-            fail_request(signals, &mut requests, request, refusal.to_string());
+            fail_request(signals, request, refusal.to_string());
             assert_eq!(
                 signals.terminal_lines.get_untracked().into_lines()[0]
                     .line
@@ -9128,7 +9812,7 @@ mod tests {
                 panic!("a completion request past the outstanding bound is refused");
             };
             let RefusedRequest { request, refusal } = *refused;
-            fail_request(signals, &mut requests, request, refusal.to_string());
+            fail_request(signals, request, refusal.to_string());
             assert!(signals.suggestions.get_untracked().is_empty());
             assert_eq!(
                 signals.suggestion_status.get_untracked(),
@@ -11023,55 +11707,71 @@ mod tests {
     }
 
     #[test]
-    fn failed_create_and_choice_requests_update_their_own_surface() {
+    fn cancelled_create_and_wrong_command_replies_report_terminal_failures() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
             let mut requests = SessionRequests::new();
             signals.create.open(CreateKind::User, None, "trigger");
             let (attempt, revision) = signals.create.begin_submission(true);
-            fail_request(
+            let create = requests.issue(ConsoleRequest::Command {
+                request: CommandRequest {
+                    query: "CREATE USER operator WITH PASSWORD 'secret';".to_string(),
+                    domain: None,
+                    execution_reference: command_execution_reference(),
+                    expected_transaction_position: None,
+                    expected_preview: None,
+                },
+                purpose: CommandPurpose::Create(CreateCommandContext {
+                    attempt,
+                    draft_revision: revision,
+                    kind: CreateKind::User,
+                    presentation: "CREATE USER operator WITH PASSWORD '********';".to_string(),
+                    domain: None,
+                    resource: None,
+                    created_domain: None,
+                }),
+            });
+            let step = apply_reply(
                 signals,
                 &mut requests,
-                ConsoleRequest::Command {
-                    request: CommandRequest {
-                        query: "CREATE USER operator WITH PASSWORD 'secret';".to_string(),
-                        domain: None,
-                        execution_reference: command_execution_reference(),
-                        expected_transaction_position: None,
-                        expected_preview: None,
-                    },
-                    purpose: CommandPurpose::Create(CreateCommandContext {
-                        attempt,
-                        draft_revision: revision,
-                        kind: CreateKind::User,
-                        presentation: "CREATE USER operator WITH PASSWORD '********';".to_string(),
-                        domain: None,
-                        resource: None,
-                        created_domain: None,
+                AnsweredRequest {
+                    request: create,
+                    body: ReplyBody::Cancelled(RequestCancelled {
+                        stage: CancellationStage::BeforeAdmission,
                     }),
                 },
-                "request rejected".to_string(),
             );
+            assert!(matches!(step, SessionStep::Continue));
             assert!(
                 signals
                     .terminal_lines
                     .get_untracked()
                     .into_lines()
                     .iter()
-                    .any(|entry| entry.line.text.contains("request rejected"))
+                    .any(|entry| entry.line.text.contains("cancelled before it was admitted"))
             );
 
-            signals.create.open(CreateKind::Domain, None, "trigger");
-            fail_request(
+            let command = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
+            let step = apply_reply(
                 signals,
                 &mut requests,
-                choice_request(
-                    ChoiceControl::DomainPace,
-                    revision
-                        .checked_add(1)
-                        .assured("opening the domain form advances the draft revision once"),
-                ),
-                "choice transport ended".to_string(),
+                AnsweredRequest {
+                    request: command,
+                    body: ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                        status: SuggestionStatus::Ready,
+                        continuation: None,
+                        suggestions: Vec::new(),
+                    }),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert!(
+                signals
+                    .terminal_lines
+                    .get_untracked()
+                    .into_lines()
+                    .iter()
+                    .any(|entry| entry.line.text.contains(UNEXPECTED_REPLY))
             );
         });
     }

@@ -3,7 +3,6 @@ use std::{
     fs,
     io::Write as _,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
     thread,
     time::{Duration, Instant},
 };
@@ -11,9 +10,10 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use arch_into::ArchInto as _;
 use clap::{Parser, Subcommand};
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_benchmark::LoadShape;
+use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use nervix_recovery::Discarded as _;
 use parking_lot::Mutex;
 use rdkafka::{
@@ -23,7 +23,7 @@ use rdkafka::{
     error::{KafkaError, RDKafkaErrorCode},
     producer::{BaseRecord, DeliveryResult, Producer, ProducerContext, ThreadedProducer},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use triomphe::Arc;
 
 const SEND_CLOCK_MESSAGES: u64 = 65_536;
@@ -36,6 +36,7 @@ const RECENT_SUMMARY_LIMIT: usize = 32;
 const KEY_CYCLE_DIGITS: usize = 14;
 const KEY_INDEX_DIGITS: usize = 6;
 const KEY_DIGITS: usize = KEY_CYCLE_DIGITS + KEY_INDEX_DIGITS;
+const UNIFORM_ID_DIGITS: usize = 16;
 const RETAIN_MARKER: u8 = b'x';
 const PADDING: u8 = b'y';
 
@@ -81,9 +82,13 @@ struct CommonArgs {
 /// The load shape the workload declares, with the arguments each shape requires.
 #[derive(Debug, Subcommand)]
 enum ShapeArgs {
-    /// Identical payloads and one output message for every accepted input message.
+    /// Distinct record IDs and one unchanged output per input.
     UniformPassthrough,
-    /// Identical payloads copied to a fixed number of output consumers.
+    /// Distinct record IDs and one uppercase output per input.
+    UniformUppercase,
+    /// One retained and one filtered input per cycle, yielding one uppercase output.
+    UniformFilterMap,
+    /// Distinct record IDs copied to a fixed number of output consumers.
     UniformFanout {
         #[arg(long)]
         outputs_per_input: u64,
@@ -106,6 +111,8 @@ impl ShapeArgs {
     fn into_shape(self) -> LoadShape {
         match self {
             Self::UniformPassthrough => LoadShape::UniformPassthrough,
+            Self::UniformUppercase => LoadShape::UniformUppercase,
+            Self::UniformFilterMap => LoadShape::UniformFilterMap,
             Self::UniformFanout { outputs_per_input } => {
                 LoadShape::UniformFanout { outputs_per_input }
             }
@@ -185,7 +192,9 @@ impl ProducerContext for DeliveryContext {
 /// Builds one shape's wire payloads, reusing prepared buffers so the send loop never allocates.
 enum PayloadWriter {
     Uniform {
-        payload: Vec<u8>,
+        retained: Vec<u8>,
+        dropped: Option<Vec<u8>>,
+        id_offset: usize,
     },
     Keyed {
         retained: Vec<u8>,
@@ -199,9 +208,30 @@ enum PayloadWriter {
 impl PayloadWriter {
     fn new(shape: &LoadShape, value_bytes: usize) -> Result<Self> {
         match shape {
-            LoadShape::UniformPassthrough | LoadShape::UniformFanout { .. } => Ok(Self::Uniform {
-                payload: format!(r#"{{"value":"{}"}}"#, "x".repeat(value_bytes)).into_bytes(),
-            }),
+            LoadShape::UniformPassthrough
+            | LoadShape::UniformUppercase
+            | LoadShape::UniformFilterMap
+            | LoadShape::UniformFanout { .. } => {
+                let prefix = br#"{"id":""#;
+                let infix = br#"","value":""#;
+                let suffix = br#""}"#;
+                let build = |value_byte| {
+                    let mut payload = Vec::with_capacity(
+                        prefix.len() + UNIFORM_ID_DIGITS + infix.len() + value_bytes + suffix.len(),
+                    );
+                    payload.extend_from_slice(prefix);
+                    payload.extend(std::iter::repeat_n(b'0', UNIFORM_ID_DIGITS));
+                    payload.extend_from_slice(infix);
+                    payload.extend(std::iter::repeat_n(value_byte, value_bytes));
+                    payload.extend_from_slice(suffix);
+                    payload
+                };
+                Ok(Self::Uniform {
+                    retained: build(b'x'),
+                    dropped: matches!(shape, LoadShape::UniformFilterMap).then(|| build(b'y')),
+                    id_offset: prefix.len(),
+                })
+            }
             LoadShape::KeyedWindowed {
                 keys_per_cycle,
                 retained_keys,
@@ -246,7 +276,7 @@ impl PayloadWriter {
 
     fn wire_bytes(&self) -> usize {
         match self {
-            Self::Uniform { payload } => payload.len(),
+            Self::Uniform { retained, .. } => retained.len(),
             Self::Keyed { retained, .. } => retained.len(),
         }
     }
@@ -258,7 +288,23 @@ impl PayloadWriter {
     /// close enough that deduplication expiry can never split them.
     fn payload(&mut self, cycle: u64, index: u64) -> &[u8] {
         match self {
-            Self::Uniform { payload } => payload,
+            Self::Uniform {
+                retained,
+                dropped,
+                id_offset,
+            } => {
+                let payload = if index == 1 {
+                    dropped
+                        .as_mut()
+                        .verified("only the uniform filter-map shape has a second input per cycle")
+                } else {
+                    retained
+                };
+                let mut slot = &mut payload[*id_offset..*id_offset + UNIFORM_ID_DIGITS];
+                write!(slot, "{cycle:016x}")
+                    .assured("fmt::Write over an in-memory buffer has no failure mode");
+                payload
+            }
             Self::Keyed {
                 retained,
                 dropped,
@@ -316,6 +362,104 @@ impl OutputCounts {
 enum OutputMeter {
     Watermarks,
     Summaries(SummaryDrain),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UniformOutput<'a> {
+    id: &'a str,
+    value: &'a str,
+}
+
+/// Checks each output identity and value after the timed measurement has finished.
+struct UniformRecordAudit {
+    seen: Vec<u64>,
+    copies_per_cycle: u64,
+    value_byte: u8,
+    value_bytes: usize,
+}
+
+impl UniformRecordAudit {
+    fn new(shape: &LoadShape, cycles: u64, value_bytes: usize) -> Result<Self> {
+        let (copies_per_cycle, value_byte) = match shape {
+            LoadShape::UniformPassthrough => (1, b'x'),
+            LoadShape::UniformUppercase | LoadShape::UniformFilterMap => (1, b'X'),
+            LoadShape::UniformFanout { outputs_per_input } => (*outputs_per_input, b'x'),
+            LoadShape::KeyedWindowed { .. } => {
+                bail!("window summaries require aggregate validation")
+            }
+        };
+        let cycles: usize = cycles
+            .try_into()
+            .context("uniform output cycle count does not fit in memory")?;
+        let mut seen = Vec::new();
+        seen.try_reserve_exact(cycles)
+            .context("failed to reserve uniform output identity counts")?;
+        seen.resize(cycles, 0);
+        Ok(Self {
+            seen,
+            copies_per_cycle,
+            value_byte,
+            value_bytes,
+        })
+    }
+
+    fn expected_messages(&self) -> Result<u64> {
+        u64::try_from(self.seen.len())
+            .context("uniform output cycle count does not fit in the report")?
+            .checked_mul(self.copies_per_cycle)
+            .context("uniform output message count overflowed")
+    }
+
+    fn observe(&mut self, payload: &[u8]) -> Result<()> {
+        let output: UniformOutput<'_> =
+            serde_json::from_slice(payload).context("uniform output is not an id/value record")?;
+        ensure!(
+            output.id.len() == UNIFORM_ID_DIGITS,
+            "uniform output id has {} digits, expected {UNIFORM_ID_DIGITS}",
+            output.id.len()
+        );
+        let cycle =
+            u64::from_str_radix(output.id, 16).context("uniform output id is not hexadecimal")?;
+        let index: usize = cycle
+            .try_into()
+            .context("uniform output id does not fit in memory")?;
+        let count = self.seen.get_mut(index).with_context(|| {
+            format!(
+                "uniform output id {output_id} was never produced",
+                output_id = output.id
+            )
+        })?;
+        ensure!(
+            *count < self.copies_per_cycle,
+            "uniform output id {} appeared more than {} times",
+            output.id,
+            self.copies_per_cycle
+        );
+        ensure!(
+            output.value.len() == self.value_bytes
+                && output
+                    .value
+                    .as_bytes()
+                    .iter()
+                    .all(|byte| *byte == self.value_byte),
+            "uniform output id {} has an unexpected value",
+            output.id
+        );
+        *count += 1;
+        Ok(())
+    }
+
+    fn finish(&self) -> Result<()> {
+        for (cycle, count) in self.seen.iter().enumerate() {
+            ensure!(
+                *count == self.copies_per_cycle,
+                "uniform output id {cycle:016x} appeared {count} times, expected {}",
+                self.copies_per_cycle
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -528,7 +672,7 @@ struct BenchmarkReport {
     warmup_parity_stability_elapsed: Duration,
     generation_elapsed: Duration,
     producer_flush_elapsed: Duration,
-    drain_elapsed: Duration,
+    completion_elapsed: Duration,
     end_to_end_elapsed: Duration,
     parity_stability_elapsed: Duration,
     wire_bytes_per_message: usize,
@@ -540,6 +684,7 @@ struct BenchmarkReport {
     expected_output_records: u64,
     output_messages: u64,
     output_records: u64,
+    output_validation: &'static str,
     output_records_at_generation_end: u64,
     output_records_at_flush: u64,
     backlog_messages_at_generation_end: u64,
@@ -553,8 +698,6 @@ impl BenchmarkReport {
         let input_messages = self.input_messages.approx_into::<f64>();
         let input_rate = input_messages / generation_seconds;
         let end_to_end_rate = input_messages / end_to_end_seconds;
-        let output_rate_during_generation =
-            self.output_records_at_generation_end.approx_into::<f64>() / generation_seconds;
         let input_mib =
             input_messages * self.wire_bytes_per_message.approx_into::<f64>() / (1024.0 * 1024.0);
 
@@ -579,7 +722,10 @@ impl BenchmarkReport {
             "producer_flush_seconds={:.6}",
             self.producer_flush_elapsed.as_secs_f64()
         );
-        println!("drain_seconds={:.6}", self.drain_elapsed.as_secs_f64());
+        println!(
+            "completion_seconds={:.6}",
+            self.completion_elapsed.as_secs_f64()
+        );
         println!("end_to_end_seconds={end_to_end_seconds:.6}");
         println!(
             "parity_stability_seconds={:.6}",
@@ -594,6 +740,7 @@ impl BenchmarkReport {
         println!("expected_output_records={}", self.expected_output_records);
         println!("output_messages={}", self.output_messages);
         println!("output_records={}", self.output_records);
+        println!("output_validation=\"{}\"", self.output_validation);
         println!(
             "output_records_at_generation_end={}",
             self.output_records_at_generation_end
@@ -608,7 +755,6 @@ impl BenchmarkReport {
             self.backlog_messages_at_flush
         );
         println!("input_messages_per_second={input_rate:.3}");
-        println!("output_records_per_second_during_generation={output_rate_during_generation:.3}");
         println!("end_to_end_messages_per_second={end_to_end_rate:.3}");
         println!(
             "input_payload_mib_per_second={:.3}",
@@ -625,10 +771,6 @@ impl BenchmarkRunner {
     fn new(args: CommonArgs, shape: LoadShape) -> Result<Self> {
         ensure!(args.duration_seconds > 0, "duration must be positive");
         ensure!(args.warmup_seconds > 0, "warm-up duration must be positive");
-        ensure!(
-            args.minimum_consumers > 0,
-            "minimum consumer count must be positive"
-        );
         ensure!(args.value_bytes > 0, "value byte count must be positive");
         ensure!(
             args.max_backlog_messages > 0,
@@ -773,6 +915,7 @@ impl BenchmarkRunner {
                     target_duration,
                 },
             )?;
+            let completion_started = Instant::now();
             let expected_output_records = self
                 .shape
                 .expected_output_records(measured.cycles())
@@ -843,7 +986,6 @@ impl BenchmarkRunner {
             );
             let backlog_messages_at_flush =
                 self.backlog_messages(at_flush, measured.accepted_messages)?;
-            let drain_started = Instant::now();
             let drained = self.wait_for_output_records(
                 &meter,
                 &output_partitions,
@@ -852,11 +994,24 @@ impl BenchmarkRunner {
                     .context("expected output record count overflowed")?,
                 "benchmark output",
             )?;
-            let drain_elapsed = drain_started.elapsed();
+            let completion_elapsed = completion_started.elapsed();
             let end_to_end_elapsed = measured.started.elapsed();
             let parity_stability_elapsed =
                 self.ensure_output_stable(&meter, &output_partitions, drained, "benchmark output")?;
             let output = drained.since(baseline)?;
+            let output_validation = match &self.shape {
+                LoadShape::KeyedWindowed { .. } => "aggregate-count",
+                _ => {
+                    self.verify_uniform_output(&output_partitions, measured.next_cycle, drained)?;
+                    self.ensure_output_stable(
+                        &meter,
+                        &output_partitions,
+                        drained,
+                        "verified benchmark output",
+                    )?;
+                    "ids-and-values"
+                }
+            };
 
             Ok(BenchmarkReport {
                 target_duration,
@@ -865,7 +1020,7 @@ impl BenchmarkRunner {
                 warmup_parity_stability_elapsed,
                 generation_elapsed: measured.elapsed,
                 producer_flush_elapsed,
-                drain_elapsed,
+                completion_elapsed,
                 end_to_end_elapsed,
                 parity_stability_elapsed,
                 wire_bytes_per_message,
@@ -877,6 +1032,7 @@ impl BenchmarkRunner {
                 expected_output_records,
                 output_messages: output.messages,
                 output_records: output.records,
+                output_validation,
                 output_records_at_generation_end: at_generation_end.records,
                 output_records_at_flush: at_flush.records,
                 backlog_messages_at_generation_end,
@@ -900,9 +1056,10 @@ impl BenchmarkRunner {
 
     fn start_output_meter(&self, partitions: &[i32]) -> Result<OutputMeter> {
         match &self.shape {
-            LoadShape::UniformPassthrough | LoadShape::UniformFanout { .. } => {
-                Ok(OutputMeter::Watermarks)
-            }
+            LoadShape::UniformPassthrough
+            | LoadShape::UniformUppercase
+            | LoadShape::UniformFilterMap
+            | LoadShape::UniformFanout { .. } => Ok(OutputMeter::Watermarks),
             LoadShape::KeyedWindowed { count_field, .. } => SummaryDrain::start(
                 &self.args.bootstrap_servers,
                 &self.args.output_topic,
@@ -911,6 +1068,61 @@ impl BenchmarkRunner {
             )
             .map(OutputMeter::Summaries),
         }
+    }
+
+    fn verify_uniform_output(
+        &self,
+        partitions: &[i32],
+        cycles: u64,
+        observed: OutputCounts,
+    ) -> Result<()> {
+        let mut audit = UniformRecordAudit::new(&self.shape, cycles, self.args.value_bytes)?;
+        let expected = audit.expected_messages()?;
+        ensure!(
+            observed.messages == expected,
+            "uniform output topic has {} messages, expected {expected}",
+            observed.messages
+        );
+        let consumer: BaseConsumer = ClientConfig::new()
+            .set("bootstrap.servers", &self.args.bootstrap_servers)
+            .set("group.id", format!("{}_verify", self.args.output_topic))
+            .set("enable.auto.commit", "false")
+            .set("auto.offset.reset", "earliest")
+            .create()
+            .context("failed to create the uniform output verifier")?;
+        let mut assignment = TopicPartitionList::new();
+        for partition in partitions {
+            assignment
+                .add_partition_offset(&self.args.output_topic, *partition, Offset::Beginning)
+                .with_context(|| {
+                    format!(
+                        "failed to assign output verifier partition {partition} for topic '{}'",
+                        self.args.output_topic
+                    )
+                })?;
+        }
+        consumer
+            .assign(&assignment)
+            .context("failed to assign uniform output verifier partitions")?;
+
+        let mut deadline = Instant::now() + self.wait_timeout;
+        for received in 0..expected {
+            let message = loop {
+                if let Some(result) = consumer.poll(SUMMARY_POLL_INTERVAL) {
+                    break result.context("failed to read uniform output record")?;
+                }
+                ensure!(
+                    Instant::now() < deadline,
+                    "timed out verifying uniform output after {received} of {expected} messages"
+                );
+            };
+            let payload = message
+                .payload()
+                .context("uniform output record has no payload")?;
+            audit.observe(payload)?;
+            deadline = Instant::now() + self.wait_timeout;
+        }
+        audit.finish()
     }
 
     fn output_counts(
@@ -1167,6 +1379,9 @@ impl BenchmarkRunner {
     }
 
     fn wait_for_consumer_group(&self) -> Result<()> {
+        if self.args.minimum_consumers == 0 {
+            return Ok(());
+        }
         let deadline = Instant::now() + self.wait_timeout;
         let mut stable_since = None;
         loop {
@@ -1447,6 +1662,67 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_map_generates_both_input_cases_and_audits_every_output_id() {
+        let shape = LoadShape::UniformFilterMap;
+        let mut writer = PayloadWriter::new(&shape, 4).assured("test shape and width are valid");
+        assert_eq!(
+            writer.payload(0, 0),
+            br#"{"id":"0000000000000000","value":"xxxx"}"#
+        );
+        assert_eq!(
+            writer.payload(0, 1),
+            br#"{"id":"0000000000000000","value":"yyyy"}"#
+        );
+
+        let mut audit =
+            UniformRecordAudit::new(&shape, 2, 4).assured("two test cycles fit in the verifier");
+        assert_eq!(audit.expected_messages().assured("two outputs fit"), 2);
+        audit
+            .observe(br#"{"id":"0000000000000001","value":"XXXX"}"#)
+            .assured("second retained output is valid");
+        assert!(audit.finish().is_err(), "the first cycle is still missing");
+        audit
+            .observe(br#"{"id":"0000000000000000","value":"XXXX"}"#)
+            .assured("first retained output is valid");
+        audit.finish().assured("every expected output arrived");
+        assert!(
+            audit
+                .observe(br#"{"id":"0000000000000000","value":"XXXX"}"#)
+                .is_err(),
+            "a duplicate cannot replace a missing record"
+        );
+        let mut wrong_value =
+            UniformRecordAudit::new(&shape, 1, 4).assured("one test cycle fits in the verifier");
+        assert!(
+            wrong_value
+                .observe(br#"{"id":"0000000000000000","value":"xxxx"}"#)
+                .is_err(),
+            "the map must uppercase the retained value"
+        );
+    }
+
+    #[test]
+    fn fanout_audit_requires_every_copy() {
+        let shape = LoadShape::UniformFanout {
+            outputs_per_input: 4,
+        };
+        let mut audit =
+            UniformRecordAudit::new(&shape, 1, 1).assured("one test cycle fits in the verifier");
+        for _ in 0..4 {
+            audit
+                .observe(br#"{"id":"0000000000000000","value":"x"}"#)
+                .assured("each expected fanout copy is valid");
+        }
+        audit.finish().assured("all four copies arrived");
+        assert!(
+            audit
+                .observe(br#"{"id":"0000000000000000","value":"x"}"#)
+                .is_err(),
+            "a fifth copy is invalid"
+        );
+    }
 
     #[test]
     fn summary_diagnostics_keep_partition_totals_and_the_most_recent_counts() {

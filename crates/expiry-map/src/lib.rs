@@ -252,16 +252,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::VecDeque,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-    };
+    use std::{collections::VecDeque, sync::Arc};
 
     use ahash::HashMap;
     use meticulous::ResultExt as _;
+    use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
 
     use super::ExpiryMap;
 

@@ -8,8 +8,6 @@
 //!   classification.
 //! - **Must not know.** Relays, branches, batches, acknowledgements, placement, or any Model.
 
-#[cfg(not(feature = "shuttle"))]
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{
     collections::BTreeMap,
     fmt,
@@ -22,9 +20,8 @@ use concurrent_queue::{ConcurrentQueue, PopError, PushError};
 use futures_util::task::AtomicWaker;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::sync::{ArcSwap, Guard};
+use nervix_primitives::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use parking_lot::Mutex;
-#[cfg(feature = "shuttle")]
-use shuttle::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::{
     sync::Notify,
     time::{Instant, timeout_at},

@@ -15,7 +15,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU64,
-    sync::{Arc as StdArc, atomic::Ordering},
+    sync::Arc as StdArc,
 };
 
 use arch_into::ArchInto as _;
@@ -26,6 +26,7 @@ use nervix_models::{
     ArchiveDigest, CommandExecutionReference, DomainName, RestoreArchive, RestoreStep, Timestamp,
     UserName,
 };
+use nervix_primitives::sync::atomic::Ordering;
 use parking_lot::Mutex;
 use shuttle::{future::block_on, thread};
 

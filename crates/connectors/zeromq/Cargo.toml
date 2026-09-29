@@ -13,6 +13,7 @@ default = []
 shuttle = [
   "dep:shuttle-tokio",
   "nervix-connector/shuttle",
+  "nervix-primitives/shuttle",
   "shuttle-tokio/shuttle",
 ]
 
@@ -21,6 +22,7 @@ async-trait = { workspace = true }
 error-stack = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-models = { workspace = true }
+nervix-primitives = { workspace = true }
 shuttle-tokio = { workspace = true, features = ["rt"], optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }

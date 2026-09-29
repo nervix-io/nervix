@@ -20,10 +20,12 @@ nervix-backup = { workspace = true }
 nervix-client-core = { workspace = true, features = ["autocomplete"] }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }
+nervix-primitives = { workspace = true }
 nervix-recovery = { workspace = true }
 reedline = { workspace = true, features = ["external_printer"] }
 rpassword = { workspace = true }
 serde_json = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }

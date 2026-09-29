@@ -231,6 +231,24 @@ all 40 pass, and so do the 102 cases of `http_emitter.feature`, `http_emitter_re
 No completion or cancellation ownership changed, so the Shuttle checks of prepared payloads and
 their answers stay as HTTP Emitter 04 and Emitter Batching 06 left them.
 
+### HTTP Emitter 07 alteration, drain, shutdown and recovery
+
+`tests/features/runtime/http_emitter_lifecycle.feature` exercises each lifecycle contract on one
+and three nodes. A held request keeps its original method, path and destination while `ALTER`
+waits for the entity drain; a failed drain leaves the original emitter active. The body-mode
+cases reject retained `INHERIT`, `SET`, and `partial_output` uses when the replacement has no
+body, preserve a valid `INVOKE`, and replace the full body and header construction in one
+`DROP` plus `CREATE` transaction. The transaction report and command output expose the expected
+quiesce levels: entity for request and mode changes, dynamic for `FLUSH`, and domain for source
+membership and client-definition replacement.
+
+The shutdown cases exercise an hourly flush that must publish during a graceful drain, then a
+Kafka source whose first applied HTTP request loses its response and whose retry remains held
+when the drain deadline expires. The held work remains unacknowledged; after restart the source
+redelivers the same request and commits only after the receiver answers it. This covers the
+volatile prepared-request boundary without treating the receiver's application of a request as
+proof that the attached source may commit.
+
 Every criterion runs through NSPL against the HTTP receiver on one and three nodes unless its row
 names a topology. The owning task adds the criterion's scenarios red, turns them green, and keeps
 them in the ordinary suite; HTTP Emitter 09 composes the complete matrix and closes it.

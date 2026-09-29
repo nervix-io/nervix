@@ -363,9 +363,20 @@ rows then follow `ON MESSAGE ERROR` as a failed publish.
 The Sentry sink rejects a final serialized event above its decompressed event limit before sending
 the envelope. The Syslog sink rejects a UDP datagram above its payload limit, a stream frame whose
 octet count needs more than ten digits, or an LF-bearing non-transparent TCP frame before writing.
-A batching OTEL sink measures the full protobuf Export request after mapping; if
-halving still leaves one source record above `MAX SIZE`, that record receives an external publish
-message error. Other members can be sent in bounded requests. An OTLP receiver's
+A row sink — ClickHouse, Postgres, MySQL or MongoDB — and a batching OTEL sink, which prepares
+its requests from mapped rows, measure each request they would send. If halving still leaves one
+row whose own request exceeds `MAX SIZE`, that row receives a `validation` message error of the
+`encode` operation naming the measured size and the limit, such as
+`Postgres insert of one row measures 1219 bytes, above MAX SIZE 600B`, and the other rows are sent
+in bounded requests. A row within `MAX SIZE` that its destination could never
+accept is the destination's `external` rejection of the `publish` operation, named with the
+destination's limit: a Postgres insert above the largest protocol message the server reads, or a
+MongoDB document above its 16 MiB document limit, which is rejected before the write that would
+carry it. A SQL write that fails for a reason specific to its rows is written again one row at a
+time, and each row the destination still refuses receives an `external` `publish` error with the
+destination's reason. That includes a violated MySQL `CHECK` constraint, which the server reports
+under the generic SQLSTATE `HY000`, and a Postgres cardinality violation, which is how
+`ON CONFLICT DO UPDATE` refuses one insert that carries a key twice. An OTLP receiver's
 `partial_success` has no member identities, so it acknowledges the entire request and emits a
 warning instead of inventing per-record rejections. An OTLP/gRPC export the receiver never answered
 — a timeout, a lost connection, an unreadable answer — is an infrastructure failure the host
@@ -421,6 +432,10 @@ boundary for an already classified failure; it is not used to recover a new clas
 replication and materialized-snapshot description use this envelope, and local errors retain the
 remote class alongside their target and placement. [Cluster Interconnect](./interconnect.md)
 defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries.
+Local interconnect transport, typed request, and streaming-handler failures carry reports through
+their callers. A layer that changes the failure's meaning adds context to the existing report, so
+the caller can still inspect the transport or producer cause. The HTTP/2 and rkyv boundary sends
+the classified remote result or its rejection text, rather than serializing the local cause chain.
 
 ```mermaid
 sequenceDiagram
@@ -481,18 +496,38 @@ serving node has no such domain, or `Failed` when the request could not run; a d
 session holds a transaction, both fail with the session-local refusal that other session-scoped
 statements receive. The server ends an attachment with a frame whose typed reason is
 `DomainRemoved`, and the Rust client reports a lost session as an interruption of each clock it
-follows before it attaches again. Each disposition's message is display text for a client that
-prints it; a client decides from the variant. The Rust client's `execute` turns any disposition but
-`Attached` or `Detached` into a `Failed` command outcome carrying that message, and its clock helper
-reports a stopped or uninstalled clock, or a projection outside the timestamp range, as a typed
-`DomainClockReadError`. See
-[Domain Clock Attachment](./sessions.md#domain-clock-attachment).
+follows before it attaches again. An attach the new session refuses or leaves unanswered is not an
+error of any call: the Rust client reports it as a typed restoration failure carrying the refusal's
+message and the wait before it tries again, and reports a refused subscription reopening the same
+way. Each disposition's message is display text for a client that prints it; a client decides from
+the variant. The Rust client's `execute` turns any disposition but `Attached` or `Detached` into a
+`Failed` command outcome carrying that message, and its clock helper reports a stopped or
+uninstalled clock, or a projection outside the timestamp range, as a typed `DomainClockReadError`.
+See [Domain Clock Attachment](./sessions.md#domain-clock-attachment).
+
+A Rust client subscribe or unsubscribe runs on a task of its own, so that an attempt its caller
+stops waiting for still completes. Its caller rebuilds the typed session failure from that task's
+report, and recovers the session and sends the request again exactly as for any other call; only a
+failure a new session cannot remedy is returned, as `ClientError::SubscriptionOperation` carrying
+the report.
+
+The shared C binding converts a clock-event wait's `error_stack::Report<ClientError>` at its
+reporting boundary. It classifies the typed current context as an `NX_ERROR_*` kind and retains
+the report's contextual message. A cancelled or expired wait returns `NX_ERROR_CANCELLED` or
+`NX_ERROR_DEADLINE` without writing an event handle. Clock accessors return `NX_ERROR_TYPE` when
+the event kind or installation state lacks a requested field and leave outputs untouched;
+generation, state, and end-reason accessors require a non-null output pointer.
 
 The CLI's `domain-clock` subcommand classifies attach refusals from those variants. A missing
 domain and an already attached clock have distinct typed CLI errors; other attach and detach
 refusals retain the server's message. It exits nonzero for a refusal. Transport or session failures
 while attaching, reading events, or detaching retain their underlying report beneath the CLI
 operation that failed.
+
+The web console shows an automatic attach refusal in the clock panel and event log without
+retrying it. If its bounded request hand-off refuses a clock request before the session sends it,
+the console reports that local refusal in the event log; an automatic attach also leaves the panel
+in the refused state until the selected domain or connection changes.
 
 If a paced clock cannot convert one period through its rate, the authority can still emit its
 already-due first tick. Scheduling a later tick then reports a rate-conversion or cadence error and
@@ -529,7 +564,8 @@ in the type. A dropped result with no stated recovery class does not establish t
 The former `result_string_errors` debt measure is now a zero-tolerance rule:
 `just validate-typed-errors`, run by `just validate`, rejects `Result<_, String>` in product code
 without a baseline. `just ratchet` still counts `bare_error_signatures`: a Nervix error returned
-without an `error-stack` report cannot increase that debt. The ratchet also guards raw dropped
+without an `error-stack` report cannot increase that debt, including a locally owned error nested
+in a `Future` output or `Stream` item callback contract. The ratchet also guards raw dropped
 outcomes and panic sites. For a new fallible site, a reviewer asks in order: which layer decides its
 meaning; whether it is an ordinary outcome, a recoverable failure, or a broken invariant; which
 typed fields let the caller act; which context must cross each boundary; and which public

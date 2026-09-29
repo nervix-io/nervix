@@ -12,10 +12,7 @@
 //! The report goes to standard output and progress to standard error, only when standard error is
 //! a terminal. Every restore that did not complete ends the process with a nonzero status.
 
-use std::{
-    io::{IsTerminal as _, Write as _},
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
-};
+use std::io::{IsTerminal as _, Write as _};
 
 use error_stack::Report as StackReport;
 use meticulous::ResultExt as _;
@@ -25,6 +22,7 @@ use nervix_client_core::{
 };
 use nervix_models::{DomainName, Statement};
 use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
+use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use nervix_recovery::{Discarded as _, Reported as _};
 use serde_json::{Value, json};
 use triomphe::Arc;

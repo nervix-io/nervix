@@ -564,7 +564,7 @@ impl From<&ResourceRecords> for ResourceVersionStatus {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 

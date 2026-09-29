@@ -15,8 +15,8 @@ use nervix_client_core::{
     CommandDisposition, CommandExecutionReference, CommandOutcome, Diagnostic, LeaderRedirect,
     OutcomeOrigin, RestoreArchive, RestoreMode, RestoreReport, RestoreStep, RestoreStepOutcome,
     RestoreStepReport, RestoredDomain, RowSchema, SourceSpan, SubscriptionEvent,
-    SubscriptionHandle, SubscriptionInterruption, SubscriptionOpened, SubscriptionRowsEvent,
-    UnknownOutcomeCause,
+    SubscriptionHandle, SubscriptionInterruption, SubscriptionOpened,
+    SubscriptionRestorationFailure, SubscriptionRowsEvent, UnknownOutcomeCause,
     wire::{
         CellWriter, RequestRejection, RowBranch, RowsSkippedCause, ServerEvent, ServerMessage,
         SessionLimits, SubscriptionDeliveryLost, SubscriptionEndReason, SubscriptionEnded,
@@ -38,6 +38,8 @@ use crate::{
     nx_outcome_schema, nx_outcome_subscription, nx_schema_branch, nx_schema_field,
     nx_schema_field_count, nx_schema_free, nx_session_connect, nx_session_free,
 };
+
+mod clock_events;
 
 const ROWS: i32 = 1;
 const BRANCH_KEY: i32 = 2;
@@ -713,6 +715,15 @@ fn every_event_kind_reports_its_subscription_and_count() {
             0,
         ),
         (
+            SubscriptionEvent::RestorationFailed(SubscriptionRestorationFailure {
+                subscription: handle(),
+                message: "stream 'orders' does not exist".to_string(),
+                retry_after: Duration::from_secs(2),
+            }),
+            EventKind::RestorationFailed,
+            0,
+        ),
+        (
             SubscriptionEvent::ConsumerOverflow(handle()),
             EventKind::ConsumerOverflow,
             0,
@@ -1198,6 +1209,20 @@ fn client_errors_are_classified_and_keep_their_causes() {
         assert_eq!(failure.kind(), kind);
         assert_eq!(failure.execution_reference(), None);
     }
+    let layered = crate::Failure::from(
+        error_stack::Report::new(ClientError::RetryDeadline)
+            .change_context(ClientError::SessionClosed),
+    );
+    assert_eq!(
+        layered.kind(),
+        FailureKind::Closed,
+        "a report is classified by its current context"
+    );
+    assert!(
+        layered.message().contains("session retry deadline expired"),
+        "every context beneath the current one stays in the message: {}",
+        layered.message()
+    );
     let downloads = [
         (
             BackupDownloadError::Refused {

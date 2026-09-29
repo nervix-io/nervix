@@ -49,7 +49,7 @@ them substitutes for another.
 | `crates/interconnect/src/authentication.rs` | Product seam | `TransportClock`, the one UTC clock each TLS bundle judges certificates by. `TransportClock::system` in production, `TransportClock::from_provider` for a controlled environment |
 | `crates/interconnect/src/entropy.rs` | Product seam | `TransportEntropy`, the source of the process epoch and relay grant identifiers. `TransportEntropy::operating_system` in production, `TransportEntropy::from_source` for a controlled environment |
 | `crates/execution/src/workers.rs` | Product seam | The strategy that runs an admitted CPU job: the blocking pool, or a scheduler task in the Turmoil build |
-| `crates/interconnect/src/lib.rs`, `crates/execution/src/lib.rs` | Product seam | The compile error when both scheduler modes are selected |
+| `crates/primitives/src/lib.rs` | Product seam | The compile error when two execution modes are selected together |
 | `crates/interconnect/tests/simulation/runner.rs` | Harness | Run configuration, the scheduler thread and its real-time bound, host supervision, first-panic capture, the simulated UTC clock, seeded entropy, and the semantic trace. The library's own simulation tests include it as `simulation_runner` |
 | `crates/interconnect/tests/simulation/scenario.rs` | Harness | Scenario identity, committed seeds, the seed sweep, fresh-process attempts, failure records, replay, and failure injection |
 | `crates/interconnect/tests/simulation.rs` | Harness | The `simulation` test target: runner checks, the DNS and CPU scenarios, and the fresh-process record and replay checks |
@@ -74,10 +74,10 @@ compilation with the production or Shuttle builds.
 
 | Build | Selected by | Sockets and DNS | CPU jobs | Synchronization primitives | Tokio configuration |
 | --- | --- | --- | --- | --- | --- |
-| Normal | Default features | Tokio's operating-system sockets and the node's Hickory resolver | Tokio's blocking pool | Tokio, `parking_lot`, `dashmap`, `tokio-util` | Stable |
-| Shuttle | The `shuttle` feature of each owning package | Not driven by the checks | `spawn_blocking` of Shuttle's modeled Tokio | Shuttle's modeled `tokio`, `parking_lot`, `dashmap`, and `tokio-util` | Stable |
-| Turmoil | The `turmoil` feature of `nervix-interconnect`, which enables `nervix-execution/turmoil` | `turmoil::net` | A task on the simulated host's scheduler; storage jobs stay on the blocking pool | Real | `--cfg tokio_unstable` |
-| Shuttle and Turmoil | Both features in one package | Fails to compile with `Shuttle and Turmoil scheduler modes cannot be enabled together` | | | |
+| Normal | Default features | Tokio's operating-system sockets and the node's Hickory resolver | Tokio's blocking pool | Tokio, `parking_lot`, `dashmap`, `tokio-util`, and the standard library's atomics | Stable |
+| Shuttle | The `shuttle` feature of each owning package, forwarded to `nervix-primitives` | Not driven by the checks | `spawn_blocking` of Shuttle's modeled Tokio | Shuttle's modeled `tokio`, `parking_lot`, `dashmap`, `tokio-util`, and atomics | Stable |
+| Turmoil | The `turmoil` feature of `nervix-interconnect`, which enables `nervix-execution/turmoil` and `nervix-primitives/turmoil` | `turmoil::net` | A task on the simulated host's scheduler; storage jobs stay on the blocking pool | Real | `--cfg tokio_unstable` |
+| Turmoil with Shuttle or Loom | Both modes in one dependency graph, from one package or two | Fails to compile in `nervix-primitives` with a diagnostic naming both modes | | | |
 
 Only the Turmoil recipes pass `--cfg tokio_unstable`. With it, Turmoil seeds each host runtime's
 scheduling from the simulation seed and configures an unhandled task panic to shut that host's
@@ -91,8 +91,10 @@ Validation keeps the modes apart:
 - `just validate-turmoil-dependencies` fails when the normal workspace dependency graph, with or
   without default features, contains a Turmoil package.
 - `just validate-shuttle-dependencies` does the same for Shuttle.
-- `just validate-simulation-feature-conflict` builds `nervix-execution` and `nervix-interconnect`
-  with both features and requires the compile error above in each.
+- `just validate-execution-mode-conflicts` builds `nervix-primitives` with every pair of the
+  `loom`, `shuttle` and `turmoil` modes and with all three, and `nervix-interconnect` with Shuttle
+  while its execution dependency selects Turmoil, and requires the diagnostic naming the modes in
+  each.
 - `just lint` runs Clippy over every target of both packages with the `turmoil` feature, beside the
   production and Shuttle lints.
 - `just test` runs the workspace with all features while excluding every package that offers a
@@ -540,6 +542,10 @@ a typed request carrying an Arrow batch and the same batch as a relay payload, a
 it with the production codec and checks the values without printing them. The three-host case adds a
 second peer and a rejected dial whose DNS name the certificate does not carry, so authentication
 failure is proven over the same connection path that succeeds.
+The rejection assertions inspect the `TransportError` at the report's current context; relay
+timeout, cancellation, and indeterminate-delivery assertions do the same. This keeps the simulated
+failure class independent of the report's diagnostic text while production transport and wire
+causes remain available underneath it.
 
 The certificate-clock checks, beside the transport, prove that time-dependent authentication follows
 the simulated clock on both peers: not-yet-valid and expired boundaries of the local and the peer

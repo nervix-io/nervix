@@ -2,14 +2,15 @@
 //! C++ hosts load instead of reimplementing the session.
 //!
 //! `include/nervix_client.h` is the contract. Every host drives the same [`Client`] state
-//! machine the Rust client uses, so correlation, redirects, reconnection, execution identity and
-//! subscription restoration are decided once, here, and never reinterpreted by a host.
+//! machine the Rust client uses, so correlation, redirects, reconnection, execution identity,
+//! subscription restoration and domain clock re-attachment are decided once, here, and never
+//! reinterpreted by a host.
 //!
 //! Layer: edges.
 //!
 //! - **Owns.** The C ABI: the handles a host holds, their ownership and release, blocking calls
-//!   with cancellation and deadlines, the typed failure a host reads, and bulk column access to
-//!   the rows of a verified frame.
+//!   with cancellation and deadlines, the typed failure a host reads, bulk column access to the
+//!   rows of a verified frame, and the typed fields of a domain clock event.
 //! - **Depends on.** The Rust session client and its wire contract, the vocabulary it names, and
 //!   Tokio to run the session on threads the library owns.
 //! - **Must not know.** The server, the parser, Arrow, or anything about a host language beyond
@@ -19,6 +20,7 @@
 
 mod abi;
 mod cancel;
+mod clock_event;
 mod event;
 mod failure;
 mod outcome;
@@ -28,6 +30,12 @@ mod suggestions;
 
 pub use cancel::{
     Cancel, nx_cancel_free, nx_cancel_new, nx_cancel_trigger, nx_cancel_with_deadline,
+};
+pub use clock_event::{
+    ClockEndReason, ClockEvent, ClockEventKind, ClockState, nx_clock_event_domain,
+    nx_clock_event_end_reason, nx_clock_event_generation, nx_clock_event_kind_of,
+    nx_clock_event_paced, nx_clock_event_release, nx_clock_event_retain, nx_clock_event_state,
+    nx_clock_event_tick,
 };
 pub use event::{
     CellState, Event, EventKind, nx_event_cell_varlen, nx_event_column_fixed,
@@ -49,7 +57,8 @@ pub use schema::{
 };
 pub use session::{
     Execution, Session, nx_execution_free, nx_execution_reference, nx_session_connect,
-    nx_session_execute, nx_session_free, nx_session_next_event, nx_session_prepare,
+    nx_session_execute, nx_session_free, nx_session_next_clock_event, nx_session_next_event,
+    nx_session_prepare,
 };
 pub use suggestions::{
     CompletionKind, CompletionStatus, Suggestions, nx_session_suggest, nx_suggestions_at,

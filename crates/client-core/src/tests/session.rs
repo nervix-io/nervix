@@ -11,7 +11,6 @@ use std::{
     net::SocketAddr,
     num::{NonZeroU64, NonZeroUsize},
     path::Path,
-    sync::atomic::{AtomicU64, Ordering},
     task::{Context, Poll},
     time::Duration,
 };
@@ -22,6 +21,8 @@ use nervix_models::{
     PlacementPolicy, RelayName, SchemaField, SubscriptionName, TransactionInspection,
     TransactionInspectionRejection, TransactionInspectionTarget,
 };
+use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
+use nervix_recovery::Discarded as _;
 use tokio::{
     net::TcpListener,
     sync::{Mutex, mpsc},
@@ -386,7 +387,12 @@ impl Drop for TestServer {
 
 impl TestServer {
     async fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0")
+        Self::start_at(SocketAddr::from(([127, 0, 0, 1], 0))).await
+    }
+
+    /// Starts a server listening on `address`, a loopback address with a free port or port 0.
+    async fn start_at(address: SocketAddr) -> Self {
+        let listener = TcpListener::bind(address)
             .await
             .assured("the loopback interface accepts a listener");
         let address = listener
@@ -433,6 +439,15 @@ impl TestServer {
         within_deadline(self.exchanges.recv())
             .await
             .assured("the server keeps handing exchanges to the test")
+    }
+
+    /// Stops serving and waits until the listener is closed, so a client connecting afterwards is
+    /// refused.
+    async fn stop(mut self) {
+        self.task.abort();
+        (&mut self.task)
+            .await
+            .discarded("the server task only ever ends by being aborted");
     }
 }
 
@@ -502,11 +517,9 @@ async fn a_closed_session_recovers_through_a_configured_seed() {
     .await
     .assured("the primary accepts the session");
     let exchange = primary.next_exchange().await;
+    let reading = client.clone();
+    let notice = tokio::spawn(async move { reading.next_server_event().await });
     drop(exchange);
-    assert!(matches!(
-        within_deadline(client.next_server_event()).await,
-        Err(ClientError::SessionClosed)
-    ));
 
     let command_client = client.clone();
     let command = tokio::spawn(async move { command_client.execute("SHOW CLUSTER STATUS;").await });
@@ -528,6 +541,22 @@ async fn a_closed_session_recovers_through_a_configured_seed() {
         .assured("the command task completes")
         .assured("the seed answers the command");
     assert!(outcome.succeeded());
+    recovered
+        .send(
+            ServerNotice {
+                level: NoticeLevel::Warning,
+                message: "relay 'orders' is behind".to_string(),
+            }
+            .encode(&limits())
+            .assured("a notice fits a frame"),
+        )
+        .await;
+    let notice = within_deadline(notice)
+        .await
+        .assured("the notice task completes")
+        .assured("the notice stream continues on the recovered session");
+    assert_eq!(notice.level, NoticeLevel::Warning);
+    assert_eq!(notice.message, "relay 'orders' is behind");
     let recovered_requests = client.inner.exchange.lock().await.requests();
     assert!(matches!(
         client
@@ -2106,5 +2135,496 @@ async fn an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_cl
             .assured("the restored clock is followed")
             .clock(),
         &stopped
+    );
+}
+
+/// The reply that opens `live` at `generation` on `orders`.
+fn opened(generation: u64) -> ReplyBody {
+    ReplyBody::Subscribe(SubscribeOutcome {
+        disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
+            subscription: subscription(generation),
+            domain: domain("tenant"),
+            relay: RelayName::parse("orders").assured("the test relay name is valid"),
+            subscription_type: SubscriptionType::Row,
+            schema: orders_schema(),
+        })),
+        message: "subscription 'live' opened".to_string(),
+        diagnostics: Vec::new(),
+    })
+}
+
+/// Waits until the client observes that its session ended: the exchange's reader closed the
+/// registry of the requests waiting on it.
+async fn session_closed(client: &Client) {
+    within_deadline(async {
+        loop {
+            tokio::task::consume_budget().await;
+            let requests = client.inner.exchange.lock().await.requests();
+            if !requests.pending.lock().is_open() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_subscription_requested_on_a_closed_session_opens_on_a_new_session() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let exchange = server.next_exchange().await;
+    drop(exchange);
+    session_closed(&client).await;
+
+    let subscribing = client.clone();
+    let mut subscribe = tokio::spawn(async move {
+        subscribing
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let mut reopened = tokio::select! {
+        exchange = server.next_exchange() => exchange,
+        finished = &mut subscribe => {
+            panic!("the subscription ended without opening a new session: {finished:?}")
+        }
+    };
+    let request = reopened.next_request().await;
+    let ClientRequest::Subscribe(sent) = request.request else {
+        panic!("the subscription is requested on the new session");
+    };
+    assert_eq!(sent.statement, "CREATE SUBSCRIPTION live TO orders;");
+    reopened
+        .reply(request.request_id, opened(1), &limits())
+        .await;
+    let outcome = within_deadline(subscribe)
+        .await
+        .assured("the subscribe task completes")
+        .assured("the subscription opens on the new session");
+    assert!(outcome.succeeded(), "{}", outcome.message);
+    assert_eq!(
+        client.subscription_lifecycle(
+            &SubscriptionName::parse("live").assured("the test name is valid")
+        ),
+        Some(crate::SubscriptionLifecycle::Active(subscription(1)))
+    );
+}
+
+#[tokio::test]
+async fn deleting_an_unknown_subscription_on_a_closed_session_asks_a_new_session() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let exchange = server.next_exchange().await;
+    drop(exchange);
+    session_closed(&client).await;
+
+    let deleting = client.clone();
+    let mut unsubscribe = tokio::spawn(async move { deleting.unsubscribe("ghost").await });
+    let mut reopened = tokio::select! {
+        exchange = server.next_exchange() => exchange,
+        finished = &mut unsubscribe => {
+            panic!("the deletion ended without opening a new session: {finished:?}")
+        }
+    };
+    let request = reopened.next_request().await;
+    let ClientRequest::Unsubscribe(sent) = request.request else {
+        panic!("the deletion is requested on the new session");
+    };
+    assert_eq!(sent.subscription.as_str(), "ghost");
+    reopened
+        .reply(
+            request.request_id,
+            ReplyBody::Unsubscribe(crate::wire::UnsubscribeOutcome {
+                disposition: crate::wire::UnsubscribeDisposition::Failed,
+                message: "session subscription 'ghost' does not exist".to_string(),
+                diagnostics: Vec::new(),
+            }),
+            &limits(),
+        )
+        .await;
+    let outcome = within_deadline(unsubscribe)
+        .await
+        .assured("the unsubscribe task completes")
+        .assured("the refusal is an outcome");
+    assert!(!outcome.succeeded());
+    assert_eq!(
+        outcome.message,
+        "session subscription 'ghost' does not exist"
+    );
+
+    let subscribing = client.clone();
+    let subscribe = tokio::spawn(async move {
+        subscribing
+            .subscribe(&SubscriptionRequest::new("ghost", "orders"))
+            .await
+    });
+    let request = reopened.next_request().await;
+    assert!(
+        matches!(request.request, ClientRequest::Subscribe(_)),
+        "a refused deletion of a name the client never held leaves the name free"
+    );
+    reopened
+        .reply(
+            request.request_id,
+            ReplyBody::Subscribe(SubscribeOutcome {
+                disposition: SubscribeDisposition::Failed,
+                message: "relay 'orders' does not exist".to_string(),
+                diagnostics: Vec::new(),
+            }),
+            &limits(),
+        )
+        .await;
+    within_deadline(subscribe)
+        .await
+        .assured("the subscribe task completes")
+        .assured("the refusal is an outcome");
+}
+
+#[tokio::test]
+async fn a_reconnected_session_restores_subscriptions_before_it_attaches_its_transaction() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+    let subscribing = client.clone();
+    let subscribe = tokio::spawn(async move {
+        subscribing
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let request = exchange.next_request().await;
+    exchange
+        .reply(request.request_id, opened(1), &limits())
+        .await;
+    within_deadline(subscribe)
+        .await
+        .assured("the subscribe task completes")
+        .assured("the subscription opens");
+    let transaction = nervix_models::TransactionStatus::new(
+        "tx".to_string(),
+        domain("tenant"),
+        nervix_models::TransactionLifecycle::Open,
+        nervix_models::TransactionPosition::new(0),
+        0,
+    )
+    .assured("an empty open transaction is consistent");
+    client.adopt_transaction_status(transaction.clone()).await;
+
+    drop(exchange);
+    let interrupted = within_deadline(client.next_subscription())
+        .await
+        .assured("the lost session reports the subscription's gap");
+    assert!(matches!(interrupted, SubscriptionEvent::Interrupted(_)));
+
+    let recovering = client.clone();
+    let recovery = tokio::spawn(async move {
+        recovering
+            .recover_session(crate::client::RecoveryMode::IfClosed)
+            .await
+            .map(|_| ())
+    });
+    let mut restored = server.next_exchange().await;
+    let first = restored.next_request().await;
+    assert!(
+        matches!(first.request, ClientRequest::Subscribe(_)),
+        "a session that holds a transaction refuses subscriptions, so restoration comes first: \
+         {:?}",
+        first.request
+    );
+    restored.reply(first.request_id, opened(2), &limits()).await;
+    let second = restored.next_request().await;
+    let ClientRequest::AttachTransaction(attach) = second.request else {
+        panic!("the transaction is attached again after the subscription");
+    };
+    assert_eq!(attach.transaction_id, "tx");
+    restored
+        .reply(
+            second.request_id,
+            ReplyBody::Attach(crate::wire::AttachOutcome {
+                disposition: crate::wire::AttachDisposition::Attached(transaction),
+                message: "attached".to_string(),
+                diagnostics: Vec::new(),
+            }),
+            &limits(),
+        )
+        .await;
+    within_deadline(recovery)
+        .await
+        .assured("the recovery task completes")
+        .assured("the session recovers");
+}
+
+#[tokio::test]
+async fn a_refused_clock_restoration_is_repeated_on_the_same_session() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+    let attaching = client.clone();
+    let attach = tokio::spawn(async move { attaching.attach_domain_clock(domain("tenant")).await });
+    let request = exchange.next_request().await;
+    exchange
+        .reply(
+            request.request_id,
+            attach_reply(clock_in(1, crate::DomainClockObservedState::Unpaced), ""),
+            &limits(),
+        )
+        .await;
+    within_deadline(attach)
+        .await
+        .assured("the attach task completes")
+        .assured("the attachment succeeds");
+
+    drop(exchange);
+    assert_eq!(
+        within_deadline(client.next_domain_clock_event())
+            .await
+            .assured("the interruption is an event"),
+        crate::DomainClockEvent::Interrupted(crate::DomainClockInterruption {
+            domain: domain("tenant"),
+        })
+    );
+    let reading = client.clone();
+    let next = tokio::spawn(async move { reading.next_domain_clock_event().await });
+    let mut restored = server.next_exchange().await;
+    let request = restored.next_request().await;
+    assert!(matches!(
+        request.request,
+        ClientRequest::AttachDomainClock(_)
+    ));
+    restored
+        .reply(
+            request.request_id,
+            ReplyBody::DomainClockAttach(crate::DomainClockAttachOutcome {
+                disposition: crate::DomainClockAttachDisposition::Failed,
+                message: "the session holds a transaction".to_string(),
+            }),
+            &limits(),
+        )
+        .await;
+    assert_eq!(
+        within_deadline(next)
+            .await
+            .assured("the event task completes")
+            .assured("the refusal is reported"),
+        crate::DomainClockEvent::RestorationFailed(crate::DomainClockRestorationFailure {
+            domain: domain("tenant"),
+            message: "the session holds a transaction".to_string(),
+            retry_after: Duration::from_secs(1),
+        })
+    );
+    let request = restored.next_request().await;
+    assert!(
+        matches!(request.request, ClientRequest::AttachDomainClock(_)),
+        "a refused restoration is sent again on the same session"
+    );
+    restored
+        .reply(
+            request.request_id,
+            ReplyBody::Rejected(crate::wire::RequestRejected {
+                rejection: crate::wire::RequestRejection::TooManyRequestsInFlight,
+                field: None,
+                message: "the session already has 64 requests in flight".to_string(),
+            }),
+            &limits(),
+        )
+        .await;
+    let rejected = within_deadline(client.next_domain_clock_event())
+        .await
+        .assured("the rejection is reported");
+    let crate::DomainClockEvent::RestorationFailed(rejected) = rejected else {
+        panic!("a rejected restoration is reported as a failed restoration: {rejected:?}");
+    };
+    assert_eq!(rejected.retry_after, Duration::from_secs(2));
+    assert!(
+        rejected.message.contains("TooManyRequestsInFlight"),
+        "{}",
+        rejected.message
+    );
+    let request = restored.next_request().await;
+    assert!(
+        matches!(request.request, ClientRequest::AttachDomainClock(_)),
+        "a rejected restoration is sent again on the same session"
+    );
+    let stopped = clock_in(2, crate::DomainClockObservedState::Stopped);
+    restored
+        .reply(
+            request.request_id,
+            attach_reply(stopped.clone(), ""),
+            &limits(),
+        )
+        .await;
+    assert_eq!(
+        within_deadline(client.next_domain_clock_event())
+            .await
+            .assured("the restored clock is reported"),
+        crate::DomainClockEvent::Observed(crate::DomainClockObserved {
+            domain: domain("tenant"),
+            clock: stopped.clone(),
+        })
+    );
+    assert_eq!(
+        client
+            .domain_clock(&domain("tenant"))
+            .assured("the restored clock is followed")
+            .clock(),
+        &stopped
+    );
+}
+
+#[tokio::test]
+async fn a_clock_restoration_answered_already_attached_follows_the_new_session() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+    let attaching = client.clone();
+    let attach = tokio::spawn(async move { attaching.attach_domain_clock(domain("tenant")).await });
+    let request = exchange.next_request().await;
+    exchange
+        .reply(
+            request.request_id,
+            attach_reply(clock_in(1, crate::DomainClockObservedState::Unpaced), ""),
+            &limits(),
+        )
+        .await;
+    within_deadline(attach)
+        .await
+        .assured("the attach task completes")
+        .assured("the attachment succeeds");
+
+    drop(exchange);
+    assert_eq!(
+        within_deadline(client.next_domain_clock_event())
+            .await
+            .assured("the interruption is an event"),
+        crate::DomainClockEvent::Interrupted(crate::DomainClockInterruption {
+            domain: domain("tenant"),
+        })
+    );
+    let reading = client.clone();
+    let next = tokio::spawn(async move { reading.next_domain_clock_event().await });
+    let mut restored = server.next_exchange().await;
+    let request = restored.next_request().await;
+    restored
+        .reply(
+            request.request_id,
+            ReplyBody::DomainClockAttach(crate::DomainClockAttachOutcome {
+                disposition: crate::DomainClockAttachDisposition::AlreadyAttached(domain("tenant")),
+                message: "this session already follows the clock of domain 'tenant'".to_string(),
+            }),
+            &limits(),
+        )
+        .await;
+    let stopped = clock_in(1, crate::DomainClockObservedState::Stopped);
+    let frame = crate::DomainClockObserved {
+        domain: domain("tenant"),
+        clock: stopped.clone(),
+    }
+    .encode(&limits())
+    .assured("a clock frame fits the default limits");
+    restored.send(frame).await;
+    assert_eq!(
+        within_deadline(next)
+            .await
+            .assured("the event task completes")
+            .assured("the clock frame is reported"),
+        crate::DomainClockEvent::Observed(crate::DomainClockObserved {
+            domain: domain("tenant"),
+            clock: stopped,
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_read() {
+    let mut primary = TestServer::start().await;
+    let unused = TcpListener::bind("127.0.0.1:0")
+        .await
+        .assured("loopback accepts a test listener");
+    let seed_address = unused
+        .local_addr()
+        .assured("a bound listener has an address");
+    drop(unused);
+    let seed_url =
+        Url::parse(&format!("http://{seed_address}")).assured("the test seed is an HTTP origin");
+    let options = ConnectOptions {
+        seed_servers: vec![seed_url],
+        connect_timeout: Duration::from_millis(250),
+        retry_timeout: Duration::from_secs(1),
+        ..ConnectOptions::default()
+    };
+    let client = within_deadline(Client::connect_with_options(
+        format!("http://{}", primary.address),
+        Some(domain("tenant")),
+        options,
+    ))
+    .await
+    .assured("the primary accepts the session");
+    let mut exchange = primary.next_exchange().await;
+    let attaching = client.clone();
+    let attach = tokio::spawn(async move { attaching.attach_domain_clock(domain("tenant")).await });
+    let request = exchange.next_request().await;
+    let unpaced = clock_in(1, crate::DomainClockObservedState::Unpaced);
+    exchange
+        .reply(
+            request.request_id,
+            attach_reply(unpaced.clone(), ""),
+            &limits(),
+        )
+        .await;
+    within_deadline(attach)
+        .await
+        .assured("the attach task completes")
+        .assured("the attachment succeeds");
+
+    drop(exchange);
+    primary.stop().await;
+    assert_eq!(
+        within_deadline(client.next_domain_clock_event())
+            .await
+            .assured("the interruption is an event"),
+        crate::DomainClockEvent::Interrupted(crate::DomainClockInterruption {
+            domain: domain("tenant"),
+        })
+    );
+    let failure = within_deadline(client.next_domain_clock_event())
+        .await
+        .expect_err("no server accepts a session within the retry deadline");
+    assert!(
+        matches!(failure.current_context(), ClientError::ConnectServer(_)),
+        "the reopening fails to connect: {failure:?}"
+    );
+    assert_eq!(
+        client
+            .domain_clock(&domain("tenant"))
+            .assured("the clock is still followed")
+            .clock(),
+        &unpaced
+    );
+
+    let mut seed = TestServer::start_at(seed_address).await;
+    let reading = client.clone();
+    let next = tokio::spawn(async move { reading.next_domain_clock_event().await });
+    let mut restored = seed.next_exchange().await;
+    let request = restored.next_request().await;
+    let ClientRequest::AttachDomainClock(sent) = request.request else {
+        panic!("the first request on the reopened session attaches the followed clock again");
+    };
+    assert_eq!(sent.domain, domain("tenant"));
+    let stopped = clock_in(2, crate::DomainClockObservedState::Stopped);
+    restored
+        .reply(
+            request.request_id,
+            attach_reply(stopped.clone(), ""),
+            &limits(),
+        )
+        .await;
+    assert_eq!(
+        within_deadline(next)
+            .await
+            .assured("the event task completes")
+            .assured("the restored clock is reported"),
+        crate::DomainClockEvent::Observed(crate::DomainClockObserved {
+            domain: domain("tenant"),
+            clock: stopped,
+        })
     );
 }

@@ -13,11 +13,13 @@ default = []
 shuttle = [
   "dep:shuttle-tokio",
   "nervix-connector/shuttle",
+  "nervix-primitives/shuttle",
   "shuttle-tokio/shuttle",
 ]
 
 [dependencies]
 async-trait = { workspace = true }
+bytes = { workspace = true }
 clickhouse = { workspace = true, features = ["inserter", "chrono"] }
 error-stack = { workspace = true }
 hyper-rustls = { workspace = true, features = ["http1"] }
@@ -31,6 +33,7 @@ nervix-columnar-json = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
+nervix-primitives = { workspace = true }
 shuttle-tokio = { workspace = true, features = [
   "macros",
   "rt",

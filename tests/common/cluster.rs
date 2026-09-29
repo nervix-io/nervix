@@ -2197,6 +2197,28 @@ impl Cluster {
             .fail_health_responses_from(node_name(responding_node_id));
     }
 
+    pub(crate) fn fail_health_responses_between(
+        &self,
+        probing_node_id: &str,
+        responding_node_id: &str,
+    ) {
+        self.fault_injection.fail_health_responses_between(
+            node_name(probing_node_id),
+            node_name(responding_node_id),
+        );
+    }
+
+    pub(crate) fn restore_health_responses_between(
+        &self,
+        probing_node_id: &str,
+        responding_node_id: &str,
+    ) {
+        self.fault_injection.restore_health_responses_between(
+            &node_name(probing_node_id),
+            &node_name(responding_node_id),
+        );
+    }
+
     pub(crate) fn block_gossip_for_node(&self, node_id: &str, send_delay: Duration) {
         self.fault_injection
             .block_gossip_for_node(node_name(node_id), send_delay);

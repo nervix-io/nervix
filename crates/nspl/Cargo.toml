@@ -42,6 +42,8 @@ serde_json = { workspace = true }
 # Excluded from the default test run: the walk saturates every core for tens of seconds, which is
 # not what belongs in a suite people run while working. It is a gate of its own, run by
 # `just nspl-completion-walk` and by CI once the main tests have passed.
+nervix-primitives = { workspace = true }
+
 [[test]]
 harness = false
 name = "completion_walk"

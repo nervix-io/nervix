@@ -51,10 +51,7 @@ mod tests {
         future, io,
         net::{Ipv4Addr, SocketAddr},
         path::PathBuf,
-        sync::{
-            Arc as StdArc, LazyLock,
-            atomic::{AtomicUsize, Ordering},
-        },
+        sync::{Arc as StdArc, LazyLock},
         time::Duration,
     };
 
@@ -68,6 +65,7 @@ mod tests {
         grpc::{EXCHANGE_PATH, SERVICE_NAME, ServerExchangeCodec},
     };
     use nervix_models::{ClusterNodeName, CommandExecutionReference};
+    use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
     use nervix_recovery::NoReceiver as _;
     use nervix_server::application::AppError;
     use parking_lot::Mutex;
@@ -420,14 +418,16 @@ mod tests {
             "Ordinary feature one",
             "Web console NSPL REPL",
             "Ordinary feature two",
+            "Web console domain clock",
             "Coordinated WASM processor state reset",
         ];
         prioritize_features(&mut names, |name| Some(name));
         assert_eq!(
-            &names[..2],
+            &names[..3],
             &[
                 "Coordinated WASM processor state reset",
-                "Web console NSPL REPL"
+                "Web console NSPL REPL",
+                "Web console domain clock",
             ]
         );
     }
