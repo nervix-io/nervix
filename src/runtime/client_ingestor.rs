@@ -625,6 +625,7 @@ impl Runtime {
             return ClientProducerRefusal::EndpointUnavailable;
         };
         match execution
+            .revision
             .entrypoints
             .ingestor(ingestor)
             .map(|plan| &plan.input)
@@ -876,14 +877,14 @@ impl Runtime {
             return Some(ClientProducerEndReason::DomainStopped);
         };
         let ingestor = IngestorName::from(key.identifier());
-        let Some(plan) = execution.entrypoints.ingestor(&ingestor) else {
+        let Some(plan) = execution.revision.entrypoints.ingestor(&ingestor) else {
             return Some(ClientProducerEndReason::EndpointRemoved);
         };
         if let IngestorInputPlan::Transport(_) = plan.input {
             return Some(ClientProducerEndReason::EndpointChanged);
         }
         let identity = NodeRef::new(ModelKind::Ingestor, ModelName::from(&ingestor));
-        let scheduled = execution.schedule.nodes.get(&identity)?;
+        let scheduled = execution.revision.nodes.get(&identity)?;
         if Self::scheduled_node_executes_locally(scheduled, Some(local_node_id)) {
             return None;
         }

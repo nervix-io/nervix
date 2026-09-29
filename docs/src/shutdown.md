@@ -640,7 +640,13 @@ committed log boundary. The node applies through exactly that boundary before it
 clock-authority, and schedule state it installs, and it retries every half second until that read
 succeeds.
 
-Until it succeeds, the node is live but inert with respect to ownership. Its public listeners and
+After admission, the control plane converts the committed schedule into a complete typed execution
+revision before runtime installation. Running and stopped domains use that same revision for local
+placement, state identities, passive recovery, and ownership handoff. The handoff fingerprint keeps
+the committed schedule's exact bytes. If an installation fails, the next attempt is planned from
+the last successfully applied schedule; the failed revision is not recorded as applied.
+
+Until admission succeeds, the node is live but inert with respect to ownership. Its public listeners and
 its interconnect answer requests, which keeps configured listening entities available on every live
 node, but no runtime routes exist, so a payload it accepts cannot reach recovered graph execution.
 A former owner restarted while cut off from consensus therefore produces no output, and once

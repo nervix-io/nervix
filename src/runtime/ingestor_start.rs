@@ -145,12 +145,12 @@ impl Runtime {
                 continue;
             }
             let mut local_plans = Vec::new();
-            for plan in execution.entrypoints.ingestors() {
+            for plan in execution.revision.entrypoints.ingestors() {
                 let identity =
                     NodeRef::new(ModelKind::Ingestor, ModelName::from(&plan.ingestor.name));
-                let node = execution.schedule.nodes.get(&identity).assured(
+                let node = execution.revision.nodes.get(&identity).assured(
                     "every domain execution is installed and updated with the entrypoint plans \
-                     decided from the schedule it keeps",
+                     decided from its planned revision",
                 );
                 if Self::scheduled_node_executes_locally(node, local_node_id) {
                     local_plans.push(plan.clone());

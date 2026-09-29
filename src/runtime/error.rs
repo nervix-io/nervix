@@ -47,16 +47,6 @@ pub enum RuntimeError {
         domain: String,
         report: Report<nervix_roto::UdfError>,
     },
-    #[error("failed to plan domain activation for '{domain}': {report}")]
-    DomainActivationPlan {
-        domain: DomainName,
-        report: Report<DomainActivationPlanError>,
-    },
-    #[error("failed to plan the ingestors and reingestors of domain '{domain}': {report}")]
-    EntrypointPlan {
-        domain: DomainName,
-        report: Report<EntrypointPlanError>,
-    },
     #[error("failed to bind an ingestor or reingestor of domain '{domain}': {report}")]
     EntrypointBinding {
         domain: DomainName,
@@ -96,26 +86,6 @@ pub enum RuntimeError {
 }
 
 impl RuntimeError {
-    pub(super) fn activation_plan(
-        domain: &DomainName,
-        report: Report<DomainActivationPlanError>,
-    ) -> Self {
-        Self::DomainActivationPlan {
-            domain: domain.clone(),
-            report,
-        }
-    }
-
-    pub(super) fn entrypoint_plan(
-        domain: &DomainName,
-        report: Report<EntrypointPlanError>,
-    ) -> Self {
-        Self::EntrypointPlan {
-            domain: domain.clone(),
-            report,
-        }
-    }
-
     pub(super) fn entrypoint_binding(
         domain: &DomainName,
         report: Report<EntrypointBindingError>,

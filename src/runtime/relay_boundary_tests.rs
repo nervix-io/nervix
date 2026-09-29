@@ -832,7 +832,7 @@ async fn owner_ingress_touches_expiring_stream_state() {
     runtime.install_domain_execution(
         &domain,
         DomainExecution {
-            schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
+            revision: test_execution_revision(&domain, Vec::new()),
             start_version: 0,
             domain_clock: test_domain_clock(&domain),
             shutdown,
@@ -845,7 +845,6 @@ async fn owner_ingress_touches_expiring_stream_state() {
                     ..DomainRoutingSnapshot::default()
                 },
             ),
-            entrypoints: Arc::default(),
             message_error_plans: Arc::default(),
             branched_entrypoints: HashMap::default(),
             endpoint_routes: HashMap::default(),
@@ -856,7 +855,6 @@ async fn owner_ingress_touches_expiring_stream_state() {
             placement_tasks: HashMap::default(),
             relay_state_tasks: HashMap::default(),
             relay_owner_tasks: HashMap::default(),
-            emitter_plans: Arc::new(EmitterExecutionPlans::default()),
             tasks: Vec::new(),
         },
     );
@@ -1196,12 +1194,11 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
         .stop_domain_execution(
             &domain,
             DomainExecution {
-                schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
+                revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),
                 shutdown,
                 routing: DomainRouting::new(DomainRoutingSnapshot::default()),
-                entrypoints: Arc::default(),
                 message_error_plans: Arc::default(),
                 branched_entrypoints: HashMap::default(),
                 endpoint_routes: HashMap::default(),
@@ -1212,7 +1209,6 @@ async fn stop_domain_execution_preserves_expiring_relay_branch_registry() {
                 placement_tasks: HashMap::default(),
                 relay_state_tasks: HashMap::default(),
                 relay_owner_tasks: HashMap::default(),
-                emitter_plans: Arc::new(EmitterExecutionPlans::default()),
                 tasks: Vec::new(),
             },
         )

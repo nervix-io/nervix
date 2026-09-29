@@ -62,7 +62,7 @@ pub(crate) struct MessageErrorRouteSpec {
     pub(crate) flush_policy: Option<FlushPolicy>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct MessageErrorRouteSpecs {
     pub(crate) routes: Vec<MessageErrorRouteSpec>,
 }

@@ -234,11 +234,13 @@ sequenceDiagram
 
 ## Sink boundary
 
-Each domain revision decides one typed emitter execution plan per scheduled emitter before
-publishing the domain execution. The plan resolves its sink clients and codec, retains its ordered
-source relay edges and lowered source predicates, and lowers its route, HTTP request fields, SQS
-ordering group and the mappings of row and row request sinks. It also converts OTEL resource
-literals and the Iceberg commit cadence and size into connector values. Initial startup,
+Each committed domain schedule becomes one complete typed execution revision before it reaches the
+host. That revision carries placement, entrypoint and emitter plans, and the exact ownership-handoff
+fingerprint of the committed schedule. It decides one typed emitter execution plan per scheduled
+emitter before publishing the domain execution. The plan resolves its sink clients and codec,
+retains its ordered source relay edges and lowered source predicates, and lowers its route, HTTP
+request fields, SQS ordering group and the mappings of row and row request sinks. It also converts
+OTEL resource literals and the Iceberg commit cadence and size into connector values. Initial startup,
 reassignment and an entity swap use that same plan. A swap publishes new source and remote
 consumer edges from the new plan; it does not reconstruct the emitter from a Model in the host.
 The host resolves resource mounts and binds the lowered VM programs to installed schemas and UDFs

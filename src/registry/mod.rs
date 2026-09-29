@@ -16,6 +16,7 @@ mod domain_state;
 mod entity_gate;
 mod entrypoint_plan;
 mod error;
+mod execution_revision;
 mod graph;
 mod ingestor_plan;
 mod message_error_plan;
@@ -35,21 +36,27 @@ mod validation;
 
 pub(crate) use creation_order::creation_order;
 pub(crate) use domain_activation_plan::{
-    DomainActivationPlan, DomainActivationPlanError, PlannedCodec, PlannedCodecWireFormat,
-    PlannedRelayRetention, PlannedSignalingProtocol,
+    DomainActivationPlan, PlannedCodec, PlannedCodecWireFormat, PlannedRelayRetention,
+    PlannedSignalingProtocol,
 };
 pub(crate) use entity_gate::{
     EntityGatePlan, entity_pause_relays_for_schedule, gate_boundary,
     ownership_handoff_relays_for_schedule, scheduled_impact_coverage,
 };
+#[cfg(test)]
+pub(crate) use entrypoint_plan::EntrypointPlanError;
 pub(crate) use entrypoint_plan::{
-    BranchInstanceAckBoundary, EntrypointPlanError, EntrypointPlans, LoweredConstruction,
-    LoweredFilter, PlannedEntryRoute, PlannedRouteBranch,
+    BranchInstanceAckBoundary, EntrypointPlans, LoweredConstruction, LoweredFilter,
+    PlannedEntryRoute, PlannedRouteBranch,
 };
 /// What the decisions layer exposes. Everything else this module and its submodules declare is
 /// `pub(in crate::registry)` or narrower, so the control plane reaches the registry only through
 /// the names below.
 pub(crate) use error::RegistryError;
+pub(crate) use execution_revision::{
+    DynamicExecutionUpdate, EntitySwapExecution, ExecutionDelta, ExecutionNode, ExecutionRevision,
+    ExecutionRevisionError, PlannedClusterRevision,
+};
 pub(crate) use graph::{ActiveGraph, EdgeKind};
 pub(crate) use ingestor_plan::{
     ClientIngestorStartPlan, EndpointIngestorStartPlan, HttpIngestorStartPlan, IngestorInputPlan,
@@ -71,7 +78,6 @@ pub(crate) use placement::{
 pub(crate) use processor_plan::{
     BranchedNodeSpecs, BranchedProcessorNodeSpec, BranchedProcessorOperationSpec,
     BranchedProcessorOutputSpec, BranchedProcessorOutputsSpec, BranchedProcessorSpec,
-    branched_node_specs_from_scheduled_nodes,
 };
 #[cfg(test)]
 pub(crate) use processor_plan::{PlannedModel, branched_node_specs_from_models};
@@ -86,7 +92,7 @@ pub(crate) use resource_plan::{
 pub(crate) use schedule_delta::ScheduleDelta;
 #[cfg(feature = "testing")]
 pub use scheduler::SchedulerMode;
-pub(crate) use storage::{Registry, RuntimeChanges};
+pub(crate) use storage::Registry;
 pub(crate) use transaction::{
     PlannedTransaction, PlannedTransactionStep, PlannedTransactionStepKind,
     TransactionPlanningError, TransactionPlanningSnapshot, TransactionScheduleDecision,

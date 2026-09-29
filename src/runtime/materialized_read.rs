@@ -1008,7 +1008,7 @@ fn materialized_record_report(
 mod tests {
     use ahash::HashMap;
     use nervix_interconnect::{RemoteOperationFailure, RemoteOperationSubject};
-    use nervix_models::{Assignment, AssignmentTarget, DomainSchedule, Expression, ParseAsType};
+    use nervix_models::{Assignment, AssignmentTarget, Expression, ParseAsType};
     use tokio::{
         sync::watch,
         time::{Duration, timeout},
@@ -1134,7 +1134,7 @@ mod tests {
         runtime.install_domain_execution(
             &domain,
             DomainExecution {
-                schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
+                revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),
                 shutdown,
@@ -1146,7 +1146,6 @@ mod tests {
                         ..DomainRoutingSnapshot::default()
                     },
                 ),
-                entrypoints: Arc::default(),
                 message_error_plans: Arc::default(),
                 branched_entrypoints: HashMap::default(),
                 endpoint_routes: HashMap::default(),
@@ -1157,7 +1156,6 @@ mod tests {
                 placement_tasks: HashMap::default(),
                 relay_state_tasks: HashMap::default(),
                 relay_owner_tasks: HashMap::default(),
-                emitter_plans: Arc::new(EmitterExecutionPlans::default()),
                 tasks: Vec::new(),
             },
         );

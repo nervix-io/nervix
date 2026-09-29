@@ -1239,8 +1239,8 @@ impl Runtime {
 mod tests {
     use ahash::HashMap;
     use nervix_models::{
-        AckMode, CreateReingestor, DomainSchedule, ErrorPolicies, ModelKind, NodeRef, ParseAsType,
-        ProcessorInputs, ProcessorOutputs, ReingestorName, RelayName,
+        AckMode, CreateReingestor, ErrorPolicies, ModelKind, NodeRef, ParseAsType, ProcessorInputs,
+        ProcessorOutputs, ReingestorName, RelayName,
     };
     use tokio::{
         sync::{Mutex, mpsc, watch},
@@ -1547,7 +1547,7 @@ mod tests {
         runtime.install_domain_execution(
             &domain,
             DomainExecution {
-                schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
+                revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),
                 shutdown: execution_shutdown,
@@ -1569,7 +1569,6 @@ mod tests {
                         ..DomainRoutingSnapshot::default()
                     },
                 ),
-                entrypoints: Arc::default(),
                 message_error_plans: Arc::default(),
                 branched_entrypoints: HashMap::default(),
                 endpoint_routes: HashMap::default(),
@@ -1580,7 +1579,6 @@ mod tests {
                 placement_tasks: HashMap::default(),
                 relay_state_tasks: HashMap::default(),
                 relay_owner_tasks: HashMap::default(),
-                emitter_plans: Arc::new(EmitterExecutionPlans::default()),
                 tasks: Vec::new(),
             },
         );
@@ -1799,7 +1797,7 @@ mod tests {
         runtime.install_domain_execution(
             &domain,
             DomainExecution {
-                schedule: DomainSchedule::new(domain.clone(), Vec::new(), Vec::new()),
+                revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),
                 shutdown: execution_shutdown,
@@ -1821,7 +1819,6 @@ mod tests {
                         ..DomainRoutingSnapshot::default()
                     },
                 ),
-                entrypoints: Arc::default(),
                 message_error_plans: Arc::default(),
                 branched_entrypoints: HashMap::default(),
                 endpoint_routes: HashMap::default(),
@@ -1832,7 +1829,6 @@ mod tests {
                 placement_tasks: HashMap::default(),
                 relay_state_tasks: HashMap::default(),
                 relay_owner_tasks: HashMap::default(),
-                emitter_plans: Arc::new(EmitterExecutionPlans::default()),
                 tasks: Vec::new(),
             },
         );

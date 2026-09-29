@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
-    ClusterNodeName, ClusterSchedule, CodecName, CreateUdf, CreateWasmProcessor, DomainClockPeriod,
-    DomainName, FieldName, FlushPolicy, GeneratorName, LookupName, MessageErrorPolicy, Model,
-    ModelKind, ModelName, RelayName, ResolvedBranching, ResourceId, ScheduledNode, ScheduledNodes,
+    ClusterNodeName, CodecName, CreateUdf, CreateWasmProcessor, DomainClockPeriod, DomainName,
+    FieldName, FlushPolicy, GeneratorName, LookupName, MessageErrorPolicy, Model, ModelKind,
+    ModelName, RelayName, ResolvedBranching, ResourceId, ScheduledNode, ScheduledNodes,
 };
 use nervix_roto::UdfProgram;
 use nervix_vm::{
@@ -154,26 +154,6 @@ impl WasmModulePlan {
             ),
             file: model.file.clone(),
         }
-    }
-
-    /// Modules retained after a schedule installation are exactly those pinned by an assigned
-    /// processor, including replicas that may need to restore its guest state.
-    pub(crate) fn assigned_in_cluster(
-        schedule: &ClusterSchedule,
-        local: &ClusterNodeName,
-    ) -> Vec<Self> {
-        let mut modules = Vec::new();
-        for domain in schedule.domains.values() {
-            for node in domain.nodes.values() {
-                let Model::WasmProcessor(processor) = node.config.as_ref() else {
-                    continue;
-                };
-                if node.is_assigned_to(local) {
-                    modules.push(Self::from_model(&domain.domain, processor));
-                }
-            }
-        }
-        modules
     }
 }
 

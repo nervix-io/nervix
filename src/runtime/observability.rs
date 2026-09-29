@@ -242,7 +242,7 @@ impl Runtime {
             return Vec::new();
         };
         let entity = NodeRef::new(ModelKind::WasmProcessor, processor.clone());
-        let Some(scheduled) = execution.schedule.nodes.get(&entity) else {
+        let Some(scheduled) = execution.revision.nodes.get(&entity) else {
             return Vec::new();
         };
         let Some(generations) = scheduled.wasm_state_generations() else {
@@ -574,7 +574,8 @@ impl Runtime {
                 client_producers: self.client_ingestor_gauges(domain, ingestor),
             });
         };
-        let kafka_domain_offsets = if let Some(plan) = execution.entrypoints.ingestor(ingestor)
+        let kafka_domain_offsets = if let Some(plan) =
+            execution.revision.entrypoints.ingestor(ingestor)
             && let IngestorInputPlan::Transport(TransportInputPlan {
                 source:
                     SourceStartPlan::Kafka(KafkaIngestorStartPlan {
@@ -585,7 +586,7 @@ impl Runtime {
                     }),
                 ..
             }) = &plan.input
-            && let Some(node) = execution.schedule.nodes.get(&NodeRef::new(
+            && let Some(node) = execution.revision.nodes.get(&NodeRef::new(
                 ModelKind::Ingestor,
                 ModelName::from(ingestor),
             ))
