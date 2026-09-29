@@ -6,18 +6,20 @@
 //!   both, and delivering installation changes and newest accepted ticks on the session's
 //!   control lane until the session detaches, the domain leaves the serving node, or the session
 //!   ends.
-//! - **Depends on.** The runtime's observer of installed domain clocks, the session's control lane,
-//!   and the client wire contract.
+//! - **Depends on.** The runtime's installation of the committed domains and its observer of
+//!   installed domain clocks, the session's control lane, and the client wire contract.
 //! - **Must not know.** Relay subscriptions or their lane, the session's transaction binding, how a
 //!   transport carries frames, or how a clock is installed or advanced.
 //!
 //! An attachment is keyed by its domain, so a session follows each domain clock at most once. Both
-//! requests run on the ordered lane. The attach reply is queued before delivery starts, so the
-//! clock it carries precedes every frame about the domain, and detach stops delivery before its
-//! reply is queued, so no frame about the domain follows that reply. Delivery reads the
-//! installation the serving node publishes each time it is replaced and sends a frame only when
-//! it differs from the one the client last received. It then sends the newest accepted tick of
-//! that installation. State frames wait for room; each tick holds one replaceable control slot.
+//! requests run on the ordered lane. An attach answers only once the serving node has installed
+//! the committed domains since it started, so a domain it refuses as not found is one the committed
+//! state lacks. The attach reply is queued before delivery starts, so the clock it carries precedes
+//! every frame about the domain, and detach stops delivery before its reply is queued, so no frame
+//! about the domain follows that reply. Delivery reads the installation the serving node publishes
+//! each time it is replaced and sends a frame only when it differs from the one the client last
+//! received. It then sends the newest accepted tick of that installation. State frames wait for
+//! room; each tick holds one replaceable control slot.
 
 use ahash::HashMap;
 use meticulous::OptionExt as _;
@@ -68,9 +70,11 @@ enum DeliveryEnd {
 impl ClockAttachments {
     /// Attaches the session to the clock of `domain` and answers the request.
     ///
-    /// The reply carries the clock as this node has it installed. Delivery starts only once that
-    /// reply is queued: a reply that was not queued, because the request was cancelled, the session
-    /// ended or the reply did not fit, announced nothing, so nothing is delivered after it.
+    /// The reply carries the clock as this node has it installed. A node that has not installed the
+    /// committed domains since it started answers once it has, so it never refuses a domain the
+    /// cluster has as not found. Delivery starts only once that reply is queued: a reply that was
+    /// not queued, because the request was cancelled, the session ended or the reply did not fit,
+    /// announced nothing, so nothing is delivered after it.
     pub(super) async fn attach(
         &mut self,
         shared: &Arc<SessionShared>,
@@ -91,7 +95,15 @@ impl ClockAttachments {
                 .await;
             return;
         }
-        let observer = shared.service.inner.runtime.observe_domain_clock(&domain);
+        let runtime = &shared.service.inner.runtime;
+        // A node holds no domain until it installs the committed ones after it starts, so before
+        // that it cannot tell a domain the cluster lacks from one it has not installed yet, as
+        // right after a restart. The answer waits for that installation, or for the session to end.
+        tokio::select! {
+            () = runtime.committed_domains_installed() => {}
+            () = shared.ended() => return,
+        }
+        let observer = runtime.observe_domain_clock(&domain);
         let clock = match &observer {
             Some(observer) => observer.current(),
             None => None,

@@ -75,6 +75,9 @@ pub(in crate::runtime) struct RuntimeInner {
         ArcSwapOption<AppliedRuntimeRecoveryExpansions>,
     pub(in crate::runtime) domain_instantiation_errors: DashMap<DomainName, String, RandomState>,
     pub(in crate::runtime) domains: DashMap<DomainName, RuntimeDomainState, RandomState>,
+    /// How many times this node has installed the committed domain states since it started. An
+    /// installation advances it only once every domain it inserts, updates or removes is in place,
+    /// so a reader woken by the count finds those domains.
     pub(in crate::runtime) domain_status_changed: watch::Sender<u64>,
     /// Whether this node still admits new work. A terminating node closes it once, and ingestors
     /// and generators observe the change.

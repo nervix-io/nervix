@@ -462,10 +462,12 @@ describes impact inspection.
 A domain clock attachment answers with its own typed disposition rather than a command disposition,
 and every refusal names the domain it concerns. An attach is `Attached` with the observed clock,
 `AlreadyAttached` when the session already follows that domain's clock, `DomainNotFound` when the
-serving node has no such domain, or `Failed` when the request could not run; a detach is
-`Detached`, `NotAttached` when the session does not follow that clock, or `Failed`. While the
-session holds a transaction, both fail with the session-local refusal that other session-scoped
-statements receive. The server ends an attachment with a frame whose typed reason is
+committed domains the serving node installed hold no such domain, or `Failed` when the request could
+not run; a detach is `Detached`, `NotAttached` when the session does not follow that clock, or
+`Failed`. A node that is still starting answers an attach only once it has installed the committed
+domains, so `DomainNotFound` never reflects a restart. While the session holds a transaction, both
+fail with the session-local refusal that other session-scoped statements receive. The server ends
+an attachment with a frame whose typed reason is
 `DomainRemoved`, and the Rust client reports a lost session as an interruption of each clock it
 follows before it attaches again. An attach the new session refuses or leaves unanswered is not an
 error of any call: the Rust client reports it as a typed restoration failure carrying the refusal's

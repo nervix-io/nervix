@@ -186,10 +186,36 @@ Feature: CLI public session dispatch
       | 1            |
       | 3            |
 
-  Scenario: The CLI refuses to follow the clock of a missing domain
-    Given a 1 node nervix cluster is started
-    When the CLI attempts to follow the clock of missing domain "absent-clock" on node "node-1"
+  Scenario Outline: The CLI refuses to follow the clock of a missing domain
+    Given a <cluster_size> node nervix cluster is started
+    When the CLI attempts to follow the clock of missing domain "absent-clock" on node "<cli_node>"
     Then the CLI fails with "domain 'absent-clock' does not exist"
+
+    Examples:
+      | cluster_size | cli_node |
+      | 1            | node-1   |
+      | 3            | node-2   |
+
+  Scenario Outline: The CLI follows a domain clock across a cluster restart
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 500ms SKEW 50ms;
+      START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
+      """
+    When the CLI follows the clock of domain "{{domain}}" on node "<cli_node>"
+    Then within "10s" the CLI clock output has 2 increasing ticks for generation 1 of domain "{{domain}}"
+    When the cluster is restarted
+    Then within "60s" the CLI clock output contains "[events] domain clock [{{domain}}] notice: the session was interrupted; the clock is attached again on the next session"
+    And within "60s" the CLI clock output shows the clock it attached to again after an interruption of domain "{{domain}}"
+    And within "30s" the CLI clock output has a tick for generation 1 after its state of domain "{{domain}}"
+    When the CLI clock process receives Ctrl-C
+    Then the CLI clock process exits successfully
+
+    Examples:
+      | cluster_size | cli_node |
+      | 1            | node-1   |
+      | 3            | node-2   |
 
   Scenario: The CLI restores a domain clock after transport loss
     Given a 1 node nervix cluster is started

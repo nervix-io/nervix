@@ -1123,6 +1123,16 @@ These requests enter the console's bounded session hand-off; a local refusal is 
 operator and sends no request. Both requests are refused while the session holds a transaction,
 like every other session-local request.
 
+A node answers an attach only once it has installed the cluster's committed domains since it
+started. Before that it holds no domain, so it cannot tell one the cluster lacks from one it has not
+installed yet, and an attach that reaches a restarting node waits on the ordered lane rather than
+hearing that a live domain was not found. The server bounds that wait only by the session, as it
+bounds every wait, so a client that needs an answer sooner applies its own deadline. Ordered
+requests the session sends after the attach wait behind it. `DomainNotFound` therefore always means
+that the committed state the node installed holds no such domain, and the Rust client ends an
+attachment it was restoring when a new session answers it so, as it does after
+`DomainClockAttachmentEnded`.
+
 The CLI's `domain-clock` subcommand uses the Rust client's typed attach reply and clock event
 stream. It prints the reply and then the same state, tick, interruption, and end lines as its REPL,
 including the fresh state after the client restores an attachment. Ctrl-C sends a detach request

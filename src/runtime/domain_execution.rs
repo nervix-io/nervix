@@ -235,6 +235,19 @@ impl Runtime {
         self.inner.domain_status_changed.subscribe()
     }
 
+    /// Waits until this node has installed the cluster's committed domains since it started.
+    ///
+    /// Until then the node holds no domain, so a domain it lacks may still be one the cluster has,
+    /// as right after a restart. From then on, a domain the node lacks is one the committed state
+    /// it installed does not hold.
+    pub(crate) async fn committed_domains_installed(&self) {
+        let mut installations = self.inner.domain_status_changed.subscribe();
+        let installed = installations
+            .wait_for(|installations| *installations > 0)
+            .await;
+        installed.assured("the runtime holds the sender of its own domain installations");
+    }
+
     pub(crate) fn has_domain_clock_authority(
         &self,
         domain: &DomainName,
@@ -837,6 +850,23 @@ mod tests {
         assert_eq!(
             second_revision.materialized_stream_owner_nodes.get(&relay),
             Some(&Some(second_owner))
+        );
+    }
+
+    #[test]
+    fn committed_domains_are_installed_once_the_first_committed_state_is_applied() {
+        use futures_util::FutureExt as _;
+
+        let runtime = Runtime::new();
+        let mut installed = std::pin::pin!(runtime.committed_domains_installed());
+        assert!(
+            (&mut installed).now_or_never().is_none(),
+            "a node that has installed nothing waits"
+        );
+        runtime.sync_committed_domains(&BTreeMap::new(), &BTreeMap::new());
+        assert!(
+            installed.now_or_never().is_some(),
+            "installing the committed state releases the wait, even when it holds no domain"
         );
     }
 

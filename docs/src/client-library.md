@@ -195,12 +195,16 @@ when the session holding an attachment ended. Events are coalesced per domain: a
 arrives before a tick of its generation, while older unread ticks are replaced by the newest one.
 After a reconnect, the client attaches every followed
 clock again on the new session before any other request, and the clock that attachment reports
-follows the interruption as an `Observed` event; changes in between are not reported. When the new
-session refuses that attach or leaves it unanswered, the event is `RestorationFailed` with the
-server's message and the wait before the client sends the attach again on the same session; the
-wait starts at one second and doubles up to thirty seconds. Waiting for the next event reopens a
-closed session when a followed clock waits for it. A detach, or an end, stops following the domain,
-and `domain_clock` returns `None` for it afterwards.
+follows the interruption as an `Observed` event; changes in between are not reported. A new session
+that answers the attach with the domain not found ends the attachment with `Ended`, as the server
+would. A node that is still starting answers that attach only once it has installed the cluster's
+committed domains, so a restart never ends an attachment. When the new session refuses that attach
+for any other reason, the event is `RestorationFailed` with the server's message and the wait
+before the client sends the attach again on the same session; the wait starts at one second and
+doubles up to thirty seconds. An attach the session leaves unanswered past `request_timeout` ends
+that session, and the next one attaches the clock again. Waiting for the next event reopens a
+closed session when a followed clock waits for it. A detach, or an end, stops following the domain, and
+`domain_clock` returns `None` for it afterwards.
 
 ### Through The Shared C Binding
 
