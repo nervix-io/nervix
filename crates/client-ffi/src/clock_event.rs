@@ -35,6 +35,7 @@ pub enum ClockEventKind {
     Tick = 2,
     Ended = 3,
     Interrupted = 4,
+    RestorationFailed = 5,
 }
 
 /// The installation state of one clock generation, with the header's values.
@@ -95,6 +96,7 @@ impl ClockEvent {
             DomainClockEvent::Ticked(_) => ClockEventKind::Tick,
             DomainClockEvent::Ended(_) => ClockEventKind::Ended,
             DomainClockEvent::Interrupted(_) => ClockEventKind::Interrupted,
+            DomainClockEvent::RestorationFailed(_) => ClockEventKind::RestorationFailed,
         }
     }
 
@@ -108,9 +110,9 @@ impl ClockEvent {
         match &self.event {
             DomainClockEvent::Observed(observed) => Ok(observed.clock.generation),
             DomainClockEvent::Ticked(ticked) => Ok(ticked.tick.generation),
-            DomainClockEvent::Ended(_) | DomainClockEvent::Interrupted(_) => {
-                Err(self.carries_no("clock generation"))
-            }
+            DomainClockEvent::Ended(_)
+            | DomainClockEvent::Interrupted(_)
+            | DomainClockEvent::RestorationFailed(_) => Err(self.carries_no("clock generation")),
         }
     }
 
@@ -139,7 +141,8 @@ impl ClockEvent {
             DomainClockEvent::Ticked(ticked) => Ok(&ticked.tick),
             DomainClockEvent::Observed(_)
             | DomainClockEvent::Ended(_)
-            | DomainClockEvent::Interrupted(_) => Err(self.carries_no("tick")),
+            | DomainClockEvent::Interrupted(_)
+            | DomainClockEvent::RestorationFailed(_) => Err(self.carries_no("tick")),
         }
     }
 
@@ -149,7 +152,8 @@ impl ClockEvent {
             DomainClockEvent::Ended(ended) => Ok(ClockEndReason::from(ended.reason)),
             DomainClockEvent::Observed(_)
             | DomainClockEvent::Ticked(_)
-            | DomainClockEvent::Interrupted(_) => Err(self.carries_no("end reason")),
+            | DomainClockEvent::Interrupted(_)
+            | DomainClockEvent::RestorationFailed(_) => Err(self.carries_no("end reason")),
         }
     }
 
@@ -158,7 +162,8 @@ impl ClockEvent {
             DomainClockEvent::Observed(observed) => Ok(&observed.clock.state),
             DomainClockEvent::Ticked(_)
             | DomainClockEvent::Ended(_)
-            | DomainClockEvent::Interrupted(_) => Err(self.carries_no("clock state")),
+            | DomainClockEvent::Interrupted(_)
+            | DomainClockEvent::RestorationFailed(_) => Err(self.carries_no("clock state")),
         }
     }
 

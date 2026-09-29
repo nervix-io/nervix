@@ -300,10 +300,11 @@ attachment travels in the protocol.
 
 The Rust client keeps the attach reply's state as its latest followed clock. The shared C binding
 gives hosts a separate retained `nx_clock_event` handle for later state changes, ticks,
-interruptions, and ends through `nx_session_next_clock_event`. Its typed accessors expose the
-domain, generation, state and paced mapping, tick, or end reason. The binding does not expose the
-initial state in the attach reply as a typed value, so a host attaching to an already paced clock
-can use tick readings as they arrive but needs a later state change to read that generation's mapping.
+interruptions, refused restorations, and ends through `nx_session_next_clock_event`. Its typed
+accessors expose the domain, generation, state and paced mapping, tick, or end reason. The binding
+does not expose the initial state in the attach reply as a typed value, so a host attaching to an
+already paced clock can use tick readings as they arrive but needs a later state change to read that
+generation's mapping.
 
 ## Execution-Time Snapshots
 

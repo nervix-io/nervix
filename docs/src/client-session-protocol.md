@@ -660,7 +660,10 @@ current status, `TransactionAlreadyFinished` with the final status and aggregate
 tombstone is retained, or a failure for an identity that is unknown or retained no longer. A leader
 that holds no binding for the session's transaction answers the session's next transaction request
 with `TransactionDetached`, and the client attaches again and repeats the request under the same
-reference. Attaching from a second session takes the binding over, and the displaced session's next
+reference. A finished or failed attach does not resolve commands whose replies were lost: the
+client repeats each under its own execution reference and expected position. The leader returns a
+recorded outcome before planning a new request; a command it never admitted receives a failure.
+Attaching from a second session takes the binding over, and the displaced session's next
 transaction request receives `TransactionTakenOver` before anything is admitted. While a session
 holds a transaction, the server refuses the requests that belong to the session rather than the
 transaction, subscribe and unsubscribe and domain clock attach and detach, and the Rust client and
@@ -775,12 +778,26 @@ it:
    was using, with the same backoff as an election.
 2. It attaches every domain clock it followed.
 3. It publishes the new session to its callers and ends the old one, reporting an interruption for
-   every subscription and clock the old session held.
-4. It opens again every subscription the server had acknowledged, each as a new generation.
+   every subscription and clock the old session held. The old session's frames stop before the
+   interruption, so nothing it delivers afterwards can make an attachment look held.
+4. It attaches every clock the old session began to follow while the new one was opening, and
+   opens again every subscription the server had acknowledged, each as a new generation.
 5. It attaches its transaction before it repeats any command that belongs to it.
 
-Only then does it repeat outstanding commands, each under its original execution reference and, for
-an append, its original expected position.
+The requests of steps 2 and 4 are sent before step 5 begins, not merely started, so the transaction
+can never overtake them on the ordered lane. Only then does the client repeat outstanding commands,
+each under its original execution reference and, for an append, its original expected position.
+
+The new session can still refuse a restoration, or leave it unanswered: a relay may no longer exist
+or not be running yet, the session may already hold as many requests as it admits, or a transaction
+a caller attached meanwhile may have made it refuse session-local requests. The client then reports
+a restoration failure for that subscription or clock, carrying the server's message and the wait
+before the next attempt, and sends the request again on the same session. The wait starts at one
+second and doubles after each refusal up to thirty seconds. It keeps trying for as long as the
+session stays open and the client still wants the subscription or follows the clock; the next
+session starts again from one second. An attach answered `DomainClockAlreadyAttached` means the
+session already holds the attachment, so the client follows the clock on that session and reads its
+frames from then on.
 
 The client's event streams outlive the session. A caller reading subscription events, clock events,
 or notices keeps reading across the replacement: the interruptions of step 3 mark the gap, and
@@ -976,6 +993,7 @@ protocol reports the losses the server knows of and states which ones it cannot 
 | Batches published while the subscription was opening | Not reported; they precede the subscription |
 | Batches lost in transit while relay ownership moves or a node-to-node delivery fails | Not reported; the nodes log them |
 | The session itself | Not reported by the server, whose session is gone; the Rust client reports an interruption |
+| A restoration the new session refused | Not a server event; the Rust client reports each refused attempt, and the gap lasts until an attempt succeeds |
 
 ### Restoration And Bounded Consumers
 
@@ -984,7 +1002,18 @@ it again on the next session, which is a new generation with a new schema announ
 treat the time between as a gap. The Rust client does this for every subscription it holds that the
 server acknowledged, and fences its restoration by generation: a late reply for an attempt the
 caller has since cancelled is followed by a deletion before the name can be reused, and rows of a
-generation the client no longer holds are ignored. Each subscription moves through `Creating`,
+generation the client no longer holds are ignored. A restoration the new session refuses is reported
+as a restoration failure and sent again on that session after a growing wait, as [Reconnecting A
+Session](#reconnecting-a-session) describes.
+
+A deletion asks the server only while an open session may hold the subscription. A subscription
+whose session ended, including one whose delivery had already failed, is deleted without a request,
+and so is an interrupted subscription the current session refused to open again: no session holds
+either, so the client simply stops wanting it and releases the name. A deletion whose session ends
+before it is answered is complete, because the subscription ended with that session. A deletion that
+waited for an opening or a restoration still in flight asks the server only if that request opened
+the subscription. Only a name the client never held is always asked about, on a new session if the
+current one ended, and a refusal leaves that name free. Each subscription moves through `Creating`,
 `Active`, `Interrupted`, `Restoring`, `DeliveryFailed`, `Closing`, and `DeletionFailed`:
 
 ```mermaid
@@ -996,12 +1025,16 @@ stateDiagram-v2
     Active --> Interrupted: session lost
     Interrupted --> Restoring: next session
     Restoring --> Active: opening reply for a new generation
-    Restoring --> Interrupted: refused or session lost; retried
+    Restoring --> Interrupted: refused; reported, then retried on the same session
+    Restoring --> Interrupted: session lost; retried on the next session
     Active --> DeliveryFailed: the client's event queue overflowed
     Active --> Closing: unsubscribe
-    Interrupted --> Closing: unsubscribe
-    DeliveryFailed --> Closing: unsubscribe
-    Closing --> [*]: deleted, or the session ended
+    Creating --> Closing: unsubscribe
+    Restoring --> Closing: unsubscribe
+    DeliveryFailed --> Closing: unsubscribe while its session is open
+    Interrupted --> [*]: unsubscribe, which no session is left to answer
+    DeliveryFailed --> [*]: unsubscribe after its session ended
+    Closing --> [*]: deleted, the session ended, or the opening it waited for was refused
     Closing --> DeletionFailed: deletion refused
     DeletionFailed --> Closing: unsubscribe again
     DeletionFailed --> [*]: the session ended
@@ -1079,7 +1112,10 @@ Every node serves attachments from its own installation, which it derives from t
 revision as every other node, and from progress it already accepted, so an attachment adds no
 interconnect traffic and survives nothing: it ends silently with its session. The Rust client
 attaches every clock it followed again on its next session, clears its previous tick, and reports
-the gap as an interruption. The shared binding exposes this event stream through
+the gap as an interruption. An attach that session refuses or leaves unanswered is reported as a
+restoration failure and sent again on the same session after a growing wait, and a reply that the
+session already follows the clock moves the attachment to that session, whose frames then report
+the clock and its ticks. The shared binding exposes this event stream through
 `nx_session_next_clock_event` and a dedicated retained `nx_clock_event` handle. The web console
 attaches the selected domain clock once per session, detaches it on selection changes, and restores
 it on reconnect; its REPL sends the same typed requests for explicit attach and detach statements.
@@ -1393,7 +1429,8 @@ The protocol guarantees:
   redefined relay reaches a subscription announced under the earlier definition.
 - **Named losses.** A subscription reports the rows the server skipped, the rows a `DROPPING`
   subscription discarded before its next rows, and its end. The Rust client and its bindings also
-  report the loss of the session a subscription lived on.
+  report the loss of the session a subscription lived on, and every attempt to restore it that a
+  new session refused.
 - **Verifiable archives.** A backup's archive arrives with the size and digest its recorded outcome
   names, and a download that ends early leaves it retained for another attempt.
 
@@ -1406,6 +1443,9 @@ It does not provide:
   a cancelled waiter keeps its admitted effect. Undoing either is a new command.
 - **Durable subscription replay.** Subscriptions keep no offsets and are not persisted. A restored
   subscription starts with the rows that arrive after it opens again.
+- **Guaranteed restoration.** The Rust client opens a subscription again, or attaches a clock
+  again, only when a new session accepts it. A subscription whose relay no longer exists stays
+  interrupted, and is reported at every attempt, until its caller deletes it.
 - **A required Arrow client library.** Rows arrive as typed FlatBuffers cells; a client needs only
   code generated from the schema.
 - **Columnar subscriptions.** `SubscriptionType` has one value, `Row`. A server refuses a type it
@@ -1437,8 +1477,9 @@ The protocol makes a client's view of its own work explicit rather than inferred
   Impact Inspection](./transaction-quiescence.md#observing-a-transaction).
 - **Subscriptions.** A client learns of its own losses from `SubscriptionDeliveryLost`,
   `SubscriptionRowsSkipped`, and `SubscriptionEnded`, and the Rust client reports a lost session as
-  an interruption of each subscription. The web console shows each tab's state on the tab:
-  pending, active, interrupted, restoring, ended, resubscribing, or closing. Each node exports
+  an interruption of each subscription and clock, and each refused attempt to restore one as a
+  restoration failure with the server's message. The web console shows each tab's state on the
+  tab: pending, active, interrupted, restoring, ended, resubscribing, or closing. Each node exports
   `nervix_session_subscriptions`, the number of subscription leases it holds per relay, and
   `nervix_session_subscription_dropped_rows_total`, the rows its `DROPPING` subscriptions discarded,
   both labeled by `domain` and `relay`; see
