@@ -8,8 +8,8 @@
 //!   the incremental writer that fails at its budget boundary instead of growing past it. It is
 //!   the only entry point for variable-size encoding, decoding, validation, hashing, snapshot
 //!   construction, and synchronous filesystem or database work.
-//! - **Depends on.** Tokio's runtime and its blocking pool, the simulation scheduler when enabled,
-//!   and the byte vocabulary its budgets are configured in.
+//! - **Depends on.** Tokio's runtime and its blocking pool, the primitive boundary for its atomics,
+//!   the simulation scheduler when enabled, and the byte vocabulary its budgets are configured in.
 //! - **Must not know.** What a job computes. It admits, charges, runs and cancels; it decides
 //!   nothing about relays, branches, domains, peers, graphs or the cluster.
 //!
@@ -34,8 +34,6 @@
 
 #[cfg(feature = "shuttle")]
 extern crate shuttle_dashmap as dashmap;
-#[cfg(all(feature = "shuttle", feature = "turmoil"))]
-compile_error!("nervix-execution: Shuttle and Turmoil scheduler modes cannot be enabled together");
 #[cfg(feature = "shuttle")]
 extern crate shuttle_parking_lot as parking_lot;
 #[cfg(feature = "shuttle")]
@@ -310,5 +308,7 @@ pub enum ExecutionFailure {
 /// this crate uses `triomphe::Arc`.
 type SemaphoreRef = StdArc<tokio::sync::Semaphore>;
 
-#[cfg(test)]
+// The ordinary tests build executors whose atomics would be Loom's in a Loom build, outside any
+// model. That build runs only the cancellation models.
+#[cfg(all(test, not(feature = "loom")))]
 mod tests;

@@ -1,12 +1,10 @@
-use std::sync::{
-    Arc as StdArc,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::Arc as StdArc;
 
 use ahash::RandomState;
 use error_stack::Report;
 use nervix_execution::{Executor, sync::DashMap};
 use nervix_models::ClusterNodeName;
+use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use triomphe::Arc;
 
 use super::{

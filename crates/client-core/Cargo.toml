@@ -14,6 +14,7 @@ default = []
 shuttle = [
   "dep:shuttle-tokio",
   "dep:shuttle-tokio-stream",
+  "nervix-primitives/shuttle",
   "shuttle-tokio/shuttle",
   "shuttle-tokio-stream/shuttle",
 ]
@@ -30,6 +31,7 @@ meticulous = { workspace = true }
 nervix-client-wire = { workspace = true, features = ["grpc"] }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }
+nervix-primitives = { workspace = true }
 nervix-recovery = { workspace = true }
 parking_lot = { workspace = true }
 rustls = { workspace = true }

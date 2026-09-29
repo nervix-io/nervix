@@ -17,7 +17,6 @@ use std::{
     cmp::Ordering,
     collections::VecDeque,
     num::NonZeroU64,
-    sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering as AtomicOrdering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -31,6 +30,9 @@ use nervix_execution::sync::DashMap;
 use nervix_models::{
     BranchName, ClusterNodeName, DomainName, IngestorName, ModelKind, ModelName, RelayName,
     Timestamp,
+};
+use nervix_primitives::sync::atomic::{
+    AtomicBool, AtomicI64, AtomicU64, Ordering as AtomicOrdering,
 };
 use nervix_recovery::Discarded as _;
 use nervix_simd_kernels::{ElapsedHistogram, ElapsedLayout, elapsed_nanos};

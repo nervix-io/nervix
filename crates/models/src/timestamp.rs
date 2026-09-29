@@ -6,16 +6,12 @@
 //! - **Depends on.** Chrono and serialization primitives.
 //! - **Must not know.** Domain clocks, scheduling, runtime state or transport behavior.
 
-use std::{
-    fmt,
-    str::FromStr,
-    sync::atomic::{AtomicI64, Ordering},
-    time::Duration,
-};
+use std::{fmt, str::FromStr, time::Duration};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_primitives::sync::atomic::{AtomicI64, Ordering};
 use rkyv::{
     Archive, Archived, Deserialize as RkyvDeserialize, Place, Serialize as RkyvSerialize,
     rancor::Fallible,

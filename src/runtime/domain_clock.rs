@@ -7,8 +7,6 @@
 //! - **Depends on.** Vocabulary clock models and branch-local runtime state.
 //! - **Must not know.** NSPL parsing, consensus decisions or clock-authority selection.
 
-#[cfg(not(feature = "shuttle"))]
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::{sync::Arc as StdArc, time::Duration};
 
 use error_stack::{Report, ResultExt as _};
@@ -22,12 +20,11 @@ use nervix_models::{
     DomainClockPeriod, DomainClockProgress, DomainClockSkew, DomainClockState,
     DomainClockTickObservation, DomainName, DomainPace, DomainState, PacedDomainClock, Timestamp,
 };
-#[cfg(test)]
-use nervix_wasm::WasmExecutionContext;
 // Shuttle schedules around the watermark's atomic maximum, so a read can be preempted between
 // loading its publication and raising the watermark published with it.
-#[cfg(feature = "shuttle")]
-use shuttle::sync::atomic::{AtomicI64, Ordering};
+use nervix_primitives::sync::atomic::{AtomicI64, Ordering};
+#[cfg(test)]
+use nervix_wasm::WasmExecutionContext;
 use thiserror::Error;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;

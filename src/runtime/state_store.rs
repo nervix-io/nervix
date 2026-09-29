@@ -1,5 +1,3 @@
-#[cfg(not(feature = "shuttle"))]
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::{collections::BTreeSet, fmt, str::FromStr, sync::Arc as StdArc};
 
 use ahash::HashMap;
@@ -16,9 +14,8 @@ use nervix_models::{
     DomainName, DomainNodeRef, ModelKind, ModelName, NodeRef, SchemaFingerprint,
     WasmStateGeneration, WasmStateGenerations,
 };
+use nervix_primitives::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-#[cfg(feature = "shuttle")]
-use shuttle::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use thiserror::Error;
 use triomphe::Arc;
 

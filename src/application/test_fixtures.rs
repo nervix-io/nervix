@@ -6,13 +6,7 @@
 //! The runtime's unit tests bind their loopback interconnect through this module as well, so the
 //! TLS material a transport authenticates with is generated in one place.
 
-use std::{
-    path::PathBuf,
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::{path::PathBuf, sync::Arc as StdArc};
 
 use ahash::RandomState;
 use clap::Parser;
@@ -30,6 +24,7 @@ use nervix_models::{
     PlacementGroupSchedule, ProcessorInputs, ProcessorOutputs, ScheduledNode, SchemaFingerprint,
     TransactionLifecycle, TransactionPosition, WasmProcessorLimits,
 };
+use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use nonzero_ext::nonzero;
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,

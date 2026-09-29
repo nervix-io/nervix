@@ -1,16 +1,10 @@
 //! One class's bounded pool of workers, and the admission that keeps its queue finite.
 
-use std::{
-    num::NonZeroUsize,
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::{num::NonZeroUsize, sync::Arc as StdArc, time::Duration};
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_primitives::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use thiserror::Error;
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError},
@@ -19,7 +13,7 @@ use tokio::{
 
 use crate::{
     SemaphoreRef,
-    cancellation::{CancelOnDrop, Cancellation},
+    cancellation::{ArmedCancellation, CancelOnDrop, Cancellation},
     limits::WorkerClassName,
     memory::Reservation,
 };
@@ -125,17 +119,13 @@ impl WorkerPool {
     where
         T: Send + 'static,
     {
-        let RunningJob {
-            handle,
-            cancellation,
-        } = self.start(reservation, job).await?;
-        let signal = CancelOnDrop::new(cancellation);
+        let RunningJob { handle, obligation } = self.start(reservation, job).await?;
         let value = handle.await.map_err(|_| {
             Report::new(ExecutionError::JobPanicked {
                 class: self.class.as_str(),
             })
         })?;
-        signal.disarm();
+        obligation.disarm();
         Ok(value)
     }
 
@@ -145,10 +135,12 @@ impl WorkerPool {
         reservation: Reservation,
         job: impl FnOnce(Reservation) + Send + 'static,
     ) -> Result<(), Report<ExecutionError>> {
-        let running = self
+        let RunningJob { handle, obligation } = self
             .start(reservation, move |reservation, _| job(reservation))
             .await?;
-        drop(running);
+        // The job outlives its submitter, which never cancels it.
+        obligation.disarm();
+        drop(handle);
         Ok(())
     }
 
@@ -175,8 +167,10 @@ impl WorkerPool {
         self.queued_nanos
             .fetch_add(elapsed_nanos(requested_at), Ordering::AcqRel);
         drop(queued);
-        let cancellation = Cancellation::new();
-        let job_cancellation = cancellation.clone();
+        let ArmedCancellation {
+            obligation,
+            signal: job_cancellation,
+        } = Cancellation::armed();
         let completed = StdArc::clone(&self.completed);
         let worked_nanos = StdArc::clone(&self.worked_nanos);
         let work = move || {
@@ -198,10 +192,7 @@ impl WorkerPool {
         };
         #[cfg(not(feature = "turmoil"))]
         let handle = tokio::task::spawn_blocking(work);
-        Ok(RunningJob {
-            handle,
-            cancellation,
-        })
+        Ok(RunningJob { handle, obligation })
     }
 
     fn enter_queue(&self) -> Result<QueueSlot, Report<ExecutionError>> {
@@ -227,10 +218,11 @@ impl WorkerPool {
     }
 }
 
-/// A job already submitted to its worker, with the signal an awaiting caller may cancel.
+/// A job already submitted to its worker, with the armed obligation that cancels it when the
+/// caller stops awaiting it.
 struct RunningJob<T> {
     handle: tokio::task::JoinHandle<T>,
-    cancellation: Cancellation,
+    obligation: CancelOnDrop,
 }
 
 /// Nanoseconds since `started_at`, for the cumulative service counters this pool exposes.
@@ -381,7 +373,7 @@ mod simulation_checks {
             .try_reserve(MemoryClass::Management, 8192)
             .assured("the untouched management budget has room");
         let observed = executor.clone();
-        let running = pool
+        let RunningJob { handle, obligation } = pool
             .start(charge, move |_, cancellation| {
                 (
                     cancellation.check().is_err(),
@@ -393,10 +385,8 @@ mod simulation_checks {
         assert_eq!(pool.snapshot().running, 1);
         assert_eq!(executor.snapshot().management_memory.reserved_bytes, 8192);
 
-        let signal = CancelOnDrop::new(running.cancellation.clone());
-        drop(signal);
-        let (cancelled, charged_at_exit) = running
-            .handle
+        drop(obligation);
+        let (cancelled, charged_at_exit) = handle
             .await
             .assured("the cancelled job exits cooperatively");
         assert!(cancelled);

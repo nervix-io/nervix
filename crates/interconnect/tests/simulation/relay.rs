@@ -6,10 +6,9 @@
 //! - **Depends on.** The transport fixture, production relay APIs, and Turmoil network faults.
 //! - **Must not know.** Runtime graphs, persistent ACK stores, or connector behavior.
 
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-
 use nervix_interconnect::{RelayAdmissionDecision, RelayAdmissionStatus};
 use nervix_models::{CoordinationIdentity, RemoteAckOutcome, RemoteAckResolution};
+use nervix_primitives::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use super::*;
 
