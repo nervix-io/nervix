@@ -16,20 +16,21 @@ test: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    # Shuttle features replace synchronization primitives and are valid only inside a Shuttle
-    # runner. Test their owning packages with production primitives here; `test-shuttle` exercises
-    # their modeled features separately.
-    shuttle_packages=(
+    # Execution-mode features replace primitives and are valid only inside their runner, and the
+    # modes cannot be enabled together. Test the packages that own a mode with ordinary primitives
+    # here; `test-shuttle`, `test-turmoil` and `test-primitives` exercise the modes.
+    mode_packages=(
         nervix-client-core
         'nervix-connector*'
         nervix-consensus
         nervix-execution
         nervix-interconnect
+        nervix-primitives
         nervix-server
         nervix-wasm
     )
     workspace_exclusions=()
-    for package in "${shuttle_packages[@]}"; do
+    for package in "${mode_packages[@]}"; do
         workspace_exclusions+=(--exclude "${package}")
     done
     cargo test --all-targets --all-features --workspace "${workspace_exclusions[@]}"
@@ -41,6 +42,7 @@ test: tests-deps
         --package nervix-execution \
         --package nervix-interconnect \
         --package nervix-wasm
+    cargo test --all-targets --features native --package nervix-primitives
     just test-turmoil
 
 test-scenarios *args: tests-deps
@@ -129,6 +131,18 @@ test-package-bins package *args:
 # server lib.
 test-execution *args:
     cargo test --package nervix-execution --lib -- {{ args }}
+
+# Run the primitive boundary's conformance checks once per execution mode. Each mode runs the same
+# atomic surface against its own backend and checks that it selected that backend, so an operation a
+# backend lacks or answers differently fails here. Every mode is its own build, because Cargo would
+# unify the features of one. The portable surface is also built for the browser target.
+test-primitives:
+    cargo test --package nervix-primitives --lib
+    cargo test --package nervix-primitives --features native --lib
+    cargo test --package nervix-primitives --features 'shuttle native' --lib
+    cargo test --package nervix-primitives --features 'loom native' --lib
+    cargo test --package nervix-primitives --features 'turmoil native' --lib
+    cargo check --package nervix-primitives --lib --target wasm32-unknown-unknown
 
 # Explore the filtered execution, interconnect and server invariants under Shuttle, then replay
 # randomized schedules to detect uncontrolled nondeterminism in every check. The former Loom
@@ -448,19 +462,21 @@ test-coverage: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    # Merge production-mode coverage for Shuttle-owning packages into the workspace profile
-    # without running modeled synchronization outside a Shuttle runner.
-    shuttle_packages=(
+    # Merge ordinary-mode coverage for the packages that own an execution mode into the workspace
+    # profile without running modeled primitives outside their runner. Model checks are not
+    # product coverage, so no Shuttle or Turmoil build contributes to it.
+    mode_packages=(
         nervix-client-core
         'nervix-connector*'
         nervix-consensus
         nervix-execution
         nervix-interconnect
+        nervix-primitives
         nervix-server
         nervix-wasm
     )
     workspace_exclusions=()
-    for package in "${shuttle_packages[@]}"; do
+    for package in "${mode_packages[@]}"; do
         workspace_exclusions+=(--exclude "${package}")
     done
     cargo llvm-cov clean --workspace
@@ -477,6 +493,7 @@ test-coverage: tests-deps
         --package nervix-execution \
         --package nervix-interconnect \
         --package nervix-wasm
+    cargo llvm-cov --no-report --all-targets --features native --package nervix-primitives
     cargo llvm-cov report --lcov --output-path lcov-workspace.info
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
@@ -934,20 +951,21 @@ cargo-clippy-all:
     set -euo pipefail
     export CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all"
     export RUSTFLAGS="-Dwarnings {{ rustflags }}"
-    # Shuttle-backed targets require a Shuttle runner and deliberately omit Tokio's process and
-    # runtime-builder APIs. Lint their production targets normally, then lint the modeled library
-    # boundary separately. `test-shuttle` compiles and runs the modeled test targets.
-    shuttle_packages=(
+    # Execution-mode builds require their runner, Shuttle's deliberately omits Tokio's process and
+    # runtime-builder APIs, and the modes cannot be enabled together. Lint the packages that own a
+    # mode in ordinary mode, then lint each modeled build separately.
+    mode_packages=(
         nervix-client-core
         'nervix-connector*'
         nervix-consensus
         nervix-execution
         nervix-interconnect
+        nervix-primitives
         nervix-server
         nervix-wasm
     )
     workspace_exclusions=()
-    for package in "${shuttle_packages[@]}"; do
+    for package in "${mode_packages[@]}"; do
         workspace_exclusions+=(--exclude "${package}")
     done
     cargo clippy --all-features --all-targets --workspace "${workspace_exclusions[@]}"
@@ -959,6 +977,7 @@ cargo-clippy-all:
         --package nervix-execution \
         --package nervix-interconnect \
         --package nervix-wasm
+    cargo clippy --all-targets --features native --package nervix-primitives
     cargo clippy --lib --features 'shuttle testing' \
         --package nervix-client-core \
         --package 'nervix-connector*' \
@@ -967,9 +986,12 @@ cargo-clippy-all:
         --package nervix-interconnect \
         --package nervix-server \
         --package nervix-wasm
+    cargo clippy --all-targets --features 'shuttle native' --package nervix-primitives
+    cargo clippy --all-targets --features 'loom native' --package nervix-primitives
     cargo clippy --all-targets --features turmoil \
         --package nervix-execution \
         --package nervix-interconnect
+    cargo clippy --all-targets --features 'turmoil native' --package nervix-primitives
 
 # Lint one workspace package and all of its targets with warnings denied, sharing the workspace
 # lint build directory. Extra arguments are forwarded to Cargo.
