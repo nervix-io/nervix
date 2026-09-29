@@ -271,7 +271,7 @@ mod tests {
                                             max_size: "1MiB".to_string(),
                                         },
                                     },
-                                    codec: codec,
+                                    codec,
                                 },
                             ),
                             timestamp_source: None,

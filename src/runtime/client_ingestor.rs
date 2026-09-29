@@ -999,7 +999,8 @@ impl Endpoint {
         let admission_state = self.intake.admission();
         let (events, outcomes) = mpsc::unbounded_channel();
         let (admission, admission_receiver) = watch::channel(admission_state);
-        let id = ClientAttachmentId::new();
+        // A fresh identity, ordered by the time the attachment was made.
+        let id = ClientAttachmentId::from_u128(uuid::Uuid::now_v7().as_u128());
         let description = ClientProducerDescription {
             attachment: id,
             fields: execution.fields.clone(),

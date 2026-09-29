@@ -71,7 +71,7 @@ enum ScenarioProducer {
     Raw {
         session: String,
         id: ProducerId,
-        description: ClientProducerDescription,
+        description: Box<ClientProducerDescription>,
         /// How many of the producer's frames earlier steps already accounted for.
         frames_seen: usize,
     },
@@ -473,7 +473,7 @@ async fn open_producer(
                 OpenIngestorDisposition::Opened(opened) => Ok(ScenarioProducer::Raw {
                     session: name,
                     id: ProducerId::opened_by(request_id),
-                    description: opened.description,
+                    description: Box::new(opened.description),
                     frames_seen: 0,
                 }),
                 OpenIngestorDisposition::Refused(refusal) => Err(OpenRefused {

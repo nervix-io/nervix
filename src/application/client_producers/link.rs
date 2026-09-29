@@ -20,13 +20,12 @@
 //! graph.
 
 use std::{
-    collections::HashMap,
     num::NonZeroU64,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
-use ahash::RandomState;
+use ahash::{HashMap, RandomState};
 use bytes::Bytes;
 use error_stack::Report;
 use futures_util::StreamExt as _;

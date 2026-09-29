@@ -162,23 +162,12 @@ impl fmt::Display for ClientEndpointContract {
 pub struct ClientAttachmentId(u128);
 
 impl ClientAttachmentId {
-    /// A fresh identity, ordered by the time it was created.
-    pub fn new() -> Self {
-        Self(Uuid::now_v7().as_u128())
-    }
-
     pub const fn from_u128(value: u128) -> Self {
         Self(value)
     }
 
     pub const fn as_u128(&self) -> u128 {
         self.0
-    }
-}
-
-impl Default for ClientAttachmentId {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

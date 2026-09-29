@@ -2,7 +2,6 @@
 //! ingestor's schema within its limits, and every other body is refused with the defect it has.
 
 use std::{
-    collections::HashMap,
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc as StdArc,
 };
@@ -153,7 +152,7 @@ fn framed(message: &[u8], body: &[u8]) -> Vec<u8> {
 #[tokio::test]
 async fn one_canonical_batch_of_the_schema_is_decoded_with_its_rows() {
     let batch = batch_of(arrow_schema(), &[1, 2, 3]);
-    let decoded = decode(stream(&arrow_schema(), &[batch.clone()]), limits())
+    let decoded = decode(stream(&arrow_schema(), std::slice::from_ref(&batch)), limits())
         .await
         .assured("a canonical batch decodes");
     assert_eq!(decoded, batch);
@@ -215,22 +214,24 @@ async fn another_schema_is_refused_with_its_first_difference() {
                     field("id", DataType::UInt64, false),
                     field("note", DataType::Utf8, true),
                 ],
-                HashMap::from([("origin".to_string(), "sensor".to_string())]),
+                [("origin".to_string(), "sensor".to_string())]
+                    .into_iter()
+                    .collect(),
             ),
             ClientSchemaDifference::Metadata,
         ),
     ];
     for (submitted, difference) in cases {
         let submitted = StdArc::new(submitted);
-        let columns: Vec<ArrayRef> = submitted
-            .fields()
-            .iter()
-            .map(|field| match field.data_type() {
-                DataType::UInt64 => StdArc::new(UInt64Array::from(vec![1])) as ArrayRef,
-                DataType::Int64 => StdArc::new(Int64Array::from(vec![1])) as ArrayRef,
-                _ => StdArc::new(StringArray::from(vec![Some("n")])) as ArrayRef,
-            })
-            .collect();
+        let mut columns = Vec::new();
+        for field in submitted.fields() {
+            let column: ArrayRef = match field.data_type() {
+                DataType::UInt64 => StdArc::new(UInt64Array::from(vec![1])),
+                DataType::Int64 => StdArc::new(Int64Array::from(vec![1])),
+                _ => StdArc::new(StringArray::from(vec![Some("n")])),
+            };
+            columns.push(column);
+        }
         let batch = RecordBatch::try_new(submitted.clone(), columns).assured("matching columns");
         let refused = decode(stream(&submitted, &[batch]), limits()).await;
         let Err(ClientBatchError::SchemaMismatch { difference: found }) = refused else {

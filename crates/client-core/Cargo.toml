@@ -10,7 +10,12 @@ workspace = true
 
 [features]
 # Encode Arrow record batches as the canonical stream a producer submits.
-arrow = ["dep:arrow-array", "dep:arrow-ipc", "dep:arrow-schema", "nervix-models/arrow"]
+arrow = [
+  "dep:arrow-array",
+  "dep:arrow-ipc",
+  "dep:arrow-schema",
+  "nervix-models/arrow",
+]
 autocomplete = []
 default = []
 shuttle = [
