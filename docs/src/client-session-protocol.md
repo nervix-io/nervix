@@ -658,7 +658,10 @@ current status, `TransactionAlreadyFinished` with the final status and aggregate
 tombstone is retained, or a failure for an identity that is unknown or retained no longer. A leader
 that holds no binding for the session's transaction answers the session's next transaction request
 with `TransactionDetached`, and the client attaches again and repeats the request under the same
-reference. Attaching from a second session takes the binding over, and the displaced session's next
+reference. A finished or failed attach does not resolve commands whose replies were lost: the
+client repeats each under its own execution reference and expected position. The leader returns a
+recorded outcome before planning a new request; a command it never admitted receives a failure.
+Attaching from a second session takes the binding over, and the displaced session's next
 transaction request receives `TransactionTakenOver` before anything is admitted. While a session
 holds a transaction, the server refuses the requests that belong to the session rather than the
 transaction, subscribe and unsubscribe and domain clock attach and detach, and the Rust client and
