@@ -348,6 +348,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_generated_backup_model_with_keyword_spelling_reparses() {
+        let model = gen_model(&[0x19, 0x29, 0x08, 0xc3, 0xec]);
+        let document = nervix_models::canonical_nspl_document(std::slice::from_ref(&model))
+            .expect("generator output must be renderable");
+        let exported = archived_models_document(&document);
+        let statements = crate::client_statement::parse_client_statements(&exported)
+            .expect("the exported model must reparse");
+        let expected = ClientStatement::Server(Statement::Create(
+            nervix_models::CreateStatement::new(Box::new(model), false),
+        ));
+        assert_eq!(statements, [expected]);
+    }
+
     /// Every generated Model exported the way a backup exports a domain — one canonical document,
     /// held as a section of an archive and read back from the archive stream — reparses to itself,
     /// statement for statement and in order.
