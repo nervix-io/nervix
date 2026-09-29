@@ -25,11 +25,7 @@ pub mod dash_map {
 
 #[cfg(feature = "shuttle")]
 mod scheduled {
-    use std::{
-        hash::Hash,
-        marker::PhantomData,
-        ops::{Deref, DerefMut},
-    };
+    use std::{hash::Hash, marker::PhantomData, ops::Deref};
 
     use crate::scheduling;
 
@@ -96,12 +92,6 @@ mod scheduled {
 
         fn deref(&self) -> &Self::Target {
             &self.inner
-        }
-    }
-
-    impl<K, V, S> DerefMut for DashMap<K, V, S> {
-        fn deref_mut(&mut self) -> &mut Self::Target {
-            &mut self.inner
         }
     }
 
