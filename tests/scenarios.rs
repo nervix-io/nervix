@@ -20756,6 +20756,13 @@ async fn then_named_client_receives_subscription_payload(
             .unwrap_or_else(|error| {
                 panic!("client '{client_name}' subscription stream closed: {error}")
             });
+        if let nervix_client_core::SubscriptionEvent::ConsumerOverflow(overflowed) = &event {
+            panic!(
+                "client '{client_name}' could not retain the events of subscription '{}', so no \
+                 further rows of it follow",
+                overflowed.name.as_str()
+            );
+        }
         let nervix_client_core::SubscriptionEvent::Rows(rows) = event else {
             continue;
         };
