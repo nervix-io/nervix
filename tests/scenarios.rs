@@ -9498,6 +9498,66 @@ async fn when_node_is_restarted_with_new_interconnect_addresses(
     }
 }
 
+#[then(
+    expr = "the leader eventually records node {string} at its current interconnect address in \
+            Raft membership"
+)]
+async fn then_leader_records_current_raft_address(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let endpoint = world
+        .cluster()
+        .interconnect_endpoint(&node_id)
+        .expect("the restarted node has an interconnect endpoint");
+    let expected = format!("- {node_id} [voter] {endpoint}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        tokio::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let status = run_nspl_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
+            .await
+            .expect("leader cluster status must be available");
+        if status.lines().any(|line| line == expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Raft membership did not record {expected}; last leader status: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(expr = "the leader Raft log index remains unchanged for {string}")]
+async fn then_leader_raft_log_stays_still(world: &mut ScenarioWorld, duration: String) {
+    let duration = humantime::parse_duration(&duration).expect("the observation duration is valid");
+    let leader = current_leader_node(world).await;
+    let deadline = Instant::now() + duration;
+    let mut initial = None;
+    loop {
+        tokio::task::consume_budget().await;
+        let status = run_nspl_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
+            .await
+            .expect("leader cluster status must be available");
+        let index = status
+            .lines()
+            .find_map(|line| line.strip_prefix("raft.last_log_index: "))
+            .expect("cluster status reports a Raft log index")
+            .parse::<u64>()
+            .expect("Raft log index is numeric");
+        match initial {
+            Some(initial) => assert_eq!(
+                index, initial,
+                "leader Raft log grew after membership converged; last status: {status}"
+            ),
+            None => initial = Some(index),
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[when("interconnect certificates are rotated to a new certificate authority")]
 async fn when_interconnect_certificates_are_rotated(world: &mut ScenarioWorld) {
     world
