@@ -1720,30 +1720,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relay_gate_allows_admitted_owner_batches_to_reach_consumers() {
+    async fn relay_gate_fails_buffered_owner_batch_when_its_attached_consumer_moves() {
         let domain = domain("default");
         let relay = named("orders");
         let services = test_relay_boundary_services();
-        let mut consumer = services.add_local_runtime_consumer(AckMode::Attached);
+        let consumer = services.add_local_runtime_consumer(AckMode::Attached);
+        let (acks, completion) = AckSet::root();
+        let mut batch = quiesce_test_batch();
+        batch.acks = vec![acks.clone()];
         let gate = services.fanout.dispatch_gate();
         let mut lease = RelayDispatchGateLease::engage(
             gate,
             Instant::now() + Duration::from_secs(1),
-            "relay owner is moving",
+            "attached consumer is moving",
         );
         assert!(lease.wait_quiescent().await);
-        timeout(
-            Duration::from_millis(100),
-            services.fanout_owner_batch(&domain, &relay, &quiesce_test_batch()),
-        )
-        .await
-        .expect("the gate must not pause a batch already admitted to the owner buffer")
-        .expect("the owner should fan out the admitted batch");
-        timeout(Duration::from_secs(1), consumer.recv())
-            .await
-            .expect("the attached consumer should receive the admitted batch")
-            .expect("the attached consumer should remain open");
-
+        drop(consumer);
         services.remove_local_runtime_consumer(AckMode::Attached);
+        let result = services
+            .fanout_owner_batch(
+                &domain,
+                &relay,
+                &batch,
+                &ConfiguredFaultInjection::default(),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "a closed routing gate must fail the attached batch before fan-out"
+        );
+        let outcome = timeout(Duration::from_secs(1), completion.wait())
+            .await
+            .expect("the failed owner fan-out must resolve its root ACK");
+        assert!(matches!(outcome, AckOutcome::NoAck(_)));
     }
 }

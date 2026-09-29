@@ -122,6 +122,9 @@ Operationally that means:
 - a delivery that reaches a node after its attached consumer moved away fails its attached
   acknowledgements, so the source redelivers the record along the owner's current routes; see
   [Consumers That Leave The Receiver](interconnect.md#consumers-that-leave-the-receiver)
+- an owner batch that starts fan-out while a schedule swap fences its consumer routes fails its
+  record acknowledgements and is retried by its source after the swap; fan-out already holding a
+  dispatch permit finishes before those routes change
 
 Lookup and state-replication control paths are separate from this relay payload model. The Arrow batch path applies to relay movement inside the data plane.
 

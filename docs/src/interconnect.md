@@ -639,6 +639,17 @@ keeps a previous branch lifetime from being confused with the new runtime instan
 
 ### Consumers That Leave The Receiver
 
+The relay owner also fences the start of each buffered batch's fan-out against its local schedule
+swap. It acquires a dispatch permit before reading the local and remote consumer sets, and keeps
+that permit through fan-out, attachment of the consumer ACK shares, and resolution of the owner's
+share. A swap closes the gate
+and waits for existing permits before changing those sets. If the gate is already closed when a
+buffered batch starts fan-out, the owner fails its record acknowledgements and the source retries
+after the schedule changes. It cannot wait for the gate while holding that buffered batch: the
+swap's drain counts the batch, so such a wait would prevent the swap from finishing. In particular,
+an attached sibling on the old destination cannot acknowledge a batch while another attached
+consumer moves to a new destination before the owner selected routes for that batch.
+
 The receiver decides admission before it hands the batch to the runtime consumers of the relay, and
 it hands the batch to the consumers that run on the node at that moment. An owner routes an attached
 batch to a node because its schedule places an attached consumer of the relay there. That consumer
