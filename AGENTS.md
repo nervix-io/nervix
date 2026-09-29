@@ -857,7 +857,7 @@ build and the existing tests, and nothing in it changes behavior.
   selects nothing, and leaves a failed model's checkpoint and metadata for
   `just test-loom-replay`. `just test-loom-qualification` shows each model fails under its
   registered weakening. Required CI runs Shuttle, Loom and its qualification, and Turmoil
-  independently of the ordinary tests, and every one of them fails when it selects no check.
+  independently of the ordinary tests.
 - Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
   user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
   accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.
