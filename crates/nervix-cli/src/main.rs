@@ -1288,32 +1288,106 @@ fn print_event_gap(dropped: u64, output: EventOutput) {
 }
 
 fn spawn_event_collectors(client: Client, sender: EventLineSender) {
-    let subscription_client = client.clone();
-    let subscription_sender = sender.clone();
-    tokio::spawn(async move {
-        while let Ok(event) = subscription_client.next_subscription().await {
+    for stream in EventStream::ALL {
+        tokio::spawn(stream.collect(client.clone(), sender.clone()));
+    }
+}
+
+/// An asynchronous stream of session output the terminal prints, named the way its notices name
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr)]
+enum EventStream {
+    #[strum(serialize = "subscription events")]
+    Subscriptions,
+    #[strum(serialize = "domain clock events")]
+    DomainClocks,
+    #[strum(serialize = "server notices")]
+    ServerNotices,
+}
+
+/// What the terminal prints about a failed read of an event stream, and whether the stream is
+/// over.
+#[derive(Debug, PartialEq, Eq)]
+struct StreamFailure {
+    line: String,
+    ended: bool,
+}
+
+impl EventStream {
+    const ALL: [Self; 3] = [Self::Subscriptions, Self::DomainClocks, Self::ServerNotices];
+
+    /// Prints the stream's events for as long as the client can open a session. The client
+    /// restores subscriptions and clocks on its next session and notices continue there, so every
+    /// other failure is printed and reading goes on.
+    async fn collect(self, client: Client, sender: EventLineSender) {
+        loop {
             tokio::task::consume_budget().await;
-            for line in format_subscription_event(&event) {
-                subscription_sender.push(line);
+            match self.next_lines(&client).await {
+                Ok(lines) => {
+                    for line in lines {
+                        sender.push(line);
+                    }
+                }
+                Err(error) => {
+                    let failure = self.failure(error.current_context());
+                    sender.push(failure.line);
+                    if failure.ended {
+                        return;
+                    }
+                }
             }
         }
-    });
+    }
 
-    let clock_client = client.clone();
-    let clock_sender = sender.clone();
-    tokio::spawn(async move {
-        while let Ok(event) = clock_client.next_domain_clock_event().await {
-            tokio::task::consume_budget().await;
-            clock_sender.push(format_domain_clock_event(&event));
+    /// The terminal lines of the stream's next event.
+    async fn next_lines(
+        self,
+        client: &Client,
+    ) -> Result<Vec<String>, StackReport<CoreClientError>> {
+        match self {
+            Self::Subscriptions => {
+                let event = client.next_subscription().await.map_err(StackReport::new)?;
+                Ok(format_subscription_event(&event))
+            }
+            Self::DomainClocks => {
+                let event = client.next_domain_clock_event().await?;
+                Ok(vec![format_domain_clock_event(&event)])
+            }
+            Self::ServerNotices => {
+                let event = client.next_server_event().await.map_err(StackReport::new)?;
+                Ok(vec![format_server_event(&event)])
+            }
         }
-    });
+    }
 
-    tokio::spawn(async move {
-        while let Ok(event) = client.next_server_event().await {
-            tokio::task::consume_budget().await;
-            sender.push(format_server_event(&event));
+    /// What the terminal prints when a read of the stream fails. Only a session that no known
+    /// server can reopen ends the stream.
+    fn failure(self, error: &CoreClientError) -> StreamFailure {
+        let stream = self.as_ref();
+        match error {
+            CoreClientError::SessionClosed => StreamFailure {
+                line: format!(
+                    "[events] notice: {stream} stopped because the session closed and no known \
+                     server can reopen it"
+                ),
+                ended: true,
+            },
+            CoreClientError::EventOverflow { .. } => StreamFailure {
+                line: format!(
+                    "[events] notice: {stream} were dropped because they arrived faster than they \
+                     were read"
+                ),
+                ended: false,
+            },
+            other => StreamFailure {
+                line: format!(
+                    "[events] notice: {stream} could not resume yet: {other}; the client keeps \
+                     trying"
+                ),
+                ended: false,
+            },
         }
-    });
+    }
 }
 
 fn spawn_event_loggers(client: Client, output: EventOutput) {
@@ -2516,6 +2590,39 @@ mod tests {
                 "[events] subscription [live] notice: opening the subscription again failed: \
                  stream 'orders' does not exist in domain 'tenant'; the next attempt follows in 2s"
             ]
+        );
+    }
+
+    #[test]
+    fn a_failed_event_read_is_printed_and_only_an_unrecoverable_session_ends_the_stream() {
+        assert_eq!(
+            EventStream::DomainClocks.failure(&CoreClientError::RetryDeadline),
+            StreamFailure {
+                line: "[events] notice: domain clock events could not resume yet: session retry \
+                       deadline expired; the client keeps trying"
+                    .to_string(),
+                ended: false,
+            }
+        );
+        assert_eq!(
+            EventStream::ServerNotices.failure(&CoreClientError::EventOverflow {
+                stream: nervix_client_core::EventStreamKind::ServerNotice,
+            }),
+            StreamFailure {
+                line: "[events] notice: server notices were dropped because they arrived faster \
+                       than they were read"
+                    .to_string(),
+                ended: false,
+            }
+        );
+        assert_eq!(
+            EventStream::Subscriptions.failure(&CoreClientError::SessionClosed),
+            StreamFailure {
+                line: "[events] notice: subscription events stopped because the session closed \
+                       and no known server can reopen it"
+                    .to_string(),
+                ended: true,
+            }
         );
     }
 

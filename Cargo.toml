@@ -230,7 +230,7 @@ mysql_async = { workspace = true, features = ["default-rustls"] }
 nervix-client-core = { workspace = true }
 nervix-client-ffi = { workspace = true }
 nervix-test-environment = { workspace = true }
-nix = { workspace = true, features = ["signal"] }
+nix = { workspace = true, features = ["fs", "signal", "term"] }
 # The features the OTEL connector builds the crate with, so the scenarios decode the Export
 # requests it sends without compiling the crate a second time.
 opentelemetry-proto = { workspace = true, features = [

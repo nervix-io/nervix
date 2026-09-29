@@ -1,3 +1,4 @@
+pub(crate) mod cli_terminal;
 pub(crate) mod client_conformance;
 pub(crate) mod client_wire_baseline;
 pub(crate) mod client_wire_tls_cost;

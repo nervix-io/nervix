@@ -24,13 +24,14 @@ use chitchat::{
     Serializable as _, spawn_chitchat,
     transport::{Socket as GossipSocket, Transport as GossipTransport},
 };
+use error_stack::Report;
 use futures_util::future::join_all;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{GossipNode, GossipState};
 use nervix_execution::sync::{ArcSwap, DashMap, Guard};
 use nervix_interconnect::{
     ApplicationRevisionResponse, InterconnectRequest, PeerTarget, PoolClass, RequestContext,
-    RequestSubquota, Transport as InterconnectTransport,
+    RequestError, RequestSubquota, Transport as InterconnectTransport, TransportError,
 };
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, NodeEndpoint, NodeServiceUrl,
@@ -914,6 +915,15 @@ struct GossipRoute {
     target: PeerTarget,
 }
 
+/// Chitchat requires a standard error; keep the interconnect report inside that boundary.
+#[derive(Debug, thiserror::Error)]
+enum GossipExchangeFailure {
+    #[error("{0}")]
+    Transport(Report<TransportError>),
+    #[error("{0}")]
+    Request(Report<RequestError>),
+}
+
 impl InterconnectGossipTransport {
     fn build(
         interconnect: InterconnectTransport,
@@ -1118,7 +1128,8 @@ impl InterconnectGossipTransport {
                 // configured seeds, so restore the authenticated route before trying the probe.
                 self.inner
                     .interconnect
-                    .register_outbound_target(node_id.clone(), route.target.endpoint())?;
+                    .register_outbound_target(node_id.clone(), route.target.endpoint())
+                    .map_err(|error| anyhow::Error::new(GossipExchangeFailure::Transport(error)))?;
                 node_id
             }
             None => {
@@ -1126,7 +1137,8 @@ impl InterconnectGossipTransport {
                     .inner
                     .interconnect
                     .bootstrap_target(route.target.clone())
-                    .await?;
+                    .await
+                    .map_err(|error| anyhow::Error::new(GossipExchangeFailure::Transport(error)))?;
                 self.inner.routes.insert(
                     to,
                     GossipRoute {
@@ -1151,7 +1163,7 @@ impl InterconnectGossipTransport {
                 },
             )
             .await
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            .map_err(|error| anyhow::Error::new(GossipExchangeFailure::Request(error)))?;
         response?;
         Ok(())
     }
@@ -1995,6 +2007,47 @@ pub fn derive_peer_addr(grpc_addr: SocketAddr) -> Option<SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gossip_errors_keep_their_typed_interconnect_report() {
+        let transport = anyhow::Error::new(GossipExchangeFailure::Transport(Report::new(
+            TransportError::ShuttingDown,
+        )));
+        let GossipExchangeFailure::Transport(report) = transport
+            .downcast_ref::<GossipExchangeFailure>()
+            .assured("the gossip transport error was wrapped in GossipExchangeFailure")
+        else {
+            panic!("the transport failure must retain its transport report");
+        };
+        assert!(matches!(
+            report.current_context(),
+            TransportError::ShuttingDown
+        ));
+        assert_eq!(transport.to_string(), "transport is shutting down");
+
+        let node = ClusterNodeName::parse("node-2").assured("the fixture node name is valid");
+        let request = anyhow::Error::new(GossipExchangeFailure::Request(Report::new(
+            RequestError::Timeout {
+                node: node.clone(),
+                request: GossipExchange::NAME,
+                timeout: GossipExchange::TIMEOUT,
+            },
+        )));
+        let GossipExchangeFailure::Request(report) = request
+            .downcast_ref::<GossipExchangeFailure>()
+            .assured("the gossip request error was wrapped in GossipExchangeFailure")
+        else {
+            panic!("the request failure must retain its request report");
+        };
+        assert!(matches!(
+            report.current_context(),
+            RequestError::Timeout { node: target, request, .. }
+                if target == &node && *request == GossipExchange::NAME
+        ));
+        assert!(request.to_string().contains("node-2"));
+        assert!(request.to_string().contains(GossipExchange::NAME));
+        assert!(request.to_string().contains("timed out"));
+    }
 
     #[tokio::test]
     async fn gossip_reconnects_a_known_route_after_its_outbound_target_is_retired() {

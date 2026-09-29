@@ -233,6 +233,29 @@ waits and admission windows from the paced fields itself. The outcome of an atta
 disposition and message, not the clock, so a host that attaches to a running clock paces on the
 ticks' logical readings until the next state event reports the committed mapping.
 
+## Events Across Reconnects
+
+`next_subscription()`, `next_domain_clock_event()`, and `next_server_event()` read streams that
+belong to the client rather than to one session, so a reader keeps calling them across reconnects:
+
+- When a session ends, `next_subscription()` reports `Interrupted` for every subscription that
+  session held, reopens a session, and opens each of them again as a new generation. With nothing
+  to restore it waits for the next session the client opens, for example for its next command, and
+  delivers the events of subscriptions opened there.
+- `next_domain_clock_event()` reopens a session while a followed clock waits to be attached again,
+  as described above.
+- `next_server_event()` never opens a session itself. Notices end with the session that delivered
+  them, including the ones not read yet, and the stream continues with the notices of the next
+  session.
+
+A failed read leaves its stream open. `ClientError::EventOverflow` from `next_server_event()` means
+notices arrived faster than they were read: the client dropped the ones it held, and the next read
+returns the notices that arrived after that gap. An error from reopening a session, such as
+`ClientError::RetryDeadline` or `ClientError::ConnectServer`, leaves subscriptions and clocks
+waiting to be restored, and the next read tries again. Only `ClientError::SessionClosed` ends a
+stream: the session ended and the client knows no server to open another on, as happens to a
+client built with `Client::from_channel` that has not been redirected.
+
 ## Transaction Handles And Attach
 
 `CommandOutcome::transaction` describes the session's transaction binding. Its `TransactionStatus`

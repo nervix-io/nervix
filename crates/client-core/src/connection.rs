@@ -232,6 +232,11 @@ impl ServerDirectory {
         self.remember(server);
     }
 
+    /// Whether any server is known to open a new session on when the exchange is lost.
+    pub(crate) fn can_reconnect(&self) -> bool {
+        self.current.is_some() || !self.seeds.is_empty() || !self.discovered.is_empty()
+    }
+
     /// The servers to try when the exchange is lost: every known server other than the current
     /// one, in the order they were learned, and then the current one.
     pub(crate) fn reconnect_candidates(&self) -> Vec<Url> {

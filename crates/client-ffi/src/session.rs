@@ -149,7 +149,8 @@ impl Session {
         }
     }
 
-    /// Waits for the next event of any subscription the session holds.
+    /// Waits for the next event of any subscription the session holds, continuing across a lost
+    /// session as [`nervix_client_core::Client::next_subscription`] does.
     pub fn next_event(&self, cancel: Option<&Cancel>) -> Result<Event, Failure> {
         let waiting = async {
             match self.client.next_subscription().await {

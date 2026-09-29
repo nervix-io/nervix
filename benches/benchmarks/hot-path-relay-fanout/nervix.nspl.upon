@@ -1,8 +1,10 @@
 BEGIN;
 CREATE SCHEMA benchmark_record (
+  id STRING,
   value STRING
 );
 CREATE WIRE JSON SCHEMA benchmark_wire MODE STRICT (
+  id string,
   value string
 );
 CREATE CODEC benchmark_codec

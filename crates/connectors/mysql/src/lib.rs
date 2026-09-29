@@ -3,8 +3,9 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The node's shared MySQL pool and the task that keeps it at its declared minimum,
-//!   the insert statement each mapped batch becomes, its bind parameters, the `ON DUPLICATE KEY`
-//!   clause of a conflict action, and server-error classification.
+//!   the multi-row insert every write becomes under the emitter's `BATCH` limits and the
+//!   placeholders one statement binds, its bind parameters and their exact encoded size, the
+//!   `ON DUPLICATE KEY` clause of a conflict action, and server-error classification.
 //! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio
 //!   and the `mysql_async` driver.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -13,14 +14,15 @@
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
 
-use std::{path::PathBuf, sync::atomic::Ordering, time::Duration};
+use std::{num::NonZeroUsize, ops::Range, path::PathBuf, sync::atomic::Ordering, time::Duration};
 
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
-    Int64Array, ListArray, RecordBatch, StringArray, TimestampNanosecondArray, UInt8Array,
-    UInt16Array, UInt32Array, UInt64Array,
+    Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeListArray, Float32Array, Float64Array,
+    Int8Array, Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
+    TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::DateTime;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -29,14 +31,26 @@ use mysql_async::{
     prelude::Queryable as _,
 };
 use nervix_connector::{
-    MappedSinkRows, PerRecordOutcome, RejectedSinkRecord, RowSink, SinkHost, SinkLifecycle,
-    SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
+    MappedSinkMember, MappedSinkRows, MeasuredRequest, PerRecordOutcome, RejectedSinkRecord,
+    RowRequest, RowRequestLimits, RowSink, SinkHost, SinkLifecycle, SinkPublishError,
+    SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
     optional_client_config_value,
 };
-use nervix_models::{ClientConfigEntry, ClientPoolBounds, TableName};
-use tracing::trace;
+use nervix_models::{ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, TableName};
+use tracing::{debug, trace};
 
 const MYSQL: &str = "mysql";
+
+/// What `MAX SIZE` measures on a MySQL write, which an oversized row's rejection names.
+const MEASURED_REQUEST: &str = "MySQL insert";
+
+/// The most placeholders one prepared statement binds, which the protocol counts in 16 bits. A
+/// statement with more is refused before it runs, so every insert carries at most as many rows as
+/// fit this many placeholders.
+const MAX_PLACEHOLDERS: usize = 65_535;
+
+/// What separates one row's placeholders from the next in a multi-row insert.
+const ROW_SEPARATOR: &str = ", ";
 
 /// How often an idle MySQL pool is topped back up to its declared minimum.
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
@@ -72,6 +86,8 @@ pub trait MySqlConnections: Send + Sync + 'static {
 pub struct MySqlSinkConfig {
     pub table: TableName,
     pub conflict_action: MySqlConflictAction,
+    /// The emitter's `BATCH` limits, which bound the rows and the measured bytes of every insert.
+    pub batch: EmitterBatchPolicy,
 }
 
 /// What an insert does with a row the target table already holds.
@@ -87,6 +103,7 @@ pub struct MySqlSink {
     connections: Box<dyn MySqlConnections>,
     table: TableName,
     conflict_action: MySqlConflictAction,
+    limits: RowRequestLimits,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -137,8 +154,12 @@ impl MySqlWriteError {
 }
 
 /// A SQLSTATE and error code the server reports for a row it will never accept.
+///
+/// Besides data exceptions and integrity violations, a packet above `max_allowed_packet`, a value
+/// its column cannot hold, and a violated `CHECK` constraint name the rows of one insert, although
+/// the server reports the last two under the generic SQLSTATE `HY000`.
 fn is_record_server_error(state: &str, code: u16) -> bool {
-    state.starts_with("22") || state.starts_with("23") || matches!(code, 1153 | 1366)
+    state.starts_with("22") || state.starts_with("23") || matches!(code, 1153 | 1366 | 3819)
 }
 
 /// Keep `pool` at `minimum` established connections without waiting for traffic.
@@ -247,11 +268,13 @@ impl MySqlSink {
         let MySqlSinkConfig {
             table,
             conflict_action,
+            batch,
         } = config;
         Ok(Self {
             connections,
             table,
             conflict_action,
+            limits: RowRequestLimits::from(batch),
         })
     }
 
@@ -259,54 +282,46 @@ impl MySqlSink {
         format!("`{}`", identifier.replace('`', "``"))
     }
 
-    /// One bounded insert, on a connection borrowed for that insert and returned after it.
-    async fn publish_rows(
-        &self,
-        columns: &MappedMySqlColumns<'_>,
-        rows: &[usize],
-    ) -> Result<u64, MySqlWriteError> {
-        if rows.is_empty() {
-            return Ok(0);
-        }
+    /// The statement every insert of a write executes, around the placeholders of its rows.
+    fn insert_statement(&self, columns: &[String]) -> SinkPublishResult<MultiRowInsert> {
         let quoted_columns = columns
-            .names
             .iter()
             .map(|column| Self::quote_ident(column))
             .collect::<Vec<_>>();
-        let columns_sql = quoted_columns
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let row_placeholders = format!(
+        let columns_sql = quoted_columns.join(", ");
+        let row = format!(
             "({})",
             std::iter::repeat_n("?", quoted_columns.len())
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        let value_placeholders = std::iter::repeat_n(row_placeholders, rows.len())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let conflict_clause = Self::conflict_clause(&quoted_columns, self.conflict_action)?;
-        let sql = format!(
-            "INSERT INTO {} ({columns_sql}) VALUES {value_placeholders}{conflict_clause}",
-            Self::quote_ident(self.table.as_str())
-        );
-        let mut params = Vec::with_capacity(
-            rows.len()
-                .checked_mul(quoted_columns.len())
-                .assured("a batch this node holds in memory has bindable parameters"),
-        );
-        for row in rows {
-            params.extend(columns.values.iter().map(|column| column.value(*row)));
-        }
+        let suffix = Self::conflict_clause(&quoted_columns, self.conflict_action)
+            .map_err(MySqlWriteError::into_report)?;
+        Ok(MultiRowInsert {
+            prefix: format!(
+                "INSERT INTO {} ({columns_sql}) VALUES ",
+                Self::quote_ident(self.table.as_str())
+            ),
+            row,
+            suffix,
+        })
+    }
+
+    /// One insert of `rows` rows binding `params`, on a connection borrowed for that insert and
+    /// returned after it.
+    async fn insert(
+        &self,
+        statement: &MultiRowInsert,
+        rows: usize,
+        params: Vec<Value>,
+    ) -> Result<u64, MySqlWriteError> {
         let mut conn = self
             .connections
             .connection()
             .await
             .map_err(|error| MySqlWriteError::Pool(format!("{error:?}")))?;
         conn.0
-            .exec_drop(sql, Params::Positional(params))
+            .exec_drop(statement.sql(rows), Params::Positional(params))
             .await
             .map_err(MySqlWriteError::Execute)?;
         Ok(conn.0.affected_rows())
@@ -350,53 +365,97 @@ impl SinkLifecycle for MySqlSink {}
 
 #[async_trait]
 impl RowSink for MySqlSink {
+    /// Writes the rows of every carrier in multi-row inserts of at most `MAX MESSAGES` rows and as
+    /// many as fit the placeholders one statement binds, whose statement and bound values measure
+    /// at most `MAX SIZE` bytes.
     async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
-        let mut outcome = PerRecordOutcome::with_capacity(rows.selected_rows.len());
-        let columns = match MappedMySqlColumns::new(rows.batch, rows.target_columns) {
-            Ok(columns) => columns,
+        let members = rows.members();
+        let mut outcome = PerRecordOutcome::with_capacity(members.len());
+        let mut carriers = Vec::with_capacity(rows.carriers.len());
+        for carrier in &rows.carriers {
+            match MappedMySqlColumns::new(carrier.batch, rows.target_columns) {
+                Ok(columns) => carriers.push(columns),
+                Err(error) => {
+                    outcome.fail(
+                        Report::new(SinkPublishError::Publish { sink: MYSQL })
+                            .attach_printable(error.to_string()),
+                    );
+                    return outcome;
+                }
+            }
+        }
+        let column_count = rows.target_columns.len();
+        let Some(rows_per_statement) = MultiRowInsert::rows_per_statement(column_count) else {
+            outcome.fail(
+                Report::new(SinkPublishError::Misconfigured { sink: MYSQL }).attach_printable(
+                    format!(
+                        "a MySQL insert of {column_count} columns binds more than the \
+                         {MAX_PLACEHOLDERS} placeholders one statement accepts"
+                    ),
+                ),
+            );
+            return outcome;
+        };
+        let statement = match self.insert_statement(rows.target_columns) {
+            Ok(statement) => statement,
             Err(error) => {
-                outcome.fail(
-                    Report::new(SinkPublishError::Publish { sink: MYSQL })
-                        .attach_printable(error.to_string()),
-                );
+                outcome.fail(error);
                 return outcome;
             }
         };
-        for chunk in rows.selected_row_chunks {
+        let mut values = BoundValues::bind(&carriers, &members, column_count);
+        let limits = self.limits.with_native_rows(rows_per_statement);
+        let requests = limits.divide(members.len(), |candidate| MeasuredRequest {
+            size: statement.measure(&values, candidate),
+            request: (),
+        });
+        if requests.subdivisions > 0 {
+            debug!(
+                table = self.table.as_str(),
+                subdivisions = requests.subdivisions,
+                "halved MySQL inserts that exceeded MAX SIZE"
+            );
+        }
+        for request in requests.requests {
             tokio::task::consume_budget().await;
-            let Some(chunk_rows) = rows.selected_rows.get(chunk.clone()) else {
-                outcome.fail(
-                    Report::new(SinkPublishError::Publish { sink: MYSQL }).attach_printable(
-                        format!(
-                            "MySQL chunk {chunk:?} is outside its {} selected rows",
-                            rows.selected_rows.len()
-                        ),
-                    ),
-                );
-                return outcome;
+            let written = match request {
+                RowRequest::Write {
+                    members: written, ..
+                } => written,
+                RowRequest::Oversize { member, oversize } => {
+                    let member = members[member];
+                    outcome.reject(oversize.rejected(
+                        rows.position(member),
+                        rows.occurred_at(member),
+                        MEASURED_REQUEST,
+                    ));
+                    continue;
+                }
             };
-            match self.publish_rows(&columns, chunk_rows).await {
+            let params = values.take(written.clone());
+            match self.insert(&statement, written.len(), params).await {
                 Ok(_) => {
-                    for row in chunk_rows {
-                        outcome.deliver(SinkRecordPosition {
-                            batch_index: rows.batch_index,
-                            row_index: *row,
-                        });
+                    for index in written {
+                        outcome.deliver(rows.position(members[index]));
                     }
                 }
-                Err(error) if error.is_record_error() && chunk_rows.len() > 1 => {
-                    for row in chunk_rows {
+                // A record-specific failure of a multi-row insert is isolated by inserting each of
+                // its rows alone, so healthy rows land and only the rejected ones follow the error
+                // policy. The values the failed insert took are bound again from the row's columns.
+                Err(error) if error.is_record_error() && written.len() > 1 => {
+                    for index in written {
                         tokio::task::consume_budget().await;
-                        let position = SinkRecordPosition {
-                            batch_index: rows.batch_index,
-                            row_index: *row,
-                        };
-                        match self.publish_rows(&columns, &[*row]).await {
-                            Ok(_) => outcome.deliver(position),
+                        let member = members[index];
+                        let params = carriers
+                            .get(member.carrier)
+                            .assured("every carrier of the write was mapped before it was bound")
+                            .row_values(member.row);
+                        match self.insert(&statement, 1, params).await {
+                            Ok(_) => outcome.deliver(rows.position(member)),
                             Err(error) if error.is_record_error() => {
                                 outcome.reject(RejectedSinkRecord::external(
-                                    position,
-                                    rows.occurred_at,
+                                    rows.position(member),
+                                    rows.occurred_at(member),
                                     error.record_reason(),
                                 ));
                             }
@@ -408,16 +467,12 @@ impl RowSink for MySqlSink {
                     }
                 }
                 Err(error) if error.is_record_error() => {
-                    if let Some(row) = chunk_rows.first() {
-                        outcome.reject(RejectedSinkRecord::external(
-                            SinkRecordPosition {
-                                batch_index: rows.batch_index,
-                                row_index: *row,
-                            },
-                            rows.occurred_at,
-                            error.record_reason(),
-                        ));
-                    }
+                    let member = members[written.start];
+                    outcome.reject(RejectedSinkRecord::external(
+                        rows.position(member),
+                        rows.occurred_at(member),
+                        error.record_reason(),
+                    ));
                 }
                 Err(error) => {
                     outcome.fail(error.into_report());
@@ -427,10 +482,153 @@ impl RowSink for MySqlSink {
         }
         trace!(
             table = self.table.as_str(),
-            rows = rows.selected_rows.len(),
+            rows = members.len(),
             "emitter published mysql rows"
         );
         outcome
+    }
+}
+
+/// The statement of a multi-row insert, which repeats one placeholder group per row it carries.
+struct MultiRowInsert {
+    /// `INSERT INTO <table> (<columns>) VALUES `.
+    prefix: String,
+    /// One row's placeholder group, such as `(?, ?)`.
+    row: String,
+    /// The duplicate-key clause of the conflict action, when it has one.
+    suffix: String,
+}
+
+impl MultiRowInsert {
+    /// How many rows of `column_count` placeholders each fit one statement, or nothing when not
+    /// even one row does.
+    fn rows_per_statement(column_count: usize) -> Option<NonZeroUsize> {
+        let rows = MAX_PLACEHOLDERS.checked_div(column_count)?;
+        NonZeroUsize::new(rows)
+    }
+
+    /// The statement an insert of `rows` rows executes.
+    fn sql(&self, rows: usize) -> String {
+        let placeholders = std::iter::repeat_n(self.row.as_str(), rows)
+            .collect::<Vec<_>>()
+            .join(ROW_SEPARATOR);
+        format!("{}{placeholders}{}", self.prefix, self.suffix)
+    }
+
+    /// The exact size an insert of `members` is measured at: its statement text and every value
+    /// it binds, as the binary protocol encodes it. The packet headers and the statement's
+    /// parameter types and null bitmap are framing outside the measure.
+    fn measure(&self, values: &BoundValues, members: Range<usize>) -> u64 {
+        let rows = members.len();
+        let separators = rows
+            .checked_sub(1)
+            .assured("an insert carries at least one row")
+            .checked_mul(ROW_SEPARATOR.len())
+            .assured("the separators of one statement are held in memory");
+        let groups = rows
+            .checked_mul(self.row.len())
+            .assured("the placeholders of one statement are held in memory");
+        let mut statement = self.prefix.len();
+        for part in [groups, separators, self.suffix.len()] {
+            statement = statement
+                .checked_add(part)
+                .assured("one statement's text is held in memory");
+        }
+        let statement = u64::try_from(statement)
+            .assured("Nervix builds for 64-bit targets only, where u64 holds usize");
+        statement
+            .checked_add(values.measure(members))
+            .assured("every term measures bytes this node holds in memory")
+    }
+}
+
+/// The values every row of one write binds, row by row in the order the write carries its rows,
+/// with the running size those values add to an insert.
+struct BoundValues {
+    /// Each row's values in mapping order, rows in the write's order. An insert takes the values of
+    /// its rows when it runs.
+    values: Vec<Value>,
+    column_count: usize,
+    /// The bytes the values of the first `n + 1` rows encode to, for each `n`.
+    value_ends: Vec<u64>,
+}
+
+impl BoundValues {
+    fn bind(
+        carriers: &[MappedMySqlColumns<'_>],
+        members: &[MappedSinkMember],
+        column_count: usize,
+    ) -> Self {
+        let mut values = Vec::with_capacity(
+            members
+                .len()
+                .checked_mul(column_count)
+                .assured("the values of one write are held in memory"),
+        );
+        let mut value_ends = Vec::with_capacity(members.len());
+        let mut encoded = 0_u64;
+        for member in members {
+            let mapped = carriers
+                .get(member.carrier)
+                .assured("every carrier of the write was mapped before its rows were bound");
+            for column in &mapped.values {
+                let value = column.value(member.row);
+                encoded = encoded
+                    .checked_add(value.bin_len())
+                    .assured("the values one write binds are held in memory");
+                values.push(value);
+            }
+            value_ends.push(encoded);
+        }
+        Self {
+            values,
+            column_count,
+            value_ends,
+        }
+    }
+
+    /// The bytes the values of `members` encode to in the binary protocol.
+    fn measure(&self, members: Range<usize>) -> u64 {
+        let start = match members.start.checked_sub(1) {
+            Some(previous) => *self
+                .value_ends
+                .get(previous)
+                .assured("an insert starts at a row the write bound"),
+            None => 0,
+        };
+        let last = members
+            .end
+            .checked_sub(1)
+            .assured("an insert carries at least one row");
+        let end = *self
+            .value_ends
+            .get(last)
+            .assured("an insert ends at a row the write bound");
+        end.checked_sub(start)
+            .assured("the running size of later rows is at least that of earlier ones")
+    }
+
+    /// The values of `members`, taken for the insert that binds them. Every row travels in at most
+    /// one insert of the write, and a row isolated after a failed insert is bound again from its
+    /// columns.
+    fn take(&mut self, members: Range<usize>) -> Vec<Value> {
+        let start = members
+            .start
+            .checked_mul(self.column_count)
+            .assured("a row's first value sits inside the write's values");
+        let end = members
+            .end
+            .checked_mul(self.column_count)
+            .assured("a row's last value sits inside the write's values");
+        let taken = self
+            .values
+            .get_mut(start..end)
+            .assured("an insert takes the values of rows the write bound");
+        let mut params = Vec::with_capacity(taken.len());
+        for value in taken {
+            params.push(std::mem::replace(value, Value::NULL));
+        }
+        params
     }
 }
 
@@ -444,14 +642,13 @@ struct UnsupportedMappedColumn {
 
 /// The mapped columns of one batch, downcast once so every row binds from the column that holds it.
 struct MappedMySqlColumns<'a> {
-    names: &'a [String],
     values: Vec<MappedMySqlColumn<'a>>,
 }
 
 impl<'a> MappedMySqlColumns<'a> {
     fn new(
         batch: &'a RecordBatch,
-        target_columns: &'a [String],
+        target_columns: &[String],
     ) -> Result<Self, UnsupportedMappedColumn> {
         let mut values = Vec::with_capacity(target_columns.len());
         for (index, column) in target_columns.iter().enumerate() {
@@ -462,10 +659,16 @@ impl<'a> MappedMySqlColumns<'a> {
             })?;
             values.push(mapped);
         }
-        Ok(Self {
-            names: target_columns,
-            values,
-        })
+        Ok(Self { values })
+    }
+
+    /// The values one row binds, in mapping order.
+    fn row_values(&self, row: usize) -> Vec<Value> {
+        let mut values = Vec::with_capacity(self.values.len());
+        for column in &self.values {
+            values.push(column.value(row));
+        }
+        values
     }
 }
 
@@ -483,9 +686,16 @@ enum MappedMySqlColumn<'a> {
     F32(&'a Float32Array),
     F64(&'a Float64Array),
     String(&'a StringArray),
+    /// Octets, bound as they are, which a binary column stores unchanged.
+    Bytes(&'a BinaryArray),
     Datetime(&'a TimestampNanosecondArray),
     List {
         offsets: &'a ListArray,
+        elements: Box<MappedMySqlColumn<'a>>,
+    },
+    /// A fixed-size array, such as an array literal, whose rows all hold the same element count.
+    FixedList {
+        list: &'a FixedSizeListArray,
         elements: Box<MappedMySqlColumn<'a>>,
     },
 }
@@ -529,8 +739,18 @@ impl<'a> MappedMySqlColumn<'a> {
         if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
             return Some(Self::String(values));
         }
+        if let Some(values) = array.as_any().downcast_ref::<BinaryArray>() {
+            return Some(Self::Bytes(values));
+        }
         if let Some(values) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
             return Some(Self::Datetime(values));
+        }
+        if let Some(list) = array.as_any().downcast_ref::<FixedSizeListArray>() {
+            let elements = Self::new(list.values())?;
+            return Some(Self::FixedList {
+                list,
+                elements: Box::new(elements),
+            });
         }
         let values = array.as_any().downcast_ref::<ListArray>()?;
         let elements = Self::new(values.values())?;
@@ -561,6 +781,7 @@ impl<'a> MappedMySqlColumn<'a> {
             Self::F32(values) => Value::Double(f64::from(values.value(row))),
             Self::F64(values) => Value::Double(values.value(row)),
             Self::String(values) => Value::Bytes(values.value(row).as_bytes().to_vec()),
+            Self::Bytes(values) => Value::Bytes(values.value(row).to_vec()),
             Self::Datetime(values) => Value::Bytes(
                 DateTime::from_timestamp_nanos(values.value(row))
                     .fixed_offset()
@@ -569,7 +790,9 @@ impl<'a> MappedMySqlColumn<'a> {
             ),
             // A list binds as the JSON text of its elements, which is what a JSON column reads and
             // a text column stores.
-            Self::List { .. } => Value::Bytes(self.json_value(row).to_string().into_bytes()),
+            Self::List { .. } | Self::FixedList { .. } => {
+                Value::Bytes(self.json_value(row).to_string().into_bytes())
+            }
         }
     }
 
@@ -590,6 +813,9 @@ impl<'a> MappedMySqlColumn<'a> {
             Self::F32(values) => serde_json::Value::from(values.value(row)),
             Self::F64(values) => serde_json::Value::from(values.value(row)),
             Self::String(values) => serde_json::Value::from(values.value(row)),
+            // Inside JSON, octets are the canonical padded base64 text every Nervix JSON value
+            // carries them as.
+            Self::Bytes(values) => serde_json::Value::from(BASE64.encode(values.value(row))),
             Self::Datetime(values) => serde_json::Value::from(
                 DateTime::from_timestamp_nanos(values.value(row))
                     .fixed_offset()
@@ -606,15 +832,28 @@ impl<'a> MappedMySqlColumn<'a> {
                     )],
                 )
                 .assured(non_negative);
-                let mut items = Vec::with_capacity(end.checked_sub(start).assured(
-                    "Arrow list offsets increase, so a row ends no earlier than it starts",
-                ));
-                for element in start..end {
-                    items.push(elements.json_value(element));
-                }
-                serde_json::Value::Array(items)
+                elements.json_array(start..end)
+            }
+            Self::FixedList { list, elements } => {
+                let non_negative = "Arrow builds fixed-size list offsets and widths as \
+                                    non-negative element counts";
+                let start = usize::try_from(list.value_offset(row)).assured(non_negative);
+                let width = usize::try_from(list.value_length()).assured(non_negative);
+                let end = start
+                    .checked_add(width)
+                    .assured("a fixed-size list row ends inside its element array");
+                elements.json_array(start..end)
             }
         }
+    }
+
+    /// The elements `elements` of this column as one JSON array.
+    fn json_array(&self, elements: Range<usize>) -> serde_json::Value {
+        let mut items = Vec::with_capacity(elements.len());
+        for element in elements {
+            items.push(self.json_value(element));
+        }
+        serde_json::Value::Array(items)
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -631,8 +870,10 @@ impl<'a> MappedMySqlColumn<'a> {
             Self::F32(values) => values.is_null(row),
             Self::F64(values) => values.is_null(row),
             Self::String(values) => values.is_null(row),
+            Self::Bytes(values) => values.is_null(row),
             Self::Datetime(values) => values.is_null(row),
             Self::List { offsets, .. } => offsets.is_null(row),
+            Self::FixedList { list, .. } => list.is_null(row),
         }
     }
 }
@@ -641,6 +882,7 @@ impl<'a> MappedMySqlColumn<'a> {
 mod tests {
     use std::sync::Arc as StdArc;
 
+    use arrow_array::builder::{BinaryBuilder, ListBuilder};
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
 
     use super::*;
@@ -654,6 +896,10 @@ mod tests {
             );
         }
         assert!(is_record_server_error("08S01", 1153));
+        assert!(
+            is_record_server_error("HY000", 3819),
+            "a violated CHECK constraint names the rows of one insert even under HY000"
+        );
         assert!(
             is_record_server_error("HY000", 1366),
             "invalid string values are definitive record errors even when MySQL reports HY000"
@@ -722,6 +968,161 @@ mod tests {
                 Value::Double(2.0),
                 Value::Bytes(b"second".to_vec()),
                 Value::NULL,
+            ]
+        );
+    }
+    /// Stands in for the pool where a test never opens a connection.
+    struct NoConnections;
+
+    #[async_trait]
+    impl MySqlConnections for NoConnections {
+        async fn connection(&self) -> SinkPublishResult<MySqlConnection> {
+            Err(Report::new(SinkPublishError::NotInitialized {
+                sink: MYSQL,
+            }))
+        }
+    }
+
+    fn test_sink(conflict_action: MySqlConflictAction) -> MySqlSink {
+        MySqlSink {
+            connections: Box::new(NoConnections),
+            table: TableName::parse("limit_a_t0192a1b2c3d4e5f60718293a4b5c6d7e")
+                .expect("the test table name is valid"),
+            conflict_action,
+            limits: RowRequestLimits::from(EmitterBatchPolicy {
+                max_messages: nervix_models::BatchMessageLimit::try_from(3_u32)
+                    .expect("three is a valid message limit"),
+                max_size: "1KiB".parse().expect("1KiB is a valid size"),
+            }),
+        }
+    }
+
+    /// The measured size is the statement a candidate executes and every value exactly as the
+    /// binary protocol encodes it, so a scenario's `MAX SIZE` can be written to the byte.
+    #[test]
+    fn measures_the_statement_and_the_values_the_protocol_encodes() {
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("seq", DataType::Int64, true),
+            Field::new("note", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                StdArc::new(Int64Array::from(vec![Some(1), Some(2), Some(3), None])),
+                StdArc::new(StringArray::from(vec![
+                    Some("abc"),
+                    Some("abc"),
+                    Some("abc"),
+                    Some("a longer note"),
+                ])),
+            ],
+        )
+        .expect("the mapped batch should build");
+        let names = ["seq".to_string(), "note".to_string()];
+        let columns = MappedMySqlColumns::new(&batch, &names).expect("columns should be mapped");
+        let members = [0, 1, 2, 3].map(|row| MappedSinkMember { carrier: 0, row });
+        for conflict_action in [
+            MySqlConflictAction::None,
+            MySqlConflictAction::DoNothing,
+            MySqlConflictAction::DoUpdate,
+        ] {
+            let statement = test_sink(conflict_action)
+                .insert_statement(&names)
+                .expect("the insert statement builds");
+            let values = BoundValues::bind(std::slice::from_ref(&columns), &members, names.len());
+            for range in [0..1, 0..3, 1..4, 3..4] {
+                let mut encoded = 0;
+                for member in &members[range.clone()] {
+                    for value in columns.row_values(member.row) {
+                        encoded += value.bin_len();
+                    }
+                }
+                let sql = statement.sql(range.len());
+                let expected =
+                    u64::try_from(sql.len()).expect("a test statement fits u64") + encoded;
+                assert_eq!(statement.measure(&values, range), expected, "{sql}");
+            }
+        }
+        let statement = test_sink(MySqlConflictAction::None)
+            .insert_statement(&names)
+            .expect("the insert statement builds");
+        let values = BoundValues::bind(&[columns], &members, names.len());
+        assert_eq!(statement.measure(&values, 0..3), 137);
+        assert_eq!(statement.measure(&values, 0..2), 117);
+    }
+
+    #[test]
+    fn a_statement_carries_the_rows_its_placeholders_allow() {
+        assert_eq!(
+            MultiRowInsert::rows_per_statement(5).map(NonZeroUsize::get),
+            Some(13_107)
+        );
+        assert_eq!(
+            MultiRowInsert::rows_per_statement(1).map(NonZeroUsize::get),
+            Some(MAX_PLACEHOLDERS)
+        );
+        assert_eq!(
+            MultiRowInsert::rows_per_statement(MAX_PLACEHOLDERS + 1),
+            None
+        );
+        assert_eq!(MultiRowInsert::rows_per_statement(0), None);
+    }
+
+    #[test]
+    fn an_insert_takes_the_values_of_its_rows_in_order() {
+        let schema = StdArc::new(Schema::new(vec![Field::new("seq", DataType::Int64, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![StdArc::new(Int64Array::from(vec![
+                Some(1),
+                Some(2),
+                Some(3),
+            ]))],
+        )
+        .expect("the mapped batch should build");
+        let names = ["seq".to_string()];
+        let columns = MappedMySqlColumns::new(&batch, &names).expect("columns should be mapped");
+        let members = [2, 0, 1].map(|row| MappedSinkMember { carrier: 0, row });
+        let mut values = BoundValues::bind(&[columns], &members, names.len());
+
+        assert_eq!(values.take(1..3), vec![Value::Int(1), Value::Int(2)]);
+        assert_eq!(values.take(0..1), vec![Value::Int(3)]);
+    }
+
+    #[test]
+    fn binds_bytes_as_they_are_and_arrays_as_json_text() {
+        let pairs = FixedSizeListArray::try_new(
+            StdArc::new(Field::new("item", DataType::Int64, false)),
+            2,
+            StdArc::new(Int64Array::from(vec![1, 10])),
+            None,
+        )
+        .expect("one row of two elements builds");
+        let mut blobs = ListBuilder::new(BinaryBuilder::new());
+        blobs.values().append_value(b"\x00\xff");
+        blobs.append(true);
+        let blobs = blobs.finish();
+        let raw = BinaryArray::from(vec![b"\x00\xff".as_slice()]);
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("pair", pairs.data_type().clone(), true),
+            Field::new("blobs", blobs.data_type().clone(), true),
+            Field::new("raw", DataType::Binary, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![StdArc::new(pairs), StdArc::new(blobs), StdArc::new(raw)],
+        )
+        .expect("the mapped batch should build");
+        let names = ["pair".to_string(), "blobs".to_string(), "raw".to_string()];
+
+        let columns = MappedMySqlColumns::new(&batch, &names).expect("columns should be mapped");
+
+        assert_eq!(
+            columns.row_values(0),
+            vec![
+                Value::Bytes(b"[1,10]".to_vec()),
+                Value::Bytes(br#"["AP8="]"#.to_vec()),
+                Value::Bytes(b"\x00\xff".to_vec()),
             ]
         );
     }

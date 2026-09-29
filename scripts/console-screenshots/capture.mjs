@@ -257,6 +257,7 @@ async function captureConsole(page, output) {
   await page.fill(".prompt-row input", "LIST DOMAINS;");
   await page.press(".prompt-row input", "Enter");
   await waitForText(page, ".terminal", `${DOMAIN} pace=UNPACED status=STOPPED`);
+  await waitForText(page, ".domain-clock", "STOPPED");
 
   // The whole pipeline is wider than the panel at full zoom, so frame it first.
   await page.click(".zoom-group button[title='Reset zoom']");
