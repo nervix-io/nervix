@@ -26,6 +26,7 @@ are in [Message Errors](./processors.md#message-errors) and [Error Routes](./qui
 | Materialized state and lookups | Dependency resolution, field and schema checks, defaults, lookup evaluation, snapshot opening, and state exchange | Use a declared absence policy only for unavailable state; report a genuine failed read or invalid state. |
 | Ingest grouping and relay batching | Route grouping, branch-key construction, Arrow batch assembly, relay admission, and delivery failures | Keep the affected concrete branch and fail or retry the correct in-memory attempt. |
 | Registry, placement, and planning | Invalid domain models, references, capabilities, branch relationships, flush contracts, schedules, and placements | Reject the command before activating an invalid graph or refuse a relocation plan. |
+| Backup archive format | Records that do not encode or exceed their size limit, and archives whose structure, record headers, record values, section lengths or digests do not match what the manifest declares | Refuse to write an archive, or refuse a whole archive naming the section and the check that failed. |
 | Interconnect | Authentication, framing, limits, transport, and the class and subject of a remote operation failure | Distinguish a transport failure from a peer's rejection, absence, unreadiness, or executed failure. |
 | Control plane and public edges | Transaction and lifecycle results, command dispositions, session diagnostics, and HTTP response selection | Return a recoverable command outcome or an appropriate response to a client or operator. |
 
@@ -131,6 +132,31 @@ body size and the limit as typed fields and becomes a record rejection of that m
 `external` and operation `publish`, reaching every member of a batch message. Any other close, a
 lost connection, and a close whose reason never arrives fail the attempt as an infrastructure
 failure, which the emitter retries on its backoff.
+
+A backup's failures are owned where they are decided. The archive format reports an
+`ArchiveWriteError` for a record that does not encode, a record above the 64 MiB record limit, a
+section path a tar header cannot name, or bytes that differ from the manifest entry they were
+written for, and an `ArchiveReadError` for an archive whose first entry is not the manifest, a
+record with a foreign magic, kind, or format version, an invalid record value, a missing,
+misplaced, unexpected, or out-of-order section, and a section whose length or digest differs from
+the manifest. Each names the section path and the check as typed fields, and none carries section
+bytes. The control plane's backup execution reports a `BackupError`: no configuration yet, no
+selected or no existing domain, models that are not a valid graph or do not render or parse back to
+themselves, a clock mapping that cannot be projected, a resource version that is missing on the
+leader or differs from its catalog entry, a record that does not encode, and an archive the
+staging area cannot hold. The failed command's message is `backup failed:` followed by that
+error's text. A download the server does not serve is answered with a typed refusal,
+`InvalidRequest`, `NotRetained`, `Expired`, `NotOwner` or `ReadFailed`, or with a redirect to the
+leader, and a call without valid credentials ends with `UNAUTHENTICATED`. The client reports a
+`BackupDownloadError` beneath `ClientError::BackupDownload`, which carries the backup's execution
+reference: the server's refusal, a transport failure, a stalled or interrupted stream, a missing
+leader or a redirect loop, frames out of order or undecodable, an archive that differs from the
+backup's summary, or a local write failure. Only a transport failure, a stall, and an interrupted
+stream are retried, from the archive's first byte. The C binding classifies a refusal as
+`NX_ERROR_REJECTED`, a transport failure as `NX_ERROR_TRANSPORT`, a mismatched or malformed
+archive as `NX_ERROR_PROTOCOL`, and a write failure as `NX_ERROR_INVALID_ARGUMENT`, and names the
+execution reference so a host can run the backup again. No diagnostic of a backup includes archive
+contents, password hashes, or resource bytes.
 
 The vocabulary is the innermost owner, and its Model operations report the same way. An alteration
 is applied to a copy of the stored Model, which replaces the original only when every operation

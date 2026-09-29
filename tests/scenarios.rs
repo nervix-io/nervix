@@ -136,6 +136,7 @@ use crate::common::{
     tcp_forwarder::TcpForwarders,
 };
 
+mod backup;
 mod common;
 mod domain_clock_attachment;
 mod ingestion_time;
@@ -275,6 +276,14 @@ struct ScenarioWorld {
     last_clock_reply: Option<nervix_client_wire::ReplyBody>,
     /// When the last `START AT NOW` a scenario sent ran.
     clock_start_window: Option<domain_clock_attachment::ClockStartWindow>,
+    /// The directory a scenario's backup archives are written to.
+    backup_directory: Option<TempDir>,
+    /// The backup a scenario ran through its own session, whose archive it downloads itself.
+    last_backup: Option<backup::TestBackup>,
+    /// How the last backup download a scenario shaped itself ended.
+    last_backup_download: Option<crate::common::raw_session::TestDownloadEnd>,
+    /// The outcome of the last command a scenario sent through its own session.
+    last_session_command: Option<nervix_client_wire::CommandOutcome>,
     /// Candidates collected by a public session completion paging scenario.
     last_completion_values: Vec<String>,
     last_completion_page_count: usize,

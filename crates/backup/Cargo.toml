@@ -1,0 +1,24 @@
+[package]
+description = "The public Nervix backup archive: its manifest, sections and records, and the manifest-first tar layout it is written and streamed in"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-backup"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+arch-into = { workspace = true }
+blake3 = { workspace = true }
+error-stack = { workspace = true }
+meticulous = { workspace = true }
+nervix-models = { workspace = true }
+rkyv = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
+tar = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+bolero = { workspace = true }
+rstest = { workspace = true }

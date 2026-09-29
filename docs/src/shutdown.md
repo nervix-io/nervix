@@ -688,6 +688,11 @@ A new leader reconciles durable handoff preparations after a coordinator or part
 described above. Resource uploads that were staged but never promoted are removed at startup, so an
 upload interrupted by a forced ending leaves no partial version behind.
 
+A backup archive a node retains for download is a temporary file in its staging area and is never
+durable. Stopping the node, gracefully or not, loses it: a later download is refused, while the
+backup's recorded outcome stays retained under its execution reference. See
+[Backup And Restore](./backup-and-restore.md#downloading-the-archive).
+
 ### Domain Time
 
 The paced mapping, lifecycle generation, and authority fence recover from consensus state. Tick

@@ -93,6 +93,7 @@ fn requires_request_domain(statement: &Statement) -> bool {
         statement,
         Statement::CreateDomain(_)
             | Statement::CreateUser(_)
+            | Statement::Backup(_)
             | Statement::StopDomain(_)
             | Statement::ShowClusterStatus(_)
             | Statement::ShowTransactions(_)
@@ -109,6 +110,7 @@ pub(in crate::application) fn requires_existing_domain(statement: &Statement) ->
         statement,
         Statement::CreateDomain(_)
             | Statement::CreateUser(_)
+            | Statement::Backup(_)
             | Statement::StopDomain(_)
             | Statement::ShowClusterStatus(_)
             | Statement::ShowTransactions(_)
@@ -166,6 +168,7 @@ pub(in crate::application) fn is_persistent_statement(statement: &Statement) -> 
                 | Statement::DrainNode(_)
                 | Statement::Relocate(_)
                 | Statement::ResetWasmState(_)
+                | Statement::Backup(_)
         )
 }
 
@@ -2068,6 +2071,13 @@ impl SessionServiceImpl {
             ClientStatement::UploadResource(upload) => {
                 return self.upload_resource_command(upload).await;
             }
+            ClientStatement::DescribeBackup(_) => {
+                return command_error(
+                    "DESCRIBE BACKUP reads an archive on the client's machine and runs in the \
+                     client"
+                        .to_string(),
+                );
+            }
             ClientStatement::CreateSubscription(_) => {
                 return command_error(
                     "CREATE SUBSCRIPTION must be sent as a subscribe request".to_string(),
@@ -2139,6 +2149,9 @@ impl SessionServiceImpl {
                 .await
             }
             Statement::UploadResource(upload) => self.upload_resource_command(upload).await,
+            Statement::Backup(_) => command_error(
+                "BACKUP runs only as an admitted command under its execution reference".to_string(),
+            ),
             Statement::StartDomain(start) => {
                 let domain = domain
                     .as_ref()

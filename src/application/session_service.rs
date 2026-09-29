@@ -30,8 +30,8 @@ use nervix_models::{
 use nervix_nspl::{
     Token, Word,
     client_statement::{
-        ClientStatement, CompletionExpectation, parse_client_statement_sources,
-        suggest_client_expectations, upload_resource_path_fragment, upload_resource_path_range,
+        ClientStatement, CompletionExpectation, local_path_fragment,
+        parse_client_statement_sources, suggest_client_expectations,
     },
     lex,
     schema::{Diagnostic as ParseDiagnostic, ParseFromSourceError},
@@ -48,6 +48,7 @@ use triomphe::Arc;
 
 use super::{
     authentication::{AuthRateLimiter, BasicAuthCredentials},
+    backup::ServerRetainedBackups,
     command_execution::{
         CommandAdmission, CommandExecutionOwners, CommandExecutionPolicy, PersistentCommandRequest,
     },
@@ -196,6 +197,9 @@ pub(in crate::application) struct SessionServiceInner {
     /// Repeated observations of the same missing version join that one installation.
     pub(in crate::application) resource_replication_executions:
         DashMap<ResourceId, StdArc<AsyncMutex<()>>, RandomState>,
+    /// The archives this node's backups assembled, until a download collects each or its retry
+    /// validity ends.
+    pub(in crate::application) retained_backups: ServerRetainedBackups,
 }
 
 /// The node-local handles that install the newest admitted runtime state.
@@ -1442,19 +1446,17 @@ impl SessionServiceImpl {
             })
             .collect::<Vec<_>>();
 
-        if let Some(fragment) = upload_resource_path_fragment(req.input(), cursor) {
-            let range = upload_resource_path_range(req.input(), cursor)
-                .assured("a detected upload path has a source range");
+        if let Some(local_path) = local_path_fragment(req.input(), cursor) {
             response_suggestions.push(Suggestion {
-                value: fragment.to_string(),
+                value: local_path.fragment.to_string(),
                 kind: SuggestionKind::LocalDirectoryLookup,
                 edit: TextEdit {
-                    start: u32::try_from(range.start)
+                    start: u32::try_from(local_path.range.start)
                         .assured("the local path fragment is a slice of the bounded request"),
-                    end: u32::try_from(range.end).assured(
+                    end: u32::try_from(local_path.range.end).assured(
                         "a completion source fits the session frame limit below 2^32 bytes",
                     ),
-                    replacement: fragment.to_string(),
+                    replacement: local_path.fragment.to_string(),
                 },
             });
         }

@@ -208,8 +208,10 @@ header writes.
 
 Each suggestion carries a display value, a kind, and a text edit with UTF-8 byte start and end
 offsets and replacement text. Clients apply that edit to the original input; they do not infer the
-range from the display value. A local upload path suggestion asks the native CLI to search its own
-filesystem and carries the path fragment's source range. The server sorts and deduplicates the
+range from the display value. A local path suggestion asks the native CLI to search its own
+filesystem and carries the path fragment's source range. The grammar offers one wherever a
+statement names a file or directory on the client's machine: the directory of `UPLOAD RESOURCE`,
+the destination of `BACKUP`, and the archive `DESCRIBE BACKUP` reads. The server sorts and deduplicates the
 candidate set before returning a bounded page. A continuation binds the input, cursor, domain,
 configuration revision, and candidate set; if any of these changes, the server returns
 `StaleContext` instead of silently paging through a different set.
@@ -222,6 +224,34 @@ an empty candidate list.
 
 Suggestions are read-only session requests. They can complete while a command is still pending;
 they neither enter the command admission gate nor change the transaction queue.
+
+## Backup Downloads
+
+The session service's `DownloadBackup` method is a server-streaming gRPC call that sends the
+archive of one completed backup. Its single request names the backup's execution reference. The
+call authenticates from its metadata before it reads the request, like every session method, and a
+call without valid credentials ends with `UNAUTHENTICATED`.
+
+A node that retains the archive answers with a start frame carrying the archive's total size and
+BLAKE3 digest, then the archive's bytes in chunks of at most 256 KiB, then a completion frame. It
+reads the archive only as fast as the client takes frames, at most four frames ahead, so a slow
+client holds back the reads instead of growing what the node holds for it. Every other answer is a
+single frame:
+
+| Answer | When |
+| --- | --- |
+| Refused `InvalidRequest` | The request does not decode. |
+| Refused `Expired` | The retry validity of the execution reference has ended. |
+| Refused `NotOwner` | Another user ran the backup. |
+| Redirect to the leader | The node does not retain the archive and is not the leader. |
+| Refused `NotRetained` | The leader does not retain the archive: a download already collected it, the node that assembled it restarted, or the reference names no backup. |
+| Refused `ReadFailed` | The node could not read the archive it retains; the archive stays retained. |
+
+The first download whose completion frame was queued collects the archive, and a later download of
+it is refused. A download whose client goes away releases only its own hold, so the archive stays
+retained for the client to download again. The call is not bounded by the request timeout; the
+Rust client bounds the wait for each frame by it instead, and starts a failed download again from
+the first byte. [Backup And Restore](backup-and-restore.md) describes backups and their archives.
 
 ## Structured Choices
 
