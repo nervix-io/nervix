@@ -8,14 +8,9 @@
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::ClusterNodeName;
+use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use nervix_recovery::Discarded as _;
-use shuttle::{
-    sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        mpsc,
-    },
-    thread,
-};
+use shuttle::{sync::mpsc, thread};
 use triomphe::Arc;
 
 use super::{

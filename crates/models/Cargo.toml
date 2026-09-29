@@ -23,6 +23,7 @@ humantime = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
 meticulous = { workspace = true }
 nervix-approx-into = { workspace = true }
+nervix-primitives = { workspace = true }
 nonzero_ext = { workspace = true }
 rkyv = { workspace = true }
 serde = { workspace = true }

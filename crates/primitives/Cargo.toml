@@ -1,0 +1,28 @@
+[package]
+description = "The execution-sensitive primitives every Nervix crate obtains through one boundary, selected for ordinary execution or for a model checker"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-primitives"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Operating-system threads. A capability of native targets only: enabling it for a wasm target is a
+# compile error rather than a thread that fails when it starts.
+native = []
+# The execution modes. Exactly one may be enabled in a dependency graph, and every crate that owns a
+# mode feature forwards it here, so the whole graph uses one backend. Ordinary execution is the
+# absence of all three.
+loom = ["dep:loom"]
+shuttle = ["dep:shuttle"]
+turmoil = []
+
+[dependencies]
+loom = { workspace = true, optional = true }
+shuttle = { workspace = true, optional = true }
+
+[dev-dependencies]
+meticulous = { workspace = true }

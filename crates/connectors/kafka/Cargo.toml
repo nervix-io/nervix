@@ -13,6 +13,7 @@ default = []
 shuttle = [
   "dep:shuttle-tokio",
   "nervix-connector/shuttle",
+  "nervix-primitives/shuttle",
   "shuttle-tokio/shuttle",
 ]
 testing = []
@@ -25,6 +26,7 @@ humantime = { workspace = true }
 meticulous = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-models = { workspace = true }
+nervix-primitives = { workspace = true }
 rdkafka = { workspace = true, features = [
   "tokio",
   "curl-static",

@@ -1287,10 +1287,9 @@ pub(super) async fn handle_correlator_timeout_action(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
-
     use ahash::HashMap;
     use nervix_models::ParseAsType;
+    use nervix_primitives::sync::atomic::Ordering;
     use triomphe::Arc;
 
     use super::*;

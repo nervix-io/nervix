@@ -47,6 +47,7 @@ shuttle = [
   "nervix-consensus/shuttle",
   "nervix-execution/shuttle",
   "nervix-interconnect/shuttle",
+  "nervix-primitives/shuttle",
   "nervix-wasm/shuttle",
   "shuttle-dashmap/shuttle",
   "shuttle-parking-lot/shuttle",
@@ -138,6 +139,7 @@ nervix-interconnect = { workspace = true }
 nervix-jaq = { workspace = true }
 nervix-models = { workspace = true, features = ["arrow"] }
 nervix-nspl = { workspace = true }
+nervix-primitives = { workspace = true }
 nervix-recovery = { workspace = true }
 nervix-roto = { workspace = true }
 nervix-simd-kernels = { workspace = true }
@@ -331,7 +333,9 @@ members = [
   "crates/nervix-vm",
   "crates/nspl",
   "crates/nspl-format",
+  "crates/model-harness",
   "crates/models",
+  "crates/primitives",
   "crates/recovery",
   "crates/simd-kernels",
   "crates/test-environment",
@@ -482,6 +486,10 @@ js-sys = "0.3"
 lapin = "4.12.0"
 leptos = { version = "0.8.19", features = ["csr"] }
 libc = "0.2"
+# The model checker for memory-ordering claims. Only `nervix-primitives` selects its atomics and
+# threads, and only `nervix-model-harness` runs its models; both take it as an optional dependency,
+# so no ordinary dependency graph contains it.
+loom = "0.7.2"
 md5 = "0.8"
 # `disallow-todo-on-release` is not enabled: the published crate gates the `todo` method on the
 # trait implementations but not on the trait declarations, so the feature fails every release build
@@ -529,10 +537,12 @@ nervix-execution = { package = "nervix-execution", path = "crates/execution" }
 nervix-expiry-map = { package = "nervix-expiry-map", path = "crates/expiry-map" }
 nervix-interconnect = { package = "nervix-interconnect", path = "crates/interconnect" }
 nervix-jaq = { package = "nervix-jaq", path = "crates/jaq" }
+nervix-model-harness = { package = "nervix-model-harness", path = "crates/model-harness" }
 nervix-models = { package = "nervix-models", path = "crates/models" }
 nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
   "server",
 ] }
+nervix-primitives = { package = "nervix-primitives", path = "crates/primitives" }
 nervix-recovery = { package = "nervix-recovery", path = "crates/recovery" }
 nervix-roto = { package = "nervix-roto", path = "crates/nervix-roto" }
 nervix-simd-kernels = { package = "nervix-simd-kernels", path = "crates/simd-kernels" }

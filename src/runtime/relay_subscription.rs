@@ -16,7 +16,7 @@
 //! Declaring a different definition, or withdrawing the relay, therefore closes every subscriber
 //! first; each drains what it already received and then sees its receiver end.
 
-use std::sync::atomic::fence;
+use nervix_primitives::sync::atomic::fence;
 
 use super::*;
 

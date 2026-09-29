@@ -19,12 +19,10 @@ use std::{
     collections::BTreeMap,
     io,
     net::{IpAddr, SocketAddr},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
 };
 
+use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use nervix_recovery::Discarded as _;
 use tokio::{
     io::copy_bidirectional,

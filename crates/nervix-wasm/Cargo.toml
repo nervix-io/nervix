@@ -13,6 +13,7 @@ default = []
 shuttle = [
   "dep:shuttle-parking-lot",
   "dep:shuttle-tokio",
+  "nervix-primitives/shuttle",
   "shuttle-parking-lot/shuttle",
   "shuttle-tokio/shuttle",
 ]
@@ -24,6 +25,7 @@ error-stack = { workspace = true }
 flatbuffers = { workspace = true }
 meticulous = { workspace = true }
 nervix-models = { workspace = true }
+nervix-primitives = { workspace = true }
 nervix-recovery = { workspace = true }
 nervix-wasm-protocol = { workspace = true }
 nonzero_ext = { workspace = true }
