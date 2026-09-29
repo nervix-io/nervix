@@ -120,6 +120,10 @@ the download of a backup's archive; see [Backup Downloads](#backup-downloads).
 - **T-2.** A server address MUST be an `http` or `https` origin whose path is `/` and that has no
   query, fragment, or user information, as an advertised `grpc_uri` is. A client that started over
   `https` MUST NOT follow a redirect or a seed to `http`.
+  A native client that resolves a hostname to one or more addresses MUST retain the original URI
+  authority and verify the TLS certificate against that hostname on every connection, including
+  redirects and reconnects. DNS and address attempts MUST fit within the client's connection
+  deadline.
 - **T-3.** A WebSocket client MUST connect to `/console/ws` on the leader's console endpoint, using
   `ws` for an `http` endpoint and `wss` for an `https` one, and MUST send binary messages only. It
   MUST treat a close with code `1003`, `1007`, or `1009` as a defect in what it sent.
@@ -184,7 +188,14 @@ the download of a backup's archive; see [Backup Downloads](#backup-downloads).
   domain followed by a relay `Model` reference for relay fields; domain followed by a codec
   `Model` reference for the fields of its output schema; and domain followed by a
   `Resource` reference for completed resource versions. It MUST use the distinct wire-schema
-  targets when a form requires an exact format.
+  targets when a form requires an exact format. An ingestor source-reference target MUST carry a
+  domain and MUST match the selected source family; the endpoint source target returns endpoints
+  and the others return clients of the matching transport. The ingestor codec target carries a
+  domain and returns only decoding codecs. Its unbranched relay target carries a domain, while its
+  branched relay target carries a domain followed by a branch `Model` reference. Ingestor error
+  relays use the unbranched target. A branch-field lookup carries a domain followed by a branch
+  `Model` reference. Decoded and relay output fields
+  use the codec-field and relay-field targets above.
 - **Q-2.** A client MUST use the returned `ChoiceValue`, rather than its presentation label, for
   selection. For completed resource versions it MUST handle `ResourceVersionNumber` and
   `LatestResourceVersion` as distinct values. It MUST NOT offer a version absent from the result as

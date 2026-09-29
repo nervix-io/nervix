@@ -455,6 +455,9 @@ state; see [Forced Recovery](./wasm-state.md#forced-recovery).
 
 The no-replacement path is explicit in the log: `no live schedulable replacement node remains;
 admitted work completes in place`.
+When a follower contacts the leader's session service to request or clear a drain, a named leader
+endpoint resolves through the follower node's loaded resolver. DNS and connection attempts remain
+within the existing drain and shutdown deadlines.
 
 ## Connector Contracts
 

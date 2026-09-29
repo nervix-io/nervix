@@ -155,10 +155,11 @@ impl<'a> ByteGen<'a> {
     }
 
     fn raw_name(&mut self) -> String {
-        // Keep identifiers parser-valid and deterministic after canonical render.
+        // Prefix generated names so letter combinations cannot become grammar keywords.
         let len = usize::from(self.next_u8());
         let len = (len % 8) + 1;
-        let mut s = String::with_capacity(len);
+        let mut s = String::with_capacity(len + 2);
+        s.push_str("n_");
         for i in 0..len {
             let raw = self.next_u8();
             let ch = if i == 0 {

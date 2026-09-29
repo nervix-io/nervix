@@ -12,6 +12,7 @@
 use std::{
     collections::BTreeSet,
     io::{self, Write},
+    net::SocketAddr,
     ops::Range,
     path::{Path, PathBuf},
     sync::Mutex as StdMutex,
@@ -25,13 +26,15 @@ use clap_complete::{Shell, generate};
 use error_stack::{Report as StackReport, ResultExt as _};
 use nervix_client_core::{
     AutocompleteOutcome, AutocompleteSuggestion, Client, ClientError as CoreClientError,
-    CommandDisposition, CommandExecutionReference, CommandOutcome, ConnectOptions, Diagnostic,
-    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockDetachDisposition,
-    DomainClockDetachOutcome, DomainClockEvent, DomainName, LeaderRedirect, NoticeLevel,
-    ServerEvent, SourceSpan, StatementDisposition, StatementOutcome, SubscriptionDeliveryBehavior,
-    SubscriptionEvent, SubscriptionRequest, SuggestionKind as ClientSuggestionKind, TlsRequirement,
-    TransactionLifecycle, TransactionStatus,
+    CommandDisposition, CommandExecutionReference, CommandOutcome, ConnectDns, ConnectOptions,
+    Diagnostic, DomainClockAttachDisposition, DomainClockAttachOutcome,
+    DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockEvent, DomainName,
+    LeaderRedirect, NoticeLevel, ServerEvent, SourceSpan, StatementDisposition, StatementOutcome,
+    SubscriptionDeliveryBehavior, SubscriptionEvent, SubscriptionRequest,
+    SuggestionKind as ClientSuggestionKind, TlsRequirement, TransactionLifecycle,
+    TransactionStatus,
 };
+use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_models::{ClusterNodeName, InspectionFormat, Statement};
 use nervix_nspl::client_statement::{
     ClientStatement, local_path_fragment, parse_client_statements, parse_upload_resource_query,
@@ -73,6 +76,19 @@ struct Args {
     /// PEM certificate authority used to verify the server certificate
     #[arg(long)]
     tls_ca_cert: Option<PathBuf>,
+    /// Resolv.conf-format file used by native session hostname resolution
+    #[arg(long, env = "NERVIX_DNS_RESOLVER_CONFIG", default_value = nervix_dns::SYSTEM_RESOLVER_CONFIGURATION)]
+    dns_resolver_config: PathBuf,
+    /// Hosts-format file consulted before DNS
+    #[arg(long, env = "NERVIX_DNS_HOSTS_FILE", default_value = nervix_dns::SYSTEM_HOSTS_FILE)]
+    dns_hosts_file: PathBuf,
+    /// Name server addresses with ports, replacing those in the resolver configuration
+    #[arg(
+        long = "dns-name-server",
+        env = "NERVIX_DNS_NAME_SERVERS",
+        value_delimiter = ','
+    )]
+    dns_name_servers: Vec<SocketAddr>,
     /// Domain the session starts in
     #[arg(long, default_value = "default")]
     domain: DomainName,
@@ -962,6 +978,15 @@ fn connect_options_from_args(args: &Args) -> Result<ConnectOptions, StackReport<
             .map_err(|_| StackReport::new(ClientError::ReadPassword))?,
     };
     Ok(ConnectOptions {
+        dns: ConnectDns::Configuration(DnsConfiguration {
+            resolver_configuration: args.dns_resolver_config.clone(),
+            hosts_file: args.dns_hosts_file.clone(),
+            name_servers: if args.dns_name_servers.is_empty() {
+                NameServers::ResolverConfiguration
+            } else {
+                NameServers::Explicit(args.dns_name_servers.clone())
+            },
+        }),
         tls_requirement: Some(match args.tls {
             CliTlsRequirement::Preferred => TlsRequirement::Preferred,
             CliTlsRequirement::Required => TlsRequirement::Required,

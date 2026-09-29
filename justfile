@@ -638,7 +638,7 @@ coverage-visual-create output="target/visual-create.lcov": tests-deps
         --package nervix-models --package nervix-client-wire --package nervix-nspl
     cargo llvm-cov --no-report --bin nervix-web-console --package nervix-web-console
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
-    for feature in visual_create_schema visual_create_relay visual_create_codec visual_create_client_endpoint visual_create_lookup_udf; do
+    for feature in visual_create_schema visual_create_relay visual_create_codec visual_create_client_endpoint visual_create_lookup_udf visual_create_ingestor; do
         cargo llvm-cov --no-report --features testing --package nervix-server \
             --test scenarios -- --input "tests/features/web-console/${feature}.feature" \
             --concurrency 1 --retry 0
@@ -681,6 +681,9 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --all-targets \
         --package nervix-dns \
+        --package nervix-client-core \
+        --package nervix-client-ffi \
+        --package nervix-cli \
         --package nervix-connector \
         --package nervix-connector-http \
         --package nervix-connector-prometheus \
@@ -693,6 +696,8 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
         --package nervix-connector-clickhouse \
         --package nervix-connector-sqs \
         --package nervix-interconnect
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
     run_scenario() {
         cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
@@ -701,7 +706,11 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
     run_scenario tests/features/runtime/http_client_ingestion.feature 'DNS.*fixture'
     run_scenario tests/features/runtime/prometheus_ingestion.feature 'Prometheus.*delivers'
     run_scenario tests/features/runtime/sentry_emission.feature 'Sentry.*publishes'
+    run_scenario tests/features/runtime/otel_emission.feature 'OTEL.*trace'
     run_scenario tests/features/runtime/otel_emission.feature 'OTEL.*metric.*HTTP'
+    run_scenario tests/features/runtime/client_wire_qualification.feature 'Subscription.restoration'
+    run_scenario tests/features/tools/cli_session.feature 'CLI.connects.by.hostname'
+    run_scenario tests/features/tools/cli_session.feature 'CLI.rejects.a.TLS'
     run_scenario tests/features/runtime/iceberg_emission.feature 'DNS.*fixture|Iceberg.*holds.*ACK'
     run_scenario tests/features/runtime/rabbitmq_dns_resolution.feature 'RabbitMQ|AMQPS'
     run_scenario tests/features/runtime/syslog_dns_resolution.feature 'Syslog'
@@ -717,6 +726,9 @@ coverage-dns-clients-report output="target/dns-clients.lcov":
     cargo llvm-cov report --lcov --output-path {{ quote(output) }} \
         --package nervix-server \
         --package nervix-dns \
+        --package nervix-client-core \
+        --package nervix-client-ffi \
+        --package nervix-cli \
         --package nervix-connector \
         --package nervix-connector-http \
         --package nervix-connector-prometheus \

@@ -41,6 +41,11 @@ mod endpoint_draft;
 mod endpoint_editor;
 mod hash_map_draft;
 mod hash_map_editor;
+mod ingestor_draft;
+mod ingestor_editor;
+mod ingestor_route_draft;
+mod ingestor_route_editor;
+mod ingestor_source_draft;
 mod relay_draft;
 mod relay_editor;
 mod resource_binding_draft;
@@ -70,6 +75,9 @@ use endpoint_draft::{EndpointDraft, EndpointDraftError};
 use endpoint_editor::EndpointEditor;
 use hash_map_draft::{HashMapDraft, HashMapDraftError};
 use hash_map_editor::HashMapEditor;
+use ingestor_draft::{IngestorDraft, IngestorDraftError, TimestampDraft};
+use ingestor_editor::IngestorEditor;
+use ingestor_route_draft::{InheritDraft, MessageErrorDraft, RouteBranchDraft};
 use relay_draft::{RelayDraft, RelayDraftError};
 use relay_editor::RelayEditor;
 use schema_draft::{SchemaDraftError, StructuredDrafts, WireFormat};
@@ -102,6 +110,7 @@ pub(crate) enum CreateKind {
     Endpoint,
     HashMap,
     Udf,
+    Ingestor,
 }
 
 impl CreateKind {
@@ -124,6 +133,7 @@ impl CreateKind {
             Self::Endpoint => "endpoint",
             Self::HashMap => "hash map",
             Self::Udf => "Roto UDF",
+            Self::Ingestor => "ingestor",
         }
     }
 
@@ -154,7 +164,7 @@ impl CreateKind {
             | Self::Client
             | Self::Vhost
             | Self::Endpoint => None,
-            Self::HashMap | Self::Udf => None,
+            Self::HashMap | Self::Udf | Self::Ingestor => None,
         }
     }
 }
@@ -186,6 +196,16 @@ pub(crate) enum ChoiceControl {
     HashVersion,
     HashCodec,
     HashKey,
+    IngestSourceRef,
+    IngestCodec,
+    IngestTimestampField,
+    IngestInputField,
+    IngestRouteBranch,
+    IngestRouteRelay,
+    IngestOutputField,
+    IngestBranchField,
+    IngestErrorRelay,
+    IngestErrorField,
 }
 
 impl ChoiceControl {
@@ -209,6 +229,16 @@ impl ChoiceControl {
             Self::HashResource | Self::HashVersion | Self::HashCodec | Self::HashKey => {
                 CreateKind::HashMap
             }
+            Self::IngestSourceRef
+            | Self::IngestCodec
+            | Self::IngestTimestampField
+            | Self::IngestInputField
+            | Self::IngestRouteBranch
+            | Self::IngestRouteRelay
+            | Self::IngestOutputField
+            | Self::IngestBranchField
+            | Self::IngestErrorRelay
+            | Self::IngestErrorField => CreateKind::Ingestor,
         }
     }
 }
@@ -278,6 +308,16 @@ struct ChoiceControls {
     hash_version: ChoiceControlSignals,
     hash_codec: ChoiceControlSignals,
     hash_key: ChoiceControlSignals,
+    ingest_source_ref: ChoiceControlSignals,
+    ingest_codec: ChoiceControlSignals,
+    ingest_timestamp_field: ChoiceControlSignals,
+    ingest_input_field: ChoiceControlSignals,
+    ingest_route_branch: ChoiceControlSignals,
+    ingest_route_relay: ChoiceControlSignals,
+    ingest_output_field: ChoiceControlSignals,
+    ingest_branch_field: ChoiceControlSignals,
+    ingest_error_relay: ChoiceControlSignals,
+    ingest_error_field: ChoiceControlSignals,
 }
 
 impl ChoiceControls {
@@ -307,6 +347,16 @@ impl ChoiceControls {
             hash_version: ChoiceControlSignals::new(),
             hash_codec: ChoiceControlSignals::new(),
             hash_key: ChoiceControlSignals::new(),
+            ingest_source_ref: ChoiceControlSignals::new(),
+            ingest_codec: ChoiceControlSignals::new(),
+            ingest_timestamp_field: ChoiceControlSignals::new(),
+            ingest_input_field: ChoiceControlSignals::new(),
+            ingest_route_branch: ChoiceControlSignals::new(),
+            ingest_route_relay: ChoiceControlSignals::new(),
+            ingest_output_field: ChoiceControlSignals::new(),
+            ingest_branch_field: ChoiceControlSignals::new(),
+            ingest_error_relay: ChoiceControlSignals::new(),
+            ingest_error_field: ChoiceControlSignals::new(),
         }
     }
 
@@ -336,6 +386,16 @@ impl ChoiceControls {
             ChoiceControl::HashVersion => self.hash_version,
             ChoiceControl::HashCodec => self.hash_codec,
             ChoiceControl::HashKey => self.hash_key,
+            ChoiceControl::IngestSourceRef => self.ingest_source_ref,
+            ChoiceControl::IngestCodec => self.ingest_codec,
+            ChoiceControl::IngestTimestampField => self.ingest_timestamp_field,
+            ChoiceControl::IngestInputField => self.ingest_input_field,
+            ChoiceControl::IngestRouteBranch => self.ingest_route_branch,
+            ChoiceControl::IngestRouteRelay => self.ingest_route_relay,
+            ChoiceControl::IngestOutputField => self.ingest_output_field,
+            ChoiceControl::IngestBranchField => self.ingest_branch_field,
+            ChoiceControl::IngestErrorRelay => self.ingest_error_relay,
+            ChoiceControl::IngestErrorField => self.ingest_error_field,
         }
     }
 }
@@ -625,6 +685,8 @@ enum CreateDraftError {
     HashMap(#[from] HashMapDraftError),
     #[error("{0}")]
     Udf(#[from] UdfDraftError),
+    #[error("{0}")]
+    Ingestor(#[from] IngestorDraftError),
     #[error("Canonical NSPL could not be rendered")]
     CanonicalNspl,
 }
@@ -779,6 +841,7 @@ pub(crate) struct CreateSignals {
     endpoint: RwSignal<EndpointDraft>,
     hash_map: RwSignal<HashMapDraft>,
     udf: RwSignal<UdfDraft>,
+    ingestor: RwSignal<IngestorDraft>,
     /// The number the next generated subscription name carries. Numbers only increase, so no two
     /// generated names of one console coincide.
     next_subscription_name: RwSignal<u64>,
@@ -813,6 +876,7 @@ impl CreateSignals {
             endpoint: RwSignal::new(EndpointDraft::default()),
             hash_map: RwSignal::new(HashMapDraft::default()),
             udf: RwSignal::new(UdfDraft::default()),
+            ingestor: RwSignal::new(IngestorDraft::default()),
             next_subscription_name: RwSignal::new(2),
             choices: ChoiceControls::new(),
         }
@@ -923,6 +987,7 @@ impl CreateSignals {
                 CreateKind::Vhost => self.vhost.update(VhostDraft::invalidate_references),
                 CreateKind::Endpoint => self.endpoint.update(EndpointDraft::invalidate_references),
                 CreateKind::HashMap => self.hash_map.update(HashMapDraft::invalidate_references),
+                CreateKind::Ingestor => self.ingestor.update(IngestorDraft::invalidate_references),
                 CreateKind::Udf => {}
                 CreateKind::Domain
                 | CreateKind::User
@@ -1228,6 +1293,148 @@ impl CreateSignals {
                     page_size: 100,
                 })
             }
+            ChoiceControl::IngestSourceRef => {
+                let kind = self
+                    .ingestor
+                    .get_untracked()
+                    .source
+                    .kind
+                    .ok_or("Choose a source type before its client or endpoint")?;
+                self.domain_question(
+                    ChoiceTarget::for_ingest_source(kind),
+                    "Select a domain before choosing a source",
+                )
+            }
+            ChoiceControl::IngestCodec => self.domain_question(
+                ChoiceTarget::IngestCodec,
+                "Select a domain before choosing a decoding codec",
+            ),
+            ChoiceControl::IngestTimestampField | ChoiceControl::IngestInputField => {
+                let Some(domain) = self.captured_domain.get_untracked() else {
+                    return Err("Select a domain before choosing decoded fields");
+                };
+                let draft = self.ingestor.get_untracked();
+                let Some(codec) = draft.current_codec() else {
+                    return Err("Choose a decoding codec before its fields");
+                };
+                Ok(ChoiceQuery {
+                    target: ChoiceTarget::CodecField,
+                    dependencies: vec![
+                        ChoiceSelection {
+                            value: ChoiceValue::Domain(domain),
+                        },
+                        ChoiceSelection {
+                            value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                                ModelKind::Codec,
+                                codec,
+                            )),
+                        },
+                    ],
+                    page_size: 100,
+                })
+            }
+            ChoiceControl::IngestRouteBranch => self.domain_question(
+                ChoiceTarget::Branch,
+                "Select a domain before choosing a route branch",
+            ),
+            ChoiceControl::IngestErrorRelay => self.domain_question(
+                ChoiceTarget::IngestUnbranchedRelay,
+                "Select a domain before choosing an ingestor error relay",
+            ),
+            ChoiceControl::IngestRouteRelay => {
+                let Some(domain) = self.captured_domain.get_untracked() else {
+                    return Err("Select a domain before choosing a route relay");
+                };
+                let draft = self.ingestor.get_untracked();
+                let Some(route) = draft.active_route() else {
+                    return Err("Add a route before choosing a relay");
+                };
+                let mut dependencies = vec![ChoiceSelection {
+                    value: ChoiceValue::Domain(domain),
+                }];
+                let target = match &route.branch {
+                    RouteBranchDraft::Unselected => {
+                        return Err("Choose the route branch before its relay");
+                    }
+                    RouteBranchDraft::Unbranched => ChoiceTarget::IngestUnbranchedRelay,
+                    RouteBranchDraft::Branched { .. } => {
+                        let Some(branch) = route.branch.current_branch() else {
+                            return Err("Choose the named branch before its relay");
+                        };
+                        dependencies.push(ChoiceSelection {
+                            value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                                ModelKind::Branch,
+                                branch,
+                            )),
+                        });
+                        ChoiceTarget::IngestBranchedRelay
+                    }
+                };
+                Ok(ChoiceQuery {
+                    target,
+                    dependencies,
+                    page_size: 20,
+                })
+            }
+            ChoiceControl::IngestOutputField | ChoiceControl::IngestErrorField => {
+                let Some(domain) = self.captured_domain.get_untracked() else {
+                    return Err("Select a domain before choosing an output field");
+                };
+                let draft = self.ingestor.get_untracked();
+                let Some(route) = draft.active_route() else {
+                    return Err("Add a route before choosing an output field");
+                };
+                let relay = if control == ChoiceControl::IngestErrorField {
+                    route.message_error.current_relay()
+                } else {
+                    route.current_relay()
+                };
+                let Some(relay) = relay else {
+                    return Err("Choose the relay before its output fields");
+                };
+                Ok(ChoiceQuery {
+                    target: ChoiceTarget::RelayField,
+                    dependencies: vec![
+                        ChoiceSelection {
+                            value: ChoiceValue::Domain(domain),
+                        },
+                        ChoiceSelection {
+                            value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                                ModelKind::Relay,
+                                relay,
+                            )),
+                        },
+                    ],
+                    page_size: 100,
+                })
+            }
+            ChoiceControl::IngestBranchField => {
+                let Some(domain) = self.captured_domain.get_untracked() else {
+                    return Err("Select a domain before choosing a branch field");
+                };
+                let draft = self.ingestor.get_untracked();
+                let Some(branch) = draft
+                    .active_route()
+                    .and_then(|route| route.branch.current_branch())
+                else {
+                    return Err("Choose a named branch before its key fields");
+                };
+                Ok(ChoiceQuery {
+                    target: ChoiceTarget::BranchField,
+                    dependencies: vec![
+                        ChoiceSelection {
+                            value: ChoiceValue::Domain(domain),
+                        },
+                        ChoiceSelection {
+                            value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                                ModelKind::Branch,
+                                branch,
+                            )),
+                        },
+                    ],
+                    page_size: 100,
+                })
+            }
         }
     }
 
@@ -1381,6 +1588,18 @@ impl CreateSignals {
                 let udf = draft.build().map_err(draft_error)?;
                 CreateSubmission::domain_model(kind, Model::Udf(udf), draft.if_not_exists, scope)
             }
+            CreateKind::Ingestor => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.ingestor.get_untracked();
+                let ingestor = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_model(
+                    kind,
+                    Model::Ingestor(ingestor),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
             CreateKind::Subscription => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
@@ -1482,6 +1701,9 @@ pub(crate) fn CreateMenu(
                 </button>
                 <button type="button" role="menuitem" data-create-kind="udf" on:click=move |_| choose(CreateKind::Udf)>
                     <span>"Roto UDF"</span><em>"Typed function and source tests"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="ingestor" on:click=move |_| choose(CreateKind::Ingestor)>
+                    <span>"Ingestor"</span><em>"External source and ordered routes"</em>
                 </button>
             </div>
         </div>
@@ -1632,6 +1854,34 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
             ChoiceControl::HashCodec,
             ChoiceControl::HashKey,
         ],
+        CreateKind::Ingestor => {
+            let draft = signals.ingestor.get_untracked();
+            let mut controls = vec![ChoiceControl::IngestCodec, ChoiceControl::IngestRouteRelay];
+            if draft.source.kind.is_some() {
+                controls.push(ChoiceControl::IngestSourceRef);
+            }
+            if matches!(draft.timestamp, TimestampDraft::At(_)) {
+                controls.push(ChoiceControl::IngestTimestampField);
+            }
+            if let Some(route) = draft.active_route() {
+                if matches!(
+                    route.inherit,
+                    InheritDraft::AllExcept(_) | InheritDraft::Fields(_)
+                ) {
+                    controls.push(ChoiceControl::IngestInputField);
+                }
+                if matches!(route.branch, RouteBranchDraft::Branched { .. }) {
+                    controls.push(ChoiceControl::IngestRouteBranch);
+                    controls.push(ChoiceControl::IngestBranchField);
+                }
+                controls.push(ChoiceControl::IngestOutputField);
+                if matches!(route.message_error, MessageErrorDraft::SendTo { .. }) {
+                    controls.push(ChoiceControl::IngestErrorRelay);
+                    controls.push(ChoiceControl::IngestErrorField);
+                }
+            }
+            controls
+        }
         CreateKind::Udf => Vec::new(),
         CreateKind::User
         | CreateKind::Resource
@@ -1880,6 +2130,9 @@ pub(crate) fn CreateDialog(
                         <Show when=move || signals.open.get() == Some(CreateKind::Udf) fallback=|| ()>
                             <UdfEditor signals=signals name_input=name_input />
                         </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Ingestor) fallback=|| ()>
+                            <IngestorEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
 
                         <Show when=move || signals.open.get().is_some_and(CreateKind::takes_if_not_exists) fallback=|| ()>
                             <label class="create-check">
@@ -1903,6 +2156,7 @@ pub(crate) fn CreateDialog(
                                         Some(CreateKind::Endpoint) => signals.endpoint.get().if_not_exists,
                                         Some(CreateKind::HashMap) => signals.hash_map.get().if_not_exists,
                                         Some(CreateKind::Udf) => signals.udf.get().if_not_exists,
+                                        Some(CreateKind::Ingestor) => signals.ingestor.get().if_not_exists,
                                         Some(CreateKind::Subscription) | None => false,
                                     }
                                     disabled=move || signals.progress.get().is_pending()
@@ -1925,6 +2179,7 @@ pub(crate) fn CreateDialog(
                                             Some(CreateKind::Endpoint) => signals.endpoint.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::HashMap) => signals.hash_map.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Udf) => signals.udf.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Ingestor) => signals.ingestor.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Subscription) | None => {}
                                         }
                                         signals.edit();

@@ -12,7 +12,8 @@
 use error_stack::Report;
 use flatbuffers::WIPOffset;
 use nervix_models::{
-    DomainName, FieldName, NodeRef, PlacementPolicy, RequestedResourceVersion, ResourceName,
+    DomainName, FieldName, IngestSourceKind, NodeRef, PlacementPolicy, RequestedResourceVersion,
+    ResourceName,
 };
 
 use crate::{
@@ -42,6 +43,23 @@ pub enum ChoiceTarget {
     Codec,
     /// Fields of the output schema selected by one configured codec.
     CodecField,
+    IngestHttpSource,
+    IngestKafkaSource,
+    IngestPulsarSource,
+    IngestMqttSource,
+    IngestNatsSource,
+    IngestRabbitMqSource,
+    IngestRedisPubSubSource,
+    IngestPrometheusSource,
+    IngestZeroMqSource,
+    IngestSqsSource,
+    IngestEndpointSource,
+    IngestWebsocketsSource,
+    IngestSyslogSource,
+    IngestCodec,
+    IngestUnbranchedRelay,
+    IngestBranchedRelay,
+    BranchField,
 }
 
 wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
@@ -60,7 +78,84 @@ wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
     SignalingProtocol,
     Codec,
     CodecField,
+    IngestHttpSource,
+    IngestKafkaSource,
+    IngestPulsarSource,
+    IngestMqttSource,
+    IngestNatsSource,
+    IngestRabbitMqSource,
+    IngestRedisPubSubSource,
+    IngestPrometheusSource,
+    IngestZeroMqSource,
+    IngestSqsSource,
+    IngestEndpointSource,
+    IngestWebsocketsSource,
+    IngestSyslogSource,
+    IngestCodec,
+    IngestUnbranchedRelay,
+    IngestBranchedRelay,
+    BranchField,
 });
+
+impl ChoiceTarget {
+    /// The choices of what a source names: its client or endpoint, or, for a client source, the
+    /// input schema its producers' batches carry.
+    pub const fn for_ingest_source(kind: IngestSourceKind) -> Self {
+        match kind {
+            IngestSourceKind::Client => Self::Schema,
+            IngestSourceKind::Http => Self::IngestHttpSource,
+            IngestSourceKind::Kafka => Self::IngestKafkaSource,
+            IngestSourceKind::Pulsar => Self::IngestPulsarSource,
+            IngestSourceKind::Mqtt => Self::IngestMqttSource,
+            IngestSourceKind::Nats => Self::IngestNatsSource,
+            IngestSourceKind::RabbitMq => Self::IngestRabbitMqSource,
+            IngestSourceKind::RedisPubSub => Self::IngestRedisPubSubSource,
+            IngestSourceKind::Prometheus => Self::IngestPrometheusSource,
+            IngestSourceKind::ZeroMq => Self::IngestZeroMqSource,
+            IngestSourceKind::Sqs => Self::IngestSqsSource,
+            IngestSourceKind::Endpoint => Self::IngestEndpointSource,
+            IngestSourceKind::Websockets => Self::IngestWebsocketsSource,
+            IngestSourceKind::Syslog => Self::IngestSyslogSource,
+        }
+    }
+
+    pub const fn ingest_source_kind(self) -> Option<IngestSourceKind> {
+        match self {
+            Self::IngestHttpSource => Some(IngestSourceKind::Http),
+            Self::IngestKafkaSource => Some(IngestSourceKind::Kafka),
+            Self::IngestPulsarSource => Some(IngestSourceKind::Pulsar),
+            Self::IngestMqttSource => Some(IngestSourceKind::Mqtt),
+            Self::IngestNatsSource => Some(IngestSourceKind::Nats),
+            Self::IngestRabbitMqSource => Some(IngestSourceKind::RabbitMq),
+            Self::IngestRedisPubSubSource => Some(IngestSourceKind::RedisPubSub),
+            Self::IngestPrometheusSource => Some(IngestSourceKind::Prometheus),
+            Self::IngestZeroMqSource => Some(IngestSourceKind::ZeroMq),
+            Self::IngestSqsSource => Some(IngestSourceKind::Sqs),
+            Self::IngestEndpointSource => Some(IngestSourceKind::Endpoint),
+            Self::IngestWebsocketsSource => Some(IngestSourceKind::Websockets),
+            Self::IngestSyslogSource => Some(IngestSourceKind::Syslog),
+            Self::DomainPace
+            | Self::PlacementPolicy
+            | Self::Schema
+            | Self::Branch
+            | Self::Relay
+            | Self::RelayField
+            | Self::WireJsonSchema
+            | Self::WireCborSchema
+            | Self::WireAvroSchema
+            | Self::Resource
+            | Self::CompletedResourceVersion
+            | Self::Vhost
+            | Self::SignalingProtocol
+            | Self::Codec
+            | Self::CodecField
+            | Self::IngestCodec
+            | Self::IngestUnbranchedRelay
+            | Self::IngestBranchedRelay
+            | Self::BranchField => None,
+        }
+    }
+}
 
 /// Whether a domain clock advances with wall time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

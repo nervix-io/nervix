@@ -17,8 +17,9 @@ contract. Refer users to those chapters for cursor edits, transaction-aware cand
 completion status messages.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
-Roto UDFs, and session subscriptions; use the same web-console chapter for their typed fields,
-resource versions, program editors, reference lookup, and transaction behavior.
+Roto UDFs, ingestors for all supported source families, and session subscriptions; use the same
+web-console chapter for their typed fields, resource versions, program editors, reference lookup,
+and transaction behavior.
 
 ## Gather the configuration contract
 
@@ -48,6 +49,12 @@ guidance to select the relevant Markdown entries from the public index.
 
 Run the control plane with `nervix-server` and submit configuration through the separate
 `nervix-cli` client. Format saved `.nspl` files with `nervix-nspl-format`.
+For a native CLI or Rust-client session addressed by hostname, Hickory resolves the selected
+server, seeds, and redirects on connection. Keep the hostname in the `http://` or `https://` server
+URL so HTTPS verifies that name. The CLI normally reads the system resolver and hosts files; use
+its `--dns-resolver-config`, `--dns-hosts-file`, and repeatable `--dns-name-server` options only
+when the session needs an explicitly configured resolver. Browser sessions use browser DNS.
+
 Use the CLI's `subscribe` and `domain-clock` subcommands for shell streams of relay records and
 the selected domain's clock. See the Command Line Client chapter for their line formats.
 
@@ -306,7 +313,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - Request/response emitters do not take `ACK TIMEOUT`. When configuring SQS, Sentry, OTEL, or
   ClickHouse, put `timeout_ms` in the referenced client CONFIG when the request needs an explicit
   bound; the emitter's declared retry policy owns pacing after that request fails. OTEL clients
-  must also select `grpc` or `http/protobuf` explicitly with the required `protocol` key.
+  must also select `grpc` or `http/protobuf` explicitly with the required `protocol` key. An OTEL
+  `grpc` endpoint may use a DNS hostname: the node's resolver is used when the first export opens
+  the lazy connection, and the configured hostname remains the HTTPS certificate name. A DNS
+  outage follows the emitter's declared retry policy.
 - For an HTTP emitter, write `TO HTTP <client> METHOD <string_expression> PATH
   <string_expression> MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>` followed by exactly
   one of `ENCODE USING <codec>` or `WITHOUT BODY`. Do not add an ACK window, `ACK TIMEOUT`,

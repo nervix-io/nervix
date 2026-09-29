@@ -8,7 +8,7 @@ use std::{
     fmt,
     fs::{OpenOptions, create_dir_all},
     io::{Read as _, Write},
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU64,
     os::unix::process::ExitStatusExt as _,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
@@ -66,7 +66,8 @@ use mysql_async::{
     prelude::Queryable as MySqlQueryable,
 };
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
-use nervix_client_core::{Client, CommandOutcome as ClientCommandOutcome};
+use nervix_client_core::{Client, CommandOutcome as ClientCommandOutcome, ConnectDns};
+use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_recovery::Discarded as _;
 use nervix_server::{
     FaultInjection, SchedulerMode, WasmStateResetRequestError, application::InternalTransportMode,
@@ -3498,32 +3499,85 @@ fn scenario_cli_binary() -> PathBuf {
     candidate
 }
 
+fn fixture_grpc_uri(
+    world: &ScenarioWorld,
+    grpc_uri: &str,
+    name: &str,
+) -> (String, DnsConfiguration) {
+    let mut endpoint = url::Url::parse(grpc_uri).assured("the cluster's gRPC URI is valid");
+    let address = match endpoint.host() {
+        Some(url::Host::Ipv4(ip)) => IpAddr::V4(ip),
+        Some(url::Host::Ipv6(ip)) => IpAddr::V6(ip),
+        _ => panic!("the cluster's gRPC URI must have a literal listener address"),
+    };
+    world
+        .cluster()
+        .publish_dns_service(name, vec![address])
+        .assured("the named cluster has a DNS fixture");
+    endpoint
+        .set_host(Some(name))
+        .assured("the fixture DNS name is a valid URL host");
+    let configuration = world
+        .cluster()
+        .dns_configuration()
+        .assured("the named cluster has a DNS configuration");
+    (endpoint.to_string(), configuration)
+}
+
 impl ScenarioWorld {
-    async fn execute_cli(&mut self, command: String, node: String, password: &str) {
+    async fn execute_cli(
+        &mut self,
+        command: String,
+        node: String,
+        password: &str,
+        fixture_name: Option<&str>,
+    ) {
         let command = expand_placeholders(self, &command);
         let node = expand_placeholders(self, &node);
-        let grpc_uri = self
+        let mut grpc_uri = self
             .cluster()
             .grpc_uri(&node)
             .assured("the scenario names a cluster node");
-        let result = tokio::time::timeout(
-            Duration::from_secs(60),
-            tokio::process::Command::new(scenario_cli_binary())
-                .args([
-                    "--server",
-                    &grpc_uri,
-                    "--domain",
-                    &self.domain,
-                    "--username",
-                    TEST_AUTH_USERNAME,
-                    "--password",
-                    password,
-                    "--command",
-                    &command,
-                ])
-                .output(),
-        )
-        .await;
+        let dns = if let Some(name) = fixture_name {
+            let (named_uri, configuration) = fixture_grpc_uri(self, &grpc_uri, name);
+            grpc_uri = named_uri;
+            Some(configuration)
+        } else {
+            None
+        };
+        let mut process = tokio::process::Command::new(scenario_cli_binary());
+        process.args([
+            "--server",
+            &grpc_uri,
+            "--domain",
+            &self.domain,
+            "--username",
+            TEST_AUTH_USERNAME,
+            "--password",
+            password,
+            "--command",
+            &command,
+        ]);
+        if let Some(configuration) = dns {
+            if grpc_uri.starts_with("https://") {
+                process.arg("--tls").arg("required");
+                process
+                    .arg("--tls-ca-cert")
+                    .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tls/dev/ca.pem"));
+            }
+            process
+                .arg("--dns-resolver-config")
+                .arg(configuration.resolver_configuration);
+            process
+                .arg("--dns-hosts-file")
+                .arg(configuration.hosts_file);
+            if let NameServers::Explicit(addresses) = configuration.name_servers {
+                for address in addresses {
+                    process.arg("--dns-name-server").arg(address.to_string());
+                }
+            }
+        }
+        let result = tokio::time::timeout(Duration::from_secs(60), process.output()).await;
         let output = match result {
             Ok(Ok(output)) => output,
             Ok(Err(error)) => panic!("the scenario CLI process failed to start: {error}"),
@@ -3535,7 +3589,37 @@ impl ScenarioWorld {
 
 #[when(expr = "the CLI executes {string} on node {string}")]
 async fn when_cli_executes_on_node(world: &mut ScenarioWorld, command: String, node: String) {
-    world.execute_cli(command, node, TEST_AUTH_PASSWORD).await;
+    world
+        .execute_cli(command, node, TEST_AUTH_PASSWORD, None)
+        .await;
+}
+
+#[when(expr = "the CLI executes {string} on node {string} through fixture DNS")]
+async fn when_cli_executes_through_fixture_dns(
+    world: &mut ScenarioWorld,
+    command: String,
+    node: String,
+) {
+    world
+        .execute_cli(
+            command,
+            node,
+            TEST_AUTH_PASSWORD,
+            Some("native-session.nervix.test"),
+        )
+        .await;
+}
+
+#[when(expr = "the CLI executes {string} on node {string} through fixture DNS name {string}")]
+async fn when_cli_executes_through_fixture_dns_name(
+    world: &mut ScenarioWorld,
+    command: String,
+    node: String,
+    name: String,
+) {
+    world
+        .execute_cli(command, node, TEST_AUTH_PASSWORD, Some(&name))
+        .await;
 }
 
 #[when(expr = "the CLI executes {string} on node {string} with password {string}")]
@@ -3545,7 +3629,7 @@ async fn when_cli_executes_with_password(
     node: String,
     password: String,
 ) {
-    world.execute_cli(command, node, &password).await;
+    world.execute_cli(command, node, &password, None).await;
 }
 
 #[then(expr = "the CLI output contains {string}")]
@@ -7230,6 +7314,16 @@ async fn given_otel_http_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
         "otel_collector_http_addr",
         "otel-http.nervix.test",
         "otel_collector_dns_addr",
+    );
+}
+
+#[given("the OTEL gRPC endpoint is published under fixture DNS")]
+async fn given_otel_grpc_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
+    publish_fixture_name(
+        world,
+        "otel_collector_grpc_addr",
+        "otel-grpc.nervix.test",
+        "otel_collector_grpc_dns_addr",
     );
 }
 
@@ -12297,30 +12391,47 @@ async fn connect_named_client_to_node(
     name: String,
     node_id: String,
     seed_nodes: Vec<String>,
+    fixture_dns: bool,
 ) {
     let node_id = expand_placeholders(world, &node_id);
     let grpc_uri = world
         .cluster()
         .grpc_uri(&node_id)
         .expect("failed to resolve client node gRPC URI");
-    connect_named_client(world, name, grpc_uri, seed_nodes).await;
+    connect_named_client(world, name, grpc_uri, seed_nodes, fixture_dns).await;
 }
 
 /// Connects a named client to `grpc_uri`, with the gRPC endpoints of `seed_nodes` as its seeds.
 async fn connect_named_client(
     world: &mut ScenarioWorld,
     name: String,
-    grpc_uri: String,
+    mut grpc_uri: String,
     seed_nodes: Vec<String>,
+    fixture_dns: bool,
 ) {
     let name = expand_placeholders(world, &name);
+    let dns = if fixture_dns {
+        let (named_uri, configuration) =
+            fixture_grpc_uri(world, &grpc_uri, "native-session.nervix.test");
+        grpc_uri = named_uri;
+        Some(configuration)
+    } else {
+        None
+    };
     let mut options =
         client_connect_options(&grpc_uri).expect("failed to build client tls options");
+    if let Some(configuration) = dns {
+        options.dns = ConnectDns::Configuration(configuration);
+    }
     for seed_node in seed_nodes {
-        let seed_uri = world
+        let mut seed_uri = world
             .cluster()
             .grpc_uri(&seed_node)
             .expect("failed to resolve seed node gRPC URI");
+        if fixture_dns {
+            let seed_name = format!("native-session-{seed_node}.nervix.test");
+            seed_uri = fixture_grpc_uri(world, &seed_uri, &seed_name).0;
+        }
         options
             .seed_servers
             .push(url::Url::parse(&seed_uri).expect("cluster gRPC seed URIs are valid URLs"));
@@ -12345,7 +12456,7 @@ async fn given_named_client_is_connected_to_node(
     name: String,
     node_id: String,
 ) {
-    connect_named_client_to_node(world, name, node_id, Vec::new()).await;
+    connect_named_client_to_node(world, name, node_id, Vec::new(), false).await;
 }
 
 #[given(expr = "client {string} is connected to node {string} with cluster seeds")]
@@ -12355,7 +12466,19 @@ async fn given_named_client_is_connected_with_cluster_seeds(
     node_id: String,
 ) {
     let seeds = world.cluster().node_ids();
-    connect_named_client_to_node(world, name, node_id, seeds).await;
+    connect_named_client_to_node(world, name, node_id, seeds, false).await;
+}
+
+#[given(
+    expr = "client {string} is connected to node {string} through fixture DNS with cluster seeds"
+)]
+async fn given_named_client_is_connected_through_fixture_dns(
+    world: &mut ScenarioWorld,
+    name: String,
+    node_id: String,
+) {
+    let seeds = world.cluster().node_ids();
+    connect_named_client_to_node(world, name, node_id, seeds, true).await;
 }
 
 #[given(expr = "client {string} is connected to {string} with cluster seeds")]
@@ -12366,13 +12489,13 @@ async fn given_named_client_is_connected_to_endpoint_with_cluster_seeds(
 ) {
     let grpc_uri = expand_placeholders(world, &grpc_uri);
     let seeds = world.cluster().node_ids();
-    connect_named_client(world, name, grpc_uri, seeds).await;
+    connect_named_client(world, name, grpc_uri, seeds, false).await;
 }
 
 #[given(expr = "client {string} is connected to the leader node")]
 async fn given_named_client_is_connected_to_leader(world: &mut ScenarioWorld, name: String) {
     let leader = current_leader_node(world).await;
-    connect_named_client_to_node(world, name, leader, Vec::new()).await;
+    connect_named_client_to_node(world, name, leader, Vec::new(), false).await;
 }
 
 #[given(

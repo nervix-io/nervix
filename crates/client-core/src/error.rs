@@ -9,6 +9,7 @@
 use nervix_client_wire::{
     CancellationStage, ClientRequest, ReplyBody, RequestRejection, WireDecodeError, WireEncodeError,
 };
+use nervix_dns::DnsConfigurationError;
 use nervix_models::{
     ClientProducerRefusal, CommandExecutionReference, NameError, ResourceUploadIdentity,
 };
@@ -84,6 +85,8 @@ impl From<&ClientRequest> for RequestKind {
 
 #[derive(Debug, Error)]
 pub enum ClientError {
+    #[error("failed to load native DNS configuration: {0}")]
+    LoadDnsConfiguration(error_stack::Report<DnsConfigurationError>),
     #[error("invalid server URI")]
     InvalidServerUri(#[source] tonic::codegen::http::uri::InvalidUri),
     #[error("invalid server URL")]

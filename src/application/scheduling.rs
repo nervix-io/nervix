@@ -993,6 +993,7 @@ impl SessionServiceImpl {
             grpc_client_connect_options(
                 &leader_grpc_uri,
                 self.inner.configured_basic_auth.as_ref(),
+                self.inner.runtime.dns(),
             ),
         )
         .await;
@@ -1089,6 +1090,7 @@ impl SessionServiceImpl {
                 grpc_client_connect_options(
                     &leader_grpc_uri,
                     self.inner.configured_basic_auth.as_ref(),
+                    self.inner.runtime.dns(),
                 ),
             )
             .await;

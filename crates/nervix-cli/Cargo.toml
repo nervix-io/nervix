@@ -18,6 +18,7 @@ error-stack = { workspace = true }
 meticulous = { workspace = true }
 nervix-backup = { workspace = true }
 nervix-client-core = { workspace = true, features = ["autocomplete"] }
+nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }
 nervix-primitives = { workspace = true }

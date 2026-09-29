@@ -812,6 +812,23 @@ impl ChoicePageBasis {
             ChoiceTarget::SignalingProtocol => 12,
             ChoiceTarget::Codec => 13,
             ChoiceTarget::CodecField => 14,
+            ChoiceTarget::IngestHttpSource => 15,
+            ChoiceTarget::IngestKafkaSource => 16,
+            ChoiceTarget::IngestPulsarSource => 17,
+            ChoiceTarget::IngestMqttSource => 18,
+            ChoiceTarget::IngestNatsSource => 19,
+            ChoiceTarget::IngestRabbitMqSource => 20,
+            ChoiceTarget::IngestRedisPubSubSource => 21,
+            ChoiceTarget::IngestPrometheusSource => 22,
+            ChoiceTarget::IngestZeroMqSource => 23,
+            ChoiceTarget::IngestSqsSource => 24,
+            ChoiceTarget::IngestEndpointSource => 25,
+            ChoiceTarget::IngestWebsocketsSource => 26,
+            ChoiceTarget::IngestSyslogSource => 27,
+            ChoiceTarget::IngestCodec => 28,
+            ChoiceTarget::IngestUnbranchedRelay => 29,
+            ChoiceTarget::IngestBranchedRelay => 30,
+            ChoiceTarget::BranchField => 31,
         }]);
         hash_choice_text(&mut hasher, request.search());
         for dependency in request.dependencies() {
@@ -1042,7 +1059,24 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         ChoiceTarget::Vhost
         | ChoiceTarget::SignalingProtocol
         | ChoiceTarget::Codec
-        | ChoiceTarget::CodecField => {
+        | ChoiceTarget::CodecField
+        | ChoiceTarget::IngestHttpSource
+        | ChoiceTarget::IngestKafkaSource
+        | ChoiceTarget::IngestPulsarSource
+        | ChoiceTarget::IngestMqttSource
+        | ChoiceTarget::IngestNatsSource
+        | ChoiceTarget::IngestRabbitMqSource
+        | ChoiceTarget::IngestRedisPubSubSource
+        | ChoiceTarget::IngestPrometheusSource
+        | ChoiceTarget::IngestZeroMqSource
+        | ChoiceTarget::IngestSqsSource
+        | ChoiceTarget::IngestEndpointSource
+        | ChoiceTarget::IngestWebsocketsSource
+        | ChoiceTarget::IngestSyslogSource
+        | ChoiceTarget::IngestCodec
+        | ChoiceTarget::IngestUnbranchedRelay
+        | ChoiceTarget::IngestBranchedRelay
+        | ChoiceTarget::BranchField => {
             return Err(ChoiceStatus::MissingContext);
         }
     };
@@ -1267,7 +1301,24 @@ impl SessionServiceImpl {
             ChoiceTarget::Vhost
             | ChoiceTarget::SignalingProtocol
             | ChoiceTarget::Codec
-            | ChoiceTarget::CodecField => self.configured_choices_for(&request, session).await,
+            | ChoiceTarget::CodecField
+            | ChoiceTarget::IngestHttpSource
+            | ChoiceTarget::IngestKafkaSource
+            | ChoiceTarget::IngestPulsarSource
+            | ChoiceTarget::IngestMqttSource
+            | ChoiceTarget::IngestNatsSource
+            | ChoiceTarget::IngestRabbitMqSource
+            | ChoiceTarget::IngestRedisPubSubSource
+            | ChoiceTarget::IngestPrometheusSource
+            | ChoiceTarget::IngestZeroMqSource
+            | ChoiceTarget::IngestSqsSource
+            | ChoiceTarget::IngestEndpointSource
+            | ChoiceTarget::IngestWebsocketsSource
+            | ChoiceTarget::IngestSyslogSource
+            | ChoiceTarget::IngestCodec
+            | ChoiceTarget::IngestUnbranchedRelay
+            | ChoiceTarget::IngestBranchedRelay
+            | ChoiceTarget::BranchField => self.configured_choices_for(&request, session).await,
         };
         let (choices, content_digest) = match resolved {
             Ok(resolved) => resolved,
