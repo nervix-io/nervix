@@ -13,9 +13,9 @@ use ahash::HashMap;
 use arrow_array::Array;
 use nervix_interconnect::{EntityGatePurpose, RelayPayload, RelayPayloadKind};
 use nervix_models::{
-    AckMode, ClusterNodeName, CreateRelay, CreateSchema, DomainName, DomainSchedule, ModelKind,
-    ModelName, NodeRef, ParseAsType, RelayBranching, RelayName, RemoteAckRegistration, SchemaName,
-    Timestamp,
+    AckMode, ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CreateRelay,
+    CreateSchema, DomainName, DomainSchedule, ModelKind, ModelName, NodeRef, ParseAsType,
+    RelayBranching, RelayName, RemoteAckRegistration, SchemaName, Timestamp,
 };
 use nonzero_ext::nonzero;
 use tokio::{
@@ -968,8 +968,10 @@ async fn a_routed_attached_delivery_fails_on_a_node_that_no_longer_runs_its_cons
                 metadata: vec![test_runtime_row([]).metadata().to_remote()],
                 acks: vec![Some(RemoteAckRegistration {
                     ack_id: 229,
-                    reply_node_id: ClusterNodeName::parse("node-1")
-                        .expect("the relay owner name is valid"),
+                    registrar: ClusterNodeIdentity::new(
+                        ClusterNodeName::parse("node-1").expect("the relay owner name is valid"),
+                        ClusterNodeIncarnation::new(1),
+                    ),
                 })],
                 admission: None,
             },
@@ -1599,6 +1601,10 @@ async fn a_three_destination_fanout_shares_one_encoded_body() {
     );
 
     let domain = domain("default");
+    let source = ClusterNodeIdentity::new(
+        ClusterNodeName::parse("node-source").expect("valid name"),
+        ClusterNodeIncarnation::new(1),
+    );
     let consumers = ["one", "two", "three"].map(|relay| RemoteRuntimeConsumer {
         node_id: ClusterNodeName::parse(&format!("node-{relay}")).expect("valid name"),
         relay: named::<RelayName>(relay),
@@ -1619,7 +1625,7 @@ async fn a_three_destination_fanout_shares_one_encoded_body() {
                 batch_ipc: body.clone(),
                 acks: vec![Some(RemoteAckRegistration {
                     ack_id: index.arch_into(),
-                    reply_node_id: ClusterNodeName::parse("node-source").expect("valid name"),
+                    registrar: source.clone(),
                 })],
             })
         })
@@ -1640,7 +1646,7 @@ async fn a_three_destination_fanout_shares_one_encoded_body() {
             payload.acks,
             vec![Some(RemoteAckRegistration {
                 ack_id: index.arch_into(),
-                reply_node_id: ClusterNodeName::parse("node-source").expect("valid name"),
+                registrar: source.clone(),
             })],
             "each destination owes its own acknowledgement"
         );
