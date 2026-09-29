@@ -13,6 +13,9 @@ delivery, and transport failures. [Domain Clock](./domain-clock.md) owns clock i
 authority, and time bounds. [Shutdown And Recovery](./shutdown.md) owns drain, handoff, and restart
 semantics. The state rules here apply to those systems without replacing their detailed contracts.
 
+[Execution Plans](./execution-plans.md) follows the validated values into a complete installed
+revision.
+
 ## A State Has One Owner
 
 Text is parsed into a semantic Model, registry validation resolves its references and contracts,

@@ -279,13 +279,14 @@ Three rules together guarantee that a consumer uses exactly the version its mode
    stored, and a stored model holds only the resulting number. The written `LATEST` is kept only in
    the transaction record of the statement that carried it, which is never planned again once that
    statement is applied.
-2. **The execution plan carries it.** Schedule application builds each consumer from the scheduled
-   model it runs, so the number travels with the model into every node's execution.
+2. **The execution plan carries it.** The decision layer derives each typed consumer plan from the
+   committed schedule, including the pinned number. Runtime installation binds that plan to the
+   node's local store without reading a Model; see [Execution Plans](./execution-plans.md).
 3. **No consumer consults the catalog.** A consumer resolves its number to a directory in the local
    store and loads it. It never asks which version is newest.
 
-A rebuild, a restart, a failover, and a relocation all rebuild consumers from the same stored
-models, so they load the same versions. Only a model mutation can change a number.
+A rebuild, a restart, a failover, and a relocation derive typed consumer plans from the same
+committed models, so they load the same versions. Only a model mutation can change a number.
 
 ## `LATEST` Resolution
 
