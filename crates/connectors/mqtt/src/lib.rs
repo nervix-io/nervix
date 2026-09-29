@@ -37,7 +37,10 @@ use nervix_connector::{
     optional_client_config_value, read_tls_file,
 };
 use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
-use nervix_primitives::sync::atomic::{AtomicU32, Ordering};
+use nervix_primitives::sync::{
+    atomic::{AtomicU32, Ordering},
+    watch,
+};
 use rumqttc::{
     AsyncClient, ClientError as MqttClientError, ConnAck, Event, Incoming, MqttOptions,
     PubAckReason as MqttPubAckReason, PubRecReason as MqttPubRecReason, PublishNoticeError,
@@ -48,10 +51,7 @@ pub use source::{
     MqttSourcePosition, MqttSourceSettings,
 };
 use thiserror::Error;
-use tokio::{
-    sync::watch,
-    time::{Instant, sleep},
-};
+use tokio::time::{Instant, sleep};
 use tracing::warn;
 use triomphe::Arc;
 use url::{Host, Url};
@@ -280,11 +280,11 @@ impl MqttSink {
         let broker_limit = Arc::new(MqttBrokerPacketLimit::default());
         let declared_limit = broker_limit.clone();
         let (eventloop_shutdown, mut eventloop_shutdown_rx) = watch::channel(false);
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             let mut backoff = MqttReconnectBackoff::from_policy(retry_policy);
             loop {
-                tokio::task::consume_budget().await;
-                let polled = tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                let polled = nervix_primitives::select! {
                     changed = eventloop_shutdown_rx.changed() => {
                         if changed.is_err() || *eventloop_shutdown_rx.borrow() {
                             break;
@@ -316,7 +316,7 @@ impl MqttSink {
                             retry_in = %humantime::format_duration(wait),
                             "mqtt sink event loop reconnecting"
                         );
-                        tokio::select! {
+                        nervix_primitives::select! {
                             changed = eventloop_shutdown_rx.changed() => {
                                 if changed.is_err() || *eventloop_shutdown_rx.borrow() {
                                     break;
@@ -448,7 +448,7 @@ impl MqttSink {
             Self::harvest_ready_after_oldest_failure(pending, outcome);
             return Err(Self::confirm_timeout_error(timeout));
         }
-        let result = tokio::select! {
+        let result = nervix_primitives::select! {
             biased;
             result = &mut oldest.confirmation => Some(result),
             _ = sleep(remaining) => None,
@@ -601,7 +601,7 @@ impl RecordSink for MqttSink {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         let mut pending: VecDeque<PendingMqttConfirmation> = VecDeque::new();
         for record in records {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
             // The client would fail its connection on a packet the broker refuses to receive, so
@@ -681,7 +681,7 @@ impl RecordSink for MqttSink {
             }
         }
         while !pending.is_empty() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let AckConfirmation { timeout, .. } = self.mode.confirmation_settings().verified(
                 "this path only runs for the confirmed publishing mode, which carries the settings",
             );
@@ -952,7 +952,7 @@ mod tests {
         )
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_record_the_broker_would_refuse_is_rejected_before_the_client_sees_it() {
         // Nothing listens on the discard port, so the client never connects and the accepted
         // record waits in its request queue.
@@ -982,7 +982,7 @@ mod tests {
         assert!(outcome.infrastructure_error.is_none());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_event_loop_records_the_maximum_packet_size_the_broker_declares() {
         let broker = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -1009,7 +1009,7 @@ mod tests {
 
         let declared = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if let Some(maximum) = sink.broker_limit.declared() {
                     return maximum;
                 }

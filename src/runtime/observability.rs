@@ -715,7 +715,7 @@ mod tests {
     use super::*;
     use crate::metrics::RuntimeMetrics;
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_reported_runtime_error_reaches_every_attached_observer() {
         let events = RuntimeEvents::new();
         let mut first = events.subscribe();
@@ -724,7 +724,7 @@ mod tests {
         events.report_error("ingestor 'orders' failed to decode a message");
 
         for observer in [&mut first, &mut second] {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let RuntimeEvent::Error(message) = observer
                 .recv()
                 .await
@@ -742,7 +742,7 @@ mod tests {
         events.report_error("emitter 'ledger' failed to publish");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_observer_that_attaches_later_sees_only_what_follows_it() {
         let events = RuntimeEvents::new();
         events.report_error("reported before anyone was listening");
@@ -1132,7 +1132,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn describe_ingestor_surfaces_instantiation_error_when_runtime_is_missing() {
         let runtime = Runtime::new();
         let domain = domain("default");

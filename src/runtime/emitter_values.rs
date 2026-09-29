@@ -65,7 +65,7 @@ impl EmitterSink for MappedRowSink {
         };
         let mut open_run: Option<ProjectedRun> = None;
         for batch_index in 0..batches.len() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let (source, mut projected) = {
                 let batch = &batches[batch_index];
                 let pending_rows = batch.pending_record_rows();
@@ -229,7 +229,7 @@ impl EmitterSink for MappedRequestSink {
             ..
         } = publication;
         for batch_index in 0..batches.len() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut projected = {
                 let batch = &batches[batch_index];
                 let pending_rows = batch.pending_record_rows();
@@ -701,7 +701,7 @@ mod tests {
         SinkPublishResult, SinkRecordId, SinkRowRequest,
     };
     use nervix_models::ClickHouseValueMapping;
-    use parking_lot::Mutex;
+    use nervix_primitives::sync::blocking::Mutex;
 
     use super::*;
     use crate::{
@@ -725,7 +725,7 @@ mod tests {
 
     /// A row sink that delivers every row it is handed and records the carriers of each write.
     struct RecordingRowSink {
-        writes: StdArc<parking_lot::Mutex<Vec<Vec<RecordedCarrier>>>>,
+        writes: StdArc<nervix_primitives::sync::blocking::Mutex<Vec<Vec<RecordedCarrier>>>>,
     }
 
     #[async_trait]
@@ -764,9 +764,9 @@ mod tests {
 
     /// Successive carriers of one relay and branch travel in one write, and a carrier of another
     /// relay or branch starts the next one, so a write never mixes sources.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_write_carries_successive_carriers_of_one_relay_and_branch() {
-        let writes = StdArc::new(parking_lot::Mutex::new(Vec::new()));
+        let writes = StdArc::new(nervix_primitives::sync::blocking::Mutex::new(Vec::new()));
         let mut sink = MappedRowSink::new(
             Box::new(RecordingRowSink {
                 writes: writes.clone(),
@@ -862,7 +862,7 @@ mod tests {
         RelayRecordBatch::from_messages(schema, messages).expect("the test batch should build")
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn mapped_columns_carry_every_selected_row_under_its_target_name() {
         let projection = test_projection();
         let batch = test_batch(3);
@@ -888,7 +888,7 @@ mod tests {
         assert_eq!(doubled.values().as_ref(), [0, 2, 4]);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_mapping_that_fails_rejects_its_row_instead_of_selecting_it() {
         let domain: DomainName = named("test_domain");
         let emitter: EmitterName = named("test_emitter");
@@ -929,7 +929,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn projection_failure_keeps_the_schema_report_under_sink_context() {
         let projection = test_projection();
         let schema = test_schema(&[("other", ParseAsType::I64)]);
@@ -956,7 +956,7 @@ mod tests {
 
     /// The projection evaluates one program and builds one Arrow batch, so its allocation count is
     /// a property of the batch and not of the rows inside it.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn projecting_allocates_per_batch_and_not_per_row() {
         let projection = test_projection();
         let narrow = test_batch(8);
@@ -973,13 +973,13 @@ mod tests {
 
         // Each projection is polled exactly once, so no other task runs on this thread while the
         // counter is reading. Yielding first gives that poll a fresh scheduling budget.
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         let (narrow_allocations, narrow_projected) = alloc_count::alloc_count!({
             projection
                 .project(0, &narrow, execution_now, &narrow_rows)
                 .now_or_never()
         });
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         let (wide_allocations, wide_projected) = alloc_count::alloc_count!({
             projection
                 .project(0, &wide, execution_now, &wide_rows)
@@ -1171,7 +1171,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_request_whose_outcome_is_unknown_is_sent_again_unchanged_without_preparing_it_again()
     {
         let context = sink_context();
@@ -1292,7 +1292,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_preparation_that_breaks_its_contract_keeps_nothing_and_is_not_retried() {
         let context = sink_context();
         let mut sink = MappedRequestSink::new(Box::new(ForeignRowSink), value_projection());

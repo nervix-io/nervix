@@ -134,7 +134,7 @@ async fn when_nspl_commands_are_executed_on_server_process_cluster(
 ) {
     let commands = expand_placeholders(world, docstring(step));
     for statement in nspl_statements(&commands) {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let output = world
             .process_cluster()
             .run_commands(&world.domain, &statement)
@@ -220,7 +220,7 @@ async fn then_server_process_cluster_describes_ingestor_with(
     let command = format!("DESCRIBE INGESTOR {ingestor};");
     let deadline = Instant::now() + within;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let described = world
             .process_cluster()
             .run_commands(&world.domain, &command)

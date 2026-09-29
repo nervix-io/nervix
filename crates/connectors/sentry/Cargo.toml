@@ -10,12 +10,7 @@ workspace = true
 
 [features]
 default = []
-shuttle = [
-  "dep:shuttle-tokio",
-  "nervix-connector/shuttle",
-  "nervix-primitives/shuttle",
-  "shuttle-tokio/shuttle",
-]
+shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -24,11 +19,9 @@ error-stack = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
-nervix-primitives = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 reqwest = { workspace = true }
 sentry-types = { workspace = true }
 serde_json = { workspace = true }
-shuttle-tokio = { workspace = true, features = ["rt"], optional = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
 url = { workspace = true }

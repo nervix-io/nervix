@@ -27,7 +27,7 @@ use nervix_connector::{
     SourcePoll, SourceResume, next_retry_delay, physical_time::actual_utc_now,
 };
 use nervix_models::{DomainClockPeriod, IngestAcknowledgement};
-use tokio_util::sync::CancellationToken;
+use nervix_primitives::sync::CancellationToken;
 
 use super::super::{
     domain_clock::{DomainCadence, DomainClockWaitResult},
@@ -171,7 +171,7 @@ impl<P> BrokerSourceStart<'_, P> {
         let mut opened: Vec<Box<dyn SourceInstance>> =
             Vec::with_capacity(plan.capabilities.instances().get().arch_into());
         for instance_index in 0..plan.capabilities.instances().get() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let source = C::open(&plan.connector, instance_index)
                 .await
                 .map_err(|error| ingestor.start_failure(format!("{error:#}")))?;
@@ -338,7 +338,9 @@ impl Runtime {
         let (shutdown_tx, _) = watch::channel(false);
         let mut tasks = Vec::with_capacity(instances.len());
         for companion in companions {
-            tasks.push(tokio::spawn(companion.start(shutdown_tx.subscribe())));
+            tasks.push(nervix_primitives::task::spawn(
+                companion.start(shutdown_tx.subscribe()),
+            ));
         }
         for (instance_index, instance) in (0_u64..).zip(instances) {
             let host = RuntimeSourceHost::new(RuntimeSourceHostSpec {
@@ -362,7 +364,7 @@ impl Runtime {
             let task_domain = domain.clone();
             let task_ingestor = ingestor.name.clone();
             let task_client_mounts = client_mounts.clone();
-            tasks.push(tokio::spawn(async move {
+            tasks.push(nervix_primitives::task::spawn(async move {
                 let _client_mounts = task_client_mounts;
                 info!(
                     domain = task_domain.as_str(),
@@ -483,7 +485,7 @@ impl RuntimeSourceHost {
 
     async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool> {
         for failure in poll.failures {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.report_error(format!(
                 "source poll could not materialize one message: {failure:?}"
             ));
@@ -636,7 +638,7 @@ impl RuntimeSourceHost {
     ) -> SourceIntakeResult<SourceIntakeOutcome> {
         let mut entries = Vec::with_capacity(messages.len());
         for message in messages {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let metadata = Self::retained_metadata(&message.metadata)?;
             entries.push((message.payload.to_vec(), metadata));
         }
@@ -664,7 +666,7 @@ impl RuntimeSourceHost {
         let mut admitted = Vec::with_capacity(messages.len());
         let mut decisions = Vec::with_capacity(messages.len());
         for message in messages {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let metadata = Self::retained_metadata(&message.metadata)?;
             let retained = BufferedIngestPayload::new(message.payload, metadata, actual_utc_now());
             match self.quiesce.intake(self.instance_index, retained, false) {
@@ -692,7 +694,7 @@ impl RuntimeSourceHost {
         let mut dispatched = dispatched.into_iter();
         let mut acknowledgements = Vec::with_capacity(decisions.len());
         for decision in decisions {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let acknowledgement = match decision {
                 QuiescedIntake::Admitted => dispatched.next().verified(
                     "an acknowledged dispatch returns one acknowledgement per admitted message",
@@ -728,7 +730,7 @@ impl RuntimeSourceHost {
 
         let mut metadata = Vec::with_capacity(batch.messages.len());
         for message in batch.messages {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Err(error) = collector.decode_payload(&self.codec, message.payload).await {
                 collector.discard_undispatched_payloads();
                 return Err(Report::new(error).change_context(SourceIntakeError::Decode));
@@ -743,7 +745,7 @@ impl RuntimeSourceHost {
             completions.reserve(metadata.len());
             let mut acks = Vec::with_capacity(metadata.len());
             for _ in &metadata {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let (root, completion) = self.ack_root_trackers.tracked_root();
                 if self.branched_senders.is_empty() {
                     acks.push(root.clone());
@@ -858,7 +860,7 @@ impl SourceHostServices for RuntimeSourceHost {
 
     async fn wait_until_active(&mut self) -> bool {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if !self
                 .runtime
                 .inner
@@ -1006,7 +1008,7 @@ where
             *ready = false;
             host.mark_unready();
         }
-        let keep_running = tokio::select! {
+        let keep_running = nervix_primitives::select! {
             changed = shutdown.changed() => !(changed.is_err() || *shutdown.borrow()),
             _ = host.wait_until_not_suspended() => true,
         };
@@ -1064,7 +1066,7 @@ async fn run_paced_source<C, H, D>(
     let mut ready = false;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await {
             PacedSourceAction::Poll => {}
             PacedSourceAction::Restart => continue,
@@ -1080,7 +1082,7 @@ async fn run_paced_source<C, H, D>(
             Err(error) => host.report_error(error.to_string()),
         }
 
-        let due_at = tokio::select! {
+        let due_at = nervix_primitives::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     break;
@@ -1103,7 +1105,7 @@ async fn run_paced_source<C, H, D>(
             continue;
         }
 
-        let poll = tokio::select! {
+        let poll = nervix_primitives::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     break;
@@ -1154,7 +1156,7 @@ async fn wait_for_paced_retry<H>(
 where
     H: SourceHostServices,
 {
-    tokio::select! {
+    nervix_primitives::select! {
         changed = shutdown.changed() => !(changed.is_err() || *shutdown.borrow()),
         _ = host.wait_for_quiesce_change() => true,
         _ = sleep(delay) => true,
@@ -1175,7 +1177,7 @@ pub(super) async fn run_request_source<C>(
     C: SourceConnector,
 {
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match host.replay_buffered().await {
             Ok(true) => continue,
             Ok(false) => {}
@@ -1184,7 +1186,7 @@ pub(super) async fn run_request_source<C>(
                 continue;
             }
         }
-        tokio::select! {
+        nervix_primitives::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     break;
@@ -1221,7 +1223,7 @@ pub(super) async fn run_source_instance_with_retry<C>(
     let mut pending_rejection: Option<Vec<C::Position>> = None;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if !host.wait_until_active().await {
             break;
         }
@@ -1239,7 +1241,7 @@ pub(super) async fn run_source_instance_with_retry<C>(
                 ready = false;
                 host.mark_unready();
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
                         break;
@@ -1252,7 +1254,7 @@ pub(super) async fn run_source_instance_with_retry<C>(
 
         if !ready || source.needs_resume() {
             flush_for_lifecycle(&mut host).await;
-            let resumed = tokio::select! {
+            let resumed = nervix_primitives::select! {
                 biased;
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
@@ -1325,7 +1327,7 @@ pub(super) async fn run_source_instance_with_retry<C>(
 
         let request = batch_request(acknowledgement);
         let next_flush = host.next_flush();
-        let batch = tokio::select! {
+        let batch = nervix_primitives::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     break;
@@ -1476,7 +1478,7 @@ where
             return reject_batch(source, host, positions).await;
         }
         for acknowledgement in outcome.acknowledgements {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match acknowledgement.wait(timeout).await {
                 SourceAcknowledgementOutcome::Ack => {}
                 SourceAcknowledgementOutcome::NoAck(reason) => {
@@ -1529,7 +1531,7 @@ async fn wait_for_retry(
     shutdown: &mut watch::Receiver<bool>,
     delay: Duration,
 ) -> bool {
-    tokio::select! {
+    nervix_primitives::select! {
         changed = shutdown.changed() => !(changed.is_err() || *shutdown.borrow()),
         _ = host.wait_for_quiesce_change() => true,
         _ = sleep(delay) => true,
@@ -1550,8 +1552,7 @@ mod tests {
     use nervix_connector::{
         IngestMessageHeaders, IngestMetadataRow, SourceConnector, SourceError, SourceResult,
     };
-    use parking_lot::Mutex;
-    use tokio::sync::Notify;
+    use nervix_primitives::sync::{Notify, blocking::Mutex};
 
     use super::*;
 
@@ -1930,7 +1931,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn source_loop_replays_a_buffer_released_during_resume_before_polling() {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         let source = FakeSource {
@@ -1972,7 +1973,7 @@ mod tests {
         assert_eq!(observations.pending_replays, 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn source_shutdown_cancels_pending_resume_and_closes_the_source() {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         let started = Arc::new(Notify::new());
@@ -1981,7 +1982,7 @@ mod tests {
         source.block_resume = true;
         let host = SourceHost::new(FakeHost::running(observations.clone()));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let running = tokio::spawn(run_source_instance_with_retry(
+        let running = nervix_primitives::task::spawn(run_source_instance_with_retry(
             source,
             host,
             SourceAckPolicy::None,
@@ -1997,7 +1998,7 @@ mod tests {
         assert_eq!(observations.lock().closes, 1);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn source_quiesce_change_cancels_pending_resume_before_retrying() {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         let started = Arc::new(Notify::new());
@@ -2009,7 +2010,7 @@ mod tests {
         fake_host.quiesce_change = Some(changed.clone());
         let host = SourceHost::new(fake_host);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let running = tokio::spawn(run_source_instance_with_retry(
+        let running = nervix_primitives::task::spawn(run_source_instance_with_retry(
             source,
             host,
             SourceAckPolicy::None,
@@ -2032,7 +2033,7 @@ mod tests {
         assert_eq!(observations.closes, 1);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn request_source_loop_replays_retained_requests_and_closes_the_source_at_shutdown() {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         observations.lock().pending_replays = 2;
@@ -2054,7 +2055,7 @@ mod tests {
         assert_eq!(observations.unready, 1);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn paced_source_preparation_suspends_a_ready_source_until_quiesce_releases() {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         let mut source = empty_source(observations.clone());
@@ -2075,7 +2076,7 @@ mod tests {
         assert_eq!(observations.unready, 1);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn paced_source_preparation_retries_resume_until_the_source_is_ready() {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         let mut source = empty_source(observations.clone());
@@ -2116,7 +2117,7 @@ mod tests {
         assert_eq!(observations.reported_errors.len(), 1);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn paced_source_preparation_stops_when_the_host_is_inactive() {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         let mut source = empty_source(observations.clone());
@@ -2132,7 +2133,7 @@ mod tests {
         assert_eq!(observations.lock().resumes, 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn paced_source_preparation_stops_suspended_intake_after_shutdown_closes() {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         let mut source = empty_source(observations.clone());
@@ -2149,7 +2150,7 @@ mod tests {
         assert_eq!(observations.lock().flushes, 1);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn source_loop_accepts_no_ack_messages_one_at_a_time() {
         let observations = run_policy(SourceAckPolicy::None).await;
         let observations = observations.lock();
@@ -2162,7 +2163,7 @@ mod tests {
         assert!(observations.rejected.is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn source_loop_waits_and_commits_each_sequential_ack() {
         let observations = run_policy(SourceAckPolicy::Sequential {
             timeout: Duration::from_secs(1),
@@ -2179,7 +2180,7 @@ mod tests {
         assert!(observations.rejected.is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn failed_rewind_cannot_commit_past_an_unacknowledged_kafka_position() {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         observations.lock().ack_outcomes = VecDeque::from([
@@ -2214,7 +2215,7 @@ mod tests {
         assert_eq!(observations.resumes, 3);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn source_loop_commits_one_parallel_ack_batch() {
         let observations = run_policy(SourceAckPolicy::Parallel {
             max_in_flight: NonZeroUsize::new(3).verified("three is a nonzero source batch bound"),
@@ -2238,7 +2239,7 @@ mod tests {
         assert!(observations.rejected.is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn source_loop_resumes_after_connector_configuration_changes() {
         let observations = run_policy_with_refresh(SourceAckPolicy::None, true).await;
         let observations = observations.lock();

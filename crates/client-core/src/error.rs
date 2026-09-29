@@ -127,7 +127,7 @@ pub enum ClientError {
     #[error("session exchange closed")]
     SessionClosed,
     #[error("a subscription operation task stopped before completing")]
-    SubscriptionTask(#[source] tokio::task::JoinError),
+    SubscriptionTask(#[source] nervix_primitives::task::JoinError),
     #[error("subscription operation failed")]
     SubscriptionOperation(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("session exchange failed: {0}")]

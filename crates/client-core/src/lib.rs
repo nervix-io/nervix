@@ -14,8 +14,6 @@
 
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio_stream as tokio_stream;
 
 mod backup;
 mod client;

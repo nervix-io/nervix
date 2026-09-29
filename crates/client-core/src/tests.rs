@@ -45,8 +45,7 @@ use nervix_models::{
     TransactionInspection, TransactionLifecycle, TransactionOperationNumber, TransactionPosition,
     TransactionPreviewIdentity, TransactionStatus,
 };
-use parking_lot::Mutex;
-use tokio::sync::{mpsc, watch};
+use nervix_primitives::sync::{blocking::Mutex, mpsc, watch};
 use tonic::{Status, transport::Channel};
 use triomphe::Arc;
 use url::Url;
@@ -268,7 +267,7 @@ fn detached_exchange(
             pending,
             channel: Channel::from_static("http://127.0.0.1:9").connect_lazy(),
         }),
-        reader: tokio::spawn(std::future::ready(())),
+        reader: nervix_primitives::task::spawn(std::future::ready(())),
         sinks,
         generation,
     }
@@ -289,7 +288,7 @@ fn client_reaching(
     let sinks = exchange.sinks.clone();
     let events = SessionEvents {
         leadership: sinks.leadership.subscribe(),
-        domains: tokio::sync::Mutex::new(sinks.domains.subscribe()),
+        domains: nervix_primitives::sync::Mutex::new(sinks.domains.subscribe()),
         sinks,
     };
     Client::assemble(exchange, events, connector, session_domain, servers)
@@ -464,7 +463,7 @@ fn statement_splitting_reports_invalid_source_with_context() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_commit_fences_against_the_basis_its_own_transaction_reported() {
     let client = test_client("tenant");
     client
@@ -478,7 +477,7 @@ async fn a_commit_fences_against_the_basis_its_own_transaction_reported() {
     assert_eq!(expectation.preview, Some(test_preview("tx-1", 1)));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_basis_read_for_another_transaction_never_fences_this_one() {
     let client = test_client("tenant");
     client
@@ -495,7 +494,7 @@ async fn a_basis_read_for_another_transaction_never_fences_this_one() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_refused_commit_does_not_adopt_an_unreviewed_basis() {
     let client = test_client("tenant");
     client
@@ -519,7 +518,7 @@ async fn a_refused_commit_does_not_adopt_an_unreviewed_basis() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn inspection_refreshes_only_the_attached_transaction_at_its_queue_position() {
     let client = test_client("tenant");
     client
@@ -556,7 +555,7 @@ async fn inspection_refreshes_only_the_attached_transaction_at_its_queue_positio
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_older_inspection_cannot_replace_a_newer_queue_preview() {
     let client = test_client("tenant");
     client
@@ -581,7 +580,7 @@ async fn an_older_inspection_cannot_replace_a_newer_queue_preview() {
     assert_eq!(client.inner.previews.lock().await.len(), 1);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_inspected_report_arrives_typed_beside_the_callers_own_binding() {
     let mut fixture = reader_fixture(4);
     let request = register(&fixture.pending).await;
@@ -636,7 +635,7 @@ async fn an_inspected_report_arrives_typed_beside_the_callers_own_binding() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_failed_inspected_transaction_names_its_failing_operation() {
     let mut fixture = reader_fixture(4);
     let request = register(&fixture.pending).await;
@@ -687,7 +686,7 @@ async fn a_failed_inspected_transaction_names_its_failing_operation() {
     assert_eq!(error, "domain start refused");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_frame_the_contract_does_not_describe_ends_the_exchange() {
     let defaults = SessionLimits::DEFAULT;
     let size = |value: usize| NonZeroUsize::new(value).assured("a non-zero test limit");
@@ -713,7 +712,8 @@ async fn a_frame_the_contract_does_not_describe_ends_the_exchange() {
 
     let fixture = reader_fixture(4);
     let request = register(&fixture.pending).await;
-    let frames = tokio_stream::iter([Ok(undecodable), Ok(notice_frame("never routed"))]);
+    let frames =
+        nervix_primitives::stream::iter([Ok(undecodable), Ok(notice_frame("never routed"))]);
     fixture.reader.run(frames).await;
 
     assert!(
@@ -730,7 +730,7 @@ async fn a_frame_the_contract_does_not_describe_ends_the_exchange() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn connect_rejects_plain_server_when_tls_is_required() {
     let connector = GrpcConnector::new(ConnectOptions {
         tls_requirement: Some(TlsRequirement::Required),
@@ -748,7 +748,7 @@ async fn connect_rejects_plain_server_when_tls_is_required() {
     assert!(matches!(error, ClientError::TlsRequired));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn response_reordering_cannot_take_another_requests_waiter() {
     let mut fixture = reader_fixture(4);
     let domains_request = register(&fixture.pending).await;
@@ -783,7 +783,7 @@ async fn response_reordering_cannot_take_another_requests_waiter() {
     assert_eq!(domains.domains[0].domain.as_str(), "orders");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn saturated_event_consumer_cannot_block_a_command_reply() {
     let ReaderFixture {
         mut reader,
@@ -795,7 +795,7 @@ async fn saturated_event_consumer_cannot_block_a_command_reply() {
     let command_id = command_request.request_id;
     reader.route(notice_frame("undrained")).await;
 
-    let delivery = tokio::spawn(async move {
+    let delivery = nervix_primitives::task::spawn(async move {
         if reader.route(notice_frame("also undrained")).await == ReaderFlow::End {
             return;
         }
@@ -815,7 +815,7 @@ async fn saturated_event_consumer_cannot_block_a_command_reply() {
     assert_eq!(command.message, "executed");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn overflowing_a_notice_stream_is_reported_without_losing_replies() {
     let mut fixture = reader_fixture(1);
     let request = register(&fixture.pending).await;
@@ -836,7 +836,7 @@ async fn overflowing_a_notice_stream_is_reported_without_losing_replies() {
     assert!(matches!(request.reply.await, Ok(ReplyBody::Command(_))));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_notice_overflow_is_reported_once_and_later_notices_follow() {
     let mut fixture = reader_fixture(1);
     fixture.reader.route(notice_frame("first")).await;
@@ -855,7 +855,7 @@ async fn a_notice_overflow_is_reported_once_and_later_notices_follow() {
     assert_eq!(third.message, "third");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn overflowing_subscription_rows_cannot_delay_a_command_reply() {
     let mut fixture = reader_fixture(1);
     let subscribe = register(&fixture.pending).await;
@@ -1016,7 +1016,7 @@ fn a_subscription_past_the_exchange_allowance_overflows_without_evicting_full_su
     assert!(queue.try_next().is_none());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn event_queue_counts_retained_bytes_as_well_as_records() {
     let notices = EventQueue::new(10, 128);
     let subscriptions = EventQueue::new(10, 128);
@@ -1047,7 +1047,7 @@ async fn event_queue_counts_retained_bytes_as_well_as_records() {
     ));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn closing_a_failed_exchange_preserves_its_grpc_status_for_waiters() {
     let fixture = reader_fixture(1);
     let (frames, _) = mpsc::channel(1);
@@ -1059,9 +1059,9 @@ async fn closing_a_failed_exchange_preserves_its_grpc_status_for_waiters() {
     let mut request = exchange.register().assured("the exchange is open");
     fixture
         .reader
-        .run(tokio_stream::iter([Err(Status::unauthenticated(
-            "credentials were rejected",
-        ))]))
+        .run(nervix_primitives::stream::iter([Err(
+            Status::unauthenticated("credentials were rejected"),
+        )]))
         .await;
     assert!(request.receive().await.is_none());
     let ClientError::Transport(status) = exchange.pending.lock().failure() else {
@@ -1071,7 +1071,7 @@ async fn closing_a_failed_exchange_preserves_its_grpc_status_for_waiters() {
     assert_eq!(status.message(), "credentials were rejected");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn request_identities_start_at_one_and_are_never_reused() {
     let mut pending = PendingReplies::new();
     let first = pending
@@ -1094,7 +1094,7 @@ async fn request_identities_start_at_one_and_are_never_reused() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn connection_options_reject_unbounded_seeds_and_deadlines_before_connecting() {
     let endpoint = Url::parse("http://127.0.0.1:9").assured("the test endpoint is a URL");
     let too_many_seeds = ConnectOptions {
@@ -1136,7 +1136,7 @@ async fn connection_options_reject_unbounded_seeds_and_deadlines_before_connecti
     assert!(matches!(error, ClientError::TlsRequired));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_prepared_execution_keeps_its_identity_domain_and_upload_identity() {
     let client = test_client("tenant");
     let execution = client
@@ -1176,7 +1176,7 @@ fn transport_failure_classification_preserves_uncertainty_and_authentication() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_exchange_that_used_every_identity_takes_no_further_requests() {
     let mut pending = PendingReplies::Open {
         next_request_id: Some(RequestId::new(NonZeroU64::MAX)),
@@ -1189,7 +1189,7 @@ async fn an_exchange_that_used_every_identity_takes_no_further_requests() {
     assert!(pending.register().is_none());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn closing_an_exchange_drops_every_waiter_once() {
     let mut pending = PendingReplies::new();
     let first = pending
@@ -1207,7 +1207,7 @@ async fn closing_an_exchange_drops_every_waiter_once() {
     assert!(pending.take(first.request_id).is_none());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_reply_no_request_waits_for_is_dropped() {
     let mut fixture = reader_fixture(4);
     let mut waiting = register(&fixture.pending).await;
@@ -1228,7 +1228,7 @@ async fn a_reply_no_request_waits_for_is_dropped() {
     assert!(fixture.pending.lock().take(waiting.request_id).is_some());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_transferred_reply_completes_its_waiter() {
     let defaults = SessionLimits::DEFAULT;
     let size = |value: usize| NonZeroUsize::new(value).assured("a non-zero test limit");
@@ -1267,7 +1267,7 @@ async fn a_transferred_reply_completes_its_waiter() {
     assert_eq!(outcome.message, message);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn subscription_rows_render_against_the_schema_their_subscription_announced() {
     let mut fixture = reader_fixture(8);
     let request = register(&fixture.pending).await;
@@ -1318,7 +1318,7 @@ async fn subscription_rows_render_against_the_schema_their_subscription_announce
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_unsubscribe_reply_stops_the_subscription_rows() {
     let mut fixture = reader_fixture(8);
     let subscribe = register(&fixture.pending).await;
@@ -1352,7 +1352,7 @@ async fn an_unsubscribe_reply_stops_the_subscription_rows() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn observations_keep_only_their_latest_value() {
     let mut fixture = reader_fixture(4);
     let leader = |name: &str| {
@@ -1408,7 +1408,7 @@ async fn observations_keep_only_their_latest_value() {
     assert_eq!(latest.len(), 2);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn the_client_reads_the_latest_observations_of_its_exchange() {
     let client = test_client("tenant");
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
@@ -1457,7 +1457,7 @@ async fn the_client_reads_the_latest_observations_of_its_exchange() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_session_ending_frame_closes_the_waiters_of_its_exchange() {
     let fixture = reader_fixture(4);
     let request = register(&fixture.pending).await;
@@ -1466,7 +1466,7 @@ async fn a_session_ending_frame_closes_the_waiters_of_its_exchange() {
     }
     .encode(&SESSION_LIMITS)
     .assured("a session ending fits a frame");
-    let frames = tokio_stream::iter([
+    let frames = nervix_primitives::stream::iter([
         Ok(verified(ending)),
         Ok(reply_frame(
             request.request_id,
@@ -1509,7 +1509,7 @@ fn subscription_query_is_rendered() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn client_domain_can_be_updated() {
     let client = test_client("tenant_a");
     assert_eq!(client.domain().await, Some(domain("tenant_a")));
@@ -1756,7 +1756,7 @@ fn replies_ask_for_the_routing_their_disposition_needs() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn execute_returns_session_closed_when_request_channel_is_closed() {
     let client = test_client("tenant_a");
     let error = client
@@ -1766,7 +1766,7 @@ async fn execute_returns_session_closed_when_request_channel_is_closed() {
     assert!(matches!(error, ClientError::SessionClosed));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn execute_rejects_mixed_client_local_multi_statement_request() {
     let client = test_client("default");
     let outcome = client
@@ -1781,7 +1781,7 @@ async fn execute_rejects_mixed_client_local_multi_statement_request() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn execute_rejects_subscription_statements_in_a_batch() {
     let client = test_client("default");
     let outcome = client
@@ -1796,7 +1796,7 @@ async fn execute_rejects_subscription_statements_in_a_batch() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn execute_rejects_client_local_command_during_transaction() {
     let client = test_client("default");
     *client.inner.transaction.lock().await = Some(open_transaction("tx-1", 0));
@@ -1813,7 +1813,7 @@ async fn execute_rejects_client_local_command_during_transaction() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn use_domain_is_served_by_the_client() {
     let client = test_client("default");
     let outcome = client
@@ -1827,7 +1827,7 @@ async fn use_domain_is_served_by_the_client() {
     assert_eq!(client.domain().await, Some(domain("prod")));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_subscription_needs_a_selected_domain() {
     let (frames, outbound) = mpsc::channel(1);
     drop(outbound);
@@ -1842,11 +1842,11 @@ async fn a_subscription_needs_a_selected_domain() {
     assert!(matches!(error, ClientError::NoActiveDomain));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_create_subscription_statement_is_sent_as_a_subscribe_request() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
-    let execution = tokio::spawn(async move {
+    let execution = nervix_primitives::task::spawn(async move {
         client
             .subscribe(&SubscriptionRequest::new("live", "orders"))
             .await
@@ -1897,11 +1897,11 @@ async fn a_create_subscription_statement_is_sent_as_a_subscribe_request() {
     assert!(matches!(interrupted, SubscriptionEvent::Interrupted(_)));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn subscription_diagnostics_address_the_query_the_caller_passed() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
-    let execution = tokio::spawn(async move {
+    let execution = nervix_primitives::task::spawn(async move {
         client
             .execute("  // live orders\n  CREATE SUBSCRIPTION live TO order;")
             .await
@@ -1954,11 +1954,11 @@ async fn subscription_diagnostics_address_the_query_the_caller_passed() {
     assert_eq!(outcome.diagnostics[1].span, None);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_delete_subscription_statement_is_sent_as_an_unsubscribe_request() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
-    let execution = tokio::spawn(async move { client.unsubscribe("live").await });
+    let execution = nervix_primitives::task::spawn(async move { client.unsubscribe("live").await });
 
     let request = loopback.next_request().await;
     let ClientRequest::Unsubscribe(unsubscribe) = request.request else {
@@ -1984,11 +1984,11 @@ async fn a_delete_subscription_statement_is_sent_as_an_unsubscribe_request() {
     assert_eq!(outcome.message, "subscription 'live' does not exist");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn deleting_while_creation_is_in_flight_drains_its_late_success_before_name_reuse() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
-    let creating = tokio::spawn(async move {
+    let creating = nervix_primitives::task::spawn(async move {
         client
             .subscribe(&SubscriptionRequest::new("live", "orders"))
             .await
@@ -2001,8 +2001,8 @@ async fn deleting_while_creation_is_in_flight_drains_its_late_success_before_nam
     creating.abort();
 
     let client = loopback.client.clone();
-    let deleting = tokio::spawn(async move { client.unsubscribe("live").await });
-    tokio::task::yield_now().await;
+    let deleting = nervix_primitives::task::spawn(async move { client.unsubscribe("live").await });
+    nervix_primitives::task::yield_now().await;
     assert_eq!(
         loopback
             .client
@@ -2043,7 +2043,7 @@ async fn deleting_while_creation_is_in_flight_drains_its_late_success_before_nam
     );
 
     let client = loopback.client.clone();
-    let recreating = tokio::spawn(async move {
+    let recreating = nervix_primitives::task::spawn(async move {
         client
             .subscribe(&SubscriptionRequest::new("live", "orders"))
             .await
@@ -2066,11 +2066,11 @@ async fn deleting_while_creation_is_in_flight_drains_its_late_success_before_nam
     assert!(recreated.succeeded());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_acknowledged_subscription_retries_restoration_on_the_replacement_exchange() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
-    let creating = tokio::spawn(async move {
+    let creating = nervix_primitives::task::spawn(async move {
         client
             .subscribe(&SubscriptionRequest::new("live", "orders"))
             .await
@@ -2122,7 +2122,7 @@ async fn an_acknowledged_subscription_retries_restoration_on_the_replacement_exc
     let mut changed = loopback.client.inner.events.sinks.desired.watch();
     tokio::time::timeout(DEADLINE, async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(crate::SubscriptionLifecycle::Active(handle)) =
                 loopback.client.subscription_lifecycle(
                     &SubscriptionName::parse("live").assured("the test name is valid"),
@@ -2141,14 +2141,14 @@ async fn an_acknowledged_subscription_retries_restoration_on_the_replacement_exc
     .assured("the replacement subscription becomes active within the deadline");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn subscription_events_follow_the_next_session_when_nothing_awaits_restoration() {
     let mut loopback = Loopback::reopenable(Some(domain("tenant")));
     let reading = loopback.client.clone();
-    let next = tokio::spawn(async move { reading.next_subscription().await });
+    let next = nervix_primitives::task::spawn(async move { reading.next_subscription().await });
     // The test runs on one thread, so each yield lets the reader run until it waits: first on the
     // session that is about to end, then on the ended one, before the next session begins.
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
     let ended = loopback
         .client
         .inner
@@ -2159,11 +2159,11 @@ async fn subscription_events_follow_the_next_session_when_nothing_awaits_restora
         .clone();
     loopback.pending.lock().close();
     loopback.client.inner.events.sinks.close_generation(&ended);
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
 
     loopback.replace_exchange().await;
     let client = loopback.client.clone();
-    let creating = tokio::spawn(async move {
+    let creating = nervix_primitives::task::spawn(async move {
         client
             .subscribe(&SubscriptionRequest::new("live", "orders"))
             .await
@@ -2204,11 +2204,11 @@ async fn subscription_events_follow_the_next_session_when_nothing_awaits_restora
     assert_eq!(lost.subscription, subscription("live", 1));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_session_lost_before_create_acknowledgement_does_not_restore_the_request() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
-    let creating = tokio::spawn(async move {
+    let creating = nervix_primitives::task::spawn(async move {
         client
             .subscribe(&SubscriptionRequest::new("live", "orders"))
             .await
@@ -2239,11 +2239,11 @@ async fn a_session_lost_before_create_acknowledgement_does_not_restore_the_reque
     assert!(loopback.requests.try_recv().is_err());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_session_lost_during_unsubscribe_releases_the_name_on_the_next_exchange() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
-    let creating = tokio::spawn(async move {
+    let creating = nervix_primitives::task::spawn(async move {
         client
             .subscribe(&SubscriptionRequest::new("live", "orders"))
             .await
@@ -2258,7 +2258,7 @@ async fn a_session_lost_during_unsubscribe_releases_the_name_on_the_next_exchang
         .assured("the first subscription opens");
 
     let client = loopback.client.clone();
-    let deleting = tokio::spawn(async move { client.unsubscribe("live").await });
+    let deleting = nervix_primitives::task::spawn(async move { client.unsubscribe("live").await });
     let request = loopback.next_request().await;
     assert!(matches!(request.request, ClientRequest::Unsubscribe(_)));
     let generation = loopback
@@ -2290,7 +2290,7 @@ async fn a_session_lost_during_unsubscribe_releases_the_name_on_the_next_exchang
 
     loopback.replace_exchange().await;
     let client = loopback.client.clone();
-    let recreating = tokio::spawn(async move {
+    let recreating = nervix_primitives::task::spawn(async move {
         client
             .subscribe(&SubscriptionRequest::new("live", "orders"))
             .await
@@ -2309,11 +2309,11 @@ async fn a_session_lost_during_unsubscribe_releases_the_name_on_the_next_exchang
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn cancelling_an_in_flight_restore_cleans_up_its_late_success() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
-    let creating = tokio::spawn(async move {
+    let creating = nervix_primitives::task::spawn(async move {
         client
             .subscribe(&SubscriptionRequest::new("live", "orders"))
             .await
@@ -2337,8 +2337,8 @@ async fn cancelling_an_in_flight_restore_cleans_up_its_late_success() {
     assert!(matches!(restore.request, ClientRequest::Subscribe(_)));
 
     let client = loopback.client.clone();
-    let deleting = tokio::spawn(async move { client.unsubscribe("live").await });
-    tokio::task::yield_now().await;
+    let deleting = nervix_primitives::task::spawn(async move { client.unsubscribe("live").await });
+    nervix_primitives::task::yield_now().await;
     let name = SubscriptionName::parse("live").assured("the test name is valid");
     assert_eq!(
         loopback.client.subscription_lifecycle(&name),
@@ -2369,7 +2369,7 @@ async fn cancelling_an_in_flight_restore_cleans_up_its_late_success() {
     assert_eq!(loopback.client.subscription_lifecycle(&name), None);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_command_carries_the_expectation_of_the_attached_transaction() {
     let mut loopback = Loopback::new(Some(domain("default")));
     loopback
@@ -2378,7 +2378,7 @@ async fn a_command_carries_the_expectation_of_the_attached_transaction() {
         .await;
     cache_test_preview(&loopback.client, "tx-1", 2).await;
     let client = loopback.client.clone();
-    let execution = tokio::spawn(async move { client.execute("COMMIT;").await });
+    let execution = nervix_primitives::task::spawn(async move { client.execute("COMMIT;").await });
 
     let request = loopback.next_request().await;
     let ClientRequest::Command(command) = request.request else {
@@ -2417,7 +2417,7 @@ async fn a_command_carries_the_expectation_of_the_attached_transaction() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn concurrent_commands_capture_transaction_position_in_send_order() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     loopback
@@ -2425,8 +2425,9 @@ async fn concurrent_commands_capture_transaction_position_in_send_order() {
         .adopt_transaction_status(open_transaction("tx-1", 0))
         .await;
     let first_client = loopback.client.clone();
-    let first_task =
-        tokio::spawn(async move { first_client.execute("SHOW CLUSTER STATUS;").await });
+    let first_task = nervix_primitives::task::spawn(async move {
+        first_client.execute("SHOW CLUSTER STATUS;").await
+    });
     let first = loopback.next_request().await;
     let ClientRequest::Command(first_command) = first.request else {
         panic!("the first request is a command");
@@ -2437,8 +2438,9 @@ async fn concurrent_commands_capture_transaction_position_in_send_order() {
     );
 
     let second_client = loopback.client.clone();
-    let second_task =
-        tokio::spawn(async move { second_client.execute("SHOW CLUSTER STATUS;").await });
+    let second_task = nervix_primitives::task::spawn(async move {
+        second_client.execute("SHOW CLUSTER STATUS;").await
+    });
     let mut first_outcome = wire_outcome(
         first_command.execution_reference.as_str(),
         completed(),
@@ -2479,11 +2481,14 @@ async fn concurrent_commands_capture_transaction_position_in_send_order() {
         .assured("the second command succeeds");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_unknown_outcome_is_recovered_with_the_same_execution_reference() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
-    let execution = tokio::spawn(async move { client.execute("CREATE DOMAIN orders;").await });
+    let execution =
+        nervix_primitives::task::spawn(
+            async move { client.execute("CREATE DOMAIN orders;").await },
+        );
 
     let first = loopback.next_request().await;
     let ClientRequest::Command(first_command) = first.request else {
@@ -2528,11 +2533,12 @@ async fn an_unknown_outcome_is_recovered_with_the_same_execution_reference() {
     assert_eq!(outcome.origin, Some(OutcomeOrigin::Recovered));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_command_reply_for_another_execution_cannot_claim_success() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
-    let execution = tokio::spawn(async move { client.execute("SHOW CLUSTER STATUS;").await });
+    let execution =
+        nervix_primitives::task::spawn(async move { client.execute("SHOW CLUSTER STATUS;").await });
     let request = loopback.next_request().await;
     loopback
         .answer(
@@ -2547,12 +2553,13 @@ async fn a_command_reply_for_another_execution_cannot_claim_success() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn cancelling_a_command_releases_its_pending_reply() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
     let execution = client.prepare_execution("SHOW CLUSTER STATUS;").await;
-    let waiter = tokio::spawn(async move { client.execute_prepared(&execution).await });
+    let waiter =
+        nervix_primitives::task::spawn(async move { client.execute_prepared(&execution).await });
     let request = loopback.next_request().await;
 
     waiter.abort();
@@ -2563,7 +2570,7 @@ async fn cancelling_a_command_releases_its_pending_reply() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_detached_transaction_is_attached_again_before_the_command_is_retried() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     loopback
@@ -2571,7 +2578,10 @@ async fn a_detached_transaction_is_attached_again_before_the_command_is_retried(
         .adopt_transaction_status(open_transaction("tx-1", 1))
         .await;
     let client = loopback.client.clone();
-    let execution = tokio::spawn(async move { client.execute("CREATE DOMAIN orders;").await });
+    let execution =
+        nervix_primitives::task::spawn(
+            async move { client.execute("CREATE DOMAIN orders;").await },
+        );
 
     let first = loopback.next_request().await;
     let ClientRequest::Command(first_command) = first.request else {
@@ -2630,11 +2640,11 @@ async fn a_detached_transaction_is_attached_again_before_the_command_is_retried(
     assert!(outcome.succeeded());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_rejected_request_surfaces_as_a_typed_error() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
-    let listing = tokio::spawn(async move { client.list_domains().await });
+    let listing = nervix_primitives::task::spawn(async move { client.list_domains().await });
 
     let request = loopback.next_request().await;
     assert!(matches!(request.request, ClientRequest::ListDomains));
@@ -2668,11 +2678,12 @@ async fn a_rejected_request_surfaces_as_a_typed_error() {
     assert_eq!(message, "too many requests in flight");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn list_domains_is_served_from_a_domain_list_request() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
-    let execution = tokio::spawn(async move { client.execute("LIST DOMAINS;").await });
+    let execution =
+        nervix_primitives::task::spawn(async move { client.execute("LIST DOMAINS;").await });
 
     let request = loopback.next_request().await;
     assert!(matches!(request.request, ClientRequest::ListDomains));
@@ -2691,7 +2702,7 @@ async fn list_domains_is_served_from_a_domain_list_request() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn event_streams_end_with_a_session_that_no_known_server_can_reopen() {
     let client = test_client("tenant_a");
     client.inner.events.sinks.subscriptions.close_current();
@@ -2709,11 +2720,11 @@ async fn event_streams_end_with_a_session_that_no_known_server_can_reopen() {
     assert!(matches!(server_error, ClientError::SessionClosed));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_acknowledged_subscription_that_no_known_server_can_restore_ends_after_its_gap() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
-    let creating = tokio::spawn(async move {
+    let creating = nervix_primitives::task::spawn(async move {
         client
             .subscribe(&SubscriptionRequest::new("live", "orders"))
             .await
@@ -2754,7 +2765,7 @@ async fn an_acknowledged_subscription_that_no_known_server_can_restore_ends_afte
     assert!(matches!(error, ClientError::SessionClosed), "{error:?}");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn the_client_reports_a_notice_gap_once_and_returns_the_notices_after_it() {
     let client = test_client("tenant");
     let generation = client.inner.exchange.lock().await.generation.clone();
@@ -2788,7 +2799,7 @@ async fn the_client_reports_a_notice_gap_once_and_returns_the_notices_after_it()
 }
 
 #[cfg(feature = "autocomplete")]
-#[tokio::test]
+#[nervix_primitives::test]
 async fn suggest_returns_session_closed_when_request_channel_is_closed() {
     let client = test_client("tenant_a");
     let error = client
@@ -2799,7 +2810,7 @@ async fn suggest_returns_session_closed_when_request_channel_is_closed() {
 }
 
 #[cfg(feature = "autocomplete")]
-#[tokio::test]
+#[nervix_primitives::test]
 async fn suggest_refuses_a_cursor_inside_a_character() {
     let client = test_client("tenant_a");
     let error = client

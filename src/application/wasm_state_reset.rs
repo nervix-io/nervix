@@ -151,7 +151,7 @@ impl SessionServiceImpl {
     /// into one.
     pub(super) fn register_wasm_state_reset_service(
         &self,
-        shutdown: tokio_util::sync::CancellationToken,
+        shutdown: nervix_primitives::sync::CancellationToken,
     ) -> error_stack::Result<(), AppError> {
         self.register_guest_wasm_state_reset_coordinator(shutdown);
         let service = self.clone();
@@ -208,15 +208,15 @@ impl SessionServiceImpl {
     pub(super) fn register_wasm_state_reset_test_coordinator(
         &self,
         fault_injection: &crate::fault_injection::FaultInjection,
-        shutdown: tokio_util::sync::CancellationToken,
+        shutdown: nervix_primitives::sync::CancellationToken,
     ) {
         let mut reset_requests = fault_injection
             .register_wasm_state_reset_coordinator(self.inner.consensus.local_node_id().clone());
         let service = self.clone();
         self.inner.service_tasks.spawn(async move {
             loop {
-                tokio::task::consume_budget().await;
-                let request = tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                let request = nervix_primitives::select! {
                     _ = shutdown.cancelled() => break,
                     request = reset_requests.recv() => request,
                 };
@@ -321,16 +321,16 @@ impl SessionServiceImpl {
     /// has the same durability and replica guarantees as an operator's.
     fn register_guest_wasm_state_reset_coordinator(
         &self,
-        shutdown: tokio_util::sync::CancellationToken,
+        shutdown: nervix_primitives::sync::CancellationToken,
     ) {
         let service = self.clone();
         self.inner.service_tasks.spawn(async move {
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 for request in service.inner.runtime.take_guest_wasm_state_resets() {
                     service.coordinate_guest_wasm_state_reset(request).await;
                 }
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = shutdown.cancelled() => break,
                     () = service.inner.runtime.guest_wasm_state_reset_requested() => {}
                 }

@@ -11,12 +11,12 @@ use std::{
 };
 
 use nervix_dns::{DnsConfiguration, DnsLookupFailure, NameServers};
+use nervix_primitives::task::JoinHandle;
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
-    task::JoinHandle,
 };
 
 use super::*;
@@ -91,7 +91,7 @@ impl Fixture {
 /// A server on `listener` that accepts one connection, reads one insert request whole, answers it
 /// with an empty success, and returns the request as it arrived.
 fn stand_in(listener: TcpListener) -> JoinHandle<String> {
-    tokio::spawn(async move {
+    nervix_primitives::task::spawn(async move {
         let (mut stream, _) = listener
             .accept()
             .await
@@ -126,7 +126,7 @@ async fn insert(client: &ClickHouseClient) -> Result<(), ClickHouseWriteError> {
     .await
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn inserts_reach_the_answer_that_accepts_and_keep_the_configured_authority() {
     let fixture = Fixture::start().await;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -161,7 +161,7 @@ async fn inserts_reach_the_answer_that_accepts_and_keep_the_configured_authority
     assert!(fixture.authority.questions_for(SERVER) > 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn literal_addresses_are_dialled_without_a_lookup() {
     let fixture = Fixture::start().await;
     for (ip, host) in [
@@ -192,7 +192,7 @@ async fn literal_addresses_are_dialled_without_a_lookup() {
     assert_eq!(fixture.authority.total_questions(), 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_host_that_does_not_resolve_is_the_typed_cause_of_the_insert_failure() {
     let fixture = Fixture::start().await;
     fixture.authority.set(
@@ -235,7 +235,7 @@ async fn a_host_that_does_not_resolve_is_the_typed_cause_of_the_insert_failure()
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_refused_connection_is_described_by_its_causes() {
     let fixture = Fixture::start().await;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -265,7 +265,7 @@ async fn a_refused_connection_is_described_by_its_causes() {
     assert!(message.contains("tcp connect error"), "{message}");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_client_without_tls_entries_speaks_plain_http_only() {
     let fixture = Fixture::start().await;
     fixture.answer(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);

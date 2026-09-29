@@ -709,7 +709,7 @@ impl SessionServiceImpl {
         let domain_schedule = schedule.domain(domain);
         let mut lines = Vec::with_capacity(names.len());
         for name in names {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let ingestor = IngestorName::from(&name);
             let model = match self.inner.registry.get::<CreateIngestor>(domain, &ingestor) {
                 Ok(Some(model)) => model,
@@ -2233,7 +2233,7 @@ impl SessionServiceImpl {
         let latest_version = latest.map(|latest| catalog_version(latest.version));
         let mut versions = Vec::new();
         for resource in resources.versions_of(domain, &identifier) {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let entries = self.resource_version_entries(resource).await;
             versions.push(ResourceVersionDescription {
                 version: catalog_version(resource.id.version),
@@ -2439,7 +2439,7 @@ mod tests {
         *,
     };
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn remote_observation_errors_retain_request_and_decode_causes() {
         let TestService {
             service,
@@ -2502,7 +2502,7 @@ mod tests {
         std::fs::remove_dir_all(path).expect("the test database is removed");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn lookup_schedule_errors_identify_missing_dependencies() {
         use nervix_models::{
             CodecWireFormat, CreateCodec, CreateSchema, DomainSchedule, SchemaField,
@@ -2541,7 +2541,7 @@ mod tests {
             fingerprint,
         )];
         for stage in 0..4 {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let inputs = service
                 .inner
                 .consensus
@@ -2619,7 +2619,7 @@ mod tests {
         std::fs::remove_dir_all(path).expect("the test database is removed");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn show_placements_reports_fully_overridden_effective_coverage() {
         let TestService {
             service,
@@ -2675,7 +2675,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_describes_resource_metadata() {
         let TestService {
             service,

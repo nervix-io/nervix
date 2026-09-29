@@ -803,7 +803,7 @@ impl EmitterTask {
         let (stop_signal, mut stop_rx) = watch::channel(None);
         let task_stop_signal = stop_signal.clone();
 
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let shared_routing = match runtime
                 .wait_for_domain_routing(&task_domain, &routing_relay)
                 .await
@@ -832,14 +832,15 @@ impl EmitterTask {
                     return;
                 }
             };
-            let work_cancel_forwarder = AbortOnDropHandle::new(tokio::spawn(async move {
-                if *domain_work_cancel_rx.borrow()
-                    || domain_work_cancel_rx.changed().await.is_err()
-                    || *domain_work_cancel_rx.borrow()
-                {
-                    task_work_cancel.send_replace(true);
-                }
-            }));
+            let work_cancel_forwarder =
+                AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+                    if *domain_work_cancel_rx.borrow()
+                        || domain_work_cancel_rx.changed().await.is_err()
+                        || *domain_work_cancel_rx.borrow()
+                    {
+                        task_work_cancel.send_replace(true);
+                    }
+                }));
             let mut interaction_inputs = Vec::with_capacity(inputs.len());
             for (relay, receiver) in inputs {
                 let input = match input_collect_policy {
@@ -922,7 +923,7 @@ impl EmitterTask {
             // inside an external publish attempt when terminal teardown begins. Dropping the
             // task at that boundary releases its volatile prepared requests and unresolved ACK
             // guards without reporting them as delivered or waiting for the attempt timeout.
-            tokio::select! {
+            nervix_primitives::select! {
                 biased;
                 _ = super::emitter_publishing::wait_for_emitter_work_cancel(&mut terminal_shutdown_rx) => {}
                 _ = task_loop.run() => {}
@@ -940,7 +941,7 @@ impl EmitterTask {
 impl EmitterTaskLoop<'_> {
     async fn run(&mut self) {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let wake = self.state.wake(self.context);
             let receive_input = self
                 .state
@@ -2018,7 +2019,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn publish_success_clears_retry_state_and_releases_the_caller_batch() {
         let context = sink_context();
         let routing = DomainRouting::new(DomainRoutingSnapshot::default());
@@ -2071,7 +2072,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn retryable_caller_failure_retains_the_batch_and_defers_one_retry() {
         let context = sink_context();
         let routing = DomainRouting::new(DomainRoutingSnapshot::default());
@@ -2125,7 +2126,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn terminal_buffer_failure_drains_and_routes_every_owned_batch() {
         let context = sink_context();
         let routing = DomainRouting::new(DomainRoutingSnapshot::default());
@@ -2179,7 +2180,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_terminal_failure_counts_the_rows_delivered_before_it_as_sent() {
         let context = sink_context();
         let routing = DomainRouting::new(DomainRoutingSnapshot::default());
@@ -2253,7 +2254,7 @@ mod tests {
         assert!(state.buffer.is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn sink_context_reports_configuration_and_publish_failures() {
         let context = sink_context();
         let mut events = context.runtime.events().subscribe();
@@ -2275,7 +2276,7 @@ mod tests {
 
         let mut messages = Vec::with_capacity(4);
         for _ in 0..4 {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let RuntimeEvent::Error(message) =
                 events.recv().await.expect("error event must be emitted");
             messages.push(message);
@@ -2286,7 +2287,7 @@ mod tests {
         assert!(messages[3].contains("invalid flush_each 'not-a-duration'"));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn sink_host_delegates_runtime_services_and_general_error_policy() {
         let context = sink_context();
         let host = context.sink_host();
@@ -2350,7 +2351,7 @@ mod tests {
         assert_eq!(ignored_completion.wait().await, AckOutcome::Ack);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn sink_acknowledgement_handle_preserves_ack_lifecycle() {
         let (acks, mut completion) = AckSet::root();
         let acks = SinkAcknowledgements::new(acks);

@@ -410,7 +410,7 @@ impl Runtime {
         self.withdraw_routed_endpoints(domain, &execution);
         execution.shutdown.send_replace(true);
         for (relay, task) in execution.relay_owner_tasks {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Err(reason) = task.stop(self.branch_task_stop_timeout()).await {
                 warn!(
                     domain = domain.as_str(),
@@ -421,7 +421,7 @@ impl Runtime {
             }
         }
         for (relay, task) in execution.relay_state_tasks {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Err(reason) = task.stop(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE).await {
                 warn!(
                     domain = domain.as_str(),
@@ -587,7 +587,7 @@ impl Runtime {
         timeout_duration: Duration,
     ) -> Option<AckOutcome> {
         loop {
-            tokio::select! {
+            nervix_primitives::select! {
                 // A signalled stop and a dropped sender both end this wait, so the outcome
                 // carries nothing the caller could act on differently.
                 _ = shutdown_rx.changed() => {

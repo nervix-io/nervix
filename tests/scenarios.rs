@@ -1,7 +1,5 @@
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio_util as tokio_util;
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -15,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     str::FromStr,
-    sync::{Arc as StdArc, Mutex as StdMutex, OnceLock},
+    sync::Arc as StdArc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -68,6 +66,13 @@ use mysql_async::{
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_client_core::{Client, CommandOutcome as ClientCommandOutcome, ConnectDns};
 use nervix_dns::{DnsConfiguration, NameServers};
+use nervix_primitives::{
+    sync::{
+        CancellationToken,
+        blocking::{Mutex as BlockingMutex, OnceLock},
+    },
+    task::AbortOnDropHandle,
+};
 use nervix_recovery::Discarded as _;
 use nervix_server::{
     FaultInjection, SchedulerMode, WasmStateResetRequestError, application::InternalTransportMode,
@@ -93,7 +98,6 @@ use sqlx::{
 };
 use tempfile::TempDir;
 use tokio::io::AsyncBufReadExt as _;
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uuid::Uuid;
 
 use crate::common::{
@@ -155,8 +159,9 @@ const SCENARIOS_PATH: &str = "tests/features";
 const TEST_LOG_DIR: &str = "tests/logs";
 const CUCUMBER_LOG_FILE: &str = "tests/logs/cucumber.log";
 static ONNX_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
-static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<StdMutex<BTreeMap<String, String>>> = OnceLock::new();
+static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<nervix_primitives::sync::Mutex<()>> = OnceLock::new();
+static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<BlockingMutex<BTreeMap<String, String>>> =
+    OnceLock::new();
 const WEB_CONSOLE_ASSERTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ZEROMQ_OBSERVER_BIND_ATTEMPTS: usize = 8;
 const DURABLE_CATCH_UP_STORAGE_COMMITS_PER_ENTRY: u32 = 2;
@@ -257,7 +262,7 @@ struct SavedHealthyPlacement {
 /// One long-running CLI clock follower and the bounded stdout lines its assertions inspect.
 struct CliClockProcess {
     child: tokio::process::Child,
-    lines: StdArc<StdMutex<VecDeque<String>>>,
+    lines: StdArc<BlockingMutex<VecDeque<String>>>,
     _reader: AbortOnDropHandle<()>,
 }
 
@@ -323,7 +328,7 @@ struct ScenarioWorld {
     last_command_disposition: Option<nervix_client_wire::CommandDisposition>,
     last_cli_output: Option<Output>,
     cli_subscription_process: Option<tokio::process::Child>,
-    cli_subscription_lines: Option<StdArc<StdMutex<VecDeque<String>>>>,
+    cli_subscription_lines: Option<StdArc<BlockingMutex<VecDeque<String>>>>,
     cli_subscription_reader: Option<AbortOnDropHandle<()>>,
     cli_clock_process: Option<CliClockProcess>,
     /// The interactive CLI a scenario types into through a pseudo-terminal.
@@ -350,7 +355,7 @@ struct ScenarioWorld {
     postgres_tls: bool,
     /// Releases the Postgres table lock a contention scenario is holding, if one is held. The
     /// lock lives in a spawned task because it must outlive the step that took it.
-    postgres_lock_release: Option<tokio::sync::oneshot::Sender<()>>,
+    postgres_lock_release: Option<nervix_primitives::sync::oneshot::Sender<()>>,
     mysql_table: Option<String>,
     mysql_tls: bool,
     mysql_insert_command_baseline: Option<u64>,
@@ -1898,7 +1903,7 @@ async fn then_clock_source_recorder_records_requests(
     let name = expand_placeholders(world, &name);
     let deadline = Instant::now() + duration;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observations = world
             .dependencies
             .clock_source_observations(&name)
@@ -1938,7 +1943,7 @@ async fn then_clock_source_recorder_records_at_least_requests(
         .checked_add(duration)
         .assured("the Cucumber fixture duration fits the monotonic clock range");
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observations = world
             .dependencies
             .clock_source_observations(&name)
@@ -2108,7 +2113,7 @@ async fn then_clock_source_and_subscription_observe_fresh_cadence(
         .assured("scenario durations fit Tokio's monotonic instant range");
 
     let observations = loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observations = match world.dependencies.clock_source_observations(&name).await {
             Ok(observations) => observations,
             Err(error) => panic!("failed to read clock source recorder '{name}': {error}"),
@@ -2180,7 +2185,7 @@ async fn then_clock_source_and_subscription_observe_fresh_cadence(
         .assured("an active session with subscription must exist");
     let mut observed_payloads = Vec::with_capacity(expected_count);
     for (index, due) in recorded_due.iter().enumerate() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -2322,7 +2327,7 @@ async fn then_dependency_endpoint_responds_with_200(
         .to_string();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let attempt_error = match reqwest::get(&endpoint).await {
             Ok(response) if response.status() == reqwest::StatusCode::OK => return,
             Ok(response) => format!("HTTP {}", response.status()),
@@ -2510,7 +2515,7 @@ async fn given_server_process_cluster_is_configured(
         .as_ref()
         .verified("the preceding step started a real-process cluster");
     for statement in nspl_statements(&commands) {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let output = cluster
             .run_commands(&world.domain, &statement)
             .await
@@ -2592,7 +2597,7 @@ async fn when_held_server_process_cluster_transaction_queues(
         .as_mut()
         .verified("the preceding step held a transaction session");
     for statement in nspl_statements(&commands) {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = session
             .run_command_result(&statement)
             .await
@@ -2640,7 +2645,7 @@ async fn then_server_process_cluster_transaction_eventually_has_state(
     let deadline = PhaseDeadline::after(Duration::from_secs(60));
     let mut last_output = String::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             !deadline.has_passed(),
             "real-process cluster transaction '{transaction_id}' did not reach {expected_state}; \
@@ -2907,7 +2912,7 @@ async fn then_server_process_transaction_eventually_has_state(
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut last_output = String::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "server process transaction '{transaction_id}' did not reach state \
@@ -3860,15 +3865,13 @@ async fn when_cli_subscribes_to_relay(world: &mut ScenarioWorld, relay: String, 
         .stdout
         .take()
         .verified("the CLI process was started with piped stdout");
-    let lines = StdArc::new(StdMutex::new(VecDeque::new()));
+    let lines = StdArc::new(BlockingMutex::new(VecDeque::new()));
     let reader_lines = lines.clone();
-    let task = tokio::spawn(async move {
+    let task = nervix_primitives::task::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stdout).lines();
         while let Ok(Some(line)) = reader.next_line().await {
-            tokio::task::consume_budget().await;
-            let mut retained = reader_lines
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            nervix_primitives::task::consume_budget().await;
+            let mut retained = reader_lines.lock();
             if retained.len() == 256 {
                 retained.pop_front();
             }
@@ -3889,20 +3892,16 @@ async fn then_cli_subscription_output_contains(world: &mut ScenarioWorld, expect
         .verified("the preceding step started the CLI subscription");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let found = {
-            let retained = lines
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let retained = lines.lock();
             retained.iter().any(|line| line.contains(&expected))
         };
         if found {
             return;
         }
         if Instant::now() >= deadline {
-            let retained = lines
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let retained = lines.lock();
             panic!("CLI subscription output did not contain {expected:?}: {retained:?}");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3985,15 +3984,13 @@ fn start_cli_clock_process(world: &mut ScenarioWorld, domain: &str, grpc_uri: &s
         .stdout
         .take()
         .verified("the CLI clock process was started with piped stdout");
-    let lines = StdArc::new(StdMutex::new(VecDeque::new()));
+    let lines = StdArc::new(BlockingMutex::new(VecDeque::new()));
     let reader_lines = lines.clone();
-    let reader = tokio::spawn(async move {
+    let reader = nervix_primitives::task::spawn(async move {
         let mut stdout = tokio::io::BufReader::new(stdout).lines();
         while let Ok(Some(line)) = stdout.next_line().await {
-            tokio::task::consume_budget().await;
-            let mut retained = reader_lines
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            nervix_primitives::task::consume_budget().await;
+            let mut retained = reader_lines.lock();
             if retained.len() == 2048 {
                 retained.pop_front();
             }
@@ -4020,11 +4017,9 @@ async fn wait_for_cli_clock_output(
         .lines;
     let deadline = Instant::now() + duration;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         {
-            let retained = lines
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let retained = lines.lock();
             if matches(&retained) {
                 return;
             }
@@ -4347,7 +4342,7 @@ async fn when_http_payload_is_posted_until_the_cli_repl_displays(
         .verified("a preceding step started the CLI REPL");
     let deadline = Instant::now() + CLI_TERMINAL_DISPLAY_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_http(&node_id, &host, &path, &payload)
@@ -4691,7 +4686,7 @@ impl IngestorLogicTransportFixture {
                 let topic = expand_placeholders(world, "logic_notifications_{{test_id}}");
                 let deadline = Instant::now() + Duration::from_secs(5);
                 loop {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     world
                         .cluster()
                         .publish_kafka(&topic, payload)
@@ -4777,7 +4772,7 @@ impl IngestorLogicTransportFixture {
                 let subject = expand_placeholders(world, "logic_notifications_{{test_id}}");
                 let deadline = Instant::now() + Duration::from_secs(5);
                 loop {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     world
                         .cluster()
                         .publish_nats_with_headers(&subject, payload, &headers)
@@ -4850,9 +4845,8 @@ fn then_dependency_endpoint_remains_stable_for_the_test_suite(
         .unwrap_or_else(|error| panic!("{error}"))
         .to_string();
     let mut observed = SUITE_DEPENDENCY_ENDPOINTS
-        .get_or_init(|| StdMutex::new(BTreeMap::new()))
-        .lock()
-        .expect("suite dependency endpoint observations must not be poisoned");
+        .get_or_init(|| BlockingMutex::new(BTreeMap::new()))
+        .lock();
     match observed.get(&endpoint_key) {
         Some(existing) => assert_eq!(
             existing, &endpoint,
@@ -5653,7 +5647,7 @@ async fn when_domains_are_created_in_a_burst(
         .await
         .unwrap_or_else(|error| panic!("failed to open burst NSPL session: {error}"));
     for index in 0..count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let name = burst_domain_name(&prefix, index);
         session
             .run_command(&format!("CREATE DOMAIN {name};"))
@@ -5791,17 +5785,17 @@ async fn when_node_starts_durable_catch_up(
     let cancellation = CancellationToken::new();
     let writer_cancellation = cancellation.clone();
     let writer_prefix = live_prefix.clone();
-    let task = AbortOnDropHandle::new(tokio::spawn(async move {
+    let task = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
         let mut written = 0_usize;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if writer_cancellation.is_cancelled() {
                 return Ok(written);
             }
 
             let name = burst_domain_name(&writer_prefix, written);
             let request = client.execute(format!("CREATE DOMAIN {name};"));
-            let outcome = tokio::select! {
+            let outcome = nervix_primitives::select! {
                 () = writer_cancellation.cancelled() => return Ok(written),
                 outcome = request => outcome,
             };
@@ -5824,7 +5818,7 @@ async fn when_node_starts_durable_catch_up(
                     "follower catch-up did not finish while {written} leader writes succeeded"
                 ));
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 () = writer_cancellation.cancelled() => return Ok(written),
                 () = tokio::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE) => {}
             }
@@ -5841,7 +5835,7 @@ async fn when_node_starts_durable_catch_up(
         });
     let memory_cancellation = CancellationToken::new();
     let sampler_cancellation = memory_cancellation.clone();
-    let memory_task = AbortOnDropHandle::new(tokio::spawn(
+    let memory_task = AbortOnDropHandle::new(nervix_primitives::task::spawn(
         crate::common::cluster::sample_peak_observability_metric(
             metrics_url,
             "nervix_execution_memory_reserved_bytes".to_string(),
@@ -5907,7 +5901,7 @@ async fn then_node_catches_up_within_durable_storage_bound(
         .assured("the durable catch-up test bound fits the monotonic clock range");
 
     let backlog_applied = loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let applied = applied_burst_domains(world, &node_id, &backlog_prefix).await;
         if applied >= backlog_count || Instant::now() >= maximum_deadline {
             break applied;
@@ -5930,7 +5924,7 @@ async fn then_node_catches_up_within_durable_storage_bound(
         .assured("the durable catch-up test bound fits the monotonic clock range");
 
     let live_applied = loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let applied = applied_burst_domains(world, &node_id, &live_prefix).await;
         let all_applied = backlog_applied >= backlog_count && applied >= live_writes;
         if all_applied || Instant::now() >= deadline {
@@ -6053,7 +6047,7 @@ async fn await_burst_domains(
         + humantime::parse_duration(duration).expect("step duration must be a valid duration");
     for node_id in nodes {
         let applied = loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let applied = applied_burst_domains(world, node_id, prefix).await;
             if applied >= count || Instant::now() >= deadline {
                 break applied;
@@ -6143,7 +6137,7 @@ async fn then_leader_released_snapshot_bulk_memory(world: &mut ScenarioWorld, du
         .verified("the default snapshot-section working set fits in u64");
     let section_reservation: f64 = section_reservation.approx_into();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let reserved = world
             .cluster()
             .read_observability_metric(
@@ -6180,7 +6174,7 @@ async fn await_purge_beyond_retention_peak(
     let deadline = Instant::now()
         + humantime::parse_duration(duration).expect("step duration must be a valid duration");
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let retention = observer.raft_log_retention();
         assert!(
             retention.snapshot_index >= retention.purged_index,
@@ -6209,7 +6203,7 @@ async fn await_covered_log_purge(
     let deadline = Instant::now()
         + humantime::parse_duration(duration).expect("step duration must be a valid duration");
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let retention = observer.raft_log_retention();
         if retention.purged_index > beyond {
             assert!(
@@ -6277,7 +6271,7 @@ async fn then_node_interrupted_a_snapshot_installation(
     let deadline = Instant::now()
         + humantime::parse_duration(&duration).expect("step duration must be a valid duration");
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if world.fault_injection.consensus_storage_failure_fired(&node) {
             return;
         }
@@ -6299,7 +6293,7 @@ async fn then_node_recovers_by_snapshot(
     let deadline = Instant::now()
         + humantime::parse_duration(&duration).expect("step duration must be a valid duration");
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observer = world
             .fault_injection
             .consensus_observer(&crate::common::cluster::node_name(&node_id));
@@ -6550,7 +6544,7 @@ async fn then_wasm_processor_completes_a_guest_requested_state_reset(
         humantime::parse_duration(&timeout).expect("step duration must be a valid duration");
     let deadline = Instant::now() + timeout;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if completed_guest_wasm_state_reset(world, &processor).await {
             return;
         }
@@ -7092,7 +7086,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
             .checked_add(Duration::from_secs(30))
             .expect("the scenario placement deadline must fit in the monotonic clock");
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let outcome = client
                 .execute("SHOW CLUSTER STATUS;".to_string())
                 .await
@@ -7275,7 +7269,7 @@ async fn given_http_mock_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
 async fn then_dns_fixture_queried_http_mock(world: &mut ScenarioWorld) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let count = world
                 .cluster()
                 .dns_questions_for_name("http-source.nervix.test")
@@ -7312,7 +7306,7 @@ async fn given_iceberg_endpoints_have_fixture_dns(world: &mut ScenarioWorld) {
 async fn then_dns_fixture_queried_iceberg(world: &mut ScenarioWorld) {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let catalog = world
                 .cluster()
                 .dns_questions_for_name("iceberg-catalog.nervix.test")
@@ -7693,7 +7687,7 @@ async fn then_the_tcp_forwarder_accepts_a_connection(world: &mut ScenarioWorld, 
         .expect("the scenario started TCP forwarders");
     tokio::time::timeout(ACCEPT_BUDGET, async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let accepted = forwarders
                 .accepted(address)
                 .unwrap_or_else(|error| panic!("{error}"));
@@ -7713,7 +7707,7 @@ async fn then_the_tcp_forwarder_accepts_a_connection(world: &mut ScenarioWorld, 
 async fn then_dns_fixture_queried_name(world: &mut ScenarioWorld, name: String) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let count = world
                 .cluster()
                 .dns_questions_for_name(&name)
@@ -7736,7 +7730,7 @@ async fn then_dns_fixture_queried_name_again(world: &mut ScenarioWorld, name: St
         .assured("the scenario configured fixture DNS before observing questions");
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let count = world
                 .cluster()
                 .dns_questions_for_name(&name)
@@ -9555,7 +9549,7 @@ async fn when_node_is_restarted_with_new_interconnect_addresses(
 ) {
     let node_id = expand_placeholders(world, &node_id);
     for _ in 0..repetitions {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster_mut()
             .restart_node_with_new_interconnect_address(&node_id)
@@ -9577,7 +9571,7 @@ async fn then_leader_records_current_raft_address(world: &mut ScenarioWorld, nod
     let expected = format!("- {node_id} [voter] {endpoint}");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let leader = current_leader_node(world).await;
         let status = run_nspl_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
             .await
@@ -9600,7 +9594,7 @@ async fn then_leader_raft_log_stays_still(world: &mut ScenarioWorld, duration: S
     let deadline = Instant::now() + duration;
     let mut initial = None;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let status = run_nspl_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
             .await
             .expect("leader cluster status must be available");
@@ -9975,7 +9969,7 @@ async fn then_command_admission_pause_is_reached(world: &mut ScenarioWorld, node
     tokio::time::timeout(Duration::from_secs(30), async {
         if let Some(task) = world.background_command_result.as_mut() {
             let node_name = crate::common::cluster::node_name(&node_id);
-            tokio::select! {
+            nervix_primitives::select! {
                 () = fault_injection.wait_for_command_admission_pause(&node_name) => {},
                 result = task => panic!(
                     "command on '{node_id}' returned before reaching its admission pause: \
@@ -9986,7 +9980,7 @@ async fn then_command_admission_pause_is_reached(world: &mut ScenarioWorld, node
         }
         if let Some(task) = world.background_nspl.as_mut() {
             let node_name = crate::common::cluster::node_name(&node_id);
-            tokio::select! {
+            nervix_primitives::select! {
                 () = fault_injection.wait_for_command_admission_pause(&node_name) => {},
                 result = task => panic!(
                     "command on '{node_id}' returned before reaching its admission pause: \
@@ -10041,7 +10035,7 @@ async fn then_command_reference_lookup_pause_is_reached(
         .as_mut()
         .verified("the preceding step started a background command request");
     tokio::time::timeout(Duration::from_secs(30), async {
-        tokio::select! {
+        nervix_primitives::select! {
             () = fault_injection.wait_for_command_reference_lookup_pause(&node_name) => {},
             result = request => panic!(
                 "command on '{node_id}' returned before its reference lookup pause: {result:?}"
@@ -10093,7 +10087,7 @@ async fn then_command_durable_admission_pause_is_reached(
                 .await;
             return;
         };
-        tokio::select! {
+        nervix_primitives::select! {
             () = fault_injection.wait_for_command_durable_admission_pause(&node_name) => {},
             result = task => panic!(
                 "command on '{node_id}' returned before its durable admission pause: {result:?}"
@@ -10139,7 +10133,7 @@ async fn then_relocation_publication_pause_is_reached(world: &mut ScenarioWorld,
         .as_mut()
         .verified("the preceding step started a background relocation");
     tokio::time::timeout(Duration::from_secs(30), async {
-        tokio::select! {
+        nervix_primitives::select! {
             () = fault_injection.wait_for_relocation_publication_pause(&domain) => {},
             result = task => panic!(
                 "relocation for domain '{domain}' returned before its publication pause: \
@@ -10179,7 +10173,7 @@ async fn then_command_response_delivery_pause_is_reached(
     let node_id = expand_placeholders(world, &node_id);
     let node_name = crate::common::cluster::node_name(&node_id);
     let fault_injection = world.fault_injection.clone();
-    tokio::select! {
+    nervix_primitives::select! {
         () = fault_injection.wait_for_command_response_delivery_pause(&node_name) => {},
         () = tokio::time::sleep(Duration::from_secs(30)) => {
             panic!("command response delivery pause on node '{node_id}' was not reached");
@@ -10466,7 +10460,7 @@ async fn then_entity_gate_pause_is_reached(world: &mut ScenarioWorld, domain: St
     let fault_injection = world.fault_injection.clone();
     let deadline = Instant::now() + ENTITY_GATE_PAUSE_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if tokio::time::timeout(
             Duration::from_millis(50),
             fault_injection.wait_for_entity_gate_pause(&domain),
@@ -10556,7 +10550,7 @@ async fn then_ownership_handoff_preparation_pause_is_reached(
     let fault_injection = world.fault_injection.clone();
     let deadline = Instant::now() + ENTITY_GATE_PAUSE_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if tokio::time::timeout(
             Duration::from_millis(50),
             fault_injection.wait_for_ownership_handoff_preparation_pause(&domain),
@@ -11669,17 +11663,19 @@ async fn when_these_nspl_commands_begin_executing_in_the_background(
         .open_session(&leader, &world.domain)
         .await
         .expect("failed to open background NSPL session");
-    world.background_nspl = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-        let mut last_output = String::new();
-        for command in statements {
-            tokio::task::consume_budget().await;
-            last_output = session
-                .run_command(&command)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
-        Ok(last_output)
-    })));
+    world.background_nspl = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move {
+            let mut last_output = String::new();
+            for command in statements {
+                nervix_primitives::task::consume_budget().await;
+                last_output = session
+                    .run_command(&command)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(last_output)
+        },
+    )));
 }
 
 #[when("this NSPL command request begins executing in the background on the leader node")]
@@ -11695,9 +11691,9 @@ async fn when_command_request_begins_in_background(world: &mut ScenarioWorld, #[
         .open_session(&leader, &world.domain)
         .await
         .unwrap_or_else(|error| panic!("failed to open the background command session: {error}"));
-    world.background_command_result = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-        session.run_command_result(&query).await
-    })));
+    world.background_command_result = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move { session.run_command_result(&query).await },
+    )));
 }
 
 #[when(
@@ -11721,11 +11717,13 @@ async fn when_referenced_command_request_begins_in_background(
         .open_session(&leader, &world.domain)
         .await
         .unwrap_or_else(|error| panic!("failed to open the background command session: {error}"));
-    world.background_command_result = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-        session
-            .run_command_result_with_reference(&query, &execution_reference)
-            .await
-    })));
+    world.background_command_result = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move {
+            session
+                .run_command_result_with_reference(&query, &execution_reference)
+                .await
+        },
+    )));
 }
 
 #[when(
@@ -11749,17 +11747,19 @@ async fn when_exact_command_retry_begins_in_parallel(
         .open_session(&leader, &world.domain)
         .await
         .unwrap_or_else(|error| panic!("failed to open the exact retry session: {error}"));
-    world.background_nspl = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-        let result = session
-            .run_command_result_with_reference(&query, &execution_reference)
-            .await
-            .map_err(|error| error.to_string())?;
-        if result.succeeded() {
-            Ok(result.message)
-        } else {
-            Err(result.message)
-        }
-    })));
+    world.background_nspl = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move {
+            let result = session
+                .run_command_result_with_reference(&query, &execution_reference)
+                .await
+                .map_err(|error| error.to_string())?;
+            if result.succeeded() {
+                Ok(result.message)
+            } else {
+                Err(result.message)
+            }
+        },
+    )));
 }
 
 #[when(
@@ -11783,11 +11783,13 @@ async fn when_active_session_referenced_command_begins_in_background(
         .verified("the preceding setup created an active session");
     world.active_session_node = None;
     world.active_session_has_subscription = false;
-    world.background_command_result = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-        session
-            .run_command_result_with_reference(&query, &execution_reference)
-            .await
-    })));
+    world.background_command_result = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move {
+            session
+                .run_command_result_with_reference(&query, &execution_reference)
+                .await
+        },
+    )));
 }
 
 #[when(
@@ -11822,7 +11824,7 @@ async fn when_background_command_request_connection_is_dropped(world: &mut Scena
         .take()
         .verified("the preceding step started a background command request");
     drop(request);
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
 }
 
 #[when(expr = "the background command caller deadline expires after {string}")]
@@ -11842,7 +11844,7 @@ async fn when_background_command_caller_deadline_expires(
         "the command request returned before its caller deadline: {outcome:?}"
     );
     drop(request);
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
 }
 
 #[when(
@@ -12004,7 +12006,7 @@ async fn then_command_execution_reference_is_eventually_reclaimed(
         .consensus_observer(&crate::common::cluster::node_name(&leader));
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "command execution reference '{execution_reference}' was not reclaimed"
@@ -12094,21 +12096,23 @@ async fn when_named_client_begins_executing_in_the_background(
         .get(&name)
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
-    world.background_nspl = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-        let mut last_output = String::new();
-        for command in statements {
-            tokio::task::consume_budget().await;
-            let outcome = client
-                .execute(command)
-                .await
-                .map_err(|error| error.to_string())?;
-            if !outcome.succeeded() {
-                return Err(outcome.message);
+    world.background_nspl = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move {
+            let mut last_output = String::new();
+            for command in statements {
+                nervix_primitives::task::consume_budget().await;
+                let outcome = client
+                    .execute(command)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if !outcome.succeeded() {
+                    return Err(outcome.message);
+                }
+                last_output = outcome.message;
             }
-            last_output = outcome.message;
-        }
-        Ok(last_output)
-    })));
+            Ok(last_output)
+        },
+    )));
 }
 
 #[when(
@@ -12137,27 +12141,29 @@ async fn when_named_client_begins_resource_upload_in_the_background(
         .clone();
     let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
         .assured("the scenario identity is an identifier-shaped literal");
-    world.background_nspl = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-        let upload_domain = client
-            .domain()
-            .await
-            .assured("the upload client selected a domain");
-        let outcome = client
-            .upload_resource_from_directory_with_identity(
-                &resource,
-                directory,
-                upload_domain,
-                identity,
-                |_| {},
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        if outcome.succeeded() {
-            Ok(outcome.message)
-        } else {
-            Err(outcome.message)
-        }
-    })));
+    world.background_nspl = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move {
+            let upload_domain = client
+                .domain()
+                .await
+                .assured("the upload client selected a domain");
+            let outcome = client
+                .upload_resource_from_directory_with_identity(
+                    &resource,
+                    directory,
+                    upload_domain,
+                    identity,
+                    |_| {},
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            if outcome.succeeded() {
+                Ok(outcome.message)
+            } else {
+                Err(outcome.message)
+            }
+        },
+    )));
 }
 
 #[when("the background resource upload connection is dropped")]
@@ -12167,7 +12173,7 @@ async fn when_background_resource_upload_connection_is_dropped(world: &mut Scena
         .take()
         .verified("the preceding step started a background resource upload");
     drop(upload);
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
 }
 
 #[then("the background NSPL execution succeeds")]
@@ -12244,7 +12250,7 @@ async fn when_the_background_nspl_execution_is_canceled(world: &mut ScenarioWorl
         .take()
         .expect("a background NSPL execution must be active");
     drop(task);
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
 }
 
 fn commands_are_retry_safe_session_ops(commands: &str) -> bool {
@@ -12375,7 +12381,7 @@ async fn wait_for_mqtt_ingestors_ready(world: &mut ScenarioWorld) {
     for ingestor in ingestors {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let output = run_nspl_commands_on_node(
                 world,
                 &leader,
@@ -12723,7 +12729,7 @@ async fn when_named_client_executes_commands(
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
     for command in nspl_statements(&commands) {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let outcome = client
             .execute(command.clone())
             .await
@@ -12783,7 +12789,7 @@ async fn when_named_client_fails_to_execute_commands(
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
     for command in nspl_statements(&commands) {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match client.execute(command.clone()).await {
             Ok(outcome) if outcome.succeeded() => {
                 world.last_command_output = Some(outcome.message);
@@ -13715,7 +13721,7 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
         if retry_safe {
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 match run_nspl_commands_on_active_session(world, &commands).await {
                     Ok(()) => break,
                     Err(error) => {
@@ -13737,7 +13743,7 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
     let session = if retry_safe {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match execute_nspl_commands_on_node(world, &leader, &commands).await {
                 Ok(session) => break session,
                 Err(error) => {
@@ -13874,7 +13880,7 @@ async fn then_transaction_eventually_has_state(
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut last_output = String::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "transaction '{transaction_id}' did not reach state '{expected_state}'; last output: \
@@ -13960,7 +13966,7 @@ async fn given_stopped_transaction_qualification_graph(
             panic!("failed to create the transaction qualification schema: {error}")
         });
     for index in 0..relay_count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let relay = format!("qualification_relay_{index:04}");
         let command =
             format!("CREATE RELAY {relay} SCHEMA qualification_event UNBRANCHED CAPACITY 1;");
@@ -14010,7 +14016,7 @@ async fn when_named_client_queues_transaction_qualification_changes(
         begun.message
     );
     for index in 0..change_count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let field = format!("qualification_field_{index:03}");
         let command =
             format!("ALTER SCHEMA qualification_event ADD FIELD {field} STRING OPTIONAL;");
@@ -14112,7 +14118,7 @@ async fn then_node_retains_transaction_report(
         Instant::now() + humantime::parse_duration(&duration).assured("the step duration is valid");
     let mut observed = String::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "node '{node_id}' did not retain transaction '{transaction_id}' with \
@@ -14193,7 +14199,7 @@ async fn then_transaction_report_records_actual_quiescence(
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut observed = String::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "transaction '{transaction_id}' report step {step_number} did not record planned \
@@ -14255,7 +14261,7 @@ async fn then_transaction_report_records_recovery_rebuilds(
         .assured("transaction report step numbers are one-based");
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "transaction '{transaction_id}' report step {step_number} did not record recovery \
@@ -14285,7 +14291,7 @@ async fn then_transaction_is_eventually_removed(world: &mut ScenarioWorld, trans
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut last_output = String::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "transaction '{transaction_id}' tombstone was not removed; last output: {last_output}"
@@ -14440,7 +14446,7 @@ async fn when_web_console_submits_repeatedly(
     let command = expand_placeholders(world, &command);
     let input = page.locator(".prompt-row input");
     for _ in 0..count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         input
             .fill(&command, None)
             .await
@@ -14783,7 +14789,7 @@ async fn when_the_ingestor_logic_fixture_starts_with_output_schema_and_program(
         let placement = PhaseDeadline::after(Duration::from_secs(5));
         let mut last_output = None;
         let owner = loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             assert!(
                 !placement.has_passed(),
                 "timed out waiting for logic_ingestor schedule placement; last output: \
@@ -15045,7 +15051,7 @@ async fn then_selector_contains_text_exactly_times(
     let locator = page.locator(&selector);
     let deadline = Instant::now() + WEB_CONSOLE_ASSERTION_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let texts = locator
             .all_inner_texts()
             .await
@@ -15102,7 +15108,7 @@ async fn then_selector_contains_text(
     let locator = page.locator(&selector);
     let deadline = Instant::now() + WEB_CONSOLE_ASSERTION_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let texts = locator
             .all_inner_texts()
             .await
@@ -15132,7 +15138,7 @@ where
     let deadline = Instant::now() + bound;
     let mut first: Option<T> = None;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let text = locator
             .all_inner_texts()
             .await
@@ -15199,7 +15205,7 @@ async fn then_selector_contains_docstring(
     let locator = page.locator(&selector);
     let deadline = Instant::now() + WEB_CONSOLE_ASSERTION_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let texts = locator
             .all_inner_texts()
             .await
@@ -15232,7 +15238,7 @@ async fn then_selector_contains_text_for_milliseconds(
     let locator = page.locator(&selector);
     let deadline = Instant::now() + Duration::from_millis(duration_milliseconds.arch_into());
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let texts = locator
             .all_inner_texts()
             .await
@@ -15264,7 +15270,7 @@ async fn then_selector_does_not_contain_text(
     let locator = page.locator(&selector);
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let texts = locator
             .all_inner_texts()
             .await
@@ -15295,7 +15301,7 @@ async fn then_selector_does_not_exist(world: &mut ScenarioWorld, selector: Strin
     );
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let missing = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -15333,7 +15339,7 @@ async fn then_selector_eventually_disappears(world: &mut ScenarioWorld, selector
     let locator = page.locator(&selector);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let texts = locator
             .all_inner_texts()
             .await
@@ -15370,7 +15376,7 @@ async fn then_selector_has_value(world: &mut ScenarioWorld, selector: String, ex
         .expect("selector must become visible");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let value = locator
             .input_value(None)
             .await
@@ -15438,7 +15444,7 @@ async fn then_selector_is_scrolled_to_bottom(world: &mut ScenarioWorld, selector
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let is_scrolled_to_bottom = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -15483,7 +15489,7 @@ async fn then_selector_is_pinned_to_viewport_bottom(world: &mut ScenarioWorld, s
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let is_pinned = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -15527,7 +15533,7 @@ async fn then_selector_does_not_overlap_selector(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let does_not_overlap = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -15574,7 +15580,7 @@ async fn then_graph_item_does_not_overlap_graph_item(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let does_not_overlap = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -15616,7 +15622,7 @@ async fn then_graph_item_has_graph_width_at_least(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let actual_width = page
             .evaluate::<(), Option<f64>>(&script, None::<&()>)
             .await
@@ -15653,7 +15659,7 @@ async fn then_graph_item_has_status(world: &mut ScenarioWorld, item: String, exp
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let status = page
             .evaluate::<(), Option<String>>(&script, None::<&()>)
             .await
@@ -15704,7 +15710,7 @@ async fn then_graph_item_search_highlight_matches(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let highlighted = page
             .evaluate::<(), Option<bool>>(&script, None::<&()>)
             .await
@@ -15737,7 +15743,7 @@ async fn then_graph_search_highlights_exactly_graph_items(
     "#;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let count = page
             .evaluate::<(), i32>(script, None::<&()>)
             .await
@@ -16470,7 +16476,7 @@ async fn then_inspector_parallel_relations_are_distinct(
 async fn assert_graph_probe(page: &playwright_rs::Page, script: &str, expectation: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let last = page
             .evaluate::<(), String>(script, None::<&()>)
             .await
@@ -16537,7 +16543,7 @@ async fn then_graph_search_result_is_visible_in_the_graph_viewport(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -16590,7 +16596,7 @@ async fn then_graph_relay_item_has_buffer_statistics(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let statistics = page
             .evaluate::<(), Option<BTreeMap<String, String>>>(&script, None::<&()>)
             .await
@@ -16807,7 +16813,7 @@ async fn when_graph_edge_from_to_is_clicked_with_viewport_focused_on_its_middle(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), BTreeMap<String, String>>(&script, None::<&()>)
             .await
@@ -16899,7 +16905,7 @@ async fn then_graph_edge_from_to_has_both_endpoints_visible_in_the_graph_viewpor
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -16981,7 +16987,7 @@ async fn then_graph_edge_from_to_does_not_intersect_graph_item(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let does_not_intersect = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -17079,7 +17085,7 @@ async fn then_graph_edge_from_to_does_not_intersect_branch_group_body(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -17238,7 +17244,7 @@ async fn then_graph_edge_from_to_does_not_intersect_graph_edge_from_to(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -17345,7 +17351,7 @@ async fn then_graph_edge_from_to_does_not_share_horizontal_lane_with_graph_edge_
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -17413,7 +17419,7 @@ async fn then_graph_edge_from_to_starts_horizontally(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -17480,7 +17486,7 @@ async fn then_graph_edge_from_to_ends_horizontally(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -17556,7 +17562,7 @@ async fn then_graph_edge_from_to_has_target_plug_at_least(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -17612,7 +17618,7 @@ async fn then_graph_edge_from_to_has_at_most_rounded_turns(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -17689,7 +17695,7 @@ async fn then_graph_edge_from_to_has_source_plug_at_least(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -17765,7 +17771,7 @@ async fn then_graph_edge_from_to_has_traffic_statistics(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let statistics = page
             .evaluate::<(), Option<BTreeMap<String, String>>>(&script, None::<&()>)
             .await
@@ -17809,7 +17815,7 @@ async fn when_graph_topology_render_count_observation_starts(world: &mut Scenari
     "##;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observing = page
             .evaluate::<(), bool>(script, None::<&()>)
             .await
@@ -17849,7 +17855,7 @@ async fn then_graph_topology_render_count_does_not_change_during_observed_traffi
     "##;
     let deadline = Instant::now() + Duration::from_millis(600);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(script, None::<&()>)
             .await
@@ -17907,7 +17913,7 @@ async fn then_graph_edge_with_kind_from_to_is_visible(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let is_visible = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -18033,7 +18039,7 @@ async fn then_graph_edge_from_to_has_exact_hover_target(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = page
             .evaluate::<(), String>(&script, None::<&()>)
             .await
@@ -18090,7 +18096,7 @@ async fn then_branch_group_body_does_not_overlap_graph_item(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let does_not_overlap = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -18145,7 +18151,7 @@ async fn then_branch_group_body_overlaps_graph_item(
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let overlaps = page
             .evaluate::<(), bool>(&script, None::<&()>)
             .await
@@ -18381,12 +18387,12 @@ async fn then_within_duration_describe_domain_section_metric_across_physical_nod
     let mut last_totals = std::collections::BTreeMap::<String, u64>::new();
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let mut outputs = Vec::new();
         let mut command_error = None;
         last_totals.clear();
         for node_id in world.cluster().node_ids() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match run_nspl_commands_on_node(world, &node_id, "DESCRIBE DOMAIN;").await {
                 Ok(output) => {
                     for (physical_node, total) in
@@ -18680,7 +18686,7 @@ async fn then_connected_quorum_observes_lagging_follower(
     let lagging_node = expand_placeholders(world, &lagging_node);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let connected_status = world
             .cluster()
             .status_text(
@@ -18782,7 +18788,7 @@ async fn observe_healthy_peers(
     );
     let observation = PhaseDeadline::after(duration);
     while !observation.has_passed() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         for (source, peer) in [(nodes[0], nodes[1]), (nodes[1], nodes[0])] {
             let status = world
                 .cluster()
@@ -18841,7 +18847,7 @@ async fn then_no_scheduled_work_on_node(
     let unavailable_node = expand_placeholders(world, &unavailable_node);
     let observation = PhaseDeadline::after(duration);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             !observation.has_passed(),
             "work on '{unavailable_node}' did not fail over"
@@ -19153,7 +19159,7 @@ async fn then_within_duration_describe_ingestor_on_leader_contains(
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let leader = current_leader_node(world).await;
         let output =
             run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE INGESTOR {ingestor};"))
@@ -19187,7 +19193,7 @@ async fn then_within_duration_describe_wasm_processor_on_leader_contains(
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let leader = current_leader_node(world).await;
         let output = run_nspl_commands_on_node(
             world,
@@ -19255,7 +19261,7 @@ async fn then_describe_one_of_two_emitters_contains(
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let leader = current_leader_node(world).await;
         let mut outputs = Vec::with_capacity(emitters.len());
         for emitter in &emitters {
@@ -19294,7 +19300,7 @@ async fn then_within_duration_describe_emitter_on_leader_contains(
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let leader = current_leader_node(world).await;
         let output =
             run_nspl_commands_on_node(world, &leader, &format!("DESCRIBE EMITTER {emitter};"))
@@ -19350,7 +19356,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_equals_
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match run_nspl_commands_on_node(
             world,
             &node_id,
@@ -19400,7 +19406,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_differe
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match run_nspl_commands_on_node(
             world,
             &node_id,
@@ -19454,7 +19460,7 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_equals_pla
     let placement = PhaseDeadline::after(duration);
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             !placement.has_passed(),
             "timed out waiting for scheduled {kind} {name} owner to equal '{expected}'. last \
@@ -19502,7 +19508,7 @@ async fn then_for_duration_node_keeps_reporting_scheduled_owner_equal_to_placeho
     let observation = PhaseDeadline::after(duration);
 
     while !observation.has_passed() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         // The observation window bounds how long the owner is watched, not how long one read may
         // take, so every read keeps a full request budget even near the end of the window.
         let output = world
@@ -19554,7 +19560,7 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_different_
     let placement = PhaseDeadline::after(duration);
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             !placement.has_passed(),
             "timed out waiting for scheduled {kind} {name} owner to differ from '{unexpected}'. \
@@ -19733,7 +19739,7 @@ async fn then_within_duration_node_eventually_reports_describe_stream_as(
     let deadline = Instant::now() + timeout;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match run_nspl_commands_on_node(world, &node_id, &commands).await {
             Ok(output) if output.contains(expected.as_str()) => {
                 world.last_command_output = Some(output);
@@ -19778,7 +19784,7 @@ async fn then_within_duration_node_eventually_reports_describe_ingestor_as(
     let deadline = Instant::now() + timeout;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match run_nspl_commands_on_node(world, &node_id, &commands).await {
             Ok(output) if output.contains(expected.as_str()) => {
                 world.last_command_output = Some(output);
@@ -19817,7 +19823,7 @@ async fn then_within_duration_node_eventually_reports_describe_resource_as(
     let deadline = Instant::now() + timeout;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match run_nspl_commands_on_node(world, &node_id, &commands).await {
             Ok(output) if output.contains(expected.as_str()) => {
                 world.last_command_output = Some(output);
@@ -19864,7 +19870,7 @@ async fn then_within_duration_node_eventually_reports_materialized_state_contain
     let deadline = Instant::now() + timeout;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match run_nspl_commands_on_node(world, &node_id, &command).await {
             Ok(output) if output.contains(expected.trim()) => {
                 world.last_command_output = Some(output);
@@ -20068,7 +20074,7 @@ async fn observe_zeromq_emission_endpoint(world: &mut ScenarioWorld, addr: Strin
     }
 
     for _ in 0..ZEROMQ_OBSERVER_BIND_ATTEMPTS {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let replacement = format!(
             "tcp://127.0.0.1:{}",
             draw_scenario_port(world, "replacement ZeroMQ emit")
@@ -20676,7 +20682,7 @@ async fn when_these_mqtt_messages_are_rapidly_published(
     );
     wait_for_mqtt_ingestors_ready(world).await;
     for payload in payloads {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_mqtt(&topic, &payload)
@@ -21081,7 +21087,7 @@ async fn then_node_eventually_forwards_syslog_udp_message(
     let mut received = vec![0_u8; 65_535];
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let _ = socket.send_to(payload.as_bytes(), &addr).await;
         let next = tokio::time::timeout(
             Duration::from_millis(250),
@@ -21278,7 +21284,7 @@ async fn when_websocket_client_test_server_sends_a_payload(
     let deadline = Instant::now() + Duration::from_secs(10);
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match client.post(url.clone()).body(payload.clone()).send().await {
             Ok(response) if response.status().is_success() => {
                 world.last_server_error = None;
@@ -21598,7 +21604,7 @@ async fn when_sequential_metric_http_payloads_are_posted(
         "http publish sequential metrics: node=node-1 host={host} path={path} count={count}"
     ));
     for value in 1..=count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let payload = format!(r#"{{"value":{value}}}"#);
         world
             .cluster()
@@ -21937,7 +21943,7 @@ async fn when_http_payload_is_posted_to_node_and_fails(
     let deadline = Instant::now() + Duration::from_secs(5);
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let result = world
             .cluster()
             .publish_http(&node_id, &host, &path, &payload)
@@ -22023,7 +22029,7 @@ async fn then_named_client_receives_subscription_payload(
         .clone();
     let deadline = Instant::now() + duration;
     let payload = loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let pending = world
             .client_subscription_rows
             .entry(client_name.clone())
@@ -22092,7 +22098,7 @@ async fn when_named_client_receives_from_repeated_http_posts(
         .clone();
     let deadline = Instant::now() + duration;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "client '{client_name}' did not receive a row from repeated posts within {duration:?}"
@@ -22202,7 +22208,7 @@ async fn then_named_client_subscription_is_interrupted(
     // while an attempt is in flight; it is interrupted again once that attempt is refused.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let lifecycle = client.subscription_lifecycle(&name);
         if let Some(nervix_client_core::SubscriptionLifecycle::Interrupted(_)) = lifecycle {
             break;
@@ -22253,7 +22259,7 @@ async fn then_named_client_subscription_is_active(
         .assured("the scenario subscription name is valid");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let lifecycle = client.subscription_lifecycle(&name);
         if let Some(nervix_client_core::SubscriptionLifecycle::Active(_)) = lifecycle {
             break;
@@ -22281,7 +22287,7 @@ async fn then_node_eventually_accepts_websocket_traffic(
     let deadline = Instant::now() + Duration::from_secs(10);
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match world
             .cluster()
             .publish_websocket(&node_id, &host, &path, &payload)
@@ -22314,7 +22320,7 @@ async fn then_node_eventually_accepts_http_traffic(
     let deadline = Instant::now() + Duration::from_secs(10);
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match world
             .cluster()
             .publish_http(&node_id, &host, &path, &payload)
@@ -22351,7 +22357,7 @@ async fn then_within_duration_repeatedly_posting_http_payload_yields_subscriptio
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let _ = world
             .cluster()
             .publish_http("node-1", &host, &path, &payload)
@@ -22391,7 +22397,7 @@ async fn then_within_duration_repeatedly_posting_https_payload_yields_subscripti
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let publish = world
             .cluster()
             .publish_https("node-1", &host, &path, &payload, &ca_pem)
@@ -22437,7 +22443,7 @@ async fn then_within_duration_repeatedly_posting_encoded_http_payload_yields_sub
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let _ = world
             .cluster()
             .publish_http_bytes(
@@ -22479,7 +22485,7 @@ async fn then_within_duration_repeatedly_publishing_kafka_message_yields_subscri
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_kafka(&topic, &payload)
@@ -22519,7 +22525,7 @@ async fn then_within_duration_repeatedly_publishing_kafka_message_to_partition_y
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_kafka_partition(&topic, partition, &payload)
@@ -22556,7 +22562,7 @@ async fn then_within_duration_repeatedly_publishing_mqtt_message_yields_subscrip
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_mqtt(&topic, &payload)
@@ -22593,7 +22599,7 @@ async fn then_within_duration_repeatedly_publishing_pulsar_tls_message_yields_su
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_pulsar_tls(&topic, &payload)
@@ -22630,7 +22636,7 @@ async fn then_within_duration_repeatedly_publishing_redis_message_yields_subscri
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_redis(&channel, &payload)
@@ -22667,7 +22673,7 @@ async fn then_within_duration_repeatedly_publishing_nats_message_yields_subscrip
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_nats(&subject, &payload)
@@ -22704,7 +22710,7 @@ async fn then_within_duration_repeatedly_publishing_nats_tls_message_yields_subs
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_nats_tls(&subject, &payload)
@@ -22741,7 +22747,7 @@ async fn then_within_duration_repeatedly_publishing_sqs_message_yields_subscript
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_sqs(&queue, &payload)
@@ -22778,7 +22784,7 @@ async fn then_within_duration_repeatedly_publishing_tls_sqs_message_yields_subsc
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         world
             .cluster()
             .publish_sqs_tls(&queue, &payload)
@@ -22905,7 +22911,7 @@ async fn then_within_duration_repeatedly_posting_http_payload_yields_observed_br
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let _ = world
             .cluster()
             .publish_http(&node_id, &host, &path, &payload)
@@ -23041,7 +23047,7 @@ async fn then_subscriptions_each_sample_metric_values(
     samples.insert(second.clone(), SubscriptionSample::default());
     let deadline = Instant::now() + duration;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let mut all_drawn = true;
         for sample in samples.values() {
             if !sample.drawn {
@@ -23144,7 +23150,7 @@ async fn then_relay_subscription_payloads_share_field(
     let mut observed = Vec::with_capacity(expected_count);
 
     while observed.len() < expected_count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -23224,7 +23230,7 @@ async fn then_generator_occurrences_preserve_branches(
     let mut observed = Vec::new();
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let complete_occurrences = branches_by_timestamp
             .values()
             .filter(|branches| *branches == &expected_branches)
@@ -23344,7 +23350,7 @@ async fn then_generated_routes_share_field(
     let mut observed = Vec::new();
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -23978,7 +23984,7 @@ async fn then_within_duration_the_active_session_observes_a_server_error_contain
     let deadline = Instant::now() + duration;
     let mut passed_over = Vec::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let remaining = deadline.saturating_duration_since(Instant::now());
         let event = session
             .try_next_server_error(remaining)
@@ -24110,7 +24116,7 @@ async fn then_sentry_eventually_receives_event(world: &mut ScenarioWorld, #[step
     let deadline = Instant::now() + Duration::from_secs(10);
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if let Some(event) = world
             .dependencies
             .sentry_event(&world.test_id)
@@ -24172,7 +24178,7 @@ async fn then_quickwit_index_eventually_contains(
     let deadline = Instant::now() + Duration::from_secs(45);
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if world
             .dependencies
             .quickwit_index_contains(&index, &expected)
@@ -24194,7 +24200,7 @@ async fn then_otel_collector_eventually_contains(world: &mut ScenarioWorld, expe
     let expected = expand_placeholders(world, &expected);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if world
             .dependencies
             .otel_collector_contains(&expected)
@@ -24236,7 +24242,7 @@ async fn then_otel_collector_receives_split_exports(
     let deadline = Instant::now() + Duration::from_secs(10);
     let export_boundary = format!("\tinfo\t{heading}\t");
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let logs = world
             .dependencies
             .otel_collector_logs()
@@ -24476,9 +24482,9 @@ async fn given_postgres_table_is_locked(world: &mut ScenarioWorld) {
     let client = postgres_client(world.dependencies.endpoints(), world.postgres_tls)
         .await
         .expect("failed to connect to Postgres");
-    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
+    let (release_tx, release_rx) = nervix_primitives::sync::oneshot::channel();
+    let (locked_tx, locked_rx) = nervix_primitives::sync::oneshot::channel();
+    nervix_primitives::task::spawn(async move {
         let mut transaction = client
             .begin()
             .await
@@ -24670,7 +24676,7 @@ async fn then_postgres_table_eventually_contains_rows_across_bounded_inserts(
         .expect("failed to connect to Postgres");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let row = sqlx::query(SqlxAssertSqlSafe(format!(
             "SELECT (SELECT count(*) FROM {table}),
                     (SELECT count(*) FROM {audit_table}),
@@ -24765,7 +24771,7 @@ async fn then_mysql_table_eventually_contains_rows_from_insert_commands(
         .expect("failed to connect to MySQL as root");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observed_rows = conn
             .query_first::<u64, _>(format!("SELECT COUNT(*) FROM `{table}`"))
             .await
@@ -24930,7 +24936,7 @@ async fn then_mongodb_collection_eventually_holds_exactly_these_documents(
     };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observed = read_documents().await;
         if observed == expected {
             break;
@@ -25007,7 +25013,7 @@ async fn then_mongodb_collection_eventually_contains_documents_across_bounded_in
     let profile = database.collection::<MongoDbDocument>("system.profile");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observed_documents = collection
             .count_documents(mongodb_doc! {})
             .await
@@ -25072,7 +25078,7 @@ async fn then_within_duration_iceberg_table_contains_row(
     let mut observed = Vec::new();
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match iceberg_table_rows(&dependencies, &domain, &table).await {
             Ok(rows) => {
                 if rows
@@ -25114,7 +25120,7 @@ async fn then_iceberg_table_eventually_contains_row(
     let mut observed = Vec::new();
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match iceberg_table_rows(&dependencies, &domain, &table).await {
             Ok(rows) => {
                 if rows
@@ -25158,7 +25164,7 @@ async fn then_iceberg_table_does_not_contain_row_within(
     let deadline = Instant::now() + duration;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match iceberg_table_rows(&dependencies, &domain, &table).await {
             Ok(rows) => {
                 assert!(
@@ -25193,7 +25199,7 @@ async fn then_iceberg_table_metadata_does_not_contain(
     let mut observed = Vec::new();
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match iceberg_table_metadata(&dependencies, &domain, &table).await {
             Ok(metadata) => {
                 assert!(
@@ -25222,7 +25228,7 @@ async fn then_temp_directory_contains_iceberg_arrow_ipc_staged_batch(world: &mut
         .expect("temp root must be configured by the scenario");
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if path_contains_staged_iceberg_arrow_ipc_batch(temp_root.path()) {
             append_cucumber_log_line(&format!(
                 "observed Iceberg Arrow IPC staged batch under {}",
@@ -25455,12 +25461,12 @@ impl IcebergTableFixture {
 
     async fn ensure(&self) -> Result<(), String> {
         let _guard = ICEBERG_TABLE_PROVISION_LOCK
-            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .get_or_init(|| nervix_primitives::sync::Mutex::new(()))
             .lock()
             .await;
         let deadline = Instant::now() + ICEBERG_TABLE_PROVISION_TIMEOUT;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.ensure_once().await {
                 Ok(()) => return Ok(()),
                 Err(error) if Self::is_transient_catalog_lock(&error) => {
@@ -25702,7 +25708,7 @@ async fn then_within_duration_the_observed_broker_receives_payloads(
             let descriptions = PhaseDeadline::after(STATUS_DIAGNOSTIC_BUDGET);
             let mut runtime_diagnostics = Vec::new();
             for (node_id, status) in status_snapshots {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let mut node_diagnostics = Vec::new();
                 match status {
                     Ok(status) => {
@@ -25717,7 +25723,7 @@ async fn then_within_duration_the_observed_broker_receives_payloads(
                     "DESCRIBE INGESTOR ws_notifications;",
                     "DESCRIBE EMITTER kafka_forward;",
                 ] {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let described = descriptions
                         .bound(
                             world
@@ -25791,7 +25797,7 @@ async fn then_observed_broker_receives_json_payloads_preserving_group_order(
     let deadline = Instant::now() + duration;
     let mut actual = Vec::with_capacity(expected.len());
     while actual.len() < expected.len() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -25849,7 +25855,7 @@ async fn then_within_duration_the_observed_broker_receives_exactly_messages(
     let mut payload_counts = BTreeMap::new();
 
     for received in 0..count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -26112,7 +26118,7 @@ async fn receive_exactly_these_broker_messages<Expected: BrokerMessageExpectatio
     let deadline = Instant::now() + duration;
     let mut observed = Vec::new();
     while !remaining.is_empty() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -26196,7 +26202,7 @@ async fn then_observed_broker_receives_sequential_messages_with_headers(
 
     let deadline = Instant::now() + duration;
     for expected_sequence in 1..=count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -26296,7 +26302,7 @@ async fn capture_and_assert_subscription_payload(
     let mut observed = Vec::new();
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -26315,7 +26321,7 @@ async fn capture_and_assert_subscription_payload(
         let Some(event) = event else {
             let mut domain_descriptions = Vec::new();
             for node_id in world.cluster().node_ids() {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let result = world
                     .cluster()
                     .run_command(&node_id, &world.domain, "DESCRIBE DOMAIN;")
@@ -26367,7 +26373,7 @@ async fn then_stream_subscription_receives_payload_no_sooner_than(
     let deadline = Instant::now() + expected_delay + SUBSCRIPTION_DELIVERY_BUDGET;
     let mut observed = Vec::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -26411,7 +26417,7 @@ async fn try_capture_any_subscription_payload(
         .active_session
         .as_mut()
         .expect("an active session with subscription must exist");
-    tokio::task::consume_budget().await;
+    nervix_primitives::task::consume_budget().await;
     let Some(event) = session
         .try_next_subscription(duration)
         .await
@@ -26439,7 +26445,7 @@ async fn then_node_eventually_reports_interconnect_status(
 fn main() {
     TestDependencies::configure_process_lifecycle();
     let parallelism = TestParallelism::detect();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(parallelism.tokio_worker_threads())
         .thread_stack_size(8 * 1024 * 1024)

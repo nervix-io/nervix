@@ -18,8 +18,8 @@ use nervix_models::{
     ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ResourceUploadKey,
     ResourceUploadState, UploadResource,
 };
+use nervix_primitives::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use thiserror::Error;
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use super::{
     command_result::{CommandOrigin, CommandResult},
@@ -209,7 +209,7 @@ async fn fetch_resource_archive(
         .await
         .change_context(ResourceFetchError::Read)?
     {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let chunk_bytes =
             u64::try_from(chunk.len()).map_err(|_| Report::new(ResourceFetchError::ChunkLength))?;
         let next_received = received
@@ -373,7 +373,7 @@ impl SessionServiceImpl {
 
         let mut missing = Vec::new();
         for resource in resources.versions.iter().cloned() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let local_key = ResourceReplicaKey::new(
                 resource.id.domain.clone(),
                 resource.id.identifier.clone(),
@@ -473,7 +473,7 @@ impl SessionServiceImpl {
             == Some(self.inner.consensus.local_node_id())
         {
             for upload in resources.uploads.iter() {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if !matches!(upload.state, ResourceUploadState::Applying { .. }) {
                     continue;
                 }
@@ -1144,7 +1144,7 @@ impl SessionServiceImpl {
         let mut resources_changed = self.inner.consensus.subscribe_resources();
         let mut cluster_changed = self.inner.cluster.subscribe_state_changes().await;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let resources = self.inner.consensus.current_resources().await;
             let Some(resource) = resources.version(id) else {
                 return Err(Report::new(ResourceUploadError::Publish { id: id.clone() }));
@@ -1157,7 +1157,7 @@ impl SessionServiceImpl {
             ));
             let mut pending = false;
             for node in live_nodes {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let replica = resources.replicas.iter().find(|replica| {
                     replica.key.version_key().resource_id() == *id && replica.key.node == node
                 });
@@ -1183,7 +1183,7 @@ impl SessionServiceImpl {
                 return Ok(());
             }
 
-            tokio::select! {
+            nervix_primitives::select! {
                 changed = resources_changed.changed() => {
                     if changed.is_err() {
                         return Err(Report::new(ResourceUploadError::Publish { id: id.clone() }));
@@ -1480,7 +1480,7 @@ mod tests {
         assert_eq!(local_path_at_end("DESCRIBE RESOURCE proto VERSION "), None);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn create_resource_if_not_exists_returns_already_existed() {
         let TestService {
             service,
@@ -1541,7 +1541,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn interrupted_resource_upload_without_a_durable_version_becomes_terminal() {
         let TestService {
             service,
@@ -1584,7 +1584,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn interrupted_resource_upload_with_ready_replicas_completes() {
         let TestService {
             service,
@@ -1642,7 +1642,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn reconciliation_retains_a_failed_local_replica_when_no_live_source_exists() {
         let TestService {
             service,
@@ -1713,7 +1713,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn invalid_resource_archive_failure_is_retained_across_retry() {
         let TestService {
             service,

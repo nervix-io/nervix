@@ -203,7 +203,7 @@ mod tests {
         assert_eq!(reorder_key_part(&values, 2), ReorderKeyPart::Null);
         assert!(reorder_key_part(&values, 0) < reorder_key_part(&values, 1));
     }
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn reorderer_buffer_applies_one_columnar_permutation_to_batches_and_sidecars() {
         /// One row fed into the reorderer buffer: the sequence it carries, the watermark it arrived
         /// with, and the ACKs the reordered output must keep aligned with it.
@@ -336,7 +336,7 @@ mod tests {
     /// Ordering keys that do not pair with a batch's Arrow rows can only come from a defect above
     /// the buffer. The flush must name the first batch that disagrees and hand every buffered
     /// batch back, because the caller resolves the ACKs those batches carry.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn reorderer_buffer_reports_the_first_ordering_key_mismatch_and_returns_every_batch() {
         let schema = test_schema(&[("sequence", ParseAsType::U32)]);
         let batch = |sequence: u32, acks: AckSet| {
@@ -460,7 +460,7 @@ mod tests {
         assert_eq!(buffer.estimated_bytes(), 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn reorderer_key_program_evaluates_direct_u32_field() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),

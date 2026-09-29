@@ -317,7 +317,7 @@ pub(crate) struct RuntimeRecordBatchBuilder {
 // Counted per thread so a test observes only the batches it built itself, while the rest of the
 // suite exercises the same builders in parallel.
 #[cfg(test)]
-thread_local! {
+nervix_primitives::thread_local! {
     pub(crate) static RECORD_BUILDER_SETS_OPENED: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
     pub(crate) static RECORD_COLUMN_SETS_BUILT: std::cell::Cell<usize> =

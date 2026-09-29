@@ -54,7 +54,7 @@ fn queued_executor(pending_jobs: usize) -> Executor {
     .expect("the default budgets hold the default operation limits")
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn default_limits_validate_together() {
     let executor = Executor::new(ExecutionConfig::default()).expect("defaults are consistent");
     let snapshot = executor.snapshot();
@@ -67,7 +67,7 @@ async fn default_limits_validate_together() {
     assert_eq!(snapshot.filesystem_storage.workers, 2);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_relay_budget_below_two_maximum_operations_fails_to_start() {
     let error = Executor::new(ExecutionConfig {
         budgets: MemoryBudgets {
@@ -88,7 +88,7 @@ async fn a_relay_budget_below_two_maximum_operations_fails_to_start() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_management_budget_below_one_event_fails_to_start() {
     let error = Executor::new(ExecutionConfig {
         budgets: MemoryBudgets {
@@ -113,7 +113,7 @@ async fn a_management_budget_below_one_event_fails_to_start() {
 /// that answer against the same class. A budget that cannot hold the whole resident window beside
 /// one batch being encoded would let a full window leave no room to produce the answer that
 /// releases it, so the node refuses to start instead of deadlocking on its first catch-up.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_commands_budget_below_the_resident_replication_window_fails_to_start() {
     let error = Executor::new(ExecutionConfig {
         budgets: MemoryBudgets {
@@ -138,7 +138,7 @@ async fn a_commands_budget_below_the_resident_replication_window_fails_to_start(
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_commands_budget_below_one_normalized_state_write_fails_to_start() {
     let error = Executor::new(ExecutionConfig {
         budgets: MemoryBudgets {
@@ -159,7 +159,7 @@ async fn a_commands_budget_below_one_normalized_state_write_fails_to_start() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_reservation_holds_its_class_until_it_is_dropped() {
     let executor = small_executor();
     let capacity = executor.snapshot().bulk_memory.capacity_bytes;
@@ -181,7 +181,7 @@ async fn a_reservation_holds_its_class_until_it_is_dropped() {
     assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_operation_larger_than_its_class_is_refused_rather_than_queued() {
     let executor = small_executor();
     let capacity = executor.snapshot().management_memory.capacity_bytes;
@@ -224,9 +224,9 @@ mod shuttle_checks {
     const MAX_SCHEDULE_STEPS: usize = 10_000;
 
     struct ReservationProbe {
-        started: tokio::sync::oneshot::Receiver<()>,
-        release: tokio::sync::oneshot::Sender<()>,
-        task: tokio::task::JoinHandle<()>,
+        started: nervix_primitives::sync::oneshot::Receiver<()>,
+        release: nervix_primitives::sync::oneshot::Sender<()>,
+        task: nervix_primitives::task::JoinHandle<()>,
     }
 
     fn measured_invariant(
@@ -335,7 +335,7 @@ mod shuttle_checks {
 
     async fn announce_after_first_pending<F>(
         future: F,
-        pending: tokio::sync::oneshot::Sender<()>,
+        pending: nervix_primitives::sync::oneshot::Sender<()>,
     ) -> F::Output
     where
         F: Future,
@@ -369,10 +369,10 @@ mod shuttle_checks {
                 MemoryClass::Commands,
                 MemoryClass::Bulk,
             ] {
-                let (started, has_started) = tokio::sync::oneshot::channel();
-                let (release, released) = tokio::sync::oneshot::channel();
+                let (started, has_started) = nervix_primitives::sync::oneshot::channel();
+                let (release, released) = nervix_primitives::sync::oneshot::channel();
                 let probe_executor = executor.clone();
-                let task = tokio::spawn(async move {
+                let task = nervix_primitives::task::spawn(async move {
                     let reservation = probe_executor
                         .try_reserve(class, 1024)
                         .assured("a saturated relay class cannot consume another class's permits");
@@ -393,7 +393,7 @@ mod shuttle_checks {
             }
 
             for probe in &mut probes {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 (&mut probe.started)
                     .await
                     .assured("each independent memory class reports its live reservation");
@@ -419,7 +419,7 @@ mod shuttle_checks {
             assert_live_reservations_fit(&executor);
 
             for probe in probes {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 probe
                     .release
                     .send(())
@@ -443,13 +443,13 @@ mod shuttle_checks {
     fn occupied_bulk_execution_invariant() {
         shuttle::future::block_on(async {
             let executor = small_executor();
-            let (started, has_started) = tokio::sync::oneshot::channel();
-            let (release, released) = tokio::sync::oneshot::channel();
+            let (started, has_started) = nervix_primitives::sync::oneshot::channel();
+            let (release, released) = nervix_primitives::sync::oneshot::channel();
             let bulk_reservation = executor
                 .try_reserve(MemoryClass::Bulk, 1024)
                 .assured("the untouched bulk class starts with room");
             let bulk_executor = executor.clone();
-            let bulk = tokio::spawn(async move {
+            let bulk = nervix_primitives::task::spawn(async move {
                 bulk_executor
                     .run_cpu(
                         CpuClass::Bulk,
@@ -503,14 +503,14 @@ mod shuttle_checks {
     fn queued_job_drop_invariant() {
         shuttle::future::block_on(async {
             let executor = small_executor();
-            let (started, has_started) = tokio::sync::oneshot::channel();
-            let (release, released) = tokio::sync::oneshot::channel();
+            let (started, has_started) = nervix_primitives::sync::oneshot::channel();
+            let (release, released) = nervix_primitives::sync::oneshot::channel();
             let occupying_bytes = 1024;
             let occupying = executor
                 .try_reserve(MemoryClass::Relay, occupying_bytes)
                 .assured("the untouched relay class starts with room");
             let occupied = executor.clone();
-            let running = tokio::spawn(async move {
+            let running = nervix_primitives::task::spawn(async move {
                 occupied
                     .run_cpu(CpuClass::Data, occupying, move |_charge, _| {
                         started
@@ -531,9 +531,9 @@ mod shuttle_checks {
             let queued = executor
                 .try_reserve(MemoryClass::Relay, queued_bytes)
                 .assured("the relay class has room for the queued job");
-            let (admitted, is_admitted) = tokio::sync::oneshot::channel();
+            let (admitted, is_admitted) = nervix_primitives::sync::oneshot::channel();
             let waiting = executor.clone();
-            let cancelled = tokio::spawn(async move {
+            let cancelled = nervix_primitives::task::spawn(async move {
                 announce_after_first_pending(
                     waiting.run_cpu(CpuClass::Data, queued, |_, _| ()),
                     admitted,
@@ -587,15 +587,15 @@ mod shuttle_checks {
     fn running_job_cancellation_invariant() {
         shuttle::future::block_on(async {
             let executor = small_executor();
-            let (started, has_started) = tokio::sync::oneshot::channel();
-            let (continue_job, may_continue) = tokio::sync::oneshot::channel();
-            let (exited, has_exited) = tokio::sync::oneshot::channel();
+            let (started, has_started) = nervix_primitives::sync::oneshot::channel();
+            let (continue_job, may_continue) = nervix_primitives::sync::oneshot::channel();
+            let (exited, has_exited) = nervix_primitives::sync::oneshot::channel();
             let reservation = executor
                 .try_reserve(MemoryClass::Relay, 8192)
                 .assured("the untouched relay class starts with room");
             let running = executor.clone();
             let waiting_snapshot = executor.clone();
-            let task = tokio::spawn(async move {
+            let task = nervix_primitives::task::spawn(async move {
                 running
                     .run_cpu(CpuClass::Data, reservation, move |_charge, cancellation| {
                         started
@@ -668,13 +668,13 @@ mod shuttle_checks {
     fn full_wait_queue_invariant() {
         shuttle::future::block_on(async {
             let executor = small_executor();
-            let (started, has_started) = tokio::sync::oneshot::channel();
-            let (release, released) = tokio::sync::oneshot::channel();
+            let (started, has_started) = nervix_primitives::sync::oneshot::channel();
+            let (release, released) = nervix_primitives::sync::oneshot::channel();
             let occupying = executor
                 .try_reserve(MemoryClass::Relay, 1024)
                 .assured("the untouched relay class starts with room");
             let occupied = executor.clone();
-            let running = tokio::spawn(async move {
+            let running = nervix_primitives::task::spawn(async move {
                 occupied
                     .run_cpu(CpuClass::Data, occupying, move |_charge, _| {
                         started
@@ -694,9 +694,9 @@ mod shuttle_checks {
             let queued = executor
                 .try_reserve(MemoryClass::Relay, 1024)
                 .assured("the relay class has room for the queued job");
-            let (admitted, is_admitted) = tokio::sync::oneshot::channel();
+            let (admitted, is_admitted) = nervix_primitives::sync::oneshot::channel();
             let waiting = executor.clone();
-            let pending = tokio::spawn(async move {
+            let pending = nervix_primitives::task::spawn(async move {
                 announce_after_first_pending(
                     waiting.run_cpu(CpuClass::Data, queued, |_, _| ()),
                     admitted,
@@ -756,21 +756,21 @@ mod shuttle_checks {
     fn consensus_admission_order_invariant() {
         shuttle::future::block_on(async {
             let executor = queued_executor(16);
-            let order = StdArc::new(parking_lot::Mutex::new(Vec::new()));
-            let (release, released) = tokio::sync::oneshot::channel::<()>();
+            let order = StdArc::new(nervix_primitives::sync::blocking::Mutex::new(Vec::new()));
+            let (release, released) = nervix_primitives::sync::oneshot::channel::<()>();
             let mut held = Some(released);
             let mut submissions = Vec::new();
 
             for index in 0..8_usize {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let reservation = executor
                     .try_reserve(MemoryClass::Commands, 1024)
                     .assured("the commands class has room for every ordered job");
                 let submitted = executor.clone();
                 let job_order = StdArc::clone(&order);
                 let gate = held.take();
-                let (admitted, is_admitted) = tokio::sync::oneshot::channel();
-                submissions.push(tokio::spawn(async move {
+                let (admitted, is_admitted) = nervix_primitives::sync::oneshot::channel();
+                submissions.push(nervix_primitives::task::spawn(async move {
                     announce_after_first_pending(
                         submitted.run_storage(
                             StorageClass::Consensus,
@@ -811,7 +811,7 @@ mod shuttle_checks {
                 .assured("the first consensus job remains held while its followers queue");
 
             for submission in submissions {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 submission
                     .await
                     .assured("every consensus submission is joined")
@@ -829,7 +829,7 @@ mod shuttle_checks {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_incremental_writer_fails_at_its_budget_boundary() {
     let executor = small_executor();
     let capacity = executor.snapshot().bulk_memory.capacity_bytes;
@@ -868,7 +868,7 @@ async fn an_incremental_writer_fails_at_its_budget_boundary() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_budgeted_buffer_returns_its_bytes_with_the_charge_that_backs_them() {
     let executor = small_executor();
     let reservation = executor
@@ -892,7 +892,7 @@ async fn a_budgeted_buffer_returns_its_bytes_with_the_charge_that_backs_them() {
     assert_eq!(executor.snapshot().commands_memory.reserved_bytes, 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_operation_limit_stops_a_writer_before_its_class_does() {
     let executor = small_executor();
     let reservation = executor
@@ -921,7 +921,7 @@ async fn an_operation_limit_stops_a_writer_before_its_class_does() {
 
 /// A writer that reserves room to grow into must not keep that room once it is done. A frame the
 /// size of a heartbeat holds its own bytes, not the granule its writer started with.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn freezing_a_buffer_returns_the_room_the_writer_did_not_use() {
     let executor = small_executor();
     let reservation = executor
@@ -947,7 +947,7 @@ async fn freezing_a_buffer_returns_the_room_the_writer_did_not_use() {
 
 /// Shrinking is what keeps a class usable under churn: a thousand small frames must not exhaust a
 /// budget sized for the operations it actually has to hold.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn many_small_frames_do_not_exhaust_the_class_that_backs_them() {
     let executor = small_executor();
     let capacity = executor.snapshot().management_memory.capacity_bytes;

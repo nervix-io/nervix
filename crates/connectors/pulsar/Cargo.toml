@@ -25,7 +25,7 @@ humantime = { workspace = true }
 meticulous = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-models = { workspace = true }
-nervix-primitives = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 pulsar = { workspace = true }
 shuttle-tokio = { workspace = true, features = [
   "macros",

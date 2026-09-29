@@ -4,7 +4,7 @@
 //! out-parameters, and prints the same report as every other probe. It runs on a blocking thread,
 //! because every call of the binding blocks its caller.
 
-use std::{io, ptr, slice, thread, time::Duration};
+use std::{io, ptr, slice, time::Duration};
 
 use nervix_client_ffi::{
     Cancel, CellState, ClockEvent, ClockEventKind, ClockState, DomainClock, Event, EventKind,
@@ -26,6 +26,7 @@ use nervix_client_ffi::{
     nx_session_execute, nx_session_free, nx_session_next_clock_event, nx_session_next_event,
     nx_session_prepare,
 };
+use nervix_primitives::thread;
 
 use super::{ProbeExercise, ProbeTarget};
 

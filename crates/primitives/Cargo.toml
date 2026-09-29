@@ -10,19 +10,65 @@ workspace = true
 
 [features]
 default = []
-# Operating-system threads. A capability of native targets only: enabling it for a wasm target is a
-# compile error rather than a thread that fails when it starts.
-native = []
+# The native capability: operating-system threads, the async runtime and its tasks, and the
+# synchronization, publication and concurrent-collection families built for them. A capability of
+# native targets only: enabling it for a wasm target is a compile error rather than a primitive that
+# fails when it is used.
+native = [
+  "dep:arc-swap",
+  "dep:concurrent-queue",
+  "dep:dashmap",
+  "dep:nervix-primitives-macros",
+  "dep:parking_lot",
+  "dep:tokio",
+  "dep:tokio-stream",
+  "dep:tokio-util",
+]
 # The execution modes. Exactly one may be enabled in a dependency graph, and every crate that owns a
 # mode feature forwards it here, so the whole graph uses one backend. Ordinary execution is the
 # absence of all three.
 loom = ["dep:loom"]
-shuttle = ["dep:shuttle"]
+shuttle = [
+  "dep:shuttle",
+  "dep:shuttle-dashmap",
+  "dep:shuttle-parking-lot",
+  "dep:shuttle-tokio",
+  "dep:shuttle-tokio-stream",
+  "dep:shuttle-tokio-util",
+  "shuttle-dashmap/shuttle",
+  "shuttle-parking-lot/shuttle",
+  "shuttle-tokio/shuttle",
+  "shuttle-tokio-stream/shuttle",
+  "shuttle-tokio-util/shuttle",
+]
 turmoil = []
 
 [dependencies]
+arc-swap = { workspace = true, optional = true }
+concurrent-queue = { workspace = true, optional = true }
+dashmap = { workspace = true, optional = true }
 loom = { workspace = true, optional = true }
-shuttle = { workspace = true, optional = true }
-
-[dev-dependencies]
 meticulous = { workspace = true }
+nervix-primitives-macros = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
+shuttle = { workspace = true, optional = true }
+shuttle-dashmap = { workspace = true, optional = true }
+shuttle-parking-lot = { workspace = true, optional = true }
+shuttle-tokio = { workspace = true, features = [
+  "macros",
+  "rt",
+  "rt-multi-thread",
+  "sync",
+  "time",
+], optional = true }
+shuttle-tokio-stream = { workspace = true, optional = true }
+shuttle-tokio-util = { workspace = true, features = ["rt"], optional = true }
+tokio = { workspace = true, features = [
+  "macros",
+  "rt",
+  "rt-multi-thread",
+  "sync",
+  "time",
+], optional = true }
+tokio-stream = { workspace = true, features = ["net"], optional = true }
+tokio-util = { workspace = true, features = ["rt"], optional = true }

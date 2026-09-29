@@ -6,7 +6,7 @@
 //! - **Must not know.** NSPL parsing, connector transports or placement selection.
 
 use error_stack::{Report, ResultExt as _};
-use tokio_util::sync::CancellationToken;
+use nervix_primitives::sync::CancellationToken;
 
 use super::*;
 
@@ -455,7 +455,7 @@ impl Runtime {
         branch_states: &mut HashMap<Option<BranchKey>, GeneratorBranchTaskState>,
     ) {
         for (route_index, (route, _)) in routes.iter().enumerate() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut pending_groups = Vec::new();
             for (branch_key, state) in &mut *branch_states {
                 let pending = state
@@ -552,7 +552,7 @@ impl Runtime {
         let runtime = self.clone();
         let task_events = self.inner.events.clone();
 
-        Ok(tokio::spawn(async move {
+        Ok(nervix_primitives::task::spawn(async move {
             let shared_routing = match runtime
                 .wait_for_domain_routing(&task_domain, &source_relay)
                 .await
@@ -578,7 +578,7 @@ impl Runtime {
                 HashMap::<Option<BranchKey>, GeneratorBranchTaskState>::default();
 
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if *local_intake_rx.borrow_and_update() == LocalIntake::Closed {
                     // A terminating node admits no new work. The generator releases what its
                     // routes buffered and produces nothing further until the domain stops it.
@@ -611,7 +611,7 @@ impl Runtime {
                         .await;
                     quiesce_activity.take();
                     activity.set_active(false);
-                    tokio::select! {
+                    nervix_primitives::select! {
                         _ = source_gate.wait_open() => {}
                         changed = shutdown_rx.changed() => {
                             if changed.is_err() || *shutdown_rx.borrow() {
@@ -644,7 +644,7 @@ impl Runtime {
                         )
                         .await;
                     activity.set_active(false);
-                    tokio::select! {
+                    nervix_primitives::select! {
                         changed = shutdown_rx.changed() => {
                             if changed.is_err() || *shutdown_rx.borrow() {
                                 break;
@@ -751,7 +751,7 @@ impl Runtime {
                         branch_states
                             .retain(|branch_key, _| active_branch_keys.contains(branch_key));
                         for (branch_key, records) in source_state_by_branch {
-                            tokio::task::consume_budget().await;
+                            nervix_primitives::task::consume_budget().await;
                             let branch_state = branch_states
                                 .entry(branch_key.clone())
                                 .or_insert_with(|| GeneratorBranchTaskState {
@@ -762,7 +762,7 @@ impl Runtime {
                                 });
 
                             for source_record in records {
-                                tokio::task::consume_budget().await;
+                                nervix_primitives::task::consume_budget().await;
                                 let source_metadata = source_record.metadata().clone();
                                 // Projection, not reconstruction: the row already shares its
                                 // carrier columns and this narrows them to the one row.
@@ -787,7 +787,7 @@ impl Runtime {
                                 for (route_index, (route, flush_policy)) in
                                     routes.iter().enumerate()
                                 {
-                                    tokio::task::consume_budget().await;
+                                    nervix_primitives::task::consume_budget().await;
                                     let input = match route.project_input(&context, &branch_key) {
                                         Ok(input) => input,
                                         Err(error) => {
@@ -970,7 +970,7 @@ impl Runtime {
                     }
                 };
                 for (branch_key, branch_state) in &mut branch_states {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     for ((route, _), route_state) in routes.iter().zip(&mut branch_state.routes) {
                         let due = match route_state
                             .flush_timer
@@ -1028,7 +1028,7 @@ impl Runtime {
                 let route_buffer_flush_wait =
                     wait_for_branch_buffer_deadlines(&domain_clock, route_buffer_flush_deadlines);
 
-                tokio::select! {
+                nervix_primitives::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             break;
@@ -1144,7 +1144,7 @@ mod tests {
         assert!(state.flush_timer.deadline().is_none());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn generator_set_program_projects_columnar_state_and_branch_context() {
         let source_schema = test_schema(&[
             ("tenant", ParseAsType::String),

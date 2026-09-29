@@ -2207,7 +2207,7 @@ mod tests {
         assert!(nervix_nspl::parse_expression("incoming_notifications.sequence").is_err());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn ingestor_filter_map_accepts_missing_optional_input_fields() {
         let input_schema = Arc::new(compile_schema(&CreateSchema {
             name: named("optional_logic"),
@@ -2286,7 +2286,7 @@ mod tests {
         assert!(row_value(&output, "normalized").is_none());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn finalized_output_filter_reads_constructed_output_values() {
         let output_schema =
             test_schema(&[("tenant", ParseAsType::String), ("total", ParseAsType::I64)]);
