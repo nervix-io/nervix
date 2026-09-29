@@ -99,7 +99,7 @@ The CI jobs divide the work at the scenario boundary:
 | `extra-tests` | Its Miri, mutation, benchmark, Shuttle, and completion checks plus `runtime_state_capabilities`, without coverage instrumentation |
 
 The `tests` and `scenarios` jobs also sample runner CPU utilization and steal time every five
-seconds. Every kache-backed job uses kache 0.28.0, records `doctor` output without making it a
+seconds. Every kache-backed job uses kache 0.28.1, records `doctor` output without making it a
 test failure, publishes a cache report, and diagnoses its five most expensive misses with
 `why-miss`. The shared S3 cache keeps executable and test-binary outputs, with stores sized for
 the full builds: every kache-backed job and Docker image build uses a 1 TiB store ceiling. This is
@@ -894,7 +894,7 @@ current profiles and reuses unchanged instrumented artifacts for another scenari
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |
-| Work before the scenario binary starts | 14 minutes | The first cold kache 0.28.0 split-job run took 11m37s from job start to the binary, and the next took 10m08s; the ceiling adds 2m23s beyond the slower measurement |
+| Work before the scenario binary starts | 14 minutes | The first cold kache 0.28.1 split-job run took 11m37s from job start to the binary, and the next took 10m08s; the ceiling adds 2m23s beyond the slower measurement |
 | The scenario run | 41 minutes | What the limit leaves |
 | After the budget expires | 5-minute reserve | At most 60 seconds of cleanup window, 2 minutes of dependency stop, and 60 seconds of runtime shutdown, four minutes in all, and then the log upload, measured at 2 to 3 seconds with 8 seconds of steps after it |
 
