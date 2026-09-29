@@ -141,7 +141,7 @@ jobs:
           github-cache: "false"
           sync: "false"
           cache-executables: "true"
-          max-size: "30GiB"
+          max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
           s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
@@ -263,7 +263,7 @@ jobs:
           github-cache: "false"
           sync: "false"
           cache-executables: "true"
-          max-size: "150GiB"
+          max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
           s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
@@ -433,7 +433,7 @@ jobs:
           github-cache: "false"
           sync: "false"
           cache-executables: "true"
-          max-size: "150GiB"
+          max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
           s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
@@ -699,7 +699,7 @@ jobs:
           github-cache: "false"
           sync: "false"
           cache-executables: "true"
-          max-size: "60GiB"
+          max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
           s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
@@ -835,7 +835,7 @@ jobs:
           github-cache: "false"
           sync: "false"
           cache-executables: "true"
-          max-size: "60GiB"
+          max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
           s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
@@ -960,7 +960,7 @@ jobs:
           github-cache: "false"
           sync: "false"
           cache-executables: "true"
-          max-size: "30GiB"
+          max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
           s3-bucket: ${{ vars.KACHE_S3_BUCKET }}

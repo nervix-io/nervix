@@ -30,16 +30,17 @@ class KacheCiTests(unittest.TestCase):
             }
 
         jobs = job_sections(check_workflow) | job_sections(docker_workflow)
-        sizes = {
-            "checks": "30GiB",
-            "tests": "150GiB",
-            "scenarios": "150GiB",
-            "client-conformance": "60GiB",
-            "extra-tests": "60GiB",
-            "turmoil": "30GiB",
-            "benchmark": "60GiB",
-        }
-        for name in (*sizes, "build-book"):
+        kache_jobs = (
+            "checks",
+            "tests",
+            "scenarios",
+            "client-conformance",
+            "extra-tests",
+            "turmoil",
+            "benchmark",
+            "build-book",
+        )
+        for name in kache_jobs:
             with self.subTest(job=name):
                 job = jobs[name]
                 configure_index = job.index("bash scripts/configure_kache_remote.sh")
@@ -58,10 +59,9 @@ class KacheCiTests(unittest.TestCase):
                 self.assertIn("s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}", job)
                 self.assertIn("python3 scripts/publish_kache_report.py", job)
                 self.assertIn("Upload kache report", job)
-                if name in sizes:
-                    self.assertIn(f'max-size: "{sizes[name]}"', job)
-                else:
-                    self.assertNotIn("max-size:", job)
+                self.assertIn('max-size: "1TiB"', job)
+
+        self.assertNotIn("KACHE_GC_EVICT_SHARED", docker_workflow)
 
         report_script = Path("scripts/publish_kache_report.py").read_text()
         self.assertIn('run("kache", "doctor")', report_script)
@@ -142,7 +142,7 @@ class KacheCiTests(unittest.TestCase):
         self.assertIn("ENV RUSTC_WRAPPER=kache", dockerfile)
         self.assertIn("ARG KACHE_VERSION=0.28.0", dockerfile)
         self.assertIn("ENV KACHE_CACHE_EXECUTABLES=true", dockerfile)
-        self.assertIn("ENV KACHE_MAX_SIZE=30GiB", dockerfile)
+        self.assertIn("ENV KACHE_MAX_SIZE=1TiB", dockerfile)
         self.assertIn("ENV KACHE_REMOTE_KEY_LISTING=false", dockerfile)
         configure_index = dockerfile.index("bash scripts/configure_kache_remote.sh")
         daemon_index = dockerfile.index("kache daemon start")

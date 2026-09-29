@@ -209,7 +209,7 @@ jobs:
           github-cache: "false"
           sync: "false"
           cache-executables: "true"
-          max-size: "60GiB"
+          max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
           s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
@@ -489,6 +489,7 @@ jobs:
           github-cache: "false"
           sync: "false"
           cache-executables: "true"
+          max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
           s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
@@ -573,12 +574,6 @@ jobs:
                 body,
               });
             }
-
-      - name: Enforce hosted runner kache store limit
-        if: always()
-        run: |
-          mkdir -p "${RUNNER_TEMP}/kache-report"
-          KACHE_GC_EVICT_SHARED=1 kache gc --json > "${RUNNER_TEMP}/kache-report/gc.json"
 
       - name: Publish kache report
         if: always()
