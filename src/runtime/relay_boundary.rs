@@ -1257,7 +1257,6 @@ impl RelayBoundaryServices {
             }
             return Err(Box::new(batch.clone()));
         };
-        let local_node_id = dispatcher.local_node_id();
         let ingress_slot = self.ingress_slot(&batch.key);
         let _slot = ingress_slot.gate.lock().await;
         let batch_ipc = match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
@@ -1270,23 +1269,16 @@ impl RelayBoundaryServices {
             }
         };
         let delivery = ingress_slot.next_delivery();
-        let mut registered_ack_ids = Vec::new();
-        let remote_acks = batch
-            .acks
-            .iter()
-            .map(|ack| {
-                if ack.is_empty() {
-                    return None;
-                }
-                let ack_id = dispatcher.next_ack_id();
-                dispatcher.register_pending_ack(ack_id, RemoteDispatcher::forwarded_ack(ack));
-                registered_ack_ids.push(ack_id);
-                Some(RemoteAckRegistration {
-                    ack_id,
-                    reply_node_id: local_node_id.clone(),
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut remote_acks = Vec::with_capacity(batch.acks.len());
+        for ack in &batch.acks {
+            if ack.is_empty() {
+                remote_acks.push(None);
+                continue;
+            }
+            let registration =
+                dispatcher.register_pending_ack(RemoteDispatcher::forwarded_ack(ack));
+            remote_acks.push(Some(registration));
+        }
         let admission_result = dispatcher
             .dispatch_admitted_relay_payload(
                 &owner_node,
@@ -1298,7 +1290,7 @@ impl RelayBoundaryServices {
                     key: BranchKey::to_remote_key(&batch.key),
                     batch_ipc,
                     metadata: batch.metadata.to_remote(),
-                    acks: remote_acks,
+                    acks: remote_acks.clone(),
                     admission: None,
                 },
                 &ingress_slot,
@@ -1306,8 +1298,8 @@ impl RelayBoundaryServices {
             .await;
         if let Err(error) = admission_result {
             let reason = error.to_string();
-            for ack_id in registered_ack_ids {
-                dispatcher.clear_pending_ack(ack_id);
+            for registration in remote_acks.iter().flatten() {
+                dispatcher.clear_pending_ack(registration);
             }
             for ack in batch.acks.iter() {
                 ack.no_ack(reason.clone());
@@ -1431,18 +1423,10 @@ impl RelayBoundaryServices {
                 AckMode::Detached => batch.detached(),
             };
             let remote_acks = if consumer.mode == AckMode::Attached {
-                let local_node_id = dispatcher.local_node_id();
                 remote_batch
                     .acks
                     .iter()
-                    .map(|ack| {
-                        let ack_id = dispatcher.next_ack_id();
-                        dispatcher.register_pending_ack(ack_id, ack.clone());
-                        Some(RemoteAckRegistration {
-                            ack_id,
-                            reply_node_id: local_node_id.clone(),
-                        })
-                    })
+                    .map(|ack| Some(dispatcher.register_pending_ack(ack.clone())))
                     .collect::<Vec<_>>()
             } else {
                 vec![None; remote_batch.acks.len()]
@@ -1469,7 +1453,7 @@ impl RelayBoundaryServices {
                     let reason = error.to_string();
                     for (ack_set, remote_ack) in remote_batch.acks.iter().zip(remote_acks.iter()) {
                         if let Some(remote_ack) = remote_ack {
-                            dispatcher.clear_pending_ack(remote_ack.ack_id);
+                            dispatcher.clear_pending_ack(remote_ack);
                         }
                         ack_set.no_ack(reason.clone());
                     }
