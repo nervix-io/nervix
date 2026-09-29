@@ -328,9 +328,9 @@ new session. A node that is still starting answers the attach once it has instal
 committed domains, so a restart never ends the attachment.
 
 The server ends an attachment when the domain no longer exists on the serving node; the end line is
-the last clock line and the command exits. Ctrl-C detaches the clock and exits successfully. A
-refused attach, including a missing domain, prints the typed reason on stderr and exits nonzero, as
-does a lost session the client cannot replace within its retry deadline.
+the last clock line and the command exits with status `0`, as it does after Ctrl-C detaches the
+clock. A refused attach, including a missing domain, prints the typed reason on stderr and exits
+nonzero, as does a lost session the client cannot replace within its retry deadline.
 
 ## Cluster Node Administration
 
