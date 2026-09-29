@@ -45,7 +45,7 @@ use crate::wire::{SuggestOutcome, Suggestion, SuggestionKind, SuggestionStatus, 
 use crate::{
     Client, ClientError, CommandDisposition, ConnectDns, ConnectOptions, DomainName, Leadership,
     OutcomeOrigin, ResourceUploadIdentity, ResourceUploadOutcome, SubscriptionEvent,
-    SubscriptionRequest,
+    SubscriptionLifecycle, SubscriptionRequest,
     wire::{
         Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection,
         ChoiceStatus, ChoiceTarget, ChoiceValue, ClientFrame, ClientMessage, ClientRequest,
@@ -55,7 +55,7 @@ use crate::{
         SessionLimits, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
         SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRowsEncoder,
         SubscriptionType, UploadDisposition, UploadFailure, UploadFrame, UploadMessage,
-        UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame,
+        UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame, WireEncodeError,
         grpc::{
             EXCHANGE_PATH, SERVICE_NAME, ServerExchangeCodec, ServerUploadCodec,
             UPLOAD_RESOURCE_PATH,
@@ -1408,6 +1408,54 @@ fn rows_frame(handle: SubscriptionHandle, rows: &[(u64, &str)]) -> EncodedFrame<
     batch.finish().assured("a test batch finishes")
 }
 
+/// The text of each row of a batch that fills its frame.
+const WIDE_ROW_BYTES: usize = 32 * 1024;
+
+/// A batch of wide rows that the server fills until its next row no longer fits the frame limit,
+/// together with the number of rows it holds.
+fn full_rows_frame(handle: SubscriptionHandle) -> (EncodedFrame<ServerFrame>, usize) {
+    let wide = "w".repeat(WIDE_ROW_BYTES);
+    let mut batch = SubscriptionRowsEncoder::unbranched(handle, &limits())
+        .assured("an unbranched batch starts within the limits");
+    loop {
+        let id = u64::try_from(batch.rows()).assured("a frame holds far fewer than u64::MAX rows");
+        let pushed = batch.push_row(|cells| {
+            cells.push_string(&wide)?;
+            cells.push_u64(id)
+        });
+        if let Err(refused) = pushed {
+            assert!(
+                matches!(
+                    refused.current_context(),
+                    WireEncodeError::FrameTooLarge { .. }
+                ),
+                "only the frame limit ends a batch of wide rows: {refused:?}"
+            );
+            break;
+        }
+    }
+    let rows = batch.rows();
+    let frame = batch
+        .finish()
+        .assured("the rows accepted before the refused one finish their frame");
+    (frame, rows)
+}
+
+/// The reply that opens `handle` over the `orders` relay.
+fn opened_reply(handle: SubscriptionHandle) -> ReplyBody {
+    ReplyBody::Subscribe(SubscribeOutcome {
+        disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
+            subscription: handle,
+            domain: domain("tenant"),
+            relay: RelayName::parse("orders").assured("the test relay name is valid"),
+            subscription_type: SubscriptionType::Row,
+            schema: orders_schema(),
+        })),
+        message: "subscription 'live' opened".to_string(),
+        diagnostics: Vec::new(),
+    })
+}
+
 #[tokio::test]
 async fn subscription_rows_render_against_the_schema_the_subscription_opened_with() {
     let mut server = TestServer::start().await;
@@ -1430,19 +1478,8 @@ async fn subscription_rows_render_against_the_schema_the_subscription_opened_wit
         "CREATE SUBSCRIPTION live TO orders;"
     );
     assert_eq!(subscribe_request.subscription_type, SubscriptionType::Row);
-    let opened = SubscribeOutcome {
-        disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
-            subscription: subscription(1),
-            domain: domain("tenant"),
-            relay: RelayName::parse("orders").assured("the test relay name is valid"),
-            subscription_type: SubscriptionType::Row,
-            schema: orders_schema(),
-        })),
-        message: "subscription 'live' opened".to_string(),
-        diagnostics: Vec::new(),
-    };
     exchange
-        .reply(request.request_id, ReplyBody::Subscribe(opened), &limits())
+        .reply(request.request_id, opened_reply(subscription(1)), &limits())
         .await;
     // Rows of a generation the client does not hold are dropped.
     exchange
@@ -1497,6 +1534,51 @@ async fn subscription_rows_render_against_the_schema_the_subscription_opened_wit
         panic!("the subscription's end follows its rows");
     };
     assert_eq!(ended.subscription, subscription(1));
+}
+
+#[tokio::test]
+async fn a_row_frame_filled_to_the_frame_limit_reaches_an_active_subscription() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+
+    let subscribe_client = client.clone();
+    let subscribe = tokio::spawn(async move {
+        subscribe_client
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let request = exchange.next_request().await;
+    exchange
+        .reply(request.request_id, opened_reply(subscription(1)), &limits())
+        .await;
+    let (frame, rows) = full_rows_frame(subscription(1));
+    assert!(
+        frame.len() > limits().frame_bytes() - 2 * WIDE_ROW_BYTES,
+        "the batch fills its frame to within two rows of the frame limit: {} bytes",
+        frame.len()
+    );
+    exchange.send(frame).await;
+    let outcome = within_deadline(subscribe)
+        .await
+        .assured("the subscribe task completes")
+        .assured("the subscription is answered");
+    assert!(outcome.succeeded());
+
+    let event = within_deadline(client.next_subscription())
+        .await
+        .assured("the rows of the opened subscription are delivered");
+    let SubscriptionEvent::Rows(delivered) = event else {
+        panic!("a frame of the frame limit reaches its subscription as rows: {event:?}");
+    };
+    assert_eq!(delivered.rows.subscription(), &subscription(1));
+    assert_eq!(delivered.rows.batch().len(), rows);
+    let lifecycle = client.subscription_lifecycle(&subscription(1).name);
+    assert_eq!(
+        lifecycle,
+        Some(SubscriptionLifecycle::Active(subscription(1))),
+        "retaining the frame leaves its subscription active"
+    );
 }
 
 #[tokio::test]

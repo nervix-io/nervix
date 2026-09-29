@@ -996,13 +996,20 @@ stateDiagram-v2
 ```
 
 A consumer must stay bounded however fast rows arrive, and must never let an unread event hold back
-a reply. The Rust client holds at most 128 subscription events and 8 MiB across all subscriptions,
-and at most 32 events and 2 MiB for one subscription. An event that does not fit drops that
-subscription's queued events, reports a consumer overflow, and marks the subscription
-`DeliveryFailed`; the reader that routes replies never waits. Because one subscription may hold only
-2 MiB, a single Row frame above 2 MiB, which the server may send, overflows it at once. The CLI
-bounds its terminal output to 128 lines and 1 MiB, cuts a line above 8 KiB, and reports how many
-lines it omitted. The web console keeps at most 256 lines and 256 KiB per REPL and per subscription
+a reply. The Rust client charges each subscription event for the whole frame its rows keep alive and
+for the event itself. One subscription holds at most 32 events and one frame of the frame limit,
+4 MiB, with the event that carries it; all subscriptions together hold four times as much, 128
+events and 16 MiB of frames with their events. An event that does not fit drops that subscription's
+queued events, reports a consumer overflow, and marks the subscription `DeliveryFailed`; the reader
+that routes replies never waits. An event stops counting once the application reads it, so a
+subscription whose events are read before the next one arrives stays within its own allowance
+however wide the server's frames are, and overflows only when other subscriptions have filled the
+total. The gRPC receiver shares its receive buffer with a frame of 64 KiB or more rather than
+copying it, so a retained frame costs about its own size: four subscriptions each holding one
+4.17 MB frame kept 16.78 MB live for 16.69 MB of frames, and the receiver keeps the allocation of the
+last large frame it read as its receive buffer after that frame is released. The CLI bounds its
+terminal output to 128 lines and 1 MiB, cuts a line above 8 KiB, and reports how many lines it
+omitted. The web console keeps at most 256 lines and 256 KiB per REPL and per subscription
 tab, and marks where it omitted earlier lines. It keeps the latest 256 commands and 256 KiB of its
 command history and the snapshot of the one domain it observes. It holds at most 64 requests of its
 controls waiting for a connection, carrying at most 4 MiB of text, and at most 256 held or awaiting
