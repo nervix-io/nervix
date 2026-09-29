@@ -509,7 +509,11 @@ distinct from a new execution. Replicated admission preserves an expired executi
 the kind of a conflicting reference as typed consensus conflicts. The session returns
 `ExecutionReferenceExpired` or `ExecutionReferenceConflict` from those variants, including when a
 leader change lets the replicated check discover the conflict after the leader's local check. A
-client never has to classify those refusals from message text. [Command
+client never has to classify those refusals from message text. Consensus reports also keep Raft
+leadership, fatal storage, and other write failures distinct through the control plane. A
+transaction mutation refusal crosses the Raft response as its exact typed outcome and becomes a
+new report on the proposing node; the client still receives the same disposition and
+acknowledgement semantics. [Command
 Dispositions](./client-session-protocol.md#command-dispositions) defines each disposition, the phase
 that produces it, and what a client may conclude from it, and typed request rejections are covered
 in [Rejections](./client-session-protocol.md#rejections). `DESCRIBE TRANSACTION` and

@@ -10901,14 +10901,32 @@ async fn given_consensus_storage_failure(
     boundary: String,
     domain: String,
 ) {
+    fail_consensus_storage_on_leader(world, &boundary, format!("put-domain:{domain}")).await;
+}
+
+#[given(expr = "consensus storage on the leader fails {word} committing operation {string}")]
+async fn given_consensus_storage_operation_failure(
+    world: &mut ScenarioWorld,
+    boundary: String,
+    operation: String,
+) {
+    let operation = expand_placeholders(world, &operation);
+    fail_consensus_storage_on_leader(world, &boundary, operation).await;
+}
+
+async fn fail_consensus_storage_on_leader(
+    world: &mut ScenarioWorld,
+    boundary: &str,
+    operation: String,
+) {
     let leader = current_leader_node(world).await;
     world
         .placeholders
         .insert("storage_node".into(), leader.clone());
     world.fault_injection.fail_consensus_storage(
         &crate::common::cluster::node_name(&leader),
-        format!("put-domain:{domain}"),
-        match boundary.as_str() {
+        operation,
+        match boundary {
             "before" => nervix_consensus::StorageBoundary::BeforeCommit,
             "after" => nervix_consensus::StorageBoundary::AfterSync,
             _ => panic!("the fixture names a before or after storage boundary"),

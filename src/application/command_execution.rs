@@ -684,7 +684,7 @@ impl SessionServiceImpl {
                 {
                     return Err(Box::new(result));
                 }
-                let message = error.to_string();
+                let message = ConsensusError::report_message(&error);
                 let result = self
                     .consensus_error_response(error.current_context(), message)
                     .await;
@@ -861,7 +861,7 @@ impl SessionServiceImpl {
                         ),
                     )));
                 }
-                let message = error.to_string();
+                let message = ConsensusError::report_message(&error);
                 let result = self
                     .consensus_error_response(error.current_context(), message)
                     .await;
