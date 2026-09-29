@@ -52,6 +52,15 @@ For a single-input emitter, sent metrics retain that input relay as `stream`. A 
 emitter's received metrics identify the actual source relay, while its sent metrics aggregate the
 shared sink pipeline with `stream="-"` because one flush may contain work from several sources.
 
+An emitter's sent metrics count the records its destination delivered, each once, however many
+attempts it took: a flush that completes after retries counts its delivered records once, and a
+record the destination refused follows `ON MESSAGE ERROR` and is not sent. When a flush fails for
+good, the records its sink delivered before the failure are counted as its other records are routed
+to their error policy. A sink that publishes on its own commit, such as Iceberg, counts what each
+commit publishes. Sent bytes measure a delivered record's payload as the emitter's buffer measures
+it; an HTTP request's method, target and headers are not payload, and a request without a body
+carries none. See [HTTP inspection and metrics](./emitters.md#http-inspection-and-metrics).
+
 `DESCRIBE` output uses the same concepts but renders `physical_node_id` as `physical_node` for readability.
 
 Example Prometheus series:

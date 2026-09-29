@@ -646,6 +646,19 @@ impl RelayRecordBatch {
         self.batch.estimated_bytes()
     }
 
+    /// The logical Arrow bytes of `rows`, distinct rows of this batch in row order: the whole
+    /// batch's when they are all of its rows, and otherwise those of a batch holding exactly them.
+    pub(super) fn payload_bytes_of_rows(
+        &self,
+        rows: &[usize],
+    ) -> error_stack::Result<u64, RuntimeSchemaError> {
+        if rows.len() == self.batch.batch().num_rows() {
+            return Ok(self.estimated_bytes());
+        }
+        let selected = self.batch.take(rows)?;
+        Ok(selected.estimated_bytes())
+    }
+
     pub(super) fn ack_success(&self) {
         for ack in &self.acks {
             ack.ack_success();
