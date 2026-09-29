@@ -225,9 +225,17 @@ impl Runtime {
                 "failed to refresh branch-aggregated metrics before describe"
             );
         }
-        self.inner
+        let mut lines = self
+            .inner
             .metrics
-            .describe_global_target(domain, kind, identifier)
+            .describe_global_target(domain, kind, identifier.clone());
+        if kind.eq_ignore_ascii_case(ModelKind::Emitter.as_str()) {
+            let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, identifier);
+            if let Some(endpoint) = self.inner.client_emitters.get(&key) {
+                lines.extend(endpoint.metric_lines());
+            }
+        }
+        lines
     }
 
     /// Read the current generation's checkpoints without taking ownership or advancing their

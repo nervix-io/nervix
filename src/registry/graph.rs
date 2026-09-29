@@ -622,7 +622,7 @@ impl ActiveNode {
         let Model::Emitter(emitter) = self.config.as_ref() else {
             return None;
         };
-        let client = emitter.sink.client();
+        let client = emitter.sink.client()?;
         Some(DataflowNode::new(
             format!("client_sink:{}", client.as_str()),
             client.as_str(),

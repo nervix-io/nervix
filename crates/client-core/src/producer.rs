@@ -441,14 +441,14 @@ impl Client {
 }
 
 /// A reply and the identity of the request it answers.
-struct Answered {
-    request_id: RequestId,
-    body: ReplyBody,
+pub(crate) struct Answered {
+    pub(crate) request_id: RequestId,
+    pub(crate) body: ReplyBody,
 }
 
 /// Sends one request on `exchange` and waits for its reply without a deadline of its own, and
 /// without closing the exchange when the caller stops waiting.
-async fn request_on_exchange(
+pub(crate) async fn request_on_exchange(
     exchange: &ExchangeRequests,
     request: ClientRequest,
     kind: RequestKind,

@@ -44,14 +44,18 @@ fn every_request_variant_is_sampled() {
             ClientRequest::OpenIngestor(_) => 12,
             ClientRequest::SubmitBatch(_) => 13,
             ClientRequest::CloseIngestor(_) => 14,
+            ClientRequest::OpenEmitter(_) => 15,
+            ClientRequest::ReadEmitterBatch(_) => 16,
+            ClientRequest::SettleEmitterBatch(_) => 17,
+            ClientRequest::CloseEmitter(_) => 18,
         })
         .collect::<Vec<_>>();
     sampled.sort_unstable();
     sampled.dedup();
-    assert_eq!(sampled, (0..15).collect::<Vec<_>>());
+    assert_eq!(sampled, (0..19).collect::<Vec<_>>());
     assert_eq!(
         wire::ClientRequest::ENUM_VALUES.len(),
-        16,
+        20,
         "the schema declares NONE and one member per request variant"
     );
 }
@@ -159,7 +163,7 @@ fn a_zero_request_identity_is_refused() {
 fn an_undeclared_request_variant_is_refused_with_its_request_identity() {
     for discriminant in [
         wire::ClientRequest::NONE,
-        wire::ClientRequest(16),
+        wire::ClientRequest(20),
         wire::ClientRequest(255),
     ] {
         let frame = raw_client(list_domains_frame(42, discriminant));

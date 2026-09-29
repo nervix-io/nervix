@@ -552,6 +552,7 @@ struct EmitterTaskLoop<'a> {
     interaction: RelayInteraction<EmitterTaskCommand>,
     plan: &'a EmitterStartPlan,
     input_schema: &'a CompiledSchema,
+    output_schema: &'a Arc<CompiledSchema>,
     codec: Option<&'a Arc<CompiledCodec>>,
     input_metrics: &'a HashMap<RelayName, NodeInputMetricsHandle>,
     fault_injection: &'a ConfiguredFaultInjection,
@@ -607,10 +608,7 @@ impl EmitterTask {
                     ),
                 })?;
         }
-        let output_compiled_schema = match codec.as_ref() {
-            Some(codec) => codec.schema(),
-            None => input_schema.clone(),
-        };
+        let output_compiled_schema = emitter.output_schema.clone();
         let udfs = runtime.udf_executor(domain);
         let compile_context = RuntimeVmCompileContext {
             available_materialized_streams: &materialized_stream_specs,
@@ -882,6 +880,7 @@ impl EmitterTask {
                 &plan,
                 &context,
                 &input_schema,
+                &output_compiled_schema,
                 codec.as_ref(),
                 &mut work_cancel_rx,
             )
@@ -910,6 +909,7 @@ impl EmitterTask {
                 interaction,
                 plan: &plan,
                 input_schema: &input_schema,
+                output_schema: &output_compiled_schema,
                 codec: codec.as_ref(),
                 input_metrics: &task_input_metrics,
                 fault_injection: &fault_injection,
@@ -1260,6 +1260,7 @@ impl EmitterTaskLoop<'_> {
                             self.plan,
                             self.context,
                             self.input_schema,
+                            self.output_schema,
                             self.codec,
                             &mut *self.work_cancel_rx,
                         )

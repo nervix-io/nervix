@@ -1272,6 +1272,44 @@ without an outcome as of unknown outcome with `SessionLost` and ends the produce
 it does not reopen producers on its next session, so the application opens another one. The shared
 binding and the web console do not open producers.
 
+## Emitter Consumers
+
+`OpenEmitterRequest` names the domain and `TO CLIENT` emitter, an exact field list, and requested
+outstanding batch and byte limits. The serving node validates the committed schedule and schema,
+reserves the requested bytes against the session's 32 MiB and node's separate 128 MiB consumer
+budgets, and attaches to the executing node before sending `OpenEmitterOutcome.Opened`. It
+refuses an open that cannot hold the emitter's maximum IPC batch. At most 32 consumer handles
+belong to one session. The request identity of the open is its `ConsumerId`. The protocol and its
+FlatBuffers shape are identical over native gRPC and the console WebSocket.
+
+`ReadEmitterBatchRequest` is a concurrent, potentially long read. It occupies one of the 64
+ordinary in-flight request places but does not hold the ordered lane or receive loop. Its reply
+is a `ReadEmitterBatchOutcome`: `Batch` carries one canonical Arrow IPC stream, a stable delivery
+identity, a fresh attempt reference, source relay, opaque branch fingerprint, member count and
+execution-time snapshot; `Ended` says the attachment is gone. A large reply uses the normal
+bounded transfer parts. Reading the reply never acknowledges it.
+
+`SettleEmitterBatchRequest` carries the consumer, attempt reference, and `Ack`, `Retry`, or
+`Reject` with a bounded non-sensitive reason. It runs beside the ordered lane and answers with
+`Confirmed`, `StaleReference`, `WrongConsumer`, `InvalidReason`, or `ConsumerEnded`. An ACK waits
+for that confirmation. ACK is idempotent while its bounded result remains; a reference revoked by
+retry, timeout, detach, or reassignment cannot settle a newer attempt. The emitter's physical
+backoff controls retry. `CloseEmitterRequest` detaches and answers `Closed` or `NotOpen`.
+
+Consumer and producer operations can share one session. A read awaiting output runs beside
+commands, producer submissions and their outcomes, clock observations, and consumer settlement.
+Each consumer is bound to its session exchange; the Rust client does not restore it after a
+reconnect. The serving node forwards remote consumers on an authenticated relay-class duplex
+stream and reserves their granted bytes on both the serving and executing nodes. Loss of the
+stream or either endpoint revokes outstanding attempts. There is no durable cursor or consumer
+result history across an owner loss; upstream replay may be needed. [Emitters](./emitters.md#client-emitters)
+owns the source acknowledgement guarantee and [Cluster
+Interconnect](./interconnect.md#client-consumer-streams) owns the forwarding form.
+
+The executing node exports active consumer and forwarding credit gauges, retained IPC work
+gauges, and retry, application ACK, and rejection counters. `DESCRIBE EMITTER` reads those values
+from the scheduled owner, including when the command enters through another node.
+
 ## Resource Uploads
 
 A resource archive travels on its own gRPC call, `UploadResource`, beside the session rather than

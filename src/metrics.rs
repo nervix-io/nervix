@@ -26,8 +26,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
 use nervix_models::{
-    BranchName, ClusterNodeName, DomainName, IngestorName, ModelKind, ModelName, RelayName,
-    Timestamp,
+    BranchName, ClusterNodeName, DomainName, EmitterName, IngestorName, ModelKind, ModelName,
+    RelayName, Timestamp,
 };
 use nervix_primitives::{
     collections::{DashMap, dash_map::Entry},
@@ -77,6 +77,17 @@ const CLIENT_INGESTOR_OUTSTANDING_BATCHES: &str = "client_ingestor_outstanding_b
 const CLIENT_INGESTOR_OUTSTANDING_BYTES: &str = "client_ingestor_outstanding_bytes";
 const CLIENT_INGESTOR_ADMITTED_BATCHES: &str = "client_ingestor_admitted_batches";
 const CLIENT_INGESTOR_SUBMISSIONS_TOTAL: &str = "client_ingestor_submissions_total";
+const CLIENT_EMITTER_CONSUMERS: &str = "client_emitter_consumers";
+const CLIENT_EMITTER_FORWARDED_CONSUMERS: &str = "client_emitter_forwarded_consumers";
+const CLIENT_EMITTER_FORWARDED_CREDIT_BYTES: &str = "client_emitter_forwarded_credit_bytes";
+const CLIENT_EMITTER_FORWARDED_RETAINED_BATCHES: &str = "client_emitter_forwarded_retained_batches";
+const CLIENT_EMITTER_FORWARDED_RETAINED_BYTES: &str = "client_emitter_forwarded_retained_bytes";
+const CLIENT_EMITTER_RETAINED_BATCHES: &str = "client_emitter_retained_batches";
+const CLIENT_EMITTER_RETAINED_BYTES: &str = "client_emitter_retained_bytes";
+const CLIENT_EMITTER_INCOMPLETE_BATCHES: &str = "client_emitter_incomplete_batches";
+const CLIENT_EMITTER_RETRIES_TOTAL: &str = "client_emitter_retries_total";
+const CLIENT_EMITTER_ACKS_TOTAL: &str = "client_emitter_acks_total";
+const CLIENT_EMITTER_REJECTIONS_TOTAL: &str = "client_emitter_rejections_total";
 const SESSION_SUBSCRIPTION_DROPPED_ROWS_TOTAL: &str = "session_subscription_dropped_rows_total";
 const JEMALLOC_SUBSYSTEM: &str = "jemalloc";
 const DOMAIN_TARGET_KIND: &str = "DOMAIN";
@@ -114,6 +125,7 @@ const BRANCH_EVICTION_PROMETHEUS_LABELS: &[&str] =
 const INGESTOR_QUIESCE_PROMETHEUS_LABELS: &[&str] = &["domain", "ingestor", "physical_node_id"];
 const SESSION_SUBSCRIPTION_PROMETHEUS_LABELS: &[&str] = &["domain", "relay"];
 const CLIENT_INGESTOR_PROMETHEUS_LABELS: &[&str] = &["domain", "ingestor"];
+const CLIENT_EMITTER_PROMETHEUS_LABELS: &[&str] = &["domain", "emitter"];
 const CLIENT_INGESTOR_SUBMISSION_PROMETHEUS_LABELS: &[&str] =
     &["domain", "ingestor", "outcome", "cause"];
 const NO_DOMAIN_TIMESTAMP: i64 = i64::MIN;
@@ -1441,6 +1453,17 @@ struct PrometheusMetrics {
     client_ingestor_outstanding_bytes: IntGaugeVec,
     client_ingestor_admitted_batches: IntGaugeVec,
     client_ingestor_submissions_total: IntCounterVec,
+    client_emitter_consumers: IntGaugeVec,
+    client_emitter_forwarded_consumers: IntGaugeVec,
+    client_emitter_forwarded_credit_bytes: IntGaugeVec,
+    client_emitter_forwarded_retained_batches: IntGaugeVec,
+    client_emitter_forwarded_retained_bytes: IntGaugeVec,
+    client_emitter_retained_batches: IntGaugeVec,
+    client_emitter_retained_bytes: IntGaugeVec,
+    client_emitter_incomplete_batches: IntGaugeVec,
+    client_emitter_retries_total: IntCounterVec,
+    client_emitter_acks_total: IntCounterVec,
+    client_emitter_rejections_total: IntCounterVec,
 }
 
 #[derive(Debug, Clone)]
@@ -1832,6 +1855,83 @@ impl PrometheusMetrics {
                  name",
             );
         }
+        let emitter_gauge = |name, help| {
+            IntGaugeVec::new(
+                Opts::new(name, help).namespace("nervix"),
+                CLIENT_EMITTER_PROMETHEUS_LABELS,
+            )
+            .assured("client emitter metric names and labels are fixed valid Prometheus names")
+        };
+        let emitter_counter = |name, help| {
+            IntCounterVec::new(
+                Opts::new(name, help).namespace("nervix"),
+                CLIENT_EMITTER_PROMETHEUS_LABELS,
+            )
+            .assured("client emitter metric names and labels are fixed valid Prometheus names")
+        };
+        let client_emitter_consumers = emitter_gauge(
+            CLIENT_EMITTER_CONSUMERS,
+            "Application consumers attached to this client emitter.",
+        );
+        let client_emitter_forwarded_consumers = emitter_gauge(
+            CLIENT_EMITTER_FORWARDED_CONSUMERS,
+            "Client emitter consumers served on another node.",
+        );
+        let client_emitter_forwarded_credit_bytes = emitter_gauge(
+            CLIENT_EMITTER_FORWARDED_CREDIT_BYTES,
+            "Reserved byte credit of client emitter consumers served on another node.",
+        );
+        let client_emitter_forwarded_retained_batches = emitter_gauge(
+            CLIENT_EMITTER_FORWARDED_RETAINED_BATCHES,
+            "Retained output batches assigned to consumers served on another node.",
+        );
+        let client_emitter_forwarded_retained_bytes = emitter_gauge(
+            CLIENT_EMITTER_FORWARDED_RETAINED_BYTES,
+            "Arrow IPC bytes retained for consumers served on another node.",
+        );
+        let client_emitter_retained_batches = emitter_gauge(
+            CLIENT_EMITTER_RETAINED_BATCHES,
+            "Client emitter output batches still awaiting application settlement.",
+        );
+        let client_emitter_retained_bytes = emitter_gauge(
+            CLIENT_EMITTER_RETAINED_BYTES,
+            "Arrow IPC bytes retained while client emitter output awaits application settlement.",
+        );
+        let client_emitter_incomplete_batches = emitter_gauge(
+            CLIENT_EMITTER_INCOMPLETE_BATCHES,
+            "Assigned output batches awaiting application processing.",
+        );
+        let client_emitter_retries_total = emitter_counter(
+            CLIENT_EMITTER_RETRIES_TOTAL,
+            "Client emitter output attempts revoked for retry, timeout or consumer loss.",
+        );
+        let client_emitter_acks_total = emitter_counter(
+            CLIENT_EMITTER_ACKS_TOTAL,
+            "Client emitter output batches acknowledged by applications.",
+        );
+        let client_emitter_rejections_total = emitter_counter(
+            CLIENT_EMITTER_REJECTIONS_TOTAL,
+            "Client emitter output batches rejected by applications.",
+        );
+        let client_emitter_collectors: [Box<dyn prometheus::core::Collector>; 11] = [
+            Box::new(client_emitter_consumers.clone()),
+            Box::new(client_emitter_forwarded_consumers.clone()),
+            Box::new(client_emitter_forwarded_credit_bytes.clone()),
+            Box::new(client_emitter_forwarded_retained_batches.clone()),
+            Box::new(client_emitter_forwarded_retained_bytes.clone()),
+            Box::new(client_emitter_retained_batches.clone()),
+            Box::new(client_emitter_retained_bytes.clone()),
+            Box::new(client_emitter_incomplete_batches.clone()),
+            Box::new(client_emitter_retries_total.clone()),
+            Box::new(client_emitter_acks_total.clone()),
+            Box::new(client_emitter_rejections_total.clone()),
+        ];
+        for collector in client_emitter_collectors {
+            registry.register(collector).assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
+        }
         registry
             .register(Box::new(JemallocMetricsCollector::new()))
             .assured(
@@ -1871,6 +1971,17 @@ impl PrometheusMetrics {
             client_ingestor_outstanding_bytes,
             client_ingestor_admitted_batches,
             client_ingestor_submissions_total,
+            client_emitter_consumers,
+            client_emitter_forwarded_consumers,
+            client_emitter_forwarded_credit_bytes,
+            client_emitter_forwarded_retained_batches,
+            client_emitter_forwarded_retained_bytes,
+            client_emitter_retained_batches,
+            client_emitter_retained_bytes,
+            client_emitter_incomplete_batches,
+            client_emitter_retries_total,
+            client_emitter_acks_total,
+            client_emitter_rejections_total,
         }
     }
 
@@ -2821,6 +2932,51 @@ impl RuntimeMetrics {
             submissions: prometheus.client_ingestor_submissions_total.clone(),
             domain: domain.clone(),
             ingestor: ingestor.clone(),
+        }
+    }
+
+    /// The per-emitter metrics that the volatile client delivery owner updates at each boundary.
+    pub(crate) fn client_emitter_series(
+        &self,
+        domain: &DomainName,
+        emitter: &EmitterName,
+    ) -> ClientEmitterSeries {
+        let labels = [domain.as_str(), emitter.as_str()];
+        let prometheus = &self.series.prometheus;
+        ClientEmitterSeries {
+            consumers: prometheus
+                .client_emitter_consumers
+                .with_label_values(&labels),
+            forwarded_consumers: prometheus
+                .client_emitter_forwarded_consumers
+                .with_label_values(&labels),
+            forwarded_credit_bytes: prometheus
+                .client_emitter_forwarded_credit_bytes
+                .with_label_values(&labels),
+            forwarded_retained_batches: prometheus
+                .client_emitter_forwarded_retained_batches
+                .with_label_values(&labels),
+            forwarded_retained_bytes: prometheus
+                .client_emitter_forwarded_retained_bytes
+                .with_label_values(&labels),
+            retained_batches: prometheus
+                .client_emitter_retained_batches
+                .with_label_values(&labels),
+            retained_bytes: prometheus
+                .client_emitter_retained_bytes
+                .with_label_values(&labels),
+            incomplete_batches: prometheus
+                .client_emitter_incomplete_batches
+                .with_label_values(&labels),
+            retries: prometheus
+                .client_emitter_retries_total
+                .with_label_values(&labels),
+            acks: prometheus
+                .client_emitter_acks_total
+                .with_label_values(&labels),
+            rejections: prometheus
+                .client_emitter_rejections_total
+                .with_label_values(&labels),
         }
     }
 
@@ -4524,6 +4680,132 @@ impl ClientIngestorSeries {
             ));
     }
 }
+
+/// Public metrics for one volatile client emitter delivery owner. Gauges describe only current
+/// in-memory work; counters retain outcomes across endpoint restarts on the same node.
+#[derive(Clone)]
+pub(crate) struct ClientEmitterSeries {
+    consumers: IntGauge,
+    forwarded_consumers: IntGauge,
+    forwarded_credit_bytes: IntGauge,
+    forwarded_retained_batches: IntGauge,
+    forwarded_retained_bytes: IntGauge,
+    retained_batches: IntGauge,
+    retained_bytes: IntGauge,
+    incomplete_batches: IntGauge,
+    retries: IntCounter,
+    acks: IntCounter,
+    rejections: IntCounter,
+}
+
+impl ClientEmitterSeries {
+    pub(crate) fn reset_gauges(&self) {
+        self.consumers.set(0);
+        self.forwarded_consumers.set(0);
+        self.forwarded_credit_bytes.set(0);
+        self.forwarded_retained_batches.set(0);
+        self.forwarded_retained_bytes.set(0);
+        self.retained_batches.set(0);
+        self.retained_bytes.set(0);
+        self.incomplete_batches.set(0);
+    }
+
+    pub(crate) fn attach(&self, forwarded: bool, credit: u64) {
+        self.consumers.inc();
+        if forwarded {
+            self.forwarded_consumers.inc();
+            self.forwarded_credit_bytes.add(
+                i64::try_from(credit)
+                    .assured("consumer credit is bounded by the 128 MiB node budget"),
+            );
+        }
+    }
+
+    pub(crate) fn detach(&self, forwarded: bool, credit: u64) {
+        self.consumers.dec();
+        if forwarded {
+            self.forwarded_consumers.dec();
+            self.forwarded_credit_bytes.sub(
+                i64::try_from(credit)
+                    .assured("consumer credit is bounded by the 128 MiB node budget"),
+            );
+        }
+    }
+
+    pub(crate) fn retain(&self, bytes: usize) {
+        self.retained_batches.inc();
+        self.retained_bytes.add(
+            i64::try_from(bytes).assured("a retained IPC payload fits in the 128 MiB node budget"),
+        );
+    }
+
+    pub(crate) fn release(&self, bytes: usize) {
+        self.retained_batches.dec();
+        self.retained_bytes.sub(
+            i64::try_from(bytes).assured("a retained IPC payload fits in the 128 MiB node budget"),
+        );
+    }
+
+    pub(crate) fn assign(&self, bytes: usize, forwarded: bool) {
+        self.incomplete_batches.inc();
+        if forwarded {
+            self.forwarded_retained_batches.inc();
+            self.forwarded_retained_bytes.add(
+                i64::try_from(bytes)
+                    .assured("a forwarded IPC payload fits in the 128 MiB node budget"),
+            );
+        }
+    }
+
+    pub(crate) fn unassign(&self, bytes: usize, forwarded: bool) {
+        self.incomplete_batches.dec();
+        if forwarded {
+            self.forwarded_retained_batches.dec();
+            self.forwarded_retained_bytes.sub(
+                i64::try_from(bytes)
+                    .assured("a forwarded IPC payload fits in the 128 MiB node budget"),
+            );
+        }
+    }
+
+    pub(crate) fn retry(&self) {
+        self.retries.inc();
+    }
+    pub(crate) fn ack(&self) {
+        self.acks.inc();
+    }
+    pub(crate) fn reject(&self) {
+        self.rejections.inc();
+    }
+
+    pub(crate) fn describe_lines(&self) -> Vec<String> {
+        vec![
+            format!("consumers: {}", self.consumers.get()),
+            format!("forwarded consumers: {}", self.forwarded_consumers.get()),
+            format!(
+                "forwarded credit: {} bytes",
+                self.forwarded_credit_bytes.get()
+            ),
+            format!(
+                "forwarded retained batches: {}",
+                self.forwarded_retained_batches.get()
+            ),
+            format!(
+                "forwarded retained bytes: {}",
+                self.forwarded_retained_bytes.get()
+            ),
+            format!("retained batches: {}", self.retained_batches.get()),
+            format!("retained bytes: {}", self.retained_bytes.get()),
+            format!(
+                "incomplete application batches: {}",
+                self.incomplete_batches.get()
+            ),
+            format!("retries: {}", self.retries.get()),
+            format!("application ACKs: {}", self.acks.get()),
+            format!("application rejections: {}", self.rejections.get()),
+        ]
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5061,6 +5343,60 @@ mod tests {
         assert!(rendered.contains("relay=\"events\""));
         assert!(rendered.contains("physical_node_id=\"node-1\""));
         assert!(rendered.contains(" 2"));
+    }
+
+    #[test]
+    fn client_emitter_metrics_track_live_work_and_monotonic_application_results() {
+        let metrics = RuntimeMetrics::default();
+        let domain = DomainName::parse("main").expect("valid domain");
+        let emitter = EmitterName::parse("output").expect("valid emitter");
+        let series = metrics.client_emitter_series(&domain, &emitter);
+        series.reset_gauges();
+        series.attach(false, 1024);
+        series.attach(true, 2048);
+        series.retain(512);
+        series.assign(512, true);
+        series.retry();
+        series.ack();
+        series.reject();
+        let rendered = metrics.prometheus_text();
+        for (name, expected) in [
+            ("consumers", 2.0),
+            ("forwarded_consumers", 1.0),
+            ("forwarded_credit_bytes", 2048.0),
+            ("forwarded_retained_batches", 1.0),
+            ("forwarded_retained_bytes", 512.0),
+            ("retained_batches", 1.0),
+            ("retained_bytes", 512.0),
+            ("incomplete_batches", 1.0),
+            ("retries_total", 1.0),
+            ("acks_total", 1.0),
+            ("rejections_total", 1.0),
+        ] {
+            let metric = format!("nervix_client_emitter_{name}");
+            assert_eq!(
+                prometheus_sample(&rendered, &metric, "domain=\"main\",emitter=\"output\""),
+                Some(expected),
+                "{metric}"
+            );
+        }
+        series.unassign(512, true);
+        series.release(512);
+        series.detach(true, 2048);
+        series.detach(false, 1024);
+        series.reset_gauges();
+        assert!(
+            series
+                .describe_lines()
+                .iter()
+                .any(|line| line == "retained batches: 0")
+        );
+        assert!(
+            series
+                .describe_lines()
+                .iter()
+                .any(|line| line == "application ACKs: 1")
+        );
     }
 
     #[test]

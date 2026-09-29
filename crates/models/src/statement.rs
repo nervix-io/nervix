@@ -1696,16 +1696,20 @@ pub struct CreateEmitter {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum EmitterBody {
-    Codec { codec: CodecName },
+    Codec {
+        codec: CodecName,
+    },
     WithoutBody,
     Values,
+    /// Native Arrow columns constructed against the declared client output schema.
+    Client,
 }
 
 impl EmitterBody {
     pub fn codec(&self) -> Option<&CodecName> {
         match self {
             Self::Codec { codec } => Some(codec),
-            Self::WithoutBody | Self::Values => None,
+            Self::WithoutBody | Self::Values | Self::Client => None,
         }
     }
 }
@@ -1852,7 +1856,10 @@ impl CreateEmitter {
                 }
             }
             AlterEmitterOperation::SetClient { client } => {
-                *self.sink.client_mut() = client.clone();
+                let Some(current) = self.sink.client_mut() else {
+                    return Err(Report::new(AlterEmitterError::ClientUnsupported));
+                };
+                *current = client.clone();
             }
             AlterEmitterOperation::SetEncodeUsing { codec } => {
                 self.body = EmitterBody::Codec {
@@ -1878,13 +1885,28 @@ impl CreateEmitter {
                 self.mode = *mode;
             }
             AlterEmitterOperation::SetPublishingMode { mode } => {
-                if !self.sink.accepts_publishing_mode(mode) {
+                let selected = match (self.sink.as_ref(), mode) {
+                    (
+                        EmitSink::Client { .. },
+                        EmitterPublishingMode::BrokerAck {
+                            window,
+                            ack_timeout,
+                            retry_policy,
+                        },
+                    ) => EmitterPublishingMode::ClientAck {
+                        window: *window,
+                        ack_timeout: ack_timeout.clone(),
+                        retry_policy: retry_policy.clone(),
+                    },
+                    _ => mode.clone(),
+                };
+                if !self.sink.accepts_publishing_mode(&selected) {
                     return Err(Report::new(AlterEmitterError::PublishingModeUnsupported {
                         sink: self.sink.transport_label().to_string(),
                         mode: mode.kind_label().to_string(),
                     }));
                 }
-                self.publishing_mode = mode.clone();
+                self.publishing_mode = selected;
             }
             AlterEmitterOperation::SetBatch { policy } => {
                 self.batch = Some(*policy);
@@ -2017,6 +2039,8 @@ pub enum AlterEmitterError {
     CannotDropLastInput,
     #[error("emitter encoding is not configured")]
     EncodeNotConfigured,
+    #[error("CLIENT emitters do not name an external client")]
+    ClientUnsupported,
     #[error("HTTP emitters select an absent body with SET TO HTTP ... WITHOUT BODY")]
     HttpDropEncode,
     #[error("COMMIT policy is only supported by Iceberg emitters")]
@@ -2257,6 +2281,10 @@ const SQS_MESSAGE_SIZE_MAXIMUM: crate::PayloadSizeLimit =
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum EmitSink {
+    /// The session consumer of this emitter's native Arrow output.
+    Client {
+        schema: SchemaName,
+    },
     Http {
         client: ClientName,
         method: crate::Expression,
@@ -2351,6 +2379,7 @@ pub enum EmitSink {
 /// The sink transport class used by capability decisions before an emitter is fully parsed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EmitSinkKind {
+    Client,
     Http,
     Kafka,
     Pulsar,
@@ -2373,6 +2402,7 @@ pub enum EmitSinkKind {
 impl EmitSinkKind {
     pub const fn capabilities(self) -> SinkCapabilities {
         match self {
+            Self::Client => SinkCapabilities::without_headers(),
             Self::Http | Self::Kafka | Self::Pulsar | Self::RabbitMq | Self::Nats | Self::Sqs => {
                 SinkCapabilities::with_headers()
             }
@@ -2394,6 +2424,7 @@ impl EmitSinkKind {
 impl EmitSink {
     pub const fn transport_kind(&self) -> EmitSinkKind {
         match self {
+            Self::Client { .. } => EmitSinkKind::Client,
             Self::Http { .. } => EmitSinkKind::Http,
             Self::Kafka { .. } => EmitSinkKind::Kafka,
             Self::Pulsar { .. } => EmitSinkKind::Pulsar,
@@ -2422,8 +2453,9 @@ impl EmitSink {
         self.into()
     }
 
-    pub fn client(&self) -> &ClientName {
+    pub fn client(&self) -> Option<&ClientName> {
         match self {
+            Self::Client { .. } => None,
             Self::Http { client, .. }
             | Self::Kafka { client, .. }
             | Self::Pulsar { client, .. }
@@ -2440,7 +2472,7 @@ impl EmitSink {
             | Self::Postgres { client, .. }
             | Self::MySql { client, .. }
             | Self::MongoDb { client, .. }
-            | Self::Iceberg { client, .. } => client,
+            | Self::Iceberg { client, .. } => Some(client),
         }
     }
 
@@ -2465,6 +2497,7 @@ impl EmitSink {
 
     pub fn accepts_publishing_mode(&self, mode: &EmitterPublishingMode) -> bool {
         match self {
+            Self::Client { .. } => matches!(mode, EmitterPublishingMode::ClientAck { .. }),
             Self::Kafka { .. } | Self::Pulsar { .. } | Self::RabbitMq { .. } => {
                 matches!(
                     mode,
@@ -2501,8 +2534,9 @@ impl EmitSink {
         }
     }
 
-    fn client_mut(&mut self) -> &mut ClientName {
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
         match self {
+            Self::Client { .. } => None,
             Self::Http { client, .. }
             | Self::Kafka { client, .. }
             | Self::Pulsar { client, .. }
@@ -2519,7 +2553,7 @@ impl EmitSink {
             | Self::Postgres { client, .. }
             | Self::MySql { client, .. }
             | Self::MongoDb { client, .. }
-            | Self::Iceberg { client, .. } => client,
+            | Self::Iceberg { client, .. } => Some(client),
         }
     }
 
@@ -2538,6 +2572,7 @@ impl EmitSink {
 
     pub fn expected_client_type(&self) -> &'static str {
         match self {
+            Self::Client { .. } => "CLIENT",
             Self::Http { .. } => "HTTP",
             Self::Kafka { .. } => "KAFKA",
             Self::Pulsar { .. } => "PULSAR",
@@ -2614,6 +2649,7 @@ impl EmitSink {
 
     pub fn requires_codec(&self) -> bool {
         match self {
+            Self::Client { .. } => false,
             Self::Kafka { .. }
             | Self::Pulsar { .. }
             | Self::RabbitMq { .. }
@@ -2637,7 +2673,8 @@ impl EmitSink {
     /// Whether an emitter publishing to this sink may omit the batching clause.
     pub const fn batch_requirement(&self) -> crate::EmitterBatchRequirement {
         match self {
-            Self::ClickHouse { .. }
+            Self::Client { .. }
+            | Self::ClickHouse { .. }
             | Self::Postgres { .. }
             | Self::MySql { .. }
             | Self::MongoDb { .. } => crate::EmitterBatchRequirement::Required,
@@ -2664,7 +2701,8 @@ impl EmitSink {
     pub const fn requires_batch_transformation(&self) -> bool {
         match self {
             Self::Sentry { .. } => true,
-            Self::Http { .. }
+            Self::Client { .. }
+            | Self::Http { .. }
             | Self::Kafka { .. }
             | Self::Pulsar { .. }
             | Self::RabbitMq { .. }
@@ -2686,6 +2724,7 @@ impl EmitSink {
     /// The largest batch payload the destination protocol itself admits, where it fixes one.
     pub const fn batch_size_maximum(&self) -> Option<crate::PayloadSizeLimit> {
         match self {
+            Self::Client { .. } => None,
             Self::Sqs { .. } => Some(SQS_MESSAGE_SIZE_MAXIMUM),
             Self::Http { .. }
             | Self::Kafka { .. }
@@ -2713,7 +2752,8 @@ impl EmitSink {
                 max_commit_size,
                 ..
             } => Some((commit_each.as_str(), max_commit_size.as_str())),
-            Self::Http { .. }
+            Self::Client { .. }
+            | Self::Http { .. }
             | Self::Kafka { .. }
             | Self::Pulsar { .. }
             | Self::RabbitMq { .. }
@@ -4565,6 +4605,11 @@ pub enum AckWindow {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum EmitterPublishingMode {
+    ClientAck {
+        window: AckWindow,
+        ack_timeout: String,
+        retry_policy: RetryPolicy,
+    },
     NoAck {
         retry_policy: RetryPolicy,
     },
@@ -4605,7 +4650,8 @@ pub enum EmitterPublishingMode {
 impl EmitterPublishingMode {
     pub fn retry_policy(&self) -> &RetryPolicy {
         match self {
-            Self::NoAck { retry_policy }
+            Self::ClientAck { retry_policy, .. }
+            | Self::NoAck { retry_policy }
             | Self::BrokerAck { retry_policy, .. }
             | Self::MqttQos0 { retry_policy }
             | Self::MqttQos1 { retry_policy, .. }
@@ -4619,7 +4665,8 @@ impl EmitterPublishingMode {
 
     pub fn ack_timeout(&self) -> Option<&str> {
         match self {
-            Self::BrokerAck { ack_timeout, .. }
+            Self::ClientAck { ack_timeout, .. }
+            | Self::BrokerAck { ack_timeout, .. }
             | Self::MqttQos1 { ack_timeout, .. }
             | Self::MqttQos2 { ack_timeout, .. }
             | Self::NatsJetStream { ack_timeout, .. } => Some(ack_timeout),
@@ -4633,6 +4680,7 @@ impl EmitterPublishingMode {
 
     pub fn kind_label(&self) -> &'static str {
         match self {
+            Self::ClientAck { .. } => "ACK",
             Self::NoAck { .. } => "NO_ACK",
             Self::BrokerAck { .. } => "ACK",
             Self::MqttQos0 { .. } => "QOS 0",
@@ -7256,7 +7304,7 @@ mod tests {
                 ],
             })
             .expect("emitter alter should apply");
-        assert_eq!(emitter.sink.client(), &named("sink_b"));
+        assert_eq!(emitter.sink.client(), Some(&named("sink_b")));
         assert_eq!(emitter.flush_policy, FlushPolicy::Immediate);
         assert_eq!(emitter.mode, AckMode::Detached);
         assert_eq!(
@@ -7326,7 +7374,7 @@ mod tests {
             .apply_alter(&replacement)
             .expect("complete HTTP replacement");
         assert_eq!(emitter.body, EmitterBody::WithoutBody);
-        assert_eq!(emitter.sink.client(), &named("other_api"));
+        assert_eq!(emitter.sink.client(), Some(&named("other_api")));
         let stored = serde_json::to_vec(&emitter).expect("current emitter should serialize");
         let restored: CreateEmitter =
             serde_json::from_slice(&stored).expect("current emitter should deserialize");

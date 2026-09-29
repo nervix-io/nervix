@@ -513,6 +513,19 @@ impl CompiledSchema {
         &self.fields
     }
 
+    pub(crate) fn declared_fields(&self) -> Vec<nervix_models::SchemaField> {
+        self.fields
+            .iter()
+            .map(|field| nervix_models::SchemaField {
+                name: nervix_models::FieldName::parse(&field.name)
+                    .assured("compiled schema fields came from validated field names"),
+                ty: field.ty.clone(),
+                optional: field.optional,
+                sensitive: field.sensitive,
+            })
+            .collect()
+    }
+
     pub fn arrow_schema(&self) -> StdArc<ArrowSchema> {
         self.arrow_schema.clone()
     }
