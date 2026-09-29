@@ -10,7 +10,12 @@ workspace = true
 
 [features]
 default = []
-shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
+shuttle = [
+  "dep:shuttle-tokio",
+  "nervix-connector/shuttle",
+  "nervix-primitives/shuttle",
+  "shuttle-tokio/shuttle",
+]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -18,8 +23,18 @@ bb8 = { workspace = true }
 error-stack = { workspace = true }
 futures-util = { workspace = true }
 nervix-connector = { workspace = true }
+nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 redis = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+shuttle-tokio = { workspace = true, features = ["rt"], optional = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt", "time"] }
+tokio-rustls = { workspace = true }
 triomphe = { workspace = true }
+
+[dev-dependencies]
+nervix-test-environment = { workspace = true }
+tempfile = { workspace = true }

@@ -42,10 +42,10 @@ items = [
   "sync::atomic::AtomicUsize",
   "sync::atomic::Ordering",
 ]
-limit = "Records observe the node budget and the admission fence and never synchronize them; the budget's and the quiesce control's own atomics are modeled."
+limit = "Records observe the node budget, the admission fence, and a forwarded batch's clearance and never synchronize them; the budget's and the quiesce control's own atomics are modeled, and the clearance travels on the endpoint's modeled channels."
 owner = "The client ingestor's Shuttle checks."
 path = "src/runtime/client_ingestor_shuttle_tests.rs"
-reason = "Each record must change in the same scheduling step as the reservation or drain it records, so recording adds no scheduling point."
+reason = "Each record must change in the same scheduling step as the reservation, drain, or clearance it records, so recording adds no scheduling point."
 
 [[permission]]
 items = ["sync::atomic::AtomicU64", "sync::atomic::Ordering"]

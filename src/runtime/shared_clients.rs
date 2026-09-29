@@ -62,6 +62,10 @@ impl OpenClientError {
                 transport: "Redis",
                 reason: reason.clone(),
             },
+            RedisClientError::Resolve { .. } => Self::Connect {
+                transport: "Redis",
+                reason: error.current_context().to_string(),
+            },
         };
         error.change_context(context)
     }
@@ -313,7 +317,7 @@ impl Runtime {
         };
 
         let opened = cell
-            .get_or_try_init(|| Self::open_shared_client(name, pool, &client.config))
+            .get_or_try_init(|| self.open_shared_client(name, pool, &client.config))
             .await;
 
         match opened {
@@ -333,6 +337,7 @@ impl Runtime {
 
     /// Build the driver instance behind one pool-capable client.
     async fn open_shared_client(
+        &self,
         name: &ClientName,
         pool: PooledClientPlan,
         resolved: &ResolvedClientConfig,
@@ -377,12 +382,23 @@ impl Runtime {
                     .await
                     .map_err(started)?,
             ),
-            PooledTransport::Redis => SharedClientInstance::Redis(
-                open_redis_command_pool(config, pool.bounds)
-                    .await
-                    .map_err(OpenClientError::from_redis)
-                    .map_err(opened)?,
-            ),
+            PooledTransport::Redis => {
+                let Some(dns) = self.dns() else {
+                    return Err(Report::new(OpenClientError::InvalidConfig {
+                        transport: "Redis",
+                        reason: "the node DNS resolver is not installed".to_string(),
+                    })
+                    .change_context(SharedClientError::Open {
+                        client: name.as_str().to_string(),
+                    }));
+                };
+                SharedClientInstance::Redis(
+                    open_redis_command_pool(config, pool.bounds, dns.clone())
+                        .await
+                        .map_err(OpenClientError::from_redis)
+                        .map_err(opened)?,
+                )
+            }
         };
         Ok(StdArc::new(SharedClient {
             instance,
@@ -432,5 +448,66 @@ impl Runtime {
             .pool_waits
             .get(waiter)
             .map(|wait| wait.value().clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nervix_dns::DnsLookupFailure;
+    use nervix_models::ClientPoolBounds;
+
+    use super::*;
+
+    #[test]
+    fn redis_lookup_failure_keeps_its_cause_when_a_shared_client_reports_it() {
+        let error = OpenClientError::from_redis(Report::new(RedisClientError::Resolve {
+            host: "missing.nervix.test".to_string(),
+            failure: DnsLookupFailure::NameNotFound,
+        }));
+        assert!(matches!(
+            error.current_context(),
+            OpenClientError::Connect {
+                transport: "Redis",
+                reason,
+            } if reason.contains("missing.nervix.test") && reason.contains("the name does not exist")
+        ));
+        assert!(
+            error
+                .frames()
+                .any(|frame| frame.downcast_ref::<RedisClientError>().is_some())
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn redis_pool_reports_a_missing_node_resolver_before_opening() {
+        let client = ClientName::try_from("cache".to_string()).assured("the fixture name is valid");
+        let error = Runtime::default()
+            .open_shared_client(
+                &client,
+                PooledClientPlan {
+                    transport: PooledTransport::Redis,
+                    bounds: ClientPoolBounds::new(0, nonzero_ext::nonzero!(1u32))
+                        .assured("zero is below one"),
+                },
+                &ResolvedClientConfig::default(),
+            )
+            .await
+            .err()
+            .assured("a Redis pool requires the node resolver");
+        assert!(matches!(
+            error.current_context(),
+            SharedClientError::Open { client } if client == "cache"
+        ));
+        let cause = error
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<OpenClientError>())
+            .assured("the shared-client error retains the Redis configuration failure");
+        assert!(matches!(
+            cause,
+            OpenClientError::InvalidConfig {
+                transport: "Redis",
+                reason,
+            } if reason == "the node DNS resolver is not installed"
+        ));
     }
 }

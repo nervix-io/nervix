@@ -7007,10 +7007,18 @@ dependencies = [
  "error-stack",
  "futures-util",
  "nervix-connector",
+ "nervix-dns",
  "nervix-models",
  "nervix-primitives",
+ "nervix-test-environment",
  "redis",
+ "rustls",
+ "rustls-pki-types",
+ "shuttle-tokio",
+ "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
  "triomphe",
 ]
 

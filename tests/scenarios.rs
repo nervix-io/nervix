@@ -117,8 +117,8 @@ use crate::common::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
         KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
         MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR,
-        POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, RUSTFS_ADDR,
-        SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
+        POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR,
+        REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
@@ -151,6 +151,7 @@ mod common;
 mod database_batches;
 mod domain_clock_attachment;
 mod ingestion_time;
+mod process_cluster;
 mod session_protocol;
 
 const SCENARIOS_PATH: &str = "tests/features";
@@ -1301,6 +1302,25 @@ async fn then_http_receiver_captured_one_request_that_is(
         &format!("HTTP receiver '{name}' request '{}'", expected.request_line),
         request,
     );
+}
+
+/// Asserts that no captured request has `request_line`. A scenario uses it for a request that must
+/// never be sent at all, once later requests that it would have preceded have arrived.
+#[then(expr = "HTTP receiver {string} captured no request with request line {string}")]
+async fn then_http_receiver_captured_no_request_with_request_line(
+    world: &mut ScenarioWorld,
+    name: String,
+    request_line: String,
+) {
+    let request_line = expand_placeholders(world, &request_line);
+    let captured = http_receiver(world, &name).captured();
+    for request in &captured {
+        let captured_line = format!("{} {}", request.method, request.target);
+        assert_ne!(
+            captured_line, request_line,
+            "HTTP receiver '{name}' captured a request that must never be sent:\n{request}"
+        );
+    }
 }
 
 /// Compares two captured requests, counted from 1, byte for byte: request line, every header field
@@ -7368,6 +7388,12 @@ async fn given_rabbitmq_endpoints_have_fixture_dns(world: &mut ScenarioWorld, na
     publish_fixture_name(world, RABBITMQ_TLS_ADDR, &name, "rabbitmq_tls_dns_addr");
 }
 
+#[given(expr = "the Redis endpoints are published under fixture DNS name {string}")]
+async fn given_redis_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
+    publish_fixture_name(world, REDIS_ADDR, &name, "redis_dns_addr");
+    publish_fixture_name(world, REDIS_TLS_ADDR, &name, "redis_tls_dns_addr");
+}
+
 #[given(expr = "the ClickHouse endpoints are published under fixture DNS name {string}")]
 async fn given_clickhouse_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
     publish_fixture_name(world, CLICKHOUSE_ADDR, &name, "clickhouse_dns_addr");
@@ -7455,6 +7481,14 @@ async fn given_rabbitmq_is_forwarded(world: &mut ScenarioWorld, name: String, ad
         "rabbitmq_forwarded_addr",
     )
     .await;
+}
+
+/// Stand TCP forwarders to Redis so the fixture can move its answer between independently
+/// stoppable addresses while the source and command pool reconnect.
+#[given(expr = "Redis is forwarded as {string} from the fixture addresses {string}")]
+async fn given_redis_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
+    let endpoint = started_dependency(world, REDIS_ADDR);
+    forward_under_fixture_name(world, &endpoint, &name, &addresses, "redis_forwarded_addr").await;
 }
 
 /// Stand TCP forwarders to the plain ClickHouse HTTP listener at `addresses`, and record in

@@ -388,6 +388,8 @@ The request timeout covers name resolution, connection establishment, TLS, and t
 The endpoint name remains the HTTP authority and HTTPS certificate name after resolution.
 RabbitMQ resolves the host of its `addr` the same way and verifies an `amqps` broker certificate
 against that host; see [RabbitMQ](#rabbitmq).
+Redis Pub/Sub also resolves its `addr` hostname through the node resolver for each dedicated
+subscription connection; see [Redis Pub/Sub](#redis-pubsub).
 
 Example Kafka TLS client:
 
@@ -563,8 +565,11 @@ ends a producer, as the last event about it, with one of these reasons:
 | `protocol violated` | The producer sent a batch beyond its credit. |
 
 An ended producer's queued batches are refused as `producer ended`, and its admitted batches whose
-acknowledgement is unresolved have an unknown outcome. A new producer can be opened as soon as the
-ingestor runs again. An alteration that keeps the contract, such as one that changes only a route's
+acknowledgement is unresolved have an unknown outcome. That holds when the node that executes the
+ingestor dies or stops answering, too: the node that forwards a producer's batches to it clears each
+batch before it may be admitted, so after the loss it refuses every batch it never cleared as
+`producer ended`, and only the cleared ones have an unknown outcome with cause `owner_lost`. A new
+producer can be opened as soon as the ingestor runs again. An alteration that keeps the contract, such as one that changes only a route's
 `FLUSH`, suspends admission for its hold and reopens it afterwards with every producer attached. A
 planned ownership handoff stops intake for good on the former owner: batches that arrive are
 refused as `draining`, admitted ones complete there, and its producers end as `relocated` once the
@@ -718,6 +723,11 @@ Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both modes
 keep the subscriber healthy; payloads are either retained locally within the declared bound or
 discarded and counted. A `TYPE REDIS` client declares connection-pool bounds even when only
 ingestors reference it; see [Database Client Connection Pools](database-client-pools.md).
+Each subscription owns a separate connection. It resolves the `addr` hostname through the node's
+asynchronous DNS resolver on initial subscribe and every resume after a disconnect; it does not
+consume a pooled command connection. For `rediss://`, TLS verifies the original hostname and
+uses the configured CA and optional client identity. DNS and connection failures follow the
+source's existing retry cadence; Redis Pub/Sub does not replay messages missed while disconnected.
 
 ### MQTT
 

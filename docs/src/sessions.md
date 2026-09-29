@@ -220,6 +220,11 @@ producers it opens. A producer is not a statement: clients open, feed, and close
 - The session tells the client when a producer's admission is suspended or open again, and when the
   server ends a producer, which is the last frame about it. Closing a producer refuses its queued
   batches, waits for its admitted ones, and is answered once every batch has its outcome.
+- When the session's node forwards a producer to the node that executes its ingestor and loses that
+  node, whether it crashed or stopped answering, the producer ends as `owner lost`. Before the end,
+  every batch that node could not have admitted is refused as `producer ended`, because the session's
+  node clears each forwarded batch before it may be admitted; only the cleared batches are reported
+  as of unknown outcome.
 - When the session ends, its producers detach. Admitted batches continue through the graph with
   nobody left to answer them, so a client reports them as of unknown outcome.
 

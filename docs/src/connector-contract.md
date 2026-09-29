@@ -92,6 +92,36 @@ Lapin thread, and a failed handshake ends that thread and closes the socket. An 
 connection is not closed because its host's answer changed or expired; the next connection uses
 the new answer.
 
+### DNS for Redis
+
+Composition gives the node resolver to the shared Redis command pool and to each Pub/Sub source
+plan. Redis 1.7.1 exposes `AsyncConnectionConfig::set_dns_resolver` for command connections. The
+connector's `bb8` manager installs that hook whenever it opens a physical pooled connection;
+pool bounds, health checks and lease ownership remain with the existing pool and host. A pooled
+socket may remain open past an answer's TTL. A replacement socket resolves the host again.
+
+The driver's Pub/Sub convenience connection does not accept that DNS hook. A source instead
+resolves the configured `redis://` or `rediss://` hostname through the node resolver on every
+initial subscribe and resume, and opens a dedicated TCP or TLS stream. It tries the returned
+addresses in order inside a 30-second budget shared by DNS, TCP, TLS, Redis setup, and subscribe.
+It hands the stream and the original client's settings to Redis's `PubSub::new`, so the driver
+still performs its authentication, database selection and protocol setup before `SUBSCRIBE`. A Unix socket remains
+a direct Unix connection with no DNS query. The dedicated subscription never occupies a pooled
+command connection.
+
+For `rediss://`, the configured hostname remains the TLS server name after an address is chosen.
+The source's TLS configuration keeps the same optional client certificate and key as the command
+client. Without a CA file both paths use native roots; a configured `tls_ca_file` replaces those
+roots in both paths. The shared TLS configuration helper exposes that replacement policy
+explicitly because other connectors add a configured CA to their default roots.
+
+The Redis hook gives a lookup at most 30 seconds, and the driver's connection timeout can cancel
+it sooner. Pub/Sub connection attempts have one 30-second budget. Missing names, empty answers,
+silence and transport failures are connection outcomes. They do not reject a record or confirm a
+publish; the host resumes the source and retries failed sink work according to its existing
+policy. A Pub/Sub connection broken by the broker or network is dropped and reopened with a new
+lookup, while an established connection is not interrupted solely because its answer expires.
+
 ### DNS for ClickHouse and SQS
 
 Composition passes the node resolver into every ClickHouse sink configuration and into every SQS

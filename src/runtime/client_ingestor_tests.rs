@@ -104,7 +104,7 @@ impl Fixture {
             expected_fields: fields(&["unmatched"]),
             limits: limits(1, 1),
             max_batch_bytes: NonZeroU64::MIN,
-            reservation: None,
+            serving: ProducerServing::Local,
             reply,
         }));
         let refused = timeout(WAIT, attached)
@@ -145,12 +145,43 @@ impl Fixture {
         expected: Vec<SchemaField>,
         limits: ClientProducerLimits,
     ) -> Result<Producer, ClientProducerRefusal> {
+        self.attach_serving(expected, limits, ProducerServing::Local)
+            .await
+    }
+
+    /// Opens a producer that another node forwards, with the requests the endpoint sends that
+    /// node to clear its batches.
+    async fn attach_forwarded(
+        &self,
+        limits: ClientProducerLimits,
+    ) -> (Producer, mpsc::UnboundedReceiver<ClientSubmissionId>) {
+        let (clearance_requests, clearances) = mpsc::unbounded_channel();
+        let reservation = ClientProducerBudget::default()
+            .try_reserve(limits.bytes)
+            .assured("an empty node budget holds one producer's bytes");
+        let serving = ProducerServing::Forwarded {
+            _reservation: reservation,
+            clearance_requests,
+        };
+        let producer = self
+            .attach_serving(fields(&["id"]), limits, serving)
+            .await
+            .assured("an open with the right schema attaches");
+        (producer, clearances)
+    }
+
+    async fn attach_serving(
+        &self,
+        expected: Vec<SchemaField>,
+        limits: ClientProducerLimits,
+        serving: ProducerServing,
+    ) -> Result<Producer, ClientProducerRefusal> {
         let (reply, answer) = oneshot::channel();
         self.send(EndpointCommand::Attach(AttachCommand {
             expected_fields: expected,
             limits,
             max_batch_bytes: NonZeroU64::new(1024).assured("a literal non-zero size"),
-            reservation: None,
+            serving,
             reply,
         }));
         let AttachedProducer {
@@ -178,6 +209,12 @@ impl Fixture {
             .await
             .assured("the endpoint hands the worker a batch")
             .assured("the execution keeps its job sender")
+    }
+
+    /// Asserts that the worker is handed nothing while the endpoint handles what was sent to it.
+    async fn assert_no_job(&mut self, because: &str) {
+        let handed = timeout(Duration::from_millis(200), self.jobs.recv()).await;
+        assert!(handed.is_err(), "{because}");
     }
 
     /// Admits `job` under a fresh root, which the returned set resolves.
@@ -208,6 +245,14 @@ impl Producer {
             .as_ref()
             .assured("the test submits only while the producer is open")
             .submit(submission(id), Bytes::from_static(b"batch"));
+    }
+
+    /// Clears a batch the way the node that forwards this producer does.
+    fn clear(&self, id: u64) {
+        self.handle
+            .as_ref()
+            .assured("the test clears only while the producer is open")
+            .clear(submission(id));
     }
 
     async fn next_event(&mut self) -> Option<ClientProducerEvent> {
@@ -680,4 +725,218 @@ fn a_batch_validated_under_a_hold_is_refused_with_its_root_resolved() {
         .err()
         .assured("an ownership handoff refuses the batch for good");
     assert_eq!(refused, ClientSubmissionRefusal::Draining);
+}
+
+/// The next batch the endpoint asks the forwarding node to clear.
+async fn next_clearance(clearances: &mut mpsc::UnboundedReceiver<ClientSubmissionId>) -> u64 {
+    let requested = timeout(WAIT, clearances.recv())
+        .await
+        .assured("the endpoint asks for the clearance within the deadline")
+        .assured("the attachment keeps its clearance requests");
+    requested.get().get()
+}
+
+#[nervix_primitives::test]
+async fn a_forwarded_batch_reaches_the_worker_only_after_its_serving_node_cleared_it() {
+    let mut fixture = Fixture::start();
+    fixture.install(2, 1, 1, WAIT);
+    let (mut producer, mut clearances) = fixture.attach_forwarded(limits(4, 4096)).await;
+    producer.submit(1);
+    producer.submit(2);
+    producer.submit(3);
+    // Each of the two turns the window has room for asks for a clearance and holds a slot, and
+    // the third batch stays queued.
+    assert_eq!(next_clearance(&mut clearances).await, 1);
+    assert_eq!(next_clearance(&mut clearances).await, 2);
+    assert_eq!(
+        fixture.settled_gauges().await,
+        ClientIngestorGauges {
+            producers: 1,
+            forwarded_producers: 1,
+            outstanding_batches: 3,
+            outstanding_bytes: 15,
+            admitted_batches: 2,
+        }
+    );
+    fixture
+        .assert_no_job("no batch reaches the worker before its serving node cleared it")
+        .await;
+
+    // Clearances come back in the order they were asked for, so one naming a batch the endpoint
+    // is not waiting on first changes nothing.
+    producer.clear(3);
+    producer.clear(2);
+    fixture
+        .assert_no_job("a clearance out of order clears nothing")
+        .await;
+    producer.clear(1);
+    let job = fixture.next_job().await;
+    assert_eq!(job.submission, submission(1));
+    fixture.admit(&job, WAIT).ack_success();
+    assert_eq!(
+        producer.outcome().await,
+        (1, ClientSubmissionOutcome::Completed)
+    );
+    // The slot the first batch freed goes to the third, which is asked about in turn.
+    assert_eq!(next_clearance(&mut clearances).await, 3);
+    producer.clear(2);
+    let job = fixture.next_job().await;
+    assert_eq!(job.submission, submission(2));
+    fixture.admit(&job, WAIT).ack_success();
+    producer.clear(3);
+    let job = fixture.next_job().await;
+    assert_eq!(job.submission, submission(3));
+    fixture.admit(&job, WAIT).ack_success();
+    let mut outcomes = vec![producer.outcome().await, producer.outcome().await];
+    outcomes.sort_by_key(|(id, _)| *id);
+    assert_eq!(
+        outcomes,
+        vec![
+            (2, ClientSubmissionOutcome::Completed),
+            (3, ClientSubmissionOutcome::Completed),
+        ]
+    );
+}
+
+#[nervix_primitives::test]
+async fn detaching_a_forwarded_producer_returns_the_slots_its_uncleared_batches_held() {
+    let mut fixture = Fixture::start();
+    fixture.install(1, 1, 1, WAIT);
+    let (mut forwarded, mut clearances) = fixture.attach_forwarded(limits(4, 4096)).await;
+    let local = fixture
+        .attach(fields(&["id"]), limits(4, 4096))
+        .await
+        .assured("an open with the right schema attaches");
+    forwarded.submit(1);
+    assert_eq!(next_clearance(&mut clearances).await, 1);
+    local.submit(2);
+    fixture
+        .assert_no_job("the window's one slot is held by the batch being cleared")
+        .await;
+    // The forwarding node is gone, and the batch it never cleared leaves with its producer.
+    drop(forwarded.handle.take());
+    let job = fixture.next_job().await;
+    assert_eq!(
+        job.submission,
+        submission(2),
+        "the detach returned the slot to the window"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_suspension_refuses_batches_awaiting_clearance_and_ignores_their_late_clearance() {
+    let mut fixture = Fixture::start();
+    fixture.install(1, 1, 1, WAIT);
+    let (mut producer, mut clearances) = fixture.attach_forwarded(limits(4, 4096)).await;
+    producer.submit(1);
+    assert_eq!(next_clearance(&mut clearances).await, 1);
+    fixture.send(EndpointCommand::Intake(ClientIntakeState::Suspended));
+    assert_eq!(
+        producer.outcome().await,
+        (
+            1,
+            ClientSubmissionOutcome::NotAdmitted(ClientSubmissionRefusal::Suspended)
+        )
+    );
+    // The serving node cleared the batch before it learnt of the refusal.
+    producer.clear(1);
+    fixture.send(EndpointCommand::Intake(ClientIntakeState::Open));
+    producer.submit(2);
+    assert_eq!(
+        next_clearance(&mut clearances).await,
+        2,
+        "the refused batch returned its slot"
+    );
+    producer.clear(2);
+    let job = fixture.next_job().await;
+    assert_eq!(
+        job.submission,
+        submission(2),
+        "a late clearance of a refused batch admits nothing"
+    );
+}
+
+#[nervix_primitives::test]
+async fn ending_the_endpoint_refuses_a_cleared_batch_that_never_reached_the_worker() {
+    let mut fixture = Fixture::start();
+    fixture.install(2, 1, 1, WAIT);
+    let (mut producer, mut clearances) = fixture.attach_forwarded(limits(4, 4096)).await;
+    producer.submit(1);
+    producer.submit(2);
+    assert_eq!(next_clearance(&mut clearances).await, 1);
+    assert_eq!(next_clearance(&mut clearances).await, 2);
+    producer.clear(1);
+    producer.clear(2);
+    // The worker takes the first cleared batch; the second waits for it.
+    let job = fixture.next_job().await;
+    assert_eq!(job.submission, submission(1));
+    let (done, ended) = oneshot::channel();
+    fixture.send(EndpointCommand::End {
+        reason: ClientProducerEndReason::ShuttingDown,
+        done,
+    });
+    timeout(WAIT, ended)
+        .await
+        .assured("the endpoint ends within the deadline")
+        .assured("the endpoint answers the end");
+    let mut outcomes = vec![producer.outcome().await, producer.outcome().await];
+    outcomes.sort_by_key(|(id, _)| *id);
+    assert_eq!(
+        outcomes,
+        vec![
+            (
+                1,
+                ClientSubmissionOutcome::OutcomeUnknown(ClientOutcomeUncertainty::Interrupted)
+            ),
+            (
+                2,
+                ClientSubmissionOutcome::NotAdmitted(ClientSubmissionRefusal::ProducerEnded)
+            ),
+        ]
+    );
+    assert_eq!(
+        producer.next_event().await,
+        Some(ClientProducerEvent::Ended(
+            ClientProducerEndReason::ShuttingDown
+        ))
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_local_producer_takes_its_turn_while_the_worker_is_busy_with_a_forwarded_batch() {
+    let mut fixture = Fixture::start();
+    fixture.install(2, 1, 1, WAIT);
+    let local = fixture
+        .attach(fields(&["id"]), limits(4, 4096))
+        .await
+        .assured("an open with the right schema attaches");
+    let (forwarded, mut clearances) = fixture.attach_forwarded(limits(4, 4096)).await;
+    local.submit(1);
+    let first = fixture.next_job().await;
+    assert_eq!(first.submission, submission(1));
+    forwarded.submit(2);
+    assert_eq!(next_clearance(&mut clearances).await, 2);
+    // The window is full, so both producers queue their next batch.
+    local.submit(3);
+    forwarded.submit(4);
+    forwarded.clear(2);
+    let first_root = fixture.admit(&first, WAIT);
+    let second = fixture.next_job().await;
+    assert_eq!(second.submission, submission(2));
+    // The first batch's slot frees while the worker holds the second: the local producer's turn
+    // comes next, and a busy worker does not pass it over for the forwarded producer.
+    first_root.ack_success();
+    let refused_turn = timeout(Duration::from_millis(200), clearances.recv()).await;
+    assert!(
+        refused_turn.is_err(),
+        "the freed slot went to the forwarded producer out of turn"
+    );
+    fixture.admit(&second, WAIT).ack_success();
+    let third = fixture.next_job().await;
+    assert_eq!(
+        third.submission,
+        submission(3),
+        "the local batch took its turn while the worker was busy"
+    );
+    assert_eq!(next_clearance(&mut clearances).await, 4);
 }
