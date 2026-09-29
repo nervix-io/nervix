@@ -1006,11 +1006,12 @@ fn materialized_record_report(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use ahash::HashMap;
     use nervix_interconnect::{RemoteOperationFailure, RemoteOperationSubject};
     use nervix_models::{Assignment, AssignmentTarget, Expression, ParseAsType};
-    use nervix_primitives::sync::watch;
-    use tokio::time::{Duration, timeout};
+    use nervix_primitives::{sync::watch, time::timeout};
 
     use super::*;
     use crate::{

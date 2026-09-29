@@ -53,8 +53,7 @@ use hickory_resolver::{
 };
 use indexmap::IndexSet;
 use meticulous::ResultExt as _;
-use nervix_primitives::sync::Semaphore;
-use tokio::time::timeout;
+use nervix_primitives::{sync::Semaphore, time::timeout};
 use triomphe::Arc;
 
 mod configuration;

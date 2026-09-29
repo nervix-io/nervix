@@ -3,7 +3,7 @@
 //! May depend on: runtime internals and test-only storage fixtures.
 //! Must not know: production control-plane orchestration or edge protocols.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use ahash::HashMap;
 use fjall::Database;
@@ -17,13 +17,15 @@ use nervix_models::{
     OwnershipStateResetCause, OwnershipTransition, ParseAsType, RelayBranching, RelayName,
     ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint, SchemaName, Timestamp,
 };
-use nervix_primitives::sync::{
-    atomic::{AtomicBool, Ordering},
-    mpsc, watch,
+use nervix_primitives::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, watch,
+    },
+    time::timeout,
 };
 use nonzero_ext::nonzero;
 use tempfile::tempdir;
-use tokio::time::{Duration, timeout};
 use triomphe::Arc;
 
 use super::*;
@@ -134,7 +136,7 @@ impl EmptyRelayHandoffFixture {
                 std::slice::from_ref(&self.entity),
                 EntityGatePurpose::OwnershipHandoff,
                 EntityGateLease {
-                    deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+                    deadline: nervix_primitives::time::Instant::now() + Duration::from_secs(30),
                     reason: "prepare ownership handoff test fixture",
                 },
             )
@@ -2507,7 +2509,7 @@ async fn forced_recovery_never_selects_a_checkpoint_of_a_replaced_generation() {
         Vec::new(),
     ));
     let current = guest_state_placement(&runtime, &domain, acme);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = nervix_primitives::time::Instant::now() + Duration::from_secs(5);
 
     let recovered = runtime
         .forced_recovery_checkpoint(&current, &[], deadline)

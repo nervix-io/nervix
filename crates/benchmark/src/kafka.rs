@@ -27,11 +27,14 @@ pub async fn provision_topics(
         NewTopic::new(input_topic, partitions, TopicReplication::Fixed(1)),
         NewTopic::new(output_topic, partitions, TopicReplication::Fixed(1)),
     ];
-    let deadline = tokio::time::Instant::now() + timeout;
-    let results = tokio::time::timeout(timeout, admin.create_topics(&topics, &AdminOptions::new()))
-        .await
-        .map_err(|_| io::Error::other("timed out creating Kafka benchmark topics"))?
-        .map_err(io::Error::other)?;
+    let deadline = nervix_primitives::time::Instant::now() + timeout;
+    let results = nervix_primitives::time::timeout(
+        timeout,
+        admin.create_topics(&topics, &AdminOptions::new()),
+    )
+    .await
+    .map_err(|_| io::Error::other("timed out creating Kafka benchmark topics"))?
+    .map_err(io::Error::other)?;
     for result in results {
         match result {
             Ok(_) => {}
@@ -50,7 +53,8 @@ pub async fn provision_topics(
     for topic in [input_topic, output_topic] {
         loop {
             nervix_primitives::task::consume_budget().await;
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let remaining =
+                deadline.saturating_duration_since(nervix_primitives::time::Instant::now());
             if remaining.is_zero() {
                 return Err(io::Error::other(format!(
                     "Kafka topic '{topic}' did not reach {expected} partitions before timeout"
@@ -77,13 +81,13 @@ pub async fn provision_topics(
             if observed == Some(expected) {
                 break;
             }
-            if tokio::time::Instant::now() >= deadline {
+            if nervix_primitives::time::Instant::now() >= deadline {
                 return Err(io::Error::other(format!(
                     "Kafka topic '{topic}' did not reach {expected} partitions before timeout; \
                      observed {observed:?}"
                 )));
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(100)).await;
         }
     }
     Ok(())

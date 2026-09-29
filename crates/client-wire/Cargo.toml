@@ -34,13 +34,6 @@ meticulous = { workspace = true }
 futures-util = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 strum = { workspace = true }
-tokio = { workspace = true, features = [
-  "macros",
-  "net",
-  "rt-multi-thread",
-  "sync",
-  "time",
-] }
 tokio-tungstenite = { workspace = true }
 
 [[test]]

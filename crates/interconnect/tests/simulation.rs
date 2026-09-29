@@ -54,13 +54,13 @@ fn simulation_timer_smoke() {
     let result = config(41).run("timer smoke", |simulation| {
         simulation.host("worker", || async {
             HostSupervisor::run(async {
-                tokio::time::sleep(Duration::from_millis(3)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(3)).await;
                 Ok::<(), std::io::Error>(())
             })
             .await
         });
         simulation.client("observer", async {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(5)).await;
             Ok(())
         });
     });
@@ -173,7 +173,7 @@ fn simulation_supervised_host_failure_reaches_result() {
                 .await
         });
         simulation.client("observer", async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(100)).await;
             Ok(())
         });
     });
@@ -190,14 +190,14 @@ fn simulation_host_task_panic_reports_its_own_message() {
     let result = config(41).run("host task panic", |simulation| {
         simulation.host("worker", || async {
             nervix_primitives::task::spawn(async {
-                tokio::time::sleep(Duration::from_millis(2)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(2)).await;
                 panic!("unsupervised worker task failed its assertion");
             });
             std::future::pending::<()>().await;
             Ok(())
         });
         simulation.client("observer", async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(100)).await;
             Ok(())
         });
     });
@@ -241,7 +241,7 @@ fn simulation_cleanup_panic_fails_a_completed_run() {
             Ok(())
         });
         simulation.client("observer", async {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(5)).await;
             Ok(())
         });
     });
@@ -266,7 +266,7 @@ fn simulation_step_limit_names_scenario_and_seed() {
     configuration.bounds.max_steps = NonZeroUsize::new(2).assured("2 is nonzero");
     let result = configuration.run("stalled observer", |simulation| {
         simulation.client("observer", async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(100)).await;
             Ok(())
         });
     });
@@ -304,7 +304,7 @@ fn simulation_wall_bound_reports_where_simulated_time_stopped() {
     configuration.bounds.wall_duration = Duration::from_millis(200);
     let result = configuration.run("blocked host", |simulation| {
         simulation.client("observer", async {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(5)).await;
             // Blocking the scheduler thread stops simulated time inside this step.
             nervix_primitives::thread::sleep(Duration::from_secs(2));
             Ok(())
@@ -375,7 +375,7 @@ fn simulated_utc_is_the_epoch_plus_simulated_elapsed_time() {
         .expect("the configured epoch follows the Unix epoch");
     let result = configuration.run("simulated UTC", move |simulation| {
         simulation.client("observer", async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(50)).await;
             let elapsed = turmoil::elapsed();
             let exact = SimulatedUtc::new(ClockSkew::Exact)
                 .current_time()
@@ -421,7 +421,7 @@ fn semantic_trace_records_hosts_in_simulated_order() {
     let result = config(41).run("trace order", move |simulation| {
         simulation.client("observer", async move {
             recorder.record("observer", "first");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(20)).await;
             recorder.record("observer", "second");
             Ok(())
         });

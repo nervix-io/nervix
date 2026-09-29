@@ -15,9 +15,6 @@
 //! the successful catalog commit, and an appended row is never idempotent, as
 //! [Emitters](docs/src/emitters.md) documents.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 mod storage;
 
 use std::{fs::File, path::PathBuf, sync::Arc as StdArc, time::Duration};
@@ -1157,9 +1154,10 @@ mod tests {
         .await
         .assured("the fixture resolver configuration is valid");
 
-        let auth_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .assured("the OAuth endpoint can bind");
+        let auth_listener =
+            nervix_primitives::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .assured("the OAuth endpoint can bind");
         let auth_port = auth_listener
             .local_addr()
             .assured("the OAuth endpoint has an address")
@@ -1191,9 +1189,10 @@ mod tests {
                 .assured("the OAuth response can be written");
         });
 
-        let catalog_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .assured("the catalog endpoint can bind");
+        let catalog_listener =
+            nervix_primitives::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .assured("the catalog endpoint can bind");
         let catalog_port = catalog_listener
             .local_addr()
             .assured("the catalog endpoint has an address")
@@ -1251,7 +1250,7 @@ mod tests {
             .rest_catalog("fixture", &catalog_config, &dns)
             .await
             .assured("the REST catalog can be configured");
-        tokio::time::timeout(Duration::from_secs(10), catalog.invalidate_token())
+        nervix_primitives::time::timeout(Duration::from_secs(10), catalog.invalidate_token())
             .await
             .assured("the catalog initialization completes")
             .assured("the catalog accepts its runtime configuration");

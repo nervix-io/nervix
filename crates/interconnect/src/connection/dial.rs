@@ -13,12 +13,12 @@ use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_dns::ConnectionBudget;
 use nervix_models::NodeEndpoint;
-use tokio::time::timeout;
+use nervix_primitives::{net::TcpStream, time::timeout};
 use tracing::debug;
 use triomphe::Arc;
 
 use super::{ConnectionSlotKey, TransportState};
-use crate::{TransportError, socket::TcpStream};
+use crate::TransportError;
 
 /// How the connections of one registered peer endpoint find the address they dial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

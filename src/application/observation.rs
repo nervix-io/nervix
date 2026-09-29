@@ -8,7 +8,7 @@
 //!   the interconnect to reach the node that owns each answer.
 //! - **Must not know.** How the reported state came to be.
 
-use std::{collections::BTreeSet, num::NonZeroU64};
+use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};
 
 use arch_into::ArchInto;
 use error_stack::{Report, ResultExt as _};
@@ -41,7 +41,6 @@ use nervix_models::{
     ShowRelayMaterializedState, UniquelyKindedModel, WasmStateInspection,
 };
 use nervix_vm::window::{WindowAggregateProgram, lower_window_assignments};
-use tokio::time::Duration;
 use tracing::{debug, warn};
 
 use super::{

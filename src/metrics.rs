@@ -17,7 +17,7 @@ use std::{
     cmp::Ordering,
     collections::VecDeque,
     num::NonZeroU64,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use arch_into::ArchInto as _;
@@ -35,6 +35,7 @@ use nervix_primitives::{
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering as AtomicOrdering},
         blocking::Mutex,
     },
+    time::Instant,
 };
 use nervix_recovery::Discarded as _;
 use nervix_simd_kernels::{ElapsedHistogram, ElapsedLayout, elapsed_nanos};

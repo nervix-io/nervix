@@ -13,9 +13,7 @@ default = []
 shuttle = [
   "dep:shuttle",
   "nervix-execution/shuttle",
-  "dep:shuttle-tokio",
   "nervix-primitives/shuttle",
-  "shuttle-tokio/shuttle",
 ]
 turmoil = [
   "dep:turmoil",
@@ -49,7 +47,6 @@ rkyv = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 shuttle = { workspace = true, optional = true }
-shuttle-tokio = { workspace = true, features = ["full"], optional = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

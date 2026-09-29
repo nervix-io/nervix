@@ -4,12 +4,14 @@ use std::{num::NonZeroUsize, sync::Arc as StdArc, time::Duration};
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_primitives::sync::{
-    OwnedSemaphorePermit, Semaphore, TryAcquireError,
-    atomic::{AtomicU64, AtomicUsize, Ordering},
+use nervix_primitives::{
+    sync::{
+        OwnedSemaphorePermit, Semaphore, TryAcquireError,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    time::Instant,
 };
 use thiserror::Error;
-use tokio::time::Instant;
 
 use crate::{
     cancellation::{ArmedCancellation, CancelOnDrop, Cancellation},
@@ -183,15 +185,12 @@ impl WorkerPool {
             drop(worker);
             value
         };
-        #[cfg(feature = "turmoil")]
+        // The boundary runs an admitted CPU job on the blocking pool, or, in the Turmoil build, as
+        // one task of the simulated host's scheduler. Storage work always takes a real thread.
         let handle = match self.class {
-            // Bounded CPU work in the simulation target is one scheduler task. Its synchronous
-            // body is one scheduling step; instruction-level races need Shuttle or real threads.
-            WorkerClassName::Cpu(_) => nervix_primitives::task::spawn(async move { work() }),
+            WorkerClassName::Cpu(_) => nervix_primitives::task::spawn_cpu(work),
             WorkerClassName::Storage(_) => nervix_primitives::task::spawn_blocking(work),
         };
-        #[cfg(not(feature = "turmoil"))]
-        let handle = nervix_primitives::task::spawn_blocking(work);
         Ok(RunningJob { handle, obligation })
     }
 

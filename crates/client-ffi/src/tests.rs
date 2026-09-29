@@ -3,11 +3,7 @@
 //! Rows events are built from frames the wire contract encodes, so every accessor reads a real
 //! verified frame. The conformance scenarios drive the same functions against a running cluster.
 
-use std::{
-    num::NonZeroU64,
-    ptr, slice,
-    time::{Duration, Instant},
-};
+use std::{num::NonZeroU64, ptr, slice, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
@@ -24,6 +20,7 @@ use nervix_client_core::{
     },
 };
 use nervix_models::{ParseAsType, SchemaField, Timestamp};
+use nervix_primitives::time::Instant;
 use triomphe::Arc;
 
 use crate::{

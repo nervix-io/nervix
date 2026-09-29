@@ -10,9 +10,6 @@
 //! - **Must not know.** What the replicated state means. Domain lifecycle, transactions, validation
 //!   and scheduling belong above; this crate agrees on values and hands them back.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
@@ -42,6 +39,7 @@ use nervix_primitives::{
         broadcast, watch,
     },
     task::JoinHandle,
+    time::{Instant, timeout},
 };
 use nervix_recovery::Discarded as _;
 pub use openraft::raft::{
@@ -73,7 +71,6 @@ use rkyv::{
 use serde::{Deserialize, Serialize};
 use sorted_vec::SortedSet;
 use thiserror::Error;
-use tokio::time::{Instant, timeout};
 use tracing::{error, info};
 use triomphe::Arc;
 
@@ -3867,7 +3864,7 @@ impl ConsensusState {
             let reclaimed = timeout(deadline, async {
                 loop {
                     nervix_primitives::task::consume_budget().await;
-                    tokio::time::sleep(RETENTION_ADMISSION_POLL).await;
+                    nervix_primitives::time::sleep(RETENTION_ADMISSION_POLL).await;
                     if self.store.retained_log_bytes() <= cap {
                         return;
                     }

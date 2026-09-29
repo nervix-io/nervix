@@ -23,6 +23,7 @@ use nervix_models::{
     TransactionInspectionRejection, TransactionInspectionTarget,
 };
 use nervix_primitives::{
+    net::TcpListener,
     stream::wrappers::{ReceiverStream, TcpListenerStream},
     sync::{
         Mutex,
@@ -33,7 +34,6 @@ use nervix_primitives::{
 };
 use nervix_recovery::Discarded as _;
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
-use tokio::net::TcpListener;
 use tonic::{
     Request, Response, Status, Streaming,
     body::Body,
@@ -133,7 +133,7 @@ fn completed() -> CommandDisposition {
 }
 
 async fn within_deadline<F: Future>(future: F) -> F::Output {
-    tokio::time::timeout(DEADLINE, future)
+    nervix_primitives::time::timeout(DEADLINE, future)
         .await
         .assured("the awaited step completes within the generous test deadline")
 }
@@ -531,7 +531,7 @@ async fn native_session_connection_deadline_cancels_a_silent_dns_lookup() {
         retry_timeout: Duration::from_secs(1),
         ..ConnectOptions::default()
     };
-    let result = tokio::time::timeout(
+    let result = nervix_primitives::time::timeout(
         Duration::from_secs(10),
         Client::connect_with_options(format!("http://{name}:4317"), None, options),
     )
@@ -2360,7 +2360,7 @@ async fn session_closed(client: &Client) {
             if !requests.pending.lock().is_open() {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await;

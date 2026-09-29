@@ -23,6 +23,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::Arc as StdArc,
+    time::Duration,
 };
 
 use admitted_connection::AdmittingListener;
@@ -86,7 +87,7 @@ use nervix_interconnect::{
 use nervix_models::{
     ClusterNodeName, DomainName, DomainStatus, ModelKind, NodeEndpoint, NodeServiceUrl, UserName,
 };
-use nervix_primitives::{collections::DashMap, sync::broadcast};
+use nervix_primitives::{collections::DashMap, net::TcpListener, sync::broadcast, time::sleep};
 use observability_http::serve_observability_http;
 use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecoveryCoordinator};
 use scheduling::{
@@ -104,10 +105,6 @@ use subscription::{SubscriptionInterests, SubscriptionSampler};
 use tls::{
     HttpsListenerCertificates, InterconnectTlsPaths, load_grpc_tls_server_config,
     load_web_console_tls_server_config, reload_interconnect_tls,
-};
-use tokio::{
-    net::TcpListener,
-    time::{Duration, sleep},
 };
 use transaction::{
     DEFAULT_TRANSACTION_IDLE_TIMEOUT, DEFAULT_TRANSACTION_MAX_OPEN,
@@ -1220,7 +1217,7 @@ impl Application {
         }
         background_tasks.push(nervix_primitives::task::spawn(async move {
             sleep(Duration::from_millis(500)).await;
-            let reconcile_started = tokio::time::Instant::now();
+            let reconcile_started = nervix_primitives::time::Instant::now();
             let mut default_user_resolved = false;
             let mut missing_init_default_user_password_warned = false;
             loop {
@@ -1711,7 +1708,7 @@ impl Application {
                         cluster::PeerHealthProbeResult::new(
                             target,
                             outcome,
-                            std::time::Instant::now(),
+                            nervix_primitives::time::Instant::now(),
                         )
                     }
                 }))
@@ -2044,7 +2041,7 @@ impl Application {
                 let service = entity_gate_service.clone();
                 async move {
                     let subject = RemoteOperationSubject::domain(&request.domain);
-                    let deadline = tokio::time::Instant::now()
+                    let deadline = nervix_primitives::time::Instant::now()
                         .checked_add(Duration::from_millis(request.deadline_millis));
                     let result = match deadline {
                         Some(deadline) => service
@@ -2302,8 +2299,8 @@ impl Application {
                                 request.destination_incarnation,
                                 "destination",
                             )?;
-                            let deadline =
-                                tokio::time::Instant::now() + FORCED_OWNERSHIP_RECOVERY_BUDGET;
+                            let deadline = nervix_primitives::time::Instant::now()
+                                + FORCED_OWNERSHIP_RECOVERY_BUDGET;
                             service
                                 .inner
                                 .runtime

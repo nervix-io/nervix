@@ -1585,7 +1585,7 @@ pub(super) async fn stop_processor_branch_task(
     let Some(mut task) = entry.task.lock().take() else {
         return;
     };
-    match tokio::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, &mut task).await {
+    match nervix_primitives::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, &mut task).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             warn!(
@@ -1825,16 +1825,20 @@ pub(super) async fn restore_processor_branch_lru_snapshot(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use ahash::HashMap;
     use nervix_models::{
         CommandExecutionReference, CreateSchema, ErrorPolicies, MessageErrorPolicy, ModelKind,
         ModelName, NodeRef, ParseAsType, RelayName, SchemaField,
     };
-    use nervix_primitives::sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, watch,
+    use nervix_primitives::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, watch,
+        },
+        time::timeout,
     };
-    use tokio::time::{Duration, timeout};
     use triomphe::Arc;
 
     use super::*;

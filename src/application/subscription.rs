@@ -1618,12 +1618,13 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use nervix_client_wire::{
         RowSchema, ServerEvent, ServerMessage, SubscriptionEndReason, VerifiedFrame,
     };
     use nervix_models::{SchemaField, SubscriptionDeliveryBehavior};
-    use nervix_primitives::sync::CancellationToken;
-    use tokio::time::{Duration, timeout};
+    use nervix_primitives::{sync::CancellationToken, time::timeout};
 
     use super::{
         super::{

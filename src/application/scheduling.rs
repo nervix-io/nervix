@@ -8,7 +8,7 @@
 //!   handoff to move state the schedule moves.
 //! - **Must not know.** How a scheduled node executes once it is placed.
 
-use std::{collections::BTreeSet, num::NonZeroU64};
+use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};
 
 use ahash::{HashMap, HashSet};
 use error_stack::{Report, ResultExt as _};
@@ -24,8 +24,10 @@ use nervix_models::{
     KafkaPartitionSchedule, Model, ModelKind, ModelName, NodeRef, PlacementGroupSchedule,
     PlacementPolicy, QuiesceLevel, ScheduledNode,
 };
-use nervix_primitives::sync::CancellationToken;
-use tokio::time::{Duration, Instant, sleep};
+use nervix_primitives::{
+    sync::CancellationToken,
+    time::{Instant, sleep},
+};
 use tracing::{info, warn};
 
 use super::{
@@ -882,7 +884,7 @@ impl SessionServiceImpl {
             }
             ShutdownOwnershipMove::Requested(move_outcome) => {
                 let cleanup_timeout = SHUTDOWN_CORDON_CLEANUP_TIMEOUT.min(deadline.remaining());
-                let cleanup = tokio::time::timeout(
+                let cleanup = nervix_primitives::time::timeout(
                     cleanup_timeout,
                     self.clear_shutdown_drain_cordon(&local_node_id),
                 )
@@ -919,7 +921,7 @@ impl SessionServiceImpl {
         budget: &ShutdownDrainBudget,
     ) -> ShutdownOwnershipMove {
         let route = self.shutdown_drain_route(local_node_id);
-        let route = match tokio::time::timeout(budget.remaining(), route).await {
+        let route = match nervix_primitives::time::timeout(budget.remaining(), route).await {
             Ok(route) => route,
             Err(_) => {
                 warn!(
@@ -937,11 +939,11 @@ impl SessionServiceImpl {
             ShutdownDrainRoute::UnreachableLeader => return ShutdownOwnershipMove::NotRequested,
             ShutdownDrainRoute::LocalLeader => {
                 let drain = self.drain_local_node_as_leader(local_node_id);
-                tokio::time::timeout(budget.remaining(), drain).await
+                nervix_primitives::time::timeout(budget.remaining(), drain).await
             }
             ShutdownDrainRoute::RemoteLeader(leader) => {
                 let drain = leader.drain(local_node_id);
-                tokio::time::timeout(budget.remaining(), drain).await
+                nervix_primitives::time::timeout(budget.remaining(), drain).await
             }
         };
         match drained {

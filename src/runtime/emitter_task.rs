@@ -1047,7 +1047,7 @@ impl EmitterTaskLoop<'_> {
                         stop_rx: &mut *self.stop_rx,
                         backoff,
                     };
-                    let drained = tokio::time::timeout_at(deadline, async {
+                    let drained = nervix_primitives::time::timeout_at(deadline, async {
                         let report = sink
                             .flush_all(self.plan.sink.label(), self.context, &mut control, buffer)
                             .await?;

@@ -8,15 +8,13 @@
 
 use std::{env, io, path::PathBuf, time::Duration};
 
+use nervix_primitives::net::TcpStream;
 use testcontainers::{
     ContainerAsync, GenericImage, ImageExt as _, ReuseDirective,
     core::{IntoContainerPort as _, Mount, WaitFor},
     runners::AsyncRunner as _,
 };
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpStream,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use uuid::Uuid;
 
 pub(crate) const SESSION_LABEL: &str = "com.nervix.testcontainers.reaper-session";
@@ -172,19 +170,23 @@ impl RyukGuard {
             .await
             .map_err(|error| io::Error::other(format!("Ryuk port lookup failed: {error}")))?;
         let endpoint = (host.to_string(), port);
-        let mut connection = tokio::time::timeout(CONTROL_TIMEOUT, TcpStream::connect(endpoint))
-            .await
-            .map_err(|_| io::Error::other("timed out connecting to Ryuk"))??;
+        let mut connection =
+            nervix_primitives::time::timeout(CONTROL_TIMEOUT, TcpStream::connect(endpoint))
+                .await
+                .map_err(|_| io::Error::other("timed out connecting to Ryuk"))??;
         connection.set_nodelay(true)?;
 
         let filter = format!("label={SESSION_LABEL}={session}\n");
-        tokio::time::timeout(CONTROL_TIMEOUT, connection.write_all(filter.as_bytes()))
+        nervix_primitives::time::timeout(CONTROL_TIMEOUT, connection.write_all(filter.as_bytes()))
             .await
             .map_err(|_| io::Error::other("timed out registering the Ryuk cleanup filter"))??;
         let mut acknowledgement = [0_u8; 4];
-        tokio::time::timeout(CONTROL_TIMEOUT, connection.read_exact(&mut acknowledgement))
-            .await
-            .map_err(|_| io::Error::other("timed out waiting for Ryuk to accept the filter"))??;
+        nervix_primitives::time::timeout(
+            CONTROL_TIMEOUT,
+            connection.read_exact(&mut acknowledgement),
+        )
+        .await
+        .map_err(|_| io::Error::other("timed out waiting for Ryuk to accept the filter"))??;
         if acknowledgement != *b"ACK\n" {
             return Err(io::Error::other(format!(
                 "Ryuk returned an invalid filter acknowledgement: {acknowledgement:?}"

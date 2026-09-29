@@ -10,6 +10,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc as StdArc,
+    time::Duration,
 };
 
 use error_stack::{Report, ResultExt};
@@ -35,7 +36,6 @@ use nervix_nspl::client_statement::ClientStatement;
 use nervix_primitives::sync::{OwnedMutexGuard, Semaphore, blocking::Mutex as ParkingMutex};
 use serde::Serialize;
 use thiserror::Error;
-use tokio::time::Duration;
 use tracing::{info, warn};
 
 use super::{

@@ -332,8 +332,8 @@ impl TransportState {
             failure: Option<String>,
         }
 
-        let mut interval = tokio::time::interval(RELAY_PROGRESS_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut interval = nervix_primitives::time::interval(RELAY_PROGRESS_INTERVAL);
+        interval.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
         loop {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::select! {
@@ -399,8 +399,8 @@ impl TransportState {
     }
 
     pub(super) async fn retire_idle_relay_channels(self) {
-        let mut interval = tokio::time::interval(RELAY_CHANNEL_SWEEP_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut interval = nervix_primitives::time::interval(RELAY_CHANNEL_SWEEP_INTERVAL);
+        interval.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
         loop {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::select! {

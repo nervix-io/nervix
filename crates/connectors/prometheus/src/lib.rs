@@ -354,7 +354,7 @@ mod tests {
         status: &str,
         body: &str,
     ) -> Result<Vec<PrometheusVectorResult>, Report<PrometheusSourceError>> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let listener = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test Prometheus listener should bind");
         let address = listener

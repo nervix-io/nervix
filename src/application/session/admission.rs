@@ -125,7 +125,7 @@ mod tests {
             );
         nervix_primitives::task::yield_now().await;
         assert_eq!(admission.cancel(), CancelledStage::BeforeAdmission);
-        tokio::time::timeout(Duration::from_secs(5), waiting)
+        nervix_primitives::time::timeout(Duration::from_secs(5), waiting)
             .await
             .assured("a cancellation wakes the waiter within the deadline")
             .assured("the waiter does not panic");

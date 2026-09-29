@@ -10,9 +10,6 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 mod source;
 
 use std::{collections::VecDeque, future::Future, pin::Pin, sync::Arc as StdArc, time::Duration};
@@ -37,11 +34,13 @@ use nervix_connector::{
     SinkStartResult, client_config_value, client_tls_paths,
 };
 use nervix_models::{ClientConfigEntry, SubjectName, Timestamp};
-use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
+use nervix_primitives::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::{Instant, sleep},
+};
 pub use source::{
     NatsMessageHeaders, NatsSource, NatsSourceError, NatsSourceMessage, NatsSourcePlan,
 };
-use tokio::time::{Instant, sleep};
 
 const NATS: &str = "nats";
 

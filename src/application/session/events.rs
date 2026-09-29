@@ -15,7 +15,7 @@
 //! cluster summary and snapshot at once and then periodically, and a session that selected none
 //! receives neither.
 
-use std::num::NonZeroU64;
+use std::{num::NonZeroU64, time::Duration};
 
 use arch_into::ArchInto as _;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -27,8 +27,10 @@ use nervix_client_wire::{
 use nervix_dataflow_graph::DataflowGraph;
 use nervix_execution::{CpuClass, MemoryClass};
 use nervix_models::{DomainName, DomainStatus, RelayName, RequestedResourceVersion};
-use nervix_primitives::sync::broadcast::error::RecvError;
-use tokio::time::{Duration, MissedTickBehavior, interval};
+use nervix_primitives::{
+    sync::broadcast::error::RecvError,
+    time::{MissedTickBehavior, interval},
+};
 use tracing::{debug, warn};
 use triomphe::Arc;
 

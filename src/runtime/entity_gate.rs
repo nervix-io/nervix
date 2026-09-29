@@ -961,7 +961,7 @@ impl Runtime {
         let ownership_handoff_freeze_changed = self.inner.ownership_handoff_freeze_changed.clone();
         let expiring_operation = operation.clone();
         drop(nervix_primitives::task::spawn(async move {
-            tokio::time::sleep_until(deadline).await;
+            nervix_primitives::time::sleep_until(deadline).await;
             debug!(
                 domain = expiring_operation.scope().domain.as_str(),
                 %coordination,
@@ -1438,7 +1438,7 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
+    use std::{sync::Arc as StdArc, time::Duration};
 
     use nervix_interconnect::EntityGatePurpose;
     use nervix_models::{
@@ -1448,12 +1448,14 @@ mod tests {
         ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, RelayBranching, RelayName,
         RetryPolicy,
     };
-    use nervix_primitives::sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        watch,
+    use nervix_primitives::{
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            watch,
+        },
+        time::Instant,
     };
     use nonzero_ext::nonzero;
-    use tokio::time::{Duration, Instant};
     use triomphe::Arc;
 
     use super::*;
@@ -1691,10 +1693,10 @@ mod tests {
             .expect("entity hold should engage");
         assert!(gate.is_closed());
 
-        tokio::time::timeout(Duration::from_secs(1), async {
+        nervix_primitives::time::timeout(Duration::from_secs(1), async {
             while runtime.entity_gate_operation_is_held(&coordination) {
                 nervix_primitives::task::consume_budget().await;
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
@@ -1855,7 +1857,7 @@ mod tests {
         );
         drop(dispatch);
 
-        tokio::time::timeout(
+        nervix_primitives::time::timeout(
             Duration::from_secs(1),
             runtime.engage_entity_gate_operation(
                 &coordination,
@@ -2070,7 +2072,7 @@ mod tests {
             .await
             .expect("the replacement hold should engage");
 
-        tokio::time::advance(Duration::from_millis(11)).await;
+        nervix_primitives::time::advance(Duration::from_millis(11)).await;
         nervix_primitives::task::yield_now().await;
 
         assert!(runtime.entity_gate_operation_is_held(&coordination));

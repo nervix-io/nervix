@@ -29,7 +29,7 @@ use nervix_client_wire::{
     ReplyBody, SubscribeDisposition,
 };
 use nervix_models::DomainName;
-use tokio::time::sleep;
+use nervix_primitives::time::sleep;
 use triomphe::Arc;
 
 use crate::{
@@ -123,7 +123,8 @@ impl RestorationChannel {
         kind: RequestKind,
     ) -> error_stack::Result<ReplyBody, ClientError> {
         let mut waiter = sent?;
-        let Ok(received) = tokio::time::timeout(self.request_timeout, waiter.receive()).await
+        let Ok(received) =
+            nervix_primitives::time::timeout(self.request_timeout, waiter.receive()).await
         else {
             self.requests.pending.lock().close();
             return Err(Report::new(ClientError::RequestDeadline { request: kind }));

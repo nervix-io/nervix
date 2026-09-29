@@ -4,6 +4,7 @@ use error_stack::{AttachmentKind, FrameKind, Report};
 use futures_util::{SinkExt, StreamExt};
 use nervix_jaq::{JaqNativeFormat, StatefulJaqProgram};
 use nervix_models::{SignalingProtocolName, SignalingProtocolOnConnect, SignalingWireFormat};
+use nervix_primitives::time;
 use prost::Message as ProstMessage;
 use prost_reflect::{
     DeserializeOptions as ProtobufDeserializeOptions, DynamicMessage, MessageDescriptor,
@@ -11,10 +12,7 @@ use prost_reflect::{
 };
 use serde_json::Value as JsonValue;
 use thiserror::Error;
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    time,
-};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{Error as WebSocketError, Message},
@@ -1078,7 +1076,9 @@ mod tests {
                         }
                     },
                     PeerStep::ExpectSilence(window) => {
-                        if let Ok(frame) = tokio::time::timeout(window, peer.next()).await {
+                        if let Ok(frame) =
+                            nervix_primitives::time::timeout(window, peer.next()).await
+                        {
                             *peer_failure.lock() =
                                 Some(format!("expected no frame for {window:?}, got {frame:?}"));
                             return;

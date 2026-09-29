@@ -24,12 +24,12 @@ use nervix_connector::{
     client_config_value, client_tls_paths, optional_client_config_value, read_tls_file,
 };
 use nervix_models::{ClientConfigEntry, MqttQos, MqttSession};
+use nervix_primitives::time::{Instant, sleep_until};
 use rumqttc::{
     AckMode, AsyncClient, BrokerSessionResumePolicy, Event, EventLoop, Incoming, MqttOptions,
     Publish, QoS, SessionMode, SubscribeReasonCode, TlsConfiguration, Transport as MqttTransport,
 };
 use thiserror::Error;
-use tokio::time::{Instant, sleep_until};
 use url::{Host, Url};
 
 const MQTT: &str = "mqtt";

@@ -1,6 +1,3 @@
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
@@ -14,7 +11,7 @@ use std::{
     process::{Command, Output, Stdio},
     str::FromStr,
     sync::Arc as StdArc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use arch_into::ArchInto as _;
@@ -72,6 +69,7 @@ use nervix_primitives::{
         blocking::{Mutex as BlockingMutex, OnceLock},
     },
     task::AbortOnDropHandle,
+    time::Instant,
 };
 use nervix_recovery::Discarded as _;
 use nervix_server::{
@@ -369,7 +367,7 @@ struct ScenarioWorld {
     /// Every port this scenario drew for fixtures of its own: the ZeroMQ and syslog addresses its
     /// nodes and its observers bind. Given back once cleanup has stopped both.
     scenario_ports: Vec<u16>,
-    syslog_udp_observer: Option<tokio::net::UdpSocket>,
+    syslog_udp_observer: Option<nervix_primitives::net::UdpSocket>,
     placeholders: BTreeMap<String, String>,
     saved_healthy_placements: Vec<SavedHealthyPlacement>,
     health_fault_started_at: Option<Instant>,
@@ -416,7 +414,7 @@ struct ScenarioWorld {
     /// The transport each OTLP receiver a scenario started serves, by the name its steps give it.
     /// The receiver itself is kept with the HTTP or gRPC receivers under the same name.
     otlp_receivers: BTreeMap<String, OtlpTransport>,
-    silent_interconnect_peers: Vec<tokio::net::TcpStream>,
+    silent_interconnect_peers: Vec<nervix_primitives::net::TcpStream>,
     last_interconnect_attempt_error: Option<String>,
     server_process: Option<ServerProcess>,
     server_process_cluster: Option<ServerProcessCluster>,
@@ -678,7 +676,7 @@ impl ScenarioWorld {
     ) {
         let domain = expand_placeholders(self, domain);
         let node_id = expand_placeholders(self, node_id);
-        tokio::time::timeout(
+        nervix_primitives::time::timeout(
             duration,
             self.fault_injection
                 .wait_for_domain_clock_progress_pause_on(
@@ -1922,7 +1920,7 @@ async fn then_clock_source_recorder_records_requests(
             "clock source recorder '{name}' expected {expected_count} requests, observed \
              {observed_count}: {observations}"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -1962,7 +1960,7 @@ async fn then_clock_source_recorder_records_at_least_requests(
             "clock source recorder '{name}' expected at least {expected_count} requests, observed \
              {observed_count}: {observations}"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -2133,7 +2131,7 @@ async fn then_clock_source_and_subscription_observe_fresh_cadence(
              {observations}",
             requests.len(),
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(20)).await;
     };
 
     let requests = observations["requests"]
@@ -2335,7 +2333,7 @@ async fn then_dependency_endpoint_responds_with_200(
             "dependency endpoint '{endpoint_key}' at '{endpoint}' did not respond with 200: \
              {attempt_error}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -2388,7 +2386,7 @@ async fn then_ephemeral_dependency_is_cleaned_up_when_test_process_is_killed(
         .take()
         .expect("dependency lifecycle helper stdout should be piped");
     let mut lines = tokio::io::BufReader::new(stdout).lines();
-    let container_id = tokio::time::timeout(Duration::from_secs(180), async {
+    let container_id = nervix_primitives::time::timeout(Duration::from_secs(180), async {
         while let Some(line) = lines
             .next_line()
             .await
@@ -2434,7 +2432,7 @@ async fn then_ephemeral_dependency_is_cleaned_up_when_test_process_is_killed(
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -2933,7 +2931,7 @@ async fn then_server_process_transaction_eventually_has_state(
             Ok(output) => last_output = output,
             Err(error) => last_output = error.to_string(),
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -3643,7 +3641,8 @@ impl ScenarioWorld {
                 }
             }
         }
-        let result = tokio::time::timeout(Duration::from_secs(60), process.output()).await;
+        let result =
+            nervix_primitives::time::timeout(Duration::from_secs(60), process.output()).await;
         let output = match result {
             Ok(Ok(output)) => output,
             Ok(Err(error)) => panic!("the scenario CLI process failed to start: {error}"),
@@ -3726,7 +3725,7 @@ async fn when_cli_suggests_for(world: &mut ScenarioWorld, input: String, node: S
         .cluster()
         .grpc_uri(&node)
         .assured("the scenario names a cluster node");
-    let output = tokio::time::timeout(
+    let output = nervix_primitives::time::timeout(
         Duration::from_secs(60),
         tokio::process::Command::new(scenario_cli_binary())
             .args([
@@ -3901,7 +3900,7 @@ async fn then_cli_subscription_output_contains(world: &mut ScenarioWorld, expect
             let retained = lines.lock();
             panic!("CLI subscription output did not contain {expected:?}: {retained:?}");
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -4024,7 +4023,7 @@ async fn wait_for_cli_clock_output(
                 panic!("CLI clock output did not show {described}: {retained:?}");
             }
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -4197,7 +4196,7 @@ async fn then_cli_clock_exits_successfully(world: &mut ScenarioWorld) {
         .cli_clock_process
         .as_mut()
         .verified("the preceding step started the CLI clock process");
-    let status = tokio::time::timeout(Duration::from_secs(10), process.child.wait())
+    let status = nervix_primitives::time::timeout(Duration::from_secs(10), process.child.wait())
         .await
         .unwrap_or_else(|_| panic!("the CLI clock process did not stop after Ctrl-C"))
         .unwrap_or_else(|error| panic!("the CLI clock process could not be reaped: {error}"));
@@ -4215,7 +4214,7 @@ async fn when_cli_follows_missing_domain(world: &mut ScenarioWorld, domain: Stri
         .cluster()
         .grpc_uri(&node)
         .assured("the scenario names a cluster node");
-    let output = tokio::time::timeout(
+    let output = nervix_primitives::time::timeout(
         Duration::from_secs(10),
         tokio::process::Command::new(scenario_cli_binary())
             .args([
@@ -4698,7 +4697,7 @@ impl IngestorLogicTransportFixture {
                         "timed out waiting for ingestor logic kafka payload to reach the relay \
                          subscription"
                     );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    nervix_primitives::time::sleep(Duration::from_millis(100)).await;
                 }
             }
             Self::Mqtt => {
@@ -4784,7 +4783,7 @@ impl IngestorLogicTransportFixture {
                         "timed out waiting for ingestor logic nats payload with headers to reach \
                          the relay subscription"
                     );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    nervix_primitives::time::sleep(Duration::from_millis(100)).await;
                 }
             }
             Self::Mqtt | Self::WebsocketEndpoint | Self::ZeroMq => {
@@ -5720,7 +5719,7 @@ async fn finish_durable_catch_up_writer(world: &mut ScenarioWorld) -> (String, u
         .verified("durable catch-up started its continuous client writer");
     writer.cancellation.cancel();
     let prefix = writer.prefix;
-    let joined = tokio::time::timeout(Duration::from_secs(5), writer.task)
+    let joined = nervix_primitives::time::timeout(Duration::from_secs(5), writer.task)
         .await
         .unwrap_or_else(|error| panic!("durable catch-up client writer did not stop: {error}"));
     let result = joined
@@ -5817,7 +5816,7 @@ async fn when_node_starts_durable_catch_up(
             }
             nervix_primitives::select! {
                 () = writer_cancellation.cancelled() => return Ok(written),
-                () = tokio::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE) => {}
+                () = nervix_primitives::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE) => {}
             }
         }
     }));
@@ -5903,7 +5902,7 @@ async fn then_node_catches_up_within_durable_storage_bound(
         if applied >= backlog_count || Instant::now() >= maximum_deadline {
             break applied;
         }
-        tokio::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE).await;
+        nervix_primitives::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE).await;
     };
 
     let (live_prefix, live_writes) = finish_durable_catch_up_writer(world).await;
@@ -5927,7 +5926,7 @@ async fn then_node_catches_up_within_durable_storage_bound(
         if all_applied || Instant::now() >= deadline {
             break applied;
         }
-        tokio::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE).await;
+        nervix_primitives::time::sleep(DURABLE_CATCH_UP_WRITE_CADENCE).await;
     };
 
     let elapsed = observation.started_at.elapsed();
@@ -6049,7 +6048,7 @@ async fn await_burst_domains(
             if applied >= count || Instant::now() >= deadline {
                 break applied;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(100)).await;
         };
         assert_eq!(
             applied, count,
@@ -6154,7 +6153,7 @@ async fn then_leader_released_snapshot_bulk_memory(world: &mut ScenarioWorld, du
             "within {duration} leader '{leader}' still held {reserved} bytes of bulk memory, at \
              least the {section_reservation}-byte working set for one snapshot section"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -6188,7 +6187,7 @@ async fn await_purge_beyond_retention_peak(
              ({purged_beyond_peak}) and report fewer retained bytes ({retained_fewer_bytes}): \
              peak={peak:?} last={retention:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -6214,7 +6213,7 @@ async fn await_covered_log_purge(
             "the leader did not purge its covered raft log beyond {beyond:?} within {duration}: \
              {retention:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -6276,7 +6275,7 @@ async fn then_node_interrupted_a_snapshot_installation(
             Instant::now() < deadline,
             "node '{node_id}' did not interrupt a raft snapshot installation within {duration}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -6302,7 +6301,7 @@ async fn then_node_recovers_by_snapshot(
             Instant::now() < deadline,
             "node '{node_id}' did not install a raft snapshot within {duration}: {retention:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -6446,7 +6445,7 @@ async fn then_wasm_checkpoint_is_held(
     window: String,
 ) {
     let target = WasmCheckpointPauseTarget::of(world, &processor, &window);
-    let reached = tokio::time::timeout(
+    let reached = nervix_primitives::time::timeout(
         Duration::from_secs(30),
         world.fault_injection.wait_for_wasm_checkpoint_pause(
             target.domain,
@@ -6550,7 +6549,7 @@ async fn then_wasm_processor_completes_a_guest_requested_state_reset(
             "wasm processor '{processor}' did not complete a guest-requested state reset within \
              {timeout:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -7114,7 +7113,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
                 "WASM reset processor did not reach its requested test placement: {}",
                 outcome.message
             );
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(100)).await;
         }
     }
 }
@@ -7264,7 +7263,7 @@ async fn given_http_mock_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
 
 #[then("the DNS fixture eventually receives a question for the HTTP mock")]
 async fn then_dns_fixture_queried_http_mock(world: &mut ScenarioWorld) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    nervix_primitives::time::timeout(Duration::from_secs(10), async {
         loop {
             nervix_primitives::task::consume_budget().await;
             let count = world
@@ -7274,7 +7273,7 @@ async fn then_dns_fixture_queried_http_mock(world: &mut ScenarioWorld) {
             if count > 0 {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await
@@ -7301,7 +7300,7 @@ async fn given_iceberg_endpoints_have_fixture_dns(world: &mut ScenarioWorld) {
 
 #[then("the DNS fixture eventually receives Iceberg catalog and object-store questions")]
 async fn then_dns_fixture_queried_iceberg(world: &mut ScenarioWorld) {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    nervix_primitives::time::timeout(Duration::from_secs(30), async {
         loop {
             nervix_primitives::task::consume_budget().await;
             let catalog = world
@@ -7315,7 +7314,7 @@ async fn then_dns_fixture_queried_iceberg(world: &mut ScenarioWorld) {
             if catalog > 0 && objects > 0 {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
@@ -7682,7 +7681,7 @@ async fn then_the_tcp_forwarder_accepts_a_connection(world: &mut ScenarioWorld, 
         .tcp_forwarders
         .as_ref()
         .expect("the scenario started TCP forwarders");
-    tokio::time::timeout(ACCEPT_BUDGET, async {
+    nervix_primitives::time::timeout(ACCEPT_BUDGET, async {
         loop {
             nervix_primitives::task::consume_budget().await;
             let accepted = forwarders
@@ -7691,7 +7690,7 @@ async fn then_the_tcp_forwarder_accepts_a_connection(world: &mut ScenarioWorld, 
             if accepted > 0 {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
@@ -7702,7 +7701,7 @@ async fn then_the_tcp_forwarder_accepts_a_connection(world: &mut ScenarioWorld, 
 
 #[then(expr = "the DNS fixture eventually receives a question for {string}")]
 async fn then_dns_fixture_queried_name(world: &mut ScenarioWorld, name: String) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    nervix_primitives::time::timeout(Duration::from_secs(10), async {
         loop {
             nervix_primitives::task::consume_budget().await;
             let count = world
@@ -7712,7 +7711,7 @@ async fn then_dns_fixture_queried_name(world: &mut ScenarioWorld, name: String) 
             if count > 0 {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
@@ -7725,7 +7724,7 @@ async fn then_dns_fixture_queried_name_again(world: &mut ScenarioWorld, name: St
         .cluster()
         .dns_questions_for_name(&name)
         .assured("the scenario configured fixture DNS before observing questions");
-    tokio::time::timeout(Duration::from_secs(30), async {
+    nervix_primitives::time::timeout(Duration::from_secs(30), async {
         loop {
             nervix_primitives::task::consume_budget().await;
             let count = world
@@ -7735,7 +7734,7 @@ async fn then_dns_fixture_queried_name_again(world: &mut ScenarioWorld, name: St
             if count > baseline {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
@@ -9580,7 +9579,7 @@ async fn then_leader_records_current_raft_address(world: &mut ScenarioWorld, nod
             Instant::now() < deadline,
             "Raft membership did not record {expected}; last leader status: {status}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -9611,7 +9610,7 @@ async fn then_leader_raft_log_stays_still(world: &mut ScenarioWorld, duration: S
         if Instant::now() >= deadline {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -9716,7 +9715,7 @@ async fn when_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: 
 #[then(expr = "node {string} reaches its runtime preparation pause")]
 async fn then_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(10),
         world
             .fault_injection
@@ -9780,7 +9779,7 @@ async fn then_health_response_pause_is_reached(
 ) {
     let probing_node_id = expand_placeholders(world, &probing_node_id);
     let responding_node_id = expand_placeholders(world, &responding_node_id);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(10),
         world
             .cluster()
@@ -9808,7 +9807,7 @@ async fn then_health_response_pause_is_reached_within(
     let limit = humantime::parse_duration(&duration).assured("the scenario duration is valid");
     let probing_node_id = expand_placeholders(world, &probing_node_id);
     let responding_node_id = expand_placeholders(world, &responding_node_id);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         limit,
         world
             .cluster()
@@ -9963,7 +9962,7 @@ async fn given_command_admission_pause(world: &mut ScenarioWorld, node_id: Strin
 async fn then_command_admission_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
     let fault_injection = world.fault_injection.clone();
-    tokio::time::timeout(Duration::from_secs(30), async {
+    nervix_primitives::time::timeout(Duration::from_secs(30), async {
         if let Some(task) = world.background_command_result.as_mut() {
             let node_name = crate::common::cluster::node_name(&node_id);
             nervix_primitives::select! {
@@ -10031,7 +10030,7 @@ async fn then_command_reference_lookup_pause_is_reached(
         .background_command_result
         .as_mut()
         .verified("the preceding step started a background command request");
-    tokio::time::timeout(Duration::from_secs(30), async {
+    nervix_primitives::time::timeout(Duration::from_secs(30), async {
         nervix_primitives::select! {
             () = fault_injection.wait_for_command_reference_lookup_pause(&node_name) => {},
             result = request => panic!(
@@ -10075,7 +10074,7 @@ async fn then_command_durable_admission_pause_is_reached(
         task.is_some() || !world.session_requests.is_empty(),
         "a background command request or a named session request must be active"
     );
-    tokio::time::timeout(Duration::from_secs(30), async {
+    nervix_primitives::time::timeout(Duration::from_secs(30), async {
         let Some(task) = task else {
             // A request the active session sent under a name answers only when a later step
             // reads it, so its pause is awaited on its own.
@@ -10129,7 +10128,7 @@ async fn then_relocation_publication_pause_is_reached(world: &mut ScenarioWorld,
         .background_nspl
         .as_mut()
         .verified("the preceding step started a background relocation");
-    tokio::time::timeout(Duration::from_secs(30), async {
+    nervix_primitives::time::timeout(Duration::from_secs(30), async {
         nervix_primitives::select! {
             () = fault_injection.wait_for_relocation_publication_pause(&domain) => {},
             result = task => panic!(
@@ -10172,7 +10171,7 @@ async fn then_command_response_delivery_pause_is_reached(
     let fault_injection = world.fault_injection.clone();
     nervix_primitives::select! {
         () = fault_injection.wait_for_command_response_delivery_pause(&node_name) => {},
-        () = tokio::time::sleep(Duration::from_secs(30)) => {
+        () = nervix_primitives::time::sleep(Duration::from_secs(30)) => {
             panic!("command response delivery pause on node '{node_id}' was not reached");
         }
     }
@@ -10217,7 +10216,7 @@ async fn given_https_listener_installation_failure(world: &mut ScenarioWorld, no
 async fn then_resource_installation_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
     let node_name = crate::common::cluster::node_name(&node_id);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(30),
         world
             .fault_injection
@@ -10274,7 +10273,7 @@ async fn given_ingestor_dispatch_pause(world: &mut ScenarioWorld, ingestor: Stri
 #[then(expr = "ingestor {string} reaches the dispatch pause")]
 async fn then_ingestor_dispatch_pause_is_reached(world: &mut ScenarioWorld, ingestor: String) {
     let ingestor = world.ingestor_dispatch_ref(&ingestor);
-    let reached = tokio::time::timeout(
+    let reached = nervix_primitives::time::timeout(
         Duration::from_secs(10),
         world
             .fault_injection
@@ -10335,7 +10334,7 @@ async fn given_remote_relay_branch_admission_pause(
 #[then(expr = "the remote relay admission pause for domain {string} is reached")]
 async fn then_remote_relay_admission_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(10),
         world
             .fault_injection
@@ -10355,7 +10354,7 @@ async fn then_remote_relay_branch_admission_pause_is_reached(
 ) {
     let branch = expand_placeholders(world, &branch);
     let domain = expand_placeholders(world, &domain);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(10),
         world
             .fault_injection
@@ -10402,7 +10401,7 @@ async fn given_remote_relay_dispatch_pause(world: &mut ScenarioWorld, domain: St
 #[then(expr = "the admitted remote relay dispatch pause for domain {string} is reached")]
 async fn then_remote_relay_dispatch_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(30),
         world
             .fault_injection
@@ -10458,7 +10457,7 @@ async fn then_entity_gate_pause_is_reached(world: &mut ScenarioWorld, domain: St
     let deadline = Instant::now() + ENTITY_GATE_PAUSE_TIMEOUT;
     loop {
         nervix_primitives::task::consume_budget().await;
-        if tokio::time::timeout(
+        if nervix_primitives::time::timeout(
             Duration::from_millis(50),
             fault_injection.wait_for_entity_gate_pause(&domain),
         )
@@ -10507,7 +10506,7 @@ async fn then_entity_gate_response_pause_is_reached(
     let domain = expand_placeholders(world, &domain);
     let parsed_domain = nervix_models::DomainName::try_from(domain.as_str())
         .assured("the scenario uses an identifier-shaped domain name");
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         ENTITY_GATE_PAUSE_TIMEOUT,
         world.fault_injection.wait_for_entity_gate_response_pause(
             &crate::common::cluster::node_name(&node_id),
@@ -10548,7 +10547,7 @@ async fn then_ownership_handoff_preparation_pause_is_reached(
     let deadline = Instant::now() + ENTITY_GATE_PAUSE_TIMEOUT;
     loop {
         nervix_primitives::task::consume_budget().await;
-        if tokio::time::timeout(
+        if nervix_primitives::time::timeout(
             Duration::from_millis(50),
             fault_injection.wait_for_ownership_handoff_preparation_pause(&domain),
         )
@@ -10596,7 +10595,7 @@ async fn then_ownership_handoff_prepare_response_pause_is_reached(
     domain: String,
 ) {
     let domain = expand_placeholders(world, &domain);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         ENTITY_GATE_PAUSE_TIMEOUT,
         world
             .fault_injection
@@ -10654,7 +10653,7 @@ async fn then_domain_clock_progress_reaches_pause(
     let duration =
         humantime::parse_duration(&duration).expect("step duration must be a valid duration");
     let domain = expand_placeholders(world, &domain);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         duration,
         world
             .fault_injection
@@ -10704,7 +10703,7 @@ async fn then_domain_clock_progress_reaches_pause_within_authority_observation_b
 #[when(expr = "domain clock progress for domain {string} resumes")]
 async fn when_domain_clock_progress_resumes(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(10),
         world.fault_injection.release_domain_clock_progress(&domain),
     )
@@ -10722,7 +10721,7 @@ async fn when_domain_clock_progress_resumes_on_node(
 ) {
     let domain = expand_placeholders(world, &domain);
     let node_id = expand_placeholders(world, &node_id);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(5),
         world.fault_injection.release_domain_clock_progress_on(
             &domain,
@@ -10742,7 +10741,7 @@ async fn when_domain_clock_progress_resumes_on_node(
 async fn when_physical_time_passes(_world: &mut ScenarioWorld, duration: String) {
     let duration =
         humantime::parse_duration(&duration).expect("step duration must be a valid duration");
-    tokio::time::sleep(duration).await;
+    nervix_primitives::time::sleep(duration).await;
 }
 
 #[then(expr = "the transaction commit pause on node {string} after {int} statement is reached")]
@@ -10752,7 +10751,7 @@ async fn then_transaction_commit_pause_is_reached(
     completed_statements: usize,
 ) {
     let node_id = expand_placeholders(world, &node_id);
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(10),
         world.fault_injection.wait_for_transaction_commit_pause(
             &crate::common::cluster::node_name(&node_id),
@@ -10799,7 +10798,7 @@ async fn then_transaction_commit_admission_pause_is_reached(world: &mut Scenario
         .get("transaction_commit_admission_node")
         .cloned()
         .verified("the preceding admission-pause step saved its leader");
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(10),
         world.fault_injection.wait_for_transaction_commit_pause(
             &crate::common::cluster::node_name(&leader),
@@ -11835,7 +11834,7 @@ async fn when_background_command_caller_deadline_expires(
         .background_command_result
         .take()
         .verified("the preceding step started a background command request");
-    let outcome = tokio::time::timeout(duration, &mut request).await;
+    let outcome = nervix_primitives::time::timeout(duration, &mut request).await;
     assert!(
         outcome.is_err(),
         "the command request returned before its caller deadline: {outcome:?}"
@@ -11960,7 +11959,7 @@ async fn then_background_command_request_reports_conflict_or_unknown_leadership(
         .background_command_result
         .take()
         .verified("the preceding step started a background command request");
-    let result = tokio::time::timeout(Duration::from_secs(30), request)
+    let result = nervix_primitives::time::timeout(Duration::from_secs(30), request)
         .await
         .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
         .assured("the background command task is owned by this scenario")
@@ -12015,7 +12014,7 @@ async fn then_command_execution_reference_is_eventually_reclaimed(
         {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -12026,7 +12025,7 @@ async fn then_background_command_request_redirects(world: &mut ScenarioWorld, no
         .background_command_result
         .take()
         .unwrap_or_else(|| panic!("a background command request must be active"));
-    let result = tokio::time::timeout(Duration::from_secs(30), task)
+    let result = nervix_primitives::time::timeout(Duration::from_secs(30), task)
         .await
         .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
         .unwrap_or_else(|error| panic!("background command request task failed: {error}"))
@@ -12061,7 +12060,7 @@ async fn then_background_command_request_succeeds(world: &mut ScenarioWorld) {
         .background_command_result
         .take()
         .verified("the preceding step started a background command request");
-    let result = tokio::time::timeout(Duration::from_secs(30), task)
+    let result = nervix_primitives::time::timeout(Duration::from_secs(30), task)
         .await
         .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
         .assured("the background command request task is owned by this scenario")
@@ -12394,7 +12393,7 @@ async fn wait_for_mqtt_ingestors_ready(world: &mut ScenarioWorld) {
                 "timed out waiting for MQTT ingestor '{ingestor}' to become ready. last output: {}",
                 output
             );
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
@@ -13338,7 +13337,7 @@ async fn run_cli_inspection(
             .arg("--tls-ca-cert")
             .arg("/nonexistent/nervix-ca.pem");
     }
-    let output = tokio::time::timeout(Duration::from_secs(60), command.output())
+    let output = nervix_primitives::time::timeout(Duration::from_secs(60), command.output())
         .await
         .expect("the standalone CLI inspection finishes within one minute")
         .expect("the standalone CLI process starts and returns");
@@ -13700,7 +13699,7 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
                             Instant::now() < deadline,
                             "failed to execute NSPL setup command on active session: {error:?}"
                         );
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
                     }
                 }
             }
@@ -13722,7 +13721,7 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
                         Instant::now() < deadline,
                         "failed to execute NSPL setup command on leader: {error:?}"
                     );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    nervix_primitives::time::sleep(Duration::from_millis(100)).await;
                 }
             }
         }
@@ -13873,7 +13872,7 @@ async fn then_transaction_eventually_has_state(
             }
             Err(error) => last_output = error.to_string(),
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -14110,7 +14109,7 @@ async fn then_node_retains_transaction_report(
         } else {
             observed = "transaction is absent".to_string();
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -14182,7 +14181,7 @@ async fn then_transaction_report_records_actual_quiescence(
                 let Some(step) = report.execution_steps().get(index) else {
                     observed =
                         format!("report contains {} step(s)", report.execution_steps().len());
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    nervix_primitives::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 };
                 let observed_planned = step.planned().pause.level().as_str();
@@ -14216,7 +14215,7 @@ async fn then_transaction_report_records_actual_quiescence(
             }
             Err(error) => observed = error,
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -14250,7 +14249,7 @@ async fn then_transaction_report_records_recovery_rebuilds(
                 return;
             }
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -14279,7 +14278,7 @@ async fn then_transaction_is_eventually_removed(world: &mut ScenarioWorld, trans
             Ok(output) => last_output = output,
             Err(error) => last_output = error.to_string(),
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -14549,7 +14548,7 @@ async fn when_these_nspl_commands_are_executed_on_node(
                         Instant::now() < deadline,
                         "failed to execute NSPL setup command on requested node: {error:?}"
                     );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    nervix_primitives::time::sleep(Duration::from_millis(100)).await;
                 }
             }
         }
@@ -14570,7 +14569,7 @@ async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: Str
     let node_id = expand_placeholders(world, &node_id);
     let node_name = crate::common::cluster::node_name(&node_id);
     let fault_injection = world.fault_injection.clone();
-    tokio::time::timeout(
+    nervix_primitives::time::timeout(
         Duration::from_secs(30),
         fault_injection.occupy_bulk_execution(&node_name),
     )
@@ -14604,7 +14603,7 @@ async fn then_nspl_commands_complete_within(
     world.last_command_error = None;
     world.last_command_output = None;
     let started = Instant::now();
-    let session = tokio::time::timeout(
+    let session = nervix_primitives::time::timeout(
         limit,
         execute_nspl_commands_on_node(world, &node_id, &commands),
     )
@@ -14709,7 +14708,7 @@ async fn when_within_these_nspl_commands_on_node_eventually_fail_with(
             "expected an error containing {expected_error:?} within {within}, last outcome: \
              {last_outcome}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15037,7 +15036,7 @@ async fn then_selector_contains_text_exactly_times(
             "expected selector '{selector}' to contain '{expected}' {expected_count} times, got \
              {count}: {text}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15092,7 +15091,7 @@ async fn then_selector_contains_text(
             Instant::now() < deadline,
             "expected selector '{selector}' to contain '{expected}', got '{text}'"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15129,7 +15128,7 @@ where
             "selector '{selector}' did not advance from {first:?} within {bound:?}; last text: \
              '{text}'"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15189,7 +15188,7 @@ async fn then_selector_contains_docstring(
             Instant::now() < deadline,
             "expected selector '{selector}' to contain:\n{expected}\ngot:\n{text}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15222,7 +15221,7 @@ async fn then_selector_contains_text_for_milliseconds(
         if Instant::now() >= deadline {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15254,7 +15253,7 @@ async fn then_selector_does_not_contain_text(
         if Instant::now() >= deadline {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15281,7 +15280,7 @@ async fn then_selector_does_not_exist(world: &mut ScenarioWorld, selector: Strin
         if Instant::now() >= deadline {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15323,7 +15322,7 @@ async fn then_selector_eventually_disappears(world: &mut ScenarioWorld, selector
             "expected selector '{selector}' to disappear after its server acknowledgement, still \
              showing {texts:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15359,7 +15358,7 @@ async fn then_selector_has_value(world: &mut ScenarioWorld, selector: String, ex
             Instant::now() < deadline,
             "expected selector '{selector}' to have value '{expected}', got '{value}'"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15427,7 +15426,7 @@ async fn then_selector_is_scrolled_to_bottom(world: &mut ScenarioWorld, selector
             Instant::now() < deadline,
             "expected selector '{selector}' to be scrolled to bottom"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15472,7 +15471,7 @@ async fn then_selector_is_pinned_to_viewport_bottom(world: &mut ScenarioWorld, s
             Instant::now() < deadline,
             "expected selector '{selector}' to be pinned to viewport bottom"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15516,7 +15515,7 @@ async fn then_selector_does_not_overlap_selector(
             Instant::now() < deadline,
             "expected selector '{first}' not to overlap selector '{second}'"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15563,7 +15562,7 @@ async fn then_graph_item_does_not_overlap_graph_item(
             Instant::now() < deadline,
             "expected graph item '{first}' not to overlap graph item '{second}'"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15606,7 +15605,7 @@ async fn then_graph_item_has_graph_width_at_least(
             "expected graph item '{item}' to have graph width at least {expected_width}px, got \
              {actual_width:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15642,7 +15641,7 @@ async fn then_graph_item_has_status(world: &mut ScenarioWorld, item: String, exp
             Instant::now() < deadline,
             "expected graph item '{item}' to have status '{expected}', got '{status:?}'"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15693,7 +15692,7 @@ async fn then_graph_item_search_highlight_matches(
             Instant::now() < deadline,
             "expected graph item '{item}' search highlight to be {expected}, got {highlighted:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -15726,7 +15725,7 @@ async fn then_graph_search_highlights_exactly_graph_items(
             Instant::now() < deadline,
             "expected graph search to highlight {expected_count} graph items, got {count}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -16206,7 +16205,7 @@ async fn then_graph_geometry_does_not_change(world: &mut ScenarioWorld) {
         .expect("graph geometry must be readable");
     // Several leader snapshots land in this window, so an unchanged topology has been redrawn
     // repeatedly by the time the second reading is taken.
-    tokio::time::sleep(Duration::from_millis(1600)).await;
+    nervix_primitives::time::sleep(Duration::from_millis(1600)).await;
     let second = page
         .evaluate::<(), String>(&sample, None::<&()>)
         .await
@@ -16459,7 +16458,7 @@ async fn assert_graph_probe(page: &playwright_rs::Page, script: &str, expectatio
             Instant::now() < deadline,
             "expected {expectation}, but {last}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -16526,7 +16525,7 @@ async fn then_graph_search_result_is_visible_in_the_graph_viewport(
             Instant::now() < deadline,
             "expected graph search result '{item}' to be visible in the graph viewport: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -16589,7 +16588,7 @@ async fn then_graph_relay_item_has_buffer_statistics(
             assertions,
             statistics
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -16812,7 +16811,7 @@ async fn when_graph_edge_from_to_is_clicked_with_viewport_focused_on_its_middle(
             "expected graph edge from '{source}' to '{target}' to be clickable with a focused \
              middle viewport: {status}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -16889,7 +16888,7 @@ async fn then_graph_edge_from_to_has_both_endpoints_visible_in_the_graph_viewpor
             "expected graph edge from '{source}' to '{target}' to focus both endpoints in the \
              graph viewport: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -16971,7 +16970,7 @@ async fn then_graph_edge_from_to_does_not_intersect_graph_item(
             "expected graph edge from '{source}' to '{target}' not to intersect graph item \
              '{item}'"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -17069,7 +17068,7 @@ async fn then_graph_edge_from_to_does_not_intersect_branch_group_body(
             "expected graph edge from '{source}' to '{target}' not to intersect branch group \
              '{branch}' body: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -17228,7 +17227,7 @@ async fn then_graph_edge_from_to_does_not_intersect_graph_edge_from_to(
             "expected graph edge from '{first_source}' to '{first_target}' not to intersect graph \
              edge from '{second_source}' to '{second_target}': {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -17335,7 +17334,7 @@ async fn then_graph_edge_from_to_does_not_share_horizontal_lane_with_graph_edge_
             "expected graph edge from '{first_source}' to '{first_target}' not to share a \
              horizontal lane with graph edge from '{second_source}' to '{second_target}': {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -17402,7 +17401,7 @@ async fn then_graph_edge_from_to_starts_horizontally(
             Instant::now() < deadline,
             "expected graph edge from '{source}' to '{target}' to start horizontally: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -17469,7 +17468,7 @@ async fn then_graph_edge_from_to_ends_horizontally(
             Instant::now() < deadline,
             "expected graph edge from '{source}' to '{target}' to end horizontally: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -17546,7 +17545,7 @@ async fn then_graph_edge_from_to_has_target_plug_at_least(
             "expected graph edge from '{source}' to '{target}' to have a target plug at least \
              {expected_pixels}px: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -17602,7 +17601,7 @@ async fn then_graph_edge_from_to_has_at_most_rounded_turns(
             "expected graph edge from '{source}' to '{target}' to have at most {expected_turns} \
              rounded turns: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -17679,7 +17678,7 @@ async fn then_graph_edge_from_to_has_source_plug_at_least(
             "expected graph edge from '{source}' to '{target}' to have a source plug at least \
              {expected_pixels}px: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -17763,7 +17762,7 @@ async fn then_graph_edge_from_to_has_traffic_statistics(
             "expected graph edge from '{source}' to '{target}' to satisfy traffic assertions \
              {assertions:?}, got {statistics:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -17798,7 +17797,7 @@ async fn when_graph_topology_render_count_observation_starts(world: &mut Scenari
             Instant::now() < deadline,
             "expected execution graph chart render count to be available for topology observation"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -17838,7 +17837,7 @@ async fn then_graph_topology_render_count_does_not_change_during_observed_traffi
         if Instant::now() >= deadline {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -17896,7 +17895,7 @@ async fn then_graph_edge_with_kind_from_to_is_visible(
             Instant::now() < deadline,
             "expected graph edge kind '{kind}' from '{source}' to '{target}' to be visible"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -18022,7 +18021,7 @@ async fn then_graph_edge_from_to_has_exact_hover_target(
             Instant::now() < deadline,
             "expected graph edge from '{source}' to '{target}' to own its hover target: {result}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -18079,7 +18078,7 @@ async fn then_branch_group_body_does_not_overlap_graph_item(
             Instant::now() < deadline,
             "expected branch group '{branch}' body not to overlap graph item '{item}'"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -18134,7 +18133,7 @@ async fn then_branch_group_body_overlaps_graph_item(
             Instant::now() < deadline,
             "expected branch group '{branch}' body to overlap graph item '{item}'"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -18400,7 +18399,7 @@ async fn then_within_duration_describe_domain_section_metric_across_physical_nod
             world.last_command_output,
             world.last_command_error
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -18674,7 +18673,7 @@ async fn then_connected_quorum_observes_lagging_follower(
             "node '{connected_node}' did not see '{lagging_node}' live; \
              status:\n{connected_status}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19146,7 +19145,7 @@ async fn then_within_duration_describe_ingestor_on_leader_contains(
              {output}",
             expected.trim()
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19183,7 +19182,7 @@ async fn then_within_duration_describe_wasm_processor_on_leader_contains(
              output: {output}",
             expected.trim()
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19253,7 +19252,7 @@ async fn then_describe_one_of_two_emitters_contains(
             emitters[1],
             expected.trim()
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19286,7 +19285,7 @@ async fn then_within_duration_describe_emitter_on_leader_contains(
             "timed out waiting for DESCRIBE EMITTER {emitter} to contain {}. last output: {output}",
             expected.trim()
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19350,7 +19349,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_equals_
             world.last_command_output,
             world.last_command_error
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19402,7 +19401,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_differe
             world.last_command_output,
             world.last_command_error
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19731,7 +19730,7 @@ async fn then_within_duration_node_eventually_reports_describe_stream_as(
             world.last_command_output,
             world.last_command_error,
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19776,7 +19775,7 @@ async fn then_within_duration_node_eventually_reports_describe_ingestor_as(
             world.last_command_output,
             world.last_command_error,
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19815,7 +19814,7 @@ async fn then_within_duration_node_eventually_reports_describe_resource_as(
             world.last_command_output,
             world.last_command_error,
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -19863,7 +19862,7 @@ async fn then_within_duration_node_eventually_reports_materialized_state_contain
             world.last_command_output,
             world.last_command_error,
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -20204,7 +20203,7 @@ async fn given_syslog_udp_emission_endpoint_is_observed(world: &mut ScenarioWorl
     initialize_scenario_identity(world);
     let addr = expand_placeholders(world, &addr);
     world.syslog_udp_observer = Some(
-        tokio::net::UdpSocket::bind(&addr)
+        nervix_primitives::net::UdpSocket::bind(&addr)
             .await
             .unwrap_or_else(|error| {
                 panic!("failed to observe Syslog UDP endpoint '{addr}': {error}")
@@ -21021,7 +21020,7 @@ async fn when_syslog_udp_message_is_published_to(
 ) {
     let addr = expand_placeholders(world, &addr);
     let payload = expand_placeholders(world, docstring(step));
-    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+    let socket = nervix_primitives::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("failed to bind Syslog UDP test sender");
     socket
@@ -21051,7 +21050,7 @@ async fn then_node_eventually_forwards_syslog_udp_message(
         .expect("failed to resolve node-local Syslog ingestor address");
     let payload =
         format!("<34>1 2003-10-11T22:14:15.003Z lifecycle.example test 1 ID47 - {message}");
-    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+    let socket = nervix_primitives::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("failed to bind Syslog UDP test sender");
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -21060,7 +21059,7 @@ async fn then_node_eventually_forwards_syslog_udp_message(
     loop {
         nervix_primitives::task::consume_budget().await;
         let _ = socket.send_to(payload.as_bytes(), &addr).await;
-        let next = tokio::time::timeout(
+        let next = nervix_primitives::time::timeout(
             Duration::from_millis(250),
             world
                 .syslog_udp_observer
@@ -21080,7 +21079,7 @@ async fn then_node_eventually_forwards_syslog_udp_message(
             "timed out waiting for node '{node_id}' Syslog UDP traffic to reach the observed \
              endpoint"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -21106,14 +21105,14 @@ async fn when_syslog_tcp_messages_are_published_with_mixed_framing_to(
     );
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut stream = loop {
-        match tokio::net::TcpStream::connect(&addr).await {
+        match nervix_primitives::net::TcpStream::connect(&addr).await {
             Ok(stream) => break stream,
             Err(error) => {
                 assert!(
                     Instant::now() < deadline,
                     "timed out connecting to Syslog TCP listener '{addr}': {error}"
                 );
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(20)).await;
             }
         }
     };
@@ -21188,14 +21187,14 @@ async fn when_syslog_tls_message_is_published_to(
     let connector = tokio_rustls::TlsConnector::from(StdArc::new(config));
     let deadline = Instant::now() + Duration::from_secs(5);
     let stream = loop {
-        match tokio::net::TcpStream::connect(&addr).await {
+        match nervix_primitives::net::TcpStream::connect(&addr).await {
             Ok(stream) => break stream,
             Err(error) => {
                 assert!(
                     Instant::now() < deadline,
                     "timed out connecting to Syslog TLS listener '{addr}': {error}"
                 );
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(20)).await;
             }
         }
     };
@@ -21274,7 +21273,7 @@ async fn when_websocket_client_test_server_sends_a_payload(
             "timed out waiting for an outbound WebSocket client connection. last error: {:?}",
             world.last_server_error
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -21784,7 +21783,7 @@ async fn then_the_background_https_publishing_accepted_every_payload(world: &mut
         .take()
         .expect("a background https publish must be active");
     stop.cancel();
-    let outcome = tokio::time::timeout(Duration::from_secs(30), task)
+    let outcome = nervix_primitives::time::timeout(Duration::from_secs(30), task)
         .await
         .expect("background https publish did not stop")
         .expect("background https publish task failed");
@@ -21857,7 +21856,7 @@ async fn then_the_background_http_publish_succeeds(world: &mut ScenarioWorld) {
         .background_http_publish
         .take()
         .expect("a background http publish must be active");
-    tokio::time::timeout(Duration::from_secs(10), task)
+    nervix_primitives::time::timeout(Duration::from_secs(10), task)
         .await
         .expect("background http publish did not finish")
         .expect("background http publish task failed")
@@ -21926,7 +21925,7 @@ async fn when_http_payload_is_posted_to_node_and_fails(
             Instant::now() < deadline,
             "expected http post to node '{node_id}' to fail"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -22009,7 +22008,7 @@ async fn then_named_client_receives_subscription_payload(
             break payload;
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let event = tokio::time::timeout(remaining, client.next_subscription())
+        let event = nervix_primitives::time::timeout(remaining, client.next_subscription())
             .await
             .unwrap_or_else(|_| {
                 panic!(
@@ -22081,7 +22080,7 @@ async fn when_named_client_receives_from_repeated_http_posts(
             .unwrap_or_else(|error| panic!("failed to post http payload: {error}"));
         let remaining = deadline.saturating_duration_since(Instant::now());
         let wait = remaining.min(Duration::from_secs(1));
-        match tokio::time::timeout(wait, client.next_subscription()).await {
+        match nervix_primitives::time::timeout(wait, client.next_subscription()).await {
             Ok(Ok(nervix_client_core::SubscriptionEvent::Rows(rows))) => {
                 let lines = rows.display_lines().unwrap_or_else(|error| {
                     panic!("client '{client_name}' rows do not render: {error}")
@@ -22113,7 +22112,7 @@ async fn then_named_client_observes_subscription_interrupted(
         .get(&client_name)
         .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
         .clone();
-    let event = tokio::time::timeout(duration, client.next_subscription())
+    let event = nervix_primitives::time::timeout(duration, client.next_subscription())
         .await
         .unwrap_or_else(|_| panic!("client '{client_name}' did not report an interruption"))
         .unwrap_or_else(|error| panic!("client '{client_name}' event failed: {error}"));
@@ -22143,7 +22142,7 @@ async fn then_named_client_observes_failed_restoration(
         .get(&client_name)
         .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
         .clone();
-    let event = tokio::time::timeout(duration, client.next_subscription())
+    let event = nervix_primitives::time::timeout(duration, client.next_subscription())
         .await
         .unwrap_or_else(|_| {
             panic!("client '{client_name}' did not report a failed restoration within {duration:?}")
@@ -22189,7 +22188,7 @@ async fn then_named_client_subscription_is_interrupted(
             "client '{client_name}' subscription '{subscription_name}' is not interrupted: \
              {lifecycle:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -22240,7 +22239,7 @@ async fn then_named_client_subscription_is_active(
             "client '{client_name}' subscription '{subscription_name}' did not become active: \
              {lifecycle:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -22270,7 +22269,7 @@ async fn then_node_eventually_accepts_websocket_traffic(
                     Instant::now() < deadline,
                     "timed out waiting for websocket endpoint on node '{node_id}': {error}"
                 );
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
@@ -22303,7 +22302,7 @@ async fn then_node_eventually_accepts_http_traffic(
                     Instant::now() < deadline,
                     "timed out waiting for http endpoint on node '{node_id}': {error}"
                 );
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
@@ -22343,7 +22342,7 @@ async fn then_within_duration_repeatedly_posting_http_payload_yields_subscriptio
             "timed out waiting for http payload posted to host '{host}' path '{path}' to reach \
              the relay subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -22384,7 +22383,7 @@ async fn then_within_duration_repeatedly_posting_https_payload_yields_subscripti
              CA from '{ca_resource_directory}' to reach the relay subscription; last publish: \
              {publish:?}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -22435,7 +22434,7 @@ async fn then_within_duration_repeatedly_posting_encoded_http_payload_yields_sub
             "timed out waiting for {wire_format} payload posted to host '{host}' path '{path}' to \
              reach the relay subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -22472,7 +22471,7 @@ async fn then_within_duration_repeatedly_publishing_kafka_message_yields_subscri
             "timed out waiting for Kafka message published to topic '{topic}' to reach the relay \
              subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -22512,7 +22511,7 @@ async fn then_within_duration_repeatedly_publishing_kafka_message_to_partition_y
             "timed out waiting for Kafka message published to topic '{topic}' partition \
              '{partition}' to reach the relay subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -22549,7 +22548,7 @@ async fn then_within_duration_repeatedly_publishing_mqtt_message_yields_subscrip
             "timed out waiting for MQTT message published to topic '{topic}' to reach the relay \
              subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -22586,7 +22585,7 @@ async fn then_within_duration_repeatedly_publishing_pulsar_tls_message_yields_su
             "timed out waiting for Pulsar TLS message published to topic '{topic}' to reach the \
              relay subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -22623,7 +22622,7 @@ async fn then_within_duration_repeatedly_publishing_redis_message_yields_subscri
             "timed out waiting for Redis message published to channel '{channel}' to reach the \
              relay subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -22660,7 +22659,7 @@ async fn then_within_duration_repeatedly_publishing_nats_message_yields_subscrip
             "timed out waiting for NATS message published to subject '{subject}' to reach the \
              relay subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -22697,7 +22696,7 @@ async fn then_within_duration_repeatedly_publishing_nats_tls_message_yields_subs
             "timed out waiting for NATS TLS message published to subject '{subject}' to reach the \
              relay subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -22734,7 +22733,7 @@ async fn then_within_duration_repeatedly_publishing_sqs_message_yields_subscript
             "timed out waiting for SQS message published to queue '{queue}' to reach the relay \
              subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -22771,7 +22770,7 @@ async fn then_within_duration_repeatedly_publishing_tls_sqs_message_yields_subsc
             "timed out waiting for TLS SQS message published to queue '{queue}' to reach the \
              relay subscription"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -22813,7 +22812,7 @@ async fn then_node_eventually_forwards_websocket_traffic_to_observed_broker(
                     "timed out waiting for node '{node_id}' websocket traffic to reach observed \
                      broker"
                 );
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
@@ -22856,7 +22855,7 @@ async fn then_node_eventually_forwards_http_traffic_to_observed_broker(
                     Instant::now() < deadline,
                     "timed out waiting for node '{node_id}' http traffic to reach observed broker"
                 );
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
@@ -22905,7 +22904,7 @@ async fn then_within_duration_repeatedly_posting_http_payload_yields_observed_br
             "timed out waiting for http payload posted to node '{node_id}' host '{host}' path \
              '{path}' to reach the observed broker"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -24041,10 +24040,11 @@ async fn then_observed_syslog_udp_endpoint_receives_payload(
         .as_ref()
         .expect("a Syslog UDP observer must exist before assertion");
     let mut payload = vec![0_u8; 65_535];
-    let (len, _) = tokio::time::timeout(Duration::from_secs(10), observer.recv_from(&mut payload))
-        .await
-        .expect("timed out waiting for Syslog UDP payload")
-        .expect("failed to receive Syslog UDP payload");
+    let (len, _) =
+        nervix_primitives::time::timeout(Duration::from_secs(10), observer.recv_from(&mut payload))
+            .await
+            .expect("timed out waiting for Syslog UDP payload")
+            .expect("failed to receive Syslog UDP payload");
     let actual = std::str::from_utf8(&payload[..len])
         .expect("emitted Syslog UDP payload must be valid UTF-8");
     assert!(
@@ -24111,7 +24111,7 @@ async fn then_sentry_eventually_receives_event(world: &mut ScenarioWorld, #[step
             Instant::now() < deadline,
             "timed out waiting for Sentry to receive {expected}"
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -24162,7 +24162,7 @@ async fn then_quickwit_index_eventually_contains(
             Instant::now() < deadline,
             "timed out waiting for Quickwit index {index:?} to contain {expected:?}"
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -24184,7 +24184,7 @@ async fn then_otel_collector_eventually_contains(world: &mut ScenarioWorld, expe
             Instant::now() < deadline,
             "timed out waiting for OpenTelemetry Collector to contain {expected:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -24258,7 +24258,7 @@ async fn then_otel_collector_receives_split_exports(
             "timed out waiting for ordered two-member and one-member {signal} exports; observed \
              {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -24314,7 +24314,7 @@ async fn then_clickhouse_table_eventually_contains_row(
             Instant::now() < deadline,
             "timed out waiting for ClickHouse row. expected {expected}, observed {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -24352,7 +24352,7 @@ async fn then_clickhouse_table_eventually_contains_rows_in_parts(
             "timed out waiting for {expected_rows} ClickHouse rows in at least {expected_parts} \
              parts; observed rows={observed_rows} parts={observed_parts}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -24391,7 +24391,7 @@ async fn then_postgres_connections_stay_within(
             "expected at most {maximum} Postgres connections for {application}, observed \
              {observed}"
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(200)).await;
     }
     assert!(
         observed_peak > 0,
@@ -24417,7 +24417,7 @@ async fn then_postgres_eventually_reports_at_least_connections(
             "timed out waiting for at least {expected} Postgres connections for {application}; \
              observed {observed}"
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -24439,7 +24439,7 @@ async fn then_postgres_eventually_reports_connections(
             "timed out waiting for {expected} Postgres connections for {application}; observed \
              {observed}"
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -24540,7 +24540,7 @@ async fn then_postgres_table_eventually_contains_row(
             Instant::now() < deadline,
             "timed out waiting for Postgres row. expected {expected}, observed {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -24572,7 +24572,7 @@ async fn then_postgres_table_eventually_contains_exactly_rows(
             Instant::now() < deadline,
             "timed out waiting for exactly {expected_rows} Postgres rows; observed {observed_rows}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -24671,7 +24671,7 @@ async fn then_postgres_table_eventually_contains_rows_across_bounded_inserts(
              {expected_inserts} inserts of at most {maximum_rows_per_insert} rows; observed \
              rows={observed_rows} inserts={observed_inserts} largest_insert={largest_insert}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -24715,7 +24715,7 @@ async fn then_mysql_table_eventually_contains_row(world: &mut ScenarioWorld, #[s
             Instant::now() < deadline,
             "timed out waiting for MySQL row. expected {expected}, observed {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -24771,7 +24771,7 @@ async fn then_mysql_table_eventually_contains_rows_from_insert_commands(
             "timed out waiting for {expected_rows} MySQL rows from at least {expected_commands} \
              insert commands; observed rows={observed_rows} commands={recorded_commands}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -24839,7 +24839,7 @@ async fn then_mongodb_collection_eventually_contains_document(
             Instant::now() < deadline,
             "timed out waiting for MongoDB document. expected {expected}, observed {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -24917,9 +24917,9 @@ async fn then_mongodb_collection_eventually_holds_exactly_these_documents(
             "timed out waiting for exactly the expected MongoDB documents; expected {expected:?}, \
              observed {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    nervix_primitives::time::sleep(Duration::from_millis(500)).await;
     let observed = read_documents().await;
     assert_eq!(
         observed, expected,
@@ -24957,7 +24957,7 @@ async fn then_mongodb_collection_eventually_contains_exactly_documents(
             "timed out waiting for exactly {expected_documents} MongoDB documents; observed \
              {observed_documents}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -25026,7 +25026,7 @@ async fn then_mongodb_collection_eventually_contains_documents_across_bounded_in
              observed documents={observed_documents} inserts={observed_inserts} command \
              sizes={command_sizes:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -25071,7 +25071,7 @@ async fn then_within_duration_iceberg_table_contains_row(
             "timed out after {duration:?} waiting for Iceberg table {table} to contain \
              {expected}. observed {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
@@ -25113,7 +25113,7 @@ async fn then_iceberg_table_eventually_contains_row(
             "timed out waiting for Iceberg table {table} to contain {expected}. observed \
              {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -25152,7 +25152,7 @@ async fn then_iceberg_table_does_not_contain_row_within(
         if Instant::now() >= deadline {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -25187,7 +25187,7 @@ async fn then_iceberg_table_metadata_does_not_contain(
             Instant::now() < deadline,
             "timed out waiting for Iceberg table {table} metadata. observed {observed:?}"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -25212,7 +25212,7 @@ async fn then_temp_directory_contains_iceberg_arrow_ipc_staged_batch(world: &mut
             "timed out waiting for Iceberg Arrow IPC staged batch under {}",
             temp_root.path().display()
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -25447,7 +25447,7 @@ impl IcebergTableFixture {
                              {error}"
                         ));
                     }
-                    tokio::time::sleep(ICEBERG_TABLE_PROVISION_RETRY_INTERVAL).await;
+                    nervix_primitives::time::sleep(ICEBERG_TABLE_PROVISION_RETRY_INTERVAL).await;
                 }
                 Err(error) => return Err(error),
             }

@@ -19,8 +19,8 @@ use std::{
 use async_trait::async_trait;
 use error_stack::Report;
 use nervix_models::Timestamp;
+use nervix_primitives::time::Instant;
 use thiserror::Error;
-use tokio::time::Instant;
 
 use crate::{IngestMessageHeaders, IngestMetadataRow, ParsedRetryPolicy, RetainedIngestHeaders};
 

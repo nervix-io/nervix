@@ -861,13 +861,14 @@ impl BranchInstanceTemplate {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use ahash::HashMap;
     use nervix_models::{
         ErrorPolicies, MessageErrorPolicy, ModelKind, ModelName, RelayName, ResourceName,
         WasmProcessorLimits, WasmRejectedStatePolicy,
     };
     use nonzero_ext::nonzero;
-    use tokio::time::Duration;
 
     use super::*;
 

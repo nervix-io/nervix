@@ -23,11 +23,11 @@ use std::{
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_primitives::{sync::blocking::OnceLock, thread};
+use nervix_primitives::{sync::blocking::OnceLock, thread, unmodeled::time::Instant};
 use nervix_recovery::Discarded as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -445,7 +445,7 @@ impl InjectedFailure {
 
     fn install(self, simulation: &mut turmoil::Sim<'_>) {
         simulation.client(Self::HOST, async move {
-            tokio::time::sleep(self.at).await;
+            nervix_primitives::time::sleep(self.at).await;
             Err(format!("injected harness failure at {:?} simulated time", self.at).into())
         });
     }

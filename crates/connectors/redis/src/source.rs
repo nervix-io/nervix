@@ -20,17 +20,14 @@ use nervix_connector::{
 };
 use nervix_dns::{ConnectionBudget, DnsLookupFailure, DnsResolver};
 use nervix_models::{ChannelName, ClientConfigEntry};
+use nervix_primitives::{net::TcpStream, time::timeout};
 use redis::{
     Client as RedisClient, ConnectionAddr, Msg,
     aio::{PubSub, PubSubStream},
 };
 use rustls_pki_types::ServerName;
 use thiserror::Error;
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    net::TcpStream,
-    time::timeout,
-};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsConnector;
 
 use crate::{CONNECT_BUDGET, redis_client};
@@ -165,18 +162,21 @@ impl RedisPubSubSourcePlan {
             }
             #[cfg(unix)]
             ConnectionAddr::Unix(path) => {
-                let stream = timeout(budget.remaining(), tokio::net::UnixStream::connect(path))
-                    .await
-                    .map_err(|source| {
-                        Report::new(RedisPubSubSourceError::Connect {
-                            reason: source.to_string(),
-                        })
-                    })?
-                    .map_err(|source| {
-                        Report::new(RedisPubSubSourceError::Connect {
-                            reason: source.to_string(),
-                        })
-                    })?;
+                let stream = timeout(
+                    budget.remaining(),
+                    nervix_primitives::net::UnixStream::connect(path),
+                )
+                .await
+                .map_err(|source| {
+                    Report::new(RedisPubSubSourceError::Connect {
+                        reason: source.to_string(),
+                    })
+                })?
+                .map_err(|source| {
+                    Report::new(RedisPubSubSourceError::Connect {
+                        reason: source.to_string(),
+                    })
+                })?;
                 Ok(Box::new(stream))
             }
             _ => Err(Report::new(RedisPubSubSourceError::UnsupportedAddress)),
@@ -343,8 +343,8 @@ mod tests {
     };
 
     use nervix_dns::{DnsLookupError, DnsLookupFailure};
+    use nervix_primitives::net::TcpListener;
     use nervix_test_environment::dns_authority::DnsAnswer;
-    use tokio::net::TcpListener;
 
     use super::*;
     use crate::test_fixture::Fixture;
@@ -397,10 +397,11 @@ mod tests {
             .connect()
             .await
             .expect("the second address accepts the subscription stream");
-        let (_accepted, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
-            .await
-            .expect("the accepted connection arrives")
-            .expect("the listener accepts it");
+        let (_accepted, _) =
+            nervix_primitives::time::timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .expect("the accepted connection arrives")
+                .expect("the listener accepts it");
         drop(stream);
         assert!(fixture.authority.questions_for(name) > 0);
     }
@@ -457,7 +458,7 @@ mod tests {
         let name = "silent.nervix.test";
         fixture.authority.set(name, DnsAnswer::Silent);
         let plan = plan(&format!("redis://{name}:6379"), fixture.dns);
-        let error = tokio::time::timeout(Duration::from_secs(5), plan.connect())
+        let error = nervix_primitives::time::timeout(Duration::from_secs(5), plan.connect())
             .await
             .expect("the resolver bounds a silent authority")
             .err()
@@ -491,10 +492,10 @@ mod tests {
             let plan = plan.clone();
             async move { plan.connect().await }
         });
-        tokio::time::timeout(Duration::from_secs(2), async {
+        nervix_primitives::time::timeout(Duration::from_secs(2), async {
             while fixture.authority.questions_for(name) == 0 {
                 nervix_primitives::task::consume_budget().await;
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
@@ -506,7 +507,7 @@ mod tests {
         };
         assert!(stopped.is_cancelled());
         fixture.answer(name, vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
-        let stream = tokio::time::timeout(Duration::from_secs(3), plan.connect())
+        let stream = nervix_primitives::time::timeout(Duration::from_secs(3), plan.connect())
             .await
             .expect("a new connection is not held by the cancelled lookup")
             .expect("the new answer accepts a connection");
@@ -543,8 +544,8 @@ mod tests {
         let fixture = Fixture::start().await;
         let directory = tempfile::tempdir().expect("a temporary socket directory can be created");
         let path = directory.path().join("redis.sock");
-        let listener =
-            tokio::net::UnixListener::bind(&path).expect("the Unix socket listener can bind");
+        let listener = nervix_primitives::net::UnixListener::bind(&path)
+            .expect("the Unix socket listener can bind");
         let plan = plan(&format!("redis+unix://{}", path.display()), fixture.dns);
         let stream = plan.connect().await.expect("the Unix socket connects");
         let (_accepted, _) = listener

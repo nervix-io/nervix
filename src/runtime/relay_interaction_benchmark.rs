@@ -83,7 +83,7 @@ impl RelayInteractionBenchmark {
             source_count,
             capacity_per_source,
             Some(RuntimeInputCollectPolicy {
-                interval: tokio::time::Duration::from_secs(3_600),
+                interval: std::time::Duration::from_secs(3_600),
                 max_batch_size: None,
             }),
         )

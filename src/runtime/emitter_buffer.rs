@@ -882,7 +882,7 @@ mod tests {
         let mut batch = EmitterPublishBatch::from_batch(batch, Timestamp::from_unix_nanos(100));
 
         assert!(
-            tokio::time::timeout(
+            nervix_primitives::time::timeout(
                 Duration::from_millis(20),
                 batch.mark_rejected_after_delivery(0, std::future::pending()),
             )
@@ -940,9 +940,12 @@ mod tests {
         buffer.clear();
 
         assert!(
-            tokio::time::timeout(Duration::from_millis(20), completion.wait_for_progress(),)
-                .await
-                .is_err(),
+            nervix_primitives::time::timeout(
+                Duration::from_millis(20),
+                completion.wait_for_progress(),
+            )
+            .await
+            .is_err(),
             "clearing an accounted poison record must not release its source ACK"
         );
         message_error_acks.ack_success();
@@ -1239,9 +1242,12 @@ mod tests {
 
         assert_eq!(batch.resolved_rows(), vec![true]);
         assert!(
-            tokio::time::timeout(Duration::from_millis(20), completion.wait_for_progress())
-                .await
-                .is_err(),
+            nervix_primitives::time::timeout(
+                Duration::from_millis(20),
+                completion.wait_for_progress()
+            )
+            .await
+            .is_err(),
             "a second delivery must not resolve the row's share of the root again"
         );
         root.ack_success();
@@ -1785,9 +1791,12 @@ mod tests {
             .expect("retry buffer must retain the batch");
         root.ack_success();
         assert!(
-            tokio::time::timeout(Duration::from_millis(20), completion.wait_for_progress())
-                .await
-                .is_err(),
+            nervix_primitives::time::timeout(
+                Duration::from_millis(20),
+                completion.wait_for_progress()
+            )
+            .await
+            .is_err(),
             "the retained attached share must keep the root pending"
         );
 

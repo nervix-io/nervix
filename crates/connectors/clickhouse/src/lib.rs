@@ -21,9 +21,6 @@
 //! accepted the connection. The insert's request timeout covers the connection, lookup included,
 //! because the driver makes it while the insert waits for its result.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 use std::{ops::Range, time::Duration};
 
 use ::clickhouse::{Client as ClickHouseClient, error::Error as ClickHouseError};
@@ -689,7 +686,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn configured_timeout_bounds_clickhouse_insert_completion() {
         let fixture = Fixture::start().await;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let listener = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test listener should bind");
         let addr = format!(
@@ -702,7 +699,7 @@ mod tests {
             ClickHouseSink::client_from_config(&client_config(addr, "30"), fixture.dns())
                 .expect("ClickHouse client config should be valid");
 
-        let result = tokio::time::timeout(
+        let result = nervix_primitives::time::timeout(
             Duration::from_millis(250),
             ClickHouseSink::insert(
                 &client,

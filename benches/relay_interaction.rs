@@ -1,7 +1,8 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use arch_into::ArchInto as _;
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use nervix_primitives::time::Instant;
 use nervix_server::runtime::relay_interaction_benchmark::{
     DeliveryObservationBenchmark, RelayInteractionBenchmark, RelayInteractionBenchmarkEvent,
 };

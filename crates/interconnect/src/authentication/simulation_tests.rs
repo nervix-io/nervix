@@ -20,11 +20,11 @@ use std::{
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::ClusterNodeName;
+use nervix_primitives::time::{Instant, sleep_until};
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType, date_time_ymd,
 };
-use tokio::time::{Instant, sleep_until};
 
 use crate::{
     TlsConfigBundle, TransportClock, TransportEntropy, TransportError,
@@ -152,7 +152,8 @@ fn outcome(error: &TransportError) -> String {
 /// every accepted session until its certificate deadline drains it.
 async fn serve(tls: TlsConfigBundle, trace: SemanticTrace) -> io::Result<()> {
     let listener =
-        turmoil::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, PORT))).await?;
+        nervix_primitives::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, PORT)))
+            .await?;
     loop {
         nervix_primitives::task::consume_budget().await;
         let (tcp, peer_addr) = listener.accept().await?;
@@ -184,7 +185,7 @@ async fn dial_expecting(
     trace: &SemanticTrace,
     expected_node: &str,
 ) -> Option<Report<TransportError>> {
-    let tcp = match turmoil::net::TcpStream::connect(("server", PORT)).await {
+    let tcp = match nervix_primitives::net::TcpStream::connect(("server", PORT)).await {
         Ok(tcp) => tcp,
         Err(error) => {
             trace.record("client", format!("connect failed: {:?}", error.kind()));
@@ -467,7 +468,7 @@ fn stalled_handshake_times_out_after_the_simulated_setup_deadline() {
             let trace = server_trace.clone();
             async move {
                 HostSupervisor::run(async move {
-                    let listener = turmoil::net::TcpListener::bind(SocketAddr::from((
+                    let listener = nervix_primitives::net::TcpListener::bind(SocketAddr::from((
                         Ipv4Addr::UNSPECIFIED,
                         PORT,
                     )))
@@ -499,7 +500,7 @@ fn stalled_handshake_times_out_after_the_simulated_setup_deadline() {
         });
         sim.client("client", async move {
             // Connect, then say nothing, holding the connection past the server's deadline.
-            let tcp = turmoil::net::TcpStream::connect(("server", PORT)).await?;
+            let tcp = nervix_primitives::net::TcpStream::connect(("server", PORT)).await?;
             sleep_until(Instant::now() + Duration::from_secs(10)).await;
             drop(tcp);
             Ok(())

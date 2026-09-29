@@ -1,9 +1,7 @@
-use std::{
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::{path::PathBuf, time::Duration};
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use nervix_primitives::time::Instant;
 use nervix_server::runtime::wasm_checkpoint_benchmark::WasmCheckpointBenchmark;
 
 /// Branches that checkpoint at the same time, as a WASM processor's branch tasks do.

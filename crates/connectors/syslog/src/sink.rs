@@ -22,13 +22,13 @@ use nervix_connector::{
 };
 use nervix_dns::{ConnectionBudget, DnsResolver};
 use nervix_models::ClientConfigEntry;
-use rustls_pki_types::ServerName;
-use thiserror::Error;
-use tokio::{
-    io::AsyncWriteExt,
+use nervix_primitives::{
     net::{TcpStream, UdpSocket},
     time::timeout,
 };
+use rustls_pki_types::ServerName;
+use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 use tokio_rustls::{TlsConnector, client::TlsStream};
 
 use crate::config::{
@@ -444,7 +444,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn tcp_tries_dns_answers_in_order_and_writes_to_the_reachable_address() {
         let fixture = DnsFixture::start("").await;
-        let listener = tokio::net::TcpListener::bind("127.0.7.2:0")
+        let listener = nervix_primitives::net::TcpListener::bind("127.0.7.2:0")
             .await
             .assured("a loopback TCP port is available");
         let port = listener
@@ -519,7 +519,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn tcp_uses_the_hosts_file_before_dns() {
         let fixture = DnsFixture::start("127.0.7.2 listed.nervix.test\n").await;
-        let listener = tokio::net::TcpListener::bind("127.0.7.2:0")
+        let listener = nervix_primitives::net::TcpListener::bind("127.0.7.2:0")
             .await
             .assured("a loopback TCP port is available");
         let port = listener

@@ -432,7 +432,7 @@ impl SessionServiceImpl {
                 .await?;
         }
         let purpose = EntityGatePurpose::WasmStateReset(plan.scope);
-        let deadline = tokio::time::Instant::now()
+        let deadline = nervix_primitives::time::Instant::now()
             .checked_add(self.inner.runtime.entity_gate_deadline())
             .assured("the configured entity-gate duration stays within the monotonic clock");
         let gate = self

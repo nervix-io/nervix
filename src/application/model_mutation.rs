@@ -1356,8 +1356,8 @@ impl SessionServiceImpl {
             if !is_noop && !model_gate.affected_entities().is_empty() {
                 let relays = model_gate.relays();
                 let affected_entities = model_gate.affected_entities();
-                let deadline =
-                    tokio::time::Instant::now() + self.inner.runtime.entity_gate_deadline();
+                let deadline = nervix_primitives::time::Instant::now()
+                    + self.inner.runtime.entity_gate_deadline();
                 let gate = match Box::pin(self.engage_cluster_entity_gates(
                     &domain,
                     relays,

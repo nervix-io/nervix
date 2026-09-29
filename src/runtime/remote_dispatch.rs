@@ -311,7 +311,7 @@ impl RemoteDispatcher {
             .assured("the fixed relay cancellation deadline fits the monotonic clock");
         let status = loop {
             nervix_primitives::task::consume_budget().await;
-            let cancellation = tokio::time::timeout_at(
+            let cancellation = nervix_primitives::time::timeout_at(
                 deadline,
                 self.interconnect.cancel_relay(node_id, delivery),
             )
@@ -411,7 +411,7 @@ impl RemoteDispatcher {
                 .checked_add(inactivity_timeout)
                 .assured("a bounded relay inactivity timeout fits the monotonic clock");
             let deadline = inactivity_deadline.min(total_deadline);
-            match tokio::time::timeout_at(deadline, admission.changed()).await {
+            match nervix_primitives::time::timeout_at(deadline, admission.changed()).await {
                 Ok(Ok(())) => {
                     let update = admission.borrow_and_update().clone();
                     match update {
@@ -536,7 +536,7 @@ impl RemoteDispatcher {
             .assured("the fixed remote dispatch timeout fits the monotonic clock");
         loop {
             nervix_primitives::task::consume_budget().await;
-            let result = tokio::time::timeout_at(
+            let result = nervix_primitives::time::timeout_at(
                 deadline,
                 self.interconnect.send(node_id, envelope.clone()),
             )
@@ -1380,10 +1380,14 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use futures_util::FutureExt as _;
     use nervix_models::{AckMode, ClusterNodeName, RemoteAckOutcome};
-    use nervix_primitives::sync::{oneshot, watch};
-    use tokio::time::{Duration, Instant, sleep, timeout};
+    use nervix_primitives::{
+        sync::{oneshot, watch},
+        time::{Instant, sleep, timeout},
+    };
 
     use super::*;
     use crate::runtime_ack::{AckOutcome, AckSet};

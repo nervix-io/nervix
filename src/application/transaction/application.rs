@@ -6,6 +6,8 @@
 //! - **Depends on.** Transaction consensus state, runtime revision application and impact Models.
 //! - **Must not know.** Session protocol presentation or transaction planning.
 
+use std::time::Duration;
+
 use error_stack::Report;
 use nervix_consensus::{
     ConsensusError, ConsensusTransactionError, ReplicatedTransaction,
@@ -17,7 +19,7 @@ use nervix_models::{
     ModelKind, PauseRequirement, QuiesceLevel, RebuildImpact, RebuildReason,
     TransactionOperationRange,
 };
-use tokio::time::{Duration, sleep};
+use nervix_primitives::time::sleep;
 use tracing::warn;
 
 use super::{TransactionApplicationAttempt, TransactionCommitError, TransactionStepImpactRecorder};

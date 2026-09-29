@@ -36,7 +36,7 @@ async fn await_until_emitter_stop_deadline<T>(
         nervix_primitives::task::consume_budget().await;
         let stop_deadline = *stop_rx.borrow();
         if let Some(deadline) = stop_deadline {
-            return tokio::time::timeout_at(deadline, &mut future)
+            return nervix_primitives::time::timeout_at(deadline, &mut future)
                 .await
                 .map_err(|_| ());
         }
