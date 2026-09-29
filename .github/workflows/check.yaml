@@ -737,13 +737,11 @@ jobs:
   # behind it, and a slow one no longer pushes the suite's job toward its own timeout.
   extra-tests:
     name: extra-tests
-    # Half the suite job's cores on purpose. This job is compilation-bound, so it takes about
-    # twice as long here as the same steps took inside that job on sixteen: measured at 26m51s
-    # against the suite job's 39m33s. It only has to finish before the suite's job to stay off the
-    # critical path, and it does so with minutes to spare, so the cheaper runner is the one to use.
-    # Raise this if the suite's job gets faster or these steps get slower.
+    # Half the suite job's cores on purpose. Recent runs took 41-45 minutes as compilation and
+    # cache contention varied; leave room for the final completion walk and report uploads.
+    # The cheaper runner remains suitable even when this job finishes after the suite.
     runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
