@@ -1028,7 +1028,7 @@ protocol reports the losses the server knows of and states which ones it cannot 
 | A batch with a row too large for a frame | `SubscriptionRowsSkipped` with `EncodingFailed` for every selected row of the batch |
 | Batches published while the subscription was opening | Not reported; they precede the subscription |
 | Batches lost in transit while relay ownership moves or a node-to-node delivery fails | Not reported; the nodes log them |
-| The session itself | Not reported by the server, whose session is gone; the Rust client reports an interruption |
+| The session itself | Not reported by the server, whose session is gone; the Rust client reports an interruption of each subscription the server had not ended |
 | A restoration the new session refused | Not a server event; the Rust client reports each refused attempt, and the gap lasts until an attempt succeeds |
 
 ### Restoration And Bounded Consumers
@@ -1036,21 +1036,35 @@ protocol reports the losses the server knows of and states which ones it cannot 
 Nothing on the server restores a subscription. A client that wants one to outlive its session opens
 it again on the next session, which is a new generation with a new schema announcement, and must
 treat the time between as a gap. The Rust client does this for every subscription it holds that the
-server acknowledged, and fences its restoration by generation: a late reply for an attempt the
-caller has since cancelled is followed by a deletion before the name can be reused, and rows of a
-generation the client no longer holds are ignored. A restoration the new session refuses is reported
-as a restoration failure and sent again on that session after a growing wait, as [Reconnecting A
-Session](#reconnecting-a-session) describes.
+server acknowledged and did not end, and fences its restoration by generation: a late reply for an
+attempt the caller has since cancelled is followed by a deletion before the name can be reused, and
+rows of a generation the client no longer holds are ignored. A restoration the new session refuses
+is reported as a restoration failure and sent again on that session after a growing wait, as
+[Reconnecting A Session](#reconnecting-a-session) describes.
+
+A generation the server ended is never restored, because a new session would not change why it
+ended: its relay was redefined, so the announced schema no longer describes its rows, or the relay
+no longer exists. The Rust client applies `SubscriptionEnded` as the frame arrives, before it queues
+the end for its caller, so the subscription reads `Ended` from then on, even to a caller that has
+not read the end yet. It stays `Ended` across later sessions until its caller subscribes again under
+the same name, which opens a new generation that announces the relay's current definition, or
+deletes it. The end reaches the caller exactly once, after the generation's other events: when the
+session ends before the caller reads it, the client discards that session's unread events as it
+does for every subscription, reports no interruption, and reports the end itself. The one exception
+is a subscription whose events overflowed the client's queue, for which the consumer overflow stays
+the last event of its generation.
 
 A deletion asks the server only while an open session may hold the subscription. A subscription
 whose session ended, including one whose delivery had already failed, is deleted without a request,
 and so is an interrupted subscription the current session refused to open again: no session holds
-either, so the client simply stops wanting it and releases the name. A deletion whose session ends
+either, so the client simply stops wanting it and releases the name. A subscription the server ended
+is deleted without a request too: the server keeps an ended name only until it is reused or its
+session ends, and nothing of the ended generation remains to release. A deletion whose session ends
 before it is answered is complete, because the subscription ended with that session. A deletion that
 waited for an opening or a restoration still in flight asks the server only if that request opened
 the subscription. Only a name the client never held is always asked about, on a new session if the
 current one ended, and a refusal leaves that name free. Each subscription moves through `Creating`,
-`Active`, `Interrupted`, `Restoring`, `DeliveryFailed`, `Closing`, and `DeletionFailed`:
+`Active`, `Interrupted`, `Restoring`, `DeliveryFailed`, `Ended`, `Closing`, and `DeletionFailed`:
 
 ```mermaid
 stateDiagram-v2
@@ -1064,12 +1078,16 @@ stateDiagram-v2
     Restoring --> Interrupted: refused; reported, then retried on the same session
     Restoring --> Interrupted: session lost; retried on the next session
     Active --> DeliveryFailed: the client's event queue overflowed
+    Active --> Ended: SubscriptionEnded
+    DeliveryFailed --> Ended: SubscriptionEnded
+    Ended --> Creating: subscribe under the same name
     Active --> Closing: unsubscribe
     Creating --> Closing: unsubscribe
     Restoring --> Closing: unsubscribe
     DeliveryFailed --> Closing: unsubscribe while its session is open
     Interrupted --> [*]: unsubscribe, which no session is left to answer
     DeliveryFailed --> [*]: unsubscribe after its session ended
+    Ended --> [*]: unsubscribe, which needs no request
     Closing --> [*]: deleted, the session ended, or the opening it waited for was refused
     Closing --> DeletionFailed: deletion refused
     DeletionFailed --> Closing: unsubscribe again
@@ -1744,14 +1762,16 @@ The protocol makes a client's view of its own work explicit rather than inferred
   Impact Inspection](./transaction-quiescence.md#observing-a-transaction).
 - **Subscriptions.** A client learns of its own losses from `SubscriptionDeliveryLost`,
   `SubscriptionRowsSkipped`, and `SubscriptionEnded`, and the Rust client reports a lost session as
-  an interruption of each subscription and clock, and each refused attempt to restore one as a
-  restoration failure with the server's message. The web console shows each tab's state on the
-  tab: pending, active, interrupted, restoring, ended, resubscribing, or closing. Each node exports
-  `nervix_session_subscriptions`, the number of subscription leases it holds per relay, and
+  an interruption of each clock and of each subscription the server had not ended, and each refused
+  attempt to restore one as a restoration failure with the server's message.
+  `Client::subscription_lifecycle` reads each subscription's state, including `Ended` for one the
+  server ended. The web console shows each tab's state on the tab: pending, active, interrupted,
+  restoring, ended, resubscribing, or closing. Each node exports `nervix_session_subscriptions`, the
+  number of subscription leases it holds per relay, and
   `nervix_session_subscription_dropped_rows_total`, the rows its `DROPPING` subscriptions discarded,
-  both labeled by `domain` and `relay`; see
-  [Metrics And Observability](./metrics-and-observability.md#raw-metrics). Skipped rows are reported
-  only to the client.
+  both labeled by `domain` and `relay`; see [Metrics And
+  Observability](./metrics-and-observability.md#raw-metrics). Skipped rows are reported only to the
+  client.
 - **Leadership.** `LeadershipObserved` tells every session which node leads and where to reach it,
   and `SHOW CLUSTER STATUS` shows each node's availability.
 - **Producers.** A client learns every batch's outcome and every admission change and end of its

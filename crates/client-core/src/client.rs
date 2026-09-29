@@ -832,6 +832,9 @@ impl Client {
                     Cancellation::Closed => {
                         return Ok(Self::held_by_no_session(subscription));
                     }
+                    Cancellation::Ended => {
+                        return Ok(Self::ended_by_the_server(subscription));
+                    }
                     Cancellation::Delete(attempt) => attempt,
                 };
                 let client = self.clone();
@@ -874,6 +877,14 @@ impl Client {
     fn held_by_no_session(subscription: &SubscriptionName) -> CommandOutcome {
         CommandOutcome::completed_locally(format!(
             "subscription '{}' deleted; no open session held it",
+            subscription.as_str()
+        ))
+    }
+
+    /// The outcome of deleting a subscription whose generation the server ended.
+    fn ended_by_the_server(subscription: &SubscriptionName) -> CommandOutcome {
+        CommandOutcome::completed_locally(format!(
+            "subscription '{}' deleted; the server had already ended it",
             subscription.as_str()
         ))
     }
@@ -1152,7 +1163,9 @@ impl Client {
             .await
     }
 
-    /// The lifecycle currently retained for a desired subscription name.
+    /// The lifecycle currently retained for a desired subscription name. A subscription the server
+    /// ended reads [`SubscriptionLifecycle::Ended`] until it is subscribed again under its name or
+    /// deleted.
     pub fn subscription_lifecycle(&self, name: &SubscriptionName) -> Option<SubscriptionLifecycle> {
         self.inner.events.sinks.desired.lifecycle(name)
     }
@@ -1160,14 +1173,16 @@ impl Client {
     /// Waits for the next event of a subscription the client holds.
     ///
     /// The stream outlives the session. When the session ends, it reports
-    /// [`SubscriptionEvent::Interrupted`] for every subscription the session held, opens a new
-    /// session, and opens each of them again as a new generation. An opening that session refuses
-    /// or leaves unanswered is reported as [`SubscriptionEvent::RestorationFailed`] and sent again
-    /// after a growing wait. With nothing to restore it waits
-    /// for the next session the client opens, and delivers the events of the subscriptions opened
-    /// there. A failure to open a session is returned, and the next call tries again;
-    /// [`ClientError::SessionClosed`] means the session ended and the client knows no server to
-    /// open another on.
+    /// [`SubscriptionEvent::Interrupted`] for every subscription the session held that the server
+    /// had not ended, opens a new session, and opens each of them again as a new generation. An
+    /// opening that session refuses or leaves unanswered is reported as
+    /// [`SubscriptionEvent::RestorationFailed`] and sent again after a growing wait. A subscription
+    /// the server ended is never opened again, and its [`SubscriptionEvent::Ended`] is reported
+    /// once, after the events before it, even when its session ended before it was read. With
+    /// nothing to restore it waits for the next session the client opens, and delivers the events
+    /// of the subscriptions opened there. A failure to open a session is returned, and the next
+    /// call tries again; [`ClientError::SessionClosed`] means the session ended and the client
+    /// knows no server to open another on.
     pub async fn next_subscription(&self) -> Result<SubscriptionEvent, ClientError> {
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -1188,13 +1203,7 @@ impl Client {
             match result {
                 Ok(event) => {
                     let generation = self.inner.exchange.lock().await.generation.clone();
-                    if self
-                        .inner
-                        .events
-                        .sinks
-                        .desired
-                        .can_deliver(event.subscription(), &generation)
-                    {
+                    if self.inner.events.sinks.desired.admit(&event, &generation) {
                         return Ok(event);
                     }
                 }

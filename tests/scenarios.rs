@@ -22491,6 +22491,121 @@ async fn then_named_client_subscription_is_interrupted(
     }
 }
 
+#[then(
+    expr = "within {string} client {string} observes subscription {string} ended with reason \
+            {string}"
+)]
+async fn then_named_client_observes_subscription_ended(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_name: String,
+    subscription_name: String,
+    reason: String,
+) {
+    let duration =
+        humantime::parse_duration(&duration).assured("the end deadline is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let expected_reason = match reason.as_str() {
+        "RelayChanged" => nervix_client_core::wire::SubscriptionEndReason::RelayChanged,
+        "RelayRemoved" => nervix_client_core::wire::SubscriptionEndReason::RelayRemoved,
+        other => panic!("the scenario names an end reason the protocol does not have: {other}"),
+    };
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let deadline = Instant::now() + duration;
+    // Rows the subscription delivered before its end precede it.
+    let ended = loop {
+        nervix_primitives::task::consume_budget().await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = tokio::time::timeout(remaining, client.next_subscription())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "client '{client_name}' did not report the end of subscription \
+                     '{subscription_name}' within {duration:?}"
+                )
+            })
+            .unwrap_or_else(|error| panic!("client '{client_name}' event failed: {error}"));
+        match event {
+            nervix_client_core::SubscriptionEvent::Ended(ended) => break ended,
+            nervix_client_core::SubscriptionEvent::Rows(_) => {}
+            other => panic!(
+                "client '{client_name}' reported {other:?} before the end of subscription \
+                 '{subscription_name}'"
+            ),
+        }
+    };
+    assert_eq!(ended.subscription.name.as_str(), subscription_name);
+    assert_eq!(
+        ended.reason, expected_reason,
+        "client '{client_name}' reported the end of subscription '{subscription_name}' as {:?}",
+        ended.message
+    );
+}
+
+#[then(expr = "client {string} subscription {string} is ended")]
+async fn then_named_client_subscription_is_ended(
+    world: &mut ScenarioWorld,
+    client_name: String,
+    subscription_name: String,
+) {
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"));
+    let name = nervix_models::SubscriptionName::parse(&subscription_name)
+        .assured("the scenario subscription name is valid");
+    let lifecycle = client.subscription_lifecycle(&name);
+    let Some(nervix_client_core::SubscriptionLifecycle::Ended(ended)) = lifecycle else {
+        panic!(
+            "client '{client_name}' subscription '{subscription_name}' is not ended: {lifecycle:?}"
+        );
+    };
+    assert_eq!(ended.name.as_str(), subscription_name);
+}
+
+/// A subscription the server ended is never opened again, so nothing about it may arrive, and a
+/// longer window only strengthens the assertion.
+#[then(expr = "client {string} reports no event of subscription {string} within {string}")]
+async fn then_named_client_reports_no_subscription_event(
+    world: &mut ScenarioWorld,
+    client_name: String,
+    subscription_name: String,
+    duration: String,
+) {
+    let duration =
+        humantime::parse_duration(&duration).assured("the silence window is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(read) = tokio::time::timeout(remaining, client.next_subscription()).await else {
+            return;
+        };
+        let event =
+            read.unwrap_or_else(|error| panic!("client '{client_name}' event failed: {error}"));
+        assert_ne!(
+            event.subscription().name.as_str(),
+            subscription_name,
+            "client '{client_name}' reported an event of subscription '{subscription_name}': \
+             {event:?}"
+        );
+    }
+}
+
 #[then(expr = "client {string} no longer holds subscription {string}")]
 async fn then_named_client_no_longer_holds_subscription(
     world: &mut ScenarioWorld,
