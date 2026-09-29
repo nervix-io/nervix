@@ -106,6 +106,11 @@ struct FaultInjectionState {
     /// A receiver pauses after it admitted a remote relay batch and returned the admission to the
     /// batch's owner, before it hands the batch to its local runtime consumers.
     remote_relay_dispatch_pauses: DashMap<String, Arc<TestPause>, RandomState>,
+    /// One-shot losses of the terminal record acknowledgement a node returns to the node that
+    /// registered it. Each keeps whether it fired, so a scenario waits for the loss instead of
+    /// assuming it.
+    lost_remote_acknowledgements:
+        DashMap<RemoteAcknowledgementLink, watch::Sender<RemoteAcknowledgementLoss>, RandomState>,
     /// A source pauses once inside dispatch so a test can engage quiesce while its loop awaits.
     ingestor_dispatch_pauses: DashMap<DomainNodeRef, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -227,6 +232,21 @@ struct EntityScheduleSwapFailureKey {
     domain: DomainName,
 }
 
+/// The direction a record acknowledgement travels: from the node that resolved it back to the
+/// node that registered it.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct RemoteAcknowledgementLink {
+    resolver: ClusterNodeName,
+    registrar: ClusterNodeName,
+}
+
+/// Whether the one terminal record acknowledgement a scenario armed a link to lose was lost yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteAcknowledgementLoss {
+    Armed,
+    Lost,
+}
+
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
@@ -316,6 +336,7 @@ impl Default for FaultInjection {
                 entity_gate_response_pauses: DashMap::default(),
                 remote_relay_admission_pauses: DashMap::default(),
                 remote_relay_dispatch_pauses: DashMap::default(),
+                lost_remote_acknowledgements: DashMap::default(),
                 ingestor_dispatch_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
                 ownership_handoff_prepare_response_pauses: DashMap::default(),
@@ -1140,6 +1161,45 @@ impl FaultInjection {
         pause.release();
     }
 
+    /// Loses the next terminal record acknowledgement `resolver` returns to `registrar`. The
+    /// resolving node drops it instead of sending it, as a link that loses every attempt of the
+    /// send does, and reports nothing more about that record.
+    pub fn lose_next_remote_acknowledgement(
+        &self,
+        resolver: ClusterNodeName,
+        registrar: ClusterNodeName,
+    ) {
+        let link = RemoteAcknowledgementLink {
+            resolver,
+            registrar,
+        };
+        let (loss, _) = watch::channel(RemoteAcknowledgementLoss::Armed);
+        self.inner.lost_remote_acknowledgements.insert(link, loss);
+    }
+
+    /// Waits until the loss armed from `resolver` to `registrar` has taken an acknowledgement.
+    pub async fn wait_for_lost_remote_acknowledgement(
+        &self,
+        resolver: &ClusterNodeName,
+        registrar: &ClusterNodeName,
+    ) {
+        let link = RemoteAcknowledgementLink {
+            resolver: resolver.clone(),
+            registrar: registrar.clone(),
+        };
+        let mut loss = {
+            let armed = self
+                .inner
+                .lost_remote_acknowledgements
+                .get(&link)
+                .assured("a scenario waits only for a loss it armed");
+            armed.subscribe()
+        };
+        loss.wait_for(|loss| *loss == RemoteAcknowledgementLoss::Lost)
+            .await
+            .assured("the armed loss keeps its sender for the rest of the scenario");
+    }
+
     pub fn pause_ingestor_dispatch(&self, ingestor: DomainNodeRef) {
         self.inner
             .ingestor_dispatch_pauses
@@ -1767,6 +1827,29 @@ impl FaultInjection {
         }
         pause.reach();
         pause.wait_until_released().await;
+    }
+
+    /// Whether the terminal record acknowledgement `resolver` is about to return to `registrar` is
+    /// lost on the way. Only the first acknowledgement on an armed link is lost.
+    pub(crate) fn loses_remote_acknowledgement(
+        &self,
+        resolver: &ClusterNodeName,
+        registrar: &ClusterNodeName,
+    ) -> bool {
+        let link = RemoteAcknowledgementLink {
+            resolver: resolver.clone(),
+            registrar: registrar.clone(),
+        };
+        let Some(loss) = self.inner.lost_remote_acknowledgements.get(&link) else {
+            return false;
+        };
+        loss.send_if_modified(|loss| {
+            if *loss == RemoteAcknowledgementLoss::Lost {
+                return false;
+            }
+            *loss = RemoteAcknowledgementLoss::Lost;
+            true
+        })
     }
 
     pub(crate) async fn pause_remote_relay_dispatch_if_armed(&self, domain: &DomainName) {

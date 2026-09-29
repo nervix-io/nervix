@@ -124,11 +124,7 @@ impl Runtime {
                 fault_injection,
                 resource_store: ArcSwapOption::empty(),
                 remote_dispatcher: ArcSwapOption::empty(),
-                remote_dispatch: Arc::new(RemoteDispatchRegistry {
-                    next_ack_id: AtomicU64::new(1),
-                    pending_acks: DashMap::default(),
-                    pending_relay_admissions: DashMap::default(),
-                }),
+                remote_dispatch: Arc::new(RemoteDispatchRegistry::new()),
                 remote_ack_watcher_shutdown: CancellationToken::new(),
                 remote_ack_watcher_tasks: TaskTracker::new(),
                 state_checkpoint_notifications: DashMap::default(),

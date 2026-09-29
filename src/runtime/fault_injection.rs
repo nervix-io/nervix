@@ -88,4 +88,12 @@ impl ConfiguredFaultInjection {
         _domain: &DomainName,
     ) {
     }
+
+    pub(in crate::runtime) fn loses_remote_acknowledgement(
+        &self,
+        _resolver: &ClusterNodeName,
+        _registrar: &ClusterNodeName,
+    ) -> bool {
+        false
+    }
 }
