@@ -22,8 +22,8 @@ use arrow_ipc::writer::StreamWriter;
 use bytes::Bytes;
 use cucumber::{given, then, when};
 use nervix_client_core::{
-    ClientError, Producer, ProducerBatch, ProducerEnd, ProducerOutcome, SubmissionId,
-    SubmissionUncertainty,
+    ClientError, Producer, ProducerBatch, ProducerConnection, ProducerEnd, ProducerOutcome,
+    ProducerReopenReason, SubmissionId, SubmissionUncertainty,
 };
 use nervix_client_wire::{
     ClientRequest, CloseIngestorDisposition, CloseIngestorRequest, OpenIngestorDisposition,
@@ -1276,6 +1276,19 @@ async fn then_producer_ends(world: &mut ScenarioWorld, producer: String, expecte
                     );
                     return;
                 }
+                Some(ProducerEnd::ReopenRequired(reason)) => {
+                    let actual = match reason {
+                        ProducerReopenReason::DomainStopped => "domain stopped",
+                        ProducerReopenReason::EndpointRemoved => "endpoint removed",
+                        ProducerReopenReason::SchemaChanged => "schema changed",
+                        ProducerReopenReason::ContractChanged => "endpoint changed",
+                        ProducerReopenReason::GenerationChanged => "generation changed",
+                        ProducerReopenReason::ProtocolViolated => "protocol violated",
+                        ProducerReopenReason::Refused(_) => "open refused",
+                    };
+                    assert_eq!(actual, expected, "producer '{producer}' needs a new open");
+                    return;
+                }
                 Some(ProducerEnd::Closed) => panic!("producer '{producer}' was closed"),
                 None => {
                     assert!(
@@ -1309,6 +1322,45 @@ async fn then_producer_ends(world: &mut ScenarioWorld, producer: String, expecte
         "producer '{producer}' ended otherwise: {}",
         ended.message
     );
+}
+
+#[then(expr = "producer {string} is interrupted because {string}")]
+async fn then_producer_is_interrupted(
+    world: &mut ScenarioWorld,
+    producer: String,
+    expected: String,
+) {
+    let native = match world.scenario_producer(&producer) {
+        ScenarioProducer::Native(native) => Some(native.clone()),
+        ScenarioProducer::Raw { .. } => None,
+    };
+    let Some(native) = native else {
+        then_producer_ends(world, producer, expected).await;
+        return;
+    };
+    assert!(matches!(
+        expected.as_str(),
+        "relocated" | "shutting down" | "session lost"
+    ));
+    let deadline = Instant::now() + PRODUCER_EXPECTATION_TIMEOUT;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        if matches!(
+            native.connection(),
+            ProducerConnection::Interrupted | ProducerConnection::Restoring
+        ) {
+            assert!(
+                native.end().is_none(),
+                "a transient interruption keeps the desired producer"
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "producer '{producer}' was not interrupted in time"
+        );
+        tokio::time::sleep(PRODUCER_POLL_INTERVAL).await;
+    }
 }
 
 #[when(expr = "producer {string} is closed")]

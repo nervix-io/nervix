@@ -481,6 +481,10 @@ test-connectors *args:
 test-client-wire *args:
     cargo test --package nervix-client-wire --all-features --all-targets -- {{ args }}
 
+# Run native client session unit tests without enabling the modeled Shuttle build.
+test-client-core *args:
+    cargo test --package nervix-client-core --features arrow,autocomplete --lib -- {{ args }}
+
 # Rewrite the client wire conformance corpus from the encoder's current output. Review the
 # regenerated `corpus.report` before committing it: every client implementation is held to it.
 update-client-wire-corpus:

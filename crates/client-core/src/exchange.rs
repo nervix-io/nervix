@@ -1,5 +1,7 @@
 //! One exchange with a server, and the dispatcher that routes every frame it receives.
 //!
+//! Layer: edges.
+//!
 //! Every request of an exchange takes an identity that is non-zero and never reused on that
 //! exchange, and its waiter is registered under that identity before its frame is sent. Every
 //! reply names the identity it answers, so the reader completes exactly the waiter it belongs to,
@@ -448,6 +450,8 @@ pub(crate) struct EventSinks {
     pub(crate) clocks: DomainClockAttachments,
     /// The producers opened on each exchange, and the events about them.
     pub(crate) producers: ProducerRegistry,
+    /// Desired native emitter consumers and their current attachments.
+    pub(crate) consumers: crate::consumer::DesiredConsumers,
 }
 
 impl EventSinks {
@@ -462,6 +466,7 @@ impl EventSinks {
         self.desired.ended(generation);
         self.clocks.exchange_ended(generation);
         self.producers.exchange_ended(generation);
+        self.consumers.exchange_ended(generation);
         self.subscriptions.close(generation);
         self.notices.close(generation);
     }
@@ -490,6 +495,7 @@ impl SessionEvents {
                 domains,
                 clocks: DomainClockAttachments::new(),
                 producers: ProducerRegistry::default(),
+                consumers: crate::consumer::DesiredConsumers::default(),
             },
             leadership: observed_leadership,
             domains: Mutex::new(observed_domains),

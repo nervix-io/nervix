@@ -497,8 +497,14 @@ payload, infinity, and nullable and sensitive branch key fields.
   outcome retrievable, so it is never lost.
 - **P-8.** A client MUST close a producer with `CloseIngestorRequest`, and MUST expect every batch's
   outcome before the close's reply. When its session is lost, it MUST report every batch sent without
-  an outcome as of unknown outcome, MUST NOT report any of them as not admitted, and MUST open a new
-  producer on the next session; no producer survives a session.
+  an outcome as of unknown outcome and MUST NOT resend any such batch. A client retaining a desired
+  producer MAY open a new attachment on a new exchange only after its `START` generation, endpoint
+  contract, fields, policy and grant match the original description. The new open uses a fresh
+  request identity. A changed contract or generation, a removed or stopped endpoint, or a schema
+  mismatch requires an explicit new producer. A temporary capacity or owner refusal MAY be retried
+  with bounded physical backoff. `EndpointUnavailable` while the serving node establishes its
+  process-start catch-up proof is such a temporary refusal. Close and drop MUST win over an
+  in-flight restoration.
 
 ## Emitter Consumers
 
@@ -513,7 +519,9 @@ payload, infinity, and nullable and sensitive branch key fields.
 - **E-3.** A `Batch` outcome is one Arrow IPC stream with exactly the opened schema and one batch.
   The client MUST check its row count against `members`, and treat the source relay and optional
   32-byte branch fingerprint as metadata, never as extra fields. The fingerprint does not carry
-  raw branch key values. A read may instead return `Ended` when its attachment is gone.
+  raw branch key values. A read may instead return `Ended` when its attachment is gone. Since an
+  end does not say whether the endpoint moved or changed, a client retaining the desired consumer
+  MUST report the interruption and check a fresh open against its pinned contract.
 - **E-4.** A client MUST settle only the current attempt reference with `Ack`, `Retry`, or
   `Reject`. The rejection reason is nonempty, at most 1024 UTF-8 bytes, and MUST NOT contain
   sensitive values. It MUST await `Confirmed` before treating an ACK as confirmed. A stale
@@ -521,12 +529,20 @@ payload, infinity, and nullable and sensitive branch key fields.
   server retains that bounded result.
 - **E-5.** A retry or timeout can deliver the same stable identity and IPC bytes with a new
   reference, possibly to a different worker. The client MUST design its application side effects
-  for this duplicate window. There is no durable consumer cursor; an owner or session loss ends
-  the attachment and the application opens a new consumer on a new session.
+  for this duplicate window. There is no durable consumer cursor. An owner or session loss ends
+  the attachment. A client retaining a desired consumer MAY reopen it on the current or a new
+  exchange only after the `START` generation, endpoint contract, fields, window, timeouts, grant
+  and batch limits
+  match its original open. It MUST surface the interruption before delivering a batch from the new
+  attachment. It MAY retry `EndpointUnavailable` while the serving node catches up, with bounded
+  physical backoff. Removed or changed endpoints require a new consumer open by the application.
 - **E-6.** `CloseEmitterRequest` releases the attachment. Closing, losing the session, or losing
-  the forwarding stream revokes its unresolved references. Producers and consumers may share one
-  session; an application may read and ACK output while a submitted producer batch waits for its
-  graph outcome.
+  the forwarding stream revokes its unresolved references. A delivery reference MUST be settled
+  only through the exchange and consumer identity that delivered it; a lost settlement answer MUST
+  be reported as uncertain, and a revoked reference MUST NOT be sent to a replacement attachment.
+  Closing or dropping a desired consumer MUST fence a late restoration. Producers and consumers
+  may share one session; an application may read and ACK output while a submitted producer batch
+  waits for its graph outcome.
 
 ## Resource Uploads
 
@@ -714,8 +730,8 @@ stateDiagram-v2
 Consumers](./client-session-protocol.md#restoration-and-bounded-consumers) shows the lifecycle a
 client keeps for each subscription across sessions.
 
-**A producer and its batches.** A producer lives on one session, and each batch holds its credit
-until its outcome is read:
+**A producer and its batches.** A producer handle retains its desired endpoint across sessions;
+each wire attachment lives on one session, and each batch holds its credit until its outcome is read:
 
 ```mermaid
 stateDiagram-v2
@@ -729,12 +745,16 @@ stateDiagram-v2
     Closing --> Closed: every outcome, then the close reply
     Open --> Ended: every outcome, then ProducerEnded
     Suspended --> Ended: every outcome, then ProducerEnded
-    Open --> Lost: session lost; sent batches unknown
-    Suspended --> Lost: session lost; sent batches unknown
+    Open --> Interrupted: session lost; sent batches unknown
+    Suspended --> Interrupted: session lost; sent batches unknown
+    Interrupted --> Restoring: new exchange, fresh open
+    Restoring --> Open: generation and contract match
+    Restoring --> Interrupted: exchange lost again
+    Restoring --> ReopenRequired: generation or contract changed
     Refused --> [*]
     Closed --> [*]
     Ended --> [*]
-    Lost --> [*]
+    ReopenRequired --> [*]
 ```
 
 ```mermaid
@@ -778,7 +798,8 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | S-7, S-8 | In `client_wire_failures.feature`: `A reconnected native client restores acknowledged subscriptions`, `A native client deletes a subscription its lost session held and opens the name again`, `A native client reports a refused subscription restoration and deletes the subscription without the server`, and `A native client keeps a subscription active while it receives a row that fills most of a frame`; `Subscription restoration and typed transaction inspection survive the same leader loss` in `client_wire_qualification.feature`; `Web console restores a relay tab after its transaction finished while it reconnected`, `Web console restores a relay tab before it attaches its open transaction again`, and `Web console bounds a busy relay tab and keeps its REPL responsive` in `nspl_repl.feature`; `deleting_while_creation_is_in_flight_drains_its_late_success_before_name_reuse`, `cancelling_an_in_flight_restore_cleans_up_its_late_success`, `a_refused_restoration_is_repeated_after_a_growing_delay`, `deleting_a_subscription_whose_restoration_was_refused_needs_no_server`, `a_subscription_requested_on_a_closed_session_opens_on_a_new_session`, `one_subscription_overflow_preserves_other_subscription_events`, `each_subscription_retains_a_frame_of_the_frame_limit_and_overflows_alone_past_it`, `a_subscription_past_the_exchange_allowance_overflows_without_evicting_full_subscriptions`, and `a_row_frame_filled_to_the_frame_limit_reaches_an_active_subscription` |
 | R-1 to R-5 | `A <runtime> client round-trips an operation, typed rows, an error and a closure` in `client_conformance.feature` for every runtime; `a_batch_round_trips_every_cell_kind_at_its_bounds`, `cells_must_follow_their_fields`, `branch_identity_must_match_the_schema`, and `lists_must_follow_their_element_type_and_length`; `a_batch_that_does_not_conform_to_its_schema_is_a_protocol_failure` in the binding |
 | K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; the state, tick, and client pacing outlines in `domain_clock_attachment.feature`; the owner-loss case in `domain_clock_contract.feature`; `The CLI follows a domain clock across a cluster restart` in `cli_session.feature`; `A <runtime> client reads the running domain clock it attached to before its ticks and keeps its generations apart` in `client_conformance.feature` for every binding host; `an_attach_answers_once_its_node_has_installed_the_committed_domains`, `an_ended_exchange_interrupts_its_attachments_until_a_new_exchange_attaches_them`, `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock`, `a_refused_clock_restoration_is_repeated_on_the_same_session`, `a_clock_restoration_answered_already_attached_follows_the_new_session`, `a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_read`, `ticks_coalesce_per_domain_and_follow_their_generations_state`, and the `server_domain_clock_ticked.nxsm` conformance frame |
-| P-1 to P-8 | Every scenario of `client_ingestors.feature` and of `client_ingestor_process_faults.feature`, which kills or freezes the real process that executes an ingestor or serves a producer's session; `events_reach_the_producer_of_their_own_exchange_only` and `the_backoff_doubles_up_to_its_maximum` in `nervix-client-core`; `every_open_refusal_round_trips`, `every_submission_outcome_round_trips`, `producer_events_round_trip_and_name_no_request`, and `the_largest_submitted_batch_fits_a_frame_and_one_byte_more_does_not` in `nervix-client-wire`; the `client_open_ingestor.nxcm`, `client_submit_batch.nxcm`, `server_ingestor_opened.nxsm`, `server_submission_*.nxsm`, and `server_producer_*.nxsm` conformance frames |
+| P-1 to P-8 | Every scenario of `client_ingestors.feature` and of `client_ingestor_process_faults.feature`, including the socket loss, full restart, relocation, and forwarding node death cases retaining one producer; `a_lost_exchange_leaves_sent_batches_unknown_and_restores_the_producer`, `a_batch_waiting_for_admission_when_the_session_ends_is_definitely_unsent`, `a_new_domain_generation_requires_a_new_producer_open`, and `closing_a_producer_during_restoration_releases_its_late_open` in `nervix-client-core`; `every_open_refusal_round_trips`, `every_submission_outcome_round_trips`, `producer_events_round_trip_and_name_no_request`, and `the_largest_submitted_batch_fits_a_frame_and_one_byte_more_does_not` in `nervix-client-wire`; the `client_open_ingestor.nxcm`, `client_submit_batch.nxcm`, `server_ingestor_opened.nxsm`, `server_submission_*.nxsm`, and `server_producer_*.nxsm` conformance frames |
+| E-1 to E-6 (emitter consumers) | The saturated producer and concurrent consumer and clock restart, generation change, and emitter relocation cases in `client_emitters.feature`; `a_consumer_reports_a_gap_then_reads_through_a_fresh_attachment`, `an_ended_consumer_attachment_reopens_when_its_contract_is_unchanged`, `a_changed_consumer_contract_or_generation_requires_a_new_open`, `temporary_consumer_capacity_refusal_retries_the_same_desired_contract`, `a_delivery_from_a_lost_exchange_cannot_ack_a_replacement`, `a_settlement_sent_before_the_session_lost_its_answer_is_unknown`, and `closing_during_restoration_releases_the_late_attachment` in `nervix-client-core`; `consumer_replies_round_trip_with_retained_arrow_body` and the `server_emitter_opened.nxsm` conformance frame in `nervix-client-wire` |
 | U-1 to U-5 | `An upload stream the protocol does not allow is refused with a typed failure and admits nothing` in `session_protocol.feature`; in `resource_describe.feature`, `An incomplete upload does not admit content or consume its identity`, `Upload retry reports one assigned version`, `Upload retry after leader change reports the assigned version`, and `An uncertain upload completes once across installation and leader change`; `a_lost_upload_reply_retries_with_the_same_identity_and_archive` and `malformed_upload_replies_are_rejected_by_their_correlations` |
 | A-1 to A-6 | Every scenario of `backup.feature`, including `A client that loses its download fetches the archive again until a download collects it`, `An archive is refused once its execution reference's retry validity ends`, and `Downloads of another user's backup, or under a reference without an archive, are refused`; `every_download_frame_round_trips` and `a_download_request_with_an_invalid_reference_is_refused` in `nervix-client-wire`; the `backup_download_*` conformance frames |
 | B-1 to B-7 | The binding tests of `nervix-client-ffi`, such as `retained_references_keep_the_frame_until_the_last_one_is_released`, `string_and_bytes_columns_are_copied_with_offsets_and_borrowed_per_cell`, `every_event_kind_reports_its_subscription_and_count`, and `a_token_bounds_a_call_by_cancellation_and_by_deadline`; the C, C++, Python, Java, and Ruby cases of `client_conformance.feature` |

@@ -1,5 +1,7 @@
 //! Producers: typed batches an application submits to a client ingestor, and their outcomes.
 //!
+//! Layer: edges.
+//!
 //! - **Owns.** Opening a producer on the session's current exchange, the credit the server granted
 //!   it and the order batches wait for it in, every submission from the moment it waits for credit
 //!   until the application observes its terminal outcome, retrying a batch the server refused only
@@ -9,17 +11,23 @@
 //! - **Must not know.** How the server admits a batch, which node executes the ingestor, or Arrow,
 //!   apart from encoding a record batch as the canonical stream under the `arrow` feature.
 //!
-//! A producer belongs to the exchange that opened it. When that exchange ends, every batch it
-//! sent without an outcome is reported as of unknown outcome, every batch still waiting to be sent
-//! is reported as not admitted, and the producer ends: this release restores no producer across a
-//! reconnect, so the application opens another one.
+//! A producer keeps its desired endpoint across session exchanges. Each attachment and every
+//! submission attempt remains bound to the exchange that carried it. Restoration only installs a
+//! fresh attachment after its generation and endpoint contract match the producer's first open;
+//! it never resends a submission whose outcome is missing.
 //!
 //! A submission keeps its credit until the application observes its outcome through
 //! [`Producer::send`] or [`Producer::rejoin`], or releases it. Cancelling a wait therefore never
 //! loses an outcome or the batch: [`Producer::pending_submissions`] lists it, and a producer whose
 //! application stops reading outcomes stops being granted credit for new batches.
 
-use std::{fmt, num::NonZeroU64, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    num::NonZeroU64,
+    sync::{Arc as StdArc, Weak},
+    time::Duration,
+};
 
 use ahash::HashMap;
 use arch_into::ArchInto as _;
@@ -151,6 +159,31 @@ pub enum ProducerEnd {
     },
     /// The session that held it ended.
     SessionLost,
+    /// The original endpoint contract or domain generation no longer exists. The application
+    /// must open a new producer and inspect its contract before sending again.
+    ReopenRequired(ProducerReopenReason),
+}
+
+/// Why restoration cannot keep the contract of an existing producer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProducerReopenReason {
+    DomainStopped,
+    EndpointRemoved,
+    SchemaChanged,
+    ContractChanged,
+    GenerationChanged,
+    ProtocolViolated,
+    Refused(nervix_models::ClientProducerRefusal),
+}
+
+/// The connectivity of a producer handle. An interrupted handle remains desired until closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProducerConnection {
+    Active,
+    Interrupted,
+    Restoring,
+    ReopenRequired,
+    Closed,
 }
 
 /// Why a producer operation failed. None of these sends anything to the server.
@@ -164,6 +197,8 @@ pub enum ProducerError {
     EmptyBatch,
     #[error("the producer holds no submission {0}")]
     UnknownSubmission(SubmissionId),
+    #[error("the producer's session could not be restored before the retry deadline")]
+    SessionUnavailable,
     #[cfg(feature = "arrow")]
     #[error("the batch's schema differs from the producer's")]
     SchemaMismatch,
@@ -208,7 +243,15 @@ pub struct PendingSubmission {
 /// The events of producers the server opened on one exchange: admission changes and ends.
 #[derive(Clone, Default)]
 pub(crate) struct ProducerRegistry {
-    producers: Arc<SyncMutex<HashMap<ProducerKey, RegisteredProducer>>>,
+    state: Arc<SyncMutex<ProducerRegistryState>>,
+}
+
+#[derive(Default)]
+struct ProducerRegistryState {
+    producers: HashMap<ProducerKey, RegisteredProducer>,
+    /// Handles are weak so dropping a client application handle releases its desired entry.
+    desired: BTreeMap<usize, Weak<ProducerInner>>,
+    current: HashMap<ProducerKey, Weak<ProducerInner>>,
 }
 
 /// A producer of one exchange. Request identities restart with every exchange, so the exchange is
@@ -255,16 +298,44 @@ impl ProducerRegistry {
             _generation: generation.clone(),
             signals: Arc::new(ProducerSignals { admission, end }),
         };
-        self.producers
+        self.state
             .lock()
+            .producers
             .insert(ProducerKey::new(generation, producer), registered)
             .discarded("a request identity opens at most one producer on its exchange");
     }
 
     fn signals(&self, generation: &Arc<()>, producer: ProducerId) -> Option<Arc<ProducerSignals>> {
-        let producers = self.producers.lock();
-        let registered = producers.get(&ProducerKey::new(generation, producer))?;
+        let state = self.state.lock();
+        let registered = state
+            .producers
+            .get(&ProducerKey::new(generation, producer))?;
         Some(registered.signals.clone())
+    }
+
+    fn bind(&self, handle: &StdArc<ProducerInner>, attachment: &ProducerAttachment) {
+        let key = ProducerKey::new(&attachment.generation, attachment.id);
+        let mut state = self.state.lock();
+        state
+            .desired
+            .insert(StdArc::as_ptr(handle).addr(), StdArc::downgrade(handle));
+        state.current.insert(key, StdArc::downgrade(handle));
+    }
+
+    fn unbind(&self, handle: &ProducerInner, attachment: Option<&ProducerAttachment>) {
+        let mut state = self.state.lock();
+        state.desired.remove(&std::ptr::from_ref(handle).addr());
+        if let Some(attachment) = attachment {
+            state
+                .current
+                .remove(&ProducerKey::new(&attachment.generation, attachment.id));
+        }
+    }
+
+    pub(crate) fn restorable(&self) -> Vec<StdArc<ProducerInner>> {
+        let mut state = self.state.lock();
+        state.desired.retain(|_, handle| handle.strong_count() > 0);
+        state.desired.values().filter_map(Weak::upgrade).collect()
     }
 
     pub(crate) fn admission(&self, generation: &Arc<()>, changed: ProducerAdmissionChanged) {
@@ -275,25 +346,37 @@ impl ProducerRegistry {
     }
 
     pub(crate) fn ended(&self, generation: &Arc<()>, ended: ProducerEnded) {
-        let removed = self
-            .producers
-            .lock()
-            .remove(&ProducerKey::new(generation, ended.producer));
+        let key = ProducerKey::new(generation, ended.producer);
+        let (removed, handle) = {
+            let mut state = self.state.lock();
+            let removed = state.producers.remove(&key);
+            let handle = state
+                .current
+                .remove(&key)
+                .and_then(|handle| handle.upgrade());
+            (removed, handle)
+        };
         let Some(removed) = removed else {
             return;
         };
-        removed.signals.end.send_replace(Some(ProducerEnd::Ended {
+        let terminal = ProducerEnd::Ended {
             reason: ended.reason,
             message: ended.message,
-        }));
+        };
+        removed.signals.end.send_replace(Some(terminal.clone()));
+        if let Some(handle) = handle {
+            handle.attachment_ended(generation, ended.producer, terminal);
+        }
     }
 
     /// Stops following a producer the application closed.
     fn closed(&self, generation: &Arc<()>, producer: ProducerId) {
-        let removed = self
-            .producers
-            .lock()
-            .remove(&ProducerKey::new(generation, producer));
+        let key = ProducerKey::new(generation, producer);
+        let removed = {
+            let mut state = self.state.lock();
+            state.current.remove(&key);
+            state.producers.remove(&key)
+        };
         if let Some(removed) = removed {
             removed.signals.end.send_replace(Some(ProducerEnd::Closed));
         }
@@ -303,46 +386,79 @@ impl ProducerRegistry {
     pub(crate) fn exchange_ended(&self, generation: &Arc<()>) {
         let exchange = Arc::as_ptr(generation).addr();
         let mut ended = Vec::new();
-        {
-            let mut producers = self.producers.lock();
-            let keys = producers
+        let desired = {
+            let mut state = self.state.lock();
+            let keys = state
+                .producers
                 .keys()
                 .filter(|key| key.exchange == exchange)
                 .copied()
                 .collect::<Vec<_>>();
             for key in keys {
-                if let Some(removed) = producers.remove(&key) {
+                state.current.remove(&key);
+                if let Some(removed) = state.producers.remove(&key) {
                     ended.push(removed);
                 }
             }
-        }
+            state.desired.retain(|_, handle| handle.strong_count() > 0);
+            state
+                .desired
+                .values()
+                .filter_map(Weak::upgrade)
+                .collect::<Vec<_>>()
+        };
         for removed in ended {
             removed
                 .signals
                 .end
                 .send_replace(Some(ProducerEnd::SessionLost));
         }
+        for handle in desired {
+            handle.exchange_ended(generation);
+        }
     }
 }
 
 /// A producer attached to a client ingestor. Dropping it closes it without waiting.
 pub struct Producer {
-    inner: Arc<ProducerInner>,
+    inner: StdArc<ProducerInner>,
     closed: bool,
 }
 
-struct ProducerInner {
-    id: ProducerId,
+pub(crate) struct ProducerInner {
+    initial_id: ProducerId,
     domain: DomainName,
     ingestor: IngestorName,
+    request: OpenIngestorRequest,
+    pinned: ClientProducerDescription,
+    client: Client,
+    registry: ProducerRegistry,
+    /// Submission identities and credit survive an attachment replacement. Old attempts resolve
+    /// through their own exchange before they can release a slot for a new attempt.
+    slots: SubmissionSlots,
+    lifecycle: ProducerLifecycle,
+}
+
+/// The desired producer's selected primitive owner of attachment and close transitions.
+struct ProducerLifecycle {
+    phase: SyncMutex<ProducerPhase>,
+    changed: watch::Sender<()>,
+}
+
+struct ProducerAttachment {
+    id: ProducerId,
     description: ClientProducerDescription,
     exchange: Arc<ExchangeRequests>,
     generation: Arc<()>,
-    registry: ProducerRegistry,
     signals: Arc<ProducerSignals>,
-    /// Every submission from the moment the producer takes it until its outcome is taken, and
-    /// the credit each holds.
-    slots: SubmissionSlots,
+}
+
+enum ProducerPhase {
+    Active(Arc<ProducerAttachment>),
+    Interrupted,
+    Restoring(Arc<()>),
+    ReopenRequired(ProducerReopenReason),
+    Closed,
 }
 
 /// What became of one attempt to send a batch.
@@ -357,12 +473,12 @@ enum Attempt {
 impl Client {
     /// Attaches a producer to a client ingestor of `domain`.
     ///
-    /// The producer is bound to `domain` and to this session's current exchange: a later `USE`
-    /// does not move it, and it ends with the exchange. `expected_fields` must be exactly the
-    /// ingestor's input schema, including each field's optionality and sensitivity. A refusal is
-    /// [`ClientError::ProducerRefused`], and leaves nothing attached. An exchange that was lost is
-    /// reopened first, and an open the lost exchange interrupted is sent again on the next one: a
-    /// producer that exchange may have attached ended with it.
+    /// The producer is bound to `domain`; a later `USE` does not move it. Its wire attachment is
+    /// bound to one exchange, while the handle restores that attachment after a session loss if
+    /// the domain generation and endpoint contract still match. `expected_fields` must be exactly
+    /// the ingestor's input schema, including each field's optionality and sensitivity. A refusal
+    /// is [`ClientError::ProducerRefused`] and leaves nothing attached. An open interrupted by a
+    /// lost exchange is sent again on the next one because that exchange ended its attachments.
     pub async fn open_ingestor(
         &self,
         domain: DomainName,
@@ -370,18 +486,16 @@ impl Client {
         expected_fields: Vec<SchemaField>,
         limits: ClientProducerLimits,
     ) -> error_stack::Result<Producer, ClientError> {
-        let request = ClientRequest::OpenIngestor(OpenIngestorRequest {
+        let request = OpenIngestorRequest {
             domain: domain.clone(),
             ingestor: ingestor.clone(),
             expected_fields,
             limits,
-        });
+        };
         let opened = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
             for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
                 nervix_primitives::task::consume_budget().await;
-                let attempt = self
-                    .open_on_current_exchange(request.clone(), &domain, &ingestor)
-                    .await;
+                let attempt = self.open_on_current_exchange(request.clone()).await;
                 let report = match attempt {
                     Ok(producer) => return Ok(producer),
                     Err(report) => report,
@@ -407,25 +521,27 @@ impl Client {
     /// Sends one open on the current exchange and waits for its answer.
     async fn open_on_current_exchange(
         &self,
-        request: ClientRequest,
-        domain: &DomainName,
-        ingestor: &IngestorName,
+        request: OpenIngestorRequest,
     ) -> error_stack::Result<Producer, ClientError> {
         let (exchange, generation) = {
             let exchange = self.inner.exchange.lock().await;
             (exchange.requests(), exchange.generation.clone())
         };
         let registry = self.inner.events.sinks.producers.clone();
-        let domain = domain.clone();
-        let ingestor = ingestor.clone();
+        let client = self.clone();
         let (answer, answered) = oneshot::channel();
         // The open runs in a task of its own, so a caller that stops waiting leaves behind a task
         // that closes a producer the server opens anyway.
         nervix_primitives::task::spawn(async move {
-            let sent = request_on_exchange(&exchange, request, RequestKind::OpenIngestor).await;
+            let sent = request_on_exchange(
+                &exchange,
+                ClientRequest::OpenIngestor(request.clone()),
+                RequestKind::OpenIngestor,
+            )
+            .await;
             let opened = match sent {
                 Ok(sent) => {
-                    ProducerInner::opened(sent, domain, ingestor, exchange, generation, registry)
+                    ProducerInner::opened(sent, request, client, exchange, generation, registry)
                 }
                 Err(error) => Err(error),
             };
@@ -478,16 +594,385 @@ pub(crate) async fn request_on_exchange(
     }
 }
 
+/// Releases one wire attachment even when the application stopped awaiting its close. A silent
+/// server cannot retain the caller's cleanup task without bound; expiring the request also marks
+/// the exchange unusable so a later operation installs a replacement session.
+async fn close_attachment(
+    attachment: Arc<ProducerAttachment>,
+    deadline: Duration,
+) -> error_stack::Result<(), ClientError> {
+    let request = ClientRequest::CloseIngestor(CloseIngestorRequest {
+        producer: attachment.id,
+    });
+    let answered = tokio::time::timeout(
+        deadline,
+        request_on_exchange(&attachment.exchange, request, RequestKind::CloseIngestor),
+    )
+    .await;
+    let answered = match answered {
+        Ok(answered) => answered?,
+        Err(_) => {
+            attachment.exchange.pending.lock().close();
+            return Err(Report::new(ClientError::RequestDeadline {
+                request: RequestKind::CloseIngestor,
+            }));
+        }
+    };
+    match answered.body {
+        ReplyBody::CloseIngestor(_) => Ok(()),
+        other => Err(Report::new(ClientError::unexpected_reply(
+            RequestKind::CloseIngestor,
+            other,
+        ))),
+    }
+}
+
+impl ProducerLifecycle {
+    fn new(phase: ProducerPhase) -> Self {
+        let (changed, _) = watch::channel(());
+        Self {
+            phase: SyncMutex::new(phase),
+            changed,
+        }
+    }
+
+    fn connection(&self) -> ProducerConnection {
+        match &*self.phase.lock() {
+            ProducerPhase::Active(_) => ProducerConnection::Active,
+            ProducerPhase::Interrupted => ProducerConnection::Interrupted,
+            ProducerPhase::Restoring(_) => ProducerConnection::Restoring,
+            ProducerPhase::ReopenRequired(_) => ProducerConnection::ReopenRequired,
+            ProducerPhase::Closed => ProducerConnection::Closed,
+        }
+    }
+
+    fn end(&self) -> Option<ProducerEnd> {
+        match &*self.phase.lock() {
+            ProducerPhase::ReopenRequired(reason) => {
+                Some(ProducerEnd::ReopenRequired(reason.clone()))
+            }
+            ProducerPhase::Closed => Some(ProducerEnd::Closed),
+            _ => None,
+        }
+    }
+
+    fn current(&self) -> Option<Arc<ProducerAttachment>> {
+        match &*self.phase.lock() {
+            ProducerPhase::Active(attachment) => Some(attachment.clone()),
+            _ => None,
+        }
+    }
+
+    fn exchange_ended(&self, generation: &Arc<()>) {
+        let mut phase = self.phase.lock();
+        let matches = match &*phase {
+            ProducerPhase::Active(attachment) => Arc::ptr_eq(&attachment.generation, generation),
+            ProducerPhase::Restoring(restoring) => Arc::ptr_eq(restoring, generation),
+            _ => false,
+        };
+        if matches {
+            *phase = ProducerPhase::Interrupted;
+            drop(phase);
+            self.changed.send_replace(());
+        }
+    }
+
+    fn begin_restore(&self, generation: &Arc<()>) -> bool {
+        let mut phase = self.phase.lock();
+        if !matches!(&*phase, ProducerPhase::Interrupted) {
+            return false;
+        }
+        *phase = ProducerPhase::Restoring(generation.clone());
+        drop(phase);
+        self.changed.send_replace(());
+        true
+    }
+
+    fn close(&self) -> Option<Arc<ProducerAttachment>> {
+        let mut phase = self.phase.lock();
+        let current = match &*phase {
+            ProducerPhase::Active(attachment) => Some(attachment.clone()),
+            _ => None,
+        };
+        *phase = ProducerPhase::Closed;
+        drop(phase);
+        self.changed.send_replace(());
+        current
+    }
+}
+
 impl ProducerInner {
     /// The producer an open reply announced, or the error the reply stands for.
     fn opened(
         sent: Answered,
-        domain: DomainName,
-        ingestor: IngestorName,
+        request: OpenIngestorRequest,
+        client: Client,
         exchange: Arc<ExchangeRequests>,
         generation: Arc<()>,
         registry: ProducerRegistry,
     ) -> error_stack::Result<Producer, ClientError> {
+        let deadline = client.inner.connector.request_timeout();
+        let attachment =
+            ProducerAttachment::opened(sent, &request, exchange, generation, &registry, deadline)?;
+        let description = attachment.description.clone();
+        if description.fields != request.expected_fields {
+            ProducerAttachment::discard(attachment, registry, deadline);
+            return Err(Report::new(ClientError::UnexpectedReply {
+                request: RequestKind::OpenIngestor,
+            }));
+        }
+        let batches: usize = description.grant.batches.get().arch_into();
+        let bytes = usize::try_from(description.grant.bytes.get())
+            .verified("the granted bytes are within the session budget, checked at decode");
+        let inner = StdArc::new(Self {
+            initial_id: attachment.id,
+            domain: request.domain.clone(),
+            ingestor: request.ingestor.clone(),
+            request,
+            pinned: description,
+            client,
+            registry: registry.clone(),
+            slots: SubmissionSlots::new(batches, bytes),
+            lifecycle: ProducerLifecycle::new(ProducerPhase::Active(attachment.clone())),
+        });
+        registry.bind(&inner, &attachment);
+        if attachment.signals.end.borrow().is_some() {
+            inner.exchange_ended(&attachment.generation);
+        }
+        Ok(Producer {
+            inner,
+            closed: false,
+        })
+    }
+
+    fn connection(&self) -> ProducerConnection {
+        self.lifecycle.connection()
+    }
+
+    fn end(&self) -> Option<ProducerEnd> {
+        self.lifecycle.end()
+    }
+
+    fn current(&self) -> Option<Arc<ProducerAttachment>> {
+        self.lifecycle.current()
+    }
+
+    pub(crate) fn exchange_ended(&self, generation: &Arc<()>) {
+        self.lifecycle.exchange_ended(generation);
+    }
+
+    fn attachment_ended(&self, generation: &Arc<()>, id: ProducerId, end: ProducerEnd) {
+        let mut phase = self.lifecycle.phase.lock();
+        let ProducerPhase::Active(attachment) = &*phase else {
+            return;
+        };
+        if !Arc::ptr_eq(&attachment.generation, generation) || attachment.id != id {
+            return;
+        }
+        let next = match end {
+            ProducerEnd::Ended {
+                reason: ClientProducerEndReason::EndpointChanged,
+                ..
+            } => ProducerPhase::ReopenRequired(ProducerReopenReason::ContractChanged),
+            ProducerEnd::Ended {
+                reason: ClientProducerEndReason::EndpointRemoved,
+                ..
+            } => ProducerPhase::ReopenRequired(ProducerReopenReason::EndpointRemoved),
+            ProducerEnd::Ended {
+                reason: ClientProducerEndReason::DomainStopped,
+                ..
+            } => ProducerPhase::ReopenRequired(ProducerReopenReason::DomainStopped),
+            ProducerEnd::Ended {
+                reason: ClientProducerEndReason::ProtocolViolated,
+                ..
+            } => ProducerPhase::ReopenRequired(ProducerReopenReason::ProtocolViolated),
+            _ => ProducerPhase::Interrupted,
+        };
+        *phase = next;
+        drop(phase);
+        self.lifecycle.changed.send_replace(());
+    }
+
+    pub(crate) fn begin_restore(&self, generation: &Arc<()>) -> Option<OpenIngestorRequest> {
+        self.lifecycle
+            .begin_restore(generation)
+            .then(|| self.request.clone())
+    }
+
+    pub(crate) fn is_restoring(&self, generation: &Arc<()>) -> bool {
+        let phase = self.lifecycle.phase.lock();
+        matches!(&*phase, ProducerPhase::Restoring(current) if Arc::ptr_eq(current, generation))
+    }
+
+    pub(crate) fn watch(&self) -> watch::Receiver<()> {
+        self.lifecycle.changed.subscribe()
+    }
+
+    pub(crate) fn restore_request(&self) -> OpenIngestorRequest {
+        self.request.clone()
+    }
+
+    pub(crate) fn restoration_failed(&self, generation: &Arc<()>) {
+        let mut phase = self.lifecycle.phase.lock();
+        if !matches!(&*phase, ProducerPhase::Restoring(current) if Arc::ptr_eq(current, generation))
+        {
+            return;
+        }
+        *phase = ProducerPhase::ReopenRequired(ProducerReopenReason::ProtocolViolated);
+        drop(phase);
+        self.lifecycle.changed.send_replace(());
+    }
+
+    pub(crate) fn restoration_refused(
+        &self,
+        generation: &Arc<()>,
+        refusal: nervix_models::ClientProducerRefusal,
+    ) -> bool {
+        let mut phase = self.lifecycle.phase.lock();
+        if !matches!(&*phase, ProducerPhase::Restoring(current) if Arc::ptr_eq(current, generation))
+        {
+            return false;
+        }
+        let terminal = match refusal {
+            nervix_models::ClientProducerRefusal::DomainNotFound
+            | nervix_models::ClientProducerRefusal::DomainStopped => {
+                Some(ProducerReopenReason::DomainStopped)
+            }
+            nervix_models::ClientProducerRefusal::IngestorNotFound
+            | nervix_models::ClientProducerRefusal::NotClientIngestor => {
+                Some(ProducerReopenReason::EndpointRemoved)
+            }
+            nervix_models::ClientProducerRefusal::SchemaMismatch => {
+                Some(ProducerReopenReason::SchemaChanged)
+            }
+            nervix_models::ClientProducerRefusal::InvalidLimits
+            | nervix_models::ClientProducerRefusal::InTransaction => {
+                Some(ProducerReopenReason::Refused(refusal))
+            }
+            nervix_models::ClientProducerRefusal::EndpointUnavailable
+            | nervix_models::ClientProducerRefusal::TooManyProducers
+            | nervix_models::ClientProducerRefusal::SessionCapacityExhausted
+            | nervix_models::ClientProducerRefusal::NodeCapacityExhausted => None,
+        };
+        if let Some(reason) = terminal {
+            *phase = ProducerPhase::ReopenRequired(reason);
+            drop(phase);
+            self.lifecycle.changed.send_replace(());
+            return false;
+        }
+        true
+    }
+
+    pub(crate) async fn restored(
+        self: &StdArc<Self>,
+        sent: Answered,
+        exchange: Arc<ExchangeRequests>,
+        generation: Arc<()>,
+    ) -> error_stack::Result<bool, ClientError> {
+        let attachment = ProducerAttachment::opened(
+            sent,
+            &self.request,
+            exchange,
+            generation.clone(),
+            &self.registry,
+            self.client.inner.connector.request_timeout(),
+        )?;
+        let description = &attachment.description;
+        let reason = if description.generation != self.pinned.generation {
+            Some(ProducerReopenReason::GenerationChanged)
+        } else if description.fields != self.pinned.fields {
+            Some(ProducerReopenReason::SchemaChanged)
+        } else if description.contract != self.pinned.contract
+            || description.policy != self.pinned.policy
+            || description.grant != self.pinned.grant
+        {
+            Some(ProducerReopenReason::ContractChanged)
+        } else {
+            None
+        };
+        let valid = {
+            let mut phase = self.lifecycle.phase.lock();
+            let valid = matches!(&*phase, ProducerPhase::Restoring(current) if Arc::ptr_eq(current, &generation));
+            if valid {
+                if let Some(reason) = reason.clone() {
+                    *phase = ProducerPhase::ReopenRequired(reason);
+                } else {
+                    *phase = ProducerPhase::Active(attachment.clone());
+                    // Keep the phase lock while publishing the desired binding. A concurrent
+                    // close removes it only after this insertion, so a late open cannot leave
+                    // a desired entry behind after the handle was closed.
+                    self.registry.bind(self, &attachment);
+                }
+            }
+            valid
+        };
+        if valid && reason.is_none() {
+            if let Some(ended) = attachment.end() {
+                self.attachment_ended(&generation, attachment.id, ended);
+            }
+            self.lifecycle.changed.send_replace(());
+            return Ok(true);
+        }
+        self.lifecycle.changed.send_replace(());
+        close_attachment(
+            attachment.clone(),
+            self.client.inner.connector.request_timeout(),
+        )
+        .await
+        .discarded("a restoration that lost its handle releases its new attachment");
+        self.registry.closed(&attachment.generation, attachment.id);
+        Ok(false)
+    }
+
+    async fn attachment(&self) -> error_stack::Result<Arc<ProducerAttachment>, ProducerError> {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let mut changed = self.lifecycle.changed.subscribe();
+            if let Some(attachment) = self.current() {
+                if let Some(end) = attachment.end() {
+                    self.attachment_ended(&attachment.generation, attachment.id, end);
+                    continue;
+                }
+                return Ok(attachment);
+            }
+            if let Some(end) = self.end() {
+                return Err(Report::new(ProducerError::Ended(end)));
+            }
+            let recovered = self.client.recover_session(RecoveryMode::IfClosed).await;
+            if !matches!(recovered, Ok(SessionRecovery::Ready)) {
+                return Err(Report::new(ProducerError::SessionUnavailable));
+            }
+            self.client.restore_interrupted_endpoints().await;
+            if let Some(attachment) = self.current() {
+                return Ok(attachment);
+            }
+            changed
+                .changed()
+                .await
+                .discarded("the producer still holds its restoration notifier");
+        }
+    }
+
+    fn stop(&self) -> Option<Arc<ProducerAttachment>> {
+        let current = self.lifecycle.close();
+        self.registry.unbind(self, current.as_deref());
+        if let Some(attachment) = &current {
+            self.registry.closed(&attachment.generation, attachment.id);
+        }
+        self.slots.close();
+        current
+    }
+}
+
+impl ProducerAttachment {
+    fn opened(
+        sent: Answered,
+        request: &OpenIngestorRequest,
+        exchange: Arc<ExchangeRequests>,
+        generation: Arc<()>,
+        registry: &ProducerRegistry,
+        deadline: Duration,
+    ) -> error_stack::Result<Arc<Self>, ClientError> {
         let Answered { request_id, body } = sent;
         let ReplyBody::OpenIngestor(outcome) = body else {
             return Err(Report::new(ClientError::unexpected_reply(
@@ -509,31 +994,36 @@ impl ProducerInner {
             // The exchange ended between the reply and this read, which ended the producer too.
             return Err(Report::new(ClientError::SessionClosed));
         };
-        let description = opened.description;
-        let batches: usize = description.grant.batches.get().arch_into();
-        // A grant beyond what one producer may ask for is not an answer to this open.
-        if description.grant.bytes.get() > CLIENT_PRODUCER_SESSION_BYTES {
+        let attachment = Arc::new(Self {
+            id,
+            description: opened.description,
+            exchange,
+            generation,
+            signals,
+        });
+        // An inconsistent reply may still represent a server attachment. Release that attachment
+        // before returning the protocol error, including when this was a cancelled initial open.
+        if opened.domain != request.domain
+            || opened.ingestor != request.ingestor
+            || attachment.description.grant.bytes.get() > CLIENT_PRODUCER_SESSION_BYTES
+            || attachment.description.grant.batches > request.limits.batches
+            || attachment.description.grant.bytes > request.limits.bytes
+        {
+            Self::discard(attachment, registry.clone(), deadline);
             return Err(Report::new(ClientError::UnexpectedReply {
                 request: RequestKind::OpenIngestor,
             }));
         }
-        let bytes = usize::try_from(description.grant.bytes.get())
-            .verified("the granted bytes are within the session budget, checked above");
-        let inner = ProducerInner {
-            id,
-            domain,
-            ingestor,
-            slots: SubmissionSlots::new(batches, bytes),
-            description,
-            exchange,
-            generation,
-            registry,
-            signals,
-        };
-        Ok(Producer {
-            inner: Arc::new(inner),
-            closed: false,
-        })
+        Ok(attachment)
+    }
+
+    fn discard(attachment: Arc<Self>, registry: ProducerRegistry, deadline: Duration) {
+        nervix_primitives::task::spawn(async move {
+            close_attachment(attachment.clone(), deadline)
+                .await
+                .discarded("an invalid producer open still releases its attachment");
+            registry.closed(&attachment.generation, attachment.id);
+        });
     }
 
     fn end(&self) -> Option<ProducerEnd> {
@@ -651,7 +1141,10 @@ fn next_backoff(current: Duration, maximum: Duration) -> Duration {
 impl Producer {
     /// The producer's identity within its session.
     pub fn id(&self) -> ProducerId {
-        self.inner.id
+        match self.inner.current() {
+            Some(attachment) => attachment.id,
+            None => self.inner.initial_id,
+        }
     }
 
     pub fn domain(&self) -> &DomainName {
@@ -662,15 +1155,24 @@ impl Producer {
         &self.inner.ingestor
     }
 
-    /// Everything the open established: the schema, the domain generation, the endpoint contract,
-    /// the attachment, the policy and the grant.
+    /// The original open description. Its schema, domain generation, endpoint contract, policy,
+    /// and grant are pinned across restoration. Its attachment and admission are snapshots of the
+    /// first open; use [`Producer::id`] and [`Producer::admission`] for their current values.
     pub fn description(&self) -> &ClientProducerDescription {
-        &self.inner.description
+        &self.inner.pinned
+    }
+
+    /// Whether the handle has an attachment, is waiting for one, or needs an explicit new open.
+    pub fn connection(&self) -> ProducerConnection {
+        self.inner.connection()
     }
 
     /// Whether the producer's batches are admitted right now.
     pub fn admission(&self) -> ClientProducerAdmission {
-        *self.inner.signals.admission.borrow()
+        let Some(attachment) = self.inner.current() else {
+            return ClientProducerAdmission::Suspended;
+        };
+        *attachment.signals.admission.borrow()
     }
 
     /// How the producer ended, or `None` while it is open.
@@ -702,44 +1204,52 @@ impl Producer {
         if ipc.is_empty() {
             return Err(Report::new(ProducerError::EmptyBatch));
         }
-        let limit = self.inner.description.grant.max_batch_bytes.get();
-        let size: u64 = ipc.len().arch_into();
-        if size > limit {
-            return Err(Report::new(ProducerError::BatchTooLarge {
-                size: ipc.len(),
-                limit,
-            }));
-        }
-        if let Some(ended) = self.inner.end() {
-            return Err(Report::new(ProducerError::Ended(ended)));
-        }
-        let bytes = u32::try_from(ipc.len()).assured(
-            "a batch within the granted bytes, which one session's budget bounds, fits u32",
-        );
-        let credit = {
-            let mut end = self.inner.signals.end.subscribe();
-            nervix_primitives::select! {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let attachment = self.inner.attachment().await?;
+            let limit = attachment.description.grant.max_batch_bytes.get();
+            let size: u64 = ipc.len().arch_into();
+            if size > limit {
+                return Err(Report::new(ProducerError::BatchTooLarge {
+                    size: ipc.len(),
+                    limit,
+                }));
+            }
+            let bytes = u32::try_from(ipc.len()).assured(
+                "a batch within the granted bytes, which one session's budget bounds, fits u32",
+            );
+            if let Some(ended) = attachment.end() {
+                self.inner
+                    .attachment_ended(&attachment.generation, attachment.id, ended);
+                continue;
+            }
+            let mut end = attachment.signals.end.subscribe();
+            let credit = nervix_primitives::select! {
                 acquired = self.inner.slots.credit(bytes) => {
                     let Some(credit) = acquired else {
-                        let ended = self.inner.end().unwrap_or(ProducerEnd::Closed);
+                        let ended = attachment.end().unwrap_or(ProducerEnd::Closed);
                         return Err(Report::new(ProducerError::Ended(ended)));
                     };
-                    credit
+                    Some(credit)
                 }
                 changed = end.changed() => {
                     changed.assured("the producer holds the sender of its end");
-                    let ended = self.inner.end().unwrap_or(ProducerEnd::Closed);
-                    return Err(Report::new(ProducerError::Ended(ended)));
+                    let ended = attachment.end().unwrap_or(ProducerEnd::Closed);
+                    self.inner.attachment_ended(&attachment.generation, attachment.id, ended);
+                    None
                 }
-            }
-        };
-        let id = self.inner.slots.hold();
-        let inner = self.inner.clone();
-        nervix_primitives::task::spawn(async move {
-            let outcome = inner.deliver(ipc).await;
-            inner.slots.resolve(id, outcome, credit);
-        });
-        Ok(id)
+            };
+            let Some(credit) = credit else {
+                continue;
+            };
+            let id = self.inner.slots.hold();
+            let slots = self.inner.clone();
+            nervix_primitives::task::spawn(async move {
+                let outcome = attachment.deliver(ipc).await;
+                slots.slots.resolve(id, outcome, credit);
+            });
+            return Ok(id);
+        }
     }
 
     /// Waits for a submission's terminal outcome and takes it, which returns its credit.
@@ -769,27 +1279,21 @@ impl Producer {
     /// producer sent has its outcome by then.
     pub async fn close(mut self) -> error_stack::Result<(), ClientError> {
         self.closed = true;
-        let request = ClientRequest::CloseIngestor(CloseIngestorRequest {
-            producer: self.inner.id,
+        let Some(attachment) = self.inner.stop() else {
+            return Ok(());
+        };
+        let deadline = self.inner.client.inner.connector.request_timeout();
+        let (answer, answered) = oneshot::channel();
+        nervix_primitives::task::spawn(async move {
+            let result = close_attachment(attachment, deadline).await;
+            answer
+                .send(result)
+                .discarded("a cancelled close still releases its attachment");
         });
-        let answered =
-            request_on_exchange(&self.inner.exchange, request, RequestKind::CloseIngestor).await?;
-        self.inner.stop();
-        match answered.body {
-            ReplyBody::CloseIngestor(_) => Ok(()),
-            other => Err(Report::new(ClientError::unexpected_reply(
-                RequestKind::CloseIngestor,
-                other,
-            ))),
+        match answered.await {
+            Ok(result) => result,
+            Err(_) => Err(Report::new(ClientError::SessionClosed)),
         }
-    }
-}
-
-impl ProducerInner {
-    /// Ends the producer on the client: credit waits stop, and the registry stops following it.
-    fn stop(&self) {
-        self.registry.closed(&self.generation, self.id);
-        self.slots.close();
     }
 }
 
@@ -798,15 +1302,16 @@ impl Drop for Producer {
         if self.closed {
             return;
         }
-        self.inner.stop();
+        let Some(attachment) = self.inner.stop() else {
+            return;
+        };
         let Ok(runtime) = nervix_primitives::runtime::Handle::try_current() else {
             return;
         };
-        let inner = self.inner.clone();
+        let deadline = self.inner.client.inner.connector.request_timeout();
         runtime.spawn(async move {
-            let request = ClientRequest::CloseIngestor(CloseIngestorRequest { producer: inner.id });
             // A producer dropped by its application is released without anyone waiting for it.
-            request_on_exchange(&inner.exchange, request, RequestKind::CloseIngestor)
+            close_attachment(attachment, deadline)
                 .await
                 .discarded("a dropped producer's close has nobody left to tell");
         });
@@ -875,6 +1380,64 @@ mod arrow_batch {
             }
             ProducerBatch::from_record_batch(batch)
         }
+    }
+}
+
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_tests {
+    use super::*;
+    use crate::shuttle_test::check_random_and_pct;
+
+    #[test]
+    fn shuttle_close_fences_a_producer_restore_started_on_the_same_exchange() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(async {
+                let lifecycle = StdArc::new(ProducerLifecycle::new(ProducerPhase::Interrupted));
+                let generation = Arc::new(());
+                let restoring = {
+                    let lifecycle = lifecycle.clone();
+                    let generation = generation.clone();
+                    nervix_primitives::task::spawn(
+                        async move { lifecycle.begin_restore(&generation) },
+                    )
+                };
+                let closing = {
+                    let lifecycle = lifecycle.clone();
+                    nervix_primitives::task::spawn(async move { lifecycle.close() })
+                };
+                assert!(restoring.await.is_ok());
+                assert!(matches!(closing.await, Ok(None)));
+                assert_eq!(lifecycle.connection(), ProducerConnection::Closed);
+                assert!(!lifecycle.begin_restore(&Arc::new(())));
+            });
+        });
+    }
+
+    #[test]
+    fn shuttle_close_fences_a_producer_restore_interrupted_by_another_loss() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(async {
+                let generation = Arc::new(());
+                let lifecycle = StdArc::new(ProducerLifecycle::new(ProducerPhase::Restoring(
+                    generation.clone(),
+                )));
+                let ending = {
+                    let lifecycle = lifecycle.clone();
+                    let generation = generation.clone();
+                    nervix_primitives::task::spawn(async move {
+                        lifecycle.exchange_ended(&generation);
+                    })
+                };
+                let closing = {
+                    let lifecycle = lifecycle.clone();
+                    nervix_primitives::task::spawn(async move { lifecycle.close() })
+                };
+                assert!(ending.await.is_ok());
+                assert!(matches!(closing.await, Ok(None)));
+                assert_eq!(lifecycle.connection(), ProducerConnection::Closed);
+                assert!(!lifecycle.begin_restore(&Arc::new(())));
+            });
+        });
     }
 }
 

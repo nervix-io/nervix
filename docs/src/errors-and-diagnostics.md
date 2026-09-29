@@ -155,6 +155,22 @@ failures and do not become command dispositions. OTEL gRPC reports a failed look
 connection through its existing infrastructure export failure; the emitter host keeps the batch
 and its acknowledgement under the declared retry policy. No record rejection is inferred from DNS.
 
+Native endpoint recovery keeps failure states distinct. A lost producer submission resolves to
+`ProducerOutcome::OutcomeUnknown(SessionLost)` when its frame was sent but no outcome arrived; the
+client never calls that batch not admitted or replays it automatically. A consumer read crossing a
+session gap returns `ClientError::ConsumerInterrupted` before any batch from the replacement
+attachment. `ClientError::ConsumerReopenRequired` names a changed, stopped or removed endpoint that
+needs a fresh application open; `ConsumerSessionUnavailable` means the bounded reconnect attempt
+did not establish a session. A delivery from a revoked attachment returns
+`DeliveryReferenceExpired` before settlement, while `SettlementUnknown` means a settlement request
+may have reached the server but its answer was lost. The application must resolve such an ACK with
+its own idempotency policy. None of these errors claims that a downstream effect did or did not
+occur.
+
+Before a restarted serving node has proved linearizable catch-up, both native endpoint opens use
+the ordinary retryable `EndpointUnavailable` refusal. They do not report a missing or stopped
+domain from that node's stale local snapshot as a terminal application error.
+
 A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar sink: a message
 larger than the maximum message size the broker announced, which carries the measured size of its
 metadata and payload and the limit as typed fields, or a message the broker answered with

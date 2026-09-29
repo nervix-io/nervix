@@ -17,7 +17,8 @@ use nervix_client_wire::{
     SettleEmitterBatchOutcome, SettleEmitterBatchRequest,
 };
 use nervix_models::{
-    CLIENT_CONSUMER_SESSION_BYTES, DomainStatus, EmitSink, MAX_CLIENT_CONSUMERS_PER_SESSION,
+    CLIENT_CONSUMER_SESSION_BYTES, ClientEndpointContract, DomainStatus, EmitSink, FlushPolicy,
+    MAX_CLIENT_CONSUMERS_PER_SESSION,
 };
 use nervix_primitives::sync::{
     Mutex as AsyncMutex,
@@ -142,6 +143,12 @@ impl SessionConsumers {
             ));
         }
         let service = &shared.service;
+        if !service.inner.runtime_admission.is_admitted() {
+            return Err(refuse(
+                EmitterOpenRefusal::EndpointUnavailable,
+                "the serving node is catching up with committed domain state",
+            ));
+        }
         let Some(domain_state) = service.inner.consensus.current_domain(&open.domain).await else {
             return Err(refuse(
                 EmitterOpenRefusal::DomainNotFound,
@@ -177,6 +184,27 @@ impl SessionConsumers {
                 "emitter has no execution owner",
             ));
         };
+        let mut contract_model = model;
+        // A flush-only retuning keeps the endpoint; normalize that cadence before hashing the
+        // construction, publishing and acknowledgement contract.
+        contract_model.flush_policy = FlushPolicy::Immediate;
+        let canonical = contract_model.to_canonical_nspl().map_err(|_| {
+            refuse(
+                EmitterOpenRefusal::EndpointUnavailable,
+                "emitter contract could not be rendered",
+            )
+        })?;
+        let fields = serde_json::to_vec(&open.expected_fields).map_err(|_| {
+            refuse(
+                EmitterOpenRefusal::EndpointUnavailable,
+                "emitter output fields could not be fingerprinted",
+            )
+        })?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(canonical.as_bytes());
+        hasher.update(&[0xff]);
+        hasher.update(&fields);
+        let contract = ClientEndpointContract::from_digest(*hasher.finalize().as_bytes());
         let capacity = self
             .reserve(open.limits.bytes.get())
             .map_err(|why| (why, "session consumer budget is full".to_string()))?;
@@ -227,6 +255,8 @@ impl SessionConsumers {
             domain: open.domain,
             emitter: open.emitter,
             fields: description.fields,
+            generation: domain_state.start_version,
+            contract,
             window: description.window,
             ack_timeout: description.ack_timeout,
             retry_backoff: description.retry_backoff,

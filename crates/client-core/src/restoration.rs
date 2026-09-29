@@ -1,5 +1,7 @@
-//! Restoring on a new exchange what a client holds: the domain clocks it follows and the
-//! subscriptions the server acknowledged.
+//! Restoring on a new exchange what a client holds: domain clocks, subscriptions, and native
+//! producer and consumer endpoint attachments.
+//!
+//! Layer: edges.
 //!
 //! - **Owns.** Sending the restoration requests of a new exchange in the order the protocol
 //!   requires, waiting for their replies, and sending a restoration the exchange refused again
@@ -10,32 +12,36 @@
 //!   or how the exchange routes its frames.
 //!
 //! Clocks are attached before the new exchange is published, so no other request of the client
-//! precedes them on it. Subscriptions are opened again once the previous exchange has ended, which
-//! is what interrupts the subscriptions it held. Both are sent before the reconnect returns, and so
-//! before the transaction the reconnect attaches next: a session that holds a transaction refuses
-//! them.
+//! precedes them on it. Subscriptions and native endpoints are opened again once the previous
+//! exchange has ended and interrupted its attachments. Their opens are sent before reconnect
+//! returns, and so before the transaction it attaches next: a session holding a transaction
+//! refuses them.
 //!
-//! The exchange reader applies every reply to the followed clocks and desired subscriptions as it
-//! arrives. A restoration task only waits for the replies of its own requests, to report a refused
-//! restoration and to send it again for as long as the exchange stays open.
+//! The exchange reader applies replies to followed clocks and desired subscriptions as they
+//! arrive. Each endpoint's restoration task checks its own open reply against the pinned contract
+//! before publishing a new attachment. A restoration task waits for the replies of its own
+//! requests and sends a transient refusal again while the exchange stays open.
 
-use std::time::Duration;
+use std::{sync::Arc as StdArc, time::Duration};
 
 use ahash::HashSet;
 use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_client_wire::{
-    AttachDomainClockRequest, ClientMessage, ClientRequest, DomainClockAttachDisposition,
-    ReplyBody, SubscribeDisposition,
+    AttachDomainClockRequest, ClientMessage, ClientRequest, ConsumerId,
+    DomainClockAttachDisposition, OpenEmitterDisposition, OpenIngestorDisposition, ReplyBody,
+    SubscribeDisposition,
 };
 use nervix_models::DomainName;
 use tokio::time::sleep;
 use triomphe::Arc;
 
 use crate::{
+    consumer::ConsumerHandle,
     domain_clock::DomainClockAttachments,
     error::{ClientError, RequestKind},
     exchange::{EventSinks, Exchange, ExchangeRequests, PendingRequest, SESSION_LIMITS},
+    producer::{Answered, ProducerInner},
     subscriptions::{DesiredSubscriptions, RestoreAttempt},
 };
 
@@ -154,6 +160,8 @@ pub(crate) struct Restoration {
     attached: HashSet<DomainName>,
     clocks: Vec<ClockRestoration>,
     subscriptions: Vec<SubscriptionRestoration>,
+    producers: Vec<ProducerRestoration>,
+    consumers: Vec<ConsumerRestoration>,
 }
 
 /// The attach request restoring one followed clock, as it was sent.
@@ -165,6 +173,16 @@ struct ClockRestoration {
 /// The subscribe request restoring one desired subscription, as it was sent.
 struct SubscriptionRestoration {
     attempt: RestoreAttempt,
+    sent: error_stack::Result<PendingRequest, ClientError>,
+}
+
+struct ProducerRestoration {
+    handle: StdArc<ProducerInner>,
+    sent: error_stack::Result<PendingRequest, ClientError>,
+}
+
+struct ConsumerRestoration {
+    handle: StdArc<ConsumerHandle>,
     sent: error_stack::Result<PendingRequest, ClientError>,
 }
 
@@ -180,6 +198,8 @@ impl Restoration {
             attached: HashSet::default(),
             clocks: Vec::new(),
             subscriptions: Vec::new(),
+            producers: Vec::new(),
+            consumers: Vec::new(),
         }
     }
 
@@ -224,6 +244,35 @@ impl Restoration {
         }
     }
 
+    /// Opens every desired producer whose prior attachment was interrupted. The open reply is
+    /// fenced by its exchange and checked against the original endpoint contract before the
+    /// application may send through it.
+    pub(crate) async fn open_producers(&mut self) {
+        for handle in self.sinks.producers.restorable() {
+            nervix_primitives::task::consume_budget().await;
+            let Some(request) = handle.begin_restore(&self.generation) else {
+                continue;
+            };
+            let sent = self
+                .channel
+                .send(ClientRequest::OpenIngestor(request))
+                .await;
+            self.producers.push(ProducerRestoration { handle, sent });
+        }
+    }
+
+    /// Restores native emitter consumers with fresh request identities on this exchange.
+    pub(crate) async fn open_consumers(&mut self) {
+        for handle in self.sinks.consumers.restorable() {
+            nervix_primitives::task::consume_budget().await;
+            let Some(request) = handle.begin_restore(&self.generation) else {
+                continue;
+            };
+            let sent = self.channel.send(ClientRequest::OpenEmitter(request)).await;
+            self.consumers.push(ConsumerRestoration { handle, sent });
+        }
+    }
+
     /// Waits for every reply on a task of its own, which sends a refused restoration again for
     /// as long as the exchange stays open.
     pub(crate) fn follow(self) {
@@ -242,6 +291,168 @@ impl Restoration {
                 generation: self.generation.clone(),
             };
             nervix_primitives::task::spawn(follower.run(subscription.attempt, subscription.sent));
+        }
+        for producer in self.producers {
+            let follower = ProducerFollower {
+                channel: self.channel.clone(),
+                generation: self.generation.clone(),
+                handle: producer.handle,
+            };
+            nervix_primitives::task::spawn(follower.run(producer.sent));
+        }
+        for consumer in self.consumers {
+            let follower = ConsumerFollower {
+                channel: self.channel.clone(),
+                generation: self.generation.clone(),
+                handle: consumer.handle,
+            };
+            nervix_primitives::task::spawn(follower.run(consumer.sent));
+        }
+    }
+}
+
+struct ConsumerFollower {
+    channel: RestorationChannel,
+    generation: Arc<()>,
+    handle: StdArc<ConsumerHandle>,
+}
+
+impl ConsumerFollower {
+    async fn run(self, sent: error_stack::Result<PendingRequest, ClientError>) {
+        let mut sent = sent;
+        let mut delay = RestorationDelay::default();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let request_id = sent.as_ref().ok().map(|pending| pending.request_id);
+            let reply = self.channel.reply(sent, RequestKind::OpenEmitter).await;
+            let retry = match reply {
+                Ok(ReplyBody::OpenEmitter(outcome)) => match outcome.disposition {
+                    OpenEmitterDisposition::Opened(opened) => {
+                        let Some(request_id) = request_id else {
+                            self.handle.restoration_failed(&self.generation);
+                            return;
+                        };
+                        self.handle
+                            .restored(
+                                ConsumerId::opened_by(request_id),
+                                *opened,
+                                self.channel.requests.clone(),
+                                self.generation.clone(),
+                            )
+                            .await;
+                        return;
+                    }
+                    OpenEmitterDisposition::Refused(refusal) => {
+                        self.handle.restoration_refused(&self.generation, refusal)
+                    }
+                },
+                Ok(_) => {
+                    self.handle.restoration_failed(&self.generation);
+                    return;
+                }
+                Err(report) if report.current_context().retryable_session_failure() => {
+                    self.handle.exchange_ended(&self.generation);
+                    return;
+                }
+                Err(_) => {
+                    self.handle.restoration_failed(&self.generation);
+                    return;
+                }
+            };
+            if !retry || !self.channel.is_open() {
+                return;
+            }
+            let retry_after = delay.advance();
+            let mut changed = self.handle.watch();
+            nervix_primitives::select! {
+                () = sleep(retry_after) => {}
+                _ = changed.changed() => {}
+            }
+            if !self.handle.is_restoring(&self.generation) {
+                return;
+            }
+            sent = self
+                .channel
+                .send(ClientRequest::OpenEmitter(self.handle.restore_request()))
+                .await;
+        }
+    }
+}
+
+struct ProducerFollower {
+    channel: RestorationChannel,
+    generation: Arc<()>,
+    handle: StdArc<ProducerInner>,
+}
+
+impl ProducerFollower {
+    async fn run(self, sent: error_stack::Result<PendingRequest, ClientError>) {
+        let mut sent = sent;
+        let mut delay = RestorationDelay::default();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let request_id = sent.as_ref().ok().map(|pending| pending.request_id);
+            let reply = self.channel.reply(sent, RequestKind::OpenIngestor).await;
+            let retry = match reply {
+                Ok(ReplyBody::OpenIngestor(outcome)) => match outcome.disposition {
+                    OpenIngestorDisposition::Opened(opened) => {
+                        let Some(request_id) = request_id else {
+                            self.handle.restoration_failed(&self.generation);
+                            return;
+                        };
+                        let answer = Answered {
+                            request_id,
+                            body: ReplyBody::OpenIngestor(
+                                nervix_client_wire::OpenIngestorOutcome {
+                                    disposition: OpenIngestorDisposition::Opened(opened),
+                                    message: outcome.message,
+                                },
+                            ),
+                        };
+                        let restored = self
+                            .handle
+                            .restored(
+                                answer,
+                                self.channel.requests.clone(),
+                                self.generation.clone(),
+                            )
+                            .await;
+                        if restored.is_err() {
+                            self.handle.restoration_failed(&self.generation);
+                        }
+                        return;
+                    }
+                    OpenIngestorDisposition::Refused(refusal) => {
+                        self.handle.restoration_refused(&self.generation, refusal)
+                    }
+                },
+                Ok(_) => {
+                    self.handle.restoration_failed(&self.generation);
+                    return;
+                }
+                Err(report) if report.current_context().retryable_session_failure() => {
+                    self.handle.exchange_ended(&self.generation);
+                    return;
+                }
+                Err(_) => {
+                    self.handle.restoration_failed(&self.generation);
+                    return;
+                }
+            };
+            if !retry || !self.channel.is_open() {
+                return;
+            }
+            let retry_after = delay.advance();
+            let mut changed = self.handle.watch();
+            nervix_primitives::select! {
+                () = sleep(retry_after) => {}
+                _ = changed.changed() => {}
+            }
+            if !self.handle.is_restoring(&self.generation) {
+                return;
+            }
+            let request = ClientRequest::OpenIngestor(self.handle.restore_request());
+            sent = self.channel.send(request).await;
         }
     }
 }

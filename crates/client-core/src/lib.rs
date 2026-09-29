@@ -35,7 +35,7 @@ mod upload;
 pub use backup::BackupDownloadError;
 pub use client::{Client, ExecutionHandle};
 pub use connection::{ConnectDns, ConnectOptions, TlsRequirement};
-pub use consumer::{EmitterConsumer, EmitterDelivery};
+pub use consumer::{ConsumerConnection, ConsumerReopenReason, EmitterConsumer, EmitterDelivery};
 pub use domain_clock::{
     AttachedDomainClock, DomainClockEvent, DomainClockInterruption, DomainClockReadError,
     DomainClockRestorationFailure,
@@ -76,8 +76,8 @@ pub use nervix_models::{
 };
 pub use outcome::{CommandOutcome, ResourceUploadOutcome};
 pub use producer::{
-    PendingSubmission, Producer, ProducerBatch, ProducerEnd, ProducerError, ProducerOutcome,
-    SubmissionId, SubmissionUncertainty,
+    PendingSubmission, Producer, ProducerBatch, ProducerConnection, ProducerEnd, ProducerError,
+    ProducerOutcome, ProducerReopenReason, SubmissionId, SubmissionUncertainty,
 };
 pub use subscriptions::{
     SubscriptionInterruption, SubscriptionLifecycle, SubscriptionRestorationFailure,

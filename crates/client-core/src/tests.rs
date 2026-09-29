@@ -18,6 +18,8 @@ mod session;
 // The producer tests poll the client's own state against the wall clock, which a Shuttle build's
 // models do not keep outside a Shuttle test.
 #[cfg(not(feature = "shuttle"))]
+mod consumers;
+#[cfg(not(feature = "shuttle"))]
 mod producers;
 
 use std::{
@@ -295,7 +297,7 @@ fn client_reaching(
 }
 
 /// A client whose exchange lost its transport: every request finds nothing to send it on.
-fn test_client(domain_name: &str) -> Client {
+pub(crate) fn test_client(domain_name: &str) -> Client {
     let (frames, outbound) = mpsc::channel(1);
     drop(outbound);
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
@@ -402,6 +404,7 @@ fn reader_fixture(capacity: usize) -> ReaderFixture {
         domains,
         clocks: crate::domain_clock::DomainClockAttachments::new(),
         producers: crate::producer::ProducerRegistry::default(),
+        consumers: crate::consumer::DesiredConsumers::default(),
     };
     let generation = sinks.begin_generation();
     let reader = ExchangeReader::new(pending.clone(), sinks, generation);
@@ -1030,6 +1033,7 @@ async fn event_queue_counts_retained_bytes_as_well_as_records() {
         domains,
         clocks: crate::domain_clock::DomainClockAttachments::new(),
         producers: crate::producer::ProducerRegistry::default(),
+        consumers: crate::consumer::DesiredConsumers::default(),
     };
     let generation = sinks.begin_generation();
     notices.push(

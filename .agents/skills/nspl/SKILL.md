@@ -320,7 +320,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   Arrow, then explicitly ACKs, retries, or rejects each attempt. `ATTACHED` holds source ACKs
   until the application ACKs; `DETACHED` releases the source earlier. Retries preserve the bytes
   and delivery identity but use a fresh reference. Consumers are volatile across owner and
-  session loss; design application effects for duplicates. Read `Emitters` → `Client emitters`,
+  session loss; the Rust client may restore the same handle with a fresh attachment only when the
+  domain `START` generation and endpoint contract still match. The first read after a session gap
+  or endpoint relocation reports interruption, and an old delivery reference cannot ACK a
+  replacement attempt. Design
+  application effects for duplicates and uncertain ACK confirmation. Read `Emitters` → `Client emitters`,
   `Sessions` → `Emitter Consumers`, and the Client Implementation Manual for limits and recovery.
 - Request/response emitters do not take `ACK TIMEOUT`. When configuring SQS, Sentry, OTEL, or
   ClickHouse, put `timeout_ms` in the referenced client CONFIG when the request needs an explicit
@@ -411,7 +415,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   BACKOFF <d> MAX <d> ON QUIESCE SUSPEND`, with no client, codec, headers, or `NO_ACK`. Producers are
   opened through the client library or session protocol, not with a statement. Read `Ingestors` →
   `Client Ingestors` before explaining outcomes, limits, or what ends a producer, and never promise
-  that a batch whose outcome is unknown or failed had no effect.
+  that a batch whose outcome is unknown or failed had no effect. The Rust client restores a desired
+  producer across a session gap or relocation only while the domain `START` generation and endpoint
+  contract still match; it never resends a batch merely because its outcome is missing.
 - End every transport ingestor source specification with an explicit source-supported `ON QUIESCE`
   body immediately before `DECODE USING`. Include positive `MAX SIZE` and, outside `ENDPOINT`, an
   explicit `ON OVERFLOW DROP OLDEST|DROP NEWEST` for `BUFFER`; include `RETRY AFTER` for endpoint

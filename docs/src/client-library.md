@@ -387,9 +387,10 @@ suspended. It never replays a batch that failed or whose outcome is unknown. A b
 when the session ended is reported as `OutcomeUnknown` with `SubmissionUncertainty::SessionLost`,
 and one still waiting to be sent as not admitted. `Producer::admission()` tells whether batches are
 admitted now and `Producer::end()` how the producer ended: `Closed`, `Ended` with the server's
-reason, or `SessionLost`. This release restores no producer across a reconnect; the application
-opens another one, and `open_ingestor` reopens a lost session before it sends the open. Dropping a
-producer closes it without waiting.
+reason, or `ReopenRequired`. The same handle restores an attachment after reconnect only when the
+domain generation, endpoint contract, schema, policy and credit grant still match. `connection()`
+reports active, interrupted, restoring, reopen required or closed. A changed or removed endpoint
+requires the application to open another producer. Dropping a producer closes it without waiting.
 
 ## Emitter Consumers
 
@@ -425,9 +426,15 @@ consumer.close().await?;
 backoff. `delivery.reject(reason).await` sends one bounded, non-sensitive reason through the
 emitter's message error policy for all members. Each reassignment carries a new reference; a
 stale reference reports `StaleReference`. Reading, receiving, or decoding the batch is never an
-ACK. A consumer ends when its session or endpoint ends; it is not restored across reconnects.
-The application explicitly opens another one. The Rust client's exchange reader continues to
-route producer outcomes and command or clock replies while application processing awaits ACK.
+ACK. A server attachment ends with its session or endpoint. Applications using the sample loop
+should handle `ClientError::ConsumerInterrupted` explicitly: the first read after a session loss
+or endpoint relocation returns it, and later reads use a fresh attachment if its generation and
+contract still match. `connection()` reports its current state. A changed or removed endpoint
+returns `ClientError::ConsumerReopenRequired` and needs an explicit new open. An old delivery cannot
+ACK through the new attachment; its reference expires,
+and a settlement whose answer was lost returns `ClientError::SettlementUnknown`. The Rust client's
+exchange reader continues to route producer outcomes and command or clock replies while
+application processing awaits ACK.
 
 ## Transaction Handles And Attach
 
