@@ -4,7 +4,9 @@ use std::{num::NonZeroU32, time::Duration};
 
 use bytes::Bytes;
 use meticulous::OptionExt as _;
-use nervix_models::{AckWindow, ClientConsumerLimits, Timestamp};
+use nervix_models::{
+    AckWindow, ClientConsumerLimits, DomainName, EmitterName, RelayName, Timestamp,
+};
 use uuid::Uuid;
 
 use super::{
@@ -129,4 +131,139 @@ fn consumer_replies_round_trip_with_retained_arrow_body() {
         };
         assert_eq!(round_trip_reply(&reply), reply);
     }
+}
+
+#[test]
+fn bolero_native_emitter_frames_round_trip() {
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(128)
+        .for_each(|bytes: &[u8]| {
+            let byte = |index: usize| match bytes.get(index) {
+                Some(value) => *value,
+                None => 0,
+            };
+            let domain: DomainName = name(&format!("tenant_{}", byte(0)));
+            let emitter: EmitterName = name(&format!("output_{}", byte(1)));
+            let source_relay: RelayName = name(&format!("relay_{}", byte(2)));
+            let mut fields = producer_fields();
+            fields[0].optional = byte(3) & 1 != 0;
+            fields[1].sensitive = byte(3) & 2 != 0;
+            let limits = ClientConsumerLimits {
+                batches: NonZeroU32::new(1 + u32::from(byte(4)))
+                    .assured("one plus a byte is nonzero"),
+                bytes: non_zero(4096 + u64::from(byte(5))),
+            };
+            let opened_by = request(1 + u64::from(byte(6)));
+            let consumer = ConsumerId::opened_by(opened_by);
+            assert_eq!(consumer.open_request(), opened_by);
+            let identity = Uuid::from_bytes(std::array::from_fn(|index| byte(16 + index)));
+            let reference = Uuid::from_bytes(std::array::from_fn(|index| byte(32 + index)));
+            let reason = format!("application rejected {} 🚀", byte(7));
+            let requests = [
+                ClientRequest::OpenEmitter(OpenEmitterRequest {
+                    domain: domain.clone(),
+                    emitter: emitter.clone(),
+                    expected_fields: fields.clone(),
+                    limits,
+                }),
+                ClientRequest::ReadEmitterBatch(ReadEmitterBatchRequest { consumer }),
+                ClientRequest::SettleEmitterBatch(SettleEmitterBatchRequest {
+                    consumer,
+                    reference,
+                    decision: EmitterBatchDecision::Ack,
+                }),
+                ClientRequest::SettleEmitterBatch(SettleEmitterBatchRequest {
+                    consumer,
+                    reference,
+                    decision: EmitterBatchDecision::Retry,
+                }),
+                ClientRequest::SettleEmitterBatch(SettleEmitterBatchRequest {
+                    consumer,
+                    reference,
+                    decision: EmitterBatchDecision::Reject(reason.clone()),
+                }),
+                ClientRequest::CloseEmitter(CloseEmitterRequest { consumer }),
+            ];
+            for (index, request_body) in requests.into_iter().enumerate() {
+                let message = ClientMessage {
+                    request_id: request(300 + u64::try_from(index).expect("sample index fits")),
+                    request: request_body,
+                };
+                assert_eq!(round_trip_client(&message), message);
+            }
+
+            let ack_timeout = Duration::from_millis(1 + u64::from(byte(8)));
+            let retry_backoff = Duration::from_millis(1 + u64::from(byte(9)));
+            let retry_max_backoff = retry_backoff + Duration::from_millis(u64::from(byte(10)));
+            let mut replies = Vec::new();
+            for window in [
+                AckWindow::Sequential,
+                AckWindow::Parallel {
+                    max: non_zero(1 + u64::from(byte(11))),
+                },
+            ] {
+                replies.push(ReplyBody::OpenEmitter(OpenEmitterOutcome {
+                    disposition: OpenEmitterDisposition::Opened(Box::new(EmitterOpened {
+                        domain: domain.clone(),
+                        emitter: emitter.clone(),
+                        fields: fields.clone(),
+                        window,
+                        ack_timeout,
+                        retry_backoff,
+                        retry_max_backoff,
+                        granted: limits,
+                        max_batch_bytes: 1 + u64::from(byte(12)),
+                        max_batch_rows: 1 + u32::from(byte(13)),
+                    })),
+                    message: reason.clone(),
+                }));
+            }
+            for &refusal in crate::consumer::ALL_EMITTER_OPEN_REFUSALS {
+                replies.push(ReplyBody::OpenEmitter(OpenEmitterOutcome {
+                    disposition: OpenEmitterDisposition::Refused(refusal),
+                    message: reason.clone(),
+                }));
+            }
+            for branch_fingerprint in [None, Some([byte(14); 32])] {
+                replies.push(ReplyBody::ReadEmitterBatch(ReadEmitterBatchOutcome {
+                    disposition: ReadEmitterDisposition::Batch(EmitterBatchReceived {
+                        identity,
+                        reference,
+                        source_relay: source_relay.clone(),
+                        branch_fingerprint,
+                        batch: Bytes::from(vec![byte(48), byte(49), byte(50)]),
+                        members: 1 + u32::from(byte(51)),
+                        execution_now: Timestamp::from_unix_nanos(i64::from(i16::from_le_bytes([
+                            byte(52),
+                            byte(53),
+                        ]))),
+                    }),
+                    message: reason.clone(),
+                }));
+            }
+            replies.push(ReplyBody::ReadEmitterBatch(ReadEmitterBatchOutcome {
+                disposition: ReadEmitterDisposition::Ended,
+                message: reason.clone(),
+            }));
+            for &settlement in crate::consumer::ALL_EMITTER_SETTLEMENTS {
+                replies.push(ReplyBody::SettleEmitterBatch(SettleEmitterBatchOutcome {
+                    disposition: settlement,
+                    message: reason.clone(),
+                }));
+            }
+            for &disposition in crate::consumer::ALL_EMITTER_CLOSE_DISPOSITIONS {
+                replies.push(ReplyBody::CloseEmitter(CloseEmitterOutcome {
+                    disposition,
+                    message: reason.clone(),
+                }));
+            }
+            for (index, body) in replies.into_iter().enumerate() {
+                let reply = Reply {
+                    request_id: request(400 + u64::try_from(index).expect("sample index fits")),
+                    body,
+                };
+                assert_eq!(round_trip_reply(&reply), reply);
+            }
+        });
 }
