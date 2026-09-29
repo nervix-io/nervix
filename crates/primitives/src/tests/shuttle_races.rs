@@ -204,6 +204,23 @@ fn shuttle_subscribing_before_reading_never_misses_a_send() {
     shuttle::check_dfs(subscribe_then_read, None);
 }
 
+/// The last receiver is dropped while the sender waits for the channel to close. In every order the
+/// wait ends: it registers before it reads the receiver count, so a drop between the two still wakes
+/// it.
+fn the_last_receiver_is_dropped_while_the_sender_waits_to_close() {
+    let (sender, receiver) = watch::channel(0_u8);
+    let dropper = thread::spawn(move || drop(receiver));
+    block_on(sender.closed());
+    dropper
+        .join()
+        .assured("the dropper only drops a receiver, which cannot panic");
+}
+
+#[test]
+fn shuttle_closing_never_misses_the_last_receivers_drop() {
+    shuttle::check_dfs(the_last_receiver_is_dropped_while_the_sender_waits_to_close, None);
+}
+
 /// Two waiters are registered and the first is cancelled while a single notification is sent. In
 /// every order the other waiter completes: the notification chooses it, or chooses the cancelled
 /// waiter and passes on when that one is dropped.

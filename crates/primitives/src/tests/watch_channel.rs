@@ -139,6 +139,58 @@ pub(super) fn waiting_for_a_condition_returns_the_first_value_that_meets_it() {
     assert!(!receiver.has_changed().assured("the sender is alive"));
 }
 
+/// Waiting for a condition on a closed channel still checks the value it holds, and fails once no
+/// unseen value meets the condition.
+pub(super) fn waiting_for_a_condition_on_a_closed_channel_checks_the_value_it_holds() {
+    let (sender, mut receiver) = watch::channel(0_u8);
+    sender.send_replace(1);
+    drop(sender);
+    {
+        let mut met = pin!(receiver.wait_for(|value| *value == 1));
+        let outcome = ready(
+            poll_once(met.as_mut()),
+            "the held value meets the condition at once",
+        );
+        assert_eq!(*outcome.assured("the held value meets the condition"), 1);
+    }
+    let mut unmet = pin!(receiver.wait_for(|value| *value == 2));
+    let outcome = ready(
+        poll_once(unmet.as_mut()),
+        "a closed channel ends the wait at once",
+    );
+    assert!(outcome.is_err());
+}
+
+/// Endpoints know their channel: a clone shares it, and another channel's endpoint does not.
+pub(super) fn endpoints_know_their_channel() {
+    let (sender, receiver) = watch::channel(0_u8);
+    let (other_sender, other_receiver) = watch::channel(0_u8);
+    assert!(sender.same_channel(&sender.clone()));
+    assert!(!sender.same_channel(&other_sender));
+    assert!(receiver.same_channel(&receiver.clone()));
+    assert!(!receiver.same_channel(&other_receiver));
+}
+
+/// A default sender holds the default value, an endpoint can be debugged, and the errors read the
+/// same in every mode.
+pub(super) fn a_default_sender_holds_the_default_value_and_errors_read_alike() {
+    let sender = watch::Sender::<u8>::default();
+    assert_eq!(*sender.borrow(), 0);
+    assert!(format!("{sender:?}").contains("Sender"));
+    let Err(failed) = sender.send(1) else {
+        panic!("a send without receivers fails");
+    };
+    assert_eq!(failed.to_string(), "channel closed");
+    assert_eq!(format!("{failed:?}"), "SendError { .. }");
+
+    let (closing, receiver) = watch::channel(0_u8);
+    drop(closing);
+    let Err(closed) = receiver.has_changed() else {
+        panic!("a channel without senders is closed");
+    };
+    assert_eq!(closed.to_string(), "channel closed");
+}
+
 /// The sender's `closed` completes once every receiver is dropped.
 pub(super) fn closing_completes_when_every_receiver_is_dropped() {
     let (sender, receiver) = watch::channel(0_u8);
@@ -161,5 +213,8 @@ pub(super) fn keeps_the_channel_contract() {
     sending_without_receivers_fails_and_replacing_succeeds();
     a_conditional_send_notifies_only_a_change();
     waiting_for_a_condition_returns_the_first_value_that_meets_it();
+    waiting_for_a_condition_on_a_closed_channel_checks_the_value_it_holds();
+    endpoints_know_their_channel();
+    a_default_sender_holds_the_default_value_and_errors_read_alike();
     closing_completes_when_every_receiver_is_dropped();
 }

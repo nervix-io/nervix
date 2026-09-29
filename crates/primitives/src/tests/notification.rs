@@ -8,12 +8,16 @@
 use std::{
     future::Future,
     pin::{Pin, pin},
-    task::{Context, Poll, Waker},
+    sync::Arc,
+    task::{Context, Poll, Wake, Waker},
 };
 
 use meticulous::OptionExt as _;
 
-use crate::sync::Notify;
+use crate::sync::{
+    Notify,
+    atomic::{AtomicUsize, Ordering},
+};
 
 /// Poll `future` once, with a waker that does nothing.
 pub(super) fn poll_once<F: Future + ?Sized>(future: Pin<&mut F>) -> Poll<F::Output> {
@@ -131,6 +135,55 @@ pub(super) fn a_dropped_waiting_future_leaves_the_wait_list() {
     assert!(poll_once(later.as_mut()).is_ready());
 }
 
+/// A future that observed its notification stays complete: enabling or polling it again completes
+/// at once.
+pub(super) fn an_observed_notification_stays_observed() {
+    let notify = Notify::new();
+    notify.notify_one();
+    let mut observed = pin!(notify.notified());
+    assert!(observed.as_mut().enable());
+    assert!(poll_once(observed.as_mut()).is_ready());
+    assert!(observed.as_mut().enable());
+}
+
+/// Counts the wakes of the waker it backs.
+#[derive(Default)]
+struct WakeCount(AtomicUsize);
+
+impl WakeCount {
+    fn count(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl Wake for WakeCount {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// The notification a dropped chosen future passes on wakes the next registered future that waits
+/// in a poll.
+pub(super) fn a_passed_on_notification_wakes_the_next_waiter() {
+    let notify = Notify::new();
+    let wakes = Arc::new(WakeCount::default());
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut waiting = Context::from_waker(&waker);
+    let mut chosen = Box::pin(notify.notified());
+    let mut next = pin!(notify.notified());
+    assert!(poll_once(chosen.as_mut()).is_pending());
+    assert!(next.as_mut().poll(&mut waiting).is_pending());
+    notify.notify_one();
+    assert_eq!(wakes.count(), 0);
+    drop(chosen);
+    assert_eq!(wakes.count(), 1);
+    assert!(poll_once(next.as_mut()).is_ready());
+}
+
 /// Every script of this contract, in one run.
 pub(super) fn keeps_the_registration_contract() {
     notify_waiters_reaches_every_future_created_before_it();
@@ -141,4 +194,6 @@ pub(super) fn keeps_the_registration_contract() {
     a_dropped_chosen_future_passes_its_notification_on();
     a_dropped_chosen_future_leaves_its_notification_as_the_permit();
     a_dropped_waiting_future_leaves_the_wait_list();
+    an_observed_notification_stays_observed();
+    a_passed_on_notification_wakes_the_next_waiter();
 }

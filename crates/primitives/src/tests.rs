@@ -14,6 +14,8 @@ mod notification;
 #[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
 mod shuttle_races;
 #[cfg(all(feature = "native", not(feature = "loom")))]
+mod tasks;
+#[cfg(all(feature = "native", not(feature = "loom")))]
 mod watch_channel;
 
 use std::{any::TypeId, ptr};
@@ -271,23 +273,10 @@ mod ordinary {
         assert_eq!(runtime.metrics().num_workers(), 2);
     }
 
-    /// An aborted task never completes, and dropping its abort-on-drop handle aborts it.
     #[cfg(feature = "native")]
     #[crate::test]
-    async fn dropping_an_abort_on_drop_handle_aborts_its_task() {
-        use meticulous::ResultExt as _;
-
-        let (release, released) = crate::sync::oneshot::channel::<()>();
-        let (finished, has_finished) = crate::sync::oneshot::channel::<()>();
-        let task = crate::task::spawn(async move {
-            released.await.assured("the sender waits for the abort");
-            finished.send(()).assured("the receiver waits for the task");
-        });
-        let handle = crate::task::AbortOnDropHandle::new(task);
-        drop(handle);
-        crate::task::yield_now().await;
-        assert!(release.send(()).is_err());
-        assert!(has_finished.await.is_err());
+    async fn an_abort_on_drop_handle_keeps_its_contract() {
+        super::tasks::an_abort_on_drop_handle_ends_its_task_on_request_and_when_dropped().await;
     }
 }
 
@@ -424,6 +413,20 @@ mod shuttle_mode {
     #[test]
     fn the_other_native_families_keep_their_contracts_under_shuttle() {
         shuttle::check_random(super::families::keep_their_contracts, 1);
+    }
+
+    /// The script spawns tasks, so it runs under several schedules: its outcomes hold in each.
+    #[cfg(feature = "native")]
+    #[test]
+    fn an_abort_on_drop_handle_keeps_its_contract_under_shuttle() {
+        shuttle::check_random(
+            || {
+                shuttle::future::block_on(
+                    super::tasks::an_abort_on_drop_handle_ends_its_task_on_request_and_when_dropped(),
+                );
+            },
+            16,
+        );
     }
 
     /// Each registration and notification of `Notify`, and each read of the watch channel's version

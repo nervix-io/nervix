@@ -4,7 +4,7 @@
 //! operating-system thread in ordinary execution and a modeled thread under Shuttle. The ordinary
 //! build runs the scripts directly and the Shuttle build inside a Shuttle execution.
 
-use std::{cell::Cell, pin::pin, sync::Arc};
+use std::{cell::Cell, collections::hash_map::RandomState, pin::pin, sync::Arc};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 
@@ -142,6 +142,27 @@ pub(super) fn a_map_entry_inserts_once() {
     assert_eq!(map.len(), 1);
 }
 
+/// A map built with a capacity or a hasher holds entries like any other, and iterating a borrowed
+/// map visits each entry once.
+pub(super) fn a_map_built_with_a_capacity_or_a_hasher_holds_its_entries() {
+    let presized: DashMap<u8, u8> = DashMap::with_capacity(4);
+    let hashed: DashMap<u8, u8, RandomState> = DashMap::with_hasher(RandomState::new());
+    let sized: DashMap<u8, u8, RandomState> =
+        DashMap::with_capacity_and_hasher(4, RandomState::new());
+    presized.insert(1, 10);
+    hashed.insert(2, 20);
+    sized.insert(3, 30);
+    sized.insert(4, 40);
+    assert_eq!(presized.get(&1).map(|entry| *entry), Some(10));
+    assert_eq!(hashed.get(&2).map(|entry| *entry), Some(20));
+    let mut visited = Vec::new();
+    for entry in &sized {
+        visited.push(*entry.key());
+    }
+    visited.sort_unstable();
+    assert_eq!(visited, [3, 4]);
+}
+
 /// A publication serves the latest value to every reader, and a cache follows it.
 pub(super) fn a_publication_serves_the_latest_value() {
     let published = Arc::new(ArcSwap::from_pointee(1_u8));
@@ -162,9 +183,25 @@ pub(super) fn a_publication_serves_the_latest_value() {
     assert_eq!(optional.load_full().map(|value| *value), Some(5));
 }
 
+/// A publication converts from the value it starts with, an optional one starts empty by default,
+/// and read-copy-update replaces the present value and returns the one it replaced.
+pub(super) fn a_publication_starts_from_a_value_and_updates_in_place() {
+    let converted = ArcSwap::from(Arc::new(8_u8));
+    assert_eq!(**converted.load(), 8);
+
+    let defaulted: ArcSwapOption<u8> = ArcSwapOption::default();
+    assert!(defaulted.load().is_none());
+    let present = ArcSwapOption::from(Some(Arc::new(9_u8)));
+    let replaced = present.rcu(|current| current.as_ref().map(|value| Arc::new(**value + 1)));
+    assert_eq!(replaced.map(|value| *value), Some(9));
+    assert_eq!(present.load_full().map(|value| *value), Some(10));
+}
+
 /// A token equals its clones and not its children; cancelling it cancels its children, and running
 /// a future under a cancelled token ends it without its output.
 pub(super) fn a_cancellation_token_has_clone_identity_and_cancels_its_children() {
+    let defaulted = CancellationToken::default();
+    assert!(!defaulted.is_cancelled());
     let token = CancellationToken::new();
     let clone = token.clone();
     let child = token.child_token();
@@ -186,6 +223,11 @@ pub(super) fn a_cancellation_token_has_clone_identity_and_cancels_its_children()
     token.cancel();
     assert!(clone.is_cancelled());
     assert!(child.is_cancelled());
+    let mut waited = pin!(clone.cancelled_owned());
+    ready(
+        poll_once(waited.as_mut()),
+        "the wait of a cancelled token ends at once",
+    );
     let mut ended = pin!(token.run_until_cancelled_owned(std::future::pending::<u8>()));
     let output = ready(
         poll_once(ended.as_mut()),
@@ -230,7 +272,9 @@ pub(super) fn keep_their_contracts() {
     a_queue_drains_in_order_after_it_closes();
     a_bounded_queue_refuses_a_value_past_its_capacity();
     a_map_entry_inserts_once();
+    a_map_built_with_a_capacity_or_a_hasher_holds_its_entries();
     a_publication_serves_the_latest_value();
+    a_publication_starts_from_a_value_and_updates_in_place();
     a_cancellation_token_has_clone_identity_and_cancels_its_children();
     a_detached_thread_runs_its_body();
     each_thread_sees_its_own_thread_local();
