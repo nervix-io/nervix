@@ -625,13 +625,13 @@ and these rules:
   error that names the restore's execution reference, the host MUST execute the same `nx_execution`
   again, which streams the archive again and joins the restore or recovers its outcome.
 - **B-11.** A host that paces on a domain clock MUST read it with `nx_session_domain_clock` once
-  `ATTACH DOMAIN CLOCK;` completes, before it uses a tick, and MUST take the generation and mapping
-  of every later tick from the latest `NX_CLOCK_EVENT_STATE` event or a read taken after it, never
-  from a clock of another generation. After `NX_CLOCK_EVENT_INTERRUPTED` it MUST NOT use a tick until
-  the state event that follows reports the restored clock. After `NX_ERROR_CANCELLED` or
-  `NX_ERROR_DEADLINE` from an attach, it MUST execute the same `nx_execution` again, as B-1
-  requires, and read `nx_session_domain_clock` to learn whether the session follows the clock, since
-  that attempt is refused as already attached when the first one took effect. It MUST release every
+  `ATTACH DOMAIN CLOCK;` completes, before it uses a tick, and MUST hold every later tick to the
+  clock of the tick's generation as the latest `NX_CLOCK_EVENT_STATE` event, or a read taken after
+  it, reports that clock. After `NX_CLOCK_EVENT_INTERRUPTED` it MUST NOT assume that the clock it
+  read before the gap still holds. After `NX_ERROR_CANCELLED` or `NX_ERROR_DEADLINE` from an
+  attach, it MUST execute the same `nx_execution` again, as B-1 requires, and read
+  `nx_session_domain_clock` to learn whether the session follows the clock, since that attempt is
+  refused as already attached when the first one took effect. It MUST release every
   `nx_domain_clock` exactly once, and MAY release it on any thread. It SHOULD project logical time,
   waits, and admission with the `nx_domain_clock` projections rather than reimplement the mapping's
   rounding.
