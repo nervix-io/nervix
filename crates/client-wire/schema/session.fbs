@@ -1,8 +1,9 @@
 // The Nervix client session protocol.
 //
 // Every shape of the public client boundary is declared in this file, once. The root files
-// client_message.fbs, server_message.fbs, upload_message.fbs and upload_reply.fbs name the table a
-// frame is rooted at and the file identifier it carries; they declare no shapes of their own.
+// client_message.fbs, server_message.fbs, upload_message.fbs, upload_reply.fbs,
+// backup_download_request.fbs and backup_download_message.fbs name the table a frame is rooted at
+// and the file identifier it carries; they declare no shapes of their own.
 //
 // Framing
 //
@@ -13,6 +14,8 @@
 //   bidirectional stream of ClientMessage frames ("NXCM") answered by ServerMessage frames
 //   ("NXSM"). `/nervix.session.Session/UploadResource` is a client stream of UploadMessage frames
 //   ("NXUM") answered by exactly one UploadReply frame ("NXUR").
+//   `/nervix.session.Session/DownloadBackup` is one BackupDownloadRequest frame ("NXBQ") answered
+//   by a server stream of BackupDownloadMessage frames ("NXBD").
 // * WebSocket. Each binary message holds exactly one ClientMessage frame from the client or one
 //   ServerMessage frame from the server. A text message is a protocol violation.
 //
@@ -145,7 +148,11 @@ enum ChoiceTarget : ubyte {
   /// Configured VHOSTs in a domain.
   Vhost,
   /// Configured signaling protocols in a domain.
-  SignalingProtocol
+  SignalingProtocol,
+  /// Configured codecs in a domain.
+  Codec,
+  /// Fields of a codec's output schema. Requires a domain and then a codec model reference.
+  CodecField
 }
 
 enum DomainPaceChoice : ubyte {
@@ -1169,6 +1176,48 @@ table DomainClockObservation {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Backups
+// ---------------------------------------------------------------------------------------------
+
+/// Whether a backup archive carries the original bytes of every resource version.
+enum BackupResources : ubyte {
+  Included,
+  /// `WITHOUT RESOURCES`: every version's catalog metadata and checksums, without its bytes.
+  Omitted
+}
+
+/// One domain of a completed backup.
+table BackupDomainSummary {
+  domain: string (required);
+  /// The applied consensus revision the domain's configuration was read at.
+  revision: ulong;
+  /// The sections the archive holds for the domain.
+  sections: ulong;
+  /// The bytes those sections hold.
+  section_bytes: ulong;
+}
+
+/// The archive a completed BACKUP assembled, which the serving leader retains for download until
+/// a complete download collects it or `retained_until` passes.
+table BackupArchiveSummary {
+  /// The archive's exact size. Non-zero.
+  total_bytes: ulong;
+  /// The BLAKE3 digest of the whole archive.
+  digest: Fingerprint (required);
+  /// When the archive's contents were read, in nanoseconds since the Unix epoch.
+  captured_at: long;
+  /// The instant after which the archive can no longer be downloaded, in nanoseconds since the
+  /// Unix epoch.
+  retained_until: long;
+  /// Required.
+  resources: BackupResources = null;
+  /// The users the archive holds. Absent for a domain backup, which holds none.
+  users: ulong = null;
+  /// In strictly ascending domain name order.
+  domains: [BackupDomainSummary] (required);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Client requests
 // ---------------------------------------------------------------------------------------------
 
@@ -1387,6 +1436,9 @@ table CommandOutcome {
   /// Present when the command described every version of a resource, beside the text its message
   /// renders.
   resource: ResourceDescription;
+  /// Present when the command was a completed BACKUP. Download the archive with the command's
+  /// execution_reference.
+  backup: BackupArchiveSummary;
 }
 
 table TransactionAttached {
@@ -1963,6 +2015,67 @@ union UploadDisposition {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Backup download
+// ---------------------------------------------------------------------------------------------
+//
+// A download is one BackupDownloadRequest answered by a stream that is exactly one of:
+// BackupDownloadFailed; LeaderRedirect; or BackupArchiveStart, then BackupArchiveChunk frames whose
+// bytes add up to total_bytes, then BackupArchiveComplete. A stream may also end with
+// BackupDownloadFailed after its start, when the server cannot read the rest of the archive. A
+// stream that ends any other way was cut short; download again with the same reference.
+
+/// Asks for the archive a completed BACKUP retains, by that command's execution reference.
+table BackupDownloadRequest {
+  execution_reference: string (required);
+}
+
+/// The archive's size and digest, before its bytes.
+table BackupArchiveStart {
+  /// The archive's exact size. Non-zero.
+  total_bytes: ulong;
+  /// The BLAKE3 digest of the whole archive.
+  digest: Fingerprint (required);
+}
+
+/// Archive bytes, in order after BackupArchiveStart.
+table BackupArchiveChunk {
+  /// Never empty.
+  bytes: [ubyte] (required);
+}
+
+/// Every byte of the archive was sent, and the server collected it: a later download of the same
+/// reference is refused.
+table BackupArchiveComplete {}
+
+enum BackupDownloadFailure : ubyte {
+  /// The request is malformed.
+  InvalidRequest,
+  /// The serving node retains no archive under the reference: it assembled none, a complete
+  /// download already collected it, or the command is not a completed backup.
+  NotRetained,
+  /// The reference's retry validity ended, and the archive with it.
+  Expired,
+  /// Another user ran the backup.
+  NotOwner,
+  /// The serving node could not read its retained archive.
+  ReadFailed
+}
+
+table BackupDownloadFailed {
+  /// Required.
+  failure: BackupDownloadFailure = null;
+  message: string (required);
+}
+
+union BackupDownloadPart {
+  BackupArchiveStart,
+  BackupArchiveChunk,
+  BackupArchiveComplete,
+  BackupDownloadFailed,
+  LeaderRedirect
+}
+
+// ---------------------------------------------------------------------------------------------
 // Frame roots
 // ---------------------------------------------------------------------------------------------
 
@@ -1981,6 +2094,11 @@ table ServerMessage {
 /// Root of an upload stream frame ("NXUM").
 table UploadMessage {
   part: UploadPart (required);
+}
+
+/// Root of a backup download stream frame ("NXBD").
+table BackupDownloadMessage {
+  part: BackupDownloadPart (required);
 }
 
 /// Root of the frame that answers an upload stream ("NXUR").

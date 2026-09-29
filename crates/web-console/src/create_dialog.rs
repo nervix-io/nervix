@@ -39,6 +39,8 @@ mod codec_draft;
 mod codec_editor;
 mod endpoint_draft;
 mod endpoint_editor;
+mod hash_map_draft;
+mod hash_map_editor;
 mod relay_draft;
 mod relay_editor;
 mod resource_binding_draft;
@@ -50,6 +52,8 @@ mod signaling_draft;
 mod signaling_editor;
 mod subscription_draft;
 mod subscription_editor;
+mod udf_draft;
+mod udf_editor;
 mod vhost_draft;
 mod vhost_editor;
 #[cfg(test)]
@@ -64,6 +68,8 @@ use codec_draft::{CodecDraft, CodecDraftError, CodecFormatDraft, CodecFormatKind
 use codec_editor::CodecEditor;
 use endpoint_draft::{EndpointDraft, EndpointDraftError};
 use endpoint_editor::EndpointEditor;
+use hash_map_draft::{HashMapDraft, HashMapDraftError};
+use hash_map_editor::HashMapEditor;
 use relay_draft::{RelayDraft, RelayDraftError};
 use relay_editor::RelayEditor;
 use schema_draft::{SchemaDraftError, StructuredDrafts, WireFormat};
@@ -72,6 +78,8 @@ use signaling_draft::{SignalingDraft, SignalingDraftError, SignalingFormatDraft}
 use signaling_editor::SignalingEditor;
 use subscription_draft::{SubscriptionDraft, SubscriptionDraftError};
 use subscription_editor::SubscriptionEditor;
+use udf_draft::{UdfDraft, UdfDraftError};
+use udf_editor::UdfEditor;
 use vhost_draft::{VhostDraft, VhostDraftError};
 use vhost_editor::VhostEditor;
 
@@ -92,6 +100,8 @@ pub(crate) enum CreateKind {
     Client,
     Vhost,
     Endpoint,
+    HashMap,
+    Udf,
 }
 
 impl CreateKind {
@@ -112,6 +122,8 @@ impl CreateKind {
             Self::Client => "client",
             Self::Vhost => "VHOST",
             Self::Endpoint => "endpoint",
+            Self::HashMap => "hash map",
+            Self::Udf => "Roto UDF",
         }
     }
 
@@ -142,6 +154,7 @@ impl CreateKind {
             | Self::Client
             | Self::Vhost
             | Self::Endpoint => None,
+            Self::HashMap | Self::Udf => None,
         }
     }
 }
@@ -169,6 +182,10 @@ pub(crate) enum ChoiceControl {
     VhostVersion,
     EndpointVhost,
     EndpointSignaling,
+    HashResource,
+    HashVersion,
+    HashCodec,
+    HashKey,
 }
 
 impl ChoiceControl {
@@ -189,6 +206,9 @@ impl ChoiceControl {
             }
             Self::VhostResource | Self::VhostVersion => CreateKind::Vhost,
             Self::EndpointVhost | Self::EndpointSignaling => CreateKind::Endpoint,
+            Self::HashResource | Self::HashVersion | Self::HashCodec | Self::HashKey => {
+                CreateKind::HashMap
+            }
         }
     }
 }
@@ -254,6 +274,10 @@ struct ChoiceControls {
     vhost_version: ChoiceControlSignals,
     endpoint_vhost: ChoiceControlSignals,
     endpoint_signaling: ChoiceControlSignals,
+    hash_resource: ChoiceControlSignals,
+    hash_version: ChoiceControlSignals,
+    hash_codec: ChoiceControlSignals,
+    hash_key: ChoiceControlSignals,
 }
 
 impl ChoiceControls {
@@ -279,6 +303,10 @@ impl ChoiceControls {
             vhost_version: ChoiceControlSignals::new(),
             endpoint_vhost: ChoiceControlSignals::new(),
             endpoint_signaling: ChoiceControlSignals::new(),
+            hash_resource: ChoiceControlSignals::new(),
+            hash_version: ChoiceControlSignals::new(),
+            hash_codec: ChoiceControlSignals::new(),
+            hash_key: ChoiceControlSignals::new(),
         }
     }
 
@@ -304,6 +332,10 @@ impl ChoiceControls {
             ChoiceControl::VhostVersion => self.vhost_version,
             ChoiceControl::EndpointVhost => self.endpoint_vhost,
             ChoiceControl::EndpointSignaling => self.endpoint_signaling,
+            ChoiceControl::HashResource => self.hash_resource,
+            ChoiceControl::HashVersion => self.hash_version,
+            ChoiceControl::HashCodec => self.hash_codec,
+            ChoiceControl::HashKey => self.hash_key,
         }
     }
 }
@@ -589,6 +621,10 @@ enum CreateDraftError {
     Vhost(#[from] VhostDraftError),
     #[error("{0}")]
     Endpoint(#[from] EndpointDraftError),
+    #[error("{0}")]
+    HashMap(#[from] HashMapDraftError),
+    #[error("{0}")]
+    Udf(#[from] UdfDraftError),
     #[error("Canonical NSPL could not be rendered")]
     CanonicalNspl,
 }
@@ -741,6 +777,8 @@ pub(crate) struct CreateSignals {
     client: RwSignal<ClientDraft>,
     vhost: RwSignal<VhostDraft>,
     endpoint: RwSignal<EndpointDraft>,
+    hash_map: RwSignal<HashMapDraft>,
+    udf: RwSignal<UdfDraft>,
     /// The number the next generated subscription name carries. Numbers only increase, so no two
     /// generated names of one console coincide.
     next_subscription_name: RwSignal<u64>,
@@ -773,6 +811,8 @@ impl CreateSignals {
             client: RwSignal::new(ClientDraft::default()),
             vhost: RwSignal::new(VhostDraft::default()),
             endpoint: RwSignal::new(EndpointDraft::default()),
+            hash_map: RwSignal::new(HashMapDraft::default()),
+            udf: RwSignal::new(UdfDraft::default()),
             next_subscription_name: RwSignal::new(2),
             choices: ChoiceControls::new(),
         }
@@ -882,6 +922,8 @@ impl CreateSignals {
                 CreateKind::Client => self.client.update(ClientDraft::invalidate_references),
                 CreateKind::Vhost => self.vhost.update(VhostDraft::invalidate_references),
                 CreateKind::Endpoint => self.endpoint.update(EndpointDraft::invalidate_references),
+                CreateKind::HashMap => self.hash_map.update(HashMapDraft::invalidate_references),
+                CreateKind::Udf => {}
                 CreateKind::Domain
                 | CreateKind::User
                 | CreateKind::Resource
@@ -1063,14 +1105,16 @@ impl CreateSignals {
             ChoiceControl::CodecResource
             | ChoiceControl::SignalingResource
             | ChoiceControl::ClientResource
-            | ChoiceControl::VhostResource => self.domain_question(
+            | ChoiceControl::VhostResource
+            | ChoiceControl::HashResource => self.domain_question(
                 ChoiceTarget::Resource,
                 "Select a domain before choosing a resource",
             ),
             ChoiceControl::CodecVersion
             | ChoiceControl::SignalingVersion
             | ChoiceControl::ClientVersion
-            | ChoiceControl::VhostVersion => {
+            | ChoiceControl::VhostVersion
+            | ChoiceControl::HashVersion => {
                 let Some(domain) = self.captured_domain.get_untracked() else {
                     return Err("Select a domain before choosing a resource version");
                 };
@@ -1091,6 +1135,12 @@ impl CreateSignals {
                     ChoiceControl::VhostVersion => {
                         self.vhost.get_untracked().current_resource().cloned()
                     }
+                    ChoiceControl::HashVersion => self
+                        .hash_map
+                        .get_untracked()
+                        .pin
+                        .current_resource()
+                        .cloned(),
                     _ => None,
                 };
                 let Some(resource) = resource else {
@@ -1122,6 +1172,34 @@ impl CreateSignals {
                 ChoiceTarget::Vhost,
                 "Select a domain before choosing a VHOST",
             ),
+            ChoiceControl::HashCodec => self.domain_question(
+                ChoiceTarget::Codec,
+                "Select a domain before choosing a codec",
+            ),
+            ChoiceControl::HashKey => {
+                let Some(domain) = self.captured_domain.get_untracked() else {
+                    return Err("Select a domain before choosing a key field");
+                };
+                let draft = self.hash_map.get_untracked();
+                let Some(codec) = draft.current_codec() else {
+                    return Err("Select a codec to list the fields of its output schema");
+                };
+                Ok(ChoiceQuery {
+                    target: ChoiceTarget::CodecField,
+                    dependencies: vec![
+                        ChoiceSelection {
+                            value: ChoiceValue::Domain(domain),
+                        },
+                        ChoiceSelection {
+                            value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                                ModelKind::Codec,
+                                codec,
+                            )),
+                        },
+                    ],
+                    page_size: 100,
+                })
+            }
             ChoiceControl::SubscriptionRelay => self.domain_question(
                 ChoiceTarget::Relay,
                 "Select a domain before choosing a relay",
@@ -1284,6 +1362,25 @@ impl CreateSignals {
                     scope,
                 )
             }
+            CreateKind::HashMap => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.hash_map.get_untracked();
+                let lookup = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_requested_model(
+                    kind,
+                    Model::Lookup(lookup),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
+            CreateKind::Udf => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.udf.get_untracked();
+                let udf = draft.build().map_err(draft_error)?;
+                CreateSubmission::domain_model(kind, Model::Udf(udf), draft.if_not_exists, scope)
+            }
             CreateKind::Subscription => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
@@ -1379,6 +1476,12 @@ pub(crate) fn CreateMenu(
                 </button>
                 <button type="button" role="menuitem" data-create-kind="endpoint" on:click=move |_| choose(CreateKind::Endpoint)>
                     <span>"Endpoint"</span><em>"HTTP or WebSocket path"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="hash-map" on:click=move |_| choose(CreateKind::HashMap)>
+                    <span>"Hash map"</span><em>"Resource-backed lookup"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="udf" on:click=move |_| choose(CreateKind::Udf)>
+                    <span>"Roto UDF"</span><em>"Typed function and source tests"</em>
                 </button>
             </div>
         </div>
@@ -1523,6 +1626,13 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
             }
             controls
         }
+        CreateKind::HashMap => vec![
+            ChoiceControl::HashResource,
+            ChoiceControl::HashVersion,
+            ChoiceControl::HashCodec,
+            ChoiceControl::HashKey,
+        ],
+        CreateKind::Udf => Vec::new(),
         CreateKind::User
         | CreateKind::Resource
         | CreateKind::Schema
@@ -1764,6 +1874,12 @@ pub(crate) fn CreateDialog(
                         <Show when=move || signals.open.get() == Some(CreateKind::Endpoint) fallback=|| ()>
                             <EndpointEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
                         </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::HashMap) fallback=|| ()>
+                            <HashMapEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Udf) fallback=|| ()>
+                            <UdfEditor signals=signals name_input=name_input />
+                        </Show>
 
                         <Show when=move || signals.open.get().is_some_and(CreateKind::takes_if_not_exists) fallback=|| ()>
                             <label class="create-check">
@@ -1785,6 +1901,8 @@ pub(crate) fn CreateDialog(
                                         Some(CreateKind::Client) => signals.client.get().if_not_exists,
                                         Some(CreateKind::Vhost) => signals.vhost.get().if_not_exists,
                                         Some(CreateKind::Endpoint) => signals.endpoint.get().if_not_exists,
+                                        Some(CreateKind::HashMap) => signals.hash_map.get().if_not_exists,
+                                        Some(CreateKind::Udf) => signals.udf.get().if_not_exists,
                                         Some(CreateKind::Subscription) | None => false,
                                     }
                                     disabled=move || signals.progress.get().is_pending()
@@ -1805,6 +1923,8 @@ pub(crate) fn CreateDialog(
                                             Some(CreateKind::Client) => signals.client.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Vhost) => signals.vhost.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Endpoint) => signals.endpoint.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::HashMap) => signals.hash_map.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Udf) => signals.udf.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Subscription) | None => {}
                                         }
                                         signals.edit();

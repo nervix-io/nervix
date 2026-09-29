@@ -41,6 +41,7 @@ pub(super) fn command_outcome(
         inspection,
         wasm_state,
         resource,
+        backup,
     } = result;
     let origin = match origin {
         CommandOrigin::Executed => OutcomeOrigin::Executed,
@@ -58,6 +59,7 @@ pub(super) fn command_outcome(
         inspection,
         wasm_state,
         resource,
+        backup,
     }
 }
 
