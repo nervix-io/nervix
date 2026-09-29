@@ -274,7 +274,9 @@ use.
 - **D-5.** After it loses a session, a client that restores session state MUST, in this order: open
   a new session; attach the domain clocks it follows; open the subscriptions it keeps again, each as
   a new generation, reporting the gap; attach its transaction; and only then repeat outstanding
-  commands under their original references.
+  commands under their original references. It MUST have sent every clock attach and subscription
+  of the new session before it sends the transaction attach, because a session that holds a
+  transaction refuses both.
 - **D-6.** A client MUST treat `SessionEnding`, the end of the transport, and a protocol violation
   alike: every request in flight ends without a reply, and every command among them is uncertain.
 
@@ -337,7 +339,12 @@ use.
 - **S-7.** A client that keeps a subscription across sessions MUST open it again as a new generation
   on the next session and report the time between as a gap. If its user deletes a subscription while
   an opening or reopening is in flight, a late successful reply MUST be followed by an unsubscribe
-  before the name is used again.
+  before the name is used again. When the new session refuses the reopening, or leaves it
+  unanswered, the client MUST report the refusal and SHOULD send it again on that session after a
+  wait that grows with each refusal, rather than at a fixed rate. A client MUST complete the
+  deletion of a subscription no open session holds, because the session that held it ended or the
+  current session refused to open it again, without sending `UnsubscribeRequest`, and MUST release
+  its name; a deletion whose session ends before it is answered is complete too.
 - **S-8.** A client MUST bound what it retains for subscriptions, per subscription and in total, and
   SHOULD let one subscription retain at least one frame of the frame limit.
 - **S-9.** A client that stops reading a `BLOCKING` subscription holds back the relay it reads. A
@@ -426,7 +433,10 @@ payload, infinity, and nullable and sensitive branch key fields.
   projection a client computes from a paced clock.
 - **K-5.** After it loses a session, a client that follows clocks MUST attach them again, and MUST
   NOT assume it saw the changes or ticks made in between. It MUST clear the old tick frontier until
-  the new attachment reports accepted progress.
+  the new attachment reports accepted progress. It MUST treat `DomainClockAlreadyAttached` as the
+  session holding the attachment, and read the clock from that session's frames. When the session
+  refuses the attach or leaves it unanswered, the client MUST keep the attachment interrupted rather
+  than drop the domain, and SHOULD send the attach again on that session after a growing wait.
 
 ## Resource Uploads
 
@@ -506,8 +516,10 @@ and these rules:
 - **B-5.** A host MUST NOT call the binding from a thread that is driving a Tokio runtime.
 - **B-6.** A host SHOULD read a batch one column at a time with the column accessors. For a string
   or bytes column it first passes a null data buffer to learn the size it needs.
-- **B-7.** A host MUST treat `NX_EVENT_INTERRUPTED` as a gap in every subscription it names, and
-  `NX_EVENT_CONSUMER_OVERFLOW` as the end of that subscription's delivery on this session.
+- **B-7.** A host MUST treat `NX_EVENT_INTERRUPTED` as a gap in every subscription it names,
+  `NX_EVENT_RESTORATION_FAILED` as a refused attempt to open that subscription again, which the
+  session repeats, and `NX_EVENT_CONSUMER_OVERFLOW` as the end of that subscription's delivery on
+  this session.
 - **B-8.** A host that runs `BACKUP` through `nx_session_execute` receives the archive in the file
   the statement names, and reads its size and digest with `nx_outcome_backup`. After an error that
   names the backup's execution reference, the host MAY execute the same `nx_execution` again, which
@@ -516,7 +528,8 @@ and these rules:
   `nx_clock_event_retain` returns exactly once, and MAY release it on any thread. It MUST treat
   `NX_CLOCK_EVENT_INTERRUPTED` as a gap in that domain's clock: the state event that follows
   reports the clock the restored attachment found, and the changes and ticks in between are not
-  reported. [Rust Client Library](./client-library.md#through-the-shared-c-binding) lists the
+  reported. It MUST treat `NX_CLOCK_EVENT_RESTORATION_FAILED` as a refused attempt to attach that
+  domain's clock again, which the session repeats. [Rust Client Library](./client-library.md#through-the-shared-c-binding) lists the
   accessors of each event kind.
 
 ## Required State Machines
@@ -585,20 +598,20 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | L-1 to L-3 | `use_domain_is_served_by_the_client`, `list_domains_is_served_from_a_domain_list_request`, `execute_rejects_mixed_client_local_multi_statement_request`, `execute_rejects_client_local_command_during_transaction`, and `a_create_subscription_statement_is_sent_as_a_subscribe_request`; `Implicit multi-command requests are rejected` in `nspl_transactions.feature` |
 | E-1 to E-5 | In `client_wire_failures.feature`: `A command lost after durable admission is recovered by its request identity`, `A reclaimed command identity stays expired after a durable restart`, `A race across leaders recovers a typed execution reference conflict`, `A command identity outside its retry window starts no effect`, `A full command history refuses new identities and keeps every retained result`, `Concurrent exact BEGIN retries join one durable execution`, and `Reusing a durable transaction identity with different content fails semantically`; `a_command_reply_for_another_execution_cannot_claim_success` |
 | E-6 to E-8 | `Leadership lost after durable admission leaves an unknown outcome that a retry recovers` in `session_protocol.feature`; `an_unknown_outcome_is_recovered_with_the_same_execution_reference` and `replies_ask_for_the_routing_their_disposition_needs` |
-| D-1 to D-5 | `A redirect names no endpoint for a leader that discovery cannot reach` in `session_protocol.feature`; `The Rust client reconnects through its original seed after the leader stops` in `client_wire_failures.feature`; `a_command_redirect_keeps_its_execution_reference`, `a_command_waits_for_an_election_and_is_sent_again_with_its_reference`, and `a_closed_session_recovers_through_a_configured_seed` |
+| D-1 to D-5 | `A redirect names no endpoint for a leader that discovery cannot reach` in `session_protocol.feature`; `The Rust client reconnects through its original seed after the leader stops` in `client_wire_failures.feature`; `a_command_redirect_keeps_its_execution_reference`, `a_command_waits_for_an_election_and_is_sent_again_with_its_reference`, `a_closed_session_recovers_through_a_configured_seed`, and `a_reconnected_session_restores_subscriptions_before_it_attaches_its_transaction` |
 | X-1 to X-3 | In `client_wire_failures.feature`: `A command missing from a committed transaction cannot report aggregate success`, `Replaying a BEGIN whose response was lost returns the original transaction`, `Replaying an accepted <append_kind> append does not preflight or append it again`, and the two exact transaction batch retries; `lost_begin_append_and_commit_replies_retry_the_exact_request` and `concurrent_commands_capture_transaction_position_in_send_order` |
 | X-4, X-5 | `A commit fenced to a preview the transaction outgrew is refused and stays open` in `nspl_transactions.feature`; `a_commit_fences_against_the_basis_its_own_transaction_reported`, `a_refused_commit_does_not_adopt_an_unreviewed_basis`, and `an_older_inspection_cannot_replace_a_newer_queue_preview` |
 | X-6 | `A session whose leader lost its binding re-attaches instead of failing` and `Attaching from a second session takes over an open transaction` in `nspl_transactions.feature`; `Web console recovers a reverted command's own outcome after its reply is lost` and `Web console resolves a Create command held when its transaction finishes during reconnect` in `nspl_repl.feature`; `a_detached_transaction_is_attached_again_before_the_command_is_retried` |
 | X-7, X-8 | `A clean session close reverts its open transaction` and `An orphaned transaction expires and retains its outcome` in `nspl_transactions.feature`; `A stalled commit cannot block expiry, another domain, or tombstone cleanup` in `client_wire_failures.feature`; `Physical inactivity while every node is stopped expires an open transaction` in `client_wire_process_restart.feature` |
 | S-1 to S-6 | Every scenario of `session_subscription_lifecycle.feature` and `session_subscription_options.feature`; `Published interest starts, reopens, and stops remote subscription fan-out` in `subscription_interest.feature`; `Web console ends a relay tab the server ended and resubscribes it on request` in `nspl_repl.feature`; `a_subscription_type_must_be_selected_and_supported` and, in the console, `a_generation_the_server_ended_ends_its_tab_which_keeps_its_rows_and_is_not_restored` |
-| S-7, S-8 | `A reconnected native client restores acknowledged subscriptions` and `A native client keeps a subscription active while it receives a row that fills most of a frame` in `client_wire_failures.feature`; `Subscription restoration and typed transaction inspection survive the same leader loss` in `client_wire_qualification.feature`; `Web console restores a relay tab after its transaction finished while it reconnected`, `Web console restores a relay tab before it attaches its open transaction again`, and `Web console bounds a busy relay tab and keeps its REPL responsive` in `nspl_repl.feature`; `deleting_while_creation_is_in_flight_drains_its_late_success_before_name_reuse`, `cancelling_an_in_flight_restore_cleans_up_its_late_success`, `one_subscription_overflow_preserves_other_subscription_events`, `each_subscription_retains_a_frame_of_the_frame_limit_and_overflows_alone_past_it`, `a_subscription_past_the_exchange_allowance_overflows_without_evicting_full_subscriptions`, and `a_row_frame_filled_to_the_frame_limit_reaches_an_active_subscription` |
+| S-7, S-8 | In `client_wire_failures.feature`: `A reconnected native client restores acknowledged subscriptions`, `A native client deletes a subscription its lost session held and opens the name again`, `A native client reports a refused subscription restoration and deletes the subscription without the server`, and `A native client keeps a subscription active while it receives a row that fills most of a frame`; `Subscription restoration and typed transaction inspection survive the same leader loss` in `client_wire_qualification.feature`; `Web console restores a relay tab after its transaction finished while it reconnected`, `Web console restores a relay tab before it attaches its open transaction again`, and `Web console bounds a busy relay tab and keeps its REPL responsive` in `nspl_repl.feature`; `deleting_while_creation_is_in_flight_drains_its_late_success_before_name_reuse`, `cancelling_an_in_flight_restore_cleans_up_its_late_success`, `a_refused_restoration_is_repeated_after_a_growing_delay`, `deleting_a_subscription_whose_restoration_was_refused_needs_no_server`, `a_subscription_requested_on_a_closed_session_opens_on_a_new_session`, `one_subscription_overflow_preserves_other_subscription_events`, `each_subscription_retains_a_frame_of_the_frame_limit_and_overflows_alone_past_it`, `a_subscription_past_the_exchange_allowance_overflows_without_evicting_full_subscriptions`, and `a_row_frame_filled_to_the_frame_limit_reaches_an_active_subscription` |
 | R-1 to R-5 | `A <runtime> client round-trips an operation, typed rows, an error and a closure` in `client_conformance.feature` for every runtime; `a_batch_round_trips_every_cell_kind_at_its_bounds`, `cells_must_follow_their_fields`, `branch_identity_must_match_the_schema`, and `lists_must_follow_their_element_type_and_length`; `a_batch_that_does_not_conform_to_its_schema_is_a_protocol_failure` in the binding |
-| K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; the state, tick, and client pacing outlines in `domain_clock_attachment.feature`; the owner-loss case in `domain_clock_contract.feature`; `A <runtime> client follows a paced domain clock through the shared binding` in `client_conformance.feature` for every binding host; `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock`, `a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_read`, `ticks_coalesce_per_domain_and_follow_their_generations_state`, and the `server_domain_clock_ticked.nxsm` conformance frame |
+| K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; the state, tick, and client pacing outlines in `domain_clock_attachment.feature`; the owner-loss case in `domain_clock_contract.feature`; `A <runtime> client follows a paced domain clock through the shared binding` in `client_conformance.feature` for every binding host; `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock`, `a_refused_clock_restoration_is_repeated_on_the_same_session`, `a_clock_restoration_answered_already_attached_follows_the_new_session`, `a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_read`, `ticks_coalesce_per_domain_and_follow_their_generations_state`, and the `server_domain_clock_ticked.nxsm` conformance frame |
 | U-1 to U-5 | `An upload stream the protocol does not allow is refused with a typed failure and admits nothing` in `session_protocol.feature`; in `resource_describe.feature`, `An incomplete upload does not admit content or consume its identity`, `Upload retry reports one assigned version`, `Upload retry after leader change reports the assigned version`, and `An uncertain upload completes once across installation and leader change`; `a_lost_upload_reply_retries_with_the_same_identity_and_archive` and `malformed_upload_replies_are_rejected_by_their_correlations` |
 | A-1 to A-6 | Every scenario of `backup.feature`, including `A client that loses its download fetches the archive again until a download collects it`, `An archive is refused once its execution reference's retry validity ends`, and `Downloads of another user's backup, or under a reference without an archive, are refused`; `every_download_frame_round_trips` and `a_download_request_with_an_invalid_reference_is_refused` in `nervix-client-wire`; the `backup_download_*` conformance frames |
-| B-1 to B-7 | The binding tests of `nervix-client-ffi`, such as `retained_references_keep_the_frame_until_the_last_one_is_released`, `string_and_bytes_columns_are_copied_with_offsets_and_borrowed_per_cell`, and `a_token_bounds_a_call_by_cancellation_and_by_deadline`; the C, C++, Python, Java, and Ruby cases of `client_conformance.feature` |
+| B-1 to B-7 | The binding tests of `nervix-client-ffi`, such as `retained_references_keep_the_frame_until_the_last_one_is_released`, `string_and_bytes_columns_are_copied_with_offsets_and_borrowed_per_cell`, `every_event_kind_reports_its_subscription_and_count`, and `a_token_bounds_a_call_by_cancellation_and_by_deadline`; the C, C++, Python, Java, and Ruby cases of `client_conformance.feature` |
 | B-8 | `a_backup_outcome_reports_its_archive` and `client_errors_are_classified_and_keep_their_causes` in `nervix-client-ffi` |
-| B-9 | `a_retained_clock_event_outlives_a_reference_released_on_another_thread` and `a_session_reads_every_clock_event_kind_and_bounds_its_wait` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for C, C++, Python, Java, and Ruby |
+| B-9 | `a_retained_clock_event_outlives_a_reference_released_on_another_thread`, `a_session_reads_every_clock_event_kind_and_bounds_its_wait`, and `a_restoration_failure_names_its_domain_and_carries_no_clock` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for C, C++, Python, Java, and Ruby |
 
 ### Executable Examples
 

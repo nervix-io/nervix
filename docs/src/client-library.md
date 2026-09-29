@@ -98,6 +98,17 @@ redefined, so the announced schema no longer describes its rows, or `RelayRemove
 or its domain no longer exists. The end is the last event of that subscription; subscribe again to
 keep reading a redefined relay. See [Sessions](sessions.md#subscription-lifecycle).
 
+A subscription the server acknowledged outlives its session. When the session ends,
+`next_subscription()` reports `Interrupted`, the gap before the subscription opens again, and the
+client opens it again as a new generation on its next session. When that session refuses it, for
+example because its relay no longer exists, `next_subscription()` reports `RestorationFailed` with
+the server's message and the wait before the next attempt; the client keeps trying on that session,
+after a wait that starts at one second and doubles up to thirty seconds, until the subscription
+opens, the session ends, or the subscription is deleted. `Client::subscription_lifecycle(&name)`
+reads the state a subscription is in. `subscribe` and `unsubscribe` reopen a closed session like
+every other call. Deleting a subscription that no open session holds, because its session ended or
+the current session refused to open it again, completes without a request and releases the name.
+
 ## Backing Up
 
 `execute` runs `BACKUP CLUSTER TO '<file>';` and `BACKUP DOMAIN [<name>] TO '<file>';` as one
@@ -163,6 +174,9 @@ match client.next_domain_clock_event().await? {
     DomainClockEvent::Ticked(ticked) => println!("tick {}", ticked.tick.tick_id),
     DomainClockEvent::Ended(ended) => println!("ended because {}", ended.reason),
     DomainClockEvent::Interrupted(gap) => println!("{} is attached again", gap.domain),
+    DomainClockEvent::RestorationFailed(failure) => {
+        println!("{}: {}; retrying in {:?}", failure.domain, failure.message, failure.retry_after)
+    }
 }
 ```
 
@@ -181,9 +195,12 @@ when the session holding an attachment ended. Events are coalesced per domain: a
 arrives before a tick of its generation, while older unread ticks are replaced by the newest one.
 After a reconnect, the client attaches every followed
 clock again on the new session before any other request, and the clock that attachment reports
-follows the interruption as an `Observed` event; changes in between are not reported. Waiting for
-the next event reopens a closed session when a followed clock waits for it. A detach, or an end,
-stops following the domain, and `domain_clock` returns `None` for it afterwards.
+follows the interruption as an `Observed` event; changes in between are not reported. When the new
+session refuses that attach or leaves it unanswered, the event is `RestorationFailed` with the
+server's message and the wait before the client sends the attach again on the same session; the
+wait starts at one second and doubles up to thirty seconds. Waiting for the next event reopens a
+closed session when a followed clock waits for it. A detach, or an end, stops following the domain,
+and `domain_clock` returns `None` for it afterwards.
 
 ### Through The Shared C Binding
 
@@ -195,8 +212,10 @@ tokens and deadlines as every blocking call, and hands out an `nx_clock_event` r
 are the Rust client's, coalesced the same way:
 
 - `nx_clock_event_kind_of` tells an `NX_CLOCK_EVENT_STATE`, `NX_CLOCK_EVENT_TICK`,
-  `NX_CLOCK_EVENT_ENDED` or `NX_CLOCK_EVENT_INTERRUPTED` event apart, and `nx_clock_event_domain`
-  borrows the name of the domain it concerns.
+  `NX_CLOCK_EVENT_ENDED`, `NX_CLOCK_EVENT_INTERRUPTED` or `NX_CLOCK_EVENT_RESTORATION_FAILED` event
+  apart, and `nx_clock_event_domain` borrows the name of the domain it concerns. A restoration
+  failure reports that the session refused to attach an interrupted clock again, or did not answer;
+  the session tries again after the growing wait the Rust client reports.
 - `nx_clock_event_generation` reads the `START` generation of a state or tick event,
   `nx_clock_event_state` the installation state of a state event, `nx_clock_event_paced` the period,
   skew, logical origin, UTC anchor and time rate of a paced one, `nx_clock_event_tick` the id,
