@@ -54,43 +54,27 @@ pub(in crate::runtime) struct TruthCounter {
 
 impl TruthCounter {
     pub(super) fn admit(&mut self, column: &ArgumentColumn, rows: Range<usize>) {
-        for row in rows {
-            match column.boolean_at(row) {
-                Some(true) => {
-                    self.true_rows = self
-                        .true_rows
-                        .checked_add(1)
-                        .assured("a window cannot retain 2^64 rows in memory");
-                }
-                Some(false) => {
-                    self.false_rows = self
-                        .false_rows
-                        .checked_add(1)
-                        .assured("a window cannot retain 2^64 rows in memory");
-                }
-                None => {}
-            }
-        }
+        let (trues, falses) = column.boolean_counts(rows);
+        self.true_rows = self
+            .true_rows
+            .checked_add(trues)
+            .assured("a window cannot retain 2^64 rows in memory");
+        self.false_rows = self
+            .false_rows
+            .checked_add(falses)
+            .assured("a window cannot retain 2^64 rows in memory");
     }
 
     pub(super) fn retract(&mut self, column: &ArgumentColumn, rows: Range<usize>) {
-        for row in rows {
-            match column.boolean_at(row) {
-                Some(true) => {
-                    self.true_rows = self
-                        .true_rows
-                        .checked_sub(1)
-                        .verified("a retracted true row was counted when the window admitted it");
-                }
-                Some(false) => {
-                    self.false_rows = self
-                        .false_rows
-                        .checked_sub(1)
-                        .verified("a retracted false row was counted when the window admitted it");
-                }
-                None => {}
-            }
-        }
+        let (trues, falses) = column.boolean_counts(rows);
+        self.true_rows = self
+            .true_rows
+            .checked_sub(trues)
+            .verified("retracted true rows were counted when admitted");
+        self.false_rows = self
+            .false_rows
+            .checked_sub(falses)
+            .verified("retracted false rows were counted when admitted");
     }
 
     pub(super) fn evaluate(&self, function: WindowAggregateFunction) -> ArrayRef {
