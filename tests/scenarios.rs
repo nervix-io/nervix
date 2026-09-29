@@ -125,6 +125,7 @@ use crate::common::{
         CapturedRequest, ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET,
         ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
+    kafka_group_member::ExternalKafkaGroupMember,
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     raw_session::{TestUpload, TestUploadPart, WireOutcome as _},
@@ -347,6 +348,8 @@ struct ScenarioWorld {
     last_server_error: Option<String>,
     last_auth_attempts_elapsed: Option<Duration>,
     broker_observer: Option<BrokerObserver>,
+    /// The Kafka consumer group members a scenario runs beside Nervix's consumers, by group.
+    external_kafka_members: BTreeMap<String, ExternalKafkaGroupMember>,
     last_broker_payload: Option<String>,
     last_broker_headers: Vec<(String, String)>,
     clickhouse_table: Option<String>,
@@ -10494,6 +10497,127 @@ async fn when_remote_relay_dispatch_pause_is_released(world: &mut ScenarioWorld,
         .release_remote_relay_dispatch_pause(&domain);
 }
 
+#[given(expr = "relay owner fan-out for domain {string} is paused before dispatch")]
+async fn given_owner_relay_fanout_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world.fault_injection.pause_owner_relay_fanout(domain);
+}
+
+#[given(
+    expr = "entity drain on node {string} reports no buffered relay batches in domain {string}"
+)]
+async fn given_stale_owner_buffer_drain_report(
+    world: &mut ScenarioWorld,
+    node: String,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .report_no_owner_buffered_batches_for_entity_drain(
+            nervix_models::DomainName::try_from(domain.as_str()).expect("valid scenario domain"),
+            crate::common::cluster::node_name(&node),
+        );
+}
+
+#[then(expr = "the relay owner fan-out pause for domain {string} is reached")]
+async fn then_owner_relay_fanout_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_owner_relay_fanout_pause(&domain),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("relay owner fan-out pause for domain '{domain}' was not reached: {error}")
+    });
+}
+
+#[when(expr = "the relay owner fan-out pause for domain {string} is released")]
+async fn when_owner_relay_fanout_pause_is_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .release_owner_relay_fanout_pause(&domain);
+}
+
+#[then(expr = "relay owner fan-out for domain {string} has finished")]
+async fn then_owner_relay_fanout_has_finished(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_owner_relay_fanout_completion(&domain),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("relay owner fan-out in domain '{domain}' did not finish: {error}")
+    });
+}
+
+fn emitter_swap_pause_key(
+    world: &ScenarioWorld,
+    domain: &str,
+    emitter: &str,
+) -> (nervix_models::DomainName, nervix_models::EmitterName) {
+    let domain = expand_placeholders(world, domain);
+    let emitter = expand_placeholders(world, emitter);
+    (
+        nervix_models::DomainName::try_from(domain.as_str()).expect("valid scenario domain"),
+        nervix_models::EmitterName::try_from(emitter.as_str()).expect("valid scenario emitter"),
+    )
+}
+
+#[given(expr = "emitter {string} in domain {string} pauses its swap after detaching")]
+async fn given_emitter_swap_after_detach_pause(
+    world: &mut ScenarioWorld,
+    emitter: String,
+    domain: String,
+) {
+    let (domain, emitter) = emitter_swap_pause_key(world, &domain, &emitter);
+    world
+        .fault_injection
+        .pause_emitter_swap_after_detach(domain, emitter);
+}
+
+#[then(expr = "the swap of emitter {string} in domain {string} has detached it")]
+async fn then_emitter_swap_after_detach_pause_is_reached(
+    world: &mut ScenarioWorld,
+    emitter: String,
+    domain: String,
+) {
+    let (domain, emitter) = emitter_swap_pause_key(world, &domain, &emitter);
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_emitter_swap_after_detach_pause(&domain, &emitter),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "swap of emitter '{}' in domain '{}' did not detach it: {error}",
+            emitter.as_str(),
+            domain.as_str()
+        )
+    });
+}
+
+#[when(expr = "the swap of emitter {string} in domain {string} is released")]
+async fn when_emitter_swap_after_detach_pause_is_released(
+    world: &mut ScenarioWorld,
+    emitter: String,
+    domain: String,
+) {
+    let (domain, emitter) = emitter_swap_pause_key(world, &domain, &emitter);
+    world
+        .fault_injection
+        .release_emitter_swap_after_detach_pause(&domain, &emitter);
+}
+
 #[given(expr = "ownership handoff for domain {string} pauses after preparation")]
 async fn given_ownership_handoff_preparation_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
@@ -10901,14 +11025,32 @@ async fn given_consensus_storage_failure(
     boundary: String,
     domain: String,
 ) {
+    fail_consensus_storage_on_leader(world, &boundary, format!("put-domain:{domain}")).await;
+}
+
+#[given(expr = "consensus storage on the leader fails {word} committing operation {string}")]
+async fn given_consensus_storage_operation_failure(
+    world: &mut ScenarioWorld,
+    boundary: String,
+    operation: String,
+) {
+    let operation = expand_placeholders(world, &operation);
+    fail_consensus_storage_on_leader(world, &boundary, operation).await;
+}
+
+async fn fail_consensus_storage_on_leader(
+    world: &mut ScenarioWorld,
+    boundary: &str,
+    operation: String,
+) {
     let leader = current_leader_node(world).await;
     world
         .placeholders
         .insert("storage_node".into(), leader.clone());
     world.fault_injection.fail_consensus_storage(
         &crate::common::cluster::node_name(&leader),
-        format!("put-domain:{domain}"),
-        match boundary.as_str() {
+        operation,
+        match boundary {
             "before" => nervix_consensus::StorageBoundary::BeforeCommit,
             "after" => nervix_consensus::StorageBoundary::AfterSync,
             _ => panic!("the fixture names a before or after storage boundary"),
@@ -11187,6 +11329,66 @@ async fn then_kafka_consumer_group_eventually_has_consumers(
         .wait_for_kafka_consumer_group_members(&group, expected)
         .await
         .expect("kafka consumer group did not reach expected member count");
+}
+
+/// Joins a member that Nervix does not run to the group. It takes the topic's first partitions from
+/// Nervix's consumers and holds them, reading without committing, until it leaves.
+#[when(expr = "an external member joins Kafka consumer group {string} on topic {string}")]
+async fn when_an_external_member_joins_kafka_consumer_group(
+    world: &mut ScenarioWorld,
+    group: String,
+    topic: String,
+) {
+    let group = expand_placeholders(world, &group);
+    let topic = expand_placeholders(world, &topic);
+    assert!(
+        !world.external_kafka_members.contains_key(&group),
+        "an external member already belongs to Kafka consumer group '{group}'"
+    );
+    let member = world
+        .cluster()
+        .join_external_kafka_group_member(&group, &topic)
+        .expect("the external Kafka group member should join");
+    world.external_kafka_members.insert(group, member);
+}
+
+#[then(
+    expr = "within {string} the external member of Kafka consumer group {string} holds topic \
+            {string} partition {int}"
+)]
+async fn then_the_external_member_of_kafka_consumer_group_holds_partition(
+    world: &mut ScenarioWorld,
+    duration: String,
+    group: String,
+    topic: String,
+    partition: i32,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let group = expand_placeholders(world, &group);
+    let topic = expand_placeholders(world, &topic);
+    world
+        .external_kafka_members
+        .get_mut(&group)
+        .unwrap_or_else(|| panic!("no external member belongs to Kafka consumer group '{group}'"))
+        .wait_until_assigned(&topic, partition, duration)
+        .await
+        .expect("the external Kafka group member was not assigned the partition");
+}
+
+#[when(expr = "the external member leaves Kafka consumer group {string}")]
+async fn when_the_external_member_leaves_kafka_consumer_group(
+    world: &mut ScenarioWorld,
+    group: String,
+) {
+    let group = expand_placeholders(world, &group);
+    world
+        .external_kafka_members
+        .remove(&group)
+        .unwrap_or_else(|| panic!("no external member belongs to Kafka consumer group '{group}'"))
+        .leave()
+        .await
+        .expect("the external Kafka group member should leave");
 }
 
 #[then(
@@ -22286,6 +22488,121 @@ async fn then_named_client_subscription_is_interrupted(
              {lifecycle:?}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(
+    expr = "within {string} client {string} observes subscription {string} ended with reason \
+            {string}"
+)]
+async fn then_named_client_observes_subscription_ended(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_name: String,
+    subscription_name: String,
+    reason: String,
+) {
+    let duration =
+        humantime::parse_duration(&duration).assured("the end deadline is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let expected_reason = match reason.as_str() {
+        "RelayChanged" => nervix_client_core::wire::SubscriptionEndReason::RelayChanged,
+        "RelayRemoved" => nervix_client_core::wire::SubscriptionEndReason::RelayRemoved,
+        other => panic!("the scenario names an end reason the protocol does not have: {other}"),
+    };
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let deadline = Instant::now() + duration;
+    // Rows the subscription delivered before its end precede it.
+    let ended = loop {
+        nervix_primitives::task::consume_budget().await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = tokio::time::timeout(remaining, client.next_subscription())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "client '{client_name}' did not report the end of subscription \
+                     '{subscription_name}' within {duration:?}"
+                )
+            })
+            .unwrap_or_else(|error| panic!("client '{client_name}' event failed: {error}"));
+        match event {
+            nervix_client_core::SubscriptionEvent::Ended(ended) => break ended,
+            nervix_client_core::SubscriptionEvent::Rows(_) => {}
+            other => panic!(
+                "client '{client_name}' reported {other:?} before the end of subscription \
+                 '{subscription_name}'"
+            ),
+        }
+    };
+    assert_eq!(ended.subscription.name.as_str(), subscription_name);
+    assert_eq!(
+        ended.reason, expected_reason,
+        "client '{client_name}' reported the end of subscription '{subscription_name}' as {:?}",
+        ended.message
+    );
+}
+
+#[then(expr = "client {string} subscription {string} is ended")]
+async fn then_named_client_subscription_is_ended(
+    world: &mut ScenarioWorld,
+    client_name: String,
+    subscription_name: String,
+) {
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"));
+    let name = nervix_models::SubscriptionName::parse(&subscription_name)
+        .assured("the scenario subscription name is valid");
+    let lifecycle = client.subscription_lifecycle(&name);
+    let Some(nervix_client_core::SubscriptionLifecycle::Ended(ended)) = lifecycle else {
+        panic!(
+            "client '{client_name}' subscription '{subscription_name}' is not ended: {lifecycle:?}"
+        );
+    };
+    assert_eq!(ended.name.as_str(), subscription_name);
+}
+
+/// A subscription the server ended is never opened again, so nothing about it may arrive, and a
+/// longer window only strengthens the assertion.
+#[then(expr = "client {string} reports no event of subscription {string} within {string}")]
+async fn then_named_client_reports_no_subscription_event(
+    world: &mut ScenarioWorld,
+    client_name: String,
+    subscription_name: String,
+    duration: String,
+) {
+    let duration =
+        humantime::parse_duration(&duration).assured("the silence window is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(read) = tokio::time::timeout(remaining, client.next_subscription()).await else {
+            return;
+        };
+        let event =
+            read.unwrap_or_else(|error| panic!("client '{client_name}' event failed: {error}"));
+        assert_ne!(
+            event.subscription().name.as_str(),
+            subscription_name,
+            "client '{client_name}' reported an event of subscription '{subscription_name}': \
+             {event:?}"
+        );
     }
 }
 

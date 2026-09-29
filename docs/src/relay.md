@@ -122,6 +122,9 @@ Operationally that means:
 - a delivery that reaches a node after its attached consumer moved away fails its attached
   acknowledgements, so the source redelivers the record along the owner's current routes; see
   [Consumers That Leave The Receiver](interconnect.md#consumers-that-leave-the-receiver)
+- an owner batch that starts fan-out while a schedule swap fences its consumer routes fails its
+  record acknowledgements and is retried by its source after the swap; fan-out already holding a
+  dispatch permit finishes before those routes change
 - an acknowledgement a receiver returns after the sending node restarted names that node's earlier
   run, so the restarted node rejects it and its own records stay pending until their own
   acknowledgements resolve; see
