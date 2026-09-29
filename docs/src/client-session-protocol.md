@@ -322,7 +322,14 @@ JSON/CBOR/AVRO wire schemas, or resource catalogs; a domain and relay reference 
 fields; a domain and codec reference select that codec's output schema fields; a domain and resource
 reference select completed resource versions. Wire-schema targets have separate discriminants, so
 a codec cannot mistake a JSON wire schema for a CBOR or AVRO schema with the same name. A
-completed-version value
+visual ingestor uses distinct source-reference targets for each of its 13 source families. Each
+requires a domain and offers clients of the matching transport, except the endpoint target, which
+offers endpoints. Its decoding-codec target offers codecs that can decode. An unbranched-relay
+target needs a domain; a branched-relay target also needs the selected branch and offers relays
+with exactly that branch. Ingestor error relays use the unbranched target. A branch-field target
+takes a domain and branch reference. Ingestor decoded and output fields use the existing
+codec-field and relay-field targets. The typed target and dependencies remain part of the cursor
+identity. A completed-version value
 is either an explicit number or `LATEST`, not a label to parse. Resource catalogs include resources
 staged earlier in the attached transaction, while version choices include completed uploads only.
 The cursor binds the selected candidate set and its definitions; a changed context returns

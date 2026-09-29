@@ -3,8 +3,8 @@
 //! Layer: edges.
 //!
 //! - **Owns.** Resolving a structured control's question about one domain's configuration — its
-//!   internal schemas, branches, relays, codecs, and the fields their records carry — into ordered
-//!   typed choices, their presentation, and the digest of the definitions a page cursor binds.
+//!   schemas, branches, relays, source references, decoding codecs, and record fields — into
+//!   ordered typed choices, their presentation, and the digest of the definitions a page cursor binds.
 //! - **Depends on.** Vocabulary Models, names, and node references, and the session choice
 //!   contract.
 //! - **Must not know.** How the configuration snapshot was read or queued, sessions, transports,
@@ -18,9 +18,9 @@ use nervix_client_wire::{
     ChoiceValue,
 };
 use nervix_models::{
-    CanonicalNsplError, CreateBranch, CreateRelay, CreateSchema, DomainName, Model, ModelIndex,
-    ModelKind, NodeRef, RelayBranching, RequestedResourceVersion, ResourceName,
-    ResourceVersionStatus, SchemaField,
+    BranchName, CanonicalNsplError, CreateBranch, CreateRelay, CreateSchema, DomainName,
+    IngestSourceKind, Model, ModelIndex, ModelKind, NodeRef, RelayBranching,
+    RequestedResourceVersion, ResourceName, ResourceVersionStatus, SchemaField,
 };
 
 use super::session_service::hash_choice_text;
@@ -43,6 +43,10 @@ pub(in crate::application) enum ConfiguredQuestion {
     RelayFields(NodeRef),
     /// Fields of the selected codec's output schema.
     CodecFields(NodeRef),
+    IngestSource(IngestSourceKind),
+    IngestCodecs,
+    IngestRelays(Option<BranchName>),
+    BranchFields(NodeRef),
 }
 
 /// The domain a lookup reads, and what it asks of that domain's configuration.
@@ -57,6 +61,20 @@ impl<'a> ConfiguredQuery<'a> {
     /// exactly the ones that target needs: a domain, followed for field choices by their relay or
     /// codec.
     pub(in crate::application) fn of(request: &'a ChoiceLookupRequest) -> Option<Self> {
+        if let Some(kind) = request.target().ingest_source_kind() {
+            let [
+                ChoiceSelection {
+                    value: ChoiceValue::Domain(domain),
+                },
+            ] = request.dependencies()
+            else {
+                return None;
+            };
+            return Some(Self {
+                domain,
+                question: ConfiguredQuestion::IngestSource(kind),
+            });
+        }
         let question = match request.target() {
             ChoiceTarget::Schema => ConfiguredQuestion::Schemas,
             ChoiceTarget::Branch => ConfiguredQuestion::Branches,
@@ -73,7 +91,26 @@ impl<'a> ConfiguredQuery<'a> {
             }
             ChoiceTarget::RelayField => return Self::relay_fields(request.dependencies()),
             ChoiceTarget::CodecField => return Self::codec_fields(request.dependencies()),
+            ChoiceTarget::IngestCodec => ConfiguredQuestion::IngestCodecs,
+            ChoiceTarget::IngestUnbranchedRelay => ConfiguredQuestion::IngestRelays(None),
+            ChoiceTarget::IngestBranchedRelay => {
+                return Self::ingest_branched_relays(request.dependencies());
+            }
+            ChoiceTarget::BranchField => return Self::branch_fields(request.dependencies()),
             ChoiceTarget::DomainPace | ChoiceTarget::PlacementPolicy => return None,
+            ChoiceTarget::IngestHttpSource
+            | ChoiceTarget::IngestKafkaSource
+            | ChoiceTarget::IngestPulsarSource
+            | ChoiceTarget::IngestMqttSource
+            | ChoiceTarget::IngestNatsSource
+            | ChoiceTarget::IngestRabbitMqSource
+            | ChoiceTarget::IngestRedisPubSubSource
+            | ChoiceTarget::IngestPrometheusSource
+            | ChoiceTarget::IngestZeroMqSource
+            | ChoiceTarget::IngestSqsSource
+            | ChoiceTarget::IngestEndpointSource
+            | ChoiceTarget::IngestWebsocketsSource
+            | ChoiceTarget::IngestSyslogSource => return None,
         };
         let [
             ChoiceSelection {
@@ -145,6 +182,48 @@ impl<'a> ConfiguredQuery<'a> {
             question: ConfiguredQuestion::CodecFields(codec.clone()),
         })
     }
+
+    fn ingest_branched_relays(dependencies: &'a [ChoiceSelection]) -> Option<Self> {
+        let [
+            ChoiceSelection {
+                value: ChoiceValue::Domain(domain),
+            },
+            ChoiceSelection {
+                value: ChoiceValue::Model(branch),
+            },
+        ] = dependencies
+        else {
+            return None;
+        };
+        if branch.kind != ModelKind::Branch {
+            return None;
+        }
+        Some(Self {
+            domain,
+            question: ConfiguredQuestion::IngestRelays(Some(BranchName::from(&branch.identifier))),
+        })
+    }
+
+    fn branch_fields(dependencies: &'a [ChoiceSelection]) -> Option<Self> {
+        let [
+            ChoiceSelection {
+                value: ChoiceValue::Domain(domain),
+            },
+            ChoiceSelection {
+                value: ChoiceValue::Model(branch),
+            },
+        ] = dependencies
+        else {
+            return None;
+        };
+        if branch.kind != ModelKind::Branch {
+            return None;
+        }
+        Some(Self {
+            domain,
+            question: ConfiguredQuestion::BranchFields(branch.clone()),
+        })
+    }
 }
 
 /// The choices a question resolved to, and a digest of every definition that decided them.
@@ -207,8 +286,12 @@ impl ConfiguredChoices {
             | ConfiguredQuestion::WireJsonSchemas
             | ConfiguredQuestion::WireCborSchemas
             | ConfiguredQuestion::WireAvroSchemas => self.models(question, &search),
+            ConfiguredQuestion::IngestSource(_)
+            | ConfiguredQuestion::IngestCodecs
+            | ConfiguredQuestion::IngestRelays(_) => self.models(question, &search),
             ConfiguredQuestion::RelayFields(relay) => self.relay_fields(relay, &search),
             ConfiguredQuestion::CodecFields(codec) => self.codec_fields(codec, &search),
+            ConfiguredQuestion::BranchFields(branch) => self.branch_fields(branch, &search),
             ConfiguredQuestion::Resources => self.resources(&search),
             ConfiguredQuestion::CompletedResourceVersions(resource) => {
                 self.completed_versions(resource, &search)
@@ -238,6 +321,41 @@ impl ConfiguredChoices {
                     "Codec",
                     Model::<RequestedResourceVersion>::Codec(codec.clone()).to_canonical_nspl(),
                 )?,
+                (ConfiguredQuestion::IngestCodecs, Model::Codec(codec))
+                    if codec.wire_format.supports_decoding() =>
+                {
+                    ModelCandidate::new(
+                        NodeRef::new(ModelKind::Codec, &codec.name),
+                        format!("decodes into schema {}", codec.schema),
+                        "Decoding codec",
+                        Model::<RequestedResourceVersion>::Codec(codec.clone()).to_canonical_nspl(),
+                    )?
+                }
+                (
+                    ConfiguredQuestion::IngestSource(IngestSourceKind::Endpoint),
+                    Model::Endpoint(endpoint),
+                ) => ModelCandidate::new(
+                    NodeRef::new(ModelKind::Endpoint, &endpoint.name),
+                    format!("{:?} endpoint", endpoint.endpoint_type),
+                    "Endpoint source",
+                    model.to_canonical_nspl(),
+                )?,
+                (ConfiguredQuestion::IngestSource(kind), model)
+                    if model.kind() == ModelKind::Client
+                        && model.client_type_label() == kind.client_type_label() =>
+                {
+                    ModelCandidate::new(
+                        model.node_ref(),
+                        format!("{} client", kind.form_label()),
+                        "Client source",
+                        model.to_canonical_nspl(),
+                    )?
+                }
+                (ConfiguredQuestion::IngestRelays(branch), Model::Relay(relay))
+                    if relay.branching.branch() == branch.as_ref() =>
+                {
+                    ModelCandidate::relay(relay)?
+                }
                 (ConfiguredQuestion::Vhosts, Model::Vhost(vhost)) => ModelCandidate::new(
                     NodeRef::new(ModelKind::Vhost, &vhost.name),
                     format!("{} hostnames", vhost.hostnames.len()),
@@ -467,6 +585,43 @@ impl ConfiguredChoices {
         })
     }
 
+    fn branch_fields(
+        &self,
+        branch: &NodeRef,
+        search: &str,
+    ) -> Result<ResolvedChoices, ChoiceStatus> {
+        let Some(Model::Branch(branch)) = self.models.get(branch) else {
+            return Err(ChoiceStatus::MissingContext);
+        };
+        let schema_ref = NodeRef::new(ModelKind::Schema, &branch.schema);
+        let Some(Model::Schema(schema)) = self.models.get(&schema_ref) else {
+            return Err(ChoiceStatus::LookupFailed);
+        };
+        let mut digest = blake3::Hasher::new();
+        hash_choice_text(
+            &mut digest,
+            &branch
+                .to_canonical_nspl()
+                .map_err(|_| ChoiceStatus::LookupFailed)?,
+        );
+        hash_choice_text(
+            &mut digest,
+            &schema
+                .to_canonical_nspl()
+                .map_err(|_| ChoiceStatus::LookupFailed)?,
+        );
+        let choices = schema
+            .fields
+            .iter()
+            .map(|field| Self::field_choice(field, "Branch field"))
+            .filter(|choice| choice.presentation.label.to_lowercase().contains(search))
+            .collect();
+        Ok(ResolvedChoices {
+            choices,
+            content_digest: digest.finalize().to_hex().to_string(),
+        })
+    }
+
     /// A field offered by name, presented with its exact type and modifiers as its schema declares
     /// them.
     fn field_choice(field: &SchemaField, group: &str) -> Choice {
@@ -682,6 +837,145 @@ mod tests {
             .into_iter()
             .map(|choice| choice.presentation.label)
             .collect()
+    }
+
+    #[test]
+    fn ingestor_questions_keep_source_kind_branch_and_field_dependencies_typed() {
+        use nervix_models::IngestSourceKind;
+
+        let in_domain = vec![ChoiceSelection {
+            value: ChoiceValue::Domain(domain()),
+        }];
+        for kind in IngestSourceKind::ALL {
+            let request = ChoiceLookupRequest::new(
+                ChoiceTarget::for_ingest_source(kind),
+                in_domain.clone(),
+                String::new(),
+            );
+            assert_eq!(
+                ConfiguredQuery::of(&request).map(|query| query.question),
+                Some(ConfiguredQuestion::IngestSource(kind)),
+            );
+        }
+        assert_eq!(
+            labels(&ConfiguredQuestion::IngestRelays(None), ""),
+            ["audit", "dangling"]
+        );
+        let branch = BranchName::parse("by_tenant").assured("valid branch");
+        assert_eq!(
+            labels(&ConfiguredQuestion::IngestRelays(Some(branch.clone())), ""),
+            ["orders"]
+        );
+        let branch_ref = NodeRef::new(ModelKind::Branch, &branch);
+        assert_eq!(
+            labels(&ConfiguredQuestion::BranchFields(branch_ref.clone()), ""),
+            ["tenant"]
+        );
+        let branched = ChoiceLookupRequest::new(
+            ChoiceTarget::IngestBranchedRelay,
+            vec![
+                ChoiceSelection {
+                    value: ChoiceValue::Domain(domain()),
+                },
+                ChoiceSelection {
+                    value: ChoiceValue::Model(branch_ref.clone()),
+                },
+            ],
+            String::new(),
+        );
+        assert_eq!(
+            ConfiguredQuery::of(&branched).map(|query| query.question),
+            Some(ConfiguredQuestion::IngestRelays(Some(branch))),
+        );
+        let key_fields = ChoiceLookupRequest::new(
+            ChoiceTarget::BranchField,
+            branched.dependencies().to_vec(),
+            String::new(),
+        );
+        assert_eq!(
+            ConfiguredQuery::of(&key_fields).map(|query| query.question),
+            Some(ConfiguredQuestion::BranchFields(branch_ref)),
+        );
+    }
+
+    #[test]
+    fn ingestor_source_and_codec_choices_offer_only_matching_capabilities() {
+        use nervix_models::{
+            ClientName, CodecJaqFormat, CodecJaqTransformations, CreateClientHttp,
+            CreateClientKafka, CreateEndpoint, EndpointName, EndpointType, IngestSourceKind,
+        };
+
+        let models = vec![
+            Model::ClientHttp(CreateClientHttp {
+                name: ClientName::parse("http_input").assured("valid client"),
+                mount: None,
+                config: Vec::new(),
+            }),
+            Model::ClientKafka(CreateClientKafka {
+                name: ClientName::parse("kafka_input").assured("valid client"),
+                mount: None,
+                config: Vec::new(),
+            }),
+            Model::Endpoint(CreateEndpoint {
+                name: EndpointName::parse("listener").assured("valid endpoint"),
+                on_vhost: VhostName::parse("host").assured("valid VHOST"),
+                path: "/in".into(),
+                endpoint_type: EndpointType::Http,
+                signaling_protocol: None,
+            }),
+            Model::Codec(CreateCodec {
+                name: CodecName::parse("decode").assured("valid codec"),
+                wire_format: CodecWireFormat::JaqNative {
+                    format: CodecJaqFormat::Json,
+                    transformations: CodecJaqTransformations {
+                        on_ingestion: Some(".".into()),
+                        ..CodecJaqTransformations::default()
+                    },
+                },
+                schema: SchemaName::parse("records").assured("valid schema"),
+                encoding_rules: Vec::new(),
+            }),
+            Model::Codec(CreateCodec {
+                name: CodecName::parse("encode_only").assured("valid codec"),
+                wire_format: CodecWireFormat::JaqNative {
+                    format: CodecJaqFormat::Json,
+                    transformations: CodecJaqTransformations {
+                        on_emitting: Some(".".into()),
+                        ..CodecJaqTransformations::default()
+                    },
+                },
+                schema: SchemaName::parse("records").assured("valid schema"),
+                encoding_rules: Vec::new(),
+            }),
+        ];
+        let choices = ConfiguredChoices::new(
+            domain(),
+            models,
+            ResourceVersionStatus::default(),
+            Vec::new(),
+        );
+        let labels = |question| {
+            choices
+                .resolve(&question, "")
+                .assured("configured choices resolve")
+                .choices
+                .into_iter()
+                .map(|choice| choice.presentation.label)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels(ConfiguredQuestion::IngestSource(IngestSourceKind::Http)),
+            ["http_input"]
+        );
+        assert_eq!(
+            labels(ConfiguredQuestion::IngestSource(IngestSourceKind::Kafka)),
+            ["kafka_input"]
+        );
+        assert_eq!(
+            labels(ConfiguredQuestion::IngestSource(IngestSourceKind::Endpoint)),
+            ["listener"]
+        );
+        assert_eq!(labels(ConfiguredQuestion::IngestCodecs), ["decode"]);
     }
 
     #[test]

@@ -265,6 +265,13 @@ NSPL. It carries a semantic target, typed dependent selections, search text, a p
 through 100, and an optional page cursor. Targets resolve domain pace, placement policy, and a
 domain's internal schemas, each wire-schema format, branches, relays, codecs, VHOSTs, signaling
 protocols, relay fields, codec output fields, resource catalogs, and completed resource versions.
+Ingestor controls additionally ask for a source reference by transport, a decoding codec, relays
+with exact branch declarations, and fields of a selected branch's key schema. Each source target
+requires a domain and returns clients of its transport, except endpoint ingestion, which returns
+endpoints. The ingestor codec target requires a domain and filters out codecs without decoding.
+An unbranched relay target requires a domain and also supplies ingestor error relay choices, while
+a branched relay target requires a domain then a branch model reference. Branch fields require the
+same pair. Decoded fields and output fields use the existing codec-field and relay-field targets.
 Placement requires exactly one domain-pace dependency. Schema, wire-schema, branch, relay, VHOST,
 signaling-protocol, resource, and codec lookups require exactly one domain reference. A
 relay-field lookup requires that domain reference followed by a relay model reference, and returns

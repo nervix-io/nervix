@@ -199,6 +199,303 @@ fn hash_map_choices_bind_the_key_to_the_selected_codec_and_domain() {
 }
 
 #[test]
+fn ingestor_form_renders_every_source_and_keeps_its_typed_references_in_scope() {
+    use nervix_models::IngestSourceKind;
+
+    super::super::initialize_test_executor();
+    Owner::new().with(|| {
+        let scope = DomainName::parse("orders").assured("valid domain");
+        let signals = CreateSignals::new();
+        signals.open(
+            CreateKind::Ingestor,
+            Some(scope.clone()),
+            "global-create-button",
+        );
+        let dialog = CreateDialog(
+            CreateDialogProps::builder()
+                .signals(signals)
+                .active_domain(RwSignal::new(Some(scope.clone())))
+                .connection_state(RwSignal::new(super::super::ConsoleConnectionState::Waiting))
+                .session_generation(RwSignal::new(1))
+                .request_tx(RwSignal::new(None))
+                .submit(|_, _, _| {})
+                .build(),
+        );
+        any_spawner::Executor::poll_local();
+        let html = dialog.to_html();
+        for kind in IngestSourceKind::ALL {
+            assert!(html.contains(&format!("data-source=\"{}\"", kind.form_key())));
+        }
+        for control in [
+            "create-ingestor-codec",
+            "create-ingestor-routes",
+            "create-ingestor-branching",
+            "create-ingestor-relay",
+            "create-ingestor-flush",
+            "create-ingestor-message-error",
+            "create-ingestor-general-error",
+        ] {
+            assert!(html.contains(control), "{control} must render");
+        }
+        signals
+            .ingestor
+            .update(|draft| draft.source.choose_kind(IngestSourceKind::Endpoint));
+        let source = ChoiceValue::Model(node(ModelKind::Endpoint, "incoming"));
+        select_choice(signals, ChoiceControl::IngestSourceRef, source.clone());
+        assert!(selected_choice(
+            signals,
+            ChoiceControl::IngestSourceRef,
+            &source
+        ));
+        assert_eq!(
+            signals
+                .choice_query(ChoiceControl::IngestSourceRef)
+                .assured("endpoint lookup has a captured domain")
+                .target,
+            ChoiceTarget::IngestEndpointSource,
+        );
+        signals.ingestor.update(|draft| {
+            draft.routes[0].branch.choose_branched();
+            draft.routes[0]
+                .branch
+                .select_branch(&node(ModelKind::Branch, "by_tenant"));
+        });
+        assert_eq!(
+            signals
+                .choice_query(ChoiceControl::IngestRouteRelay)
+                .assured("named branch limits the output relay")
+                .target,
+            ChoiceTarget::IngestBranchedRelay,
+        );
+        assert_eq!(
+            signals
+                .choice_query(ChoiceControl::IngestErrorRelay)
+                .assured("ingestor errors remain unbranched")
+                .target,
+            ChoiceTarget::IngestUnbranchedRelay,
+        );
+        signals.change_scope(Some(
+            DomainName::parse("new_orders").assured("valid domain"),
+        ));
+        assert!(!selected_choice(
+            signals,
+            ChoiceControl::IngestSourceRef,
+            &source
+        ));
+    });
+}
+
+#[test]
+fn ingestor_choices_follow_the_selected_source_codec_branch_and_relays() {
+    use nervix_models::IngestSourceKind;
+
+    Owner::new().with(|| {
+        let domain = DomainName::parse("orders").assured("valid domain");
+        let signals = CreateSignals::new();
+        signals.open(CreateKind::Ingestor, Some(domain.clone()), "global-create-button");
+        assert_eq!(
+            signals.choice_query(ChoiceControl::IngestSourceRef).err(),
+            Some("Choose a source type before its client or endpoint")
+        );
+        for kind in IngestSourceKind::ALL {
+            signals.ingestor.update(|draft| draft.source.choose_kind(kind));
+            let query = signals
+                .choice_query(ChoiceControl::IngestSourceRef)
+                .assured("every selected source asks a typed question");
+            assert_eq!(query.target, ChoiceTarget::for_ingest_source(kind));
+            assert_eq!(query.dependencies[0].value, ChoiceValue::Domain(domain.clone()));
+            let reference_kind = if kind == IngestSourceKind::Endpoint {
+                ModelKind::Endpoint
+            } else {
+                ModelKind::Client
+            };
+            let source = ChoiceValue::Model(node(reference_kind, "source"));
+            select_choice(signals, ChoiceControl::IngestSourceRef, source.clone());
+            assert!(selected_choice(signals, ChoiceControl::IngestSourceRef, &source));
+        }
+
+        let codec = ChoiceValue::Model(node(ModelKind::Codec, "decode"));
+        select_choice(signals, ChoiceControl::IngestCodec, codec.clone());
+        assert!(selected_choice(signals, ChoiceControl::IngestCodec, &codec));
+        assert_eq!(
+            signals.choice_query(ChoiceControl::IngestCodec).assured("domain captured").target,
+            ChoiceTarget::IngestCodec
+        );
+        signals.ingestor.update(|draft| {
+            draft.timestamp = super::ingestor_draft::TimestampDraft::At(None);
+            draft.routes[0].inherit.choose("fields");
+        });
+        for control in [ChoiceControl::IngestTimestampField, ChoiceControl::IngestInputField] {
+            let query = signals.choice_query(control).assured("codec selected");
+            assert_eq!(query.target, ChoiceTarget::CodecField);
+            assert_eq!(query.dependencies[1].value, codec);
+        }
+        let occurred_at = ChoiceValue::Field(FieldName::parse("occurred_at").assured("valid field"));
+        select_choice(signals, ChoiceControl::IngestTimestampField, occurred_at);
+        let inherited = ChoiceValue::Field(FieldName::parse("message").assured("valid field"));
+        select_choice(signals, ChoiceControl::IngestInputField, inherited);
+        assert!(matches!(
+            signals.ingestor.get().routes[0].inherit,
+            super::ingestor_route_draft::InheritDraft::Fields(ref fields) if fields.len() == 1
+        ));
+
+        assert_eq!(
+            signals.choice_query(ChoiceControl::IngestRouteRelay).err(),
+            Some("Choose the route branch before its relay")
+        );
+        signals.ingestor.update(|draft| draft.choose_route_branched());
+        assert_eq!(
+            signals.choice_query(ChoiceControl::IngestRouteRelay).err(),
+            Some("Choose the named branch before its relay")
+        );
+        let branch = ChoiceValue::Model(node(ModelKind::Branch, "by_tenant"));
+        select_choice(signals, ChoiceControl::IngestRouteBranch, branch.clone());
+        assert!(selected_choice(signals, ChoiceControl::IngestRouteBranch, &branch));
+        assert_eq!(
+            signals.choice_query(ChoiceControl::IngestBranchField).assured("branch selected").target,
+            ChoiceTarget::BranchField
+        );
+        let route_query = signals.choice_query(ChoiceControl::IngestRouteRelay).assured("branch selected");
+        assert_eq!(route_query.target, ChoiceTarget::IngestBranchedRelay);
+        assert_eq!(route_query.dependencies[1].value, branch);
+        select_choice(
+            signals,
+            ChoiceControl::IngestBranchField,
+            ChoiceValue::Field(FieldName::parse("tenant").assured("valid field")),
+        );
+        let output = ChoiceValue::Model(node(ModelKind::Relay, "output"));
+        select_choice(signals, ChoiceControl::IngestRouteRelay, output.clone());
+        assert!(selected_choice(signals, ChoiceControl::IngestRouteRelay, &output));
+        assert_eq!(
+            signals.choice_query(ChoiceControl::IngestOutputField).assured("output relay selected").dependencies[1].value,
+            output
+        );
+        select_choice(
+            signals,
+            ChoiceControl::IngestOutputField,
+            ChoiceValue::Field(FieldName::parse("message").assured("valid field")),
+        );
+
+        signals.ingestor.update(|draft| {
+            draft.routes[0].message_error = super::ingestor_route_draft::MessageErrorDraft::SendTo {
+                relay: None,
+                assignments: Vec::new(),
+            };
+        });
+        assert_eq!(
+            signals.choice_query(ChoiceControl::IngestErrorRelay).assured("domain captured").target,
+            ChoiceTarget::IngestUnbranchedRelay
+        );
+        let errors = ChoiceValue::Model(node(ModelKind::Relay, "errors"));
+        select_choice(signals, ChoiceControl::IngestErrorRelay, errors.clone());
+        assert!(selected_choice(signals, ChoiceControl::IngestErrorRelay, &errors));
+        assert_eq!(
+            signals.choice_query(ChoiceControl::IngestErrorField).assured("error relay selected").dependencies[1].value,
+            errors
+        );
+        select_choice(
+            signals,
+            ChoiceControl::IngestErrorField,
+            ChoiceValue::Field(FieldName::parse("reason").assured("valid field")),
+        );
+        assert!(matches!(
+            signals.ingestor.get().routes[0].message_error,
+            super::ingestor_route_draft::MessageErrorDraft::SendTo { ref assignments, .. } if assignments.len() == 1
+        ));
+        assert!(open_form_controls(signals, CreateKind::Ingestor)
+            .contains(&ChoiceControl::IngestErrorField));
+    });
+}
+
+#[test]
+fn ingestor_editor_shows_source_specific_fields_and_route_construction_sections() {
+    use nervix_models::IngestSourceKind;
+
+    super::super::initialize_test_executor();
+    Owner::new().with(|| {
+        let scope = DomainName::parse("orders").assured("valid domain");
+        let signals = CreateSignals::new();
+        let active_domain = RwSignal::new(Some(scope.clone()));
+        let connection_state = RwSignal::new(super::super::ConsoleConnectionState::Waiting);
+        let generation = RwSignal::new(1);
+        let request_tx = RwSignal::new(None);
+        let render = || {
+            let dialog = CreateDialog(
+                CreateDialogProps::builder()
+                    .signals(signals)
+                    .active_domain(active_domain)
+                    .connection_state(connection_state)
+                    .session_generation(generation)
+                    .request_tx(request_tx)
+                    .submit(|_, _, _| {})
+                    .build(),
+            );
+            any_spawner::Executor::poll_local();
+            dialog.to_html()
+        };
+        signals.open(CreateKind::Ingestor, Some(scope), "global-create-button");
+        for (kind, field) in [
+            (IngestSourceKind::Http, "create-ingestor-every"),
+            (IngestSourceKind::Kafka, "create-ingestor-offset"),
+            (IngestSourceKind::Pulsar, "create-ingestor-subscription"),
+            (IngestSourceKind::Mqtt, "create-ingestor-mqtt-session"),
+            (IngestSourceKind::Nats, "create-ingestor-queue-group"),
+            (IngestSourceKind::RabbitMq, "create-ingestor-queue"),
+            (IngestSourceKind::RedisPubSub, "create-ingestor-channel"),
+            (IngestSourceKind::Prometheus, "create-ingestor-query"),
+            (IngestSourceKind::ZeroMq, "create-ingestor-quiesce"),
+            (IngestSourceKind::Sqs, "create-ingestor-queue"),
+            (IngestSourceKind::Endpoint, "create-ingestor-timestamp"),
+            (IngestSourceKind::Websockets, "create-ingestor-quiesce"),
+            (IngestSourceKind::Syslog, "create-ingestor-quiesce"),
+        ] {
+            signals
+                .ingestor
+                .update(|draft| draft.source.choose_kind(kind));
+            assert!(
+                render().contains(field),
+                "{} must show {field}",
+                kind.form_label()
+            );
+        }
+        signals.ingestor.update(|draft| {
+            draft.source.choose_kind(IngestSourceKind::Mqtt);
+            draft.source.delivery = Some(super::ingestor_source_draft::DeliveryChoice::AckParallel);
+            draft.source.quiesce = Some(super::ingestor_source_draft::QuiesceChoice::Buffer);
+            let route = draft.active_route_mut().assured("first route exists");
+            route.branch.choose_branched();
+            route.inherit.choose("fields");
+            route.flush = super::ingestor_route_draft::FlushDraft::Each {
+                interval: "1s".into(),
+                max_batch_size: "1MiB".into(),
+            };
+            route.message_error = super::ingestor_route_draft::MessageErrorDraft::SendTo {
+                relay: None,
+                assignments: Vec::new(),
+            };
+            route
+                .invocations
+                .push(super::ingestor_route_draft::InvocationDraft {
+                    function: "lower".into(),
+                    arguments: vec!["message.value".into()],
+                });
+        });
+        let html = render();
+        for section in [
+            "create-ingestor-ack-max",
+            "create-ingestor-overflow",
+            "create-ingestor-branch-fields",
+            "create-ingestor-input-fields",
+            "create-ingestor-flush-interval",
+            "create-ingestor-error-relay",
+            "create-ingestor-invocation-argument",
+        ] {
+            assert!(html.contains(section), "{section} must render");
+        }
+    });
+}
+
+#[test]
 fn client_vhost_and_endpoint_forms_render_every_transport_and_typed_reference_control() {
     super::super::initialize_test_executor();
     Owner::new().with(|| {

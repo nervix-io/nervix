@@ -1498,18 +1498,6 @@ impl CodecWireFormat {
         }
     }
 
-    pub fn supports_decoding(&self) -> bool {
-        match self {
-            Self::Json { .. } | Self::Cbor { .. } | Self::Avro { .. } | Self::Syslog => true,
-            Self::JaqNative {
-                transformations, ..
-            }
-            | Self::Protobuf(CodecProtobufConfig {
-                transformations, ..
-            }) => transformations.on_ingestion.is_some(),
-        }
-    }
-
     /// How this format frames the member values of one batch into a single payload.
     pub fn batch_container(&self) -> CodecBatchContainer<'_> {
         match self {
@@ -1548,6 +1536,21 @@ impl CodecWireFormat {
             | Self::Protobuf(CodecProtobufConfig {
                 transformations, ..
             }) => transformations.on_emitting.is_some(),
+        }
+    }
+}
+
+impl<Version> CodecWireFormat<Version> {
+    /// Whether this codec can decode incoming payloads, independent of resource version state.
+    pub fn supports_decoding(&self) -> bool {
+        match self {
+            Self::Json { .. } | Self::Cbor { .. } | Self::Avro { .. } | Self::Syslog => true,
+            Self::JaqNative {
+                transformations, ..
+            }
+            | Self::Protobuf(CodecProtobufConfig {
+                transformations, ..
+            }) => transformations.on_ingestion.is_some(),
         }
     }
 }
@@ -4130,6 +4133,77 @@ pub enum IngestSourceKind {
 }
 
 impl IngestSourceKind {
+    pub const ALL: [Self; 13] = [
+        Self::Http,
+        Self::Kafka,
+        Self::Pulsar,
+        Self::Mqtt,
+        Self::Nats,
+        Self::RabbitMq,
+        Self::RedisPubSub,
+        Self::Prometheus,
+        Self::ZeroMq,
+        Self::Sqs,
+        Self::Endpoint,
+        Self::Websockets,
+        Self::Syslog,
+    ];
+
+    pub const fn form_key(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Kafka => "kafka",
+            Self::Pulsar => "pulsar",
+            Self::Mqtt => "mqtt",
+            Self::Nats => "nats",
+            Self::RabbitMq => "rabbitmq",
+            Self::RedisPubSub => "redis-pubsub",
+            Self::Prometheus => "prometheus",
+            Self::ZeroMq => "zeromq",
+            Self::Sqs => "sqs",
+            Self::Endpoint => "endpoint",
+            Self::Websockets => "websockets",
+            Self::Syslog => "syslog",
+        }
+    }
+
+    pub const fn form_label(self) -> &'static str {
+        match self {
+            Self::Http => "HTTP polling",
+            Self::Kafka => "Kafka",
+            Self::Pulsar => "Pulsar",
+            Self::Mqtt => "MQTT",
+            Self::Nats => "NATS",
+            Self::RabbitMq => "RabbitMQ",
+            Self::RedisPubSub => "Redis Pub/Sub",
+            Self::Prometheus => "Prometheus",
+            Self::ZeroMq => "ZeroMQ",
+            Self::Sqs => "SQS",
+            Self::Endpoint => "Endpoint",
+            Self::Websockets => "WebSocket client",
+            Self::Syslog => "Syslog",
+        }
+    }
+
+    /// The configured client type a source may read. Endpoint ingestion names an endpoint instead.
+    pub const fn client_type_label(self) -> Option<&'static str> {
+        match self {
+            Self::Http => Some("HTTP"),
+            Self::Kafka => Some("KAFKA"),
+            Self::Pulsar => Some("PULSAR"),
+            Self::Mqtt => Some("MQTT"),
+            Self::Nats => Some("NATS"),
+            Self::RabbitMq => Some("RABBITMQ"),
+            Self::RedisPubSub => Some("REDIS"),
+            Self::Prometheus => Some("PROMETHEUS"),
+            Self::ZeroMq => Some("ZEROMQ"),
+            Self::Sqs => Some("SQS"),
+            Self::Endpoint => None,
+            Self::Websockets => Some("WEBSOCKETS"),
+            Self::Syslog => Some("SYSLOG"),
+        }
+    }
+
     pub const fn reads_headers(self) -> bool {
         match self {
             Self::Endpoint
