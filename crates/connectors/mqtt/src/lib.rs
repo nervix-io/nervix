@@ -22,7 +22,6 @@ use std::{
     future::Future,
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
-    sync::atomic::{AtomicU32, Ordering},
     time::Duration,
 };
 
@@ -38,6 +37,7 @@ use nervix_connector::{
     optional_client_config_value, read_tls_file,
 };
 use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
+use nervix_primitives::sync::atomic::{AtomicU32, Ordering};
 use rumqttc::{
     AsyncClient, ClientError as MqttClientError, ConnAck, Event, Incoming, MqttOptions,
     PubAckReason as MqttPubAckReason, PubRecReason as MqttPubRecReason, PublishNoticeError,

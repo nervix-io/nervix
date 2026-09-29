@@ -3,10 +3,7 @@
 //! May depend on: runtime internals and test-only storage fixtures.
 //! Must not know: production control-plane orchestration or edge protocols.
 
-use std::{
-    collections::BTreeMap,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::collections::BTreeMap;
 
 use ahash::HashMap;
 use fjall::Database;
@@ -20,6 +17,7 @@ use nervix_models::{
     OwnershipStateResetCause, OwnershipTransition, ParseAsType, RelayBranching, RelayName,
     ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint, SchemaName, Timestamp,
 };
+use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
 use nonzero_ext::nonzero;
 use tempfile::tempdir;
 use tokio::{

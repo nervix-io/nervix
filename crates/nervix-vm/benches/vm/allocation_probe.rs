@@ -3,12 +3,10 @@
 //! This module is built only by `just bench-vm-alloc`. Its global allocator counts requested
 //! bytes while one fixture executes. Criterion timing uses the ordinary allocator build.
 
-use std::{
-    alloc::{GlobalAlloc, Layout, System},
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+use std::alloc::{GlobalAlloc, Layout, System};
 
 use meticulous::OptionExt as _;
+use nervix_primitives::unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
 

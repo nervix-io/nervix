@@ -2,16 +2,14 @@ use std::{
     collections::BTreeSet,
     path::PathBuf,
     process::Command,
-    sync::{
-        Arc as StdArc, OnceLock,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc as StdArc, OnceLock},
 };
 
 use futures_util::FutureExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{CpuClass, MemoryClass};
 use nervix_models::RemoteAckOutcome;
+use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType,

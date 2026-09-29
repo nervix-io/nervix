@@ -1205,9 +1205,8 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     use nervix_models::{IngestQuiesceMode, IngestQuiesceOverflow, IngestorName, ModelKind};
+    use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::watch;
     use triomphe::Arc;
 

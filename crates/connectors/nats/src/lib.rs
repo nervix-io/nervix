@@ -15,16 +15,7 @@ extern crate shuttle_tokio as tokio;
 
 mod source;
 
-use std::{
-    collections::VecDeque,
-    future::Future,
-    pin::Pin,
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{collections::VecDeque, future::Future, pin::Pin, sync::Arc as StdArc, time::Duration};
 
 use async_nats::{
     Client as NatsClient, PublishError as NatsPublishError,
@@ -46,6 +37,7 @@ use nervix_connector::{
     SinkStartResult, client_config_value, client_tls_paths,
 };
 use nervix_models::{ClientConfigEntry, SubjectName, Timestamp};
+use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
 pub use source::{
     NatsMessageHeaders, NatsSource, NatsSourceError, NatsSourceMessage, NatsSourcePlan,
 };

@@ -1,14 +1,4 @@
-// A drain reads one node's quiesce counts one after another while work moves between them, so
-// `QuiesceCount` is Shuttle's atomic under the Shuttle feature: a check needs a scheduling point at
-// every read and every adjustment to explore what a drain observes mid-transfer. The node's other
-// counters stay on the standard library's atomics, because they are shared with maps this module
-// does not own.
-#[cfg(not(feature = "shuttle"))]
-use std::sync::atomic::AtomicUsize as QuiesceCount;
-
 use parking_lot::Mutex;
-#[cfg(feature = "shuttle")]
-use shuttle::sync::atomic::AtomicUsize as QuiesceCount;
 
 use super::*;
 
@@ -283,14 +273,14 @@ pub(super) struct QuiescedIngestorHold {
 #[derive(Debug, Default)]
 pub(super) struct NodeQuiesceCounters {
     /// Every work item this node holds in memory.
-    outstanding: QuiesceCount,
+    outstanding: AtomicUsize,
     /// Everything in `outstanding` apart from messages parked on `REQUIRED WAIT` and outstanding
     /// force-flush obligations, which a local drain weighs on their own.
-    admitted: QuiesceCount,
+    admitted: AtomicUsize,
     /// Messages parked on `REQUIRED WAIT`, which a drain that ran out of time reports separately.
-    parked: QuiesceCount,
+    parked: AtomicUsize,
     /// Force-flush obligations this node has not completed, reported the same way.
-    force_flushes: QuiesceCount,
+    force_flushes: AtomicUsize,
 }
 
 /// What one publisher of processor depths contributes to its node's quiesce accounting.
@@ -419,7 +409,7 @@ impl NodeQuiesceCounters {
         Self::lower(&self.outstanding, held, holding);
     }
 
-    fn raise(count: &QuiesceCount, previous: usize, next: usize) {
+    fn raise(count: &AtomicUsize, previous: usize, next: usize) {
         if next <= previous {
             return;
         }
@@ -429,7 +419,7 @@ impl NodeQuiesceCounters {
         count.fetch_add(rise, Ordering::AcqRel);
     }
 
-    fn lower(count: &QuiesceCount, previous: usize, next: usize) {
+    fn lower(count: &AtomicUsize, previous: usize, next: usize) {
         if next >= previous {
             return;
         }
@@ -1448,10 +1438,7 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc as StdArc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    };
+    use std::sync::Arc as StdArc;
 
     use nervix_interconnect::EntityGatePurpose;
     use nervix_models::{
@@ -1461,6 +1448,7 @@ mod tests {
         ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, RelayBranching, RelayName,
         RetryPolicy,
     };
+    use nervix_primitives::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use nonzero_ext::nonzero;
     use tokio::{
         sync::watch,

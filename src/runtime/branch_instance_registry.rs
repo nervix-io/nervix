@@ -279,14 +279,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        num::NonZeroUsize,
-        sync::atomic::{AtomicUsize, Ordering},
-        time::Duration,
-    };
+    use std::{num::NonZeroUsize, time::Duration};
 
     use meticulous::OptionExt as _;
     use nervix_models::Timestamp;
+    use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
     use triomphe::Arc;
 
     use super::BranchInstanceRegistry;

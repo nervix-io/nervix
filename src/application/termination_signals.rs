@@ -20,20 +20,15 @@
 //! signal registry keeps its own handler installed, so a later signal would simply be ignored.
 //! Supervision therefore lasts until the process exits, and the first signal does not end it.
 
-use std::{ffi::c_int, time::Duration};
 #[cfg(not(feature = "shuttle"))]
-use std::{
-    sync::atomic::{AtomicBool, Ordering},
-    thread,
-};
+use std::thread;
+use std::{ffi::c_int, time::Duration};
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
+use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "shuttle")]
-use shuttle::{
-    sync::atomic::{AtomicBool, Ordering},
-    thread,
-};
+use shuttle::thread;
 use signal_hook::{
     consts::{SIGINT, SIGTERM},
     iterator::Signals,

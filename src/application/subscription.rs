@@ -38,7 +38,6 @@ mod interest;
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU64, NonZeroUsize},
-    sync::atomic::{AtomicU64, Ordering},
 };
 
 use ahash::{HashMap, HashMapExt};
@@ -59,6 +58,7 @@ use nervix_models::{
     SubscriptionLiteral, SubscriptionName, TransactionPreviewIdentity, UserName,
 };
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
+use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use nervix_recovery::Discarded as _;
 use nonzero_ext::nonzero;
 use sorted_vec::SortedSet;

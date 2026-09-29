@@ -18,10 +18,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-    },
+    sync::Arc as StdArc,
 };
 
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
@@ -88,6 +85,7 @@ use nervix_models::{
     CreateClientHttp, CreateClientPrometheus, CreateClientRabbitMq, CreateEmitter,
     EmitterPublishingMode,
 };
+use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use nervix_roto::{UdfExecutor, UdfProgram};
 #[cfg(test)]

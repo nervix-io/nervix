@@ -333,12 +333,12 @@ async fn refuse_read(
 pub(in crate::application) mod test_archives {
     //! Retained archives held in memory, which count how often they are released.
 
-    use std::sync::{
-        Arc as StdArc,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::Arc as StdArc;
 
     use error_stack::Report;
+    // A release count is a record: an unmodeled atomic is not a Shuttle scheduling point, so it
+    // changes in the same scheduling step as the release it counts.
+    use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{ArchiveBytes, ArchiveReadFailure, RetainedArtifact};
 
@@ -404,13 +404,11 @@ pub(in crate::application) mod test_archives {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc as StdArc,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::Arc as StdArc;
 
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_client_wire::{BackupDownloadMessage, SessionLimits};
+    use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{test_archives::*, *};
 
@@ -645,12 +643,10 @@ mod shuttle_tests {
     //! collecting, concurrent downloads collect an archive exactly once, and the archive is
     //! released exactly once however they finish.
 
-    use std::sync::{
-        Arc as StdArc,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::Arc as StdArc;
 
     use nervix_client_wire::{BackupDownloadMessage, SessionLimits};
+    use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
     use shuttle::{future::block_on, thread};
 
     use super::{test_archives::*, *};

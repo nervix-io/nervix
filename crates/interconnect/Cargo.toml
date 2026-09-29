@@ -17,12 +17,17 @@ shuttle = [
   "dep:shuttle-parking-lot",
   "dep:shuttle-tokio",
   "dep:shuttle-tokio-util",
+  "nervix-primitives/shuttle",
   "shuttle-dashmap/shuttle",
   "shuttle-parking-lot/shuttle",
   "shuttle-tokio/shuttle",
   "shuttle-tokio-util/shuttle",
 ]
-turmoil = ["dep:turmoil", "nervix-execution/turmoil"]
+turmoil = [
+  "dep:turmoil",
+  "nervix-execution/turmoil",
+  "nervix-primitives/turmoil",
+]
 
 [[test]]
 name = "simulation"
@@ -43,6 +48,7 @@ meticulous = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-execution = { workspace = true }
 nervix-models = { workspace = true }
+nervix-primitives = { workspace = true }
 nervix-recovery = { workspace = true }
 parking_lot = { workspace = true }
 percent-encoding = { workspace = true }
