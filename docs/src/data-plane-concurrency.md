@@ -459,23 +459,23 @@ target cannot provide is a compile error rather than another implementation.
 | Family | Path | Ordinary and Turmoil | Shuttle | Loom |
 | --- | --- | --- | --- | --- |
 | Atomic values, `Ordering`, `fence` | `sync::atomic` | The standard library's | Modeled: every operation is a scheduling point, and every ordering behaves as `SeqCst` | Modeled: explored under the C11 orderings Loom supports |
-| Async locks, semaphores and one-time cells; the `mpsc`, `oneshot` and `broadcast` channels | `sync` | Tokio's | Modeled: Shuttle's Tokio | Unavailable |
-| `Notify` and the `watch` channel | `sync` | Tokio's | Modeled: the boundary's own, with Tokio's semantics and a scheduling point before every registration, notification and deciding read | Unavailable |
-| Cancellation tokens and their guards | `sync` | Tokio Util's | Modeled: Shuttle's token, wrapped for Tokio Util's clone identity and owned operations | Unavailable |
-| Blocking locks and their condition variable | `sync::blocking` | `parking_lot`'s | Modeled: Shuttle's `parking_lot` locks, and the boundary's condition variable over them | Unavailable |
-| Barriers, `Once` and the synchronous channel | `sync::blocking` | The standard library's | Modeled: Shuttle's | Unavailable |
-| `OnceLock` | `sync::blocking` | The standard library's | Opaque, with a scheduling point before and after each read and write; no initializing read | Unavailable |
-| `LazyLock` | `sync::blocking` | The standard library's | Unavailable | Unavailable |
-| Task spawning, joining, yielding, aborting, tracking and the cooperative budget | `task` | Tokio's and Tokio Util's | Modeled: Shuttle's Tokio, with the boundary's abort-on-drop handle | Unavailable |
-| `block_in_place` | `task` | Tokio's | Unavailable | Unavailable |
-| The runtime, `#[nervix_primitives::test]`, `#[nervix_primitives::main]`, `select!` | `runtime`, crate root | Tokio's | Shuttle's runtime and `select!`; the attributes build Shuttle's runtime | Unavailable |
-| Streams over channels | `stream` | Tokio Stream's | Shuttle's Tokio Stream | Unavailable |
-| Atomic reference publication and its cache | `publication` | ArcSwap's | Opaque, with a yield before and after each load, store, compare-and-swap and read-copy-update | Unavailable |
-| Concurrent maps | `collections` | DashMap's | Modeled: Shuttle's DashMap | Unavailable |
-| Lock-free queues | `collections` | Concurrent Queue's | Opaque, with a scheduling point before and after each operation | Unavailable |
-| Threads: spawning, joining, building, scopes, parking, sleeping, yielding | `thread` | The operating system's | Modeled threads; sleeping and parking with a timeout are scheduling points that take no time | Loom's threads to spawn, join and yield; nothing else |
-| A thread nothing joins | `thread::spawn_detached` | A named operating-system thread | A detached Shuttle task, abandoned when the model's main thread returns | Unavailable |
-| Thread-local storage | `thread_local!` | The standard library's | Shuttle's, one per task | Loom's |
+| Async locks, semaphores and one-time cells; the `mpsc`, `oneshot` and `broadcast` channels | `sync` | Tokio's | Modeled: Shuttle's Tokio | Real: Tokio's, outside every model |
+| `Notify` and the `watch` channel | `sync` | Tokio's | Modeled: the boundary's own, with Tokio's semantics and a scheduling point before every registration, notification and deciding read | Real: Tokio's, outside every model |
+| Cancellation tokens and their guards | `sync` | Tokio Util's | Modeled: Shuttle's token, wrapped for Tokio Util's clone identity and owned operations | Real: Tokio Util's, outside every model |
+| Blocking locks and their condition variable | `sync::blocking` | `parking_lot`'s | Modeled: Shuttle's `parking_lot` locks, and the boundary's condition variable over them | Real: `parking_lot`'s, outside every model |
+| Barriers, `Once` and the synchronous channel | `sync::blocking` | The standard library's | Modeled: Shuttle's | Real: the standard library's, outside every model |
+| `OnceLock` | `sync::blocking` | The standard library's | Opaque, with a scheduling point before and after each read and write; no initializing read | Real: the standard library's, outside every model |
+| `LazyLock` | `sync::blocking` | The standard library's | Unavailable | Real: the standard library's, outside every model |
+| Task spawning, joining, yielding, aborting, tracking and the cooperative budget | `task` | Tokio's and Tokio Util's | Modeled: Shuttle's Tokio, with the boundary's abort-on-drop handle | Real: Tokio's and Tokio Util's, outside every model |
+| `block_in_place` | `task` | Tokio's | Unavailable | Real: Tokio's, outside every model |
+| The runtime, `#[nervix_primitives::test]`, `#[nervix_primitives::main]`, `select!` | `runtime`, crate root | Tokio's | Shuttle's runtime and `select!`; the attributes build Shuttle's runtime | Real: Tokio's, outside every model |
+| Streams over channels | `stream` | Tokio Stream's | Shuttle's Tokio Stream | Real: Tokio Stream's, outside every model |
+| Atomic reference publication and its cache | `publication` | ArcSwap's | Opaque, with a yield before and after each load, store, compare-and-swap and read-copy-update | Real: ArcSwap's, outside every model |
+| Concurrent maps | `collections` | DashMap's | Modeled: Shuttle's DashMap | Real: DashMap's, outside every model |
+| Lock-free queues | `collections` | Concurrent Queue's | Opaque, with a scheduling point before and after each operation | Real: Concurrent Queue's, outside every model |
+| Threads: spawning, joining, building, scopes, parking, sleeping, yielding | `thread` | The operating system's | Modeled threads; sleeping and parking with a timeout are scheduling points that take no time | Modeled: Loom's threads to spawn, build, join, park and yield. Real: the operating system's sleeping, timed parking and scopes, outside every model |
+| A thread nothing joins | `thread::spawn_detached` | A named operating-system thread | A detached Shuttle task, abandoned when the model's main thread returns | Real: a named operating-system thread, outside every model |
+| Thread-local storage | `thread_local!` | The standard library's | Shuttle's, one per task | Modeled: Loom's, one per model thread |
 | The host's parallelism | `thread::available_parallelism` | The host's | The host's | The host's |
 | Real primitives outside every model | `unmodeled` | Real | Real | Real |
 
@@ -487,9 +487,13 @@ ordering stay unmodeled, so a check claims nothing about them. An operation **ou
 execution** is a real primitive reached through `nervix_primitives::unmodeled` under a named
 permission, and supplies no evidence about a checked protocol. An operation a mode cannot provide is
 unavailable in that mode and fails to compile; it never falls back to a real primitive. Loom models
-isolated synchronous owners, so a Loom build provides atomics, threads and thread-local storage and
-no other native family: an async operation named in a Loom build fails to compile rather than
-running silently real. `just test-primitives` shows each of these in its mode.
+isolated synchronous owners: atomics, the threads a model spawns, joins, parks and yields, and
+thread-local storage. It models no async family, lock, collection or publication, so a Loom build,
+in which the server and consensus compile for the models of their owners, takes the ordinary
+library for each of those, outside every model. `just validate-primitive-boundary` rejects every
+such family in Loom model code, a module compiled only for Loom, so a model never names a real
+primitive; what an owner a model drives uses internally is excluded from that model's claim.
+`just test-primitives` shows each mode's selection.
 
 Turmoil runs the ordinary primitives on the simulated host that runs the caller. Its timers,
 sockets and bounded CPU work are the interconnect simulation's, described in

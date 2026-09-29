@@ -11,19 +11,19 @@
 //! `mpsc`, `oneshot` and `broadcast` channels. `Notify` and `watch` are this crate's own, with
 //! Tokio's semantics and a scheduling point before every waiter registration, because Shuttle's
 //! keep their registrations out of the scheduler's sight. The cancellation token wraps Shuttle's
-//! to give it Tokio Util's clone identity and owned operations. Loom models synchronous owners
-//! only, so none of these, nor `blocking`, exists in a Loom build.
+//! to give it Tokio Util's clone identity and owned operations. Loom models none of these: a Loom
+//! build takes the ordinary libraries, outside every model, and its model code may not name them.
 
 pub mod atomic;
-#[cfg(all(feature = "native", not(feature = "loom")))]
+#[cfg(feature = "native")]
 pub mod blocking;
 
-#[cfg(all(feature = "native", not(any(feature = "loom", feature = "shuttle"))))]
+#[cfg(all(feature = "native", not(feature = "shuttle")))]
 pub use tokio::sync::{
     AcquireError, Mutex, MutexGuard, Notify, OnceCell, OwnedMutexGuard, OwnedSemaphorePermit,
     Semaphore, SemaphorePermit, TryAcquireError, broadcast, futures, mpsc, oneshot, watch,
 };
-#[cfg(all(feature = "native", not(any(feature = "loom", feature = "shuttle"))))]
+#[cfg(all(feature = "native", not(feature = "shuttle")))]
 pub use tokio_util::sync::{CancellationToken, DropGuard, WaitForCancellationFutureOwned};
 
 #[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]

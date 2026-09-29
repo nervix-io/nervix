@@ -5,10 +5,11 @@
 //! are the operating system's threads. [`yield_now`] is how a synchronous spin wait gives the
 //! scheduler of the build, the operating system's or a model's, the chance to run what it waits on.
 //!
-//! Loom provides the threads its models spawn and join, and nothing else of this module: a Loom
-//! model has no sleeping, parking with a timeout, scoped or detached threads. Neither model checker
-//! models elapsed time, so under Shuttle `sleep` and `park_timeout` are scheduling points that do
-//! not wait for their duration. [`available_parallelism`] reports the host in every mode.
+//! Loom models the threads its models spawn, join, park and yield. It has no sleeping, parking
+//! with a timeout or scoped threads, so a Loom build takes the operating system's for those, outside
+//! every model. Neither model checker models elapsed time, so under Shuttle `sleep` and
+//! `park_timeout` are scheduling points that do not wait for their duration.
+//! [`available_parallelism`] reports the host in every mode.
 
 /// How many threads the host runs in parallel. A query of the host, the same in every mode.
 pub use std::thread::available_parallelism;
@@ -16,9 +17,11 @@ pub use std::thread::available_parallelism;
 pub use std::thread::{
     Builder, JoinHandle, current, park, park_timeout, scope, sleep, spawn, yield_now,
 };
+#[cfg(feature = "loom")]
+pub use std::thread::{park_timeout, scope, sleep};
 
 #[cfg(feature = "loom")]
-pub use loom::thread::{JoinHandle, spawn, yield_now};
+pub use loom::thread::{Builder, JoinHandle, current, park, spawn, yield_now};
 // See the atomic module: one backend stays selected when both modes are enabled by mistake.
 #[cfg(all(feature = "shuttle", not(feature = "loom")))]
 pub use shuttle::thread::{
@@ -32,13 +35,17 @@ pub use shuttle::thread::{
 /// reported as a deadlock. A Shuttle build therefore runs `body` as a detached Shuttle task, which
 /// the model abandons wherever it is parked when its main thread returns, as a process that exits
 /// abandons a thread nothing joins.
-#[cfg(not(feature = "loom"))]
+///
+/// A Loom model cannot detach its threads either, and a thread that outlives every model is not
+/// one of its participants, so a Loom build starts an operating-system thread, outside every model.
 pub fn spawn_detached<F>(name: &str, body: F) -> std::io::Result<()>
 where
     F: FnOnce() + Send + 'static,
 {
     #[cfg(not(feature = "shuttle"))]
-    let started = Builder::new().name(name.to_string()).spawn(body)?;
+    let started = std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(body)?;
     #[cfg(feature = "shuttle")]
     let started = {
         let name = name.to_string();

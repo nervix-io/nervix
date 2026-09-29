@@ -328,8 +328,9 @@ choose a backend.
   with a diagnostic naming both. Selection depends only on features, never on `cfg(test)`; there is
   no fallback from a modeled primitive to a real one, and a modeled primitive used outside its
   model is a test configuration failure. An operation a mode cannot provide is unavailable in that
-  mode and fails to compile: a Loom build has atomics, threads and thread-local storage and no
-  async family at all.
+  mode and fails to compile. Loom models atomics, its threads and thread-local storage; in a Loom
+  build every other family is the ordinary library, outside every model, and Loom model code, a
+  module compiled only for Loom, may not name one.
 - A package that owns a `shuttle`, `loom` or `turmoil` feature depends on `nervix-primitives`
   directly and forwards the mode to it and to every workspace dependency that owns the same mode.
   Cargo unifies features, so ordinary and modeled suites run in separate build invocations with

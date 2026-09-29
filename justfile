@@ -149,9 +149,9 @@ test-execution *args:
 # contract scripts of every family against its own backend and checks that it selected that backend,
 # so an operation a backend lacks or answers differently fails here. The Shuttle build also shows
 # that its adapters let the scheduler reach a publication between a read and a waiter's
-# registration. The documentation tests show that a runtime attribute refuses a crate path, and that
-# the Loom build has no async family: naming one fails to compile. Every mode is its own build,
-# because Cargo would unify the features of one.
+# registration, and the Loom build that it takes the ordinary libraries for the families Loom does
+# not model. The documentation tests show that a runtime attribute refuses a crate path. Every mode
+# is its own build, because Cargo would unify the features of one.
 # The portable surface is also built for the browser target.
 test-primitives:
     cargo test --package nervix-primitives --lib
@@ -159,7 +159,6 @@ test-primitives:
     cargo test --package nervix-primitives --features native --doc
     cargo test --package nervix-primitives --features 'shuttle native' --lib
     cargo test --package nervix-primitives --features 'loom native' --lib
-    cargo test --package nervix-primitives --features 'loom native' --doc
     cargo test --package nervix-primitives --features 'turmoil native' --lib
     cargo check --package nervix-primitives --lib --target wasm32-unknown-unknown
 

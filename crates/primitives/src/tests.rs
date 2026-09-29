@@ -506,4 +506,38 @@ mod loom_mode {
     fn native_threads_are_loom_threads() {
         loom::model(exercise_threads);
     }
+
+    /// Loom models the threads a model spawns, joins, parks and yields, and nothing of the async,
+    /// thread-blocking, collection or publication families, which a Loom build takes from the
+    /// ordinary libraries, outside every model.
+    #[cfg(feature = "native")]
+    #[test]
+    fn loom_takes_the_ordinary_libraries_for_the_families_it_does_not_model() {
+        assert!(is_same_type::<
+            crate::thread::JoinHandle<u8>,
+            loom::thread::JoinHandle<u8>,
+        >());
+        assert!(is_same_type::<crate::thread::Builder, loom::thread::Builder>());
+        assert!(is_same_type::<crate::sync::Notify, tokio::sync::Notify>());
+        assert!(is_same_type::<
+            crate::sync::watch::Sender<u8>,
+            tokio::sync::watch::Sender<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::sync::blocking::Mutex<u8>,
+            parking_lot::Mutex<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::task::JoinHandle<u8>,
+            tokio::task::JoinHandle<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::collections::DashMap<u8, u8>,
+            dashmap::DashMap<u8, u8>,
+        >());
+        assert!(is_same_type::<
+            crate::publication::ArcSwap<u8>,
+            arc_swap::ArcSwap<u8>,
+        >());
+    }
 }

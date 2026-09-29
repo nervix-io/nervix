@@ -177,6 +177,15 @@ BLOCKING = ("nervix_primitives", "sync", "blocking")
 GOVERNED_ROOTS = frozenset(
     {route.prefix[0] for route in ROUTES} | {module[0] for module in SYNC_MODULES}
 )
+# What Loom models: in a Loom build every other family is the ordinary library, outside every model,
+# so Loom model code, a module compiled only for Loom, names only these. A module prefix admits every
+# item below it; an item admits only itself.
+LOOM_MODELED_MODULES = (("nervix_primitives", "sync", "atomic"),)
+LOOM_MODELED_THREAD = frozenset({"Builder", "JoinHandle", "current", "park", "spawn", "yield_now"})
+LOOM_MODELED_ITEMS = frozenset(
+    {("nervix_primitives", "thread", item) for item in LOOM_MODELED_THREAD}
+    | {("nervix_primitives", "thread_local")}
+)
 # The one accepted crate alias: it still selects Shuttle's timers for the crates that use them.
 ACCEPTED_ALIAS = ("shuttle_tokio", "tokio")
 # Packages whose families the owner selects. No other package depends on them.
@@ -213,6 +222,14 @@ _QUALIFIED_PATH = re.compile(
     r"(?<![A-Za-z0-9_$])(?P<path>[A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)+)"
 )
 _BARE_THREAD_LOCAL = re.compile(r"(?<![A-Za-z0-9_:$])thread_local\s*!")
+# A `mod` item with a body, and the attributes in front of it.
+_MODULE_WITH_BODY = re.compile(
+    r"(?P<attributes>(?:#\[[^\]]*\]\s*)*)(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\{"
+)
+_NEGATED_CFG = re.compile(r"not\s*\([^()]*\)")
+_LOOM_FEATURE = re.compile(r"feature\s*=\s*\"loom\"")
+_CFG_ATTRIBUTE = re.compile(r"#\[\s*cfg\s*\((?P<condition>.*?)\)\s*\]", re.S)
 _IDENTIFIER = r"\$?[A-Za-z_][A-Za-z0-9_]*"
 _PATH = re.compile(rf"(?<![A-Za-z0-9_$])(?:::\s*)?{_IDENTIFIER}(?:\s*::\s*{_IDENTIFIER})*")
 # A lifetime keeps its tick after literals are blanked, so `'static` is never an item.
@@ -593,6 +610,90 @@ class FileUses:
     items: dict[str, int] = field(default_factory=dict)
 
 
+def _loom_only(attributes: str) -> bool:
+    """Whether `attributes` compile their item only for Loom: a `cfg` that requires the `loom`
+    feature outside every `not(...)`."""
+
+    for match in _CFG_ATTRIBUTE.finditer(attributes):
+        condition = match.group("condition")
+        previous = None
+        while previous != condition:
+            previous = condition
+            condition = _NEGATED_CFG.sub("", condition)
+        if _LOOM_FEATURE.search(condition):
+            return True
+    return False
+
+
+def _loom_modeled(path: Sequence[str]) -> bool:
+    path = tuple(path)
+    if path in LOOM_MODELED_ITEMS:
+        return True
+    return any(path[: len(module)] == module for module in LOOM_MODELED_MODULES)
+
+
+def check_loom_models(file: RustFile) -> list[Site]:
+    """Reject a family Loom does not model in a module compiled only for Loom.
+
+    In a Loom build such a family is the ordinary library, which no model observes, so a model that
+    named one would run a real primitive silently. What an owner the model drives uses internally
+    is outside this check: a Loom claim excludes it.
+    """
+
+    violations: list[Site] = []
+    for module in _MODULE_WITH_BODY.finditer(file.literals):
+        if not _loom_only(module.group("attributes")):
+            continue
+        brace = module.end() - 1
+        start, end = brace, _end_of_block(file.code, brace)
+        block = file.code[start:end]
+        thread_aliases: set[str] = set()
+
+        def reject(offset: int, path: Sequence[str]) -> None:
+            violations.append(
+                file.site(
+                    start + offset,
+                    f"{RULE}: Loom model code names `{'::'.join(path)}`, which a Loom build takes "
+                    "from the ordinary library, outside every model; a Loom model uses only "
+                    "atomics, the threads it spawns, joins, parks and yields, and thread-local "
+                    "storage",
+                )
+            )
+
+        use_spans: list[tuple[int, int]] = []
+        for match in _USE_ITEM.finditer(block):
+            use_spans.append((match.start(), match.end()))
+            try:
+                leaves = use_leaves(match.group("tree"))
+            except UseTreeError:
+                continue
+            for leaf in leaves:
+                path = leaf.path
+                if path[:1] != ("nervix_primitives",):
+                    continue
+                if path == ("nervix_primitives", "thread"):
+                    thread_aliases.add(leaf.alias or "thread")
+                    continue
+                if not _loom_modeled(path):
+                    reject(match.start(), path)
+        outside_uses = list(block)
+        for use_start, use_end in use_spans:
+            for index in range(use_start, use_end):
+                if outside_uses[index] != "\n":
+                    outside_uses[index] = " "
+        body = "".join(outside_uses)
+        for match in _QUALIFIED_PATH.finditer(body):
+            path = _segments(match.group("path"))
+            if path[0] == "nervix_primitives":
+                if path[:2] == ("nervix_primitives", "thread") and len(path) > 2:
+                    path = path[:3]
+                if not _loom_modeled(path):
+                    reject(match.start(), path)
+            elif path[0] in thread_aliases and path[1] not in LOOM_MODELED_THREAD:
+                reject(match.start(), ("nervix_primitives", "thread", path[1]))
+    return violations
+
+
 def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
     """Return the file's boundary violations and the unmodeled items it uses."""
 
@@ -827,6 +928,7 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
             continue
         unmodeled.items.setdefault("::".join(item), file.line_of(match.start()))
     violations.extend(check_statics(file, names))
+    violations.extend(check_loom_models(file))
     return violations, unmodeled
 
 

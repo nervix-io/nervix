@@ -270,8 +270,9 @@ requires its model to fail.
 `just test-primitives` builds `nervix-primitives` once per execution mode and runs its conformance
 checks: which backend each mode selects, the same contract scripts of every family against the
 ordinary libraries and against the Shuttle adapters, the Shuttle checks that a publication between
-a read and a waiter's registration is reached, and the compile-fail checks that a Loom build has no
-async family. Run it after changing an adapter or the families a mode provides:
+a read and a waiter's registration is reached, and the check that a Loom build takes the ordinary
+libraries for the families Loom does not model. Run it after changing an adapter or the families a
+mode provides:
 
 ```bash
 just test-primitives

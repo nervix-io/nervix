@@ -724,5 +724,64 @@ class OwnerOnlyManifestTests(CheckTestCase):
         self.assertIn("only nervix-primitives depends on `shuttle-parking_lot`", report)
 
 
+class LoomModelTests(CheckTestCase):
+    """Loom models only atomics, its threads and thread-local storage; in a Loom build every other
+    family is the ordinary library, so Loom model code may not name one."""
+
+    def test_a_model_of_atomics_and_threads_passes(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": (
+                    '#[cfg(all(test, feature = "loom"))]\n'
+                    "mod loom_models {\n"
+                    "    use nervix_primitives::{sync::atomic::{AtomicUsize, Ordering}, thread};\n"
+                    "    fn model() {\n"
+                    "        let handle = thread::spawn(|| AtomicUsize::new(0));\n"
+                    "        thread::yield_now();\n"
+                    "        nervix_primitives::thread::park();\n"
+                    "    }\n"
+                    "}\n"
+                )
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_an_unmodeled_family_in_a_model_fails(self) -> None:
+        self.assert_rejected(
+            '#[cfg(all(test, feature = "loom"))]\n'
+            "mod loom_models {\n"
+            "    use nervix_primitives::sync::Notify;\n"
+            "    fn model() {\n"
+            "        let map = nervix_primitives::collections::DashMap::<u8, u8>::new();\n"
+            "    }\n"
+            "}\n",
+            "Loom model code names `nervix_primitives::sync::Notify`",
+            "Loom model code names `nervix_primitives::collections::DashMap`",
+        )
+
+    def test_a_thread_operation_loom_does_not_model_fails_through_an_alias(self) -> None:
+        self.assert_rejected(
+            '#[cfg(feature = "loom")]\n'
+            "mod loom_models {\n"
+            "    use nervix_primitives::thread;\n"
+            "    fn model() { thread::sleep(DELAY); }\n"
+            "}\n",
+            "Loom model code names `nervix_primitives::thread::sleep`",
+        )
+
+    def test_a_module_compiled_without_loom_is_not_model_code(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": (
+                    '#[cfg(all(test, not(feature = "loom")))]\n'
+                    "mod tests {\n"
+                    "    use nervix_primitives::sync::Notify;\n"
+                    "}\n"
+                )
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+
 if __name__ == "__main__":
     unittest.main()
