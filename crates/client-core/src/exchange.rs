@@ -598,8 +598,17 @@ impl Exchange {
     }
 
     /// Ends the exchange. Every request still waiting on it observes the closed session.
-    pub(crate) async fn close(self) {
+    ///
+    /// The reader stops before the generation ends, so nothing it routes can follow that end: an
+    /// attach reply or an acknowledgement it applied is interrupted with the rest of the exchange
+    /// rather than left looking held by an exchange that is gone.
+    pub(crate) async fn close(mut self) {
         self.requests.pending.lock().close();
+        self.reader.abort();
+        (&mut self.reader).await.discarded(
+            "an aborted reader ends cancelled, and one that ended first already closed its \
+             requests",
+        );
         self.sinks.close_generation(&self.generation);
     }
 }
@@ -607,8 +616,10 @@ impl Exchange {
 impl Drop for Exchange {
     fn drop(&mut self) {
         // Nothing reads an exchange's replies once it is gone, and stopping its reader releases
-        // the server's session.
+        // the server's session. Its waiters observe the closed session instead of waiting out
+        // their deadlines.
         self.reader.abort();
+        self.requests.pending.lock().close();
     }
 }
 

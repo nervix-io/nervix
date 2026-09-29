@@ -18,8 +18,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
     DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachmentEndReason,
     DomainClockAttachmentEnded, DomainClockEvent, DomainClockInterruption, DomainClockObservation,
-    DomainClockObserved, DomainClockObservedState, DomainClockTickObservation, DomainClockTicked,
-    DomainName, PacedDomainClock, Timestamp,
+    DomainClockObserved, DomainClockObservedState, DomainClockRestorationFailure,
+    DomainClockTickObservation, DomainClockTicked, DomainName, PacedDomainClock, Timestamp,
     wire::{
         ClientFrame, ClientMessage, ClientRequest, EncodedFrame, Reply, ReplyBody, ReplyDelivery,
         ServerFrame, SessionLimits, VerifiedFrame,
@@ -358,6 +358,26 @@ fn end_and_interruption_events_name_their_domain_and_carry_no_clock() {
     assert_eq!(interrupted.kind(), ClockEventKind::Interrupted);
     assert_eq!(interrupted.domain(), "sim");
     interrupted.refuses(&[
+        Field::Generation,
+        Field::State,
+        Field::Paced,
+        Field::Tick,
+        Field::EndReason,
+    ]);
+}
+
+#[test]
+fn a_restoration_failure_names_its_domain_and_carries_no_clock() {
+    let failed = SharedClock::new(DomainClockEvent::RestorationFailed(
+        DomainClockRestorationFailure {
+            domain: domain("sim"),
+            message: "the session holds a transaction".to_string(),
+            retry_after: Duration::from_secs(2),
+        },
+    ));
+    assert_eq!(failed.kind(), ClockEventKind::RestorationFailed);
+    assert_eq!(failed.domain(), "sim");
+    failed.refuses(&[
         Field::Generation,
         Field::State,
         Field::Paced,

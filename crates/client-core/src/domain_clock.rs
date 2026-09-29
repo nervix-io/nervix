@@ -2,8 +2,9 @@
 //! ticks, and the arithmetic a participant in a domain's time runs against the latest clock.
 //!
 //! - **Owns.** The domains the client asked to follow, their latest clock and accepted tick,
-//!   which attachments wait to be restored on a new exchange, the pending clock events coalesced
-//!   per domain, and the helper that projects an attached clock.
+//!   which attachments wait to be restored on a new exchange and why an attempt to restore one
+//!   failed, the pending clock events coalesced per domain, and the helper that projects an
+//!   attached clock.
 //! - **Depends on.** The vocabulary's clock models and arithmetic, and the wire contract's clock
 //!   replies and frames.
 //! - **Must not know.** How a request is transported, how an exchange routes its frames, or relay
@@ -50,6 +51,9 @@ pub enum DomainClockEvent {
     /// next session, and the clock that attachment reports follows as an observation; changes in
     /// between are not reported.
     Interrupted(DomainClockInterruption),
+    /// The current session refused to attach the interrupted clock again, or did not answer. The
+    /// attachment stays interrupted, and the client tries again later.
+    RestorationFailed(DomainClockRestorationFailure),
 }
 
 impl DomainClockEvent {
@@ -60,6 +64,7 @@ impl DomainClockEvent {
             Self::Ticked(ticked) => &ticked.domain,
             Self::Ended(ended) => &ended.domain,
             Self::Interrupted(interrupted) => &interrupted.domain,
+            Self::RestorationFailed(failure) => &failure.domain,
         }
     }
 }
@@ -68,6 +73,18 @@ impl DomainClockEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DomainClockInterruption {
     pub domain: DomainName,
+}
+
+/// An attempt to attach an interrupted clock again that the current session refused or did not
+/// answer. The client tries again after `retry_after` for as long as it follows the clock and the
+/// session stays open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainClockRestorationFailure {
+    pub domain: DomainName,
+    /// The server's refusal, or why the request got no answer.
+    pub message: String,
+    /// How long the client waits before its next attempt.
+    pub retry_after: Duration,
 }
 
 /// Why an attached clock cannot answer a question about logical time.
@@ -217,6 +234,9 @@ struct PendingClockEvents {
     /// The end of an attachment, before anything about a later attachment to the same clock.
     ended: Option<DomainClockAttachmentEndReason>,
     interrupted: bool,
+    /// The newest failed attempt to attach the interrupted clock again, before the observation
+    /// that a later attempt reports.
+    restoration_failed: Option<DomainClockRestorationFailure>,
     /// The newest observation.
     observed: Option<DomainClockObservation>,
     /// The newest tick of the pending observation's generation, taken after that observation.
@@ -238,6 +258,9 @@ impl PendingClockEvents {
                 domain: domain.clone(),
             }));
         }
+        if let Some(failure) = self.restoration_failed.take() {
+            return Some(DomainClockEvent::RestorationFailed(failure));
+        }
         if let Some(clock) = self.observed.take() {
             return Some(DomainClockEvent::Observed(DomainClockObserved {
                 domain: domain.clone(),
@@ -252,7 +275,11 @@ impl PendingClockEvents {
     }
 
     fn is_empty(&self) -> bool {
-        self.ended.is_none() && !self.interrupted && self.observed.is_none() && self.tick.is_none()
+        self.ended.is_none()
+            && !self.interrupted
+            && self.restoration_failed.is_none()
+            && self.observed.is_none()
+            && self.tick.is_none()
     }
 }
 
@@ -314,10 +341,32 @@ impl DomainClockAttachments {
         state.followed.values().any(|followed| followed.interrupted)
     }
 
+    /// Whether the client follows the clock of `domain` and waits to attach it again.
+    pub(crate) fn awaits_restoration_of(&self, domain: &DomainName) -> bool {
+        let state = self.inner.state.lock();
+        match state.followed.get(domain) {
+            Some(followed) => followed.interrupted,
+            None => false,
+        }
+    }
+
     /// Every followed domain, in the order the client attached to its clock.
     pub(crate) fn followed_domains(&self) -> Vec<DomainName> {
         let state = self.inner.state.lock();
         state.followed.keys().cloned().collect()
+    }
+
+    /// Every followed domain whose clock waits to be attached again, in the order the client
+    /// attached to it.
+    pub(crate) fn interrupted_domains(&self) -> Vec<DomainName> {
+        let state = self.inner.state.lock();
+        let mut interrupted = Vec::new();
+        for (domain, followed) in &state.followed {
+            if followed.interrupted {
+                interrupted.push(domain.clone());
+            }
+        }
+        interrupted
     }
 
     /// Takes the earliest event a caller has not read.
@@ -341,7 +390,9 @@ impl DomainClockAttachments {
     /// frame, and the server queues an attachment's frames only after its reply, so every frame of
     /// the attachment finds it here. A reply for a clock the client already follows moves the
     /// attachment to a new exchange. It reports the clock as an observation when the attachment
-    /// was interrupted or the clock changed, because no caller waits for that reply.
+    /// was interrupted or the clock changed, because no caller waits for that reply. A reply that
+    /// the session already follows the clock moves an interrupted attachment to that session too,
+    /// whose later frames report the clock.
     pub(crate) fn apply_attach(&self, outcome: &DomainClockAttachOutcome, generation: &Arc<()>) {
         let mut state = self.inner.state.lock();
         match &outcome.disposition {
@@ -376,11 +427,47 @@ impl DomainClockAttachments {
                 *pending = PendingClockEvents::default();
                 pending.ended = Some(DomainClockAttachmentEndReason::DomainRemoved);
             }
-            DomainClockAttachDisposition::AlreadyAttached(_)
-            | DomainClockAttachDisposition::Failed => return,
+            DomainClockAttachDisposition::AlreadyAttached(domain) => {
+                let Some(followed) = state.followed.get_mut(domain) else {
+                    return;
+                };
+                if !followed.interrupted {
+                    return;
+                }
+                followed.generation = generation.clone();
+                followed.interrupted = false;
+            }
+            DomainClockAttachDisposition::Failed => return,
         }
         drop(state);
         self.inner.changed.send_replace(());
+    }
+
+    /// Reports that an attempt to attach the clock of `domain` again failed, which the client
+    /// repeats after `retry_after`. `false` once the clock no longer waits to be attached again:
+    /// the client stopped following it, or another attach restored it.
+    pub(crate) fn restoration_failed(
+        &self,
+        domain: &DomainName,
+        message: String,
+        retry_after: Duration,
+    ) -> bool {
+        let mut state = self.inner.state.lock();
+        let awaiting = match state.followed.get(domain) {
+            Some(followed) => followed.interrupted,
+            None => false,
+        };
+        if !awaiting {
+            return false;
+        }
+        state.pending(domain).restoration_failed = Some(DomainClockRestorationFailure {
+            domain: domain.clone(),
+            message,
+            retry_after,
+        });
+        drop(state);
+        self.inner.changed.send_replace(());
+        true
     }
 
     /// Applies a detach reply: the client no longer follows the domain's clock.
@@ -484,6 +571,7 @@ impl DomainClockAttachments {
         for domain in interrupted {
             let pending = state.pending(&domain);
             pending.observed = None;
+            pending.restoration_failed = None;
             pending.tick = None;
             pending.interrupted = true;
         }
@@ -915,6 +1003,145 @@ mod tests {
             })
             .domain(),
             &domain("sim")
+        );
+    }
+
+    fn already_attached(domain_name: &str) -> DomainClockAttachOutcome {
+        DomainClockAttachOutcome {
+            disposition: DomainClockAttachDisposition::AlreadyAttached(domain(domain_name)),
+            message: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_session_that_already_follows_an_interrupted_clock_takes_over_its_attachment() {
+        let clocks = DomainClockAttachments::new();
+        let first = Arc::new(());
+        clocks.apply_attach(&attach_reply("sim", paced(1, 1.0)), &first);
+        clocks.apply_attach(&attach_reply("held", paced(1, 1.0)), &first);
+        let second = Arc::new(());
+        clocks.apply_attach(&already_attached("held"), &second);
+        clocks.apply_observed(observed("held", paced(2, 1.0)), &second);
+        assert!(
+            clocks.take_event().is_none(),
+            "an attachment still held by its exchange is not moved by another session's reply"
+        );
+
+        clocks.exchange_ended(&first);
+        assert_eq!(
+            clocks.interrupted_domains(),
+            [domain("sim"), domain("held")]
+        );
+        clocks.apply_attach(&already_attached("sim"), &second);
+        assert!(!clocks.awaits_restoration_of(&domain("sim")));
+        assert!(clocks.awaits_restoration_of(&domain("held")));
+        assert!(!clocks.awaits_restoration_of(&domain("unknown")));
+        clocks.apply_observed(observed("sim", paced(2, 1.0)), &second);
+        let mut events = Vec::new();
+        while let Some(event) = clocks.take_event() {
+            events.push(event);
+        }
+        assert_eq!(
+            events,
+            [
+                DomainClockEvent::Interrupted(DomainClockInterruption {
+                    domain: domain("sim")
+                }),
+                DomainClockEvent::Observed(observed("sim", paced(2, 1.0))),
+                DomainClockEvent::Interrupted(DomainClockInterruption {
+                    domain: domain("held")
+                }),
+            ],
+            "frames of the session that already follows the clock reach the caller"
+        );
+        assert_eq!(
+            clocks.latest(&domain("sim")),
+            Some(attached("sim", paced(2, 1.0)))
+        );
+    }
+
+    #[test]
+    fn a_failed_restoration_is_reported_between_the_gap_and_the_restored_clock() {
+        let clocks = DomainClockAttachments::new();
+        let first = Arc::new(());
+        clocks.apply_attach(&attach_reply("sim", paced(1, 1.0)), &first);
+        assert!(
+            !clocks.restoration_failed(&domain("sim"), "held".to_string(), Duration::ZERO),
+            "an attachment its exchange still holds needs no restoration"
+        );
+        assert!(!clocks.restoration_failed(
+            &domain("unknown"),
+            "not followed".to_string(),
+            Duration::ZERO
+        ));
+        clocks.exchange_ended(&first);
+        let failure = |message: &str, seconds: u64| DomainClockRestorationFailure {
+            domain: domain("sim"),
+            message: message.to_string(),
+            retry_after: Duration::from_secs(seconds),
+        };
+        assert!(clocks.restoration_failed(
+            &domain("sim"),
+            "refused".to_string(),
+            Duration::from_secs(1)
+        ));
+        assert!(clocks.restoration_failed(
+            &domain("sim"),
+            "refused again".to_string(),
+            Duration::from_secs(2)
+        ));
+        let second = Arc::new(());
+        clocks.apply_attach(&attach_reply("sim", paced(2, 1.0)), &second);
+        assert!(
+            !clocks.restoration_failed(&domain("sim"), "late".to_string(), Duration::ZERO),
+            "a restored attachment reports no later failure"
+        );
+        let mut events = Vec::new();
+        while let Some(event) = clocks.take_event() {
+            events.push(event);
+        }
+        assert_eq!(
+            events,
+            [
+                DomainClockEvent::Interrupted(DomainClockInterruption {
+                    domain: domain("sim")
+                }),
+                DomainClockEvent::RestorationFailed(failure("refused again", 2)),
+                DomainClockEvent::Observed(observed("sim", paced(2, 1.0))),
+            ],
+            "the newest failure replaces an unread one and precedes the restored clock"
+        );
+        assert_eq!(
+            DomainClockEvent::RestorationFailed(failure("refused", 1)).domain(),
+            &domain("sim")
+        );
+
+        clocks.exchange_ended(&second);
+        assert!(clocks.restoration_failed(
+            &domain("sim"),
+            "refused".to_string(),
+            Duration::from_secs(1)
+        ));
+        let third = Arc::new(());
+        clocks.exchange_ended(&third);
+        clocks.apply_attach(
+            &DomainClockAttachOutcome {
+                disposition: DomainClockAttachDisposition::DomainNotFound(domain("sim")),
+                message: String::new(),
+            },
+            &third,
+        );
+        let mut events = Vec::new();
+        while let Some(event) = clocks.take_event() {
+            events.push(event);
+        }
+        assert_eq!(
+            events,
+            [DomainClockEvent::Ended(DomainClockAttachmentEnded {
+                domain: domain("sim"),
+                reason: DomainClockAttachmentEndReason::DomainRemoved,
+            })],
+            "an end replaces the gap and the failure before it"
         );
     }
 

@@ -268,6 +268,64 @@ Feature: Web console NSPL REPL
       );
       """
 
+  @client_wire33
+  Scenario: Web console recovers a reverted command's own outcome after its reply is lost
+    Given a 3 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    When the web console is opened on node "{{old_leader}}"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "BEGIN;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".prompt-row" contains "{{domain}} tx"
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA reverted_schema ( value I64 );"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "quiesce level: DYNAMIC"
+    Given command response delivery on node "{{old_leader}}" pauses after execution
+    When selector ".prompt-row input" is filled with "REVERT;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the command response delivery pause on node "{{old_leader}}" is reached
+    When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then selector ".terminal" contains "finished with outcome REVERTED"
+    When the command response delivery pause on node "{{old_leader}}" is released
+    Then selector ".terminal" contains "connected to leader '{{new_leader}}'"
+    And selector ".terminal" contains "transaction reverted: dropped 1 command(s)" exactly 1 times
+
+  @client_wire33
+  Scenario: Web console resolves a Create command held when its transaction finishes during reconnect
+    Given a 3 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    When the web console is opened on node "{{old_leader}}"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "BEGIN;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".prompt-row" contains "{{domain}} tx"
+    Given command response delivery on node "{{old_leader}}" pauses after execution
+    When selector ".prompt-row input" is filled with "REVERT;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the command response delivery pause on node "{{old_leader}}" is reached
+    Given command admission on node "{{old_leader}}" pauses before proposal
+    When selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='resource']" is clicked
+    And selector ".create-name" is filled with "unadmitted_bundle"
+    And selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Submitting"
+    When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then selector ".terminal" contains "finished with outcome REVERTED"
+    When the command response delivery pause on node "{{old_leader}}" is released
+    And the command admission pause on node "{{old_leader}}" is released
+    Then selector ".terminal" contains "connected to leader '{{new_leader}}'"
+    And selector ".create-status" contains "Failed"
+
   Scenario: Web console autocompletes NSPL commands
     Given a 3 node nervix cluster is started
     When the web console is opened on the leader node

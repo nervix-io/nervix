@@ -25,6 +25,7 @@ mod events;
 mod exchange;
 mod outcome;
 mod producer;
+mod restoration;
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_test;
 mod subscriptions;
@@ -35,6 +36,7 @@ pub use client::{Client, ExecutionHandle};
 pub use connection::{ConnectOptions, TlsRequirement};
 pub use domain_clock::{
     AttachedDomainClock, DomainClockEvent, DomainClockInterruption, DomainClockReadError,
+    DomainClockRestorationFailure,
 };
 pub use error::{ClientError, EventStreamKind, RequestKind};
 use error_stack::ResultExt as _;
@@ -71,7 +73,9 @@ pub use producer::{
     PendingSubmission, Producer, ProducerBatch, ProducerEnd, ProducerError, ProducerOutcome,
     SubmissionId, SubmissionUncertainty,
 };
-pub use subscriptions::{SubscriptionInterruption, SubscriptionLifecycle};
+pub use subscriptions::{
+    SubscriptionInterruption, SubscriptionLifecycle, SubscriptionRestorationFailure,
+};
 use thiserror::Error;
 
 /// A statement batch that could not be split, over the language's report of why it was rejected.
