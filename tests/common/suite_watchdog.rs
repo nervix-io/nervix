@@ -58,15 +58,13 @@ use super::{
 };
 
 /// The `timeout-minutes` of the workflow job that runs the scenario suite. A policy input: keep it
-/// in step with the `tests` job in `.github/workflows/check.yaml`, which is the emergency guard
+/// in step with the `scenarios` job in `.github/workflows/check.yaml`, which is the emergency guard
 /// outside this budget rather than the mechanism that ends a wedged run.
-const WORKFLOW_JOB_LIMIT: Duration = Duration::from_secs(80 * 60);
-/// What the job spends before the scenario binary starts: its setup steps, the toolchains it
-/// installs, and the builds and earlier test binaries the coverage step runs first. Measured at
-/// 16m04s and 17m20s in successful runs 36405312545 and 36398312102, and 21m28s in run
-/// 36460760301 on 2026-09-28. A policy input with build headroom: measure it again when the job's
-/// steps or its build inputs change.
-const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(25 * 60);
+const WORKFLOW_JOB_LIMIT: Duration = Duration::from_secs(60 * 60);
+/// The `scenarios` job's setup and instrumented server and CLI build before the suite starts.
+/// The first cold kache 0.28.0 PR run took 11m37s from job start to the scenario binary. Round
+/// that measurement up to 14 minutes so another cold runner has room for setup variation.
+const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(14 * 60);
 /// What the job keeps for itself once the suite budget has expired: the bounded cleanup the
 /// watchdog drives, the dependency containers the suite then stops, and the artifact upload that
 /// follows. The cleanup is bounded by [`WATCHDOG_CLEANUP_WINDOW`], the containers stop in seconds
@@ -85,11 +83,10 @@ pub(crate) const SUITE_BUDGET: Duration =
         },
         None => panic!("the workflow job limit must cover the work that precedes the suite"),
     };
-/// The slowest recent healthy suite ran for 34m40s in run 36398312102, against 32m25s in run
-/// 36405312545 on 2026-09-28. Both used the CI concurrency factor of two scenarios per CPU; the
-/// slower run retried one scenario. A policy input: measure it again whenever the suite, its
-/// concurrency or the runner changes.
-const SLOWEST_HEALTHY_SUITE: Duration = Duration::from_secs(35 * 60);
+/// The first split-job PR run completed all attempts in 21m49s, including four retries, with
+/// 88.3% run-slot utilization. The next, passing run took 20m26s with seven retries and 94.3%
+/// utilization. Round the slower complete run up to 22 minutes as the observed suite ceiling.
+const SLOWEST_HEALTHY_SUITE: Duration = Duration::from_secs(22 * 60);
 /// What the budget must leave beyond the slowest healthy suite, so a runner slower than the
 /// measuring one still finishes its own scenarios.
 ///
@@ -558,7 +555,24 @@ impl SuiteWatchdog {
     /// The budget is passed into the wait rather than wrapped around it: a timeout wrapped around
     /// the run would drop it at expiry, and the registries a diagnostic reads live in the worlds
     /// that run owns. So the run is held, read, and asked to stop, and only then dropped.
+    #[allow(
+        dead_code,
+        reason = "harness regressions use this entry point; scenarios report at expiry"
+    )]
     pub(crate) async fn bound<F>(self, run: F) -> SuiteRun<F::Output>
+    where
+        F: Future,
+    {
+        self.bound_with_timeout_report(run, || {}).await
+    }
+
+    /// As [`Self::bound`], but captures a report at the expiry instant, before cleanup changes
+    /// the active scenario registry or spends its own window.
+    pub(crate) async fn bound_with_timeout_report<F>(
+        self,
+        run: F,
+        report_timeout: impl FnOnce(),
+    ) -> SuiteRun<F::Output>
     where
         F: Future,
     {
@@ -578,6 +592,7 @@ impl SuiteWatchdog {
         // what it was doing.
         let stall = SuiteStall::capture(self.budget);
         eprint!("{stall}");
+        report_timeout();
         flush_process_output();
 
         let cleanup = WatchdogCleanup::stop_every_live_node(self.cleanup_window).await;

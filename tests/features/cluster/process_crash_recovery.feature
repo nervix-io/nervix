@@ -1,4 +1,4 @@
-@shutdown_qualification @exclusive
+@shutdown_qualification
 Feature: Real process crash recovery
 
   Scenario: SIGKILL restores interleaved incomplete window branches from durable snapshots
