@@ -1,8 +1,10 @@
 //! A session a host holds: `nx_session` and the commands it prepares, `nx_execution`.
 //!
 //! - **Owns.** The Tokio runtime a session runs on, opening and ending the session, running a
-//!   blocking call on the host's thread, and preparing, executing and waiting for events.
-//! - **Depends on.** The Rust session client, cancellation, and the outcome and event handles.
+//!   blocking call on the host's thread, and preparing, executing and waiting for subscription and
+//!   domain clock events.
+//! - **Depends on.** The Rust session client, cancellation, and the outcome, event and clock event
+//!   handles.
 //! - **Must not know.** Which host is calling, or how it schedules its threads.
 //!
 //! A host thread blocks in [`Session::block_on`] while the runtime's own threads drive the
@@ -19,6 +21,7 @@ use tokio::runtime::Runtime;
 use crate::{
     abi,
     cancel::Cancel,
+    clock_event::ClockEvent,
     event::Event,
     failure::{Failure, FailureKind},
     outcome::Outcome,
@@ -153,6 +156,17 @@ impl Session {
             match self.client.next_subscription().await {
                 Ok(event) => Event::new(event),
                 Err(error) => Err(Failure::from(error)),
+            }
+        };
+        self.block_on(cancel, waiting)
+    }
+
+    /// Waits for the next event about the domain clocks the session follows.
+    pub fn next_clock_event(&self, cancel: Option<&Cancel>) -> Result<ClockEvent, Failure> {
+        let waiting = async {
+            match self.client.next_domain_clock_event().await {
+                Ok(event) => Ok(ClockEvent::new(event)),
+                Err(report) => Err(Failure::from(report)),
             }
         };
         self.block_on(cancel, waiting)
@@ -416,6 +430,36 @@ unsafe fn write_next_event(
     // SAFETY: the caller guarantees a live session and a live token or null.
     let (session, cancel) = unsafe { (abi::handle(session, "session")?, cancel.as_ref()) };
     let event = session.next_event(cancel)?;
+    // SAFETY: `out` is non-null, and the caller guarantees it is writable.
+    unsafe { abi::write(out, event.into_shared()) };
+    Ok(())
+}
+
+/// # Safety
+///
+/// `session` is live, a non-null `cancel` is a live token, and a non-null `out` is writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_session_next_clock_event(
+    session: *const Session,
+    cancel: *const Cancel,
+    out: *mut *mut ClockEvent,
+) -> *mut Failure {
+    // SAFETY: the header's contract is this function's.
+    abi::outcome(unsafe { write_next_clock_event(session, cancel, out) })
+}
+
+/// # Safety
+///
+/// As [`nx_session_next_clock_event`].
+unsafe fn write_next_clock_event(
+    session: *const Session,
+    cancel: *const Cancel,
+    out: *mut *mut ClockEvent,
+) -> Result<(), Failure> {
+    abi::require_out(out, "out")?;
+    // SAFETY: the caller guarantees a live session and a live token or null.
+    let (session, cancel) = unsafe { (abi::handle(session, "session")?, cancel.as_ref()) };
+    let event = session.next_clock_event(cancel)?;
     // SAFETY: `out` is non-null, and the caller guarantees it is writable.
     unsafe { abi::write(out, event.into_shared()) };
     Ok(())

@@ -6561,7 +6561,9 @@ dependencies = [
  "serde_json",
  "strum 0.26.3",
  "tokio",
+ "tokio-stream",
  "tokio-util",
+ "tonic 0.13.1",
  "triomphe",
 ]
 
