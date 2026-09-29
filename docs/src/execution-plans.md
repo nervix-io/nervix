@@ -73,7 +73,7 @@ both use the same schedule-to-revision planning boundary.
 | Entrypoints | Ingestor source, client, codec, ACK and quiesce contracts; ordered routes, filters, branch construction, and reingestor input edges | Bind VM programs and connector resources; open sources and attach relay consumers only after preparation succeeds |
 | Processor specifications | Node topology, exact branch policy, ordered outputs, materialized dependencies, and schedule residue that affects a revision | Bind prepared VM, window, inferencer, and WASM artifacts into a published processor plan; instantiate one task per concrete branch |
 | Resources | Pinned lookup file and codec, UDF program, generator source and ordered routes, WASM module file and scheduled assignment | Load the named local version, build lookup indexes, prepare modules, and start branch-local generator or processor work |
-| Emitters | Typed sink and client declaration, ordered source relays and predicates, codec, construction, request and ordering expressions, flush and error policies | Resolve local mounts and schemas, bind programs, register local or remote consumers, and open the sink |
+| Emitters | Typed sink and optional connector client or codec, ordered source relays and predicates, construction, request and ordering expressions, flush, batching, ACK, and error policies | Resolve local mounts and schemas, bind programs, register local or remote consumers, and open the sink |
 | Message errors | Source and optional partial-output schemas, target relay and branch, route flush contract, and ordered `SET` program | Bind once for the installed revision; execute it for failed records using their captured state |
 
 The tables describe distinct decisions in one revision, not independently selectable runtime
@@ -163,13 +163,19 @@ typed contracts. Route plans decide whether output is unbranched, preserves an i
 constructs a new key; the actual branch state remains local to each concrete branch. Transport
 headers remain connector-owned and enter a relay only when copied into schema-backed fields.
 
-The emitter plan pairs its ordered relay inputs with one typed sink and its client, codec,
-expression, flush, batching, and error contracts. The host binds mounts and programs before
-opening a sink; reconnects and retries reuse the typed configuration and retained prepared
-write. Swaps install consumer edges from the new plan. The connector receives source or sink
-settings and per-record outcomes, never graph placement authority, Models, ACK maps, or runtime
-state. [Connector Crates And The Connector Contract](./connector-contract.md) owns each transport's
-header, retry, ACK, and commit behavior.
+The emitter plan pairs its ordered relay inputs with one typed sink and its applicable client,
+codec, expression, flush, batching, and error contracts. A native `TO CLIENT` sink has no
+external client or codec. Its plan carries the exact output schema, acknowledging sequential or
+parallel window, physical ACK timeout and retry policy, maximum rows and IPC bytes, construction
+program, and attachment boundary. Registry validation rejects an incompatible schema or missing
+batch contract before the plan can run. A flush-only dynamic change keeps that delivery contract;
+a contract change replaces the endpoint and ends existing consumers. The host binds mounts and
+programs before opening a sink; reconnects and retries reuse the typed configuration and retained
+prepared write. Swaps install consumer edges from the new plan. The connector receives source or
+sink settings and per-record outcomes, never graph placement authority, Models, ACK maps, or
+runtime state. [Connector Crates And The Connector Contract](./connector-contract.md) owns each
+external transport's header, retry, ACK, and commit behavior. [Client Session Protocol](./client-session-protocol.md)
+owns native consumer delivery and settlement.
 
 An error route is keyed by its domain, owning node, optional source route, and destination relay.
 The planner resolves the eligible original input, the optional all-nullable partial output,
