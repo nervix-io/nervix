@@ -7598,11 +7598,13 @@ name = "nervix-simd-kernels"
 version = "0.1.0-dev"
 dependencies = [
  "arch-into",
+ "criterion 0.5.1",
  "error-stack",
  "fastrand",
  "fearless_simd",
  "hdrhistogram",
  "meticulous",
+ "nervix-approx-into",
  "nervix-primitives",
  "thiserror 2.0.21",
 ]

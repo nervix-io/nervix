@@ -7,19 +7,24 @@
 use std::{io, ptr, slice, time::Duration};
 
 use nervix_client_ffi::{
-    Cancel, CellState, ClockEvent, ClockEventKind, ClockState, Event, EventKind, Execution,
-    FailureKind, FieldType, Outcome, Part, Schema, Session, nx_cancel_free, nx_cancel_new,
-    nx_cancel_trigger, nx_cancel_with_deadline, nx_clock_event_domain, nx_clock_event_generation,
-    nx_clock_event_kind_of, nx_clock_event_paced, nx_clock_event_release, nx_clock_event_retain,
-    nx_clock_event_state, nx_clock_event_tick, nx_error_execution_reference, nx_error_free,
+    Cancel, CellState, ClockEvent, ClockEventKind, ClockState, DomainClock, Event, EventKind,
+    Execution, FailureKind, FieldType, Outcome, Part, Schema, Session, nx_cancel_free,
+    nx_cancel_new, nx_cancel_trigger, nx_cancel_with_deadline, nx_clock_event_domain,
+    nx_clock_event_generation, nx_clock_event_kind_of, nx_clock_event_paced,
+    nx_clock_event_release, nx_clock_event_retain, nx_clock_event_state, nx_clock_event_tick,
+    nx_domain_clock_admission_window, nx_domain_clock_admits, nx_domain_clock_generation,
+    nx_domain_clock_logical_time_at, nx_domain_clock_paced, nx_domain_clock_release,
+    nx_domain_clock_retain, nx_domain_clock_state, nx_domain_clock_tick,
+    nx_domain_clock_wall_duration_until, nx_error_execution_reference, nx_error_free,
     nx_error_kind_of, nx_error_message, nx_event_cell_varlen, nx_event_column_fixed,
     nx_event_column_states, nx_event_column_varlen, nx_event_frame, nx_event_kind_of,
     nx_event_release, nx_event_retain, nx_event_row_count, nx_event_schema, nx_event_subscription,
     nx_execution_free, nx_execution_reference, nx_outcome_diagnostic, nx_outcome_diagnostic_count,
     nx_outcome_disposition, nx_outcome_execution_reference, nx_outcome_free, nx_outcome_message,
     nx_outcome_schema, nx_outcome_subscription, nx_schema_branch, nx_schema_field,
-    nx_schema_field_count, nx_schema_free, nx_session_connect, nx_session_execute, nx_session_free,
-    nx_session_next_clock_event, nx_session_next_event, nx_session_prepare,
+    nx_schema_field_count, nx_schema_free, nx_session_connect, nx_session_domain_clock,
+    nx_session_execute, nx_session_free, nx_session_next_clock_event, nx_session_next_event,
+    nx_session_prepare,
 };
 use nervix_primitives::thread;
 
@@ -28,7 +33,7 @@ use super::{ProbeExercise, ProbeTarget};
 /// How long the probe waits for the rows it expects.
 const ROWS_DEADLINE_MILLIS: u64 = 120_000;
 
-/// How long the probe waits for the clock events the scenario's `START` produces.
+/// How long the probe waits for the clock events each step of the scenario produces.
 const CLOCK_DEADLINE_MILLIS: u64 = 120_000;
 
 /// A reporting sink: one call per report line.
@@ -238,6 +243,19 @@ impl OpenSession {
         Ok(EventReference(event))
     }
 
+    /// The clock the session holds for `domain`, or `None` when it follows none.
+    fn domain_clock(&self, domain: &str) -> io::Result<Option<DomainClockReference>> {
+        let mut clock = ptr::null_mut();
+        // SAFETY: the session is live, the name addresses its length, and `clock` is writable.
+        check(unsafe {
+            nx_session_domain_clock(self.0, domain.as_ptr(), domain.len(), &mut clock)
+        })?;
+        if clock.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(DomainClockReference(clock)))
+    }
+
     /// The next clock event, which must concern `domain`.
     fn next_clock_event(&self, token: &Token, domain: &str) -> io::Result<ClockEventReference> {
         let mut event = ptr::null_mut();
@@ -265,12 +283,29 @@ impl Drop for ClockEventReference {
     }
 }
 
-/// The committed clock a paced state event reports.
+/// One reference to the clock the session held for a followed domain when the probe read it,
+/// released when dropped.
+struct DomainClockReference(*mut DomainClock);
+
+// SAFETY: a read of a domain clock never changes and its references are counted atomically, so a
+// reference may be released on any thread.
+unsafe impl Send for DomainClockReference {}
+
+impl Drop for DomainClockReference {
+    fn drop(&mut self) {
+        // SAFETY: this reference is live and released exactly once, here.
+        unsafe { nx_domain_clock_release(self.0) };
+    }
+}
+
+/// The committed clock of a paced generation.
+#[derive(Debug, PartialEq)]
 struct PacedClock {
     generation: u64,
     period_nanos: u64,
     skew_nanos: u64,
     logical_origin: i64,
+    utc_anchor: i64,
     time_rate: f64,
 }
 
@@ -282,11 +317,26 @@ struct Tick {
     serving_logical: i64,
 }
 
+/// The tick centers an admission window reports.
+struct Window {
+    earliest_center: i64,
+    latest_center: i64,
+}
+
+/// How the report names an admission.
+fn admission(admitted: bool) -> &'static str {
+    if admitted {
+        return "admitted";
+    }
+    "refused"
+}
+
 impl PacedClock {
-    /// The report line of a paced state event of `domain`.
-    fn state_line(&self, domain: &str) -> String {
+    /// The report line of the clock, with `prefix` naming where it was read. The UTC anchor
+    /// depends on when the scenario's START committed, so it is read but not reported.
+    fn line(&self, prefix: &str, domain: &str) -> String {
         format!(
-            "STATE domain={domain} generation={} state=paced period={} skew={} origin={} \
+            "{prefix} domain={domain} generation={} state=paced period={} skew={} origin={} \
              rate=f64:{:016x}",
             self.generation,
             self.period_nanos,
@@ -296,14 +346,58 @@ impl PacedClock {
         )
     }
 
-    /// The report line of a tick of `domain`, after holding the tick to this clock: its boundary
-    /// is the logical origin plus one period for every id before it, and the serving node's
-    /// reading never precedes the origin.
-    fn tick_line(&self, tick: &Tick, domain: &str) -> io::Result<String> {
-        if tick.generation != self.generation {
+    /// An instant as the report names it: `origin` for the logical origin, and the instant
+    /// otherwise.
+    fn relative(&self, instant: i64) -> String {
+        if instant == self.logical_origin {
+            return "origin".to_string();
+        }
+        instant.to_string()
+    }
+
+    /// The report line of the projections of `read`, which holds this clock, at its own UTC
+    /// anchor: the logical time there, the wait for the next tick center, the admission window,
+    /// and whether an event at the skew's edge and one nanosecond past it are admitted.
+    fn projection_line(&self, read: &DomainClockReference, domain: &str) -> io::Result<String> {
+        let out_of_range = || io::Error::other("the clock's fields leave the logical time range");
+        let period = i64::try_from(self.period_nanos).map_err(|_| out_of_range())?;
+        let skew = i64::try_from(self.skew_nanos).map_err(|_| out_of_range())?;
+        let next_center = self
+            .logical_origin
+            .checked_add(period)
+            .ok_or_else(out_of_range)?;
+        let edge = self
+            .logical_origin
+            .checked_add(skew)
+            .ok_or_else(out_of_range)?;
+        let beyond = edge.checked_add(1).ok_or_else(out_of_range)?;
+        let at_anchor = read.logical_time_at(self.utc_anchor)?;
+        let wait = read.wall_duration_until(self.utc_anchor, next_center)?;
+        let Some(window) = read.admission_window(self.utc_anchor)? else {
             return Err(io::Error::other(
-                "a tick belongs to another generation than the state before it",
+                "a paced clock reports no admission window",
             ));
+        };
+        let at_edge = admission(read.admits(self.utc_anchor, edge)?);
+        let past_edge = admission(read.admits(self.utc_anchor, beyond)?);
+        Ok(format!(
+            "PROJECTION domain={domain} generation={} anchor={} wait={wait} window={}..{} \
+             skew={at_edge} beyond={past_edge}",
+            self.generation,
+            self.relative(at_anchor),
+            self.relative(window.earliest_center),
+            self.relative(window.latest_center),
+        ))
+    }
+
+    /// Holds a tick to this clock: the same generation, a boundary of the logical origin plus one
+    /// period for every id before it, and a serving node's reading that never precedes the origin.
+    fn check_tick(&self, tick: &Tick) -> io::Result<()> {
+        if tick.generation != self.generation {
+            return Err(io::Error::other(format!(
+                "a tick of generation {} followed the state of generation {}",
+                tick.generation, self.generation
+            )));
         }
         let out_of_range = || io::Error::other("a tick id leaves the logical time range");
         let Some(periods) = tick.tick_id.checked_sub(1) else {
@@ -328,6 +422,12 @@ impl PacedClock {
                 "the serving node's logical reading precedes the logical origin",
             ));
         }
+        Ok(())
+    }
+
+    /// The report line of a tick this clock holds.
+    fn tick_line(&self, tick: &Tick, domain: &str) -> io::Result<String> {
+        self.check_tick(tick)?;
         Ok(format!(
             "TICK domain={domain} generation={} boundary=origin+(id-1)*period",
             tick.generation
@@ -377,17 +477,17 @@ impl ClockEventReference {
             period_nanos: 0,
             skew_nanos: 0,
             logical_origin: 0,
+            utc_anchor: 0,
             time_rate: 0.0,
         };
-        // SAFETY: the event is live and every non-null out-parameter is writable; the probe reads
-        // no UTC anchor, which depends on when the scenario's START committed.
+        // SAFETY: the event is live and every out-parameter is writable.
         check(unsafe {
             nx_clock_event_paced(
                 self.0,
                 &mut paced.period_nanos,
                 &mut paced.skew_nanos,
                 &mut paced.logical_origin,
-                ptr::null_mut(),
+                &mut paced.utc_anchor,
                 &mut paced.time_rate,
             )
         })?;
@@ -413,6 +513,109 @@ impl ClockEventReference {
             )
         })?;
         Ok(tick)
+    }
+}
+
+impl DomainClockReference {
+    fn retain(&self) -> Self {
+        // SAFETY: this reference is live, and the binding returns a new one.
+        Self(unsafe { nx_domain_clock_retain(self.0) })
+    }
+
+    fn generation(&self) -> u64 {
+        // SAFETY: the read is live.
+        unsafe { nx_domain_clock_generation(self.0) }
+    }
+
+    fn state(&self) -> ClockState {
+        // SAFETY: the read is live.
+        unsafe { nx_domain_clock_state(self.0) }
+    }
+
+    fn paced(&self) -> io::Result<PacedClock> {
+        let mut paced = PacedClock {
+            generation: self.generation(),
+            period_nanos: 0,
+            skew_nanos: 0,
+            logical_origin: 0,
+            utc_anchor: 0,
+            time_rate: 0.0,
+        };
+        // SAFETY: the read is live and every out-parameter is writable.
+        check(unsafe {
+            nx_domain_clock_paced(
+                self.0,
+                &mut paced.period_nanos,
+                &mut paced.skew_nanos,
+                &mut paced.logical_origin,
+                &mut paced.utc_anchor,
+                &mut paced.time_rate,
+            )
+        })?;
+        Ok(paced)
+    }
+
+    /// The id of the newest tick the read holds, when it holds one.
+    fn tick_id(&self) -> Option<u64> {
+        let mut tick_id = 0;
+        // SAFETY: the read is live, `tick_id` is writable, and the binding allows the other
+        // out-parameters to be null.
+        let held = unsafe {
+            nx_domain_clock_tick(
+                self.0,
+                &mut tick_id,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if !held {
+            return None;
+        }
+        Some(tick_id)
+    }
+
+    fn logical_time_at(&self, utc: i64) -> io::Result<i64> {
+        let mut logical = 0;
+        // SAFETY: the read is live and `logical` is writable.
+        check(unsafe { nx_domain_clock_logical_time_at(self.0, utc, &mut logical) })?;
+        Ok(logical)
+    }
+
+    fn wall_duration_until(&self, utc: i64, target: i64) -> io::Result<u64> {
+        let mut wait = 0;
+        // SAFETY: the read is live and `wait` is writable.
+        check(unsafe { nx_domain_clock_wall_duration_until(self.0, utc, target, &mut wait) })?;
+        Ok(wait)
+    }
+
+    fn admission_window(&self, utc: i64) -> io::Result<Option<Window>> {
+        let mut has_window = false;
+        let mut window = Window {
+            earliest_center: 0,
+            latest_center: 0,
+        };
+        // SAFETY: the read is live and every out-parameter is writable.
+        check(unsafe {
+            nx_domain_clock_admission_window(
+                self.0,
+                utc,
+                &mut has_window,
+                &mut window.earliest_center,
+                &mut window.latest_center,
+            )
+        })?;
+        if !has_window {
+            return Ok(None);
+        }
+        Ok(Some(window))
+    }
+
+    fn admits(&self, utc: i64, event: i64) -> io::Result<bool> {
+        let mut admitted = false;
+        // SAFETY: the read is live and `admitted` is writable.
+        check(unsafe { nx_domain_clock_admits(self.0, utc, event, &mut admitted) })?;
+        Ok(admitted)
     }
 }
 
@@ -931,59 +1134,58 @@ fn run_subscription(
     Ok(())
 }
 
-/// Attaches to the domain's clock, reads the state and the first tick of the generation the
-/// scenario starts, and detaches.
+/// Attaches to the domain's running clock and reads the clock the attach reported before its
+/// first tick, then follows the generation the scenario's STOP and START begin and the attachment
+/// restored after the scenario ends the session, and detaches.
 fn run_domain_clock(session: &OpenSession, domain: &str, emit: &mut Emit<'_>) -> io::Result<()> {
     check_clock_cancellation(session)?;
     let attached = session.execute("ATTACH DOMAIN CLOCK;")?;
     emit(&format!("ATTACHED {}", attached.disposition()))?;
 
-    let deadline = Token::with_deadline(CLOCK_DEADLINE_MILLIS)?;
-    let state = loop {
-        let event = session.next_clock_event(&deadline, domain)?;
-        let kind = event.kind();
-        if kind != ClockEventKind::State {
-            return Err(io::Error::other(format!(
-                "the clock reported {kind:?} before the started generation's state"
-            )));
-        }
-        // The serving node may report the started generation uninstalled until it holds the
-        // committed mapping and an assigned clock authority.
-        if event.state()? == ClockState::Paced {
-            break event;
-        }
+    // The clock the attach reported, read before any event about the attachment.
+    let Some(read) = session.domain_clock(domain)? else {
+        return Err(io::Error::other(
+            "the session follows no clock after its attach completed",
+        ));
     };
-    let clock = state.paced()?;
-    let state_line = clock.state_line(domain);
-    emit(&state_line)?;
+    let state = read.state();
+    if state != ClockState::Paced {
+        return Err(io::Error::other(format!(
+            "the attach reported a {state:?} clock rather than the running paced one"
+        )));
+    }
+    let clock = read.paced()?;
+    let clock_line = clock.line("CLOCK", domain);
+    emit(&clock_line)?;
+    emit(&clock.projection_line(&read, domain)?)?;
 
-    let tick = loop {
-        let event = session.next_clock_event(&deadline, domain)?;
-        let kind = event.kind();
-        if kind == ClockEventKind::Tick {
-            break event;
-        }
-        if kind != ClockEventKind::State {
-            return Err(io::Error::other(format!(
-                "the clock reported {kind:?} before its first tick"
-            )));
-        }
-        // The serving node reported the installation again; it is still the same generation.
-        if event.generation()? != clock.generation {
-            return Err(io::Error::other(
-                "the clock moved to another generation before its first tick",
-            ));
-        }
-    };
-    let tick_line = clock.tick_line(&tick.tick()?, domain)?;
+    let mut followed = FollowedClock::attached(session, domain, clock);
+    let deadline = Token::with_deadline(CLOCK_DEADLINE_MILLIS)?;
+    let first_tick = followed.first_tick(&deadline)?;
+    let tick_line = followed.clock()?.tick_line(&first_tick.tick()?, domain)?;
     emit(&tick_line)?;
     let reported = ReportedClock {
-        clock,
         domain,
-        state_line,
+        clock_line,
         tick_line,
     };
-    reported.check_retention(state, tick)?;
+    reported.check_retention(read, first_tick)?;
+
+    // The scenario stops the domain and starts it again at another origin and rate.
+    let deadline = Token::with_deadline(CLOCK_DEADLINE_MILLIS)?;
+    let started = followed.next_generation(&deadline)?;
+    emit(&started.paced()?.line("STATE", domain))?;
+    let tick = followed.first_tick(&deadline)?;
+    emit(&followed.clock()?.tick_line(&tick.tick()?, domain)?)?;
+
+    // The scenario ends the session, and the binding attaches the clock again on the next one.
+    let deadline = Token::with_deadline(CLOCK_DEADLINE_MILLIS)?;
+    followed.interruption(&deadline)?;
+    emit(&format!("INTERRUPTED domain={domain}"))?;
+    let restored = followed.restored(&deadline)?;
+    emit(&restored.paced()?.line("STATE", domain))?;
+    let tick = followed.first_tick(&deadline)?;
+    emit(&followed.clock()?.tick_line(&tick.tick()?, domain)?)?;
 
     let detached = session.execute("DETACH DOMAIN CLOCK;")?;
     emit(&format!("DETACHED {}", detached.disposition()))?;
@@ -992,36 +1194,236 @@ fn run_domain_clock(session: &OpenSession, domain: &str, emit: &mut Emit<'_>) ->
     Ok(())
 }
 
-/// The state and tick lines a probe reported for the clock of `domain`.
-struct ReportedClock<'a> {
-    clock: PacedClock,
+/// What the probe has read about the domain's clock: the generation of the newest state, its
+/// mapping while it is paced, and whether the session holding the attachment ended since.
+///
+/// Every event is held to what was read before it, and a read of the clock taken right after it is
+/// held to be no older: a tick of one generation never follows the state of another, no tick
+/// arrives while the clock is not paced or between an interruption and the restored state, and a
+/// state never goes back to an earlier generation.
+struct FollowedClock<'a> {
+    session: &'a OpenSession,
     domain: &'a str,
-    state_line: String,
+    generation: u64,
+    paced: Option<PacedClock>,
+    interrupted: bool,
+}
+
+impl<'a> FollowedClock<'a> {
+    /// Follows the clock the attach reported.
+    fn attached(session: &'a OpenSession, domain: &'a str, clock: PacedClock) -> Self {
+        Self {
+            session,
+            domain,
+            generation: clock.generation,
+            paced: Some(clock),
+            interrupted: false,
+        }
+    }
+
+    /// The paced clock ticks are held to.
+    fn clock(&self) -> io::Result<&PacedClock> {
+        match &self.paced {
+            Some(clock) => Ok(clock),
+            None => Err(io::Error::other("the followed clock is not paced")),
+        }
+    }
+
+    /// The next event about the domain, held to what the probe read before it.
+    fn next(&mut self, deadline: &Token) -> io::Result<ClockEventReference> {
+        let event = self.session.next_clock_event(deadline, self.domain)?;
+        match event.kind() {
+            ClockEventKind::State => self.observe(&event)?,
+            ClockEventKind::Tick => self.check_tick(&event)?,
+            ClockEventKind::Interrupted => self.interrupted = true,
+            ClockEventKind::RestorationFailed => {}
+            ClockEventKind::Ended => {
+                return Err(io::Error::other("the server ended the attachment"));
+            }
+        }
+        Ok(event)
+    }
+
+    fn observe(&mut self, event: &ClockEventReference) -> io::Result<()> {
+        let generation = event.generation()?;
+        if generation < self.generation {
+            return Err(io::Error::other(format!(
+                "a state of generation {generation} followed one of generation {}",
+                self.generation
+            )));
+        }
+        let state = event.state()?;
+        let paced = match state {
+            ClockState::Paced => Some(event.paced()?),
+            ClockState::Stopped | ClockState::Uninstalled | ClockState::Unpaced => None,
+        };
+        let read = self.read()?;
+        if read.generation() < generation {
+            return Err(io::Error::other(
+                "a read of the clock is older than the state the probe took",
+            ));
+        }
+        if read.generation() == generation {
+            if read.state() != state {
+                return Err(io::Error::other(
+                    "a read of the clock differs from the state of its generation",
+                ));
+            }
+            if let Some(mapping) = &paced
+                && read.paced()? != *mapping
+            {
+                return Err(io::Error::other(
+                    "a read of the clock differs from the mapping of its generation",
+                ));
+            }
+        }
+        self.generation = generation;
+        self.paced = paced;
+        self.interrupted = false;
+        Ok(())
+    }
+
+    fn check_tick(&self, event: &ClockEventReference) -> io::Result<()> {
+        if self.interrupted {
+            return Err(io::Error::other(
+                "a tick arrived before the restored attachment reported its clock",
+            ));
+        }
+        let tick = event.tick()?;
+        self.clock()?.check_tick(&tick)?;
+        let read = self.read()?;
+        if read.generation() < tick.generation {
+            return Err(io::Error::other(
+                "a read of the clock is older than the tick the probe took",
+            ));
+        }
+        if read.generation() == tick.generation
+            && let Some(held) = read.tick_id()
+            && held < tick.tick_id
+        {
+            return Err(io::Error::other(
+                "a read of the clock holds an older tick than the probe took",
+            ));
+        }
+        Ok(())
+    }
+
+    fn read(&self) -> io::Result<DomainClockReference> {
+        match self.session.domain_clock(self.domain)? {
+            Some(read) => Ok(read),
+            None => Err(io::Error::other(
+                "the session follows no clock of the domain after an event about it",
+            )),
+        }
+    }
+
+    /// The first tick of the followed generation. A state reporting that generation again is
+    /// taken on the way; one of another generation fails the probe.
+    fn first_tick(&mut self, deadline: &Token) -> io::Result<ClockEventReference> {
+        let generation = self.generation;
+        loop {
+            let event = self.next(deadline)?;
+            let kind = event.kind();
+            if kind == ClockEventKind::Tick {
+                return Ok(event);
+            }
+            if kind != ClockEventKind::State || self.generation != generation {
+                return Err(io::Error::other(format!(
+                    "the clock reported {kind:?} of generation {} before the first tick of \
+                     generation {generation}",
+                    self.generation
+                )));
+            }
+        }
+    }
+
+    /// The paced state of a generation after the followed one. The followed generation's ticks
+    /// and the states before the new paced one are taken on the way.
+    fn next_generation(&mut self, deadline: &Token) -> io::Result<ClockEventReference> {
+        let previous = self.generation;
+        loop {
+            let event = self.next(deadline)?;
+            let kind = event.kind();
+            if kind == ClockEventKind::State && self.generation > previous && self.paced.is_some() {
+                return Ok(event);
+            }
+            if kind != ClockEventKind::Tick && kind != ClockEventKind::State {
+                return Err(io::Error::other(format!(
+                    "the clock reported {kind:?} before a generation after {previous}"
+                )));
+            }
+        }
+    }
+
+    /// The interruption of the attachment. The followed generation's ticks and states are taken
+    /// on the way.
+    fn interruption(&mut self, deadline: &Token) -> io::Result<ClockEventReference> {
+        let generation = self.generation;
+        loop {
+            let event = self.next(deadline)?;
+            let kind = event.kind();
+            if kind == ClockEventKind::Interrupted {
+                return Ok(event);
+            }
+            if kind != ClockEventKind::Tick
+                && (kind != ClockEventKind::State || self.generation != generation)
+            {
+                return Err(io::Error::other(format!(
+                    "the clock reported {kind:?} of generation {} before the interruption",
+                    self.generation
+                )));
+            }
+        }
+    }
+
+    /// The paced state the restored attachment reports. A refused restoration, which the session
+    /// repeats, and a clock reported uninstalled are taken on the way.
+    fn restored(&mut self, deadline: &Token) -> io::Result<ClockEventReference> {
+        loop {
+            let event = self.next(deadline)?;
+            let kind = event.kind();
+            if kind == ClockEventKind::State && self.paced.is_some() {
+                return Ok(event);
+            }
+            if kind == ClockEventKind::Tick {
+                return Err(io::Error::other(
+                    "a tick arrived while the restored clock was not paced",
+                ));
+            }
+        }
+    }
+}
+
+/// The lines a probe reported for the clock the attach reported and its first tick.
+struct ReportedClock<'a> {
+    domain: &'a str,
+    clock_line: String,
     tick_line: String,
 }
 
 impl ReportedClock<'_> {
-    /// Rereads the state and the tick through retained references after their first references
-    /// were released on another thread.
+    /// Rereads the clock the attach reported and the first tick through retained references after
+    /// their first references were released on another thread.
     fn check_retention(
         &self,
-        state: ClockEventReference,
+        read: DomainClockReference,
         tick: ClockEventReference,
     ) -> io::Result<()> {
-        let retained_state = state.retain();
+        let retained_read = read.retain();
         let retained_tick = tick.retain();
         let releaser = thread::spawn(move || {
-            drop(state);
+            drop(read);
             drop(tick);
         });
-        releaser
-            .join()
-            .map_err(|_| io::Error::other("releasing clock events on another thread panicked"))?;
-        let state_again = retained_state.paced()?.state_line(self.domain);
-        let tick_again = self.clock.tick_line(&retained_tick.tick()?, self.domain)?;
-        if state_again != self.state_line || tick_again != self.tick_line {
+        releaser.join().map_err(|_| {
+            io::Error::other("releasing clock references on another thread panicked")
+        })?;
+        let clock = retained_read.paced()?;
+        let clock_again = clock.line("CLOCK", self.domain);
+        let tick_again = clock.tick_line(&retained_tick.tick()?, self.domain)?;
+        if clock_again != self.clock_line || tick_again != self.tick_line {
             return Err(io::Error::other(
-                "a retained clock event reads differently than it did",
+                "a retained clock or tick reads differently than it did",
             ));
         }
         Ok(())

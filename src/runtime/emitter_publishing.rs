@@ -287,17 +287,6 @@ impl EmitterSinkState {
         }
     }
 
-    /// Whether this sink publishes what it accepts later, on its own commit boundary.
-    ///
-    /// Such a sink neither acknowledges a row nor counts it as sent when the host's write returns:
-    /// its commit does both.
-    fn publishes_on_commit(&self) -> bool {
-        match self {
-            Self::Open(sink) => sink.lifecycle().retains_acknowledgements(),
-            Self::Unavailable { .. } => false,
-        }
-    }
-
     /// How many messages this sink staged out of the host's buffer and has not published yet.
     pub(super) fn staged_messages(&self) -> u64 {
         match self {
@@ -590,12 +579,6 @@ impl EmitterSinkState {
             return Ok(None);
         }
         self.check_fault_injection(context, control)?;
-        // A sink that stages what it accepts has not published anything yet, so its commit counts
-        // these messages as sent and this write counts none.
-        let report = match self.publishes_on_commit() {
-            true => None,
-            false => buffer.report(),
-        };
         let pending_acks = buffer.pending_acks();
         {
             let _confirmation_wait = context
@@ -611,6 +594,10 @@ impl EmitterSinkState {
             buffer.report_staged_messages(self.staged_messages());
             published.map_err(|()| emitter_stop_deadline_elapsed())??;
         }
+        // Every buffered row is resolved now, and the rows the sink delivered are sent, however
+        // many attempts delivered them. A sink that stages what it accepts has not published those
+        // rows yet, so its commit counts them as sent and this write counts none.
+        let report = buffer.delivered_report();
         buffer.clear();
         Ok(report)
     }

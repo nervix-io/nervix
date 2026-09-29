@@ -199,11 +199,15 @@ pub(super) enum CorrelatorSide {
     Right,
 }
 
+// Counted per thread so a test observes only the programs it ran itself, while the rest of the
+// suite correlates in parallel.
 #[cfg(test)]
-pub(super) static CORRELATOR_WHERE_VM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
-
-#[cfg(test)]
-pub(super) static CORRELATOR_OUTPUT_VM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
+nervix_primitives::thread_local! {
+    pub(super) static CORRELATOR_WHERE_VM_EXECUTIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    pub(super) static CORRELATOR_OUTPUT_VM_EXECUTIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct CorrelatorMaterializedState {
@@ -559,7 +563,7 @@ pub(super) async fn evaluate_correlator_where_matches(
         )
     })?;
     #[cfg(test)]
-    CORRELATOR_WHERE_VM_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
+    CORRELATOR_WHERE_VM_EXECUTIONS.with(|executions| executions.set(executions.get() + 1));
     let result = execute_program_with_selection_in_context(
         &program.program,
         &input,
@@ -793,7 +797,7 @@ pub(super) async fn evaluate_correlator_output_batch(
         }
     };
     #[cfg(test)]
-    CORRELATOR_OUTPUT_VM_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
+    CORRELATOR_OUTPUT_VM_EXECUTIONS.with(|executions| executions.set(executions.get() + 1));
     let result = match execute_program_with_selection_in_context(
         &program.program.compiled,
         &input,
@@ -1289,7 +1293,6 @@ pub(super) async fn handle_correlator_timeout_action(
 mod tests {
     use ahash::HashMap;
     use nervix_models::ParseAsType;
-    use nervix_primitives::sync::atomic::Ordering;
     use triomphe::Arc;
 
     use super::*;
@@ -1373,7 +1376,7 @@ mod tests {
             },
             materialized_state: Arc::new(HashMap::default()),
         };
-        CORRELATOR_WHERE_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+        CORRELATOR_WHERE_VM_EXECUTIONS.with(|executions| executions.set(0));
 
         let (matched_left, _matched_right) = correlate_incoming_message(
             &processor,
@@ -1389,7 +1392,7 @@ mod tests {
         .expect("matching candidates should produce a correlation");
 
         assert_eq!(
-            CORRELATOR_WHERE_VM_EXECUTIONS.load(Ordering::Relaxed),
+            CORRELATOR_WHERE_VM_EXECUTIONS.with(std::cell::Cell::get),
             1,
             "all candidate pairs must share one WHERE VM execution"
         );
@@ -1414,7 +1417,7 @@ mod tests {
             materialized_state: Arc::new(HashMap::default()),
         };
         let right_candidates = vec![right_candidate(7), right_candidate(8), right_candidate(7)];
-        CORRELATOR_WHERE_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+        CORRELATOR_WHERE_VM_EXECUTIONS.with(|executions| executions.set(0));
 
         let matching = evaluate_correlator_where_matches(
             &processor,
@@ -1429,7 +1432,7 @@ mod tests {
 
         assert_eq!(matching, vec![true, false, true]);
         assert_eq!(
-            CORRELATOR_WHERE_VM_EXECUTIONS.load(Ordering::Relaxed),
+            CORRELATOR_WHERE_VM_EXECUTIONS.with(std::cell::Cell::get),
             1,
             "a left-side arrival must also batch all candidate pairs"
         );
@@ -1533,7 +1536,7 @@ mod tests {
         let correlations = vec![correlation(0, "active"), correlation(1, "paused")];
         let matched = CorrelatorMatchedBatch::from_correlations(&correlations, &[&program])
             .expect("matched pairs should form one Arrow batch");
-        CORRELATOR_OUTPUT_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+        CORRELATOR_OUTPUT_VM_EXECUTIONS.with(|executions| executions.set(0));
 
         let outcomes = evaluate_correlator_output_batch(
             &named("join_profiles"),
@@ -1554,7 +1557,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(
-            CORRELATOR_OUTPUT_VM_EXECUTIONS.load(Ordering::Relaxed),
+            CORRELATOR_OUTPUT_VM_EXECUTIONS.with(std::cell::Cell::get),
             1,
             "all matched pairs for one route must share one output VM execution"
         );

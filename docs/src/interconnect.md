@@ -253,7 +253,9 @@ Three identities serve different purposes:
 
 - The certificate node identifier is the stable authenticated identity of a node.
 - The discovery incarnation and endpoint generation identify the current cluster presence and
-  advertised address of that node.
+  advertised address of that node. The incarnation also names the run of a node that registered a
+  relay admission or record acknowledgement, as
+  [Acknowledgement Registrations](#acknowledgement-registrations) describes.
 - The process epoch identifies one running interconnect process and fences in-memory delivery state
   across restarts. It is drawn from the transport's entropy when the transport binds, which in
   production is the operating system's secure random source.
@@ -593,6 +595,30 @@ events through the reserved management quota. The sender treats five seconds wit
 stalled exchange and bounds the total admission wait at five minutes. Progress keeps a live attempt
 from being mistaken for a disconnected one; it does not change the delivery outcome.
 
+### Acknowledgement Registrations
+
+The sender correlates the runtime admission of a delivery and every attached record acknowledgement
+it waits on through a registration it places in the delivery. A registration names the waiting
+entry by a number and names the run of the sending node that registered it: the node and the
+discovery incarnation of that run. Every process numbers its registrations from one, so the number
+alone repeats across restarts of a node, and the run is what keeps the registrations of different
+runs apart.
+
+The receiver returns every progress event and terminal outcome to the node the registration names,
+carrying the whole registration back with it. The sending node resolves an entry only when the
+registration names its current run. A receiver can still be resolving what an earlier run
+registered after that run ended: a record acknowledgement whose downstream work completes after the
+sending node restarted is the common case. Such an outcome is rejected and logged at `debug`. It
+never resolves the admission or record acknowledgement the current run holds under the same number,
+so a success reported for an earlier run can never acknowledge a record, and so commit it at its
+source, before its own delivery completed. The earlier run's entries ended with its process, and
+its sources redeliver the records they had not committed.
+
+A receiver issues a grant only when the admission registration names the authenticated sending
+node. Admission bookkeeping on both ends is keyed by the peer and the whole registration, so a
+terminal outcome addressed to an earlier run neither completes nor retires the admission a later
+run registered under the same number.
+
 ### Ordering, Retry, And Reconciliation
 
 A delivery identity combines the sender process epoch, receiver process epoch, channel incarnation,
@@ -685,9 +711,11 @@ Admission to consensus membership requires an available interconnect endpoint. A
 without one is not an admission candidate, so it is neither added as a learner nor promoted to
 voter, and it becomes eligible on the round that publishes an endpoint this node accepts. The
 client and web-console advertisements are independent of admission: a node joins, votes, and leads
-with either of them unavailable. Membership follows a replaced endpoint by refreshing the learner
-at its new address before promotion, and a node removed from membership stays out until it returns
-with a newer incarnation.
+with either of them unavailable. Membership replaces the recorded address of an existing member
+when its advertised endpoint changes. A returning voter remains a voter, while a learner still
+waits to catch up before promotion. The recorded address is a startup contact hint; live Raft
+traffic uses authenticated discovery by node identity. A node removed from membership stays out
+until it returns with a newer incarnation.
 
 A redirect to the leader names only the advertised endpoints discovery has established. A client
 redirected during an election that has not yet observed the new leader's client endpoint receives
@@ -1091,8 +1119,9 @@ wire; a local report's cause chain is not serialized into an HTTP/2 response.
 Connections, request state, relay grants, delivery reconciliation, progress trackers, and
 acknowledgement maps are never persisted. Durable control-plane state remains in consensus, and
 selected runtime state remains in its owning snapshot or replication mechanism. This boundary is
-why process epochs are part of relay delivery identities and why an unresolved result across a
-receiver restart is reported as indeterminate.
+why process epochs are part of relay delivery identities, why an unresolved result across a
+receiver restart is reported as indeterminate, and why an acknowledgement registration names the
+run of the node that registered it.
 
 An ownership-handoff gate lease is also in-memory coordination state. Releasing or expiring that
 lease removes the runtime fence but does not report a persisted preparation as cleaned up. Only an

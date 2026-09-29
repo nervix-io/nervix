@@ -49,8 +49,8 @@ pub use openraft::raft::{
     TransferLeaderResponse, VoteRequest, VoteResponse,
 };
 use openraft::{
-    BasicNode, Config, LogId, Raft, RaftNetworkFactory, Snapshot, SnapshotMeta, StoredMembership,
-    Vote,
+    BasicNode, ChangeMembers, Config, LogId, Raft, RaftNetworkFactory, Snapshot, SnapshotMeta,
+    StoredMembership, Vote,
     error::{ClientWriteError, RPCError, RaftError, StreamingError},
     metrics::RaftServerMetrics,
     network::{RPCOption, RaftNetworkV2},
@@ -811,8 +811,6 @@ const RETENTION_ADMISSION_POLL: Duration = Duration::from_millis(50);
 /// How long one complete snapshot transfer may take.
 const SNAPSHOT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(30);
 
-static NEXT_SNAPSHOT_TRANSFER_ID: AtomicU64 = AtomicU64::new(1);
-
 #[derive(Clone)]
 pub struct ConsensusSettings {
     pub cluster_name: String,
@@ -1051,10 +1049,13 @@ struct MembershipSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MembershipMutation {
+    UpdateAddress {
+        node_id: ClusterNodeName,
+        endpoint: NodeEndpoint,
+    },
     AddLearner {
         node_id: ClusterNodeName,
         endpoint: NodeEndpoint,
-        refresh: bool,
     },
     ChangeVoters {
         voters: BTreeSet<ClusterNodeName>,
@@ -1085,12 +1086,16 @@ impl MembershipSnapshot {
             let known_address = self.nodes.get(&node.node_id);
             let is_voter = self.voters.contains(&node.node_id);
             let address_changed = known_address != Some(&advertised);
-            if !is_voter || address_changed {
-                let refresh = known_address.is_some() && address_changed;
+            if known_address.is_some() && address_changed {
+                mutations.push(MembershipMutation::UpdateAddress {
+                    node_id: node.node_id.clone(),
+                    endpoint: endpoint.clone(),
+                });
+            }
+            if !is_voter {
                 mutations.push(MembershipMutation::AddLearner {
                     node_id: node.node_id.clone(),
                     endpoint,
-                    refresh,
                 });
             }
             desired_voters.insert(node.node_id);
@@ -2035,6 +2040,7 @@ impl Consensus {
             executor: settings.executor.clone(),
             connectivity: connectivity.clone(),
             append_stream_open_recorder,
+            snapshot_transfer_ids: Arc::new(SnapshotTransferIds::new()),
         };
         let raft = Raft::new(
             settings.node_id.clone(),
@@ -3652,14 +3658,31 @@ impl Administrator {
         for mutation in mutations {
             nervix_primitives::task::consume_budget().await;
             match mutation {
-                MembershipMutation::AddLearner {
-                    node_id,
-                    endpoint,
-                    refresh,
-                } => {
-                    let operation = if refresh {
-                        format!("refresh learner '{node_id}' at {endpoint}")
-                    } else if before.nodes.contains_key(&node_id) {
+                MembershipMutation::UpdateAddress { node_id, endpoint } => {
+                    let operation = format!("update address of '{node_id}' to {endpoint}");
+                    self.inner.events.report(format!("raft {operation}"));
+                    let update = timeout(
+                        MEMBERSHIP_MUTATION_TIMEOUT,
+                        self.inner.raft.change_membership(
+                            ChangeMembers::SetNodes(BTreeMap::from([(
+                                node_id,
+                                BasicNode::new(endpoint.to_string()),
+                            )])),
+                            true,
+                        ),
+                    )
+                    .await;
+                    let result = match update {
+                        Ok(result) => result,
+                        Err(_) => {
+                            let observed = self.effective_membership();
+                            return Err(self.membership_timeout(operation, &observed));
+                        }
+                    };
+                    result.map_err(ConsensusError::from)?;
+                }
+                MembershipMutation::AddLearner { node_id, endpoint } => {
+                    let operation = if before.nodes.contains_key(&node_id) {
                         format!("wait for learner '{node_id}' to catch up at {endpoint}")
                     } else {
                         format!("add learner '{node_id}' at {endpoint}")
@@ -4015,6 +4038,36 @@ impl ProtocolReceiver {
     }
 }
 
+/// The identities of the snapshot transfers one node sends.
+///
+/// A receiver stages one transfer per sending peer, and a new transfer from that peer supersedes
+/// the one it was staging. The identity tells the receiver which transfer a chunk belongs to, so a
+/// chunk of a superseded transfer is refused instead of being appended to its successor. The
+/// receiver only ever compares identities from one peer, so they have to differ between the
+/// transfers one node sends and nothing more: the node's Raft network factory owns one allocator,
+/// every client it creates draws from it, and it starts again with the node.
+#[derive(Debug)]
+struct SnapshotTransferIds {
+    next: AtomicU64,
+}
+
+impl SnapshotTransferIds {
+    fn new() -> Self {
+        Self {
+            next: AtomicU64::new(1),
+        }
+    }
+
+    /// The identity of the next transfer this node sends.
+    fn allocate(&self) -> io::Result<u64> {
+        self.next
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| io::Error::other("snapshot transfer id space is exhausted"))
+    }
+}
+
 #[derive(Clone)]
 struct NetworkFactory<Recorder> {
     local_node_id: ClusterNodeName,
@@ -4022,6 +4075,9 @@ struct NetworkFactory<Recorder> {
     executor: nervix_execution::Executor,
     connectivity: ConnectivityFault,
     append_stream_open_recorder: Recorder,
+    /// Shared with every client the factory creates, so no two transfers the node sends carry
+    /// one identity.
+    snapshot_transfer_ids: Arc<SnapshotTransferIds>,
 }
 
 #[derive(Clone)]
@@ -4033,6 +4089,8 @@ struct NetworkClient<Recorder> {
     append_path: AppendPath,
     connectivity: ConnectivityFault,
     append_stream_open_recorder: Recorder,
+    /// The node's allocator, which the factory and every other client of the node share.
+    snapshot_transfer_ids: Arc<SnapshotTransferIds>,
 }
 
 impl<Recorder> NetworkFactory<Recorder>
@@ -4048,6 +4106,7 @@ where
             append_path,
             connectivity: self.connectivity.clone(),
             append_stream_open_recorder: self.append_stream_open_recorder.clone(),
+            snapshot_transfer_ids: self.snapshot_transfer_ids.clone(),
         }
     }
 }
@@ -4083,14 +4142,6 @@ where
 
 fn io_error(err: impl std::fmt::Display) -> io::Error {
     io::Error::other(err.to_string())
-}
-
-fn next_snapshot_transfer_id() -> io::Result<u64> {
-    NEXT_SNAPSHOT_TRANSFER_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            current.checked_add(1)
-        })
-        .map_err(|_| io::Error::other("snapshot transfer id space is exhausted"))
 }
 
 /// The application body one snapshot chunk submits. A section is carried as more chunks, never as
@@ -4276,7 +4327,9 @@ where
                 "snapshot deadline exceeds the monotonic clock range",
             )))
         })?;
-        let transfer_id = next_snapshot_transfer_id()
+        let transfer_id = self
+            .snapshot_transfer_ids
+            .allocate()
             .map_err(unreachable_err)
             .map_err(StreamingError::from)?;
         let Snapshot { meta, snapshot } = snapshot;
@@ -6046,6 +6099,7 @@ mod tests {
         ResourceUploadState, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
         Statement, Timestamp, TransactionPosition,
     };
+    use nervix_primitives::sync::atomic::AtomicU64;
     use openraft::{
         entry::RaftEntry,
         storage::{RaftLogReader, RaftLogStorage, RaftLogStorageExt, RaftStateMachine},
@@ -6053,19 +6107,22 @@ mod tests {
         vote::RaftLeaderIdExt,
     };
     use tempfile::tempdir;
+    use triomphe::Arc;
 
     use super::{
         AppliedEntryContext, AutomaticScheduleFence, ClusterSchedule, CommandExecution,
         CommandExecutionAdmissionPolicy, CommandExecutionDisposition, CommandExecutionEffect,
         CommandExecutionRequestConflict, CommandExecutionResult, CommandExecutionState,
         ConsensusCommand, ConsensusConflict, ConsensusResponse, FjallLogReader, FjallStore,
-        GossipNode, GossipState, LeaderTenure, MembershipMutation, MembershipSnapshot,
-        ProtocolOriginError, ResourceRecords, StateMachineChanges, StateMachineData,
-        TransactionApplicationOutcome, TransactionCommandResult, TransactionCommitAdmissionFailure,
-        TransactionMutationError, TransactionOutcome, TransactionStatement,
-        TransactionStatementRequest, TransactionStepEffect, TransactionStepResult, TypeConfig,
-        UserCredentials, apply_consensus_command, apply_consensus_command_at,
-        apply_transaction_step_effect, io_error, storage_decode, validate_protocol_origin,
+        GossipNode, GossipState, IncomingSnapshotTransfer, LeaderTenure, MembershipMutation,
+        MembershipSnapshot, ProtocolOriginError, ResourceRecords, SnapshotChunkPart, SnapshotMeta,
+        SnapshotTransferError, SnapshotTransferIds, StateMachineChanges, StateMachineData,
+        StoredMembership, TransactionApplicationOutcome, TransactionCommandResult,
+        TransactionCommitAdmissionFailure, TransactionMutationError, TransactionOutcome,
+        TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
+        TransactionStepResult, TypeConfig, UserCredentials, apply_consensus_command,
+        apply_consensus_command_at, apply_transaction_step_effect, io_error, storage_decode,
+        validate_protocol_origin,
     };
     use crate::{
         ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionActivity,
@@ -6097,6 +6154,81 @@ mod tests {
             Duration::from_secs(60),
             capacity,
         )
+    }
+
+    #[test]
+    fn every_client_of_a_node_draws_a_distinct_snapshot_transfer_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let node = Arc::new(SnapshotTransferIds::new());
+        let replication_client = node.clone();
+        let snapshot_client = node.clone();
+
+        let identities = [
+            replication_client.allocate()?,
+            snapshot_client.allocate()?,
+            replication_client.allocate()?,
+        ];
+        assert_eq!(identities, [1, 2, 3]);
+
+        let other_node = SnapshotTransferIds::new();
+        assert_eq!(
+            other_node.allocate()?,
+            1,
+            "a receiver compares identities from one peer only, so each node counts its own"
+        );
+        assert_eq!(node.allocate()?, 4);
+        Ok(())
+    }
+
+    #[test]
+    fn a_staged_transfer_refuses_the_chunks_of_the_transfer_it_superseded()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let sender = ClusterNodeName::parse("node-1")?;
+        let meta = SnapshotMeta {
+            last_log_id: None,
+            last_membership: StoredMembership::default(),
+        };
+        let mut staged = IncomingSnapshotTransfer::new(2, 7, VoteOf::new(1, sender), meta, 1, 4);
+        let chunk = |bytes: &[u8]| SnapshotChunkPart {
+            section_index: 0,
+            section_bytes: 4,
+            offset: 0,
+            bytes: bytes.to_vec(),
+        };
+
+        let Err(late) = staged.append_chunk(1, chunk(b"late"), 4, 64) else {
+            panic!("a chunk of the superseded transfer must not be staged");
+        };
+        assert!(matches!(
+            late.current_context(),
+            SnapshotTransferError::Superseded {
+                expected: 2,
+                actual: 1
+            }
+        ));
+
+        let section = staged
+            .append_chunk(2, chunk(b"next"), 4, 64)?
+            .assured("the chunk completes the transfer's only section");
+        assert_eq!(section.bytes, b"next");
+        Ok(())
+    }
+
+    #[test]
+    fn a_node_refuses_a_transfer_once_its_identities_are_exhausted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let ids = SnapshotTransferIds {
+            next: AtomicU64::new(u64::MAX - 1),
+        };
+        assert_eq!(ids.allocate()?, u64::MAX - 1);
+
+        for _ in 0..2 {
+            let error = ids
+                .allocate()
+                .expect_err("an exhausted identity space must not repeat an identity");
+            assert_eq!(error.to_string(), "snapshot transfer id space is exhausted");
+        }
+        Ok(())
     }
 
     #[test]
@@ -6341,7 +6473,6 @@ mod tests {
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
                     endpoint: node_endpoint("node-2.test:7443"),
-                    refresh: false,
                 },
                 MembershipMutation::ChangeVoters {
                     voters: BTreeSet::from([first, joining]),
@@ -6395,7 +6526,6 @@ mod tests {
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
                     endpoint: node_endpoint("node-2.test:7443"),
-                    refresh: false,
                 },
                 MembershipMutation::ChangeVoters {
                     voters: BTreeSet::from([first, joining]),
@@ -6405,7 +6535,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_endpoint_is_refreshed_before_membership_promotion() {
+    fn changed_learner_address_is_updated_before_promotion() {
         let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
         let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
         let current_address = "node-2.test:7443".to_string();
@@ -6430,15 +6560,56 @@ mod tests {
         assert_eq!(
             membership.automatic_mutations(&gossip, &admission_fences),
             vec![
+                MembershipMutation::UpdateAddress {
+                    node_id: joining.clone(),
+                    endpoint: replacement_endpoint.clone(),
+                },
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
                     endpoint: replacement_endpoint,
-                    refresh: true,
                 },
                 MembershipMutation::ChangeVoters {
                     voters: BTreeSet::from([first, joining]),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_restarted_voter_updates_its_address_once() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let restarted = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let endpoint = node_endpoint("node-2.test:8443");
+        let gossip = GossipState {
+            live_nodes: vec![GossipNode {
+                interconnect_endpoint: Some(endpoint.clone()),
+                ..undiscovered_node("node-2", 3)
+            }],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let mut membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone(), restarted.clone()]),
+            nodes: BTreeMap::from([
+                (first, "node-1.test:7443".to_string()),
+                (restarted.clone(), "node-2.test:7443".to_string()),
+            ]),
+        };
+        let admission_fences = BTreeMap::new();
+
+        assert_eq!(
+            membership.automatic_mutations(&gossip, &admission_fences),
+            vec![MembershipMutation::UpdateAddress {
+                node_id: restarted.clone(),
+                endpoint: endpoint.clone(),
+            }]
+        );
+
+        membership.nodes.insert(restarted, endpoint.to_string());
+        assert!(
+            membership
+                .automatic_mutations(&gossip, &admission_fences)
+                .is_empty()
         );
     }
 
@@ -6478,7 +6649,6 @@ mod tests {
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
                     endpoint: node_endpoint("node-2.test:7443"),
-                    refresh: false,
                 },
                 MembershipMutation::ChangeVoters {
                     voters: BTreeSet::from([first, joining]),

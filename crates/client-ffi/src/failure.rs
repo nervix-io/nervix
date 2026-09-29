@@ -1,8 +1,10 @@
 //! The failure a host reads: `nx_error`.
 //!
-//! - **Owns.** The kinds of failure the header names, how every client error is classified into
-//!   one, and the message and execution reference a host reads from it.
-//! - **Depends on.** The Rust client's errors and the reports that carry them.
+//! - **Owns.** The kinds of failure the header names, how every client error and every refused
+//!   read of an attached domain clock is classified into one, and the message and execution
+//!   reference a host reads from it.
+//! - **Depends on.** The Rust client's errors, its domain clock read errors, and the reports that
+//!   carry them.
 //! - **Must not know.** How a host reacts to a failure.
 //!
 //! A failure is the reporting boundary of the binding: the client's typed error, with every cause
@@ -10,7 +12,9 @@
 //! branches on.
 
 use error_stack::Report;
-use nervix_client_core::{BackupDownloadError, ClientError, CommandExecutionReference};
+use nervix_client_core::{
+    BackupDownloadError, ClientError, CommandExecutionReference, DomainClockReadError,
+};
 
 use crate::abi;
 
@@ -175,6 +179,21 @@ impl From<Report<ClientError>> for Failure {
             message: format!("{report:#}"),
             execution_reference,
         }
+    }
+}
+
+impl From<Report<DomainClockReadError>> for Failure {
+    /// A stopped or uninstalled clock has no logical time to read, which is a read of a value the
+    /// clock's state does not hold; a projection outside the timestamp range is an argument out of
+    /// range for that clock.
+    fn from(report: Report<DomainClockReadError>) -> Self {
+        let kind = match report.current_context() {
+            DomainClockReadError::Stopped { .. } | DomainClockReadError::Uninstalled { .. } => {
+                FailureKind::Type
+            }
+            DomainClockReadError::Arithmetic { .. } => FailureKind::InvalidArgument,
+        };
+        Self::new(kind, format!("{report:#}"))
     }
 }
 

@@ -99,7 +99,7 @@ The CI jobs divide the work at the scenario boundary:
 | `extra-tests` | Its Miri, mutation, benchmark, Shuttle, and completion checks plus `runtime_state_capabilities`, without coverage instrumentation |
 
 The `tests` and `scenarios` jobs also sample runner CPU utilization and steal time every five
-seconds. Every kache-backed job uses kache 0.28.0, records `doctor` output without making it a
+seconds. Every kache-backed job uses kache 0.28.1, records `doctor` output without making it a
 test failure, publishes a cache report, and diagnoses its five most expensive misses with
 `why-miss`. The shared S3 cache keeps executable and test-binary outputs, with stores sized for
 the full builds: every kache-backed job and Docker image build uses a 1 TiB store ceiling. This is
@@ -812,12 +812,18 @@ starts with its target in `NERVIX_PROBE_*` variables and its standard input clos
 one report line per observation on standard output, and the fixture keeps every line it read.
 
 A probe's waits are bounded twice. The step that starts it waits at most 180 seconds for the line
-that says its subscription is open, and the step that reads its report waits the duration the step
-names for the probe to end, 180 seconds against a cluster and 60 against the corpus. Each probe also
-ends itself: it gives up on its rows after 120 seconds, or on its whole run after 170. A failure
-quotes every report line read so far, the exit status, and the probe's standard error. Dropping the
-fixture kills a child process, so a failed scenario never leaves a probe running; the in-process
-probe ends when its session fails against the stopped cluster, or at its own deadline.
+that says its subscription is open or its clock attach completed. A later step can wait, for the
+duration it names, for one more line the probe prints, so a scenario acts between the probe's
+observations: the clock probe prints the first tick of a generation before the scenario stops and
+starts the domain, and the interruption before the scenario restarts the TCP forwarder the probe
+entered through. Every line read on the way is kept for the report. The step that reads the report
+waits the duration the step names for the probe to end, 180 seconds against a cluster and 60 against
+the corpus. Each probe also ends itself: a binding probe gives up on its rows, or on each stage of
+the clock it follows, after 120 seconds, and the Go and TypeScript probes give up on their whole run
+after 170. A failure quotes every report line read so far, the exit status, and the probe's
+standard error. Dropping the fixture kills a child process, so a failed scenario never leaves a
+probe running; the in-process probe ends when its session fails against the stopped cluster, or at
+its own deadline.
 
 Every example of a runtime other than the in-process probe is tagged `@client_conformance_toolchain`
 and one `@client_probe_<runtime>` tag, and the suite excludes the first tag unless a run selects its
@@ -888,7 +894,7 @@ current profiles and reuses unchanged instrumented artifacts for another scenari
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |
-| Work before the scenario binary starts | 14 minutes | The first cold kache 0.28.0 split-job run took 11m37s from job start to the binary, and the next took 10m08s; the ceiling adds 2m23s beyond the slower measurement |
+| Work before the scenario binary starts | 14 minutes | The first cold kache 0.28.1 split-job run took 11m37s from job start to the binary, and the next took 10m08s; the ceiling adds 2m23s beyond the slower measurement |
 | The scenario run | 41 minutes | What the limit leaves |
 | After the budget expires | 5-minute reserve | At most 60 seconds of cleanup window, 2 minutes of dependency stop, and 60 seconds of runtime shutdown, four minutes in all, and then the log upload, measured at 2 to 3 seconds with 8 seconds of steps after it |
 

@@ -88,6 +88,9 @@ struct RemoteRelayAdmissionContext<'a> {
 /// The remote acknowledgement correlation registry. The runtime and the `RemoteDispatcher` it
 /// attaches must observe one instance of this: the dispatcher allocates the correlation ids that
 /// the runtime resolves when acknowledgements come back over the interconnect.
+///
+/// Both maps hold only registrations this run of the node handed out, keyed by their number. A
+/// resolution resolves an entry only once the dispatcher confirms that it names this run.
 pub(super) struct RemoteDispatchRegistry {
     pub(super) next_ack_id: AtomicU64,
     pub(super) pending_acks: DashMap<u64, AckSet, RandomState>,
@@ -139,35 +142,58 @@ impl RemoteDispatcher {
         self.cluster.local_incarnation()
     }
 
-    pub(super) fn next_ack_id(&self) -> u64 {
-        self.registry.next_ack_id.fetch_add(1, Ordering::Relaxed)
+    /// A registration numbered in this process that names this run of the node, so its resolution
+    /// can only ever resolve the entry registered under it here.
+    fn next_registration(&self) -> RemoteAckRegistration {
+        RemoteAckRegistration {
+            ack_id: self.registry.next_ack_id.fetch_add(1, Ordering::Relaxed),
+            registrar: ClusterNodeIdentity::new(
+                self.local_node_id().clone(),
+                self.local_node_incarnation(),
+            ),
+        }
     }
 
-    pub(super) fn register_pending_ack(&self, ack_id: u64, acks: AckSet) {
-        self.registry.pending_acks.insert(ack_id, acks);
+    /// Whether this run of the node handed out `registration`. Every run numbers its
+    /// registrations from one, so a registration an earlier run handed out can carry the number of
+    /// an entry this run holds.
+    pub(super) fn registered(&self, registration: &RemoteAckRegistration) -> bool {
+        registration.registrar.node_id() == self.local_node_id()
+            && registration.registrar.incarnation() == self.local_node_incarnation()
+    }
+
+    /// Registers `acks` to be resolved by the node the returned registration is sent to.
+    pub(super) fn register_pending_ack(&self, acks: AckSet) -> RemoteAckRegistration {
+        let registration = self.next_registration();
+        self.registry.pending_acks.insert(registration.ack_id, acks);
+        registration
     }
 
     pub(super) fn forwarded_ack(acks: &AckSet) -> AckSet {
         acks.attached()
     }
 
-    pub(super) fn clear_pending_ack(&self, ack_id: u64) {
-        self.registry.pending_acks.remove(&ack_id);
+    pub(super) fn clear_pending_ack(&self, registration: &RemoteAckRegistration) {
+        self.registry.pending_acks.remove(&registration.ack_id);
     }
 
+    /// Registers a relay admission to be resolved by the node the returned registration is sent
+    /// to, and returns the updates its resolutions publish.
     pub(super) fn register_pending_relay_admission(
         &self,
-        admission_id: u64,
-    ) -> watch::Receiver<RelayAdmissionUpdate> {
+    ) -> (RemoteAckRegistration, watch::Receiver<RelayAdmissionUpdate>) {
+        let registration = self.next_registration();
         let (sender, receiver) = watch::channel(RelayAdmissionUpdate::Pending);
         self.registry
             .pending_relay_admissions
-            .insert(admission_id, sender);
-        receiver
+            .insert(registration.ack_id, sender);
+        (registration, receiver)
     }
 
-    pub(super) fn clear_pending_relay_admission(&self, admission_id: u64) {
-        self.registry.pending_relay_admissions.remove(&admission_id);
+    pub(super) fn clear_pending_relay_admission(&self, registration: &RemoteAckRegistration) {
+        self.registry
+            .pending_relay_admissions
+            .remove(&registration.ack_id);
     }
 
     pub(super) async fn request_with_timeout<M>(
@@ -211,16 +237,12 @@ impl RemoteDispatcher {
                 sequence: payload.delivery.sequence,
             }));
         }
-        let admission_id = self.next_ack_id();
         let delivery = payload.delivery;
         let mut cancellation_guard = self
             .interconnect
             .relay_cancellation_guard(node_id.clone(), delivery);
-        payload.admission = Some(RemoteAckRegistration {
-            ack_id: admission_id,
-            reply_node_id: self.local_node_id().clone(),
-        });
-        let admission = self.register_pending_relay_admission(admission_id);
+        let (registration, admission) = self.register_pending_relay_admission();
+        payload.admission = Some(registration.clone());
         let dispatch = self.dispatch(node_id, Envelope::RelayPayload(payload));
         tokio::pin!(dispatch);
         let dispatch_result = nervix_primitives::select! {
@@ -234,7 +256,7 @@ impl RemoteDispatcher {
             },
         };
         if let Err(error) = dispatch_result {
-            self.clear_pending_relay_admission(admission_id);
+            self.clear_pending_relay_admission(&registration);
             let resolution = self
                 .resolve_failed_relay_admission(node_id, delivery, error, &mut cancellation_guard)
                 .await;
@@ -260,7 +282,7 @@ impl RemoteDispatcher {
             },
         };
         if let Err(error) = result {
-            self.clear_pending_relay_admission(admission_id);
+            self.clear_pending_relay_admission(&registration);
             let resolution = self
                 .resolve_failed_relay_admission(node_id, delivery, error, &mut cancellation_guard)
                 .await;
@@ -723,16 +745,13 @@ impl Runtime {
         };
         if let Err(error) = dispatcher
             .dispatch(
-                &admission.reply_node_id,
-                Envelope::Ack(RemoteAckResolution {
-                    ack_id: admission.ack_id,
-                    outcome,
-                }),
+                admission.registrar.node_id(),
+                Envelope::Ack(admission.resolution(outcome)),
             )
             .await
         {
             warn!(
-                target_node = %admission.reply_node_id,
+                target_node = %admission.registrar,
                 admission_id = admission.ack_id,
                 error = %error,
                 "failed to return relay admission response"
@@ -1060,20 +1079,48 @@ impl Runtime {
             .map_err(Report::new)
     }
 
-    pub(crate) fn handle_remote_ack_resolution(&self, ack: RemoteAckResolution) {
-        if let RemoteAckOutcome::Alive = &ack.outcome {
+    /// Resolves the admission or record acknowledgement that `resolution` names.
+    ///
+    /// Only a registration this run of the node handed out is resolved. A receiver keeps resolving
+    /// what an earlier run of the node registered after that run ended, and the earlier run
+    /// numbered its registrations from one as this run does, so a resolution naming another run is
+    /// rejected rather than resolving the entry this run holds under the same number.
+    pub(crate) fn handle_remote_ack_resolution(&self, resolution: RemoteAckResolution) {
+        let RemoteAckResolution {
+            registration,
+            outcome,
+        } = resolution;
+        let dispatcher = self.inner.remote_dispatcher.load();
+        let Some(dispatcher) = dispatcher.as_deref() else {
+            debug!(
+                ack_id = registration.ack_id,
+                registrar = %registration.registrar,
+                "rejected a remote ack resolution before this node joined its cluster"
+            );
+            return;
+        };
+        if !dispatcher.registered(&registration) {
+            debug!(
+                ack_id = registration.ack_id,
+                registrar = %registration.registrar,
+                "rejected a remote ack resolution addressed to another run of this node"
+            );
+            return;
+        }
+        let ack_id = registration.ack_id;
+        if let RemoteAckOutcome::Alive = &outcome {
             if let Some(admission) = self
                 .inner
                 .remote_dispatch
                 .pending_relay_admissions
-                .get(&ack.ack_id)
+                .get(&ack_id)
             {
                 if admission.is_closed() {
                     drop(admission);
                     self.inner
                         .remote_dispatch
                         .pending_relay_admissions
-                        .remove(&ack.ack_id);
+                        .remove(&ack_id);
                 } else {
                     admission.send_if_modified(|update| {
                         if let RelayAdmissionUpdate::Admitted | RelayAdmissionUpdate::Rejected(_) =
@@ -1087,14 +1134,11 @@ impl Runtime {
                 }
                 return;
             }
-            let Some(pending) = self.inner.remote_dispatch.pending_acks.get(&ack.ack_id) else {
-                warn!(
-                    ack_id = ack.ack_id,
-                    "received remote ack alive for unknown ack id"
-                );
+            let Some(pending) = self.inner.remote_dispatch.pending_acks.get(&ack_id) else {
+                warn!(ack_id, "received remote ack alive for unknown ack id");
                 return;
             };
-            trace!(ack_id = ack.ack_id, "received remote ack alive");
+            trace!(ack_id, "received remote ack alive");
             pending.ack_alive();
             return;
         }
@@ -1103,9 +1147,9 @@ impl Runtime {
             .inner
             .remote_dispatch
             .pending_relay_admissions
-            .remove(&ack.ack_id)
+            .remove(&ack_id)
         {
-            let terminal_update = match ack.outcome {
+            let terminal_update = match outcome {
                 RemoteAckOutcome::Ack => RelayAdmissionUpdate::Admitted,
                 RemoteAckOutcome::NoAck(error) => RelayAdmissionUpdate::Rejected(error),
                 RemoteAckOutcome::Alive => return,
@@ -1120,15 +1164,12 @@ impl Runtime {
             return;
         }
 
-        let Some((_, pending)) = self.inner.remote_dispatch.pending_acks.remove(&ack.ack_id) else {
-            warn!(
-                ack_id = ack.ack_id,
-                "received remote ack resolution for unknown ack id"
-            );
+        let Some((_, pending)) = self.inner.remote_dispatch.pending_acks.remove(&ack_id) else {
+            warn!(ack_id, "received remote ack resolution for unknown ack id");
             return;
         };
-        trace!(ack_id = ack.ack_id, outcome = ?ack.outcome, "resolving remote ack");
-        match ack.outcome {
+        trace!(ack_id, outcome = ?outcome, "resolving remote ack");
+        match outcome {
             RemoteAckOutcome::Ack => pending.ack_success(),
             RemoteAckOutcome::NoAck(error) => pending.no_ack(error),
             RemoteAckOutcome::Alive => unreachable!("alive ack outcome is handled before removal"),
@@ -1155,23 +1196,20 @@ impl Runtime {
                         trace!(
                             domain = domain.as_str(),
                             ack_id = ack.ack_id,
-                            target_node = %ack.reply_node_id,
+                            target_node = %ack.registrar,
                             "sending remote ack alive"
                         );
                         if let Err(error) = dispatcher
                             .dispatch(
-                                &ack.reply_node_id,
-                                Envelope::Ack(RemoteAckResolution {
-                                    ack_id: ack.ack_id,
-                                    outcome: RemoteAckOutcome::Alive,
-                                }),
+                                ack.registrar.node_id(),
+                                Envelope::Ack(ack.resolution(RemoteAckOutcome::Alive)),
                             )
                             .await
                         {
                             warn!(
                                 domain = domain.as_str(),
                                 ack_id = ack.ack_id,
-                                target_node = %ack.reply_node_id,
+                                target_node = %ack.registrar,
                                 error = %error,
                                 "failed to return remote ack alive"
                             );
@@ -1183,23 +1221,20 @@ impl Runtime {
                                 trace!(
                                     domain = domain.as_str(),
                                     ack_id = ack.ack_id,
-                                    target_node = %ack.reply_node_id,
+                                    target_node = %ack.registrar,
                                     "forwarding remote ack alive"
                                 );
                                 if let Err(error) = dispatcher
                                     .dispatch(
-                                        &ack.reply_node_id,
-                                        Envelope::Ack(RemoteAckResolution {
-                                            ack_id: ack.ack_id,
-                                            outcome: RemoteAckOutcome::Alive,
-                                        }),
+                                        ack.registrar.node_id(),
+                                        Envelope::Ack(ack.resolution(RemoteAckOutcome::Alive)),
                                     )
                                     .await
                                 {
                                     warn!(
                                         domain = domain.as_str(),
                                         ack_id = ack.ack_id,
-                                        target_node = %ack.reply_node_id,
+                                        target_node = %ack.registrar,
                                         error = %error,
                                         "failed to forward remote ack alive"
                                     );
@@ -1209,27 +1244,25 @@ impl Runtime {
                                 trace!(
                                     domain = domain.as_str(),
                                     ack_id = ack.ack_id,
-                                    target_node = %ack.reply_node_id,
+                                    target_node = %ack.registrar,
                                     outcome = ?outcome,
                                     "sending remote ack resolution"
                                 );
+                                let outcome = match outcome {
+                                    AckOutcome::Ack => RemoteAckOutcome::Ack,
+                                    AckOutcome::NoAck(error) => RemoteAckOutcome::NoAck(error),
+                                };
                                 if let Err(error) = dispatcher
                                     .dispatch(
-                                        &ack.reply_node_id,
-                                        Envelope::Ack(RemoteAckResolution {
-                                            ack_id: ack.ack_id,
-                                            outcome: match outcome {
-                                                AckOutcome::Ack => RemoteAckOutcome::Ack,
-                                                AckOutcome::NoAck(error) => RemoteAckOutcome::NoAck(error),
-                                            },
-                                        }),
+                                        ack.registrar.node_id(),
+                                        Envelope::Ack(ack.resolution(outcome)),
                                     )
                                     .await
                                 {
                                     warn!(
                                         domain = domain.as_str(),
                                         ack_id = ack.ack_id,
-                                        target_node = %ack.reply_node_id,
+                                        target_node = %ack.registrar,
                                         error = %error,
                                         "failed to return remote ack resolution"
                                     );
@@ -1347,7 +1380,8 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{AckMode, ClusterNodeName, RemoteAckOutcome, RemoteAckResolution};
+    use futures_util::FutureExt as _;
+    use nervix_models::{AckMode, ClusterNodeName, RemoteAckOutcome};
     use nervix_primitives::sync::{oneshot, watch};
     use tokio::time::{Duration, Instant, sleep, timeout};
 
@@ -1476,25 +1510,51 @@ mod tests {
         drop(shutdown_tx);
     }
 
+    /// A runtime attached to a loopback cluster of one node, and the dispatcher that hands out its
+    /// registrations.
+    async fn joined_runtime() -> (Runtime, StdArc<RemoteDispatcher>) {
+        let runtime = Runtime::default();
+        let node = ClusterNodeName::parse("node-1").expect("the fixture node name is valid");
+        attach_loopback_cluster(&runtime, &node).await;
+        let dispatcher = runtime
+            .inner
+            .remote_dispatcher
+            .load_full()
+            .expect("attaching the loopback cluster attaches the dispatcher");
+        (runtime, dispatcher)
+    }
+
+    /// The registration an earlier run of the same node handed out under the same number.
+    fn from_an_earlier_run(registration: &RemoteAckRegistration) -> RemoteAckRegistration {
+        let incarnation = registration
+            .registrar
+            .incarnation()
+            .get()
+            .checked_sub(1)
+            .expect("a loopback cluster's incarnation is its start time in nanoseconds");
+        RemoteAckRegistration {
+            ack_id: registration.ack_id,
+            registrar: ClusterNodeIdentity::new(
+                registration.registrar.node_id().clone(),
+                ClusterNodeIncarnation::new(incarnation),
+            ),
+        }
+    }
+
     #[nervix_primitives::test]
     async fn remote_ack_alive_packet_resets_ingestor_ack_timeout() {
-        let runtime = Runtime::default();
+        let (runtime, dispatcher) = joined_runtime().await;
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (acks, completion) = AckSet::root();
-        runtime.inner.remote_dispatch.pending_acks.insert(7, acks);
+        let registration = dispatcher.register_pending_ack(acks);
         let runtime_task = runtime.clone();
+        let resolved = registration.clone();
 
         nervix_primitives::task::spawn(async move {
             sleep(Duration::from_millis(100)).await;
-            runtime_task.handle_remote_ack_resolution(RemoteAckResolution {
-                ack_id: 7,
-                outcome: RemoteAckOutcome::Alive,
-            });
+            runtime_task.handle_remote_ack_resolution(resolved.resolution(RemoteAckOutcome::Alive));
             sleep(Duration::from_millis(150)).await;
-            runtime_task.handle_remote_ack_resolution(RemoteAckResolution {
-                ack_id: 7,
-                outcome: RemoteAckOutcome::Ack,
-            });
+            runtime_task.handle_remote_ack_resolution(resolved.resolution(RemoteAckOutcome::Ack));
         });
 
         assert_eq!(
@@ -1507,7 +1567,12 @@ mod tests {
             Some(AckOutcome::Ack)
         );
         assert!(
-            runtime.inner.remote_dispatch.pending_acks.get(&7).is_none(),
+            runtime
+                .inner
+                .remote_dispatch
+                .pending_acks
+                .get(&registration.ack_id)
+                .is_none(),
             "terminal ack must clear the pending remote ack"
         );
         drop(shutdown_tx);
@@ -1515,26 +1580,16 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn remote_relay_admission_alive_resets_dispatch_timeout() {
-        let runtime = Runtime::default();
-        let (admission_tx, admission_rx) = watch::channel(RelayAdmissionUpdate::Pending);
-        runtime
-            .inner
-            .remote_dispatch
-            .pending_relay_admissions
-            .insert(9, admission_tx);
+        let (runtime, dispatcher) = joined_runtime().await;
+        let (registration, admission_rx) = dispatcher.register_pending_relay_admission();
         let runtime_task = runtime.clone();
+        let resolved = registration.clone();
 
         nervix_primitives::task::spawn(async move {
             sleep(Duration::from_millis(100)).await;
-            runtime_task.handle_remote_ack_resolution(RemoteAckResolution {
-                ack_id: 9,
-                outcome: RemoteAckOutcome::Alive,
-            });
+            runtime_task.handle_remote_ack_resolution(resolved.resolution(RemoteAckOutcome::Alive));
             sleep(Duration::from_millis(150)).await;
-            runtime_task.handle_remote_ack_resolution(RemoteAckResolution {
-                ack_id: 9,
-                outcome: RemoteAckOutcome::Ack,
-            });
+            runtime_task.handle_remote_ack_resolution(resolved.resolution(RemoteAckOutcome::Ack));
         });
 
         RemoteDispatcher::await_relay_admission(
@@ -1549,9 +1604,139 @@ mod tests {
                 .inner
                 .remote_dispatch
                 .pending_relay_admissions
-                .get(&9)
+                .get(&registration.ack_id)
                 .is_none(),
             "terminal admission ack must clear pending admission state"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_resolution_addressed_to_an_earlier_run_leaves_the_pending_ack_unresolved() {
+        let (runtime, dispatcher) = joined_runtime().await;
+        let (acks, completion) = AckSet::root();
+        let registration = dispatcher.register_pending_ack(acks);
+        let completion = completion.wait();
+        tokio::pin!(completion);
+
+        let earlier = from_an_earlier_run(&registration);
+        runtime.handle_remote_ack_resolution(earlier.resolution(RemoteAckOutcome::Alive));
+        runtime.handle_remote_ack_resolution(earlier.resolution(RemoteAckOutcome::Ack));
+
+        assert!(
+            (&mut completion).now_or_never().is_none(),
+            "an acknowledgement addressed to an earlier run must not complete this run's record"
+        );
+        assert!(
+            runtime
+                .inner
+                .remote_dispatch
+                .pending_acks
+                .contains_key(&registration.ack_id),
+            "this run's registration stays pending for its own resolution"
+        );
+
+        runtime.handle_remote_ack_resolution(registration.resolution(RemoteAckOutcome::Ack));
+        assert_eq!(
+            timeout(ASYNC_EVENT_FAILSAFE, completion)
+                .await
+                .expect("this run's own resolution completes the record"),
+            AckOutcome::Ack
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_resolution_addressed_to_an_earlier_run_leaves_the_relay_admission_pending() {
+        let (runtime, dispatcher) = joined_runtime().await;
+        let (registration, mut admission_rx) = dispatcher.register_pending_relay_admission();
+
+        let earlier = from_an_earlier_run(&registration);
+        runtime.handle_remote_ack_resolution(earlier.resolution(RemoteAckOutcome::Alive));
+        runtime.handle_remote_ack_resolution(earlier.resolution(RemoteAckOutcome::Ack));
+
+        assert!(
+            !admission_rx
+                .has_changed()
+                .expect("the pending admission keeps its sender"),
+            "an admission outcome addressed to an earlier run must not reach this run's admission"
+        );
+
+        runtime.handle_remote_ack_resolution(
+            registration.resolution(RemoteAckOutcome::NoAck("branch is draining".to_string())),
+        );
+        admission_rx
+            .changed()
+            .await
+            .expect("this run's own admission outcome remains observable");
+        assert!(matches!(
+            &*admission_rx.borrow_and_update(),
+            RelayAdmissionUpdate::Rejected(reason) if reason == "branch is draining"
+        ));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_cleared_registration_ignores_a_late_resolution() {
+        let (runtime, dispatcher) = joined_runtime().await;
+        let (acks, completion) = AckSet::root();
+        let acknowledgement = dispatcher.register_pending_ack(acks.clone());
+        let (admission, admission_rx) = dispatcher.register_pending_relay_admission();
+
+        dispatcher.clear_pending_ack(&acknowledgement);
+        dispatcher.clear_pending_relay_admission(&admission);
+        runtime.handle_remote_ack_resolution(acknowledgement.resolution(RemoteAckOutcome::Alive));
+        runtime.handle_remote_ack_resolution(acknowledgement.resolution(RemoteAckOutcome::Ack));
+        runtime.handle_remote_ack_resolution(admission.resolution(RemoteAckOutcome::Ack));
+
+        let completion = completion.wait();
+        tokio::pin!(completion);
+        assert!(
+            (&mut completion).now_or_never().is_none(),
+            "the dispatch that cleared the registration resolves the record, not a late outcome"
+        );
+        assert!(
+            admission_rx.has_changed().is_err(),
+            "clearing the admission ends its updates"
+        );
+        drop(acks);
+    }
+
+    #[nervix_primitives::test]
+    async fn progress_for_an_abandoned_admission_retires_its_registration() {
+        let (runtime, dispatcher) = joined_runtime().await;
+        let (admission, admission_rx) = dispatcher.register_pending_relay_admission();
+        drop(admission_rx);
+
+        runtime.handle_remote_ack_resolution(admission.resolution(RemoteAckOutcome::Alive));
+
+        assert!(
+            !runtime
+                .inner
+                .remote_dispatch
+                .pending_relay_admissions
+                .contains_key(&admission.ack_id),
+            "an admission nobody waits for is retired by its next progress report"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_node_outside_a_cluster_resolves_nothing() {
+        let runtime = Runtime::default();
+        let (acks, completion) = AckSet::root();
+        runtime.inner.remote_dispatch.pending_acks.insert(1, acks);
+        let completion = completion.wait();
+        tokio::pin!(completion);
+        let registration = RemoteAckRegistration {
+            ack_id: 1,
+            registrar: ClusterNodeIdentity::new(
+                ClusterNodeName::parse("node-1").expect("the fixture node name is valid"),
+                ClusterNodeIncarnation::new(1),
+            ),
+        };
+
+        runtime.handle_remote_ack_resolution(registration.resolution(RemoteAckOutcome::Ack));
+
+        assert!(
+            (&mut completion).now_or_never().is_none(),
+            "a node that has not joined a cluster has handed out no registration to resolve"
         );
     }
 
@@ -1619,19 +1804,11 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn remote_relay_admission_progress_is_coalesced() {
-        let runtime = Runtime::default();
-        let (admission_tx, mut admission_rx) = watch::channel(RelayAdmissionUpdate::Pending);
-        runtime
-            .inner
-            .remote_dispatch
-            .pending_relay_admissions
-            .insert(10, admission_tx);
+        let (runtime, dispatcher) = joined_runtime().await;
+        let (registration, mut admission_rx) = dispatcher.register_pending_relay_admission();
 
         for _ in 0..100 {
-            runtime.handle_remote_ack_resolution(RemoteAckResolution {
-                ack_id: 10,
-                outcome: RemoteAckOutcome::Alive,
-            });
+            runtime.handle_remote_ack_resolution(registration.resolution(RemoteAckOutcome::Alive));
         }
         assert!(
             admission_rx
@@ -1649,10 +1826,7 @@ mod tests {
             "replaceable progress must occupy one pending update"
         );
 
-        runtime.handle_remote_ack_resolution(RemoteAckResolution {
-            ack_id: 10,
-            outcome: RemoteAckOutcome::Ack,
-        });
+        runtime.handle_remote_ack_resolution(registration.resolution(RemoteAckOutcome::Ack));
         admission_rx
             .changed()
             .await

@@ -3,8 +3,9 @@
 //! Layer: data plane.
 //! - **Owns.** The emitter's buffer of released batches with their source relay and branch, the
 //!   request an HTTP emitter admitted each row with and what a later rejection of the row reads,
-//!   message and byte accounting, where every row stands in its publication, the batch payloads,
-//!   HTTP requests and prepared row requests retained for the rows they carry, and flush cadence.
+//!   message and byte accounting, where every row stands in its publication and which rows its sink
+//!   delivered, what a flush reports as sent, the batch payloads, HTTP requests and prepared row
+//!   requests retained for the rows they carry, and flush cadence.
 //! - **Depends on.** Relay batches and their acknowledgements, the emitter's flush policy, and the
 //!   domain clock its cadence is resolved against.
 //! - **Must not know.** Which connector publishes the batches, how their rows are encoded or
@@ -86,8 +87,23 @@ enum BufferedRow {
     /// A batch payload, HTTP request or prepared row request the emitter retains carries the row,
     /// so only the sink's answer for it resolves the row.
     Prepared,
-    /// The row was delivered, or rejected once its message error was delivered.
-    Resolved,
+    /// The sink delivered the row, which the emitter's sent counters count once.
+    Delivered,
+    /// A sink that publishes on its own commit accepted the row and took its acknowledgements, so
+    /// that commit, not this buffer, counts it as sent.
+    Staged,
+    /// The row was rejected once its message error was delivered.
+    Rejected,
+}
+
+impl BufferedRow {
+    /// Whether the row is resolved, so no attempt carries it again.
+    fn is_resolved(self) -> bool {
+        match self {
+            Self::Pending | Self::Prepared => false,
+            Self::Delivered | Self::Staged | Self::Rejected => true,
+        }
+    }
 }
 
 /// The bound every byte estimate in this module relies on: each term counts bytes of a batch,
@@ -95,6 +111,12 @@ enum BufferedRow {
 /// address space those values occupy.
 const BYTES_IN_MEMORY: &str =
     "every term counts bytes of a value this node already holds in memory";
+
+/// The guarantee measuring the delivered rows of a batch relies on: they are read from the batch's
+/// own row states, which it holds one for each of its rows, so they are distinct rows of it in row
+/// order, and a batch of some of its rows rebuilds from its own columns under its own schema.
+const DELIVERED_ROWS: &str =
+    "delivered rows are distinct rows of their batch, read from its states one per row";
 
 impl EmitterPublishBatch {
     pub(super) fn from_input(
@@ -245,18 +267,14 @@ impl EmitterPublishBatch {
     }
 
     fn estimated_bytes(&self) -> u64 {
-        let header_bytes = self
-            .headers
-            .iter()
-            .flatten()
-            .flatten()
-            .map(|(name, value)| {
-                let name_len: u64 = name.len().arch_into();
-                let value_len: u64 = value.len().arch_into();
-                name_len.checked_add(value_len).assured(BYTES_IN_MEMORY)
-            })
-            .try_fold(0_u64, u64::checked_add)
-            .assured(BYTES_IN_MEMORY);
+        let mut header_bytes = 0_u64;
+        if let Some(headers) = &self.headers {
+            for row_headers in headers {
+                header_bytes = header_bytes
+                    .checked_add(Self::header_bytes(row_headers))
+                    .assured(BYTES_IN_MEMORY);
+            }
+        }
         let group_bytes = match &self.ordering_groups {
             Some(groups) => groups.estimated_bytes(),
             None => 0,
@@ -272,6 +290,86 @@ impl EmitterPublishBatch {
             .checked_add(group_bytes)
             .assured(BYTES_IN_MEMORY)
             .checked_add(request_bytes)
+            .assured(BYTES_IN_MEMORY)
+    }
+
+    /// The name and value bytes of `headers`, which one row is published with.
+    fn header_bytes(headers: &EmitterHeaders) -> u64 {
+        let mut bytes = 0_u64;
+        for (name, value) in headers {
+            let name_len: u64 = name.len().arch_into();
+            let value_len: u64 = value.len().arch_into();
+            bytes = bytes
+                .checked_add(name_len)
+                .assured(BYTES_IN_MEMORY)
+                .checked_add(value_len)
+                .assured(BYTES_IN_MEMORY);
+        }
+        bytes
+    }
+
+    /// The rows of this batch its sink delivered, in row order.
+    fn delivered_rows(&self) -> Vec<usize> {
+        let mut delivered = Vec::with_capacity(self.rows.len());
+        for (row, state) in self.rows.iter().enumerate() {
+            if *state == BufferedRow::Delivered {
+                delivered.push(row);
+            }
+        }
+        delivered
+    }
+
+    /// What this batch adds to its emitter's sent counters: every row its sink delivered, counted
+    /// once however many attempts it took, and the payload bytes those rows carry. A row the sink
+    /// rejected is not sent, and a row a sink staged is counted by its commit, so a batch the sink
+    /// delivered none of reports nothing.
+    pub(super) fn delivered_report(&self) -> Option<PublishReport> {
+        let delivered = self.delivered_rows();
+        if delivered.is_empty() {
+            return None;
+        }
+        let messages: u64 = delivered.len().arch_into();
+        let bytes = self.delivered_payload_bytes(&delivered);
+        let domain_timestamp = self.domain_timestamp().unwrap_or(self.execution_now);
+        Some(PublishReport::flushed(messages, bytes, domain_timestamp))
+    }
+
+    /// The payload bytes `delivered`, rows of this batch in row order, carry: the Arrow data of
+    /// their records with the headers and ordering groups they were published with, which is how
+    /// the buffer measures the whole batch.
+    ///
+    /// An HTTP request's method, target and headers are request metadata rather than payload, so
+    /// only the record a codec body encodes counts, and a request without a body carries none.
+    fn delivered_payload_bytes(&self, delivered: &[usize]) -> u64 {
+        if let Some(requests) = &self.http_requests {
+            return requests
+                .body_bytes(&self.batch, delivered)
+                .assured(DELIVERED_ROWS);
+        }
+        if delivered.len() == self.rows.len() {
+            return self.estimated_bytes();
+        }
+        let mut header_bytes = 0_u64;
+        if let Some(headers) = &self.headers {
+            for row in delivered {
+                let row_headers = headers
+                    .get(*row)
+                    .verified("the batch was built with one set of headers for each of its rows");
+                header_bytes = header_bytes
+                    .checked_add(Self::header_bytes(row_headers))
+                    .assured(BYTES_IN_MEMORY);
+            }
+        }
+        let group_bytes = match &self.ordering_groups {
+            Some(groups) => groups.estimated_bytes_of_rows(delivered),
+            None => 0,
+        };
+        self.batch
+            .payload_bytes_of_rows(delivered)
+            .assured(DELIVERED_ROWS)
+            .checked_add(header_bytes)
+            .assured(BYTES_IN_MEMORY)
+            .checked_add(group_bytes)
             .assured(BYTES_IN_MEMORY)
     }
 
@@ -303,10 +401,7 @@ impl EmitterPublishBatch {
 
     /// Whether each row is resolved, so a failure that takes the batch back routes only the rest.
     pub(super) fn resolved_rows(&self) -> Vec<bool> {
-        self.rows
-            .iter()
-            .map(|row| *row == BufferedRow::Resolved)
-            .collect()
+        self.rows.iter().map(|row| row.is_resolved()).collect()
     }
 
     pub(super) fn message_count(&self) -> u64 {
@@ -332,7 +427,7 @@ impl EmitterPublishBatch {
         let state = self.rows.get_mut(row).ok_or_else(|| {
             Report::new(EmitterRuntimeError::DeliveryRowOutOfBounds { row, row_count })
         })?;
-        if *state == BufferedRow::Resolved {
+        if state.is_resolved() {
             return Ok(());
         }
         let ack_rows = self.batch.acks.len();
@@ -342,20 +437,28 @@ impl EmitterPublishBatch {
                 row_count: ack_rows,
             })
         })?;
-        match acknowledgements {
-            DeliveredAcknowledgements::Host => acks.ack_success(),
-            DeliveredAcknowledgements::Sink => {}
-        }
-        *state = BufferedRow::Resolved;
+        let resolved = match acknowledgements {
+            DeliveredAcknowledgements::Host => {
+                acks.ack_success();
+                BufferedRow::Delivered
+            }
+            DeliveredAcknowledgements::Sink => BufferedRow::Staged,
+        };
+        *state = resolved;
         Ok(())
     }
 
+    /// Resolves `row` as rejected. A row resolves once, so rejecting a row already resolved
+    /// changes nothing, and a delivered row stays delivered.
     fn mark_rejected(&mut self, row: usize) -> EmitterRuntimeResult<()> {
         let row_count = self.rows.len();
         let state = self.rows.get_mut(row).ok_or_else(|| {
             Report::new(EmitterRuntimeError::RejectionRowOutOfBounds { row, row_count })
         })?;
-        *state = BufferedRow::Resolved;
+        if state.is_resolved() {
+            return Ok(());
+        }
+        *state = BufferedRow::Rejected;
         Ok(())
     }
 
@@ -406,7 +509,7 @@ impl EmitterPublishBatch {
             match state {
                 BufferedRow::Pending => rows.push(RowToPack::Pending(row)),
                 BufferedRow::Prepared => rows.push(RowToPack::Retained),
-                BufferedRow::Resolved => {}
+                BufferedRow::Delivered | BufferedRow::Staged | BufferedRow::Rejected => {}
             }
         }
         rows
@@ -727,22 +830,15 @@ impl EmitterBatchBuffer {
         self.update_buffered_messages();
     }
 
-    pub(super) fn report(&self) -> Option<PublishReport> {
-        if self.pending.is_empty() {
-            return None;
+    /// What a flush that just completed published: every row its sink delivered while this buffer
+    /// held it, over every attempt the flush took, each counted once, and the payload bytes they
+    /// carry. Absent when the sink delivered none of them.
+    pub(super) fn delivered_report(&self) -> Option<PublishReport> {
+        let mut report = None;
+        for batch in &self.pending {
+            report = PublishReport::merge_optional(report, batch.delivered_report());
         }
-        let bytes = self.pending_bytes;
-        let domain_timestamp = self
-            .pending
-            .iter()
-            .map(|batch| batch.domain_timestamp().unwrap_or(batch.execution_now))
-            .max()
-            .verified("a non-empty emitter buffer has an observation time for every batch");
-        Some(PublishReport::flushed(
-            self.pending_messages,
-            bytes,
-            domain_timestamp,
-        ))
+        report
     }
 }
 
@@ -804,7 +900,11 @@ mod tests {
             .mark_rejected_after_delivery(0, std::future::ready(()))
             .await
             .expect("completed message-error delivery must account for the record");
-        assert_eq!(batch.rows[0], BufferedRow::Resolved);
+        assert_eq!(batch.rows[0], BufferedRow::Rejected);
+        assert!(
+            batch.delivered_report().is_none(),
+            "a rejected record is never sent"
+        );
     }
 
     #[nervix_primitives::test]
@@ -896,24 +996,7 @@ mod tests {
 
     #[test]
     fn a_batch_counts_the_request_fields_of_its_rows() {
-        let origin = nervix_models::HttpOrigin::parse("https://api.example.com")
-            .expect("the test origin has an HTTPS scheme and a host");
-        let mut headers = nervix_models::HttpApplicationHeaders::default();
-        headers
-            .insert(
-                nervix_models::HttpHeaderName::parse("X-Key").expect("a valid field name"),
-                nervix_models::HttpHeaderValue::parse("abc").expect("a valid field value"),
-            )
-            .expect("one short header is within the envelope");
-        let fields = HttpRequestFields {
-            method: nervix_models::HttpMethod::parse(
-                "POST",
-                nervix_models::HttpBodyMode::WithoutBody,
-            )
-            .expect("POST is a valid method"),
-            target: origin.target("/events").expect("an origin-relative target"),
-            headers,
-        };
+        let fields = request_fields();
         let expected: u64 =
             ("POST".len() + "/events".len() + "x-key".len() + "abc".len()).arch_into();
         assert_eq!(fields.estimated_bytes(), expected);
@@ -935,6 +1018,136 @@ mod tests {
                 .target
                 .as_str(),
             "/events"
+        );
+    }
+
+    /// The request fields `POST /events` with one `X-Key` header, which a row is admitted with.
+    fn request_fields() -> HttpRequestFields {
+        let origin = nervix_models::HttpOrigin::parse("https://api.example.com")
+            .expect("the test origin has an HTTPS scheme and a host");
+        let mut headers = nervix_models::HttpApplicationHeaders::default();
+        headers
+            .insert(
+                nervix_models::HttpHeaderName::parse("X-Key").expect("a valid field name"),
+                nervix_models::HttpHeaderValue::parse("abc").expect("a valid field value"),
+            )
+            .expect("one short header is within the envelope");
+        HttpRequestFields {
+            method: nervix_models::HttpMethod::parse(
+                "POST",
+                nervix_models::HttpBodyMode::WithoutBody,
+            )
+            .expect("POST is a valid method"),
+            target: origin.target("/events").expect("an origin-relative target"),
+            headers,
+        }
+    }
+
+    #[test]
+    fn a_delivered_http_request_counts_its_codec_record_and_never_its_request_fields() {
+        let published = batch_of(&[1, 2]);
+        let without_body =
+            EmitterPublishBatch::from_batch(published.clone(), Timestamp::from_unix_nanos(100))
+                .with_http_requests(AdmittedHttpRequests::published(vec![
+                    request_fields(),
+                    request_fields(),
+                ]))
+                .expect("one request for each row");
+        let with_body =
+            EmitterPublishBatch::from_batch(published.clone(), Timestamp::from_unix_nanos(100))
+                .with_http_requests(AdmittedHttpRequests::encoded(
+                    vec![request_fields(), request_fields()],
+                    &published,
+                    vec![0, 1],
+                ))
+                .expect("one request for each row");
+
+        for mut batch in [without_body.clone(), with_body.clone()] {
+            batch
+                .mark_delivered(0, DeliveredAcknowledgements::Host)
+                .expect("the first request can be delivered");
+            batch
+                .mark_rejected(1)
+                .expect("the second request can be refused");
+            let report = batch.delivered_report().expect("one request was delivered");
+            assert_eq!(report.messages, 1);
+        }
+
+        let mut bodyless = without_body;
+        let mut encoded = with_body;
+        for row in 0..2 {
+            bodyless
+                .mark_delivered(row, DeliveredAcknowledgements::Host)
+                .expect("every request can be delivered");
+            encoded
+                .mark_delivered(row, DeliveredAcknowledgements::Host)
+                .expect("every request can be delivered");
+        }
+        let bodyless = bodyless
+            .delivered_report()
+            .expect("both requests were delivered");
+        assert_eq!(bodyless.messages, 2);
+        assert_eq!(bodyless.bytes, 0, "a request without a body carries none");
+        let encoded = encoded
+            .delivered_report()
+            .expect("both requests were delivered");
+        assert_eq!(encoded.messages, 2);
+        assert_eq!(
+            encoded.bytes,
+            published.estimated_bytes(),
+            "the method, target and header bytes are request metadata, not payload"
+        );
+
+        let mut partly =
+            EmitterPublishBatch::from_batch(published.clone(), Timestamp::from_unix_nanos(100))
+                .with_http_requests(AdmittedHttpRequests::encoded(
+                    vec![request_fields(), request_fields()],
+                    &published,
+                    vec![0, 1],
+                ))
+                .expect("one request for each row");
+        partly
+            .mark_rejected(0)
+            .expect("the first request can be refused");
+        partly
+            .mark_delivered(1, DeliveredAcknowledgements::Host)
+            .expect("the second request can be delivered");
+        let partly = partly
+            .delivered_report()
+            .expect("one request was delivered");
+        assert_eq!(partly.bytes, batch_of(&[2]).estimated_bytes());
+    }
+
+    #[test]
+    fn a_delivered_row_counts_only_its_own_ordering_group() {
+        let mut batch =
+            EmitterPublishBatch::from_batch(batch_of(&[1, 2, 3]), Timestamp::from_unix_nanos(100))
+                .with_ordering_groups(OrderingGroups::Evaluated(
+                    EvaluatedOrderingGroups::from_rows([
+                        Ok("tenant-a"),
+                        Ok("tenant-bb"),
+                        Err(OrderingGroupError::Null),
+                    ]),
+                ))
+                .expect("one group for each row must attach");
+        batch
+            .mark_delivered(0, DeliveredAcknowledgements::Host)
+            .expect("the first row can be delivered");
+        batch
+            .mark_rejected(1)
+            .expect("the second row can be rejected");
+        batch
+            .mark_delivered(2, DeliveredAcknowledgements::Host)
+            .expect("the third row can be delivered");
+
+        let report = batch.delivered_report().expect("two rows were delivered");
+
+        let group_bytes: u64 = "tenant-a".len().arch_into();
+        assert_eq!(report.messages, 2);
+        assert_eq!(
+            report.bytes,
+            batch_of(&[1, 3]).estimated_bytes() + group_bytes,
+            "a row without a group adds none, and a refused row's group is not sent"
         );
     }
 
@@ -1242,13 +1455,95 @@ mod tests {
         );
         assert_eq!(reported_messages.load(Ordering::Acquire), 3);
         assert_eq!(buffer.pending_messages, 3);
+        assert!(
+            buffer.delivered_report().is_none(),
+            "nothing is sent before the sink delivers it"
+        );
+        for batch in &mut buffer.pending {
+            for row in 0..batch.rows.len() {
+                batch
+                    .mark_delivered(row, DeliveredAcknowledgements::Host)
+                    .expect("every buffered row can be delivered");
+            }
+        }
         let report = buffer
-            .report()
-            .expect("pending batches must produce a report");
+            .delivered_report()
+            .expect("delivered batches must produce a report");
         assert_eq!(report.messages, 3);
         assert_eq!(report.bytes, expected_bytes);
         assert_eq!(report.domain_timestamp, Timestamp::from_unix_nanos(20));
         assert_eq!(buffer.pending_bytes, expected_bytes);
+    }
+
+    /// A batch of `values` whose every record has one acknowledgement-free message.
+    fn batch_of(values: &[i64]) -> RelayRecordBatch {
+        let mut messages = Vec::with_capacity(values.len());
+        for value in values {
+            messages.push(RelayMessage {
+                key: None,
+                record: test_runtime_row([("value".to_string(), RuntimeValue::I64(*value))])
+                    .with_ingested_at_watermarks(Timestamp::from_unix_nanos(30)),
+                acks: AckSet::empty(),
+            });
+        }
+        RelayRecordBatch::from_messages(input_schema(), messages)
+            .expect("the test records match the emitter input schema")
+    }
+
+    #[test]
+    fn a_flush_reports_each_delivered_row_once_and_no_rejected_row() {
+        let headers = vec![
+            vec![("a".to_string(), "1".to_string())],
+            vec![("b".to_string(), "22".to_string())],
+            vec![("c".to_string(), "333".to_string())],
+        ];
+        let mut mixed = EmitterPublishBatch::new(
+            named("test_relay"),
+            batch_of(&[1, 2, 3]),
+            Some(headers),
+            Timestamp::from_unix_nanos(100),
+        )
+        .expect("headers must align");
+        mixed
+            .mark_delivered(0, DeliveredAcknowledgements::Host)
+            .expect("the first row can be delivered");
+        mixed
+            .mark_rejected(1)
+            .expect("the second row can be rejected");
+        mixed
+            .mark_delivered(2, DeliveredAcknowledgements::Host)
+            .expect("the third row can be delivered");
+        mixed
+            .mark_rejected(2)
+            .expect("rejecting a delivered row changes nothing");
+        let mut refused =
+            EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100));
+        refused
+            .mark_rejected(0)
+            .expect("the only row can be rejected");
+        assert!(
+            refused.delivered_report().is_none(),
+            "a batch whose every row was refused sends nothing"
+        );
+        let mut buffer = EmitterBatchBuffer::default();
+        buffer.set_flush_policy(RuntimeFlushPolicy::Immediate);
+        buffer
+            .retain_without_cadence(mixed)
+            .expect("the configured buffer retains the batch");
+        buffer
+            .retain_without_cadence(refused)
+            .expect("the configured buffer retains the batch");
+
+        let report = buffer.delivered_report().expect("two rows were delivered");
+
+        // The delivered rows carry their own records and headers, and nothing of the refused ones.
+        let header_bytes: u64 = "a1c333".len().arch_into();
+        assert_eq!(report.messages, 2);
+        assert_eq!(
+            report.bytes,
+            batch_of(&[1, 3]).estimated_bytes() + header_bytes
+        );
+        assert_eq!(report.domain_timestamp, Timestamp::from_unix_nanos(30));
     }
 
     #[test]
@@ -1357,6 +1652,10 @@ mod tests {
             .expect("a published row must be marked delivered");
 
         assert!(batch.pending_record_rows().is_empty());
+        assert_eq!(batch.resolved_rows(), vec![true, true]);
+        // The sink's commit counts the staged row as sent, so the batch counts only the other.
+        let report = batch.delivered_report().expect("the published row is sent");
+        assert_eq!(report.messages, 1);
         assert_eq!(second_completion.wait().await, AckOutcome::Ack);
         // The staged row is the sink's until its commit resolves it, so the host left it alone.
         retained.ack_alive();
@@ -1429,7 +1728,7 @@ mod tests {
             .expect("reconfigured buffer must accept input");
         assert_eq!(buffer.pending_messages, 1);
         buffer.clear();
-        assert!(buffer.report().is_none());
+        assert!(buffer.delivered_report().is_none());
         assert_eq!(buffer.pending_messages, 0);
         assert_eq!(reported_messages.load(Ordering::Acquire), 0);
 

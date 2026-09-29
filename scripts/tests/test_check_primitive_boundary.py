@@ -271,6 +271,126 @@ class BoundaryTests(CheckTestCase):
         )
 
 
+class StaticTests(CheckTestCase):
+    def test_a_static_selected_atomic_fails(self) -> None:
+        self.assert_rejected(
+            "use nervix_primitives::sync::atomic::{AtomicU64, Ordering};\n"
+            "static NEXT: AtomicU64 = AtomicU64::new(1);\n",
+            "crates/engine/src/lib.rs:2",
+            "static `NEXT` holds a selected atomic, which outlives every model execution",
+            "nervix_primitives::unmodeled::sync::atomic",
+        )
+
+    def test_a_static_behind_a_wrapper_or_an_array_fails(self) -> None:
+        self.assert_rejected(
+            "use std::sync::LazyLock;\n"
+            "use nervix_primitives::sync::atomic::AtomicUsize;\n"
+            "static COUNTS: LazyLock<[AtomicUsize; 4]> = LazyLock::new(Default::default);\n",
+            "static `COUNTS` holds a selected atomic",
+        )
+
+    def test_a_static_named_through_a_module_path_fails(self) -> None:
+        report = self.assert_rejected(
+            "use nervix_primitives::sync::atomic as atomics;\n"
+            "static FLAG: atomics::AtomicBool = atomics::AtomicBool::new(false);\n"
+            "static SEEN: &nervix_primitives::sync::atomic::AtomicU8 = &LATEST;\n",
+            "static `FLAG` holds a selected atomic",
+            "static `SEEN` holds a selected atomic",
+        )
+        self.assertIn("crates/engine/src/lib.rs:3", report)
+
+    def test_a_renamed_or_aliased_selected_atomic_fails(self) -> None:
+        self.assert_rejected(
+            "use nervix_primitives::sync::atomic::{AtomicU32, AtomicU64 as Sequence};\n"
+            "type Counter = AtomicU32;\n"
+            "type Counters = [Counter; 2];\n"
+            "static NEXT: Sequence = Sequence::new(0);\n"
+            "static COUNTS: Counters = [Counter::new(0), Counter::new(0)];\n",
+            "static `NEXT` holds a selected atomic",
+            "static `COUNTS` holds a selected atomic",
+        )
+
+    def test_a_bare_name_the_file_does_not_import_counts_as_selected(self) -> None:
+        self.assert_rejected(
+            "use super::*;\nstatic mut NEXT: AtomicI16 = AtomicI16::new(0);\n",
+            "static `NEXT` holds a selected atomic",
+        )
+
+    def test_a_thread_local_selected_atomic_fails(self) -> None:
+        self.assert_rejected(
+            "use nervix_primitives::sync::atomic::AtomicIsize;\n"
+            "nervix_primitives::thread_local! {\n"
+            "    static SEEN: AtomicIsize = const { AtomicIsize::new(0) };\n"
+            "}\n",
+            "crates/engine/src/lib.rs:3",
+            "static `SEEN` holds a selected atomic",
+        )
+
+    def test_a_static_initializer_that_constructs_a_selected_atomic_fails(self) -> None:
+        self.assert_rejected(
+            "use nervix_primitives::sync::atomic::AtomicBool;\n"
+            "struct Gate { open: AtomicBool }\n"
+            "static GATE: Gate = Gate { open: AtomicBool::new(false) };\n",
+            "static `GATE` constructs a selected atomic",
+        )
+
+    def test_a_const_fn_that_constructs_a_selected_atomic_fails(self) -> None:
+        self.assert_rejected(
+            "use nervix_primitives::sync::atomic::AtomicI64;\n"
+            "struct Watermark { unix_nanos: AtomicI64 }\n"
+            "impl Watermark {\n"
+            "    const fn new() -> Self {\n"
+            "        Self { unix_nanos: AtomicI64::new(i64::MIN) }\n"
+            "    }\n"
+            "}\n",
+            "crates/engine/src/lib.rs:4",
+            "const fn `new` constructs a selected atomic",
+            "make the function non-const",
+        )
+
+    def test_a_const_selected_atomic_fails(self) -> None:
+        self.assert_rejected(
+            "use nervix_primitives::sync::atomic::AtomicPtr;\n"
+            "const EMPTY: AtomicPtr<u8> = AtomicPtr::<u8>::new(std::ptr::null_mut());\n"
+            "fn f() { let _ = const { nervix_primitives::sync::atomic::AtomicU8::new(0) }; }\n",
+            "const `EMPTY` makes a selected atomic in a const context",
+            "a const block constructs a selected atomic",
+        )
+
+    def test_a_static_real_atomic_passes(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/runner.rs": RUNNER
+                + "static RUNS: AtomicUsize = AtomicUsize::new(0);\n"
+                + "static LAST: nervix_primitives::unmodeled::sync::atomic::AtomicUsize =\n"
+                + "    nervix_primitives::unmodeled::sync::atomic::AtomicUsize::new(0);\n"
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_statics_and_const_items_without_a_selected_atomic_pass(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": (
+                    "use std::cell::Cell;\n"
+                    "use nervix_primitives::sync::atomic::{AtomicU64, Ordering};\n"
+                    "static NAME: &'static str = \"AtomicU64::new\";\n"
+                    "nervix_primitives::thread_local! {\n"
+                    "    static SEEN: Cell<usize> = const { Cell::new(0) };\n"
+                    "}\n"
+                    "struct Ring<const N: usize> { slots: [u64; N] }\n"
+                    "struct Counter { value: AtomicU64 }\n"
+                    "impl Counter {\n"
+                    "    fn new() -> Self { Self { value: AtomicU64::new(0) } }\n"
+                    "    const fn width() -> usize { 8 }\n"
+                    "    fn read(counter: &'static AtomicU64) -> u64 { counter.load(Ordering::Relaxed) }\n"
+                    "}\n"
+                )
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+
 class PermissionTests(CheckTestCase):
     def test_a_permitted_unmodeled_use_passes(self) -> None:
         status, report = self.check({})

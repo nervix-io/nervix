@@ -48,33 +48,13 @@ impl LinearHistogram {
         }
     }
 
-    /// The bucket a finite `value` falls in. Values at or beyond either end of the range fall in
-    /// the bucket at that end.
-    fn bucket(&self, value: f64) -> usize {
-        let last = self
-            .buckets
-            .len()
-            .checked_sub(1)
-            .verified("the histogram config requires at least one bucket");
-        if value <= self.min {
-            return 0;
-        }
-        if value >= self.max {
-            return last;
-        }
-        let bucket: usize = ((value - self.min) / self.width)
-            .floor()
-            .checked_approx_into()
-            .verified("a finite value inside the range divides into a non-negative bucket index");
-        bucket.min(last)
-    }
-
     pub(super) fn admit(&mut self, column: &ArgumentColumn, rows: Range<usize>) {
-        for row in rows {
-            let Some(value) = column.number_at(row) else {
-                continue;
-            };
-            let bucket = self.bucket(value);
+        for bucket in column
+            .number_run(rows)
+            .bucket_indices(self.min, self.max, self.width, self.buckets.len())
+            .into_iter()
+            .flatten()
+        {
             self.count_into(bucket);
         }
     }
@@ -115,11 +95,12 @@ impl LinearHistogram {
         rows: Range<usize>,
         removed_at: Timestamp,
     ) {
-        for row in rows {
-            let Some(value) = column.number_at(row) else {
-                continue;
-            };
-            let bucket = self.bucket(value);
+        for bucket in column
+            .number_run(rows)
+            .bucket_indices(self.min, self.max, self.width, self.buckets.len())
+            .into_iter()
+            .flatten()
+        {
             if self.delay.is_zero() {
                 self.uncount_from(bucket);
             } else {

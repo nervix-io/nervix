@@ -163,8 +163,9 @@ connector arrivals.
 Node names are fixed per host. Each transport's process epoch and relay grant identifiers come from
 a seeded source, `SimulatedEntropy`, whose stream is named after the host. One seed therefore
 allocates the same identities on every host in every process, while two hosts sharing the seed draw
-different values. Fixtures choose their own delivery identities and acknowledgement identifiers,
-such as the channel incarnation and ACK identifier of each relay case, so a trace can name them.
+different values. Fixtures choose their own delivery identities and acknowledgement registrations,
+such as the channel incarnation and ACK identifier of each relay case and the run of the node that
+registers it, so a trace can name them.
 
 Certificates are generated for every run with fixed validity windows: 2027-01-01 to 2028-01-01 for
 the transport fixtures, and windows placed relative to the epoch for the certificate-clock checks.

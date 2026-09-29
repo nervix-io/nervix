@@ -84,6 +84,20 @@ select_pause_target() {
         >"${output_dir}/role.json"
 }
 
+confirm_pause_target_before_fault() {
+    local role="$1"
+    local selected_node="$2"
+    local selected_kind="$3"
+    local output_dir="$4"
+    if ! wait_for 'settled public role immediately before pause' 30 \
+        select_pause_target "${role}" "${output_dir}"; then
+        pause_fail injection 'settled public role was unavailable before pause'
+        return 1
+    fi
+    [[ "${target_node}" == "${selected_node}" && "${target_kind}" == "${selected_kind}" ]] \
+        || pause_fail injection 'observed leader or execution owner moved before pause'
+}
+
 peer_status_during_pause() {
     local peer="$1"
     local output="$2"
@@ -92,21 +106,6 @@ peer_status_during_pause() {
         nervix-cli --server "http://${peer}:47391" --password "${CHAOS_PASSWORD}" \
         --command 'SHOW CLUSTER STATUS;' >"${output}" 2>&1 || status=$?
     printf '%s\n' "${status}" >"${output}.exit-code"
-}
-
-pause_node_events_expected() {
-    local target_id="$1"
-    local output="$2"
-    local since="$3"
-    run_bounded 20 docker events \
-        --since "${since}" --until "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" \
-        --filter "label=io.nervix.chaos.run=${run_id}" \
-        --filter label=io.nervix.chaos.role=node \
-        --format '{{json .}}' >"${output}"
-    jq -s -e --arg target_id "${target_id}" '
-        all(.[] | select(.Action == "pause" or .Action == "unpause"); .Actor.ID == $target_id) and
-        ([.[] | select(.Action == "die" or .Action == "kill" or .Action == "stop" or .Action == "start")] | length == 0)
-    ' "${output}" >/dev/null
 }
 
 pause_one_node() {
@@ -166,10 +165,8 @@ pause_one_node() {
         && grep -Fq "name=/${container_name}" "${round_dir}/pumba-dry-run.txt" \
         || pause_fail injection 'Pumba dry run did not select exactly the observed node'
 
-    select_pause_target "${role}" "${round_dir}/immediately-before" \
-        || pause_fail injection 'public role was unavailable immediately before pause'
-    [[ "${target_node}" == "${selected_node}" && "${target_kind}" == "${selected_kind}" ]] \
-        || pause_fail injection 'observed leader or execution owner moved before pause'
+    confirm_pause_target_before_fault "${role}" "${selected_node}" "${selected_kind}" \
+        "${round_dir}/immediately-before"
     inspect_target "${container_id}" "${round_dir}/before.json"
     "${script_dir}/verify-pause-evidence.sh" before "${run_id}" "${project_name}" \
         "${selected_host}" "${image_id}" "${round_dir}/selected.json" "${round_dir}/before.json"
@@ -186,8 +183,9 @@ pause_one_node() {
     [[ "${source_before}" =~ ^[0-9]+$ && "${output_before}" =~ ^[0-9]+$ ]] \
         || pause_fail setup 'broker offsets were unavailable before pause'
 
-    local fault_since requested_ms
+    local fault_since fault_since_ns requested_ms
     fault_since="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+    fault_since_ns="$(date -d "${fault_since}" +%s%N)"
     requested_ms="$(epoch_ms)"
     jq -n \
         --arg image "${pumba_image_id}" \
@@ -284,9 +282,9 @@ pause_one_node() {
     inspect_target "${container_id}" "${round_dir}/resumed.json"
     local resumed_since
     resumed_since="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
-    run_bounded 20 docker events --since "${fault_since}" \
-        --until "${resumed_since}" --filter "container=${container_id}" \
-        --format '{{json .}}' >"${round_dir}/pause-events.ndjson"
+    docker_event_window "${fault_since_ns}" "${round_dir}/pause-events.ndjson" \
+        --container "${container_id}" \
+        || pause_fail controller 'the live Docker event recording does not cover the pause'
     local min_ms max_ms
     if [[ "${duration}" -eq 1 ]]; then
         min_ms=800
@@ -367,7 +365,11 @@ pause_one_node() {
         >"${round_dir}/control-results.json"
     wait_for 'sink output advanced after resume' 90 \
         topic_progressed chaos_output "${output_at_resume}"
-    pause_node_events_expected "${container_id}" "${round_dir}/all-node-events.ndjson" "${fault_since}" \
+    docker_event_window "${fault_since_ns}" "${round_dir}/all-node-events.ndjson" --role node \
+        || pause_fail controller 'the live Docker event recording does not cover the pause through recovery'
+    "${script_dir}/verify-docker-events.sh" lifecycle \
+        --events "${round_dir}/all-node-events.ndjson" --target "${container_id}" \
+        --expect pause --expect unpause \
         || pause_fail product 'a Nervix process restarted or a different node was paused'
     other_node_instances_unchanged "${selected_host}" "${round_dir}/before-all-nodes.json" \
         || pause_fail product 'a non-target node changed process incarnation'
@@ -402,7 +404,7 @@ pause_one_node() {
         --argjson output_during "${output_during}" \
         --argjson output_at_resume "${output_at_resume}" \
         --argjson output_after "${output_after}" \
-        '{role:$role[0],target_host:$target_host,container_id:$target_id,requested_pause_seconds:$requested_seconds,actual_pause:$duration[0],recovered_leader:$recovered_leader,election_ms:$election_ms,placement_ms:$placement_ms,delivery_during_pause_ms:$delivery_ms,recovery_after_unpause_ms:$recovery_ms,source_offsets:{before:$source_before,during:$source_during,after:$source_after},output_offsets:{before:$output_before,during:$output_during,at_resume:$output_at_resume,after:$output_after},control:"control-results.json",observer:"observer.log",public_status:"recovered/status-nervix-1.attempt.txt",node_events:"all-node-events.ndjson"}' \
+        '{role:$role[0],target_host:$target_host,container_id:$target_id,requested_pause_seconds:$requested_seconds,actual_pause:$duration[0],recovered_leader:$recovered_leader,election_ms:$election_ms,placement_ms:$placement_ms,delivery_during_pause_ms:$delivery_ms,recovery_after_unpause_ms:$recovery_ms,source_offsets:{before:$source_before,during:$source_during,after:$source_after},output_offsets:{before:$output_before,during:$output_during,at_resume:$output_at_resume,after:$output_after},control:"control-results.json",observer:"observer.log",public_status:"recovered/status-nervix-1.attempt.txt",node_events:"all-node-events.ndjson",node_event_recording:"all-node-events.recording.json"}' \
         >"${round_dir}/result.json"
 }
 

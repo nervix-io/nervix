@@ -26,7 +26,10 @@ use nervix_interconnect::{
     RemoteOperationSubject, RequestError, RequestSubquota, TlsConfigBundle, Transport,
     TransportClock, TransportEntropy, TransportError, TransportIdentity, TransportOptions,
 };
-use nervix_models::{ClusterNodeName, DomainName, NodeEndpoint, RelayName, RemoteAckRegistration};
+use nervix_models::{
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainName, NodeEndpoint,
+    RelayName, RemoteAckRegistration,
+};
 use nervix_primitives::sync::{mpsc, watch};
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
@@ -183,6 +186,18 @@ impl InterconnectRequest for RemoteFailureProbe {
     const NAME: &'static str = "simulation_remote_failure_class";
     const CLASS: PoolClass = PoolClass::Management;
     const TIMEOUT: Duration = Duration::from_secs(10);
+}
+
+/// The admission `registrar` hands out under `ack_id`. Fixtures choose their acknowledgement
+/// identities, and every one names the first run of its registering node.
+fn fixture_registration(ack_id: u64, registrar: &Transport) -> RemoteAckRegistration {
+    RemoteAckRegistration {
+        ack_id,
+        registrar: ClusterNodeIdentity::new(
+            registrar.node_id().clone(),
+            ClusterNodeIncarnation::new(1),
+        ),
+    }
 }
 
 fn arrow_batch() -> Vec<u8> {
@@ -421,10 +436,7 @@ fn exchange_typed_arrow_batch(run: ScenarioRun) -> Result<(), SimulationError> {
                         batch_ipc,
                         metadata: Vec::new(),
                         acks: Vec::new(),
-                        admission: Some(RemoteAckRegistration {
-                            ack_id: 49,
-                            reply_node_id: client.node_id().clone(),
-                        }),
+                        admission: Some(fixture_registration(49, &client)),
                     };
                     client
                         .send(&server, Envelope::RelayPayload(relay))

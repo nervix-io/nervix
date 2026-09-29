@@ -122,6 +122,10 @@ Operationally that means:
 - a delivery that reaches a node after its attached consumer moved away fails its attached
   acknowledgements, so the source redelivers the record along the owner's current routes; see
   [Consumers That Leave The Receiver](interconnect.md#consumers-that-leave-the-receiver)
+- an acknowledgement a receiver returns after the sending node restarted names that node's earlier
+  run, so the restarted node rejects it and its own records stay pending until their own
+  acknowledgements resolve; see
+  [Acknowledgement Registrations](interconnect.md#acknowledgement-registrations)
 
 Lookup and state-replication control paths are separate from this relay payload model. The Arrow batch path applies to relay movement inside the data plane.
 

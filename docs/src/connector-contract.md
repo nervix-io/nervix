@@ -6,6 +6,9 @@ defines who owns the work after validation: the shared connector contract, each 
 transport, and the host that drives it. [Data Plane](./data-plane.md) describes what happens to
 the resulting Arrow batches inside the graph.
 
+[Execution Plans](./execution-plans.md) describes how one committed revision supplies those typed
+source and sink plans to the host.
+
 ## Ownership and dependency direction
 
 | Layer | Responsibility |
@@ -326,13 +329,17 @@ attempt's failure, can extend, but cannot shorten, the host's retry backoff; the
 advances as it would without it. The host ignores a delay whose end its monotonic clock cannot
 represent, so the backoff alone decides that wait. `finish` lets a transport empty a client-side
 queue within the remaining stop deadline; Kafka uses it. A sink may keep its client after a
-publish failure when reopening it would discard staged work or a persistent session.
+publish failure when reopening it would discard staged work or a persistent session, or, as the
+HTTP request sink does, when it holds nothing between attempts and reopening it would clear the
+transient failure its pending work is still waiting out.
 
 The task loop keeps the connector state, buffer, retry schedule, backoff, and reconnect decision in
 one mutable owner. Force flushes, cadence or retry wakes, and input-triggered publishes all apply one
-outcome transition: success clears retry state and records sent metrics, a retryable failure defers
-the owned work and decides whether to reconnect, and a terminal failure routes every still-owned
-source batch through the emitter's message error policy. Stop requests retain their separate
+outcome transition: success clears retry state and records in the sent metrics the rows the sink
+delivered, each once however many attempts that took and never a rejected one, a retryable failure
+defers the owned work and decides whether to reconnect, and a terminal failure records the rows
+delivered before it and routes every other still-owned source row through the emitter's message
+error policy. Stop requests retain their separate
 deadline-bounded final flush and transport finish, and a stopped interaction performs its final
 drain before the loop exits.
 
@@ -504,6 +511,15 @@ later requests unresolved; the authentication statuses retain a distinct infrast
 Other `3xx`/`4xx` and `101` reject their one request with a structured external message error,
 then publication continues with the next request. The host applies delivered and rejected
 members, branches and acknowledgements and keeps unresolved prepared bytes for retry.
+
+A failed attempt keeps its cause beneath the attempt's own error: the resolver's lookup failure,
+or the socket or TLS error. The connector attaches the description of that chain to the attempt's
+publish failure, and the host reports it as the emitter's transient error and runtime event. It
+names the status or the transport cause and never the evaluated target, a header value or a body.
+The connector keeps its client after a failed attempt, so the host's retry sends the pending
+request without reopening it, and the failure stays reported until the request resolves. The
+host's sent metrics count a delivered request's codec record as payload, or nothing for a request
+without a body; the method, target and headers are request metadata.
 
 When the final head of a retryable or authentication status carries exactly one `Retry-After`
 field, the connector reads it as RFC 9110 `delay-seconds`, whole digits only, or as an HTTP date

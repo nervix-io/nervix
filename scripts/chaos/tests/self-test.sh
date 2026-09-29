@@ -4,6 +4,8 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 chaos_dir="$(cd "${script_dir}/.." && pwd)"
 
+"${script_dir}/role-wait-self-test.sh"
+
 fail() {
     printf 'self-test failed: %s\n' "$*" >&2
     exit 1
@@ -615,3 +617,4 @@ fi
 
 printf 'chaos harness self-test passed\n'
 "${script_dir}/degraded-self-test.sh"
+"${script_dir}/docker-events-self-test.sh"

@@ -1491,6 +1491,11 @@ impl EmitterBatchContext<'_> {
         reason: String,
         operation: MessageErrorOperation,
     ) {
+        // The rows an earlier attempt delivered are sent, and this is the last time the emitter
+        // holds them, so they are counted before the rest follow the error policy.
+        if let Some(report) = batch.delivered_report() {
+            self.observe_sent(&report);
+        }
         let execution_now = batch.execution_now();
         let resolved = batch.resolved_rows();
         let messages = match batch.into_relay_batch().try_into_messages() {
@@ -2172,6 +2177,80 @@ mod tests {
                 .emitter_transient_error(&context.domain, &context.emitter),
             Some("test encoding failed".to_string())
         );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_terminal_failure_counts_the_rows_delivered_before_it_as_sent() {
+        let context = sink_context();
+        let routing = DomainRouting::new(DomainRoutingSnapshot::default());
+        let mut routing = DomainRoutingCache::new(routing.shared());
+        let output_metrics = output_metrics(&context);
+        let node = ModelName::from(&context.emitter);
+        let source_filters = HashMap::default();
+        let materialized_state = Vec::new();
+        let batch_context = batch_context(
+            &context,
+            &mut routing,
+            &output_metrics,
+            &node,
+            &source_filters,
+            &materialized_state,
+        );
+        let mut state = task_state(&context);
+        let mut messages = Vec::with_capacity(2);
+        for value in [1, 2] {
+            messages.push(RelayMessage {
+                key: None,
+                record: test_runtime_row([("value".to_string(), RuntimeValue::I64(value))]),
+                acks: AckSet::empty(),
+            });
+        }
+        let two_rows = RelayRecordBatch::from_messages(
+            crate::runtime::test_fixtures::input_schema(),
+            messages,
+        )
+        .expect("the test records match the emitter input schema");
+        let mut batch = EmitterPublishBatch::from_batch(two_rows, Timestamp::from_unix_nanos(100));
+        batch
+            .mark_delivered(0, DeliveredAcknowledgements::Host)
+            .expect("an earlier attempt delivered the first row");
+        state
+            .buffer
+            .push(&context, batch)
+            .expect("test batch must buffer");
+        let failure = EmitterPublishFailure::buffer(
+            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable("test encoding failed"),
+        );
+        let mut pending_batch = None;
+
+        state
+            .handle_publish_result(
+                Err(failure),
+                &mut pending_batch,
+                &context,
+                &batch_context,
+                EmitterPublishOutcomeContext {
+                    sink_label: "test",
+                    codec_route: true,
+                    error_report: EmitterPublishErrorReport::Flush,
+                },
+            )
+            .await;
+
+        let sent = context.runtime.inner.metrics.dataflow_edge_statistics(
+            &context.domain,
+            &nervix_dataflow_graph::DataflowMetricRef::new(
+                "EMITTER",
+                context.emitter.as_str(),
+                "sent",
+                None::<String>,
+            ),
+        );
+        assert_eq!(
+            sent.messages_total, 1,
+            "the delivered row is sent, and the row the failure routes is not"
+        );
+        assert!(state.buffer.is_empty());
     }
 
     #[nervix_primitives::test]

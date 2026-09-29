@@ -44,29 +44,21 @@ impl IntegerSum {
     }
 
     pub(super) fn admit(&mut self, column: &ArgumentColumn, rows: Range<usize>) {
-        for row in rows {
-            let Some(value) = column.integer_at(row) else {
-                continue;
-            };
-            self.values = self
-                .values
-                .checked_add(1)
-                .assured("a window cannot retain 2^64 rows in memory");
-            self.sum = self.sum.checked_add(value).assured(SUM_BOUND);
-        }
+        let (count, sum) = column.number_run(rows).integer_sum();
+        self.values = self
+            .values
+            .checked_add(count)
+            .assured("a window cannot retain 2^64 rows in memory");
+        self.sum = self.sum.checked_add(sum).assured(SUM_BOUND);
     }
 
     pub(super) fn retract(&mut self, column: &ArgumentColumn, rows: Range<usize>) {
-        for row in rows {
-            let Some(value) = column.integer_at(row) else {
-                continue;
-            };
-            self.values = self
-                .values
-                .checked_sub(1)
-                .verified("a retracted value was counted when the window admitted it");
-            self.sum = self.sum.checked_sub(value).assured(SUM_BOUND);
-        }
+        let (count, sum) = column.number_run(rows).integer_sum();
+        self.values = self
+            .values
+            .checked_sub(count)
+            .verified("retracted values were counted when admitted");
+        self.sum = self.sum.checked_sub(sum).assured(SUM_BOUND);
     }
 
     /// `SUM` in the argument's own integer type, which is null when no row contributed and an
@@ -174,23 +166,35 @@ impl MergeableAggregate for CompensatedSum {
 }
 
 impl CompensatedSum {
-    pub(super) fn of_row(column: &ArgumentColumn, row: usize) -> Self {
-        match column.number_at(row) {
-            Some(value) => Self {
-                values: 1,
-                sum: value,
-                compensation: 0.0,
-            },
-            None => Self::EMPTY,
+    pub(super) fn of_rows(column: &ArgumentColumn, rows: Range<usize>) -> Self {
+        let run = column.number_run(rows).compensated_sum();
+        Self {
+            values: run.count,
+            sum: run.sum,
+            compensation: run.compensation,
         }
     }
 
-    pub(super) fn of_rows(column: &ArgumentColumn, rows: Range<usize>) -> Self {
-        let mut sum = Self::EMPTY;
-        for row in rows {
-            sum = Self::merge(sum, Self::of_row(column, row));
-        }
-        sum
+    /// Rebuild suffix entries from one typed run, newest row first.
+    pub(super) fn refold_run(
+        column: &ArgumentColumn,
+        rows: Range<usize>,
+        mut newer: Self,
+        front: &mut Vec<Self>,
+    ) -> Self {
+        column.number_run(rows).visit_reverse(|value| {
+            let row = match value {
+                Some(value) => Self {
+                    values: 1,
+                    sum: value,
+                    compensation: 0.0,
+                },
+                None => Self::EMPTY,
+            };
+            newer = Self::merge(row, newer);
+            front.push(newer);
+        });
+        newer
     }
 
     /// `SUM` in the argument's own floating-point type, which is null when no row contributed and

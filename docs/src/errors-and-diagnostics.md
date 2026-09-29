@@ -13,6 +13,9 @@ Boundaries](./typed-states.md) explains how missing values and semantic states a
 [Shutdown And Recovery](./shutdown.md) owns stop and drain phases. The NSPL forms for error routes
 are in [Message Errors](./processors.md#message-errors) and [Error Routes](./quickstart-error-routes.md).
 
+[Execution Plans](./execution-plans.md) describes when planning, binding, and message-error
+delivery can fail during schedule application.
+
 ## Ownership And Propagation
 
 | Boundary | Failure meaning it owns | What its caller can decide |
@@ -72,6 +75,18 @@ same; [WASM State And Recovery](./wasm-state.md) owns those boundaries.
 
 HTTP request-field compilation retains the VM report beneath the emitter's request-field context
 and attaches its safe message for diagnostics; an invalid request program never starts the sink.
+
+An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP sink: a timeout, a
+DNS, connection, TLS, send or response-header failure, an invalid destination, or a retryable or
+authentication status with its number. The sink keeps the resolver's `DnsLookupError`, the
+response-header failure, or the socket or TLS error as the context beneath it, and attaches the
+description of the whole chain, such as
+`HTTP TLS handshake failed: invalid peer certificate: UnknownIssuer`, to its publish failure. The
+emitter reports that description as its transient error and runtime event for as long as the
+request stays pending, which `DESCRIBE EMITTER` shows. It names the status or the cause of the
+connection and never the evaluated target, a header value, a credential or a body. A refused
+request is not an attempt failure: it is a record rejection with code `external`, operation
+`publish` and its numeric status.
 
 Resource planning checks the committed lookup key and codec, generator materialized source,
 output branch and route construction, and WASM guest-state generation before runtime binding.
@@ -539,7 +554,13 @@ reporting boundary. It classifies the typed current context as an `NX_ERROR_*` k
 the report's contextual message. A cancelled or expired wait returns `NX_ERROR_CANCELLED` or
 `NX_ERROR_DEADLINE` without writing an event handle. Clock accessors return `NX_ERROR_TYPE` when
 the event kind or installation state lacks a requested field and leave outputs untouched;
-generation, state, and end-reason accessors require a non-null output pointer.
+generation, state, and end-reason accessors require a non-null output pointer. The projections of
+an `nx_domain_clock` convert the Rust client's `error_stack::Report<DomainClockReadError>` the same
+way: a stopped or uninstalled clock is `NX_ERROR_TYPE`, because it holds no logical time to read,
+and arithmetic outside the timestamp range is `NX_ERROR_INVALID_ARGUMENT`, because the instant the
+host passed is out of range for that clock. An attach refusal is not an error of the call: it
+completes with `NX_DISPOSITION_FAILED` and the server's message, and `nx_session_domain_clock`
+reports whether the session follows the clock afterwards.
 
 The CLI's `domain-clock` subcommand classifies attach refusals from those variants. A missing
 domain and an already attached clock have distinct typed CLI errors; other attach and detach

@@ -56,11 +56,11 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     AckMode, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClientConfigEntry, ClientName,
-    ClientProducerEndReason, ClientResourceMount, ClusterNodeIncarnation, ClusterNodeName,
-    CodecName, CommandExecutionReference, CoordinationIdentity, CorrelationTimeoutAction,
-    CorrelatorMatchPolicy, DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef,
-    DomainState, EmitterName, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
-    FlushPolicy, GeneralErrorPolicy, GeneratorName, InferencerExecutionMode,
+    ClientProducerEndReason, ClientResourceMount, ClusterNodeIdentity, ClusterNodeIncarnation,
+    ClusterNodeName, CodecName, CommandExecutionReference, CoordinationIdentity,
+    CorrelationTimeoutAction, CorrelatorMatchPolicy, DomainClockAuthority, DomainConfig,
+    DomainName, DomainNodeRef, DomainState, EmitterName, EndpointName, EndpointType, ErrorPolicies,
+    FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName, InferencerExecutionMode,
     InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestTimestampSource,
     IngestorName, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
     MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy,

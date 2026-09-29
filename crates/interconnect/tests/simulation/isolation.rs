@@ -533,11 +533,10 @@ impl PeerHost {
         assert_eq!(batch.rows, 3);
         let payload = self.next_relay();
         let delivery = payload.delivery;
-        let ack_id = payload
+        let registration = payload
             .admission
-            .as_ref()
-            .assured("fixture relays register an admission")
-            .ack_id;
+            .clone()
+            .assured("fixture relays register an admission");
         self.transport
             .send(&self.hub, Envelope::RelayPayload(payload))
             .await
@@ -550,13 +549,13 @@ impl PeerHost {
                     .await
                     .assured("the peer's incoming queue stays open");
                 let Envelope::Ack(RemoteAckResolution {
-                    ack_id: resolved,
+                    registration: resolved,
                     outcome,
                 }) = received.envelope
                 else {
                     panic!("only relay outcomes reach a peer's application queue");
                 };
-                assert_eq!(resolved, ack_id);
+                assert_eq!(resolved, registration);
                 // The hub reports progress while admission is unresolved; it changes no outcome.
                 if let RemoteAckOutcome::Alive = outcome {
                     continue;
@@ -721,10 +720,7 @@ impl PeerHost {
             batch_ipc,
             metadata: Vec::new(),
             acks: Vec::new(),
-            admission: Some(RemoteAckRegistration {
-                ack_id,
-                reply_node_id: self.transport.node_id().clone(),
-            }),
+            admission: Some(fixture_registration(ack_id, &self.transport)),
         }
     }
 
@@ -782,11 +778,10 @@ impl RelayIngress {
             panic!("next_from returns relay batches only");
         };
         let delivery = body.delivery;
-        let ack_id = body
+        let registration = body
             .admission
-            .as_ref()
-            .assured("fixture relays register an admission")
-            .ack_id;
+            .clone()
+            .assured("fixture relays register an admission");
         assert_eq!(
             received
                 .relay_admission
@@ -799,10 +794,7 @@ impl RelayIngress {
         self.transport
             .send(
                 peer,
-                Envelope::Ack(RemoteAckResolution {
-                    ack_id,
-                    outcome: RemoteAckOutcome::Ack,
-                }),
+                Envelope::Ack(registration.resolution(RemoteAckOutcome::Ack)),
             )
             .await
             .assured("the terminal outcome reaches the sender over reserved capacity");

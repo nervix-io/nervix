@@ -46,7 +46,8 @@ pub(crate) fn corpus_report() -> io::Result<String> {
 /// The line a probe prints once its subscription is open, before any row reaches it.
 pub(crate) const SUBSCRIBED_LINE: &str = "SUBSCRIBED";
 
-/// The line a probe prints once it follows the domain's clock, before the scenario starts it.
+/// The line a probe prints once it follows the domain's clock, before it reads the clock the
+/// attach reported.
 pub(crate) const ATTACHED_LINE: &str = "ATTACHED completed";
 
 /// The directory `just test-client-conformance` builds the probe artifacts into.
@@ -212,8 +213,9 @@ pub(crate) enum ProbeExercise {
         subscription: String,
         rows: usize,
     },
-    /// Attaches to the domain's clock, reads the state and the first tick of the generation the
-    /// scenario starts, and detaches.
+    /// Attaches to the domain's running clock and reads the clock the attach reported before its
+    /// first tick, then follows the generation the scenario's STOP and START begin and the
+    /// attachment restored after the scenario ends the probe's session, and detaches.
     DomainClock,
 }
 

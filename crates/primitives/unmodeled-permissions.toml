@@ -44,6 +44,13 @@ path = "src/runtime/client_ingestor_shuttle_tests.rs"
 reason = "Each record must change in the same scheduling step as the reservation or drain it records, so recording adds no scheduling point."
 
 [[permission]]
+items = ["sync::atomic::AtomicU64", "sync::atomic::Ordering"]
+limit = "Fixture bookkeeping that no invariant reads; no model builds these fixtures."
+owner = "The application unit-test fixtures."
+path = "src/application/test_fixtures.rs"
+reason = "Test databases and node ports must differ across every unit test the process runs in parallel, so their identities outlive each test and each model execution."
+
+[[permission]]
 items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
 limit = "Runner bookkeeping that no model reads."
 owner = "The Loom runner of nervix-model-harness."
@@ -51,13 +58,7 @@ path = "crates/model-harness/src/loom.rs"
 reason = "The number of executions a search explored spans every execution and is reported after the search ends, where no modeled atomic can exist."
 
 [[permission]]
-items = [
-  "sync::atomic::AtomicBool",
-  "sync::atomic::Ordering",
-  "task_local",
-  "thread::Builder",
-  "thread::sleep",
-]
+items = ["sync::atomic::AtomicBool", "sync::atomic::Ordering", "task_local", "thread::Builder", "thread::sleep"]
 limit = "The epoch driver and a guest callback's time scope are outside every model: no check covers when the epoch thread observes the flag, and under Shuttle every task shares the storage a time scope sets while it is polled."
 owner = "The WASM runtime: its epoch driver, and the domain time of a guest callback."
 path = "crates/nervix-wasm/src/lib.rs"
@@ -134,15 +135,7 @@ path = "crates/client-ffi/src/session.rs"
 reason = "The binding owns the runtime its host's threads enter, and entering it and shutting it down in the background are the binding's contract with the host, which Shuttle's runtime does not provide."
 
 [[permission]]
-items = [
-  "select",
-  "sync::Mutex",
-  "sync::mpsc",
-  "sync::watch",
-  "task::consume_budget",
-  "task::spawn",
-  "time::sleep",
-]
+items = ["select", "sync::Mutex", "sync::mpsc", "sync::watch", "task::consume_budget", "task::spawn", "time::sleep"]
 limit = "Cluster membership gossip is outside every model: no check covers chitchat or the transport tasks it drives."
 owner = "The cluster membership transport."
 path = "src/cluster.rs"

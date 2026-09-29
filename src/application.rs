@@ -100,7 +100,7 @@ use session_service::{
     apply_current_cluster_runtime_state,
 };
 use startup::ApplicationStartup;
-use subscription::SubscriptionInterests;
+use subscription::{SubscriptionInterests, SubscriptionSampler};
 use tls::{
     HttpsListenerCertificates, InterconnectTlsPaths, load_grpc_tls_server_config,
     load_web_console_tls_server_config, reload_interconnect_tls,
@@ -1812,6 +1812,7 @@ impl Application {
                     cluster.clone(),
                     runtime.metrics(),
                 ),
+                subscription_sampler: SubscriptionSampler::default(),
                 interconnect: interconnect.clone(),
                 client_producers: ClientProducerRouter::new(
                     runtime.clone(),

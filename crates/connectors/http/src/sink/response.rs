@@ -151,7 +151,7 @@ where
         let mut chunk = [0_u8; READ_BYTES];
         let read = tokio::io::AsyncReadExt::read(stream, &mut chunk)
             .await
-            .map_err(|_| Report::new(ResponseHeadError::Read))?;
+            .map_err(|error| Report::new(error).change_context(ResponseHeadError::Read))?;
         if read == 0 {
             return Err(Report::new(ResponseHeadError::Lost));
         }

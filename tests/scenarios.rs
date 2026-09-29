@@ -314,6 +314,9 @@ struct ScenarioWorld {
     /// The reply to the last upload stream a scenario shaped itself.
     last_upload_reply: Option<nervix_client_wire::UploadReply>,
     last_subscription_payload: Option<String>,
+    /// The metric values each named subscription passed from sampling, recorded once every value
+    /// that was sampled had been drawn for.
+    sampled_metric_values: BTreeMap<String, Vec<i64>>,
     /// When the message a delivery-delay assertion is about was published. Load moves this
     /// instant and the arrival together, which is what makes such an assertion hold on a
     /// busy machine where a fixed wall-clock window does not.
@@ -3279,8 +3282,14 @@ async fn when_client_probe_subscribes(
     start_client_probe(world, runtime, &node_id, target, SUBSCRIBED_LINE).await;
 }
 
-#[when(expr = "the {string} client probe attaches to the domain clock on node {string}")]
-async fn when_client_probe_attaches_to_the_domain_clock(
+/// Starts a probe that follows the domain's clock through the TCP forwarder a preceding step stood
+/// in front of `node_id`'s gRPC endpoint, so the scenario can end the probe's session by stopping
+/// the forwarder.
+#[when(
+    expr = "the {string} client probe attaches to the domain clock through the forwarded gRPC \
+            endpoint of node {string}"
+)]
+async fn when_client_probe_attaches_to_the_domain_clock_through_forwarder(
     world: &mut ScenarioWorld,
     runtime: String,
     node_id: String,
@@ -3289,8 +3298,28 @@ async fn when_client_probe_attaches_to_the_domain_clock(
         .parse()
         .expect("the step names a known probe runtime");
     let node_id = expand_placeholders(world, &node_id);
-    let target = client_probe_target(world, &node_id, ProbeExercise::DomainClock);
+    let forwarded = world
+        .placeholders
+        .get("forwarded_grpc")
+        .verified("a preceding step forwarded the node's gRPC endpoint")
+        .clone();
+    let mut target = client_probe_target(world, &node_id, ProbeExercise::DomainClock);
+    target.grpc_uri = forwarded;
     start_client_probe(world, runtime, &node_id, target, ATTACHED_LINE).await;
+}
+
+#[then(expr = "within {string} the client probe prints {string}")]
+async fn then_client_probe_prints(world: &mut ScenarioWorld, within: String, line: String) {
+    let within =
+        humantime::parse_duration(&within).expect("step duration must be a valid duration");
+    let line = expand_placeholders(world, &line);
+    world
+        .client_probe
+        .as_mut()
+        .verified("a preceding step started a client probe")
+        .wait_for_line(&line, within)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 #[when(expr = "the {string} client probe decodes the conformance corpus")]
@@ -9489,6 +9518,66 @@ async fn when_node_is_restarted_with_new_interconnect_addresses(
             .restart_node_with_new_interconnect_address(&node_id)
             .await
             .expect("failed to restart node with a new interconnect address");
+    }
+}
+
+#[then(
+    expr = "the leader eventually records node {string} at its current interconnect address in \
+            Raft membership"
+)]
+async fn then_leader_records_current_raft_address(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let endpoint = world
+        .cluster()
+        .interconnect_endpoint(&node_id)
+        .expect("the restarted node has an interconnect endpoint");
+    let expected = format!("- {node_id} [voter] {endpoint}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let status = run_nspl_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
+            .await
+            .expect("leader cluster status must be available");
+        if status.lines().any(|line| line == expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Raft membership did not record {expected}; last leader status: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(expr = "the leader Raft log index remains unchanged for {string}")]
+async fn then_leader_raft_log_stays_still(world: &mut ScenarioWorld, duration: String) {
+    let duration = humantime::parse_duration(&duration).expect("the observation duration is valid");
+    let leader = current_leader_node(world).await;
+    let deadline = Instant::now() + duration;
+    let mut initial = None;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let status = run_nspl_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
+            .await
+            .expect("leader cluster status must be available");
+        let index = status
+            .lines()
+            .find_map(|line| line.strip_prefix("raft.last_log_index: "))
+            .expect("cluster status reports a Raft log index")
+            .parse::<u64>()
+            .expect("Raft log index is numeric");
+        match initial {
+            Some(initial) => assert_eq!(
+                index, initial,
+                "leader Raft log grew after membership converged; last status: {status}"
+            ),
+            None => initial = Some(index),
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -22857,6 +22946,127 @@ async fn then_within_duration_the_stream_subscription_receives_payloads(
             }
         }
     }
+}
+
+#[then(
+    expr = "within {string} subscriptions {string} and {string} each pass between {int} and {int} \
+            of the metric values up to {int}"
+)]
+async fn then_subscriptions_each_sample_metric_values(
+    world: &mut ScenarioWorld,
+    duration: String,
+    first: String,
+    second: String,
+    fewest: usize,
+    most: usize,
+    sampled_up_to: i64,
+) {
+    /// What one subscription delivered while this step read it.
+    #[derive(Default)]
+    struct SubscriptionSample {
+        /// The values up to the sampled bound, in the order they arrived.
+        passed: Vec<i64>,
+        /// The last value of any kind that arrived.
+        last: Option<i64>,
+        /// Whether a value above the bound arrived. Rows arrive in the order they were
+        /// published, so every value up to the bound has been drawn for by then.
+        drawn: bool,
+    }
+
+    let duration = humantime::parse_duration(&duration)
+        .assured("the scenario sampling deadline is a valid duration");
+    let session = world
+        .active_session
+        .as_mut()
+        .expect("an active session with the sampled subscriptions must exist");
+    let mut samples = BTreeMap::new();
+    samples.insert(first.clone(), SubscriptionSample::default());
+    samples.insert(second.clone(), SubscriptionSample::default());
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let mut all_drawn = true;
+        for sample in samples.values() {
+            if !sample.drawn {
+                all_drawn = false;
+            }
+        }
+        if all_drawn {
+            break;
+        }
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out before '{first}' and '{second}' drew for every metric value up to \
+             {sampled_up_to}"
+        );
+        let event = session
+            .try_next_subscription(deadline.saturating_duration_since(now))
+            .await
+            .expect("failed while waiting for sampled subscription rows")
+            .unwrap_or_else(|| {
+                panic!(
+                    "timed out before '{first}' and '{second}' drew for every metric value up to \
+                     {sampled_up_to}"
+                )
+            });
+        let payload = serde_json::from_str::<serde_json::Value>(&event.payload)
+            .unwrap_or_else(|error| panic!("subscription payload is not valid JSON: {error}"));
+        let Some(value) = payload.get("value").and_then(serde_json::Value::as_i64) else {
+            panic!("subscription payload {payload} has no integer 'value'");
+        };
+        let subscription = event.subscription.as_str();
+        let Some(sample) = samples.get_mut(subscription) else {
+            panic!("subscription '{subscription}' delivered a row this step does not sample");
+        };
+        if let Some(last) = sample.last {
+            assert!(
+                value > last,
+                "subscription '{subscription}' delivered {value} after {last}, out of the order \
+                 the values were published in"
+            );
+        }
+        sample.last = Some(value);
+        if value > sampled_up_to {
+            sample.drawn = true;
+        } else {
+            sample.passed.push(value);
+        }
+    }
+
+    let mut sampled = BTreeMap::new();
+    for (subscription, sample) in samples {
+        let passed = sample.passed.len();
+        assert!(
+            (fewest..=most).contains(&passed),
+            "subscription '{subscription}' passed {passed} of the metric values up to \
+             {sampled_up_to}, not between {fewest} and {most}: {:?}",
+            sample.passed
+        );
+        sampled.insert(subscription, sample.passed);
+    }
+    world.sampled_metric_values = sampled;
+}
+
+#[then(expr = "subscriptions {string} and {string} passed different metric values")]
+async fn then_subscriptions_passed_different_metric_values(
+    world: &mut ScenarioWorld,
+    first: String,
+    second: String,
+) {
+    let first_values = world
+        .sampled_metric_values
+        .get(&first)
+        .unwrap_or_else(|| panic!("no earlier step recorded the values '{first}' passed"));
+    let second_values = world
+        .sampled_metric_values
+        .get(&second)
+        .unwrap_or_else(|| panic!("no earlier step recorded the values '{second}' passed"));
+    assert_ne!(
+        first_values, second_values,
+        "subscriptions on one node take their draws from one sequence, so '{first}' and \
+         '{second}' must not pass the same values"
+    );
 }
 
 #[then(expr = "within {string} {int} relay subscription payloads share field {string}")]

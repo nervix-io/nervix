@@ -18,11 +18,21 @@ Tokio's timers, networking, I/O, filesystem, processes, signals and its pure `pi
 macros are not governed here yet; `extern crate shuttle_tokio as tokio` remains the one accepted
 alias, because it still selects Shuttle's timers for the crates that use them.
 
+A selected atomic belongs to one model execution, so it never lives in a `static`, which outlives
+every execution, and it is never constructed in a const context, which Loom's atomics do not
+support. The static rules reject a `static`, including one a `thread_local!` declares, whose
+declared type names a selected atomic type directly, through a wrapper, an array, a reference, a
+module path or a local type alias. They also reject a `static` or `const` initializer, a `const fn`
+body and an inline `const` block that construct one. A bare atomic type name counts as selected
+unless the file imports it only from the unmodeled path. The rules read declared types and
+constructions, so a struct that holds an atomic hides it from them when it is built lazily; the rule
+still applies to it.
+
 A real primitive that must stay outside every model is reached through
 `nervix_primitives::unmodeled` and needs a permission in `crates/primitives/unmodeled-permissions.toml`
 naming the file, the items it uses by their paths below `unmodeled`, its owner, the reason and the
 verification limit. A use without a permission, an item the permission does not list, and a
-permission nothing uses all fail.
+permission nothing uses all fail. A real atomic may live in a `static`.
 
 The manifest rules keep mode selection in one place. Only the owner selects Loom, and the harness
 runs it, so no other package may depend on `loom`. Only the owner depends on the libraries whose
@@ -58,6 +68,23 @@ SELECTED = ("nervix_primitives", "sync", "atomic")
 UNMODELED_ROOT = ("nervix_primitives", "unmodeled")
 UNMODELED = UNMODELED_ROOT + ("sync", "atomic")
 PERMISSION_FIELDS = ("path", "items", "owner", "reason", "limit")
+# The atomic types `nervix_primitives::sync::atomic` selects for the build's execution mode.
+ATOMIC_TYPES = frozenset(
+    {
+        "AtomicBool",
+        "AtomicI8",
+        "AtomicI16",
+        "AtomicI32",
+        "AtomicI64",
+        "AtomicIsize",
+        "AtomicPtr",
+        "AtomicU8",
+        "AtomicU16",
+        "AtomicU32",
+        "AtomicU64",
+        "AtomicUsize",
+    }
+)
 
 ATOMIC_ITEMS = (
     "AtomicBool",
@@ -186,6 +213,23 @@ _QUALIFIED_PATH = re.compile(
     r"(?<![A-Za-z0-9_$])(?P<path>[A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)+)"
 )
 _BARE_THREAD_LOCAL = re.compile(r"(?<![A-Za-z0-9_:$])thread_local\s*!")
+_IDENTIFIER = r"\$?[A-Za-z_][A-Za-z0-9_]*"
+_PATH = re.compile(rf"(?<![A-Za-z0-9_$])(?:::\s*)?{_IDENTIFIER}(?:\s*::\s*{_IDENTIFIER})*")
+# A lifetime keeps its tick after literals are blanked, so `'static` is never an item.
+_STATIC_ITEM = re.compile(
+    rf"(?<![A-Za-z0-9_$'])static\s+(?:mut\s+|ref\s+)?(?P<name>{_IDENTIFIER})\s*:"
+)
+_CONST_ITEM = re.compile(rf"(?<![A-Za-z0-9_$*])const\s+(?P<name>{_IDENTIFIER})\s*:")
+_CONST_FN = re.compile(
+    rf"(?<![A-Za-z0-9_$])const\s+(?:unsafe\s+)?(?:extern\s+(?:\"[^\"]*\"\s+)?)?fn\s+(?P<name>{_IDENTIFIER})"
+)
+_CONST_BLOCK = re.compile(r"(?<![A-Za-z0-9_$])const\s*\{")
+_TYPE_ALIAS = re.compile(rf"(?<![A-Za-z0-9_$])type\s+(?P<name>{_IDENTIFIER})\b")
+_TURBOFISH_NEW = re.compile(
+    rf"(?P<path>{_PATH.pattern})\s*::\s*<[^;{{}}]*?>\s*::\s*new(?![A-Za-z0-9_])"
+)
+_OPENERS = {"(": ")", "[": "]", "{": "}", "<": ">"}
+_CLOSERS = frozenset(_OPENERS.values())
 
 
 def _selected_replacement(path: Sequence[str]) -> str:
@@ -304,6 +348,244 @@ def _unmodeled_item(rest: Sequence[str]) -> tuple[str, ...] | None:
     return None
 
 
+def _segments(path: str) -> tuple[str, ...]:
+    """The segments of a path, however it is spaced."""
+
+    segments: list[str] = []
+    for segment in path.split("::"):
+        stripped = segment.strip()
+        if stripped:
+            segments.append(stripped)
+    return tuple(segments)
+
+
+@dataclass
+class AtomicNames:
+    """The local names one file binds to atomic types: selected ones, and real unmodeled ones."""
+
+    selected: set[str] = field(default_factory=set)
+    unmodeled: set[str] = field(default_factory=set)
+
+    def bind(self, leaf: UseLeaf) -> None:
+        path = leaf.path
+        if len(path) == len(SELECTED) + 1 and path[: len(SELECTED)] == SELECTED:
+            item = path[-1]
+            if item == "*":
+                self.selected.update(ATOMIC_TYPES)
+            elif item in ATOMIC_TYPES:
+                self.selected.add(leaf.alias or item)
+        elif len(path) == len(UNMODELED) + 1 and path[: len(UNMODELED)] == UNMODELED:
+            item = path[-1]
+            if item in ATOMIC_TYPES:
+                self.unmodeled.add(leaf.alias or item)
+
+    def bind_aliases(self, code: str) -> None:
+        """Bind every local type alias whose target names a selected atomic type."""
+
+        targets: dict[str, str] = {}
+        for match in _TYPE_ALIAS.finditer(code):
+            equals = _end_of_type(code, match.end())
+            if equals >= len(code) or code[equals] != "=":
+                continue
+            target_end = _end_of_type(code, equals + 1)
+            targets[match.group("name")] = code[equals + 1 : target_end]
+        changed = True
+        while changed:
+            changed = False
+            for name, target in targets.items():
+                if name not in self.selected and self.names_selected(target):
+                    self.selected.add(name)
+                    changed = True
+
+    def is_selected(self, path: str) -> bool:
+        """Whether `path` names a selected atomic type. A bare type name is selected unless this
+        file imports it only from the unmodeled path."""
+
+        segments = _segments(path)
+        last = segments[-1]
+        if len(segments) == 1:
+            if last in self.selected:
+                return True
+            return last in ATOMIC_TYPES and last not in self.unmodeled
+        if tuple(segments[-1 - len(UNMODELED) : -1]) == UNMODELED:
+            return False
+        return last in ATOMIC_TYPES
+
+    def names_selected(self, text: str) -> bool:
+        for match in _PATH.finditer(text):
+            if self.is_selected(match.group()):
+                return True
+        return False
+
+    def constructs_selected(self, text: str) -> bool:
+        for match in _PATH.finditer(text):
+            segments = _segments(match.group())
+            if len(segments) < 2 or segments[-1] != "new":
+                continue
+            if self.is_selected("::".join(segments[:-1])):
+                return True
+        for match in _TURBOFISH_NEW.finditer(text):
+            if self.is_selected(match.group("path")):
+                return True
+        return False
+
+
+def _end_of_type(code: str, start: int) -> int:
+    """Where the type that begins at `start` ends: at the first `=`, `;`, `,` or `{` outside its
+    brackets, or at a bracket that closes one opened before it."""
+
+    closing: list[str] = []
+    index = start
+    while index < len(code):
+        char = code[index]
+        if code.startswith("->", index):
+            index += 2
+            continue
+        if char in "([<":
+            closing.append(_OPENERS[char])
+        elif char in ")]>":
+            if not closing:
+                return index
+            closing.pop()
+        elif not closing and char in "=;,{}":
+            return index
+        index += 1
+    return index
+
+
+def _end_of_expression(code: str, start: int) -> int:
+    """Where the expression that begins at `start` ends: at the first `;` outside its brackets, or
+    at a bracket that closes one opened before it. Angle brackets are comparisons here."""
+
+    closing: list[str] = []
+    index = start
+    while index < len(code):
+        char = code[index]
+        if char in "([{":
+            closing.append(_OPENERS[char])
+        elif char in ")]}":
+            if not closing:
+                return index
+            closing.pop()
+        elif not closing and char == ";":
+            return index
+        index += 1
+    return index
+
+
+def _end_of_block(code: str, start: int) -> int:
+    """The offset just past the brace that closes the one at `start`."""
+
+    depth = 0
+    for index in range(start, len(code)):
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return len(code)
+
+
+def _body_of_fn(code: str, start: int) -> tuple[int, int] | None:
+    """The span of the body of the function whose signature continues at `start`, if it has one."""
+
+    depth = 0
+    index = start
+    while index < len(code):
+        char = code[index]
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif depth == 0 and char == ";":
+            return None
+        elif depth == 0 and char == "{":
+            return index, _end_of_block(code, index)
+        index += 1
+    return None
+
+
+def _is_generic_parameter(code: str, start: int) -> bool:
+    preceding = code[:start].rstrip()
+    return preceding.endswith("<") or preceding.endswith(",")
+
+
+def check_statics(file: RustFile, names: AtomicNames) -> list[Site]:
+    """Reject a selected atomic held by a static, or constructed in a const context."""
+
+    violations: list[Site] = []
+    code = file.code
+    names.bind_aliases(code)
+    owner_hint = (
+        "give it an owner that lives exactly as long as its state, or make it a real atomic from "
+        f"{'::'.join(UNMODELED)} with a permission"
+    )
+    for match in _STATIC_ITEM.finditer(code):
+        name = match.group("name")
+        type_end = _end_of_type(code, match.end())
+        if names.names_selected(code[match.end() : type_end]):
+            violations.append(
+                file.site(
+                    match.start(),
+                    f"{RULE}: static `{name}` holds a selected atomic, which outlives every model "
+                    f"execution; {owner_hint}",
+                )
+            )
+            continue
+        if type_end < len(code) and code[type_end] == "=":
+            initializer_end = _end_of_expression(code, type_end + 1)
+            if names.constructs_selected(code[type_end + 1 : initializer_end]):
+                violations.append(
+                    file.site(
+                        match.start(),
+                        f"{RULE}: static `{name}` constructs a selected atomic, which outlives "
+                        f"every model execution; {owner_hint}",
+                    )
+                )
+    for match in _CONST_ITEM.finditer(code):
+        if _is_generic_parameter(code, match.start()):
+            continue
+        name = match.group("name")
+        type_end = _end_of_type(code, match.end())
+        constructs = False
+        if type_end < len(code) and code[type_end] == "=":
+            initializer_end = _end_of_expression(code, type_end + 1)
+            constructs = names.constructs_selected(code[type_end + 1 : initializer_end])
+        if constructs or names.names_selected(code[match.end() : type_end]):
+            violations.append(
+                file.site(
+                    match.start(),
+                    f"{RULE}: const `{name}` makes a selected atomic in a const context, and "
+                    "Loom's atomics have no const constructor",
+                )
+            )
+    for match in _CONST_FN.finditer(code):
+        body = _body_of_fn(code, match.end())
+        if body is None:
+            continue
+        body_start, body_end = body
+        if names.constructs_selected(code[body_start:body_end]):
+            violations.append(
+                file.site(
+                    match.start(),
+                    f"{RULE}: const fn `{match.group('name')}` constructs a selected atomic, and "
+                    "Loom's atomics have no const constructor; make the function non-const",
+                )
+            )
+    for match in _CONST_BLOCK.finditer(code):
+        brace = match.end() - 1
+        if names.constructs_selected(code[brace : _end_of_block(code, brace)]):
+            violations.append(
+                file.site(
+                    match.start(),
+                    f"{RULE}: a const block constructs a selected atomic, and Loom's atomics have "
+                    "no const constructor",
+                )
+            )
+    return violations
+
+
 @dataclass
 class FileUses:
     """What one file takes from the boundary's unmodeled path, and where."""
@@ -311,15 +593,12 @@ class FileUses:
     items: dict[str, int] = field(default_factory=dict)
 
 
-def _segments(text: str) -> tuple[str, ...]:
-    return tuple(segment.strip() for segment in text.split("::") if segment.strip())
-
-
 def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
     """Return the file's boundary violations and the unmodeled items it uses."""
 
     violations: list[Site] = []
     unmodeled = FileUses()
+    names = AtomicNames()
     code = file.code
     use_spans: list[tuple[int, int]] = []
     sync_aliases: set[str] = set()
@@ -333,6 +612,7 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
             violations.append(file.site(match.start(), f"{RULE}: {error}"))
             continue
         for leaf in leaves:
+            names.bind(leaf)
             path = leaf.path
             if path[:1] == ("nervix_primitives",):
                 if path[:2] == UNMODELED_ROOT:
@@ -546,6 +826,7 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
             )
             continue
         unmodeled.items.setdefault("::".join(item), file.line_of(match.start()))
+    violations.extend(check_statics(file, names))
     return violations, unmodeled
 
 
@@ -803,9 +1084,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(problem, file=sys.stderr)
     if problems:
         print(
-            f"{len(problems)} {RULE} violation(s). Every governed primitive comes from {OWNER}; a "
-            f"real primitive outside every model comes from {'::'.join(UNMODELED_ROOT)} with a "
-            f"permission in {PERMISSIONS}.",
+            f"{len(problems)} {RULE} violation(s). Every governed primitive comes from {OWNER}, and "
+            "no selected atomic lives in a static; a real primitive outside every model comes from "
+            f"{'::'.join(UNMODELED_ROOT)} with a permission in {PERMISSIONS}.",
             file=sys.stderr,
         )
         return 1

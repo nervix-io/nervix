@@ -222,7 +222,7 @@ struct DomainClockReadWatermark {
 impl DomainClockReadWatermark {
     /// Starts at the earliest representable timestamp, the identity of the maximum, so the first
     /// read returns its projection unchanged.
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
             unix_nanos: AtomicI64::new(i64::MIN),
         }

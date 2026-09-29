@@ -54,6 +54,54 @@ Feature: Session subscription delivery options
       | 1            | 0             |
       | 3            | 0             |
 
+  Scenario Outline: A fractional sample rate passes part of the rows, drawn independently per subscription
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA metric (
+        value I64
+      );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
+        value integer
+      );
+      CREATE CODEC metric_codec
+        FROM WIRE JSON SCHEMA metric_wire
+        TO SCHEMA metric;
+      CREATE RELAY metrics SCHEMA metric UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT metric_endpoint
+        ON edge
+        PATH '/metrics'
+        TYPE HTTP;
+      CREATE INGESTOR metric_http
+        FROM ENDPOINT metric_endpoint MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        TIMESTAMP NOW
+        TO metrics
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH EACH 1s MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION first_sample TO metrics BLOCKING BATCH SAMPLE RATE 0.5 WHERE value > 0;
+      CREATE SUBSCRIPTION second_sample TO metrics BLOCKING BATCH SAMPLE RATE 0.5 WHERE value > 0;
+      START;
+      """
+    # Values 1 through 200 are the sample. Rows arrive in the order they are posted, so the first
+    # of the 64 values after them that passes shows every earlier value has been drawn for.
+    When 264 sequential metric http payloads are posted to host "http-{{test_id}}.example.com" path "/metrics"
+    Then within "60s" subscriptions "first_sample" and "second_sample" each pass between 50 and 150 of the metric values up to 200
+    And subscriptions "first_sample" and "second_sample" passed different metric values
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Rows a subscription filter cannot evaluate are skipped and reported
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands

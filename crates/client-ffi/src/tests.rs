@@ -40,6 +40,7 @@ use crate::{
 };
 
 mod clock_events;
+mod domain_clock;
 
 const ROWS: i32 = 1;
 const BRANCH_KEY: i32 = 2;

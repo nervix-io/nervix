@@ -841,8 +841,13 @@ pub(super) async fn evaluate_window_arguments(
             evaluated.refuse(row_count, row, failure);
         }
     }
-    for row in 0..row_count {
-        if let Some(function) = evaluated.columns.refused_function(plan, row) {
+    for (row, function) in evaluated
+        .columns
+        .refused_functions(plan, row_count)
+        .into_iter()
+        .enumerate()
+    {
+        if let Some(function) = function {
             evaluated.refuse(
                 row_count,
                 row,

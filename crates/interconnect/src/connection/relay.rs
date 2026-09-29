@@ -237,7 +237,7 @@ impl TransportState {
         })?;
         let admission_key = RelayAdmissionKey {
             peer_node_id: node_id.clone(),
-            ack_id: admission.ack_id,
+            registration: admission.clone(),
         };
         match self.outbound_relay_admissions.entry(admission_key.clone()) {
             Entry::Occupied(entry) => {
@@ -283,10 +283,7 @@ impl TransportState {
                 self.deliver_terminal_incoming(
                     management.connection.peer_addr,
                     node_id.clone(),
-                    Envelope::Ack(nervix_models::RemoteAckResolution {
-                        ack_id: admission.ack_id,
-                        outcome: RemoteAckOutcome::Ack,
-                    }),
+                    Envelope::Ack(admission.resolution(RemoteAckOutcome::Ack)),
                     None,
                 )
                 .await?;
@@ -356,16 +353,13 @@ impl TransportState {
                 nervix_primitives::task::consume_budget().await;
                 let state = self.clone();
                 reports.push(async move {
-                    let target = registration.reply_node_id.clone();
+                    let target = registration.registrar.node_id().clone();
                     let ack_id = registration.ack_id;
                     let result = timeout(
                         RELAY_PROGRESS_SEND_TIMEOUT,
                         state.send(
                             &target,
-                            Envelope::Ack(nervix_models::RemoteAckResolution {
-                                ack_id,
-                                outcome: RemoteAckOutcome::Alive,
-                            }),
+                            Envelope::Ack(registration.resolution(RemoteAckOutcome::Alive)),
                         ),
                     )
                     .await;
@@ -613,7 +607,7 @@ impl TransportState {
             .await?;
             return Ok(());
         };
-        if admission.reply_node_id != peer_node_id {
+        if admission.registrar.node_id() != &peer_node_id {
             send_response(
                 respond,
                 StatusCode::FORBIDDEN,
@@ -625,7 +619,7 @@ impl TransportState {
         }
         let admission_key = RelayAdmissionKey {
             peer_node_id: peer_node_id.clone(),
-            ack_id: admission.ack_id,
+            registration: admission.clone(),
         };
         let attempt = self.relay_attempt_key(peer_node_id, peer_epoch, grant.delivery);
         if let Some(status) = self.retired_relay_status(&attempt) {
