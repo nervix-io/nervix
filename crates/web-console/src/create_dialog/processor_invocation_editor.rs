@@ -14,12 +14,11 @@ use super::{
 };
 
 fn invocations(signals: CreateSignals, family: ProcessorFamily) -> Vec<InvocationDraft> {
-    signals
-        .processor(family)
-        .get()
-        .active_route()
-        .map(|route| route.invocations.clone())
-        .unwrap_or_default()
+    let draft = signals.processor(family).get();
+    match draft.active_route() {
+        Some(route) => route.invocations.clone(),
+        None => Vec::new(),
+    }
 }
 
 fn with_invocations(
@@ -36,10 +35,11 @@ fn with_invocations(
 }
 
 fn argument_count(signals: CreateSignals, family: ProcessorFamily, index: usize) -> usize {
-    invocations(signals, family)
-        .get(index)
-        .map(|item| item.arguments.len())
-        .unwrap_or(0)
+    let items = invocations(signals, family);
+    match items.get(index) {
+        Some(item) => item.arguments.len(),
+        None => 0,
+    }
 }
 
 #[component]
@@ -56,7 +56,13 @@ pub(super) fn ProcessorInvocationEditor(
                     <div class="create-processor-invocation">
                         <label class="create-field"><span>"Function"</span>
                             <input class="create-processor-invocation-function" type="text" autocomplete="off"
-                                prop:value=move || invocations(signals, family).get(index).map(|item| item.function.clone()).unwrap_or_default()
+                                prop:value=move || {
+                                    let items = invocations(signals, family);
+                                    match items.get(index) {
+                                        Some(item) => item.function.clone(),
+                                        None => String::new(),
+                                    }
+                                }
                                 disabled=pending
                                 on:input=move |event| {
                                     let value = event_target_value(&event);
@@ -71,8 +77,16 @@ pub(super) fn ProcessorInvocationEditor(
                                 <div class="create-processor-invocation-argument-row">
                                     <input class="create-processor-invocation-argument" type="text" autocomplete="off"
                                         aria-label="Invocation argument expression"
-                                        prop:value=move || invocations(signals, family).get(index)
-                                            .and_then(|item| item.arguments.get(argument).cloned()).unwrap_or_default()
+                                        prop:value=move || {
+                                            let items = invocations(signals, family);
+                                            match items.get(index) {
+                                                Some(item) => match item.arguments.get(argument) {
+                                                    Some(value) => value.clone(),
+                                                    None => String::new(),
+                                                },
+                                                None => String::new(),
+                                            }
+                                        }
                                         disabled=pending
                                         on:input=move |event| {
                                             let value = event_target_value(&event);

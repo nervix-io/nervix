@@ -133,7 +133,13 @@ pub(super) fn ProcessorRouteEditor(
                 </div>
                 <label class="create-field"><span>"Route WHERE expression (optional)"</span>
                     <textarea class="create-processor-route-where"
-                        prop:value=move || draft.get().active_route().map(|route| route.where_clause.clone()).unwrap_or_default()
+                        prop:value=move || {
+                            let state = draft.get();
+                            match state.active_route() {
+                                Some(route) => route.where_clause.clone(),
+                                None => String::new(),
+                            }
+                        }
                         disabled=pending
                         on:input=move |event| {
                             let value = event_target_textarea_value(&event);

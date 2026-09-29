@@ -474,14 +474,10 @@ impl ProcessorDraft {
             }
             inputs.collect_policy = Some(InputCollectPolicy {
                 collect_for: collect.collect_for.trim().to_string(),
-                max_batch_size: collect.max_batch_size.as_ref().and_then(|size| {
-                    let trimmed = size.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed.to_string())
-                    }
-                }),
+                max_batch_size: match collect.max_batch_size.as_deref() {
+                    Some(size) if !size.trim().is_empty() => Some(size.trim().to_string()),
+                    _ => None,
+                },
             });
         }
         let filter = if self.filter.trim().is_empty() {

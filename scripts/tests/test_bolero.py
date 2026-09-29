@@ -23,11 +23,11 @@ class InventoryTests(unittest.TestCase):
             with self.assertRaisesRegex(bolero.BoleroError, message):
                 bolero.load_inventory(path)
 
-    def test_inventory_has_four_current_targets_and_exact_corpus_paths(self) -> None:
+    def test_inventory_has_five_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
-        self.assertEqual(len(inventory.targets), 4)
+        self.assertEqual(len(inventory.targets), 5)
         self.assertEqual({target.package for target in inventory.targets},
-                         {"nervix-nspl", "nervix-backup"})
+                         {"nervix-nspl", "nervix-backup", "nervix-client-wire"})
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
             self.assertTrue(target.corpus.is_dir())

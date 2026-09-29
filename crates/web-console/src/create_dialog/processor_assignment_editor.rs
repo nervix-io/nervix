@@ -34,10 +34,10 @@ impl AssignmentArea {
                 },
                 None => Vec::new(),
             },
-            Self::Output => draft
-                .active_route()
-                .map(|route| route.assignments.clone())
-                .unwrap_or_default(),
+            Self::Output => match draft.active_route() {
+                Some(route) => route.assignments.clone(),
+                None => Vec::new(),
+            },
             Self::Branch => match draft.active_route() {
                 Some(route) => match &route.branch {
                     RouteBranchDraft::Branched { assignments, .. } => assignments.clone(),
@@ -123,7 +123,13 @@ pub(super) fn ProcessorAssignmentRows(
                         }
                     }}</span>
                     <input type="text" class=expression_class autocomplete="off" aria-label="Assignment expression"
-                        prop:value=move || area.rows(signals, family).get(index).map(|row| row.expression.clone()).unwrap_or_default()
+                        prop:value=move || {
+                            let rows = area.rows(signals, family);
+                            match rows.get(index) {
+                                Some(row) => row.expression.clone(),
+                                None => String::new(),
+                            }
+                        }
                         disabled=pending
                         on:input=move |event| {
                             let value = event_target_value(&event);

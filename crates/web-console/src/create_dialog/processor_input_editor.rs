@@ -77,7 +77,13 @@ pub(super) fn ProcessorInputEditor(
                 session_generation=session_generation show_detail=true />
             <label class="create-field"><span>"Input WHERE expression (optional)"</span>
                 <textarea class="create-processor-input-where"
-                    prop:value=move || draft.get().active_input().map(|input| input.where_clause.clone()).unwrap_or_default()
+                    prop:value=move || {
+                        let state = draft.get();
+                        match state.active_input() {
+                            Some(input) => input.where_clause.clone(),
+                            None => String::new(),
+                        }
+                    }
                     disabled=pending
                     on:input=move |event| {
                         let value = event_target_textarea_value(&event);
@@ -102,7 +108,10 @@ pub(super) fn ProcessorInputEditor(
             <Show when=move || draft.get().collect.is_some() fallback=|| ()>
                 <label class="create-field"><span>"Collect duration"</span>
                     <input class="create-processor-collect-for" type="text" autocomplete="off"
-                        prop:value=move || draft.get().collect.as_ref().map(|policy| policy.collect_for.clone()).unwrap_or_default()
+                        prop:value=move || match draft.get().collect {
+                            Some(policy) => policy.collect_for,
+                            None => String::new(),
+                        }
                         disabled=pending
                         on:input=move |event| {
                             let value = event_target_value(&event);
@@ -114,7 +123,10 @@ pub(super) fn ProcessorInputEditor(
                 </label>
                 <label class="create-field"><span>"Maximum collected batch size (optional)"</span>
                     <input class="create-processor-collect-size" type="text" autocomplete="off"
-                        prop:value=move || draft.get().collect.as_ref().and_then(|policy| policy.max_batch_size.clone()).unwrap_or_default()
+                        prop:value=move || match draft.get().collect {
+                            Some(policy) => policy.max_batch_size.unwrap_or_default(),
+                            None => String::new(),
+                        }
                         disabled=pending
                         on:input=move |event| {
                             let value = event_target_value(&event);
