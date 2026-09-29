@@ -20,11 +20,7 @@ benchmarks = []
 # I/O modules remain Tokio's real implementations through the wrapper crates.
 shuttle = [
   "dep:shuttle",
-  "dep:shuttle-dashmap",
-  "dep:shuttle-parking-lot",
   "dep:shuttle-tokio",
-  "dep:shuttle-tokio-stream",
-  "dep:shuttle-tokio-util",
   "nervix-client-core/shuttle",
   "nervix-connector/shuttle",
   "nervix-connector-clickhouse/shuttle",
@@ -49,11 +45,7 @@ shuttle = [
   "nervix-interconnect/shuttle",
   "nervix-primitives/shuttle",
   "nervix-wasm/shuttle",
-  "shuttle-dashmap/shuttle",
-  "shuttle-parking-lot/shuttle",
   "shuttle-tokio/shuttle",
-  "shuttle-tokio-stream/shuttle",
-  "shuttle-tokio-util/shuttle",
 ]
 # Test-only feature used by the standard test recipes for fault injection, random multinode
 # scheduling, and lower intentionally expensive password hashing parameters.
@@ -85,7 +77,6 @@ ciborium = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
 concurrent-queue = { workspace = true }
-dashmap = { workspace = true }
 error-stack = { workspace = true }
 fastrand = { workspace = true }
 fjall = { workspace = true }
@@ -139,7 +130,7 @@ nervix-interconnect = { workspace = true }
 nervix-jaq = { workspace = true }
 nervix-models = { workspace = true, features = ["arrow"] }
 nervix-nspl = { workspace = true }
-nervix-primitives = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
 nervix-roto = { workspace = true }
 nervix-simd-kernels = { workspace = true }
@@ -163,7 +154,6 @@ ort = { workspace = true, features = [
   "tracing",
   "webgpu",
 ] }
-parking_lot = { workspace = true }
 petgraph = { workspace = true }
 prometheus = { workspace = true }
 prost = { workspace = true }
@@ -176,11 +166,7 @@ rustls-pki-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 shuttle = { workspace = true, optional = true }
-shuttle-dashmap = { workspace = true, optional = true }
-shuttle-parking-lot = { workspace = true, optional = true }
 shuttle-tokio = { workspace = true, features = ["full"], optional = true }
-shuttle-tokio-stream = { workspace = true, optional = true }
-shuttle-tokio-util = { workspace = true, features = ["rt"], optional = true }
 signal-hook = { workspace = true }
 simd-json = { workspace = true }
 sorted-vec = { workspace = true }
@@ -193,9 +179,7 @@ tikv-jemalloc-ctl = { workspace = true }
 tikv-jemallocator = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
-tokio-stream = { workspace = true }
 tokio-tungstenite = { workspace = true, features = ["__rustls-tls", "connect"] }
-tokio-util = { workspace = true, features = ["rt"] }
 tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
@@ -336,6 +320,7 @@ members = [
   "crates/model-harness",
   "crates/models",
   "crates/primitives",
+  "crates/primitives/macros",
   "crates/recovery",
   "crates/simd-kernels",
   "crates/test-environment",
@@ -543,6 +528,7 @@ nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
   "server",
 ] }
 nervix-primitives = { package = "nervix-primitives", path = "crates/primitives" }
+nervix-primitives-macros = { package = "nervix-primitives-macros", path = "crates/primitives/macros" }
 nervix-recovery = { package = "nervix-recovery", path = "crates/recovery" }
 nervix-roto = { package = "nervix-roto", path = "crates/nervix-roto" }
 nervix-simd-kernels = { package = "nervix-simd-kernels", path = "crates/simd-kernels" }

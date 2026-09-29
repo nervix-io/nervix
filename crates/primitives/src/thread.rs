@@ -2,13 +2,14 @@
 //!
 //! A model's participants are threads of that model: Loom and Shuttle can only interleave and
 //! reorder the operations of threads they started. In ordinary execution and under Turmoil these
-//! are the operating system's threads.
+//! are the operating system's threads. [`yield_now`] is how a synchronous spin wait gives the
+//! scheduler of the build, the operating system's or a model's, the chance to run what it waits on.
 
 #[cfg(not(any(feature = "loom", feature = "shuttle")))]
-pub use std::thread::{JoinHandle, spawn};
+pub use std::thread::{JoinHandle, spawn, yield_now};
 
 #[cfg(feature = "loom")]
-pub use loom::thread::{JoinHandle, spawn};
+pub use loom::thread::{JoinHandle, spawn, yield_now};
 // See the atomic module: one backend stays selected when both modes are enabled by mistake.
 #[cfg(all(feature = "shuttle", not(feature = "loom")))]
-pub use shuttle::thread::{JoinHandle, spawn};
+pub use shuttle::thread::{JoinHandle, spawn, yield_now};

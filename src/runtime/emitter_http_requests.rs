@@ -50,7 +50,7 @@ impl HttpRequestBody {
         let mut prepared = Vec::new();
         let mut rejected = Vec::new();
         for (batch_index, batch) in batches.iter().enumerate() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let pending_rows = batch.pending_record_rows();
             if pending_rows.is_empty() {
                 continue;
@@ -182,7 +182,7 @@ mod tests {
         HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, JsonType, ResolvedCodecWireFormat,
         WireSchemaField,
     };
-    use parking_lot::Mutex;
+    use nervix_primitives::sync::blocking::Mutex;
 
     use super::*;
     use crate::{
@@ -352,7 +352,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_retry_resends_the_prepared_requests_unchanged_before_preparing_new_rows() {
         let context = sink_context();
         let writes = Arc::new(Mutex::new(Vec::new()));
@@ -415,7 +415,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_bodyless_request_carries_no_content_and_a_rejection_resolves_only_its_row() {
         let context = sink_context();
         let writes = Arc::new(Mutex::new(Vec::new()));

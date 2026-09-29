@@ -26,8 +26,7 @@ use nervix_models::{
     ArchiveDigest, CommandExecutionReference, DomainName, RestoreArchive, RestoreStep, Timestamp,
     UserName,
 };
-use nervix_primitives::sync::atomic::Ordering;
-use parking_lot::Mutex;
+use nervix_primitives::sync::{atomic::Ordering, blocking::Mutex};
 use shuttle::{future::block_on, thread};
 
 use super::{

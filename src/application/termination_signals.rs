@@ -26,7 +26,10 @@ use std::{ffi::c_int, time::Duration};
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
-use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
+use nervix_primitives::{
+    runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime},
+    sync::atomic::{AtomicBool, Ordering},
+};
 #[cfg(feature = "shuttle")]
 use shuttle::thread;
 use signal_hook::{
@@ -34,7 +37,6 @@ use signal_hook::{
     iterator::Signals,
     low_level,
 };
-use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
 use tracing::{info, warn};
 use triomphe::Arc;
 
@@ -712,8 +714,8 @@ mod tests {
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
     use meticulous::ResultExt as _;
+    use nervix_primitives::sync::watch;
     use shuttle::future::block_on;
-    use tokio::sync::watch;
 
     use super::*;
     use crate::{

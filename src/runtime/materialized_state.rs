@@ -2,9 +2,12 @@ use std::sync::Arc as StdArc;
 
 use ahash::RandomState;
 use error_stack::Report;
-use nervix_execution::{Executor, sync::DashMap};
+use nervix_execution::Executor;
 use nervix_models::ClusterNodeName;
-use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
+use nervix_primitives::{
+    collections::DashMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
 use triomphe::Arc;
 
 use super::{
@@ -39,10 +42,10 @@ pub(super) struct ReplicatedMaterializedRelayState {
     /// revision, or a second requester arriving for it, is answered without scanning or encoding
     /// the state again. Exactly one generation is retained, so no build pins unbounded history;
     /// a reader that took a copy keeps its own charge until it releases it.
-    sealed: parking_lot::Mutex<Option<SealedMaterializedSnapshot>>,
+    sealed: nervix_primitives::sync::blocking::Mutex<Option<SealedMaterializedSnapshot>>,
     /// Admits one snapshot build per placement. Requesters that arrive while a build is running
     /// wait for its result instead of starting a second scan of the same state.
-    build: tokio::sync::Mutex<()>,
+    build: nervix_primitives::sync::Mutex<()>,
 }
 
 /// Read-only access to materialized records and snapshots.
@@ -141,8 +144,8 @@ impl ReplicatedMaterializedRelayState {
             installed_fence: AtomicU64::new(0),
             current_lsm: LsmSequence::restored(0),
             last_persisted_lsm: AtomicU64::new(0),
-            sealed: parking_lot::Mutex::new(None),
-            build: tokio::sync::Mutex::new(()),
+            sealed: nervix_primitives::sync::blocking::Mutex::new(None),
+            build: nervix_primitives::sync::Mutex::new(()),
         }
     }
 
@@ -571,7 +574,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn unbranched_materialized_state_snapshot_restores_entries() {
         let executor = Executor::new(nervix_execution::ExecutionConfig::default())
             .assured("the default execution configuration is internally consistent");
@@ -630,7 +633,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn materialized_state_reads_selected_arrow_columns_by_index() {
         let record = test_runtime_row([
             (
@@ -676,7 +679,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_sealed_generation_matches_the_revision_it_was_captured_at() {
         let executor = Executor::new(nervix_execution::ExecutionConfig::default())
             .assured("the default execution configuration is internally consistent");
@@ -726,7 +729,7 @@ mod tests {
         assert!(sealed.descriptor.revision < originator.read().current_lsm());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_already_current_requester_is_answered_without_a_new_generation() {
         let executor = Executor::new(nervix_execution::ExecutionConfig::default())
             .assured("the default execution configuration is internally consistent");
@@ -763,7 +766,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_evicted_branch_is_not_resurrected_by_an_earlier_generation() {
         let executor = Executor::new(nervix_execution::ExecutionConfig::default())
             .assured("the default execution configuration is internally consistent");

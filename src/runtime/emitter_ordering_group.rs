@@ -448,7 +448,7 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_expression_group_is_evaluated_per_source_row_in_order() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(groups.estimated_bytes(), group_bytes);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_expression_group_fails_only_the_row_whose_evaluation_failed() {
         let input_schema =
             test_schema(&[("left", ParseAsType::I64), ("divisor", ParseAsType::I64)]);
@@ -518,7 +518,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_branch_group_is_the_batch_key_and_an_unbranched_batch_has_none() {
         let input_schema = test_schema(&[("tenant", ParseAsType::String)]);
         let unbranched = unbranched_batch(

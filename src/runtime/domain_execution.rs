@@ -941,7 +941,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn execution_rejects_an_uninstalled_paced_clock() {
         let runtime = Runtime::new();
         let clock_domain = domain("paced");
@@ -968,7 +968,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn execution_rejects_a_mapping_without_a_committed_authority() {
         let runtime = Runtime::new();
         let clock_domain = domain("paced");
@@ -1002,7 +1002,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn passive_execution_keeps_a_stopped_clock_unreadable() {
         let runtime = Runtime::new();
         let clock_domain = domain("stopped");
@@ -1028,7 +1028,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn passive_execution_installs_planned_surfaces_without_admitting_endpoint_traffic() {
         let runtime = Runtime::new();
         let domain = domain("stopped_surfaces");
@@ -1157,7 +1157,7 @@ mod tests {
         })
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_graph_build_starts_each_planned_reingestor_input() {
         let runtime = Runtime::new();
         let domain = domain("graph_reingestor");
@@ -1216,7 +1216,7 @@ mod tests {
         assert!(!runtime.inner.executions.contains_key(&domain));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_unplaced_graph_binds_a_generator_from_its_materialized_source_plan() {
         let runtime = Runtime::new();
         let domain = domain("graph_generator");
@@ -1285,7 +1285,7 @@ mod tests {
             .assured("removing the graph stops its generator task");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_unplaced_lookup_graph_reports_a_missing_resource_store_before_activation() {
         let runtime = Runtime::new();
         let domain = domain("graph_lookup");
@@ -1343,7 +1343,7 @@ mod tests {
         assert!(!runtime.inner.executions.contains_key(&domain));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_build_rejects_a_route_its_relay_is_not_branched_for() {
         let domain = domain("branch_mismatch");
         let branched = ScheduledNode::new(

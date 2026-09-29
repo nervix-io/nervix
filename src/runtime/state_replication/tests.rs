@@ -17,13 +17,13 @@ use nervix_models::{
     OwnershipStateResetCause, OwnershipTransition, ParseAsType, RelayBranching, RelayName,
     ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint, SchemaName, Timestamp,
 };
-use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
+use nervix_primitives::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, watch,
+};
 use nonzero_ext::nonzero;
 use tempfile::tempdir;
-use tokio::{
-    sync::{mpsc, watch},
-    time::{Duration, timeout},
-};
+use tokio::time::{Duration, timeout};
 use triomphe::Arc;
 
 use super::*;
@@ -175,7 +175,7 @@ fn recovered_handoff_retries_schedule_rebuild_until_activation() {
     assert!(ordinary.is_authorized());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn restarted_destination_reclaims_an_uncommitted_handoff_preparation() {
     let dir = tempdir().expect("temporary runtime state directory should open");
     let abandoned = EmptyRelayHandoffFixture::new("abandoned-operation");
@@ -239,7 +239,7 @@ async fn restarted_destination_reclaims_an_uncommitted_handoff_preparation() {
     assert_eq!(persisted[0].operation_id, replacement.operation_id);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn surviving_authority_reconciles_a_dead_coordinators_preparation() {
     let fixture = EmptyRelayHandoffFixture::new("abandoned-operation");
     let runtime = Runtime::new();
@@ -325,7 +325,7 @@ async fn surviving_authority_reconciles_a_dead_coordinators_preparation() {
     assert_eq!(prepared.operation_id, replacement.operation_id);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn committed_preparation_survives_coordinator_failure_and_destination_restart() {
     let fixture = EmptyRelayHandoffFixture::new("committed-operation");
     let dir = tempdir().expect("temporary runtime state directory should open");
@@ -460,7 +460,7 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
     assert_eq!(persisted.destination, fixture.destination);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuild() {
     let dir = tempdir().expect("temporary runtime state directory should open");
     let domain = domain("default");
@@ -619,7 +619,7 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn forced_recovery_recreates_state_only_for_a_complete_reset_decision() {
     let dir = tempdir().expect("temporary runtime state directory should open");
     let db = Database::builder(dir.path())
@@ -1148,7 +1148,7 @@ fn runtime_state_store_persists_latest_snapshot_with_monotonic_lsm() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn deduplicator_snapshot_task_persists_published_keys_on_interval() {
     let dir = tempdir().expect("temp dir should open");
     let db = Database::builder(dir.path())
@@ -1183,7 +1183,7 @@ async fn deduplicator_snapshot_task_persists_published_keys_on_interval() {
         Timestamp::from_unix_nanos(1),
         Duration::from_secs(600),
     ));
-    let snapshot_owner = tokio::spawn(async move {
+    let snapshot_owner = nervix_primitives::task::spawn(async move {
         let response = timeout(Duration::from_secs(1), snapshot_requests.recv())
             .await
             .expect("snapshot task should ask the branch task to publish")
@@ -1209,7 +1209,7 @@ async fn deduplicator_snapshot_task_persists_published_keys_on_interval() {
 /// A branch task that is gone, such as one aborted past its shutdown grace, can no longer publish.
 /// What it published before is then the newest state anyone can restore, so the snapshot task still
 /// persists it.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn deduplicator_snapshot_task_persists_published_keys_after_the_branch_task_is_gone() {
     let dir = tempdir().expect("temp dir should open");
     let db = Database::builder(dir.path())
@@ -1267,7 +1267,7 @@ async fn deduplicator_snapshot_task_persists_published_keys_after_the_branch_tas
     assert_eq!(persisted.lsm, 1);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn materialized_relay_snapshot_task_owns_persistence() {
     let dir = tempdir().expect("temp dir should open");
     let db = Database::builder(dir.path())
@@ -1344,7 +1344,7 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn kafka_offset_snapshot_task_owns_persistence() {
     let dir = tempdir().expect("temp dir should open");
     let db = Database::builder(dir.path())
@@ -1417,7 +1417,7 @@ async fn kafka_offset_snapshot_task_owns_persistence() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn window_processor_snapshot_task_persists_published_state_on_interval() {
     let dir = tempdir().expect("temp dir should open");
     let db = Database::builder(dir.path())
@@ -1456,7 +1456,7 @@ async fn window_processor_snapshot_task_persists_published_state_on_interval() {
     );
     let snapshot_state = state.clone();
     let snapshot_branch = placement.branch_key.clone();
-    let snapshot_owner = tokio::spawn(async move {
+    let snapshot_owner = nervix_primitives::task::spawn(async move {
         let response = timeout(Duration::from_secs(1), snapshot_requests.recv())
             .await
             .expect("snapshot task should ask the branch task to publish")
@@ -1529,7 +1529,7 @@ fn a_window_state_publication_proceeds_while_a_snapshot_reads_the_previous_one()
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_recreated_window_branch_refuses_the_previous_lifetime_checkpoint() {
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
@@ -1870,7 +1870,7 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
     let runtime = Runtime::default();
     let placement = RuntimeStatePlacement {
@@ -2475,7 +2475,7 @@ fn a_checkpoint_of_a_replaced_generation_is_refused_before_it_is_published() {
 /// Forced recovery selects checkpoints only from the generation it recovers. A snapshot of a replaced
 /// generation stays on disk with a higher revision than anything current, and is still never
 /// selected.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn forced_recovery_never_selects_a_checkpoint_of_a_replaced_generation() {
     let dir = tempdir().expect("temporary runtime state directory should open");
     let db = Database::builder(dir.path())

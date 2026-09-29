@@ -1277,7 +1277,7 @@ fn client_errors_are_classified_and_keep_their_causes() {
 
 #[test]
 fn a_token_bounds_a_call_by_cancellation_and_by_deadline() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .assured("a test runtime starts");

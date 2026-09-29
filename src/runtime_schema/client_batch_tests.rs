@@ -149,7 +149,7 @@ fn framed(message: &[u8], body: &[u8]) -> Vec<u8> {
     framed
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn one_canonical_batch_of_the_schema_is_decoded_with_its_rows() {
     let batch = batch_of(arrow_schema(), &[1, 2, 3]);
     let decoded = decode(
@@ -167,7 +167,7 @@ async fn one_canonical_batch_of_the_schema_is_decoded_with_its_rows() {
     assert_eq!(decoded.num_rows(), 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn another_schema_is_refused_with_its_first_difference() {
     let field =
         |name: &str, data_type: DataType, nullable: bool| Field::new(name, data_type, nullable);
@@ -274,7 +274,7 @@ async fn another_schema_is_refused_with_its_first_difference() {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_stream_without_exactly_one_batch_is_refused() {
     let none = stream(&arrow_schema(), &[]);
     assert!(matches!(
@@ -294,7 +294,7 @@ async fn a_stream_without_exactly_one_batch_is_refused() {
     ));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn rows_and_bytes_beyond_the_limits_are_refused_before_decoding() {
     let three = stream(&arrow_schema(), &[batch_of(arrow_schema(), &[1, 2, 3])]);
     let two_rows = ClientBatchLimits {
@@ -320,7 +320,7 @@ async fn rows_and_bytes_beyond_the_limits_are_refused_before_decoding() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_body_that_is_not_one_canonical_stream_is_malformed() {
     let canonical = stream(&arrow_schema(), &[batch_of(arrow_schema(), &[1, 2])]);
     let mut truncated = canonical.clone();
@@ -364,7 +364,7 @@ async fn a_body_that_is_not_one_canonical_stream_is_malformed() {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_compressed_batch_is_refused() {
     let canonical = stream(&arrow_schema(), &[batch_of(arrow_schema(), &[1])]);
     let parts = messages(&canonical);
@@ -439,7 +439,7 @@ fn record_batch_message(rows: Option<i64>, body_length: i64) -> Vec<u8> {
     framed(builder.finished_data(), &[])
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_stream_whose_framing_or_headers_break_the_format_names_what_is_wrong() {
     let canonical = stream(&arrow_schema(), &[batch_of(arrow_schema(), &[1])]);
     let parts = messages(&canonical);
@@ -490,7 +490,7 @@ async fn a_stream_whose_framing_or_headers_break_the_format_names_what_is_wrong(
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_dictionary_message_is_unexpected() {
     let canonical = stream(&arrow_schema(), &[batch_of(arrow_schema(), &[1])]);
     let parts = messages(&canonical);
@@ -555,7 +555,7 @@ async fn a_dictionary_message_is_unexpected() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn columns_that_break_their_type_are_invalid_data() {
     // The record batch of a binary column carries bytes that are not UTF-8; framed under the
     // string schema, its columns do not satisfy their declared type.
@@ -579,7 +579,7 @@ async fn columns_that_break_their_type_are_invalid_data() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_node_without_relay_memory_is_busy_rather_than_refusing_the_batch() {
     let executor = Executor::default();
     let mut held = Vec::<Reservation>::new();

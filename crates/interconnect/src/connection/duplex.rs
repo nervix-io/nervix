@@ -95,7 +95,7 @@ impl FrameReader {
     /// The next complete frame, or `None` once the peer half-closed its direction.
     pub(crate) async fn next_frame(&mut self) -> Result<Option<Vec<u8>>, Report<TransportError>> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(frame) = self.take_buffered_frame()? {
                 return Ok(Some(frame));
             }
@@ -217,7 +217,7 @@ impl FrameWriter {
                 .await?;
             let mut offset = 0;
             while offset < payload.len() {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let remaining = payload
                     .len()
                     .checked_sub(offset)
@@ -246,7 +246,7 @@ impl FrameWriter {
 
     async fn send_all(&mut self, mut body: Bytes) -> Result<(), Report<TransportError>> {
         while !body.is_empty() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.stream.reserve_capacity(body.len());
             let assigned = poll_fn(|context| self.stream.poll_capacity(context))
                 .await
@@ -666,7 +666,7 @@ impl TransportState {
             .await?;
             return Ok(());
         }
-        let handled = tokio::select! {
+        let handled = nervix_primitives::select! {
             handled = self.requests.handle_duplex(
                 &self.executor,
                 peer_node_id,
@@ -708,7 +708,7 @@ impl TransportState {
             self.options.progress_timeout,
         );
         while let Some(frame) = responses.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let frame = match frame {
                 Ok(frame) => frame,
                 Err(error) => {

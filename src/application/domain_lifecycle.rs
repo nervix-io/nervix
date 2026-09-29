@@ -262,11 +262,11 @@ impl SessionServiceImpl {
         let mut last_status_error = None;
 
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             polling.tick().await;
             let mut all_drained = true;
             for node in &nodes {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 match self.domain_drain_status_on_node(node, domain).await {
                     Ok(status)
                         if status.active_ingestors == 0
@@ -870,7 +870,7 @@ mod tests {
         *,
     };
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn create_domain_if_not_exists_returns_already_existed() {
         let TestService {
             service,
@@ -912,7 +912,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn admitted_domain_creation_resumes_after_its_domain_record_exists() {
         let TestService {
             service,
@@ -944,7 +944,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn domain_placement_commit_uses_its_captured_planning_basis() {
         let TestService {
             service,

@@ -26,11 +26,10 @@ use std::{
     time::Duration,
 };
 
+use nervix_primitives::{sync::mpsc, task::JoinHandle};
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader},
     process::{Child, Command},
-    sync::mpsc,
-    task::JoinHandle,
     time::Instant,
 };
 
@@ -298,13 +297,14 @@ impl ClientProbe {
         }
         let (sender, lines) = mpsc::unbounded_channel();
         let Some(mut command) = runtime.command()? else {
-            let completion = Completion::InProcess(tokio::task::spawn_blocking(move || {
-                c_abi_probe::run(&target, &mut |line| {
-                    sender.send(line.to_string()).map_err(|_| {
-                        io::Error::other("the scenario stopped reading the probe's report")
+            let completion =
+                Completion::InProcess(nervix_primitives::task::spawn_blocking(move || {
+                    c_abi_probe::run(&target, &mut |line| {
+                        sender.send(line.to_string()).map_err(|_| {
+                            io::Error::other("the scenario stopped reading the probe's report")
+                        })
                     })
-                })
-            }));
+                }));
             return Ok(Self {
                 runtime,
                 lines,
@@ -342,16 +342,16 @@ impl ClientProbe {
             .stderr
             .take()
             .ok_or_else(|| io::Error::other("the probe's stderr was not captured"))?;
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = reader.next_line().await {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if sender.send(line).is_err() {
                     break;
                 }
             }
         });
-        let stderr = tokio::spawn(async move {
+        let stderr = nervix_primitives::task::spawn(async move {
             let mut captured = String::new();
             stderr.read_to_string(&mut captured).await?;
             Ok(captured)
@@ -372,7 +372,7 @@ impl ClientProbe {
     ) -> io::Result<()> {
         let deadline = Instant::now() + within;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match tokio::time::timeout_at(deadline, self.lines.recv()).await {
                 Ok(Some(line)) => {
                     let found = line == expected;
@@ -406,7 +406,7 @@ impl ClientProbe {
     pub(crate) async fn finish(mut self, within: Duration) -> io::Result<ProbeReport> {
         let deadline = Instant::now() + within;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match tokio::time::timeout_at(deadline, self.lines.recv()).await {
                 Ok(Some(line)) => self.received.push(line),
                 Ok(None) => break,

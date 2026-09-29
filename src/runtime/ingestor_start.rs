@@ -84,7 +84,7 @@ impl Runtime {
         domain: &DomainName,
     ) -> Result<(), RuntimeError> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.next_scheduled_ingestor_start_plan(Some(domain)) {
                 ScheduledIngestorStart::Plan(plan) => self.start_ingestor(&plan).await?,
                 ScheduledIngestorStart::Complete => break,
@@ -96,7 +96,7 @@ impl Runtime {
     pub(crate) async fn start_running_domain_ingestors(&self) -> Result<(), RuntimeError> {
         let _application = self.inner.schedule_application.lock().await;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.next_scheduled_ingestor_start_plan(None) {
                 ScheduledIngestorStart::Plan(plan) => self.start_ingestor(&plan).await?,
                 ScheduledIngestorStart::Complete => break,
@@ -355,7 +355,7 @@ impl Runtime {
             })
             .attach_printable(source.to_string())
         })? {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             line_number += 1;
             if line.trim().is_empty() {
                 continue;
@@ -380,7 +380,7 @@ impl Runtime {
             })?;
         let mut entries = HashMap::new();
         for (row, line_number) in row_lines.into_iter().enumerate() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(value) = batch.value(row, lookup.key_field.as_str()).change_context(
                 LookupRuntimeError::ReadKey {
                     lookup: lookup.name.clone(),
@@ -434,7 +434,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_mqtt_client_id_conflicts_are_visible_on_describe() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -574,7 +574,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_ingestor_start_failure_removes_partial_domain_execution() {
         let runtime = Runtime::default();
         let domain = domain("default");

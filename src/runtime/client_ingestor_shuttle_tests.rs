@@ -19,12 +19,12 @@ use nervix_models::{
     ClientProducerEndReason, ClientProducerLimits, ClientProducerPolicy, ClientSubmissionOutcome,
     FieldName, IngestQuiesceMode, ParseAsType, SchemaField,
 };
+use nervix_primitives::sync::{mpsc, oneshot};
 // Real atomics are not Shuttle scheduling points, so each record below changes in the same
 // scheduling step as the operation it records.
 use nervix_primitives::unmodeled::sync::atomic::{
     AtomicBool, AtomicUsize, Ordering as RecordOrdering,
 };
-use tokio::sync::{mpsc, oneshot};
 
 use super::*;
 use crate::shuttle_test::check_interleavings;
@@ -73,7 +73,7 @@ async fn reserve_more_than_half(budget: ClientProducerBudget, live: StdArc<Atomi
         budget.reserved() <= CLIENT_PRODUCER_NODE_BYTES,
         "the node budget holds more than its bound"
     );
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
     live.fetch_sub(1, RecordOrdering::SeqCst);
     drop(reservation);
 }
@@ -84,7 +84,7 @@ fn racing_reservations_stay_within_the_node_budget() {
         let live = StdArc::new(AtomicUsize::new(0));
         let mut producers = Vec::with_capacity(RACING_PRODUCERS);
         for _ in 0..RACING_PRODUCERS {
-            producers.push(tokio::spawn(reserve_more_than_half(
+            producers.push(nervix_primitives::task::spawn(reserve_more_than_half(
                 budget.clone(),
                 live.clone(),
             )));
@@ -117,7 +117,7 @@ async fn admit_one_batch(
         !drained.load(RecordOrdering::SeqCst),
         "a batch was dispatched after the drain that followed the quiesce concluded"
     );
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
     root.ack_success();
 }
 
@@ -130,11 +130,11 @@ async fn quiesce_and_drain(
 ) {
     control.engage(IngestorQuiesceCause::EntityHold);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if trackers.ingestor_outstanding() == 0 {
             break;
         }
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
     }
     drained.store(true, RecordOrdering::SeqCst);
 }
@@ -156,12 +156,13 @@ fn a_batch_racing_a_quiesce_is_counted_or_refused() {
         let drained = StdArc::new(AtomicBool::new(false));
         // The drain spins until the admitted root resolves, so it is spawned after the admission
         // it waits for.
-        let admission = tokio::spawn(admit_one_batch(
+        let admission = nervix_primitives::task::spawn(admit_one_batch(
             control.clone(),
             trackers.clone(),
             drained.clone(),
         ));
-        let drain = tokio::spawn(quiesce_and_drain(control, trackers.clone(), drained));
+        let drain =
+            nervix_primitives::task::spawn(quiesce_and_drain(control, trackers.clone(), drained));
         admission.await.assured(CHECK_TASK_JOINS);
         drain.await.assured(CHECK_TASK_JOINS);
         assert_eq!(
@@ -192,7 +193,7 @@ enum ProducerEnding {
 /// producer that submitted two batches the worker took.
 struct EndpointModel {
     commands: mpsc::UnboundedSender<EndpointCommand>,
-    endpoint: tokio::task::JoinHandle<()>,
+    endpoint: nervix_primitives::task::JoinHandle<()>,
     jobs: mpsc::Receiver<AdmissionJob>,
     handle: ClientProducerHandle,
     events: ClientProducerEvents,
@@ -219,7 +220,7 @@ impl EndpointModel {
             gauges: Arc::new(PublishedClientGauges::default()),
             published: ClientIngestorGauges::default(),
         };
-        let endpoint = tokio::spawn(endpoint.run());
+        let endpoint = nervix_primitives::task::spawn(endpoint.run());
         let (jobs, received) = mpsc::channel(1);
         let execution = Arc::new(ClientExecution {
             contract: ClientEndpointContract::from_digest([1; 32]),
@@ -369,15 +370,19 @@ fn an_ending_producer_answers_every_batch_once(ending: ProducerEnding) {
         // races the end and the first batch's acknowledgement.
         let second = model.next_job().await;
         let reporter_commands = model.commands.clone();
-        let reporter = tokio::spawn(async move {
+        let reporter = nervix_primitives::task::spawn(async move {
             let second_root = admitted(&reporter_commands, &second);
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
             second_root.no_ack("a route rejected it");
         });
-        let acknowledger = tokio::spawn(async move {
+        let acknowledger = nervix_primitives::task::spawn(async move {
             first_root.ack_success();
         });
-        let ender = tokio::spawn(end_producer(ending, model.handle, model.commands.clone()));
+        let ender = nervix_primitives::task::spawn(end_producer(
+            ending,
+            model.handle,
+            model.commands.clone(),
+        ));
         let answered = read_every_event(model.events).await;
         reporter.await.assured(CHECK_TASK_JOINS);
         acknowledger.await.assured(CHECK_TASK_JOINS);

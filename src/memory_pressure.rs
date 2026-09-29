@@ -10,10 +10,10 @@
 
 use std::time::Duration;
 
+use nervix_primitives::sync::CancellationToken;
 use thiserror::Error;
 use tikv_jemalloc_ctl::{epoch, stats};
 use tokio::time::{MissedTickBehavior, interval, sleep};
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use typed_builder::TypedBuilder;
 use ubyte::ByteUnit;
@@ -106,8 +106,8 @@ impl MemoryPressureController {
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 _ = shutdown.cancelled() => break,
                 _ = ticker.tick() => {}
             }
@@ -158,13 +158,13 @@ impl MemoryPressureController {
         shutdown: &CancellationToken,
     ) -> MemoryPressureState {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if shutdown.is_cancelled() {
                 return MemoryPressureState::Pressured;
             }
             let delay = self.resume_delay();
             if !delay.is_zero() {
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = shutdown.cancelled() => return MemoryPressureState::Pressured,
                     _ = sleep(delay) => {}
                 }

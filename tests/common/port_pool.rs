@@ -27,7 +27,7 @@ use std::{
 };
 
 use meticulous::OptionExt as _;
-use parking_lot::Mutex;
+use nervix_primitives::sync::blocking::Mutex;
 use thiserror::Error;
 
 const HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);

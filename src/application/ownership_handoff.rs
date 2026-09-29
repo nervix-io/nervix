@@ -364,7 +364,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
         let moves = planned_ownership_moves(Some(current), Some(target));
         let mut preparations = FuturesUnordered::new();
         for moved in moves {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(transition) = target
                 .nodes
                 .get(&moved.entity)
@@ -430,7 +430,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
             });
         }
         while let Some(preparation) = preparations.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let moved = preparation.moved;
             let node = target
                 .nodes
@@ -729,7 +729,7 @@ impl SessionServiceImpl {
     ) -> OwnershipHandoffResult<()> {
         let current = self.live_node_incarnations().await;
         for moved in &handoff.moves {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let source = *handoff
                 .node_incarnations
                 .get(&moved.former_owner)
@@ -974,7 +974,7 @@ impl SessionServiceImpl {
             target_schedule_fingerprint,
         );
         for moved in &moves {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let capture = tokio::time::timeout_at(
                 preparation_deadline,
                 self.capture_ownership_handoff_state(
@@ -1302,7 +1302,7 @@ impl SessionServiceImpl {
         handoff: &PlannedOwnershipHandoff,
     ) -> OwnershipHandoffResult<()> {
         for moved in &handoff.moves {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let request = RemoteConfirmOwnershipHandoffStateRequest {
                 coordination: handoff.gate.coordination.clone(),
                 operation_id: handoff.operation_id.clone(),
@@ -1327,7 +1327,7 @@ impl SessionServiceImpl {
                 handoff.preparation_deadline,
             )
             .await?;
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.confirm_ownership_handoff_on_node(
                 &moved.destination,
                 request,
@@ -1349,7 +1349,7 @@ impl SessionServiceImpl {
                 return self.confirm_local_ownership_handoff_state(request).await;
             }
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 match self.inner.interconnect.request(node, request.clone()).await {
                     Ok(Ok(())) => return Ok(()),
                     Ok(Err(failure)) => {
@@ -1494,7 +1494,7 @@ impl SessionServiceImpl {
         preparations.require_discard();
         let attempts = preparations.attempts.values().cloned().collect::<Vec<_>>();
         for moved in attempts {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self
                 .discard_ownership_handoff_preparation_on_node(
                     &preparations.coordination,
@@ -1573,7 +1573,7 @@ impl SessionServiceImpl {
             if let Some(domain_schedule) = schedule.domain(&cleanup.domain) {
                 let attempts = cleanup.attempts.values().cloned().collect::<Vec<_>>();
                 for moved in attempts {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let committed = moved.belongs_to_committed_transition(
                         domain_schedule,
                         &cleanup.operation_id,
@@ -1602,11 +1602,11 @@ impl SessionServiceImpl {
         }
 
         while !cleanup.attempts.is_empty() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let attempts = cleanup.attempts.values().cloned().collect::<Vec<_>>();
             for moved in attempts {
-                tokio::task::consume_budget().await;
-                let result = tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                let result = nervix_primitives::select! {
                     _ = self.inner.drain_support_shutdown.cancelled() => return,
                     result = self.discard_ownership_handoff_preparation_on_node(
                         &cleanup.coordination,
@@ -1634,7 +1634,7 @@ impl SessionServiceImpl {
             if cleanup.attempts.is_empty() {
                 return;
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = self.inner.drain_support_shutdown.cancelled() => return,
                 _ = sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL) => {}
             }
@@ -1647,7 +1647,7 @@ impl SessionServiceImpl {
     ) -> OwnershipHandoffResult<u64> {
         let mut applied = self.inner.consensus.subscribe_applied();
         while self.inner.consensus.current_revision().await < request.authoritative_revision {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             applied.changed().await.assured(
                 "the consensus observer retains its applied-revision sender for the server \
                  lifetime",
@@ -1834,7 +1834,7 @@ impl SessionServiceImpl {
         }
         let mut failure = None;
         while let Some((node, result)) = requests.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Err(error) = result {
                 debug!(
                     %node,
@@ -1859,7 +1859,7 @@ impl SessionServiceImpl {
         let mut observed = None;
         let mut followup_at = None;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self.inner.drain_support_shutdown.is_cancelled() {
                 return;
             }
@@ -1902,7 +1902,7 @@ impl SessionServiceImpl {
                 observed = None;
                 followup_at = None;
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = self.inner.drain_support_shutdown.cancelled() => return,
                 _ = sleep(OWNERSHIP_HANDOFF_RECONCILIATION_POLL_INTERVAL) => {}
             }
@@ -1962,7 +1962,7 @@ impl SessionServiceImpl {
 
             let mut schedule_rx = self.inner.consensus.subscribe_schedule();
             let target_schedule = loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let schedule = self.inner.consensus.current_schedule().await;
                 let current = schedule.domain(&request.domain).ok_or_else(|| {
                     OwnershipHandoffError::schedule(format!(
@@ -2033,7 +2033,7 @@ impl SessionServiceImpl {
         self.verify_planned_ownership_handoff_incarnations(handoff)
             .await?;
         for moved in &handoff.moves {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let source_incarnation = *handoff
                 .node_incarnations
                 .get(&moved.former_owner)

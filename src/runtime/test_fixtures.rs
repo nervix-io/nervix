@@ -25,14 +25,12 @@ use nervix_models::{
     OutputBranch, ParseAsType, ProcessorOutput, ProcessorOutputs, RelayName, ResolvedBranching,
     ScheduledNode, SchemaField, SchemaFingerprint, SchemaName, Timestamp,
 };
+use nervix_primitives::sync::watch;
 use nervix_vm::window::lower_window_assignments;
 use nervix_wasm::{
     WasmAckSidecar, WasmEnvelope, WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput,
 };
-use tokio::{
-    sync::watch,
-    time::{Duration, sleep, timeout},
-};
+use tokio::time::{Duration, sleep, timeout};
 use triomphe::Arc;
 
 use super::{
@@ -1076,7 +1074,7 @@ pub(super) async fn wait_for_persisted_runtime_state_lsm(
         .clone();
     timeout(Duration::from_secs(1), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if store
                 .latest_snapshot(placement)
                 .expect("snapshot lookup should succeed")

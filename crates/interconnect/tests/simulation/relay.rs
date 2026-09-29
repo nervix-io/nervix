@@ -256,7 +256,7 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                     } else {
                         let sending = client.clone();
                         let target = peer.clone();
-                        let send_task = tokio::spawn(async move {
+                        let send_task = nervix_primitives::task::spawn(async move {
                             sending.send(&target, Envelope::RelayPayload(body)).await
                         });
                         wait_for(&mut received).await;
@@ -267,7 +267,7 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                                 "client",
                                 "cancellation requested while body reply is pending",
                             );
-                            Some(tokio::spawn(async move {
+                            Some(nervix_primitives::task::spawn(async move {
                                 cancelling.cancel_relay(&target, case.delivery()).await
                             }))
                         } else {
@@ -312,7 +312,7 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                             let cancelling = client.clone();
                             let target = peer.clone();
                             trace.record("client", "cancellation requested during reconnect");
-                            Some(tokio::spawn(async move {
+                            Some(nervix_primitives::task::spawn(async move {
                                 cancelling.cancel_relay(&target, case.delivery()).await
                             }))
                         } else {
@@ -496,7 +496,9 @@ fn restarted_receiver_fences_unresolved_relay(
     let (fresh_tx, fresh_rx) = watch::channel(false);
     let (done_tx, done_rx) = watch::channel(false);
     let (finished_tx, finished_rx) = watch::channel(0_usize);
-    let epochs = StdArc::new(parking_lot::Mutex::new(Vec::<CoordinationIdentity>::new()));
+    let epochs = StdArc::new(nervix_primitives::sync::blocking::Mutex::new(Vec::<
+        CoordinationIdentity,
+    >::new()));
     let incarnations = StdArc::new(AtomicUsize::new(0));
     let crash_phase = StdArc::new(AtomicU8::new(0));
     let seed = run.seed();
@@ -644,7 +646,7 @@ fn restarted_receiver_fences_unresolved_relay(
                         register_peer(&client, "server").await;
                         let sending = client.clone();
                         let target = peer.clone();
-                        let first = tokio::spawn(async move {
+                        let first = nervix_primitives::task::spawn(async move {
                             sending
                                 .send(
                                     &target,
@@ -744,7 +746,7 @@ fn restarted_receiver_fences_unresolved_relay(
                 let mut finished = finished_rx;
                 tokio::time::timeout(Duration::from_secs(60), async {
                     while *finished.borrow() < 2 {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         finished
                             .changed()
                             .await

@@ -4,6 +4,7 @@ use std::{
     sync::OnceLock,
 };
 
+use nervix_primitives::sync::Mutex;
 pub(crate) use nervix_test_environment::{
     CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
     KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
@@ -13,7 +14,6 @@ pub(crate) use nervix_test_environment::{
     SQS_ENDPOINT, SQS_TLS_ENDPOINT,
 };
 use nervix_test_environment::{ContainerMode, DependencyEnvironment, configure_process_lifecycle};
-use tokio::sync::Mutex;
 
 static SUITE_DEPENDENCIES: OnceLock<Mutex<DependencyEnvironment>> = OnceLock::new();
 

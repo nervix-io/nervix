@@ -25,7 +25,6 @@ use ahash::{HashMap, RandomState};
 use bytes::Bytes;
 use error_stack::Report;
 use futures_util::StreamExt as _;
-use nervix_execution::sync::DashMap;
 use nervix_interconnect::{
     ChargedItem, DuplexItems, DuplexResponses, DuplexSender, HandlerRegistrationError,
     InterconnectDuplexRequest, PoolClass, RequestSubquota, StreamHandlerError, Transport,
@@ -35,14 +34,17 @@ use nervix_models::{
     ClientProducerLimits, ClientProducerRefusal, ClientSubmissionOutcome, ClusterNodeName,
     DomainName, IngestorName, SchemaField,
 };
-use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
+use nervix_primitives::{
+    collections::DashMap,
+    stream::wrappers::ReceiverStream,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, oneshot, watch,
+    },
+};
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use tokio::{
-    sync::{mpsc, oneshot, watch},
-    time::{Instant, MissedTickBehavior},
-};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::time::{Instant, MissedTickBehavior};
 use tracing::debug;
 use triomphe::Arc;
 
@@ -312,7 +314,7 @@ impl ProducerLinks {
                 pending: HashMap::default(),
                 routes: HashMap::default(),
             };
-            tokio::spawn(serving.run(commands));
+            nervix_primitives::task::spawn(serving.run(commands));
         }
         link
     }
@@ -367,11 +369,11 @@ impl ServingLink {
             }
         };
         let (items, queued) = mpsc::unbounded_channel();
-        let mut writer = tokio::spawn(write_link(sender, queued));
+        let mut writer = nervix_primitives::task::spawn(write_link(sender, queued));
         let mut last_heard = Instant::now();
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 biased;
                 event = receiver.next() => match event {
                     Ok(Some(event)) => {
@@ -586,8 +588,8 @@ async fn write_link(
     let mut heartbeat = tokio::time::interval(LINK_HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
-        tokio::task::consume_budget().await;
-        let item = tokio::select! {
+        nervix_primitives::task::consume_budget().await;
+        let item = nervix_primitives::select! {
             biased;
             item = items.recv() => match item {
                 Some(item) => item,
@@ -629,7 +631,7 @@ pub(super) fn serve_owner_links(
                     answers,
                     producers: HashMap::default(),
                 };
-                tokio::spawn(link.run(items));
+                nervix_primitives::task::spawn(link.run(items));
                 Ok(DuplexResponses::new(ReceiverStream::new(answered).map(Ok)))
             }
         },
@@ -650,8 +652,8 @@ impl OwnerLink {
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut last_heard = Instant::now();
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 biased;
                 item = items.next() => match item {
                     Ok(Some(ChargedItem { item, charge })) => {
@@ -742,7 +744,7 @@ impl OwnerLink {
                 if answered.is_err() {
                     return false;
                 }
-                tokio::spawn(forward_events(key, events, self.answers.clone()));
+                nervix_primitives::task::spawn(forward_events(key, events, self.answers.clone()));
                 self.producers.insert(key, handle);
             }
             ClientProducerLinkItem::Submit {
@@ -781,8 +783,8 @@ async fn forward_events(
     } = events;
     let mut admission_open = true;
     loop {
-        tokio::task::consume_budget().await;
-        let answer = tokio::select! {
+        nervix_primitives::task::consume_budget().await;
+        let answer = nervix_primitives::select! {
             biased;
             event = outcomes.recv() => match event {
                 Some(ClientProducerEvent::Outcome {

@@ -33,18 +33,11 @@
 //! apply in either build mode.
 
 #[cfg(feature = "shuttle")]
-extern crate shuttle_dashmap as dashmap;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_parking_lot as parking_lot;
-#[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio_util as tokio_util;
 
 mod cancellation;
 mod limits;
 mod memory;
-pub mod sync;
 mod workers;
 
 use std::sync::Arc as StdArc;
@@ -306,7 +299,7 @@ pub enum ExecutionFailure {
 
 /// The standard-library shared pointer the Tokio semaphores require. Every other shared value in
 /// this crate uses `triomphe::Arc`.
-type SemaphoreRef = StdArc<tokio::sync::Semaphore>;
+type SemaphoreRef = StdArc<nervix_primitives::sync::Semaphore>;
 
 // The ordinary tests build executors whose atomics would be Loom's in a Loom build, outside any
 // model. That build runs only the cancellation models.

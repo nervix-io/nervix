@@ -12,7 +12,6 @@ use std::{sync::Arc as StdArc, time::Duration};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::physical_time::{PhysicalDeadlineCapability, actual_utc_now};
-use nervix_execution::sync::ArcSwap;
 #[cfg(test)]
 use nervix_models::DomainTick;
 use nervix_models::{
@@ -23,11 +22,13 @@ use nervix_models::{
 // Shuttle schedules around the watermark's atomic maximum, so a read can be preempted between
 // loading its publication and raising the watermark published with it.
 use nervix_primitives::sync::atomic::{AtomicI64, Ordering};
+use nervix_primitives::{
+    publication::ArcSwap,
+    sync::{CancellationToken, watch},
+};
 #[cfg(test)]
 use nervix_wasm::WasmExecutionContext;
 use thiserror::Error;
-use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
 use triomphe::Arc;
 
 #[cfg(test)]
@@ -531,7 +532,7 @@ impl DomainClockObserver {
 
     /// Wakes on either an installation or accepted progress change.
     pub(crate) async fn any_changed(&mut self) {
-        tokio::select! {
+        nervix_primitives::select! {
             changed = self.changes.changed() => {
                 changed.assured("the observer holds the clock lifecycle sender");
             }
@@ -679,7 +680,7 @@ impl DomainClock {
 
         let mut changes = self.inner.changes.subscribe();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let snapshot = self
                 .snapshot()
                 .change_context(DomainClockWaitError::Clock {
@@ -702,7 +703,7 @@ impl DomainClock {
                     domain: self.inner.domain.clone(),
                 },
             )?;
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = physical_time.wait_until(physical) => {}
                 changed = changes.changed() => {
                     changed.assured(
@@ -1925,7 +1926,7 @@ mod tests {
         assert!(bound.snapshot().is_ok());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn cancelled_logical_wait_returns_a_typed_outcome() {
         let lifecycle = DomainClockLifecycle::new(domain("paced"));
         lifecycle.install_paced(
@@ -1962,7 +1963,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn logical_deadline_cannot_cross_domain_capabilities() {
         let first = DomainClockLifecycle::new(domain("first"));
         first.synchronize(
@@ -2021,7 +2022,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn logical_wait_revalidates_generation_after_waking() {
         let lifecycle = DomainClockLifecycle::new(domain("paced"));
         lifecycle.install_paced(
@@ -2045,9 +2046,10 @@ mod tests {
         let cancellation = CancellationToken::new();
         let task_clock = bound.clone();
         let task_cancellation = cancellation.clone();
-        let waiter =
-            tokio::spawn(async move { task_clock.wait_until(deadline, &task_cancellation).await });
-        tokio::task::yield_now().await;
+        let waiter = nervix_primitives::task::spawn(async move {
+            task_clock.wait_until(deadline, &task_cancellation).await
+        });
+        nervix_primitives::task::yield_now().await;
 
         lifecycle.install_paced(
             2,
@@ -2075,7 +2077,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn due_logical_wait_returns_due_time_and_a_fresh_snapshot() {
         let clock_domain = domain("unpaced");
         let lifecycle = DomainClockLifecycle::new(clock_domain.clone());
@@ -2189,7 +2191,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn cadence_wait_revalidates_its_bound_generation() {
         let clock_domain = domain("cadence_generation");
         let lifecycle = DomainClockLifecycle::new(clock_domain);
@@ -2210,11 +2212,11 @@ mod tests {
             DomainCadenceStart::AfterInterval,
         )
         .assured("fixture cadence starts inside the timestamp range");
-        let wait = tokio::spawn(async move {
+        let wait = nervix_primitives::task::spawn(async move {
             let mut cadence = cadence;
             cadence.next(&CancellationToken::new()).await
         });
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
 
         lifecycle.install_paced(
             2,
@@ -2277,7 +2279,7 @@ mod shuttle_lifecycle_tests {
     use std::collections::BTreeMap;
 
     use nervix_models::DomainTimeRate;
-    use parking_lot::Mutex;
+    use nervix_primitives::sync::blocking::Mutex;
     use shuttle::thread;
 
     use super::*;
@@ -2835,7 +2837,7 @@ mod shuttle_lifecycle_tests {
             .bind()
             .assured("the model installs generation one before it binds");
         let deadline = clock.deadline_at(model_time(BEYOND_SLEEP_HORIZON));
-        let waiter = tokio::spawn(wait_uncancelled(clock, deadline));
+        let waiter = nervix_primitives::task::spawn(wait_uncancelled(clock, deadline));
         change(&lifecycle);
         waiter.await.assured(PANICS_END_THE_SCHEDULE)
     }

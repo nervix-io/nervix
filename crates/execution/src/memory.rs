@@ -5,9 +5,11 @@ use std::{io, ops::Deref, sync::Arc as StdArc};
 use arch_into::ArchInto as _;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
+use nervix_primitives::sync::{
+    OwnedSemaphorePermit, Semaphore, TryAcquireError,
+    atomic::{AtomicU64, Ordering},
+};
 use thiserror::Error;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use triomphe::Arc;
 
 use crate::{MemoryClass, SemaphoreRef};

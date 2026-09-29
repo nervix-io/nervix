@@ -134,7 +134,7 @@ where
 {
     let mut pending = Vec::with_capacity(READ_BYTES);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if let Some(block) = ParsedBlock::parse(&pending)? {
             pending.drain(..block.length);
             if block.status == 101 || block.status >= 200 {
@@ -412,10 +412,10 @@ mod tests {
         assert_eq!(absent.retry_delay(received_at), None);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn only_the_final_head_states_its_retry_after() {
         let (mut client, mut server) = tokio::io::duplex(256);
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             use tokio::io::AsyncWriteExt as _;
             let head = b"HTTP/1.1 103 Early Hints\r\nRetry-After: 60\r\n\r\nHTTP/1.1 503 Service \
                          Unavailable\r\nContent-Length: 0\r\n\r\n";
@@ -495,10 +495,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn interim_headers_are_checked_separately_from_final_headers() {
         let (mut client, mut server) = tokio::io::duplex(128);
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             use tokio::io::AsyncWriteExt as _;
             let head =
                 b"HTTP/1.1 103 Early Hints\r\nx-hint: ready\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n";
@@ -516,7 +516,7 @@ mod tests {
         oversized.extend(std::iter::repeat_n(b'x', MAX_HEADER_BYTES));
         oversized.extend_from_slice(b"\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n");
         let (mut client, mut server) = tokio::io::duplex(8192);
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             use tokio::io::AsyncWriteExt as _;
             if let Err(error) = server.write_all(&oversized).await {
                 panic!("the in-memory server must write its response: {error}");

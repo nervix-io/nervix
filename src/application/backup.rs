@@ -258,7 +258,7 @@ impl SessionServiceImpl {
     ) -> error_stack::Result<Vec<MeasuredSection>, BackupError> {
         let mut measured = Vec::with_capacity(planned.len());
         for section in planned {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let PlannedSection {
                 path,
                 domain,
@@ -310,7 +310,7 @@ impl SessionServiceImpl {
             .change_context_lazy(|| resource_unavailable_error(id))?;
         let mut digester = SectionDigester::new();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let chunk = reader
                 .next_chunk()
                 .await
@@ -342,7 +342,7 @@ impl SessionServiceImpl {
         let executor = self.inner.runtime.executor().clone();
         let mut sink = StagingSink::new(writer, executor);
         for piece in layout.pieces() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match piece {
                 ArchivePiece::Bytes(bytes) => sink.write(bytes).await?,
                 ArchivePiece::Section(entry) => {
@@ -377,7 +377,7 @@ impl SessionServiceImpl {
             .change_context_lazy(|| resource_unavailable_error(id))?;
         let mut digester = SectionDigester::new();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let chunk = reader
                 .next_chunk()
                 .await
@@ -558,7 +558,7 @@ impl StagingSink {
 
     async fn write(&mut self, mut bytes: &[u8]) -> error_stack::Result<(), BackupError> {
         while !bytes.is_empty() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let room = self
                 .chunk_bytes
                 .checked_sub(self.buffer.len())

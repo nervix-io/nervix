@@ -1488,7 +1488,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         let mut replaced_failed_start = false;
         let mut replaced_unhealthy = false;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let name = self.container_name(role);
             let reusable_was_running =
                 self.mode.is_reusable() && container_is_running_by_name(&name).await?;
@@ -1933,7 +1933,7 @@ impl ReusableStartupLock {
             .open(&path)?;
         let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match file.try_lock() {
                 Ok(()) => return Ok(Self(file)),
                 Err(fs::TryLockError::WouldBlock) if tokio::time::Instant::now() < deadline => {
@@ -2138,7 +2138,7 @@ async fn wait_for_container_tcp<I: Image>(
         .map_err(testcontainers_error(dependency))?;
     let deadline = tokio::time::Instant::now() + REUSABLE_READY_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let connection_error = match tokio::net::TcpStream::connect(("127.0.0.1", host_port)).await
         {
             Ok(stream) => {
@@ -2177,7 +2177,7 @@ async fn provision_gcs_bucket(endpoint: &str) -> io::Result<()> {
     let inspect_url = format!("{endpoint}/storage/v1/b/nervix-iceberg");
     let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let attempt_error = match client
             .post(&create_url)
             .json(&serde_json::json!({ "name": "nervix-iceberg" }))

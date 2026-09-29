@@ -12,8 +12,10 @@ use std::{collections::BTreeMap, fmt, sync::LazyLock};
 
 use meticulous::OptionExt as _;
 use nervix_approx_into::ApproxInto as _;
-use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::Mutex;
+use nervix_primitives::sync::{
+    atomic::{AtomicU64, Ordering},
+    blocking::Mutex,
+};
 use tokio::time::{Duration, Instant};
 
 use super::scenario_schedule::AdmissionWait;

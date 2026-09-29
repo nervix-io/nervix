@@ -123,7 +123,7 @@ impl Fixture {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn dual_stack_answers_resolve_ipv4_first() {
     let fixture = Fixture::start(QUICK_OPTIONS, "").await;
     fixture.authority.set(
@@ -137,7 +137,7 @@ async fn dual_stack_answers_resolve_ipv4_first() {
     assert_eq!(resolved, Ok(sockets(&[v4(1), v4(2), v6(1)])));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn literal_addresses_answer_without_a_question() {
     let fixture = Fixture::start(QUICK_OPTIONS, "").await;
     let ipv6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
@@ -147,7 +147,7 @@ async fn literal_addresses_answer_without_a_question() {
     assert_eq!(fixture.authority.total_questions(), 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn hosts_file_names_answer_without_dns() {
     let hosts =
         "192.0.2.9 listed.nervix.test\n2001:db8::9 dual.nervix.test\n192.0.2.10 dual.nervix.test\n";
@@ -163,7 +163,7 @@ async fn hosts_file_names_answer_without_dns() {
     assert_eq!(fixture.authority.total_questions(), 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn search_domains_complete_unqualified_names() {
     let fixture = Fixture::start(QUICK_OPTIONS, "").await;
     fixture.authority.set(
@@ -177,7 +177,7 @@ async fn search_domains_complete_unqualified_names() {
     assert!(fixture.authority.questions_for("peer.nervix.test") > 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn fully_qualified_names_skip_the_search_list() {
     let fixture = Fixture::start(QUICK_OPTIONS, "").await;
     fixture.authority.set(
@@ -195,7 +195,7 @@ async fn fully_qualified_names_skip_the_search_list() {
     assert_eq!(fixture.authority.questions_for("peer.nervix.test"), 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn positive_answers_are_reused_within_their_ttl() {
     let fixture = Fixture::start(QUICK_OPTIONS, "").await;
     fixture.authority.set(
@@ -213,7 +213,7 @@ async fn positive_answers_are_reused_within_their_ttl() {
     assert_eq!(fixture.authority.questions_for("cached.nervix.test"), asked);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_changed_answer_is_used_once_its_ttl_expires() {
     let fixture = Fixture::start(QUICK_OPTIONS, "").await;
     let ttl = Duration::from_secs(1);
@@ -245,7 +245,7 @@ async fn a_changed_answer_is_used_once_its_ttl_expires() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn missing_names_are_reused_within_their_negative_ttl() {
     let fixture = Fixture::start(QUICK_OPTIONS, "").await;
     fixture.authority.set(
@@ -262,7 +262,7 @@ async fn missing_names_are_reused_within_their_negative_ttl() {
     assert_eq!(fixture.authority.questions_for("gone.nervix.test"), asked);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_published_name_resolves_once_its_negative_ttl_expires() {
     let fixture = Fixture::start(QUICK_OPTIONS, "").await;
     let negative_ttl = Duration::from_secs(1);
@@ -290,7 +290,7 @@ async fn a_published_name_resolves_once_its_negative_ttl_expires() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn names_without_addresses_and_refusals_are_distinct_failures() {
     let fixture = Fixture::start(QUICK_OPTIONS, "").await;
     fixture.authority.set(
@@ -316,7 +316,7 @@ async fn names_without_addresses_and_refusals_are_distinct_failures() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_silent_name_server_ends_the_lookup_at_its_budget() {
     let fixture = Fixture::start("options timeout:30 attempts:3\n", "").await;
     fixture
@@ -330,7 +330,7 @@ async fn a_silent_name_server_ends_the_lookup_at_its_budget() {
     assert!(fixture.authority.questions_for("quiet.nervix.test") > 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn the_host_configuration_bounds_retries_below_the_budget() {
     let fixture = Fixture::start(QUICK_OPTIONS, "").await;
     fixture
@@ -345,7 +345,7 @@ async fn the_host_configuration_bounds_retries_below_the_budget() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn lookups_beyond_the_concurrency_bound_wait_and_cancellation_frees_their_slots() {
     let fixture = Fixture::start("options timeout:30 attempts:1\n", "").await;
     let mut holders = Vec::with_capacity(MAX_CONCURRENT_LOOKUPS);
@@ -353,7 +353,7 @@ async fn lookups_beyond_the_concurrency_bound_wait_and_cancellation_frees_their_
         let name = format!("hold-{index}.nervix.test");
         fixture.authority.set(&name, DnsAnswer::Silent);
         let resolver = fixture.resolver.clone();
-        holders.push(tokio::spawn(async move {
+        holders.push(nervix_primitives::task::spawn(async move {
             resolver
                 .resolve(&format!("{name}."), PORT, GENEROUS_BUDGET)
                 .await
@@ -394,7 +394,7 @@ async fn lookups_beyond_the_concurrency_bound_wait_and_cancellation_frees_their_
 
 #[test]
 fn resolvers_are_rebuilt_and_torn_down_with_their_runtime() {
-    let authority_runtime = tokio::runtime::Builder::new_multi_thread()
+    let authority_runtime = nervix_primitives::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
         .build()
@@ -411,7 +411,7 @@ fn resolvers_are_rebuilt_and_torn_down_with_their_runtime() {
     );
     authority.set("quiet.nervix.test", DnsAnswer::Silent);
     for _ in 0..3 {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
+        let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
             .build()
@@ -427,7 +427,7 @@ fn resolvers_are_rebuilt_and_torn_down_with_their_runtime() {
                 .assured("the authority answers");
             assert_eq!(resolved, sockets(&[v4(12)]));
             let in_flight = resolver.clone();
-            tokio::spawn(async move {
+            nervix_primitives::task::spawn(async move {
                 in_flight
                     .resolve("quiet.nervix.test.", PORT, GENEROUS_BUDGET)
                     .await

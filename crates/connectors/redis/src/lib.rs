@@ -11,9 +11,6 @@
 //!   connector implementation. The pool it borrows from is leased by the host, which owns the
 //!   interest that keeps it open and the wait it records while a connection is handed over.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 mod source;
 
 use async_trait::async_trait;
@@ -244,7 +241,7 @@ impl RecordSink for RedisSink {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         let pool = self.pool.pool();
         for record in records {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             // Borrowed per publish and returned with the guard: an emitter between publishes, or
             // waiting out a flush interval, holds no connection at all.
             let mut connection = match Self::connection(&pool, &self.pool).await {

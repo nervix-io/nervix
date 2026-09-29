@@ -116,7 +116,7 @@ fn bounded_cpu_job_runs_on_the_simulated_scheduler() {
                             (CpuClass::Bulk, MemoryClass::Relay),
                             (CpuClass::Bulk, MemoryClass::Bulk),
                         ] {
-                            tokio::task::consume_budget().await;
+                            nervix_primitives::task::consume_budget().await;
                             let reservation = executor
                                 .try_reserve(memory, 1024)
                                 .expect("the memory class starts with room");
@@ -187,7 +187,7 @@ fn simulation_supervised_host_failure_reaches_result() {
 fn simulation_host_task_panic_reports_its_own_message() {
     let result = config(41).run("host task panic", |simulation| {
         simulation.host("worker", || async {
-            tokio::spawn(async {
+            nervix_primitives::task::spawn(async {
                 tokio::time::sleep(Duration::from_millis(2)).await;
                 panic!("unsupervised worker task failed its assertion");
             });

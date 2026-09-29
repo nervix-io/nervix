@@ -52,6 +52,11 @@ use nervix_models::{ClusterNodeName, NodeEndpoint};
 pub(crate) fn node_name(raw: &str) -> ClusterNodeName {
     ClusterNodeName::parse(raw).expect("cucumber node ids are valid cluster node names")
 }
+use nervix_primitives::{
+    stream::StreamExt,
+    sync::{CancellationToken, blocking::Mutex, mpsc, oneshot, watch},
+    task::JoinHandle,
+};
 use nervix_server::{
     FaultInjection, SchedulerMode,
     application::{
@@ -61,7 +66,6 @@ use nervix_server::{
     memory_pressure::MemoryPressureConfig,
     runtime::{DEFAULT_DOMAIN_DRAIN_TIMEOUT, DEFAULT_TEMP_DIR, branch_task_stop_timeout},
 };
-use parking_lot::Mutex;
 use pulsar::{
     ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType, TokioExecutor,
     consumer::InitialPosition as PulsarInitialPosition,
@@ -83,17 +87,13 @@ use tempfile::{TempDir, tempdir};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener as TokioTcpListener, TcpStream},
-    sync::{mpsc, oneshot, watch},
-    task::JoinHandle,
     time::{sleep, timeout},
 };
 use tokio_rustls::TlsConnector;
-use tokio_stream::StreamExt;
 use tokio_tungstenite::{
     WebSocketStream, client_async, connect_async,
     tungstenite::{Message as WsMessage, client::IntoClientRequest, http::HeaderValue},
 };
-use tokio_util::sync::CancellationToken;
 use triomphe::Arc;
 use uuid::Uuid;
 use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend};
@@ -206,10 +206,10 @@ impl StallableTcpProxy {
         let (paused, paused_rx) = watch::channel(false);
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             loop {
-                tokio::task::consume_budget().await;
-                let accepted = tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                let accepted = nervix_primitives::select! {
                     _ = task_cancellation.cancelled() => return,
                     accepted = listener.accept() => accepted,
                 };
@@ -219,7 +219,7 @@ impl StallableTcpProxy {
                 let target_host = target_host.clone();
                 let paused = paused_rx.clone();
                 let connection_cancellation = task_cancellation.child_token();
-                tokio::spawn(async move {
+                nervix_primitives::task::spawn(async move {
                     let Ok(upstream) =
                         TcpStream::connect((target_host.as_str(), target_port)).await
                     else {
@@ -279,9 +279,9 @@ where
 {
     let mut buffer = vec![0_u8; 16 * 1024];
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         wait_for_proxy_resume(&mut paused, &cancellation).await?;
-        let read = tokio::select! {
+        let read = nervix_primitives::select! {
             biased;
             _ = cancellation.cancelled() => return Ok(()),
             changed = paused.changed() => {
@@ -304,8 +304,8 @@ async fn wait_for_proxy_resume(
     cancellation: &CancellationToken,
 ) -> io::Result<()> {
     while *paused.borrow_and_update() {
-        tokio::task::consume_budget().await;
-        tokio::select! {
+        nervix_primitives::task::consume_budget().await;
+        nervix_primitives::select! {
             _ = cancellation.cancelled() => return Err(io::Error::other("TCP proxy stopped")),
             changed = paused.changed() => changed.map_err(io::Error::other)?,
         }
@@ -348,7 +348,7 @@ fn parse_addr(input: &str) -> io::Result<std::net::SocketAddr> {
 }
 
 async fn database_opens(path: PathBuf) -> io::Result<()> {
-    tokio::task::spawn_blocking(move || {
+    nervix_primitives::task::spawn_blocking(move || {
         let database = Database::builder(path).open().map_err(io::Error::other)?;
         drop(database);
         Ok(())
@@ -424,12 +424,12 @@ pub(crate) async fn sample_peak_observability_metric(
     url: String,
     metric_name: String,
     label_fragments: Vec<String>,
-    cancellation: tokio_util::sync::CancellationToken,
+    cancellation: nervix_primitives::sync::CancellationToken,
 ) -> f64 {
     let client = reqwest::Client::new();
     let mut peak = 0.0_f64;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if let Ok(response) = client.get(&url).send().await
             && let Ok(body) = response.text().await
         {
@@ -448,7 +448,7 @@ pub(crate) async fn sample_peak_observability_metric(
                 }
             }
         }
-        tokio::select! {
+        nervix_primitives::select! {
             () = cancellation.cancelled() => return peak,
             () = sleep(POLL_INTERVAL) => {}
         }
@@ -980,7 +980,7 @@ impl Cluster {
             .keys()
             .filter(|existing_id| existing_id.as_str() != node_id)
         {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if leader_lookup.has_passed() {
                 break;
             }
@@ -1238,7 +1238,7 @@ impl Cluster {
     pub(crate) async fn rotate_interconnect_certificates(&mut self) -> io::Result<()> {
         let interconnect_ca = InterconnectTestCa::new(&self._root_dir)?;
         for (node_id, node) in &mut self.nodes {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let (certificate, key) = interconnect_ca.issue_node(node_id, &node.spec.base_dir)?;
             node.spec.interconnect_tls_ca = interconnect_ca.path.clone();
             node.spec.interconnect_tls_cert = certificate;
@@ -1534,7 +1534,7 @@ impl Cluster {
     ) -> io::Result<()> {
         let deadline = Instant::now() + STATUS_WAIT_BUDGET;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match kafka_consumer_group_member_count(&self.dependencies, group) {
                 Ok(actual) if actual == expected => return Ok(()),
                 Ok(_) => {}
@@ -1563,11 +1563,11 @@ impl Cluster {
     ) -> io::Result<()> {
         let deadline = Instant::now() + duration;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let dependencies = self.dependencies.clone();
             let query_group = group.to_string();
             let query_topic = topic.to_string();
-            let actual = tokio::task::spawn_blocking(move || {
+            let actual = nervix_primitives::task::spawn_blocking(move || {
                 kafka_consumer_group_next_offset(
                     &dependencies,
                     &query_group,
@@ -1609,7 +1609,7 @@ impl Cluster {
     ) -> io::Result<()> {
         let deadline = Instant::now() + STATUS_WAIT_BUDGET;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match rabbitmq_queue_consumer_count(&self.dependencies, queue).await {
                 Ok(actual) if actual == expected => return Ok(()),
                 Ok(_) => {}
@@ -2010,13 +2010,13 @@ impl Cluster {
         host: String,
         path: String,
         payload: String,
-    ) -> tokio::task::JoinHandle<io::Result<()>> {
+    ) -> nervix_primitives::task::JoinHandle<io::Result<()>> {
         let handle = self
             .nodes
             .get(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         let uri = handle.spec.http_uri(&path);
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             publish_http_uri_with_headers(uri, &host, payload.as_bytes(), "application/json", &[])
                 .await
         })
@@ -2060,10 +2060,10 @@ impl Cluster {
             });
         }
 
-        Ok(tokio::spawn(async move {
+        Ok(nervix_primitives::task::spawn(async move {
             let mut outcome = HttpsPublishLoopOutcome::default();
             while !stop.is_cancelled() {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 for target in &targets {
                     let response = target
                         .client
@@ -2345,7 +2345,7 @@ impl Cluster {
         let mut last_error = None;
 
         while start.elapsed() < STATUS_WAIT_BUDGET {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match client.get(&url).send().await {
                 Ok(response) => {
                     let status = response.status().as_u16();
@@ -2404,7 +2404,7 @@ impl Cluster {
         let mut last_error = None;
 
         while start.elapsed() < STATUS_WAIT_BUDGET {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match client.get(&url).send().await {
                 Ok(response) => {
                     let status = response.status().as_u16();
@@ -2460,7 +2460,7 @@ impl Cluster {
         let deadline = Instant::now() + wait.unwrap_or(STATUS_WAIT_BUDGET);
 
         while Instant::now() < deadline {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let remaining = deadline.saturating_duration_since(Instant::now());
             let response = timeout(remaining, async {
                 let response = client.get(&url).send().await?;
@@ -2533,7 +2533,7 @@ impl Cluster {
         let deadline = Instant::now() + wait.unwrap_or(STATUS_WAIT_BUDGET);
 
         while Instant::now() < deadline {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let remaining = deadline.saturating_duration_since(Instant::now());
             let response = timeout(remaining, async {
                 let response = client.get(&url).send().await?;
@@ -2627,7 +2627,7 @@ impl Cluster {
     pub(crate) async fn wait_for_leader_among_running(&self) -> io::Result<String> {
         let deadline = PhaseDeadline::after(STATUS_WAIT_BUDGET);
         while !deadline.has_passed() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut reported = BTreeMap::new();
             for (node_id, status) in self.cluster_statuses(deadline).await {
                 if let Ok(status) = status {
@@ -2662,7 +2662,7 @@ impl Cluster {
         let mut stable_count = 0u8;
 
         while !deadline.has_passed() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut leader = None;
             let mut consistent = true;
 
@@ -4001,9 +4001,9 @@ async fn publish_mqtt_with_qos(
     let (host, port) = dependency_host_port(dependencies, MQTT_ADDR, 1883)?;
     let options = MqttOptions::new(client_id, (host, port));
     let (client, mut eventloop) = AsyncClient::builder(options).capacity(16).build();
-    let driver = tokio::spawn(async move {
+    let driver = nervix_primitives::task::spawn(async move {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if eventloop.poll().await.is_err() {
                 break;
             }
@@ -4012,7 +4012,7 @@ async fn publish_mqtt_with_qos(
 
     let mut last_error = None;
     for attempt in 0..5 {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         // Runtime ingestors can still be attaching to the broker immediately after START.
         // Retaining the per-test input payload makes MQTT publishes deterministic without
         // changing application-level topic reuse, because scenario topics are unique.
@@ -4067,9 +4067,9 @@ async fn publish_mqtt_burst_with_qos(
     let (client, mut eventloop) = AsyncClient::builder(options)
         .capacity(count.max(16))
         .build();
-    let driver = tokio::spawn(async move {
+    let driver = nervix_primitives::task::spawn(async move {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if eventloop.poll().await.is_err() {
                 break;
             }
@@ -4077,7 +4077,7 @@ async fn publish_mqtt_burst_with_qos(
     });
 
     for _ in 0..count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         client
             .publish(topic, payload, PublishOptions::new(qos))
             .await
@@ -4200,7 +4200,7 @@ async fn publish_redis_burst(
     let client = TestRedisClient::open(dependencies.get(REDIS_ADDR)?)?;
     let mut connection = client.connect().await?;
     for _ in 0..count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         publish_redis_to_subscriber(&mut connection, channel, payload).await?;
     }
     sleep(POLL_INTERVAL).await;
@@ -4214,7 +4214,7 @@ async fn publish_redis_to_subscriber(
 ) -> io::Result<()> {
     let deadline = Instant::now() + BROKER_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let subscriber_count: usize = connection
             .publish(channel, payload)
             .await
@@ -4263,7 +4263,7 @@ async fn wait_for_redis_channel_subscribers(
 ) -> io::Result<()> {
     let deadline = Instant::now() + STATUS_WAIT_BUDGET;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match redis_channel_subscriber_count(dependencies, channel).await {
             Ok(actual) if actual == expected => return Ok(()),
             Ok(_) => {}
@@ -4386,7 +4386,7 @@ async fn limit_pulsar_topic_message_size(
     let expected = max_message_size.to_string();
     let deadline = Instant::now() + POLICY_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observed = read_pulsar_admin_value(&client, &url).await;
         if observed.trim() == expected {
             return Ok(());
@@ -4445,7 +4445,7 @@ async fn publish_kafka_payloads(
         .map_err(io::Error::other)?;
     let mut deliveries = Vec::with_capacity(payloads.len());
     for payload in payloads {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         deliveries.push(producer.send(
             FutureRecord::<(), str>::to(topic).payload(payload.as_str()),
             Duration::from_secs(5),
@@ -4848,7 +4848,7 @@ async fn publish_nats_payloads(
     let client = nats_client(dependencies).await?;
     let subject = async_nats::Subject::from(subject.to_string());
     for payload in payloads {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         client
             .publish(subject.clone(), payload.as_bytes().to_vec().into())
             .await
@@ -4937,7 +4937,7 @@ async fn observe_mqtt(
         .await
         .map_err(io::Error::other)?;
 
-    let task = tokio::spawn(async move {
+    let task = nervix_primitives::task::spawn(async move {
         let _client = client;
         let mut ready_tx = Some(ready_tx);
 
@@ -5002,10 +5002,10 @@ async fn observe_rabbitmq(
         .map_err(io::Error::other)?;
     let (payload_tx, payload_rx) = mpsc::channel(16);
 
-    let task = tokio::spawn(async move {
+    let task = nervix_primitives::task::spawn(async move {
         let _connection = connection;
         while let Some(delivery) = consumer.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Ok(delivery) = delivery else {
                 break;
             };
@@ -5053,10 +5053,10 @@ async fn observe_redis(
     pubsub.subscribe(channel).await.map_err(io::Error::other)?;
     let (payload_tx, payload_rx) = mpsc::channel(16);
 
-    let task = tokio::spawn(async move {
+    let task = nervix_primitives::task::spawn(async move {
         let mut messages = pubsub.on_message();
         while let Some(message) = messages.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let message = BrokerMessage::from_bytes(message.get_payload_bytes(), Vec::new());
             if payload_tx.send(message).await.is_err() {
                 break;
@@ -5094,10 +5094,10 @@ async fn observe_kafka(
     consumer.subscribe(&[topic]).map_err(io::Error::other)?;
     let (payload_tx, payload_rx) = mpsc::channel(16);
 
-    let task = tokio::spawn(async move {
+    let task = nervix_primitives::task::spawn(async move {
         let mut messages = consumer.stream();
         while let Some(message) = messages.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match message {
                 Ok(message) => {
                     let bytes = message.payload().unwrap_or_default();
@@ -5194,9 +5194,9 @@ async fn observe_pulsar_with_addr(
                 .map_err(io::Error::other)?;
             let (payload_tx, payload_rx) = mpsc::channel(16);
 
-            let task = tokio::spawn(async move {
+            let task = nervix_primitives::task::spawn(async move {
                 while let Some(message) = consumer.next().await {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let Ok(message) = message else {
                         continue;
                     };
@@ -5252,7 +5252,7 @@ async fn observe_sqs(
     let queue_url = sqs_queue_url(&client, queue).await?;
     let (payload_tx, payload_rx) = mpsc::channel(16);
 
-    let task = tokio::spawn(async move {
+    let task = nervix_primitives::task::spawn(async move {
         while let Ok(response) = client
             .receive_message()
             .queue_url(queue_url.clone())
@@ -5263,7 +5263,7 @@ async fn observe_sqs(
             .send()
             .await
         {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(message) = response.messages().first() else {
                 continue;
             };
@@ -5317,9 +5317,9 @@ async fn observe_nats(
         .map_err(io::Error::other)?;
     let (payload_tx, payload_rx) = mpsc::channel(1);
 
-    let task = tokio::spawn(async move {
+    let task = nervix_primitives::task::spawn(async move {
         while let Some(message) = subscriber.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let bytes = message.payload.as_ref();
             let headers = message
                 .headers
@@ -5356,9 +5356,9 @@ async fn observe_zeromq(addr: &str) -> io::Result<BrokerObserver> {
     socket.bind(addr).await.map_err(io::Error::other)?;
     let (payload_tx, payload_rx) = mpsc::channel(1);
 
-    let task = tokio::spawn(async move {
+    let task = nervix_primitives::task::spawn(async move {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             // zmq.rs's pull socket stops polling its peers as soon as one of them has nothing to
             // read, so a message another peer already delivered can wait until some peer sends
             // again. Abandoning a pending receive consumes nothing, so a receive that stays pending
@@ -5426,7 +5426,7 @@ async fn wait_for_nats_stream_payload(
         .map_err(io::Error::other)?;
     let deadline = Instant::now() + BROKER_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let last_observation = match stream_handle.get_last_raw_message_by_subject(subject).await {
             Ok(message) => {
                 let payload = String::from_utf8_lossy(&message.payload).to_string();

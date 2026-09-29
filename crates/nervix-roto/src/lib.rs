@@ -33,6 +33,7 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto;
 use nervix_models::{ParseAsType, Timestamp, UdfArgument, UdfLanguage, UdfName, UdfReturn};
+use nervix_primitives::sync::blocking::Mutex;
 use nervix_recovery::Discarded as _;
 use nervix_vm::{
     ErrorCode, FunctionExecutionPolicy, FunctionInjector, InjectedResult, RowErrorMask,
@@ -40,7 +41,6 @@ use nervix_vm::{
     UdfSignatures,
     program::{FunctionName, Span},
 };
-use parking_lot::Mutex;
 use regex::Regex;
 use roto::{FileTree, NoCtx, RegistrationError, RotoString, Runtime, TypedFunc, Val, library};
 use thiserror::Error;
@@ -102,7 +102,7 @@ pub enum UdfError {
     #[error("Roto compile and test budget of {limit:?} was exceeded")]
     CompileBudgetExceeded { limit: Duration },
     #[error("Roto compilation task failed: {0}")]
-    CompileTask(#[source] tokio::task::JoinError),
+    CompileTask(#[source] nervix_primitives::task::JoinError),
     #[error("Roto entry signature is invalid: {0}")]
     Signature(String),
 }
@@ -1167,7 +1167,7 @@ pub struct UdfExecutor {
 
 impl UdfExecutor {
     pub async fn compile(models: Vec<UdfProgram>) -> error_stack::Result<Self, UdfError> {
-        tokio::task::spawn_blocking(move || Self::compile_sync(models))
+        nervix_primitives::task::spawn_blocking(move || Self::compile_sync(models))
             .await
             .map_err(|error| Report::new(UdfError::CompileTask(error)))?
     }

@@ -90,7 +90,7 @@ mod tests {
         T::try_from(value.to_string()).assured("the fixture name is valid")
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn sources_that_resolve_names_report_missing_node_dns_as_start_failure() {
         let runtime = Runtime::default();
         let domain: DomainName = named("sales");

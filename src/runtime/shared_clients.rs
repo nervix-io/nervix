@@ -218,7 +218,7 @@ impl SharedClient {
 pub(in crate::runtime) struct SharedClientSlot {
     /// Built once however many users race to be first, so a burst of emitters starting together
     /// opens one pool rather than one pool each.
-    instance: StdArc<tokio::sync::OnceCell<StdArc<SharedClient>>>,
+    instance: StdArc<nervix_primitives::sync::OnceCell<StdArc<SharedClient>>>,
     users: usize,
 }
 
@@ -302,7 +302,7 @@ impl Runtime {
                 .shared_clients
                 .entry(key.clone())
                 .or_insert_with(|| SharedClientSlot {
-                    instance: StdArc::new(tokio::sync::OnceCell::new()),
+                    instance: StdArc::new(nervix_primitives::sync::OnceCell::new()),
                     users: 0,
                 });
             slot.users = slot

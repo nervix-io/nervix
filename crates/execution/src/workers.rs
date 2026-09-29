@@ -4,12 +4,12 @@ use std::{num::NonZeroUsize, sync::Arc as StdArc, time::Duration};
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_primitives::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use thiserror::Error;
-use tokio::{
-    sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError},
-    time::Instant,
+use nervix_primitives::sync::{
+    OwnedSemaphorePermit, Semaphore, TryAcquireError,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
+use thiserror::Error;
+use tokio::time::Instant;
 
 use crate::{
     SemaphoreRef,
@@ -187,11 +187,11 @@ impl WorkerPool {
         let handle = match self.class {
             // Bounded CPU work in the simulation target is one scheduler task. Its synchronous
             // body is one scheduling step; instruction-level races need Shuttle or real threads.
-            WorkerClassName::Cpu(_) => tokio::task::spawn(async move { work() }),
-            WorkerClassName::Storage(_) => tokio::task::spawn_blocking(work),
+            WorkerClassName::Cpu(_) => nervix_primitives::task::spawn(async move { work() }),
+            WorkerClassName::Storage(_) => nervix_primitives::task::spawn_blocking(work),
         };
         #[cfg(not(feature = "turmoil"))]
-        let handle = tokio::task::spawn_blocking(work);
+        let handle = nervix_primitives::task::spawn_blocking(work);
         Ok(RunningJob { handle, obligation })
     }
 
@@ -221,7 +221,7 @@ impl WorkerPool {
 /// A job already submitted to its worker, with the armed obligation that cancels it when the
 /// caller stops awaiting it.
 struct RunningJob<T> {
-    handle: tokio::task::JoinHandle<T>,
+    handle: nervix_primitives::task::JoinHandle<T>,
     obligation: CancelOnDrop,
 }
 
@@ -263,7 +263,7 @@ mod simulation_checks {
         NonZeroUsize::MIN
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn saturation_and_dropped_waiters_restore_the_queue_and_charge() {
         let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Data), one(), one());
         let executor = Executor::default();
@@ -311,7 +311,7 @@ mod simulation_checks {
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn queued_jobs_take_the_worker_in_admission_order() {
         let two = NonZeroUsize::new(2).assured("2 is nonzero");
         let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Data), one(), two);
@@ -320,7 +320,7 @@ mod simulation_checks {
             .acquire_owned()
             .await
             .assured("the new pool has its one worker permit");
-        let (completed, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let (completed, mut observed) = nervix_primitives::sync::mpsc::unbounded_channel();
 
         let first_charge = executor
             .try_reserve(MemoryClass::Relay, 1024)
@@ -365,7 +365,7 @@ mod simulation_checks {
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn cancelled_running_job_keeps_its_charge_until_exit() {
         let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Control), one(), one());
         let executor = Executor::default();

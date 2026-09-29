@@ -21,8 +21,8 @@ use nervix_models::{
     CreateReorderer, CreateSchema, DomainName, Model, ModelIndex, ModelKind, ModelName, NodeRef,
     PlacementPolicy, RequestedResourceVersion, TransactionModelTransition, UniquelyKindedModel,
 };
+use nervix_primitives::sync::blocking::{Mutex, RwLock};
 use nervix_recovery::Discarded;
-use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use sorted_vec::SortedSet;
 use tracing::{info, warn};

@@ -27,8 +27,9 @@ use hyper_util::rt::TokioIo;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{IngestMessageHeaders, RetainedIngestHeaders};
 use nervix_connector_websockets::{SignalingDataSink, WebsocketSignalingSession};
+use nervix_primitives::{sync::CancellationToken, task::JoinSet};
 use nervix_recovery::NoReceiver;
-use tokio::{net::TcpListener, task::JoinSet, time::Duration};
+use tokio::{net::TcpListener, time::Duration};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{
     WebSocketStream,
@@ -38,7 +39,6 @@ use tokio_tungstenite::{
         protocol::{CloseFrame, Role, frame::coding::CloseCode},
     },
 };
-use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::{AppError, service_tasks::ServiceTasks, tls::HttpsListenerCertificates};
@@ -202,7 +202,7 @@ async fn handle_http_request(
 
         let on_upgrade = upgrade::on(&mut request);
         request_tasks.spawn(async move {
-            let upgraded = tokio::select! {
+            let upgraded = nervix_primitives::select! {
                 _ = shutdown.cancelled() => return,
                 upgraded = on_upgrade => upgraded,
             };
@@ -223,7 +223,7 @@ async fn handle_http_request(
                             path: &path,
                             headers: &headers,
                         };
-                        let session_result = tokio::select! {
+                        let session_result = nervix_primitives::select! {
                             _ = shutdown.cancelled() => return,
                             result = session.run(&mut websocket, &sink) => result,
                         };
@@ -239,7 +239,7 @@ async fn handle_http_request(
                     }
 
                     loop {
-                        let message = tokio::select! {
+                        let message = nervix_primitives::select! {
                             _ = shutdown.cancelled() => break,
                             message = futures_util::StreamExt::next(&mut websocket) => message,
                         };
@@ -349,7 +349,7 @@ pub(in crate::application) async fn serve_http(
     let mut connection_tasks = JoinSet::new();
 
     loop {
-        let accepted = tokio::select! {
+        let accepted = nervix_primitives::select! {
             _ = shutdown.cancelled() => {
                 break;
             }
@@ -400,7 +400,7 @@ pub(in crate::application) async fn serve_https(
     let mut connection_tasks = JoinSet::new();
 
     loop {
-        let accepted = tokio::select! {
+        let accepted = nervix_primitives::select! {
             _ = shutdown.cancelled() => {
                 break;
             }

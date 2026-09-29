@@ -234,7 +234,7 @@ impl RabbitMqBroker {
             host: self.host().to_string(),
         });
         for attempt in deadline.attempts(addresses) {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let address = attempt.address;
             let share = attempt.budget;
             match timeout(share, AsyncTcpStream::connect(runtime, address)).await {

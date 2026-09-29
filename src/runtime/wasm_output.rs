@@ -1414,7 +1414,7 @@ mod tests {
     use super::*;
     use crate::runtime_ack::{AckOutcome, AckSet};
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_zero_row_output_builds_exact_empty_destination_columns() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (_, ack_map) = wasm_input_for_values(&schema, &[10]).await;
@@ -1473,7 +1473,7 @@ mod tests {
         assert!(outputs[0].uninitialized_columns.contains(&0));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_mixed_input_and_generated_columns_match_destination_schema() {
         let input_schema = test_schema(&[("value", ParseAsType::I32)]);
         let output_schema =
@@ -1503,7 +1503,7 @@ mod tests {
         assert_eq!(outputs[0].batch.batch().num_rows(), 2);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_shared_generated_column_reuses_one_array_across_routes_and_fields() {
         let input_schema = test_schema(&[("value", ParseAsType::I32)]);
         let enriched_schema = test_schema(&[
@@ -1760,7 +1760,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_routed_output_fanout_waits_for_every_downstream_ack() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (input, mut ack_map) = wasm_input_for_values(&schema, &[2]).await;
@@ -1814,9 +1814,9 @@ mod tests {
             },
         )
         .expect("first routed batch must build");
-        let completion_task = tokio::spawn(completion.wait());
+        let completion_task = nervix_primitives::task::spawn(completion.wait());
         first.batch.acks[0].ack_success();
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         assert!(
             !completion_task.is_finished(),
             "the first downstream ACK must not complete the fanned-out input"
@@ -1844,7 +1844,7 @@ mod tests {
         assert_eq!(outcome, AckOutcome::Ack);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_guest_generated_rows_use_execution_time_without_replacing_source_metadata() {
         let input_schema = test_schema(&[("input_value", ParseAsType::I32)]);
         let output_schema = test_schema(&[("value", ParseAsType::I32)]);
@@ -1955,7 +1955,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_generated_arrow_contract_rejects_invalid_stream_shapes_and_schema() {
         let input_schema = test_schema(&[("value", ParseAsType::I32)]);
         let output_schema = test_schema(&[("value", ParseAsType::I32)]);
@@ -2060,7 +2060,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_input_reference_validation_rejects_invalid_mapping_and_source_tokens() {
         let input_schema = test_schema(&[("value", ParseAsType::I32)]);
         let renamed_schema = test_schema(&[("renamed_value", ParseAsType::I32)]);
@@ -2182,7 +2182,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_callback_rejects_tokens_that_are_both_carried_and_terminal() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (input, ack_map) = wasm_input_for_values(&schema, &[10]).await;
@@ -2248,7 +2248,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_reference_to_terminally_removed_or_other_branch_token_is_rejected() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (input, _) = wasm_input_for_values(&schema, &[10]).await;
@@ -2270,7 +2270,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_callback_validation_is_all_or_nothing_for_terminal_decisions() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (input, mut ack_map) = wasm_input_for_values(&schema, &[10]).await;

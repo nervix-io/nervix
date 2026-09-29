@@ -44,9 +44,11 @@ use std::{
     sync::{Arc as StdArc, LazyLock},
 };
 
-use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
+use nervix_primitives::sync::{
+    atomic::{AtomicU64, Ordering},
+    blocking::Mutex,
+};
 use nervix_recovery::Reported as _;
-use parking_lot::Mutex;
 use tokio::time::Duration;
 
 use super::{
@@ -467,7 +469,7 @@ impl WatchdogCleanup {
         let asked = request_stop_of_every_live_node();
         let deadline = PhaseDeadline::after(window);
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let still_live = LiveCluster::live();
             if still_live.is_empty() || deadline.has_passed() {
                 return Self {

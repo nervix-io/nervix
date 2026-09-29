@@ -8,13 +8,7 @@
 //! - **Must not know.** Runtime graphs, schedules, or the semantic outcome of an operation.
 
 #[cfg(feature = "shuttle")]
-extern crate shuttle_dashmap as dashmap;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_parking_lot as parking_lot;
-#[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio_util as tokio_util;
 
 use std::{collections::BTreeMap, io, net::SocketAddr, sync::OnceLock, time::Duration};
 
@@ -28,11 +22,11 @@ use nervix_models::{
     RelayName, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
     RemoteRuntimeRecordMetadata, ResourceName, SubscriptionBinding, WasmStateResetScope,
 };
+use nervix_primitives::sync::mpsc;
 use nervix_recovery::Discarded as _;
 use rkyv::{Archive, Deserialize, Serialize};
 use strum::IntoStaticStr;
 use thiserror::Error;
-use tokio::sync::mpsc;
 
 mod authentication;
 mod connection;

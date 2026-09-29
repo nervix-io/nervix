@@ -255,7 +255,7 @@ mod tests {
         test_fixtures::{input_batch, sink_context},
     };
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn emitter_backoff_resets_to_the_declared_initial_delay() {
         let policy = ParsedRetryPolicy {
             backoff: Duration::from_millis(1),
@@ -378,7 +378,7 @@ mod tests {
         assert!(!retry.is_active());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn retry_schedule_heartbeats_acks_added_by_a_force_drain() {
         let (existing, mut existing_completion) = AckSet::root();
         let (force_drained, mut force_completion) = AckSet::root();

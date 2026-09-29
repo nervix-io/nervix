@@ -36,9 +36,11 @@ mod enabled {
     use std::{thread, time::Duration};
 
     #[cfg(not(feature = "shuttle"))]
-    use parking_lot::Condvar as GateCondition;
-    use parking_lot::{Mutex, RwLock};
-    use tokio::sync::Notify;
+    use nervix_primitives::sync::blocking::Condvar as GateCondition;
+    use nervix_primitives::sync::{
+        Notify,
+        blocking::{Mutex, RwLock},
+    };
     use triomphe::Arc;
 
     use super::*;
@@ -89,7 +91,7 @@ mod enabled {
     #[cfg(feature = "shuttle")]
     fn wait_until_released(gate: &Gate) {
         while !*gate.released.lock() {
-            nervix_execution::sync::yield_now();
+            nervix_primitives::thread::yield_now();
         }
     }
 

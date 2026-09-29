@@ -56,7 +56,7 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
-use tokio::task;
+use nervix_primitives::task;
 use uuid::{NoContext, Timestamp as UuidTimestamp, Uuid};
 
 use crate::{
@@ -8975,7 +8975,7 @@ mod tests {
         assert_eq!(second_value.value(0), "second");
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[nervix_primitives::test(flavor = "current_thread")]
     async fn blocking_injector_policy_offloads_small_batches() {
         let parsed = parse_program("SET route = read_header(input.header_name)")
             .expect("program must parse");
@@ -9013,7 +9013,7 @@ mod tests {
         let (result, ()) = tokio::join!(
             execute_program_with_selection_in_context(&compiled, &batch, &context),
             async move {
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
                 release_tx
                     .send(())
                     .expect("blocking injector must still be waiting");

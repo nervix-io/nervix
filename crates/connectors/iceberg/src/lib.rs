@@ -554,7 +554,7 @@ impl IcebergSink {
                 path.display()
             ))
         };
-        tokio::task::spawn_blocking(move || {
+        nervix_primitives::task::spawn_blocking(move || {
             let file = File::create(&path).map_err(|error| staged(&error, &path))?;
             let mut writer = StreamWriter::try_new(file, batch.schema().as_ref())
                 .map_err(|error| staged(&error, &path))?;
@@ -584,7 +584,7 @@ impl IcebergSink {
                 path.display()
             ))
         };
-        tokio::task::spawn_blocking(move || {
+        nervix_primitives::task::spawn_blocking(move || {
             let mut batches = Vec::new();
             for path in paths {
                 let file = File::open(&path).map_err(|error| staged(error.to_string(), &path))?;
@@ -773,7 +773,7 @@ impl RowSink for IcebergSink {
     async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
         let mut outcome = PerRecordOutcome::with_capacity(rows.member_count());
         for carrier in rows.carriers {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Err(error) = self.stage(carrier, &mut outcome).await {
                 outcome.fail(error);
                 return outcome;
@@ -1124,7 +1124,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn iceberg_catalog_authentication_uses_the_node_dns_client() {
         const CATALOG: &str = "catalog.nervix.test";
         const AUTH: &str = "auth.nervix.test";
@@ -1164,7 +1164,7 @@ mod tests {
             .local_addr()
             .assured("the OAuth endpoint has an address")
             .port();
-        let auth_server = tokio::spawn(async move {
+        let auth_server = nervix_primitives::task::spawn(async move {
             let (mut stream, _) = auth_listener
                 .accept()
                 .await
@@ -1198,7 +1198,7 @@ mod tests {
             .local_addr()
             .assured("the catalog endpoint has an address")
             .port();
-        let catalog_server = tokio::spawn(async move {
+        let catalog_server = nervix_primitives::task::spawn(async move {
             let (mut stream, _) = catalog_listener
                 .accept()
                 .await
@@ -1299,7 +1299,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn iceberg_catalog_transaction_disables_library_internal_retries() {
         let metadata = TableMetadataBuilder::new(
             Schema::builder().build().expect("valid empty schema"),

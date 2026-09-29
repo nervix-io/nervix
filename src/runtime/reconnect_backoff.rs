@@ -60,7 +60,7 @@ impl RuntimeReconnectBackoff {
         shutdown_rx: &mut watch::Receiver<bool>,
     ) -> bool {
         let delay = self.take_next_delay();
-        tokio::select! {
+        nervix_primitives::select! {
             changed = shutdown_rx.changed() => {
                 !(changed.is_err() || *shutdown_rx.borrow())
             }
@@ -84,7 +84,7 @@ impl RuntimeReconnectBackoff {
     ) -> bool {
         let deadline = Instant::now() + delay;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             acks.keep_alive();
             let remaining = deadline
                 .checked_duration_since(Instant::now())
@@ -92,7 +92,7 @@ impl RuntimeReconnectBackoff {
             if remaining.is_zero() {
                 return true;
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 changed = shutdown_rx.changed() => {
                     return !(changed.is_err() || *shutdown_rx.borrow());
                 }

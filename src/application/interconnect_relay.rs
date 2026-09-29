@@ -13,8 +13,7 @@ use error_stack::{Report, ResultExt as _};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use nervix_interconnect::{ControlEnvelope, Envelope, RelayAdmission, RelayPayload};
 use nervix_models::{ClusterNodeName, DomainName, RelayName};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use nervix_primitives::sync::{CancellationToken, mpsc};
 use tracing::warn;
 
 use super::session_service::SessionServiceImpl;
@@ -161,11 +160,11 @@ impl InterconnectRelayPayloadLane {
         let mut receiving = true;
 
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if !receiving && active.is_empty() {
                 break;
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = shutdown.cancelled() => break,
                 message = receiver.recv(), if receiving => {
                     let Some(message) = message else {
@@ -249,7 +248,7 @@ mod tests {
 
     use super::{super::test_fixtures::named, *};
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn control_dispatch_preserves_the_transport_failure_and_target() {
         use super::super::test_fixtures::{TestService, build_test_service};
 

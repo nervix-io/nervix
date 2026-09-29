@@ -139,7 +139,7 @@ fn membership_change_before_the_wait_ends_it() {
         let target = node("node-b");
         requests.replace_live_nodes(&BTreeSet::from([peer.clone(), target.clone()]));
 
-        let caller = tokio::spawn({
+        let caller = nervix_primitives::task::spawn({
             let requests = Arc::clone(&requests);
             let target = target.clone();
             async move {
@@ -152,7 +152,7 @@ fn membership_change_before_the_wait_ends_it() {
                 );
             }
         });
-        let discovery = tokio::spawn({
+        let discovery = nervix_primitives::task::spawn({
             let requests = Arc::clone(&requests);
             async move {
                 requests.replace_live_nodes(&BTreeSet::from([peer.clone(), target]));

@@ -27,8 +27,12 @@ use nervix_client_core::{
     },
 };
 use nervix_models::{DomainClockPeriod, DomainClockSkew, DomainClockState, DomainTimeRate};
-use tokio::{net::TcpListener, runtime::Runtime, sync::mpsc};
-use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+use nervix_primitives::{
+    runtime::Runtime,
+    stream::wrappers::{ReceiverStream, TcpListenerStream},
+    sync::mpsc,
+};
+use tokio::net::TcpListener;
 use tonic::{
     Request, Response, Status, Streaming,
     body::Body,
@@ -573,7 +577,7 @@ struct TestServer {
 
 impl TestServer {
     fn start() -> Self {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
+        let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
             .build()
@@ -587,7 +591,7 @@ impl TestServer {
                 .local_addr()
                 .assured("a bound listener has an address");
             let service = SessionService { exchanges: sender };
-            tokio::spawn(async move {
+            nervix_primitives::task::spawn(async move {
                 Server::builder()
                     .add_service(service)
                     .serve_with_incoming(TcpListenerStream::new(listener))

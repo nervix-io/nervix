@@ -15,7 +15,8 @@ use nervix_models::{
     ClientProducerLimits, ClientProducerPolicy, ClientProducerRefusal, ClientSubmissionOutcome,
     ClientSubmissionRefusal, FieldName, ParseAsType, SchemaField,
 };
-use tokio::{sync::mpsc, time::timeout};
+use nervix_primitives::sync::mpsc;
+use tokio::time::timeout;
 
 use super::*;
 use crate::runtime_ack::{AckCompletion, AckSet};
@@ -85,7 +86,7 @@ impl Fixture {
             gauges: gauges.clone(),
             published: ClientIngestorGauges::default(),
         };
-        tokio::spawn(endpoint.run());
+        nervix_primitives::task::spawn(endpoint.run());
         let (_, jobs) = mpsc::channel(1);
         Self {
             commands,
@@ -227,7 +228,7 @@ impl Producer {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_open_needs_an_installed_execution_and_exactly_its_schema() {
     let mut fixture = Fixture::start();
     assert!(matches!(
@@ -259,7 +260,7 @@ async fn an_open_needs_an_installed_execution_and_exactly_its_schema() {
     assert_eq!(description.admission, ClientProducerAdmission::Open);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn producers_take_the_one_window_in_turn() {
     let mut fixture = Fixture::start();
     fixture.install(1, 1, 1, WAIT);
@@ -329,7 +330,7 @@ async fn producers_take_the_one_window_in_turn() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_batch_beyond_the_credit_ends_its_producer() {
     let mut fixture = Fixture::start();
     fixture.install(1, 1, 1, WAIT);
@@ -365,7 +366,7 @@ async fn a_batch_beyond_the_credit_ends_its_producer() {
     assert_eq!(producer.next_event().await, None);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_suspension_refuses_queued_batches_and_reopening_admits_again() {
     let mut fixture = Fixture::start();
     fixture.install(1, 1, 1, WAIT);
@@ -417,7 +418,7 @@ async fn a_suspension_refuses_queued_batches_and_reopening_admits_again() {
     assert_eq!(job.submission, submission(4));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_close_refuses_queued_batches_and_releases_after_the_admitted_ones() {
     let mut fixture = Fixture::start();
     fixture.install(1, 1, 1, WAIT);
@@ -452,7 +453,7 @@ async fn a_close_refuses_queued_batches_and_releases_after_the_admitted_ones() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_changed_contract_or_generation_ends_producers_and_an_unchanged_one_keeps_them() {
     let mut fixture = Fixture::start();
     fixture.install(1, 1, 1, WAIT);
@@ -495,7 +496,7 @@ async fn a_changed_contract_or_generation_ends_producers_and_an_unchanged_one_ke
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_uninstalled_execution_leaves_the_batch_its_aborted_worker_took_unknown() {
     let mut fixture = Fixture::start();
     fixture.install(1, 1, 1, WAIT);
@@ -516,7 +517,7 @@ async fn an_uninstalled_execution_leaves_the_batch_its_aborted_worker_took_unkno
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_batch_a_stopped_worker_never_took_is_refused_and_so_is_every_later_one() {
     let mut fixture = Fixture::start();
     fixture.install(1, 1, 1, WAIT);
@@ -555,7 +556,7 @@ async fn a_batch_a_stopped_worker_never_took_is_refused_and_so_is_every_later_on
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ending_the_endpoint_leaves_admitted_batches_unknown() {
     let mut fixture = Fixture::start();
     fixture.install(1, 1, 1, WAIT);
@@ -599,7 +600,7 @@ async fn ending_the_endpoint_leaves_admitted_batches_unknown() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[nervix_primitives::test(start_paused = true)]
 async fn an_acknowledgement_without_progress_times_out() {
     let mut fixture = Fixture::start();
     fixture.install(1, 1, 1, Duration::from_millis(50));

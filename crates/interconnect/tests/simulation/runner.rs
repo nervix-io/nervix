@@ -24,9 +24,11 @@ use std::{
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
+use nervix_primitives::sync::{
+    atomic::{AtomicU64, Ordering},
+    blocking::Mutex,
+};
 use nervix_recovery::Discarded as _;
-use parking_lot::Mutex;
 use rustls::{pki_types::UnixTime, time_provider::TimeProvider};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -602,7 +604,7 @@ impl HostSupervisor {
         F: Future<Output = Result<(), E>> + Send + 'static,
         E: std::error::Error + Send + Sync + 'static,
     {
-        let outcome = tokio::spawn(future).await?;
+        let outcome = nervix_primitives::task::spawn(future).await?;
         outcome?;
         Ok(())
     }

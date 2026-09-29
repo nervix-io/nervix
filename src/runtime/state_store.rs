@@ -4,17 +4,17 @@ use ahash::HashMap;
 use error_stack::{Report, ResultExt as _};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{
-    Executor, MemoryClass, StorageClass,
-    sync::{ArcSwap, Guard},
-};
+use nervix_execution::{Executor, MemoryClass, StorageClass};
 pub(crate) use nervix_interconnect::{RuntimeState, RuntimeStateKind, StateSchema};
 use nervix_models::{
     BranchKeyFingerprint, ClusterNodeIncarnation, ClusterNodeName, CoordinationIdentity,
     DomainName, DomainNodeRef, ModelKind, ModelName, NodeRef, SchemaFingerprint,
     WasmStateGeneration, WasmStateGenerations,
 };
-use nervix_primitives::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use nervix_primitives::{
+    publication::{ArcSwap, Guard},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use thiserror::Error;
 use triomphe::Arc;
@@ -364,7 +364,7 @@ impl StateAdmissions {
                     .verified("the loop only spins while below ADMISSION_SPINS_BEFORE_YIELD");
                 std::hint::spin_loop();
             } else {
-                nervix_execution::sync::yield_now();
+                nervix_primitives::thread::yield_now();
             }
         }
     }
@@ -403,7 +403,7 @@ pub(in crate::runtime) struct StateAssignmentAuthority {
     binding: AtomicU64,
     roles: ArcSwap<StateReplicationRoles>,
     admissions: StateAdmissions,
-    barrier: parking_lot::Mutex<()>,
+    barrier: nervix_primitives::sync::blocking::Mutex<()>,
 }
 
 impl Default for StateAssignmentAuthority {
@@ -412,7 +412,7 @@ impl Default for StateAssignmentAuthority {
             binding: AtomicU64::new(StateAssignmentBinding::UNASSIGNED.packed),
             roles: ArcSwap::from_pointee(StateReplicationRoles::default()),
             admissions: StateAdmissions::default(),
-            barrier: parking_lot::Mutex::new(()),
+            barrier: nervix_primitives::sync::blocking::Mutex::new(()),
         }
     }
 }
@@ -656,7 +656,7 @@ pub(in crate::runtime) struct RuntimeStateStore {
     forced_recovery_completions: Keyspace,
     /// Held by every replica installation, which compares with the stored snapshot before it
     /// replaces it. The storage job that installs a replica holds its own handle.
-    replica_installs: Arc<parking_lot::Mutex<()>>,
+    replica_installs: Arc<nervix_primitives::sync::blocking::Mutex<()>>,
     /// Makes applied writes durable, one synchronization for every writer waiting at once. The
     /// storage job that synchronizes holds its own handle.
     durability: Arc<DurabilityBarrier>,
@@ -669,7 +669,7 @@ struct LatestSnapshotWriter {
     db: Database,
     latest: Keyspace,
     lsm_index: Keyspace,
-    replica_installs: Arc<parking_lot::Mutex<()>>,
+    replica_installs: Arc<nervix_primitives::sync::blocking::Mutex<()>>,
 }
 
 impl LatestSnapshotWriter {
@@ -1006,7 +1006,7 @@ impl RuntimeStateStore {
             handoff_activations,
             forced_recovery_preparations,
             forced_recovery_completions,
-            replica_installs: Arc::new(parking_lot::Mutex::new(())),
+            replica_installs: Arc::new(nervix_primitives::sync::blocking::Mutex::new(())),
             durability: Arc::new(DurabilityBarrier::new()),
             executor,
         })
@@ -2650,7 +2650,7 @@ mod tests {
     /// return only once a synchronization covered them. A replica installation hands back the
     /// checkpoint it wrote, and refuses one that is not newer than the checkpoint already stored for
     /// that generation.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn guest_checkpoints_and_replica_installs_return_once_synchronized() {
         let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
         let store = open_store(&dir);

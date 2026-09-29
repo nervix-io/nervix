@@ -710,7 +710,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn ingest_group_builds_one_metadata_column_set_for_all_of_its_messages() {
         let topic = "metering_events";
         let headers = TestIngestHeaders(&[("route", "primary")]);
@@ -772,7 +772,7 @@ mod tests {
         assert_eq!(offsets.values(), &[0, 1, 2]);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn kafka_ingestor_filter_map_can_read_metadata_namespace() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -980,7 +980,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),

@@ -12,7 +12,7 @@ use nervix_models::{
     DomainStartPoint, DomainState, DomainStatus, FieldName, ModelKind, ModelName, ParseAsType,
     PlacementPolicy, RelayName, SchemaName, Timestamp,
 };
-use tokio::sync::{mpsc, watch};
+use nervix_primitives::sync::{mpsc, watch};
 
 use super::{
     DomainClockLifecycle, NodeQuiesceCounters, RelayBroadcast, RelayMessage, RelayRecordBatch,

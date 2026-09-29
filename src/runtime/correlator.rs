@@ -1332,7 +1332,7 @@ mod tests {
         assert_eq!(row_value(&combined, "id"), None);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn correlator_where_matches_pending_candidates_in_one_vm_execution() {
         let left_schema = test_schema(&[("id", ParseAsType::U32), ("marker", ParseAsType::I64)]);
         let right_schema = test_schema(&[("id", ParseAsType::U32)]);
@@ -1435,7 +1435,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn correlator_output_evaluates_all_matched_pairs_once_per_route() {
         let left_schema = test_schema(&[("id", ParseAsType::U32)]);
         let right_schema = test_schema(&[("score", ParseAsType::I64)]);
