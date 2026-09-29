@@ -3,8 +3,9 @@
 // It owns every handle through std::unique_ptr with the binding's release function, so no path
 // leaks or double-releases a handle, and turns every returned error into an exception. It prints
 // the same conformance report as every other probe. Run as `cpp-probe clock`, it attaches to the
-// domain's clock instead, reads the state and the first tick of the generation the scenario
-// starts, and detaches.
+// domain's running clock instead, reads the clock the attach reported before its first tick,
+// follows the generation a STOP and START begin and the attachment restored after its session
+// ends, and detaches.
 
 #include <atomic>
 #include <chrono>
@@ -67,6 +68,8 @@ using Outcome = std::unique_ptr<nx_outcome, Releaser<nx_outcome, nx_outcome_free
 using Schema = std::unique_ptr<nx_schema, Releaser<nx_schema, nx_schema_free>>;
 using Event = std::unique_ptr<nx_event, Releaser<nx_event, nx_event_release>>;
 using ClockEvent = std::unique_ptr<nx_clock_event, Releaser<nx_clock_event, nx_clock_event_release>>;
+using DomainClock =
+    std::unique_ptr<nx_domain_clock, Releaser<nx_domain_clock, nx_domain_clock_release>>;
 using Cancel = std::unique_ptr<nx_cancel, Releaser<nx_cancel, nx_cancel_free>>;
 
 const uint8_t *bytes(std::string_view text) {
@@ -374,64 +377,141 @@ ClockEvent next_clock_event(const Session &session, const nx_cancel *cancel,
     return event;
 }
 
+// The clock the session holds for `domain`, or an empty pointer when it follows none.
+DomainClock read_domain_clock(const Session &session, const std::string &domain) {
+    nx_domain_clock *raw_clock = nullptr;
+    check(nx_session_domain_clock(session.get(), bytes(domain), domain.size(), &raw_clock));
+    return DomainClock(raw_clock);
+}
+
 uint64_t generation_of(const nx_clock_event *event) {
     uint64_t generation = 0;
     check(nx_clock_event_generation(event, &generation));
     return generation;
 }
 
-// The committed clock of the generation the probe follows.
+// The progress a tick event reports. The authority's UTC observation depends on when the tick was
+// accepted, so it is not read.
+struct Tick {
+    uint64_t generation = 0;
+    uint64_t id = 0;
+    int64_t boundary = 0;
+    int64_t serving_logical = 0;
+
+    static Tick of(const nx_clock_event *event) {
+        Tick tick;
+        tick.generation = generation_of(event);
+        check(nx_clock_event_tick(event, &tick.id, &tick.boundary, nullptr, &tick.serving_logical));
+        return tick;
+    }
+};
+
+// The committed clock of a paced generation.
 struct PacedClock {
     uint64_t generation = 0;
     uint64_t period = 0;
     uint64_t skew = 0;
     int64_t origin = 0;
+    int64_t anchor = 0;
     double rate = 0.0;
 
     static PacedClock of(const nx_clock_event *event) {
         PacedClock clock;
         clock.generation = generation_of(event);
-        // The UTC anchor depends on when the scenario's START committed, so it is not reported.
-        check(nx_clock_event_paced(event, &clock.period, &clock.skew, &clock.origin, nullptr,
+        check(nx_clock_event_paced(event, &clock.period, &clock.skew, &clock.origin, &clock.anchor,
                                    &clock.rate));
         return clock;
     }
 
-    std::string state_line(const std::string &domain) const {
+    static PacedClock of(const nx_domain_clock *read) {
+        PacedClock clock;
+        clock.generation = nx_domain_clock_generation(read);
+        check(nx_domain_clock_paced(read, &clock.period, &clock.skew, &clock.origin, &clock.anchor,
+                                    &clock.rate));
+        return clock;
+    }
+
+    bool operator==(const PacedClock &other) const {
+        return generation == other.generation && period == other.period && skew == other.skew &&
+               origin == other.origin && anchor == other.anchor && rate == other.rate;
+    }
+
+    // The report line of the clock, with `prefix` naming where it was read. The UTC anchor depends
+    // on when the scenario's START committed, so it is read but not reported.
+    std::string line(const std::string &prefix, const std::string &domain) const {
         uint64_t rate_bits = 0;
         std::memcpy(&rate_bits, &rate, sizeof rate_bits);
         char bits[17];
         std::snprintf(bits, sizeof bits, "%016" PRIx64, rate_bits);
-        return "STATE domain=" + domain + " generation=" + std::to_string(generation) +
+        return prefix + " domain=" + domain + " generation=" + std::to_string(generation) +
                " state=paced period=" + std::to_string(period) + " skew=" + std::to_string(skew) +
                " origin=" + std::to_string(origin) + " rate=f64:" + bits;
     }
 
-    // The report line of a tick, after holding it to this clock: its boundary is the logical
-    // origin plus one period for every id before it, and the serving node's reading never precedes
-    // the origin.
-    std::string tick_line(const nx_clock_event *event, const std::string &domain) const {
-        if (generation_of(event) != generation) {
-            throw std::runtime_error("a tick belongs to another generation than the state before it");
+    // An instant as the report names it: `origin` for the logical origin, the instant otherwise.
+    std::string relative(int64_t instant) const {
+        return instant == origin ? "origin" : std::to_string(instant);
+    }
+
+    // The report line of the projections of `read`, which holds this clock, at its own UTC anchor:
+    // the logical time there, the wait for the next tick center, the admission window, and whether
+    // an event at the skew's edge and one nanosecond past it are admitted.
+    std::string projection_line(const nx_domain_clock *read, const std::string &domain) const {
+        int64_t next_center = 0;
+        int64_t edge = 0;
+        int64_t beyond = 0;
+        if (period > static_cast<uint64_t>(INT64_MAX) || skew > static_cast<uint64_t>(INT64_MAX) ||
+            __builtin_add_overflow(origin, static_cast<int64_t>(period), &next_center) ||
+            __builtin_add_overflow(origin, static_cast<int64_t>(skew), &edge) ||
+            __builtin_add_overflow(edge, 1, &beyond)) {
+            throw std::runtime_error("the clock's fields leave the logical time range");
         }
-        uint64_t id = 0;
-        int64_t boundary = 0;
-        int64_t authority_utc = 0;
-        int64_t serving_logical = 0;
-        check(nx_clock_event_tick(event, &id, &boundary, &authority_utc, &serving_logical));
+        int64_t at_anchor = 0;
+        check(nx_domain_clock_logical_time_at(read, anchor, &at_anchor));
+        uint64_t wait = 0;
+        check(nx_domain_clock_wall_duration_until(read, anchor, next_center, &wait));
+        bool has_window = false;
+        int64_t earliest = 0;
+        int64_t latest = 0;
+        check(nx_domain_clock_admission_window(read, anchor, &has_window, &earliest, &latest));
+        if (!has_window) {
+            throw std::runtime_error("a paced clock reports no admission window");
+        }
+        bool at_edge = false;
+        bool past_edge = false;
+        check(nx_domain_clock_admits(read, anchor, edge, &at_edge));
+        check(nx_domain_clock_admits(read, anchor, beyond, &past_edge));
+        return "PROJECTION domain=" + domain + " generation=" + std::to_string(generation) +
+               " anchor=" + relative(at_anchor) + " wait=" + std::to_string(wait) + " window=" +
+               relative(earliest) + ".." + relative(latest) +
+               " skew=" + (at_edge ? "admitted" : "refused") +
+               " beyond=" + (past_edge ? "admitted" : "refused");
+    }
+
+    // Holds a tick to this clock: the same generation, a boundary of the logical origin plus one
+    // period for every id before it, and a serving node's reading that never precedes the origin.
+    void check_tick(const Tick &tick) const {
+        if (tick.generation != generation) {
+            throw std::runtime_error("a tick of one generation followed the state of another");
+        }
         uint64_t offset = 0;
         int64_t expected = 0;
-        if (id == 0 || __builtin_mul_overflow(id - 1, period, &offset) ||
+        if (tick.id == 0 || __builtin_mul_overflow(tick.id - 1, period, &offset) ||
             offset > static_cast<uint64_t>(INT64_MAX) ||
             __builtin_add_overflow(origin, static_cast<int64_t>(offset), &expected) ||
-            boundary != expected) {
+            tick.boundary != expected) {
             throw std::runtime_error(
                 "a tick's boundary is not the origin plus one period for every id before it");
         }
-        if (serving_logical < origin) {
+        if (tick.serving_logical < origin) {
             throw std::runtime_error("the serving node's logical reading precedes the logical origin");
         }
-        return "TICK domain=" + domain + " generation=" + std::to_string(generation) +
+    }
+
+    // The report line of a tick this clock holds.
+    std::string tick_line(const Tick &tick, const std::string &domain) const {
+        check_tick(tick);
+        return "TICK domain=" + domain + " generation=" + std::to_string(tick.generation) +
                " boundary=origin+(id-1)*period";
     }
 };
@@ -466,67 +546,231 @@ void check_clock_cancellation(const Session &session) {
     }
 }
 
-// Attaches to the domain's clock, reads the state and the first tick of the generation the
-// scenario starts, and detaches.
+// What the probe has read about the domain's clock: the generation of the newest state, its
+// mapping while it is paced, and whether the session holding the attachment ended since. Every
+// event is held to what was read before it, and a read of the clock taken right after it is held
+// to be no older.
+class FollowedClock {
+  public:
+    FollowedClock(const Session &session, std::string domain, PacedClock clock)
+        : session_(session), domain_(std::move(domain)), generation_(clock.generation),
+          paced_(true), clock_(clock) {}
+
+    const PacedClock &clock() const {
+        if (!paced_) {
+            throw std::runtime_error("the followed clock is not paced");
+        }
+        return clock_;
+    }
+
+    // The first tick of the followed generation. A state reporting that generation again is taken
+    // on the way; one of another generation fails the probe.
+    ClockEvent first_tick(const nx_cancel *deadline) {
+        const uint64_t generation = generation_;
+        for (;;) {
+            ClockEvent event = next(deadline);
+            nx_clock_event_kind kind = nx_clock_event_kind_of(event.get());
+            if (kind == NX_CLOCK_EVENT_TICK) {
+                return event;
+            }
+            if (kind != NX_CLOCK_EVENT_STATE || generation_ != generation) {
+                throw std::runtime_error("the clock reported " + clock_kind_name(kind) +
+                                         " before the first tick of the followed generation");
+            }
+        }
+    }
+
+    // The paced state of a generation after the followed one. The followed generation's ticks and
+    // the states before the new paced one are taken on the way.
+    ClockEvent next_generation(const nx_cancel *deadline) {
+        const uint64_t previous = generation_;
+        for (;;) {
+            ClockEvent event = next(deadline);
+            nx_clock_event_kind kind = nx_clock_event_kind_of(event.get());
+            if (kind == NX_CLOCK_EVENT_STATE && generation_ > previous && paced_) {
+                return event;
+            }
+            if (kind != NX_CLOCK_EVENT_TICK && kind != NX_CLOCK_EVENT_STATE) {
+                throw std::runtime_error("the clock reported " + clock_kind_name(kind) +
+                                         " before a generation after the followed one");
+            }
+        }
+    }
+
+    // Waits for the interruption of the attachment. The followed generation's ticks and states
+    // are taken on the way.
+    void interruption(const nx_cancel *deadline) {
+        const uint64_t generation = generation_;
+        for (;;) {
+            ClockEvent event = next(deadline);
+            nx_clock_event_kind kind = nx_clock_event_kind_of(event.get());
+            if (kind == NX_CLOCK_EVENT_INTERRUPTED) {
+                return;
+            }
+            if (kind != NX_CLOCK_EVENT_TICK &&
+                (kind != NX_CLOCK_EVENT_STATE || generation_ != generation)) {
+                throw std::runtime_error("the clock reported " + clock_kind_name(kind) +
+                                         " before the interruption");
+            }
+        }
+    }
+
+    // The paced state the restored attachment reports. A refused restoration, which the session
+    // repeats, and a clock reported uninstalled are taken on the way.
+    ClockEvent restored(const nx_cancel *deadline) {
+        for (;;) {
+            ClockEvent event = next(deadline);
+            if (nx_clock_event_kind_of(event.get()) == NX_CLOCK_EVENT_STATE && paced_) {
+                return event;
+            }
+        }
+    }
+
+  private:
+    // The next event about the domain, held to what the probe read before it.
+    ClockEvent next(const nx_cancel *deadline) {
+        ClockEvent event = next_clock_event(session_, deadline, domain_);
+        switch (nx_clock_event_kind_of(event.get())) {
+        case NX_CLOCK_EVENT_STATE: observe(event.get()); break;
+        case NX_CLOCK_EVENT_TICK: check_tick(event.get()); break;
+        case NX_CLOCK_EVENT_INTERRUPTED: interrupted_ = true; break;
+        case NX_CLOCK_EVENT_RESTORATION_FAILED: break;
+        case NX_CLOCK_EVENT_ENDED: throw std::runtime_error("the server ended the attachment");
+        }
+        return event;
+    }
+
+    DomainClock read() const {
+        DomainClock read = read_domain_clock(session_, domain_);
+        if (!read) {
+            throw std::runtime_error(
+                "the session follows no clock of the domain after an event about it");
+        }
+        return read;
+    }
+
+    void observe(const nx_clock_event *event) {
+        const uint64_t generation = generation_of(event);
+        if (generation < generation_) {
+            throw std::runtime_error("a state went back to an earlier generation");
+        }
+        nx_clock_state state = NX_CLOCK_STOPPED;
+        check(nx_clock_event_state(event, &state));
+        const bool paced = state == NX_CLOCK_PACED;
+        PacedClock clock;
+        clock.generation = generation;
+        if (paced) {
+            clock = PacedClock::of(event);
+        }
+        DomainClock held = read();
+        if (nx_domain_clock_generation(held.get()) < generation) {
+            throw std::runtime_error("a read of the clock is older than the state the probe took");
+        }
+        if (nx_domain_clock_generation(held.get()) == generation) {
+            if (nx_domain_clock_state(held.get()) != state) {
+                throw std::runtime_error(
+                    "a read of the clock differs from the state of its generation");
+            }
+            if (paced && !(PacedClock::of(held.get()) == clock)) {
+                throw std::runtime_error(
+                    "a read of the clock differs from the mapping of its generation");
+            }
+        }
+        generation_ = generation;
+        paced_ = paced;
+        clock_ = clock;
+        interrupted_ = false;
+    }
+
+    void check_tick(const nx_clock_event *event) const {
+        if (interrupted_) {
+            throw std::runtime_error(
+                "a tick arrived before the restored attachment reported its clock");
+        }
+        const Tick tick = Tick::of(event);
+        clock().check_tick(tick);
+        DomainClock held = read();
+        if (nx_domain_clock_generation(held.get()) < tick.generation) {
+            throw std::runtime_error("a read of the clock is older than the tick the probe took");
+        }
+        uint64_t held_id = 0;
+        if (nx_domain_clock_generation(held.get()) == tick.generation &&
+            nx_domain_clock_tick(held.get(), &held_id, nullptr, nullptr, nullptr) &&
+            held_id < tick.id) {
+            throw std::runtime_error("a read of the clock holds an older tick than the probe took");
+        }
+    }
+
+    const Session &session_;
+    std::string domain_;
+    uint64_t generation_ = 0;
+    bool paced_ = false;
+    PacedClock clock_;
+    bool interrupted_ = false;
+};
+
+// Prints the paced state a STATE event reports and the first tick after it.
+void report_state_and_first_tick(FollowedClock &followed, const ClockEvent &state,
+                                 const nx_cancel *deadline, const std::string &domain) {
+    std::cout << PacedClock::of(state.get()).line("STATE", domain) << std::endl;
+    ClockEvent tick = followed.first_tick(deadline);
+    std::cout << followed.clock().tick_line(Tick::of(tick.get()), domain) << std::endl;
+}
+
+// Attaches to the domain's running clock and reads the clock the attach reported before its first
+// tick, then follows the generation the scenario's STOP and START begin and the attachment restored
+// after the scenario ends the session, and detaches.
 void run_clock(const Session &session, const std::string &domain) {
     check_clock_cancellation(session);
     Outcome attached = execute(session, "ATTACH DOMAIN CLOCK;", nullptr);
     std::cout << "ATTACHED " << disposition_name(nx_outcome_disposition(attached.get()))
               << std::endl;
 
-    Cancel deadline = with_deadline(120000);
-    ClockEvent state;
-    while (!state) {
-        ClockEvent event = next_clock_event(session, deadline.get(), domain);
-        nx_clock_event_kind kind = nx_clock_event_kind_of(event.get());
-        if (kind != NX_CLOCK_EVENT_STATE) {
-            throw std::runtime_error("the clock reported " + clock_kind_name(kind) +
-                                     " before the started state");
-        }
-        // The serving node may report the started generation uninstalled until it holds the
-        // committed mapping and an assigned clock authority.
-        nx_clock_state installed = NX_CLOCK_STOPPED;
-        check(nx_clock_event_state(event.get(), &installed));
-        if (installed == NX_CLOCK_PACED) {
-            state = std::move(event);
-        }
+    // The clock the attach reported, read before any event about the attachment.
+    DomainClock read = read_domain_clock(session, domain);
+    if (!read) {
+        throw std::runtime_error("the session follows no clock after its attach completed");
     }
-    PacedClock clock = PacedClock::of(state.get());
-    const std::string reported_state = clock.state_line(domain);
-    std::cout << reported_state << std::endl;
+    if (nx_domain_clock_state(read.get()) != NX_CLOCK_PACED) {
+        throw std::runtime_error("the attach reported a clock other than the running paced one");
+    }
+    const PacedClock clock = PacedClock::of(read.get());
+    const std::string reported_clock = clock.line("CLOCK", domain);
+    std::cout << reported_clock << std::endl;
+    std::cout << clock.projection_line(read.get(), domain) << std::endl;
 
-    ClockEvent tick;
-    while (!tick) {
-        ClockEvent event = next_clock_event(session, deadline.get(), domain);
-        nx_clock_event_kind kind = nx_clock_event_kind_of(event.get());
-        if (kind == NX_CLOCK_EVENT_TICK) {
-            tick = std::move(event);
-        } else if (kind == NX_CLOCK_EVENT_STATE) {
-            // The serving node reported the installation again; it is still the same generation.
-            if (generation_of(event.get()) != clock.generation) {
-                throw std::runtime_error("the clock moved to another generation before its first tick");
-            }
-        } else {
-            throw std::runtime_error("the clock reported " + clock_kind_name(kind) +
-                                     " before its first tick");
-        }
-    }
-    const std::string reported_tick = clock.tick_line(tick.get(), domain);
+    FollowedClock followed(session, domain, clock);
+    Cancel deadline = with_deadline(120000);
+    ClockEvent tick = followed.first_tick(deadline.get());
+    const std::string reported_tick = clock.tick_line(Tick::of(tick.get()), domain);
     std::cout << reported_tick << std::endl;
 
-    // Keep a second reference to each event and release the first on another thread, so the
-    // events must read the same on the second alone.
-    ClockEvent retained_state(nx_clock_event_retain(state.get()));
+    // Keep a second reference to the read and the tick and release the first ones on another
+    // thread, so both must read the same on the second alone.
+    DomainClock retained_read(nx_domain_clock_retain(read.get()));
     ClockEvent retained_tick(nx_clock_event_retain(tick.get()));
-    std::thread releaser([first_state = std::move(state), first_tick = std::move(tick)]() mutable {
-        first_state.reset();
+    std::thread releaser([first_read = std::move(read), first_tick = std::move(tick)]() mutable {
+        first_read.reset();
         first_tick.reset();
     });
     releaser.join();
-    if (PacedClock::of(retained_state.get()).state_line(domain) != reported_state ||
-        clock.tick_line(retained_tick.get(), domain) != reported_tick) {
-        throw std::runtime_error("a retained clock event reads differently than it did");
+    const PacedClock clock_again = PacedClock::of(retained_read.get());
+    if (clock_again.line("CLOCK", domain) != reported_clock ||
+        clock_again.tick_line(Tick::of(retained_tick.get()), domain) != reported_tick) {
+        throw std::runtime_error("a retained clock or tick reads differently than it did");
     }
+
+    // The scenario stops the domain and starts it again at another origin and rate.
+    Cancel started_deadline = with_deadline(120000);
+    ClockEvent started = followed.next_generation(started_deadline.get());
+    report_state_and_first_tick(followed, started, started_deadline.get(), domain);
+
+    // The scenario ends the session, and the binding attaches the clock again on the next one.
+    Cancel restored_deadline = with_deadline(120000);
+    followed.interruption(restored_deadline.get());
+    std::cout << "INTERRUPTED domain=" << domain << std::endl;
+    ClockEvent restored = followed.restored(restored_deadline.get());
+    report_state_and_first_tick(followed, restored, restored_deadline.get(), domain);
 
     Outcome detached = execute(session, "DETACH DOMAIN CLOCK;", nullptr);
     std::cout << "DETACHED " << disposition_name(nx_outcome_disposition(detached.get()))

@@ -1235,6 +1235,13 @@ impl Cluster {
         self.wait_for_full_interconnect(&node_ids).await
     }
 
+    pub(crate) fn interconnect_endpoint(&self, node_id: &str) -> io::Result<String> {
+        let handle = self.nodes.get(node_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("unknown node '{node_id}'"))
+        })?;
+        Ok(handle.spec.interconnect_endpoint())
+    }
+
     pub(crate) async fn rotate_interconnect_certificates(&mut self) -> io::Result<()> {
         let interconnect_ca = InterconnectTestCa::new(&self._root_dir)?;
         for (node_id, node) in &mut self.nodes {

@@ -58,6 +58,9 @@ test-admission-kernels *args:
     cargo test --package nervix-simd-kernels --lib -- {{ args }}
     cargo test --package nervix-models --lib -- {{ args }}
 
+bench-window-admission *args:
+    cargo bench --package nervix-simd-kernels --bench window_admission -- {{ args }}
+
 test-admission-runtime *args: download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
 
@@ -672,6 +675,40 @@ coverage-scenarios-append output *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov --no-clean --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
+# Measure the Redis DNS connector, its shared TLS/DNS code, and public source/sink scenarios.
+coverage-redis output="target/redis-dns.lcov": tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report --lib \
+        --package nervix-dns \
+        --package nervix-connector \
+        --package nervix-connector-redis
+    cargo llvm-cov --no-report --lib --package nervix-server -- redis_
+    cargo llvm-cov --no-report --lib --package nervix-server -- sources_that_resolve_names_report_missing_node_dns_as_start_failure
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+        --input tests/features/runtime/redis_dns_resolution.feature --name Redis --retry 0 --concurrency 1
+    just coverage-redis-report {{ quote(output) }}
+
+coverage-redis-report output="target/redis-dns.lcov":
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
+        --package nervix-server \
+        --package nervix-dns \
+        --package nervix-connector \
+        --package nervix-connector-redis
+
+coverage-redis-units-append output="target/redis-dns.lcov":
+    cargo llvm-cov --no-clean --lib --package nervix-connector-redis
+    just coverage-redis-report {{ quote(output) }}
+
+coverage-redis-server-units-append output="target/redis-dns.lcov":
+    cargo llvm-cov --no-clean --lib --package nervix-server -- redis_
+    cargo llvm-cov --no-clean --lib --package nervix-server -- sources_that_resolve_names_report_missing_node_dns_as_start_failure
+    just coverage-redis-report {{ quote(output) }}
+
 # Collect the changed DNS client units and their public one-/three-node paths into one LCOV
 # profile so patch coverage can be checked before opening the PR.
 coverage-dns-clients output="target/dns-clients.lcov": tests-deps
@@ -691,6 +728,7 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
         --package nervix-connector-otel \
         --package nervix-connector-iceberg \
         --package nervix-connector-rabbitmq \
+        --package nervix-connector-redis \
         --package nervix-connector-syslog \
         --package nervix-connector-websockets \
         --package nervix-connector-clickhouse \
@@ -713,6 +751,7 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
     run_scenario tests/features/tools/cli_session.feature 'CLI.rejects.a.TLS'
     run_scenario tests/features/runtime/iceberg_emission.feature 'DNS.*fixture|Iceberg.*holds.*ACK'
     run_scenario tests/features/runtime/rabbitmq_dns_resolution.feature 'RabbitMQ|AMQPS'
+    run_scenario tests/features/runtime/redis_dns_resolution.feature 'Redis'
     run_scenario tests/features/runtime/syslog_dns_resolution.feature 'Syslog'
     run_scenario tests/features/runtime/websocket_client_ingestion.feature 'Websocket client ingestor connects'
     run_scenario tests/features/runtime/websocket_client_tls_resource_mounts.feature 'Websocket client keeps'
@@ -736,6 +775,7 @@ coverage-dns-clients-report output="target/dns-clients.lcov":
         --package nervix-connector-otel \
         --package nervix-connector-iceberg \
         --package nervix-connector-rabbitmq \
+        --package nervix-connector-redis \
         --package nervix-connector-syslog \
         --package nervix-connector-websockets \
         --package nervix-connector-clickhouse \
@@ -1022,8 +1062,8 @@ cargo-clippy-all:
     export RUSTFLAGS="-Dwarnings {{ rustflags }}"
     # Execution-mode builds require their runner, Shuttle's deliberately omits Tokio's process and
     # runtime-builder APIs, and the modes cannot be enabled together. Lint the packages that own a
-    # mode in ordinary mode, then lint each modeled build separately: the Shuttle library boundary,
-    # the Loom models and the Turmoil targets.
+    # mode in ordinary mode, then lint each modeled build separately: the Shuttle library boundary
+    # and the Turmoil targets here, and the Loom builds in `cargo-clippy-loom`.
     mode_packages=(
         nervix-client-core
         'nervix-connector*'
@@ -1059,14 +1099,29 @@ cargo-clippy-all:
         --package nervix-server \
         --package nervix-wasm
     cargo clippy --all-targets --features 'shuttle native' --package nervix-primitives
-    cargo clippy --all-targets --features loom \
-        --package nervix-execution \
-        --package nervix-model-harness
-    cargo clippy --all-targets --features 'loom native' --package nervix-primitives
     cargo clippy --all-targets --features turmoil \
         --package nervix-execution \
         --package nervix-interconnect
     cargo clippy --all-targets --features 'turmoil native' --package nervix-primitives
+
+# Lint every Loom build, each in its own invocation: the models and their harness, the primitive
+# boundary, and the server and consensus libraries as they ship and in test mode, where the Loom
+# models of their owners are built. Their integration tests and binaries never run a model, and
+# consensus unit tests build with `testing`, whose fault controls only the server's tests use.
+cargo-clippy-loom:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all"
+    export RUSTFLAGS="-Dwarnings {{ rustflags }}"
+    cargo clippy --all-targets --features loom \
+        --package nervix-execution \
+        --package nervix-model-harness
+    cargo clippy --all-targets --features 'loom native' --package nervix-primitives
+    cargo clippy --lib --features loom \
+        --package nervix-consensus \
+        --package nervix-server
+    cargo clippy --lib --profile test --features loom --package nervix-server
+    cargo clippy --lib --profile test --features 'loom testing' --package nervix-consensus
 
 # Lint one workspace package and all of its targets with warnings denied, sharing the workspace
 # lint build directory. Extra arguments are forwarded to Cargo.
@@ -1090,7 +1145,7 @@ cargo-clippy-client-wire-wasm:
     CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-client-wire-wasm" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-client-wire --target wasm32-unknown-unknown -q
 
 [parallel]
-cargo-clippy: cargo-clippy-all cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console cargo-clippy-client-wire-wasm
+cargo-clippy: cargo-clippy-all cargo-clippy-loom cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console cargo-clippy-client-wire-wasm
 
 [parallel]
 lint-inner: cargo-clippy
@@ -1148,9 +1203,9 @@ validate-dns-dependencies:
             exit 1
         fi
     done
-    # Syslog and WebSocket client transports resolve through the node resolver before opening
-    # their own concrete-address sockets, even when built without the server's feature graph.
-    for package in nervix-connector-syslog nervix-connector-websockets; do
+    # Syslog, WebSocket and Redis transports resolve through the node resolver, even when each
+    # connector is built without the server's feature graph.
+    for package in nervix-connector-syslog nervix-connector-websockets nervix-connector-redis; do
         graph="$(cargo tree --package "${package}" --edges normal --format '{p} {f}' --prefix none)"
         if ! rg -q '^nervix-dns v' <<< "${graph}" || \
             ! rg -q '^hickory-resolver v0\.26\.[0-9]+ .*tokio' <<< "${graph}"; then
@@ -1158,6 +1213,12 @@ validate-dns-dependencies:
             exit 1
         fi
     done
+    graph="$(cargo tree --package nervix-connector-redis --edges normal --format '{p} {f}' --prefix none)"
+    if ! rg -q '^redis v1\.[0-9]+\.[0-9]+ .*tokio-rustls-comp' <<< "${graph}" || \
+        rg -q '^rustls v[^ ]+ (.*,)?ring(,|$)' <<< "${graph}"; then
+        echo "nervix-connector-redis lacks Redis's AWS-LC TLS path" >&2
+        exit 1
+    fi
     # ClickHouse and SQS hand the node resolver to their drivers' own DNS hooks, Hyper's connector
     # and Smithy's HTTP client, even when built without the server's feature graph, and complete
     # TLS with AWS-LC alone.
@@ -1190,10 +1251,11 @@ validate-dns-dependencies:
 validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies
 
 # Hold every atomic to nervix-primitives and every mode feature to its owner. The check rejects a
-# direct, renamed, grouped, qualified, glob, alias or macro path to another backend's atomics, an
-# unmodeled atomic without its permission, a stale permission, a `loom` dependency outside its owner
-# and harness, and a mode feature that is not forwarded. The check's own tests run first, so a rule
-# that stopped rejecting its bypass fails here too.
+# direct, renamed, grouped, qualified, glob, alias or macro path to another backend's atomics, a
+# selected atomic held by a static or constructed in a const context, an unmodeled atomic without
+# its permission, a stale permission, a `loom` dependency outside its owner and harness, and a mode
+# feature that is not forwarded. The check's own tests run first, so a rule that stopped rejecting
+# its bypass fails here too.
 validate-primitive-boundary:
     python3 -m unittest --quiet scripts.tests.test_check_primitive_boundary
     python3 -m scripts.check_primitive_boundary
@@ -1633,7 +1695,7 @@ docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian
         -f Dockerfile.debian \
         --progress=plain \
         --platform "${normalized_platform}" \
-        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.28.0}" \
+        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.28.1}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
         --build-arg DEBIAN_VERSION={{ debian_version }} \
         --build-arg LLVM_VERSION={{ llvm_version }} \

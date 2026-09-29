@@ -209,6 +209,13 @@ hands the decision back to the 50 ms interval and the batches grow:
 
 ## Comparing two local builds (A/B)
 
+### Typed window admission
+
+`just bench-window-admission` measures the sum, count, moment, and histogram-index kernels for
+one nullable 4,096-row run. Use `just benchmark-ab` with `kafka-dedup-window`, one partition,
+and the precision-10 sketch for the complete window path. The command, measurements, and
+generated-instruction inspection are in [SIMD kernels 05](reports/simd-kernels-05.md).
+
 ### JSON emission from Arrow columns
 
 `just bench-json-encode` measures a 1,024-row Arrow batch with integer, clean UTF-8, and

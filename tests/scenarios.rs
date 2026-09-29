@@ -113,8 +113,8 @@ use crate::common::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
         KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
         MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR,
-        POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, RUSTFS_ADDR,
-        SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
+        POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR,
+        REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
@@ -148,6 +148,7 @@ mod common;
 mod database_batches;
 mod domain_clock_attachment;
 mod ingestion_time;
+mod process_cluster;
 mod session_protocol;
 
 const SCENARIOS_PATH: &str = "tests/features";
@@ -310,6 +311,9 @@ struct ScenarioWorld {
     /// The reply to the last upload stream a scenario shaped itself.
     last_upload_reply: Option<nervix_client_wire::UploadReply>,
     last_subscription_payload: Option<String>,
+    /// The metric values each named subscription passed from sampling, recorded once every value
+    /// that was sampled had been drawn for.
+    sampled_metric_values: BTreeMap<String, Vec<i64>>,
     /// When the message a delivery-delay assertion is about was published. Load moves this
     /// instant and the arrival together, which is what makes such an assertion hold on a
     /// busy machine where a fixed wall-clock window does not.
@@ -1296,6 +1300,25 @@ async fn then_http_receiver_captured_one_request_that_is(
         &format!("HTTP receiver '{name}' request '{}'", expected.request_line),
         request,
     );
+}
+
+/// Asserts that no captured request has `request_line`. A scenario uses it for a request that must
+/// never be sent at all, once later requests that it would have preceded have arrived.
+#[then(expr = "HTTP receiver {string} captured no request with request line {string}")]
+async fn then_http_receiver_captured_no_request_with_request_line(
+    world: &mut ScenarioWorld,
+    name: String,
+    request_line: String,
+) {
+    let request_line = expand_placeholders(world, &request_line);
+    let captured = http_receiver(world, &name).captured();
+    for request in &captured {
+        let captured_line = format!("{} {}", request.method, request.target);
+        assert_ne!(
+            captured_line, request_line,
+            "HTTP receiver '{name}' captured a request that must never be sent:\n{request}"
+        );
+    }
 }
 
 /// Compares two captured requests, counted from 1, byte for byte: request line, every header field
@@ -3277,8 +3300,14 @@ async fn when_client_probe_subscribes(
     start_client_probe(world, runtime, &node_id, target, SUBSCRIBED_LINE).await;
 }
 
-#[when(expr = "the {string} client probe attaches to the domain clock on node {string}")]
-async fn when_client_probe_attaches_to_the_domain_clock(
+/// Starts a probe that follows the domain's clock through the TCP forwarder a preceding step stood
+/// in front of `node_id`'s gRPC endpoint, so the scenario can end the probe's session by stopping
+/// the forwarder.
+#[when(
+    expr = "the {string} client probe attaches to the domain clock through the forwarded gRPC \
+            endpoint of node {string}"
+)]
+async fn when_client_probe_attaches_to_the_domain_clock_through_forwarder(
     world: &mut ScenarioWorld,
     runtime: String,
     node_id: String,
@@ -3287,8 +3316,28 @@ async fn when_client_probe_attaches_to_the_domain_clock(
         .parse()
         .expect("the step names a known probe runtime");
     let node_id = expand_placeholders(world, &node_id);
-    let target = client_probe_target(world, &node_id, ProbeExercise::DomainClock);
+    let forwarded = world
+        .placeholders
+        .get("forwarded_grpc")
+        .verified("a preceding step forwarded the node's gRPC endpoint")
+        .clone();
+    let mut target = client_probe_target(world, &node_id, ProbeExercise::DomainClock);
+    target.grpc_uri = forwarded;
     start_client_probe(world, runtime, &node_id, target, ATTACHED_LINE).await;
+}
+
+#[then(expr = "within {string} the client probe prints {string}")]
+async fn then_client_probe_prints(world: &mut ScenarioWorld, within: String, line: String) {
+    let within =
+        humantime::parse_duration(&within).expect("step duration must be a valid duration");
+    let line = expand_placeholders(world, &line);
+    world
+        .client_probe
+        .as_mut()
+        .verified("a preceding step started a client probe")
+        .wait_for_line(&line, within)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 #[when(expr = "the {string} client probe decodes the conformance corpus")]
@@ -7348,6 +7397,12 @@ async fn given_rabbitmq_endpoints_have_fixture_dns(world: &mut ScenarioWorld, na
     publish_fixture_name(world, RABBITMQ_TLS_ADDR, &name, "rabbitmq_tls_dns_addr");
 }
 
+#[given(expr = "the Redis endpoints are published under fixture DNS name {string}")]
+async fn given_redis_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
+    publish_fixture_name(world, REDIS_ADDR, &name, "redis_dns_addr");
+    publish_fixture_name(world, REDIS_TLS_ADDR, &name, "redis_tls_dns_addr");
+}
+
 #[given(expr = "the ClickHouse endpoints are published under fixture DNS name {string}")]
 async fn given_clickhouse_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
     publish_fixture_name(world, CLICKHOUSE_ADDR, &name, "clickhouse_dns_addr");
@@ -7435,6 +7490,14 @@ async fn given_rabbitmq_is_forwarded(world: &mut ScenarioWorld, name: String, ad
         "rabbitmq_forwarded_addr",
     )
     .await;
+}
+
+/// Stand TCP forwarders to Redis so the fixture can move its answer between independently
+/// stoppable addresses while the source and command pool reconnect.
+#[given(expr = "Redis is forwarded as {string} from the fixture addresses {string}")]
+async fn given_redis_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
+    let endpoint = started_dependency(world, REDIS_ADDR);
+    forward_under_fixture_name(world, &endpoint, &name, &addresses, "redis_forwarded_addr").await;
 }
 
 /// Stand TCP forwarders to the plain ClickHouse HTTP listener at `addresses`, and record in
@@ -9498,6 +9561,66 @@ async fn when_node_is_restarted_with_new_interconnect_addresses(
             .restart_node_with_new_interconnect_address(&node_id)
             .await
             .expect("failed to restart node with a new interconnect address");
+    }
+}
+
+#[then(
+    expr = "the leader eventually records node {string} at its current interconnect address in \
+            Raft membership"
+)]
+async fn then_leader_records_current_raft_address(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let endpoint = world
+        .cluster()
+        .interconnect_endpoint(&node_id)
+        .expect("the restarted node has an interconnect endpoint");
+    let expected = format!("- {node_id} [voter] {endpoint}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        tokio::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let status = run_nspl_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
+            .await
+            .expect("leader cluster status must be available");
+        if status.lines().any(|line| line == expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Raft membership did not record {expected}; last leader status: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(expr = "the leader Raft log index remains unchanged for {string}")]
+async fn then_leader_raft_log_stays_still(world: &mut ScenarioWorld, duration: String) {
+    let duration = humantime::parse_duration(&duration).expect("the observation duration is valid");
+    let leader = current_leader_node(world).await;
+    let deadline = Instant::now() + duration;
+    let mut initial = None;
+    loop {
+        tokio::task::consume_budget().await;
+        let status = run_nspl_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
+            .await
+            .expect("leader cluster status must be available");
+        let index = status
+            .lines()
+            .find_map(|line| line.strip_prefix("raft.last_log_index: "))
+            .expect("cluster status reports a Raft log index")
+            .parse::<u64>()
+            .expect("Raft log index is numeric");
+        match initial {
+            Some(initial) => assert_eq!(
+                index, initial,
+                "leader Raft log grew after membership converged; last status: {status}"
+            ),
+            None => initial = Some(index),
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -22880,6 +23003,127 @@ async fn then_within_duration_the_stream_subscription_receives_payloads(
             }
         }
     }
+}
+
+#[then(
+    expr = "within {string} subscriptions {string} and {string} each pass between {int} and {int} \
+            of the metric values up to {int}"
+)]
+async fn then_subscriptions_each_sample_metric_values(
+    world: &mut ScenarioWorld,
+    duration: String,
+    first: String,
+    second: String,
+    fewest: usize,
+    most: usize,
+    sampled_up_to: i64,
+) {
+    /// What one subscription delivered while this step read it.
+    #[derive(Default)]
+    struct SubscriptionSample {
+        /// The values up to the sampled bound, in the order they arrived.
+        passed: Vec<i64>,
+        /// The last value of any kind that arrived.
+        last: Option<i64>,
+        /// Whether a value above the bound arrived. Rows arrive in the order they were
+        /// published, so every value up to the bound has been drawn for by then.
+        drawn: bool,
+    }
+
+    let duration = humantime::parse_duration(&duration)
+        .assured("the scenario sampling deadline is a valid duration");
+    let session = world
+        .active_session
+        .as_mut()
+        .expect("an active session with the sampled subscriptions must exist");
+    let mut samples = BTreeMap::new();
+    samples.insert(first.clone(), SubscriptionSample::default());
+    samples.insert(second.clone(), SubscriptionSample::default());
+    let deadline = Instant::now() + duration;
+    loop {
+        tokio::task::consume_budget().await;
+        let mut all_drawn = true;
+        for sample in samples.values() {
+            if !sample.drawn {
+                all_drawn = false;
+            }
+        }
+        if all_drawn {
+            break;
+        }
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out before '{first}' and '{second}' drew for every metric value up to \
+             {sampled_up_to}"
+        );
+        let event = session
+            .try_next_subscription(deadline.saturating_duration_since(now))
+            .await
+            .expect("failed while waiting for sampled subscription rows")
+            .unwrap_or_else(|| {
+                panic!(
+                    "timed out before '{first}' and '{second}' drew for every metric value up to \
+                     {sampled_up_to}"
+                )
+            });
+        let payload = serde_json::from_str::<serde_json::Value>(&event.payload)
+            .unwrap_or_else(|error| panic!("subscription payload is not valid JSON: {error}"));
+        let Some(value) = payload.get("value").and_then(serde_json::Value::as_i64) else {
+            panic!("subscription payload {payload} has no integer 'value'");
+        };
+        let subscription = event.subscription.as_str();
+        let Some(sample) = samples.get_mut(subscription) else {
+            panic!("subscription '{subscription}' delivered a row this step does not sample");
+        };
+        if let Some(last) = sample.last {
+            assert!(
+                value > last,
+                "subscription '{subscription}' delivered {value} after {last}, out of the order \
+                 the values were published in"
+            );
+        }
+        sample.last = Some(value);
+        if value > sampled_up_to {
+            sample.drawn = true;
+        } else {
+            sample.passed.push(value);
+        }
+    }
+
+    let mut sampled = BTreeMap::new();
+    for (subscription, sample) in samples {
+        let passed = sample.passed.len();
+        assert!(
+            (fewest..=most).contains(&passed),
+            "subscription '{subscription}' passed {passed} of the metric values up to \
+             {sampled_up_to}, not between {fewest} and {most}: {:?}",
+            sample.passed
+        );
+        sampled.insert(subscription, sample.passed);
+    }
+    world.sampled_metric_values = sampled;
+}
+
+#[then(expr = "subscriptions {string} and {string} passed different metric values")]
+async fn then_subscriptions_passed_different_metric_values(
+    world: &mut ScenarioWorld,
+    first: String,
+    second: String,
+) {
+    let first_values = world
+        .sampled_metric_values
+        .get(&first)
+        .unwrap_or_else(|| panic!("no earlier step recorded the values '{first}' passed"));
+    let second_values = world
+        .sampled_metric_values
+        .get(&second)
+        .unwrap_or_else(|| panic!("no earlier step recorded the values '{second}' passed"));
+    assert_ne!(
+        first_values, second_values,
+        "subscriptions on one node take their draws from one sequence, so '{first}' and \
+         '{second}' must not pass the same values"
+    );
 }
 
 #[then(expr = "within {string} {int} relay subscription payloads share field {string}")]

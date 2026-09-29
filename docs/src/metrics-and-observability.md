@@ -52,6 +52,15 @@ For a single-input emitter, sent metrics retain that input relay as `stream`. A 
 emitter's received metrics identify the actual source relay, while its sent metrics aggregate the
 shared sink pipeline with `stream="-"` because one flush may contain work from several sources.
 
+An emitter's sent metrics count the records its destination delivered, each once, however many
+attempts it took: a flush that completes after retries counts its delivered records once, and a
+record the destination refused follows `ON MESSAGE ERROR` and is not sent. When a flush fails for
+good, the records its sink delivered before the failure are counted as its other records are routed
+to their error policy. A sink that publishes on its own commit, such as Iceberg, counts what each
+commit publishes. Sent bytes measure a delivered record's payload as the emitter's buffer measures
+it; an HTTP request's method, target and headers are not payload, and a request without a body
+carries none. See [HTTP inspection and metrics](./emitters.md#http-inspection-and-metrics).
+
 `DESCRIBE` output uses the same concepts but renders `physical_node_id` as `physical_node` for readability.
 
 Example Prometheus series:
@@ -145,7 +154,10 @@ refusal of a batch that was not admitted (`invalid_batch`, `suspended`, `busy`, 
 the uncertainty of one whose outcome is unknown (`interrupted`, `owner_lost`), or `none` for a
 completed batch. No label carries a payload value, a producer, or an attachment identity. A batch
 the serving session refused before it reached the node that executes the ingestor, such as one
-beyond its producer's credit, is answered by the session and not counted here.
+beyond its producer's credit, is answered by the session and not counted here. So is every batch the
+node that forwards a producer answers itself once it lost the node that executes the ingestor: a
+batch it never cleared for admission as `not_admitted` with `producer_ended`, and a cleared one as
+`outcome_unknown` with `owner_lost`.
 [Ingestors](ingestors.md#observing-client-ingestors) describes the same counts in `SHOW INGESTORS`
 and `DESCRIBE INGESTOR`.
 

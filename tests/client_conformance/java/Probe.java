@@ -5,8 +5,9 @@
 // release function runs when the arena closes, and a view read after that throws instead of
 // reading freed memory. Arenas the garbage collector owns release their events when they become
 // unreachable. Run it with `java --enable-native-access=ALL-UNNAMED Probe.java`; with the `clock`
-// argument it attaches to the domain's clock instead, reads the state and the first tick of the
-// generation the scenario starts, and detaches.
+// argument it attaches to the domain's running clock instead, reads the clock the attach reported
+// before its first tick, follows the generation a STOP and START begin and the attachment restored
+// after its session ends, and detaches.
 
 import java.lang.foreign.AddressLayout;
 import java.lang.foreign.Arena;
@@ -25,6 +26,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class Probe {
@@ -130,6 +132,26 @@ public class Probe {
             function("nx_clock_event_tick", POINTER, POINTER, POINTER, POINTER, POINTER, POINTER);
     static final MethodHandle CLOCK_EVENT_RETAIN = function("nx_clock_event_retain", POINTER, POINTER);
     static final MethodHandle CLOCK_EVENT_RELEASE = function("nx_clock_event_release", null, POINTER);
+    static final MethodHandle SESSION_DOMAIN_CLOCK =
+            function("nx_session_domain_clock", POINTER, POINTER, POINTER, SIZE, POINTER);
+    static final MethodHandle DOMAIN_CLOCK_GENERATION =
+            function("nx_domain_clock_generation", ValueLayout.JAVA_LONG, POINTER);
+    static final MethodHandle DOMAIN_CLOCK_STATE = function("nx_domain_clock_state", INT, POINTER);
+    static final MethodHandle DOMAIN_CLOCK_PACED = function("nx_domain_clock_paced", POINTER,
+            POINTER, POINTER, POINTER, POINTER, POINTER, POINTER);
+    static final MethodHandle DOMAIN_CLOCK_TICK =
+            function("nx_domain_clock_tick", BOOL, POINTER, POINTER, POINTER, POINTER, POINTER);
+    static final MethodHandle DOMAIN_CLOCK_LOGICAL_TIME_AT = function("nx_domain_clock_logical_time_at",
+            POINTER, POINTER, ValueLayout.JAVA_LONG, POINTER);
+    static final MethodHandle DOMAIN_CLOCK_WALL_DURATION_UNTIL = function(
+            "nx_domain_clock_wall_duration_until", POINTER, POINTER, ValueLayout.JAVA_LONG,
+            ValueLayout.JAVA_LONG, POINTER);
+    static final MethodHandle DOMAIN_CLOCK_ADMISSION_WINDOW = function("nx_domain_clock_admission_window",
+            POINTER, POINTER, ValueLayout.JAVA_LONG, POINTER, POINTER, POINTER);
+    static final MethodHandle DOMAIN_CLOCK_ADMITS = function("nx_domain_clock_admits", POINTER, POINTER,
+            ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, POINTER);
+    static final MethodHandle DOMAIN_CLOCK_RETAIN = function("nx_domain_clock_retain", POINTER, POINTER);
+    static final MethodHandle DOMAIN_CLOCK_RELEASE = function("nx_domain_clock_release", null, POINTER);
 
     /** A failure the binding returned, with its kind and the execution reference it names. */
     static final class Failure extends RuntimeException {
@@ -389,44 +411,77 @@ public class Probe {
         }
     }
 
-    /** The committed clock of the generation the probe follows. */
-    record PacedClock(long generation, long period, long skew, long origin, double rate) {
-        String stateLine(String domain) {
-            return "STATE domain=" + domain + " generation=" + Long.toUnsignedString(generation)
+    /** The committed clock of a paced generation. */
+    record PacedClock(long generation, long period, long skew, long origin, long anchor, double rate) {
+        /**
+         * The report line of the clock, with `prefix` naming where it was read. The UTC anchor
+         * depends on when the scenario's START committed, so it is read but not reported.
+         */
+        String line(String prefix, String domain) {
+            return prefix + " domain=" + domain + " generation=" + Long.toUnsignedString(generation)
                     + " state=paced period=" + Long.toUnsignedString(period) + " skew="
                     + Long.toUnsignedString(skew) + " origin=" + origin + " rate=f64:"
                     + String.format("%016x", Double.doubleToRawLongBits(rate));
         }
 
+        /** An instant as the report names it: `origin` for the logical origin, the instant otherwise. */
+        String relative(long instant) {
+            return instant == origin ? "origin" : Long.toString(instant);
+        }
+
         /**
-         * The report line of a tick, after holding it to this clock: its boundary is the logical
-         * origin plus one period for every id before it, and the serving node's reading never
-         * precedes the origin.
+         * The report line of the projections of `read`, which holds this clock, at its own UTC
+         * anchor: the logical time there, the wait for the next tick center, the admission window,
+         * and whether an event at the skew's edge and one nanosecond past it are admitted.
          */
-        String tickLine(ClockEvent event, String domain) {
-            if (event.generation() != generation) {
-                throw new IllegalStateException("a tick belongs to another generation than the state before it");
+        String projectionLine(DomainClock read, String domain) {
+            long nextCenter = Math.addExact(origin, period);
+            long edge = Math.addExact(origin, skew);
+            long beyond = Math.addExact(edge, 1);
+            long[] window = read.admissionWindow(anchor);
+            if (window == null) {
+                throw new IllegalStateException("a paced clock reports no admission window");
             }
-            try (Arena scratch = Arena.ofConfined()) {
-                MemorySegment id = scratch.allocate(ValueLayout.JAVA_LONG);
-                MemorySegment boundary = scratch.allocate(ValueLayout.JAVA_LONG);
-                MemorySegment authorityUtc = scratch.allocate(ValueLayout.JAVA_LONG);
-                MemorySegment servingLogical = scratch.allocate(ValueLayout.JAVA_LONG);
-                check(call(CLOCK_EVENT_TICK, event.handle, id, boundary, authorityUtc, servingLogical));
-                long tickId = id.get(ValueLayout.JAVA_LONG, 0);
-                if (tickId == 0 || boundary.get(ValueLayout.JAVA_LONG, 0)
-                        != Math.addExact(origin, Math.multiplyExact(tickId - 1, period))) {
-                    throw new IllegalStateException(
-                            "a tick's boundary is not the origin plus one period for every id before it");
-                }
-                if (servingLogical.get(ValueLayout.JAVA_LONG, 0) < origin) {
-                    throw new IllegalStateException("the serving node's logical reading precedes the logical origin");
-                }
+            return "PROJECTION domain=" + domain + " generation=" + Long.toUnsignedString(generation)
+                    + " anchor=" + relative(read.logicalTimeAt(anchor))
+                    + " wait=" + Long.toUnsignedString(read.wallDurationUntil(anchor, nextCenter))
+                    + " window=" + relative(window[0]) + ".." + relative(window[1])
+                    + " skew=" + admission(read.admits(anchor, edge))
+                    + " beyond=" + admission(read.admits(anchor, beyond));
+        }
+
+        static String admission(boolean admitted) {
+            return admitted ? "admitted" : "refused";
+        }
+
+        /**
+         * Holds a tick to this clock: the same generation, a boundary of the logical origin plus
+         * one period for every id before it, and a serving node's reading that never precedes the
+         * origin.
+         */
+        void checkTick(Tick tick) {
+            if (tick.generation() != generation) {
+                throw new IllegalStateException("a tick of one generation followed the state of another");
             }
-            return "TICK domain=" + domain + " generation=" + Long.toUnsignedString(generation)
+            if (tick.id() == 0 || tick.boundary() != Math.addExact(origin, Math.multiplyExact(tick.id() - 1, period))) {
+                throw new IllegalStateException(
+                        "a tick's boundary is not the origin plus one period for every id before it");
+            }
+            if (tick.servingLogical() < origin) {
+                throw new IllegalStateException("the serving node's logical reading precedes the logical origin");
+            }
+        }
+
+        /** The report line of a tick this clock holds. */
+        String tickLine(Tick tick, String domain) {
+            checkTick(tick);
+            return "TICK domain=" + domain + " generation=" + Long.toUnsignedString(tick.generation())
                     + " boundary=origin+(id-1)*period";
         }
     }
+
+    /** The progress a tick event reports. */
+    record Tick(long generation, long id, long boundary, long servingLogical) {}
 
     /** One reference to a domain clock event, owned by an arena: closing it releases the reference. */
     static final class ClockEvent {
@@ -471,17 +526,112 @@ public class Probe {
             }
         }
 
-        /** The committed clock; the UTC anchor depends on when START committed and is not read. */
         PacedClock paced() {
+            return pacedClock(CLOCK_EVENT_PACED, handle, generation());
+        }
+
+        /** The tick; the authority's UTC observation depends on when it was accepted and is not read. */
+        Tick tick() {
             try (Arena scratch = Arena.ofConfined()) {
-                MemorySegment period = scratch.allocate(ValueLayout.JAVA_LONG);
-                MemorySegment skew = scratch.allocate(ValueLayout.JAVA_LONG);
-                MemorySegment origin = scratch.allocate(ValueLayout.JAVA_LONG);
-                MemorySegment rate = scratch.allocate(ValueLayout.JAVA_DOUBLE);
-                check(call(CLOCK_EVENT_PACED, handle, period, skew, origin, MemorySegment.NULL, rate));
-                return new PacedClock(generation(), period.get(ValueLayout.JAVA_LONG, 0),
-                        skew.get(ValueLayout.JAVA_LONG, 0), origin.get(ValueLayout.JAVA_LONG, 0),
-                        rate.get(ValueLayout.JAVA_DOUBLE, 0));
+                MemorySegment id = scratch.allocate(ValueLayout.JAVA_LONG);
+                MemorySegment boundary = scratch.allocate(ValueLayout.JAVA_LONG);
+                MemorySegment servingLogical = scratch.allocate(ValueLayout.JAVA_LONG);
+                check(call(CLOCK_EVENT_TICK, handle, id, boundary, MemorySegment.NULL, servingLogical));
+                return new Tick(generation(), id.get(ValueLayout.JAVA_LONG, 0),
+                        boundary.get(ValueLayout.JAVA_LONG, 0), servingLogical.get(ValueLayout.JAVA_LONG, 0));
+            }
+        }
+    }
+
+    /** The committed clock `read` writes for `handle`, a clock event or a domain clock. */
+    static PacedClock pacedClock(MethodHandle read, MemorySegment handle, long generation) {
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment period = scratch.allocate(ValueLayout.JAVA_LONG);
+            MemorySegment skew = scratch.allocate(ValueLayout.JAVA_LONG);
+            MemorySegment origin = scratch.allocate(ValueLayout.JAVA_LONG);
+            MemorySegment anchor = scratch.allocate(ValueLayout.JAVA_LONG);
+            MemorySegment rate = scratch.allocate(ValueLayout.JAVA_DOUBLE);
+            check(call(read, handle, period, skew, origin, anchor, rate));
+            return new PacedClock(generation, period.get(ValueLayout.JAVA_LONG, 0),
+                    skew.get(ValueLayout.JAVA_LONG, 0), origin.get(ValueLayout.JAVA_LONG, 0),
+                    anchor.get(ValueLayout.JAVA_LONG, 0), rate.get(ValueLayout.JAVA_DOUBLE, 0));
+        }
+    }
+
+    /**
+     * One reference to the clock the session held for a followed domain when the probe read it,
+     * owned by an arena: closing it releases the reference.
+     */
+    static final class DomainClock {
+        final MemorySegment handle;
+        final Arena arena;
+
+        DomainClock(MemorySegment raw, Arena arena) {
+            this.arena = arena;
+            this.handle = raw.reinterpret(arena, segment -> call(DOMAIN_CLOCK_RELEASE, segment));
+        }
+
+        DomainClock retain(Arena into) {
+            return new DomainClock((MemorySegment) call(DOMAIN_CLOCK_RETAIN, handle), into);
+        }
+
+        long generation() {
+            return (long) call(DOMAIN_CLOCK_GENERATION, handle);
+        }
+
+        int state() {
+            return (int) call(DOMAIN_CLOCK_STATE, handle);
+        }
+
+        PacedClock paced() {
+            return pacedClock(DOMAIN_CLOCK_PACED, handle, generation());
+        }
+
+        /** The id of the newest tick the read holds, when it holds one. */
+        OptionalLong tickId() {
+            try (Arena scratch = Arena.ofConfined()) {
+                MemorySegment id = scratch.allocate(ValueLayout.JAVA_LONG);
+                boolean held = (boolean) call(DOMAIN_CLOCK_TICK, handle, id, MemorySegment.NULL,
+                        MemorySegment.NULL, MemorySegment.NULL);
+                return held ? OptionalLong.of(id.get(ValueLayout.JAVA_LONG, 0)) : OptionalLong.empty();
+            }
+        }
+
+        long logicalTimeAt(long utc) {
+            try (Arena scratch = Arena.ofConfined()) {
+                MemorySegment logical = scratch.allocate(ValueLayout.JAVA_LONG);
+                check(call(DOMAIN_CLOCK_LOGICAL_TIME_AT, handle, utc, logical));
+                return logical.get(ValueLayout.JAVA_LONG, 0);
+            }
+        }
+
+        long wallDurationUntil(long utc, long target) {
+            try (Arena scratch = Arena.ofConfined()) {
+                MemorySegment wait = scratch.allocate(ValueLayout.JAVA_LONG);
+                check(call(DOMAIN_CLOCK_WALL_DURATION_UNTIL, handle, utc, target, wait));
+                return wait.get(ValueLayout.JAVA_LONG, 0);
+            }
+        }
+
+        /** The earliest and latest admitted tick centers, or null for a clock without a window. */
+        long[] admissionWindow(long utc) {
+            try (Arena scratch = Arena.ofConfined()) {
+                MemorySegment hasWindow = scratch.allocate(BOOL);
+                MemorySegment earliest = scratch.allocate(ValueLayout.JAVA_LONG);
+                MemorySegment latest = scratch.allocate(ValueLayout.JAVA_LONG);
+                check(call(DOMAIN_CLOCK_ADMISSION_WINDOW, handle, utc, hasWindow, earliest, latest));
+                if (!hasWindow.get(BOOL, 0)) {
+                    return null;
+                }
+                return new long[] {earliest.get(ValueLayout.JAVA_LONG, 0), latest.get(ValueLayout.JAVA_LONG, 0)};
+            }
+        }
+
+        boolean admits(long utc, long event) {
+            try (Arena scratch = Arena.ofConfined()) {
+                MemorySegment admitted = scratch.allocate(BOOL);
+                check(call(DOMAIN_CLOCK_ADMITS, handle, utc, event, admitted));
+                return admitted.get(BOOL, 0);
             }
         }
     }
@@ -527,6 +677,19 @@ public class Probe {
                 MemorySegment event = scratch.allocate(POINTER);
                 check(call(SESSION_NEXT_EVENT, handle, cancel, event));
                 return new Event(event.get(POINTER, 0), into);
+            }
+        }
+
+        /** The clock the session holds for `domain`, owned by `into`, or null when it follows none. */
+        DomainClock domainClock(String domain, Arena into) {
+            try (Arena scratch = Arena.ofConfined()) {
+                MemorySegment out = scratch.allocate(POINTER);
+                check(call(SESSION_DOMAIN_CLOCK, handle, text(scratch, domain), length(domain), out));
+                MemorySegment clock = out.get(POINTER, 0);
+                if (clock.equals(MemorySegment.NULL)) {
+                    return null;
+                }
+                return new DomainClock(clock, into);
             }
         }
 
@@ -696,67 +859,232 @@ public class Probe {
     }
 
     /**
-     * Attaches to the domain's clock, reads the state and the first tick of the generation the
-     * scenario starts, and detaches.
+     * What the probe has read about the domain's clock: the generation of the newest state, its
+     * mapping while it is paced, and whether the session holding the attachment ended since. Every
+     * event is held to what was read before it, and a read of the clock taken right after it is
+     * held to be no older.
+     */
+    static final class FollowedClock {
+        final Session session;
+        final String domain;
+        long generation;
+        PacedClock paced;
+        boolean interrupted;
+
+        FollowedClock(Session session, String domain, PacedClock clock) {
+            this.session = session;
+            this.domain = domain;
+            this.generation = clock.generation();
+            this.paced = clock;
+        }
+
+        PacedClock clock() {
+            if (paced == null) {
+                throw new IllegalStateException("the followed clock is not paced");
+            }
+            return paced;
+        }
+
+        /** The next event about the domain, held to what the probe read before it. */
+        ClockEvent next(MemorySegment deadline) {
+            ClockEvent event = session.nextClockEvent(deadline, Arena.ofShared(), domain);
+            switch (event.kind()) {
+                case "STATE" -> observe(event);
+                case "TICK" -> checkTick(event);
+                case "INTERRUPTED" -> interrupted = true;
+                case "ENDED" -> throw new IllegalStateException("the server ended the attachment");
+                default -> {}
+            }
+            return event;
+        }
+
+        void observe(ClockEvent event) {
+            long eventGeneration = event.generation();
+            if (Long.compareUnsigned(eventGeneration, generation) < 0) {
+                throw new IllegalStateException("a state went back to an earlier generation");
+            }
+            int state = event.state();
+            PacedClock eventPaced = state == CLOCK_PACED ? event.paced() : null;
+            try (Arena reads = Arena.ofConfined()) {
+                DomainClock read = read(reads);
+                if (Long.compareUnsigned(read.generation(), eventGeneration) < 0) {
+                    throw new IllegalStateException("a read of the clock is older than the state the probe took");
+                }
+                if (read.generation() == eventGeneration) {
+                    if (read.state() != state) {
+                        throw new IllegalStateException("a read of the clock differs from the state of its generation");
+                    }
+                    if (eventPaced != null && !read.paced().equals(eventPaced)) {
+                        throw new IllegalStateException("a read of the clock differs from the mapping of its generation");
+                    }
+                }
+            }
+            generation = eventGeneration;
+            paced = eventPaced;
+            interrupted = false;
+        }
+
+        void checkTick(ClockEvent event) {
+            if (interrupted) {
+                throw new IllegalStateException("a tick arrived before the restored attachment reported its clock");
+            }
+            Tick tick = event.tick();
+            clock().checkTick(tick);
+            try (Arena reads = Arena.ofConfined()) {
+                DomainClock read = read(reads);
+                if (Long.compareUnsigned(read.generation(), tick.generation()) < 0) {
+                    throw new IllegalStateException("a read of the clock is older than the tick the probe took");
+                }
+                OptionalLong held = read.tickId();
+                if (read.generation() == tick.generation() && held.isPresent()
+                        && Long.compareUnsigned(held.getAsLong(), tick.id()) < 0) {
+                    throw new IllegalStateException("a read of the clock holds an older tick than the probe took");
+                }
+            }
+        }
+
+        DomainClock read(Arena into) {
+            DomainClock read = session.domainClock(domain, into);
+            if (read == null) {
+                throw new IllegalStateException("the session follows no clock of the domain after an event about it");
+            }
+            return read;
+        }
+
+        /**
+         * The first tick of the followed generation. A state reporting that generation again is
+         * taken on the way; one of another generation fails the probe.
+         */
+        ClockEvent firstTick(MemorySegment deadline) {
+            long followed = generation;
+            while (true) {
+                ClockEvent event = next(deadline);
+                String kind = event.kind();
+                if (kind.equals("TICK")) {
+                    return event;
+                }
+                event.arena.close();
+                if (!kind.equals("STATE") || generation != followed) {
+                    throw new IllegalStateException("the clock reported " + kind
+                            + " before the first tick of the followed generation");
+                }
+            }
+        }
+
+        /**
+         * The paced state of a generation after the followed one. The followed generation's ticks
+         * and the states before the new paced one are taken on the way.
+         */
+        ClockEvent nextGeneration(MemorySegment deadline) {
+            long previous = generation;
+            while (true) {
+                ClockEvent event = next(deadline);
+                String kind = event.kind();
+                if (kind.equals("STATE") && Long.compareUnsigned(generation, previous) > 0 && paced != null) {
+                    return event;
+                }
+                event.arena.close();
+                if (!kind.equals("TICK") && !kind.equals("STATE")) {
+                    throw new IllegalStateException("the clock reported " + kind
+                            + " before a generation after the followed one");
+                }
+            }
+        }
+
+        /** Waits for the interruption; the followed generation's ticks and states are taken on the way. */
+        void interruption(MemorySegment deadline) {
+            long followed = generation;
+            while (true) {
+                ClockEvent event = next(deadline);
+                String kind = event.kind();
+                event.arena.close();
+                if (kind.equals("INTERRUPTED")) {
+                    return;
+                }
+                if (!kind.equals("TICK") && (!kind.equals("STATE") || generation != followed)) {
+                    throw new IllegalStateException("the clock reported " + kind + " before the interruption");
+                }
+            }
+        }
+
+        /**
+         * The paced state the restored attachment reports. A refused restoration, which the session
+         * repeats, and a clock reported uninstalled are taken on the way.
+         */
+        ClockEvent restored(MemorySegment deadline) {
+            while (true) {
+                ClockEvent event = next(deadline);
+                if (event.kind().equals("STATE") && paced != null) {
+                    return event;
+                }
+                event.arena.close();
+            }
+        }
+
+        /** Reports the paced state a STATE event reports and the first tick after it. */
+        void reportStateAndFirstTick(ClockEvent state, MemorySegment deadline) {
+            report(state.paced().line("STATE", domain));
+            state.arena.close();
+            ClockEvent tick = firstTick(deadline);
+            report(clock().tickLine(tick.tick(), domain));
+            tick.arena.close();
+        }
+    }
+
+    /**
+     * Attaches to the domain's running clock and reads the clock the attach reported before its
+     * first tick, then follows the generation the scenario's STOP and START begin and the attachment
+     * restored after the scenario ends the session, and detaches.
      */
     static void runClock(Session session, String domain, Arena outcomes) throws InterruptedException {
         checkClockCancellation(session, domain);
         report("ATTACHED " + session.execute("ATTACH DOMAIN CLOCK;", MemorySegment.NULL, outcomes).disposition());
         try (Arena tokens = Arena.ofConfined()) {
-            MemorySegment deadline = cancel(tokens, 120_000L);
-            ClockEvent state;
-            while (true) {
-                state = session.nextClockEvent(deadline, Arena.ofShared(), domain);
-                if (!state.kind().equals("STATE")) {
-                    throw new IllegalStateException("the clock reported " + state.kind() + " before the started state");
-                }
-                // The serving node may report the started generation uninstalled until it holds
-                // the committed mapping and an assigned clock authority.
-                if (state.state() == CLOCK_PACED) {
-                    break;
-                }
-                state.arena.close();
+            // The clock the attach reported, read before any event about the attachment.
+            DomainClock read = session.domainClock(domain, Arena.ofShared());
+            if (read == null) {
+                throw new IllegalStateException("the session follows no clock after its attach completed");
             }
-            PacedClock clock = state.paced();
-            String reportedState = clock.stateLine(domain);
-            report(reportedState);
+            if (read.state() != CLOCK_PACED) {
+                throw new IllegalStateException("the attach reported a clock other than the running paced one");
+            }
+            PacedClock clock = read.paced();
+            String reportedClock = clock.line("CLOCK", domain);
+            report(reportedClock);
+            report(clock.projectionLine(read, domain));
 
-            ClockEvent tick;
-            while (true) {
-                tick = session.nextClockEvent(deadline, Arena.ofShared(), domain);
-                if (tick.kind().equals("TICK")) {
-                    break;
-                }
-                if (!tick.kind().equals("STATE")) {
-                    throw new IllegalStateException("the clock reported " + tick.kind() + " before its first tick");
-                }
-                // The serving node reported the installation again; it is still the same generation.
-                if (tick.generation() != clock.generation()) {
-                    throw new IllegalStateException("the clock moved to another generation before its first tick");
-                }
-                tick.arena.close();
-            }
-            String reportedTick = clock.tickLine(tick, domain);
+            FollowedClock followed = new FollowedClock(session, domain, clock);
+            ClockEvent tick = followed.firstTick(cancel(tokens, 120_000L));
+            String reportedTick = clock.tickLine(tick.tick(), domain);
             report(reportedTick);
 
-            // Keep a second reference to each event and release the first on another thread, so
-            // the events must read the same on the second alone.
+            // Keep a second reference to the read and the tick and release the first ones on
+            // another thread, so both must read the same on the second alone.
             try (Arena retained = Arena.ofConfined()) {
-                ClockEvent retainedState = state.retain(retained);
+                DomainClock retainedRead = read.retain(retained);
                 ClockEvent retainedTick = tick.retain(retained);
-                ClockEvent firstState = state;
-                ClockEvent firstTick = tick;
                 Thread closer = new Thread(() -> {
-                    firstState.arena.close();
-                    firstTick.arena.close();
+                    read.arena.close();
+                    tick.arena.close();
                 });
                 closer.start();
                 closer.join();
-                if (!retainedState.paced().stateLine(domain).equals(reportedState)
-                        || !clock.tickLine(retainedTick, domain).equals(reportedTick)) {
-                    throw new IllegalStateException("a retained clock event reads differently than it did");
+                PacedClock clockAgain = retainedRead.paced();
+                if (!clockAgain.line("CLOCK", domain).equals(reportedClock)
+                        || !clockAgain.tickLine(retainedTick.tick(), domain).equals(reportedTick)) {
+                    throw new IllegalStateException("a retained clock or tick reads differently than it did");
                 }
             }
+
+            // The scenario stops the domain and starts it again at another origin and rate.
+            MemorySegment started = cancel(tokens, 120_000L);
+            followed.reportStateAndFirstTick(followed.nextGeneration(started), started);
+
+            // The scenario ends the session, and the binding attaches the clock again on the next one.
+            MemorySegment restoring = cancel(tokens, 120_000L);
+            followed.interruption(restoring);
+            report("INTERRUPTED domain=" + domain);
+            followed.reportStateAndFirstTick(followed.restored(restoring), restoring);
         }
         report("DETACHED " + session.execute("DETACH DOMAIN CLOCK;", MemorySegment.NULL, outcomes).disposition());
         report("CHECKS ok");

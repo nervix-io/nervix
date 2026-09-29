@@ -377,9 +377,11 @@ Choose checks relevant to the configured graph:
   `does not exist` refusal means the cluster has no such domain, not that the node restarted.
 - `nervix-cli --domain <domain> domain-clock` follows that clock from a shell until Ctrl-C,
   printing the attach reply, state changes, and tick lines.
-- A host using the shared C binding executes attach and detach through `nx_session_execute` and
-  reads later states and ticks with `nx_session_next_clock_event`; the binding does not expose the
-  initial state from the attach reply as a typed outcome.
+- A host using the shared C binding executes attach and detach through `nx_session_execute`, reads
+  the clock the attach reported, generation and paced mapping included, with
+  `nx_session_domain_clock` before it uses a tick, and reads later states and ticks with
+  `nx_session_next_clock_event`. The clock's projections give the logical time, the wait until a
+  logical target, and the `TIMESTAMP AT` values the ingestor admits.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.
 - `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
   expiry outcomes.

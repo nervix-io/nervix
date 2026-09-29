@@ -328,18 +328,48 @@ impl WindowAccumulator {
                     sum.retract(run.arguments.demand(demand).first(), run.rows);
                 }
             }
-            Self::FloatSum(sums) => sums.retract_oldest(count, retained, |position| {
-                let row = rows.retained_row(position);
-                CompensatedSum::of_row(row.arguments.demand(demand).first(), row.row)
-            }),
-            Self::Moments(moments) => moments.retract_oldest(count, retained, |position| {
-                let row = rows.retained_row(position);
-                Moments::of_row(row.arguments.demand(demand).first(), row.row)
-            }),
-            Self::CoMoments(moments) => moments.retract_oldest(count, retained, |position| {
-                let row = rows.retained_row(position);
-                CoMoments::of_row(row.arguments.demand(demand), row.row)
-            }),
+            Self::FloatSum(sums) => sums.retract_oldest_runs(
+                count,
+                retained,
+                || {
+                    retained_runs(rows, count..retained)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                },
+                |run, newer, front| {
+                    let arguments = run.arguments.demand(demand);
+                    CompensatedSum::refold_run(arguments.first(), run.rows, newer, front)
+                },
+            ),
+            Self::Moments(moments) => moments.retract_oldest_runs(
+                count,
+                retained,
+                || {
+                    retained_runs(rows, count..retained)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                },
+                |run, newer, front| {
+                    let arguments = run.arguments.demand(demand);
+                    Moments::refold_run(arguments.first(), run.rows, newer, front)
+                },
+            ),
+            Self::CoMoments(moments) => moments.retract_oldest_runs(
+                count,
+                retained,
+                || {
+                    retained_runs(rows, count..retained)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                },
+                |run, newer, front| {
+                    let arguments = run.arguments.demand(demand);
+                    CoMoments::refold_run(arguments, run.rows, newer, front)
+                },
+            ),
             Self::Extremes(extremes) => extremes.retract_oldest(rows, count),
             Self::Histogram(histogram) => {
                 histogram.purge_expired(removed_at);

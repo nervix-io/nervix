@@ -13,6 +13,9 @@ delivery, and transport failures. [Domain Clock](./domain-clock.md) owns clock i
 authority, and time bounds. [Shutdown And Recovery](./shutdown.md) owns drain, handoff, and restart
 semantics. The state rules here apply to those systems without replacing their detailed contracts.
 
+[Execution Plans](./execution-plans.md) follows the validated values into a complete installed
+revision.
+
 ## A State Has One Owner
 
 Text is parsed into a semantic Model, registry validation resolves its references and contracts,
@@ -185,6 +188,13 @@ restoration carries a domain but no invented generation or end reason. A mismatc
 `NX_ERROR_TYPE` without changing its outputs, so absence cannot look like a zero generation or
 timestamp. The paced and tick accessors allow omitted output pointers for fields a host does not
 need.
+
+The clock of a followed domain, `nx_domain_clock`, always has a generation and a state, so those
+accessors cannot fail. A domain the session does not follow reads as a NULL clock rather than a
+stopped one, a clock without an accepted tick answers `false` from `nx_domain_clock_tick` rather
+than a zero tick, and an unpaced clock reports no admission window rather than an unbounded one.
+Only a paced clock has a mapping for `nx_domain_clock_paced`, and a stopped or uninstalled clock has
+no logical time, so its projections return `NX_ERROR_TYPE` instead of a fabricated instant.
 
 Completion replies likewise carry a `SuggestionStatus` variant for ready, missing, stale, or failed
 context and an optional continuation. The server resolves typed semantic references from one

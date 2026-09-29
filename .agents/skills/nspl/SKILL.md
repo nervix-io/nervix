@@ -347,7 +347,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `Retry-After`, in whole seconds or as an HTTP date, can lengthen the physical wait beyond `MAX`.
   A lost response can repeat a request the endpoint applied, so give the endpoint a stable key
   such as `write_header('Idempotency-Key', input.event_id)`; see
-  [HTTP retries](../../../docs/src/emitters.md#http-retries-and-acknowledgements).
+  [HTTP retries](../../../docs/src/emitters.md#http-retries-and-acknowledgements). While a request
+  is pending after a failed attempt, `DESCRIBE EMITTER` shows that failure's status or transport
+  cause as its transient error until the request is delivered. Sent counters count each delivered
+  record once and never a refused one, and a `WITHOUT BODY` emitter sends zero payload bytes; see
+  [HTTP inspection](../../../docs/src/emitters.md#http-inspection-and-metrics).
 - Write a supported emitter's optional `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` after the complete
   sink clause and route construction, before `FLUSH`; it is required for CLIENT, ClickHouse,
   Postgres, MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a

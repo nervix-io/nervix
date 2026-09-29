@@ -230,6 +230,44 @@ emitters publish one request per eligible source record, so they do not accept t
 `BATCH` clause. `SHOW CREATE EMITTER` preserves both request expressions and the explicit body
 selection.
 
+For example, the first emitter below sends each record of `outgoing` with its own method, path and
+tenant header and a JSON body of two of its fields, and the second deletes without a body.
+`api.example.com` stands for an endpoint the operator has already provisioned.
+
+```nspl
+CREATE CLIENT api TYPE HTTP CONFIG {
+  'endpoint' = 'https://api.example.com',
+  'timeout_ms' = 5000
+};
+
+CREATE ATTACHED EMITTER deliver_event
+  FROM outgoing
+  TO HTTP api
+    METHOD input.request_method
+    PATH input.request_path
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING event_body_codec
+  INHERIT event_id, payload
+  INVOKE write_header('Content-Type', 'application/json'),
+         write_header('X-Tenant', input.tenant),
+         write_header('Idempotency-Key', input.event_id)
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE EMITTER delete_event
+  FROM outgoing WHERE input.request_method = 'DELETE'
+  TO HTTP api
+    METHOD 'DELETE'
+    PATH input.request_path
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    WITHOUT BODY
+  INVOKE write_header('Idempotency-Key', input.event_id)
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
 #### HTTP requests
 
 An HTTP emitter sends one request for each eligible record. For each batch it admits, it resolves
@@ -365,6 +403,55 @@ relays and keeps upstream ACK leases alive. `FLUSH` still controls when and how 
 flush; `MODE` controls when each record in that flush counts as published. `ATTACHED` and
 `DETACHED` are orthogonal: a detached emitter acknowledges upstream immediately but still performs
 its declared confirmations and retries for error visibility and backpressure.
+
+#### HTTP inspection and metrics
+
+`SHOW CREATE EMITTER` and canonical formatting render the method and path expressions, the header
+invocations and the construction in canonical NSPL, with the explicit body selection. A configured
+expression is rendered as NSPL under the ordinary sensitivity rules, so an explicitly leaked field
+appears as its `leak_sensitive(...)` call and never as a value. `DESCRIBE EMITTER`
+reports the request contract of the `deliver_event` example above in these lines:
+
+```text
+codec: event_body_codec
+body: codec
+sink: HTTP client=api method=input.request_method path=input.request_path
+batch: none
+flush: FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+publishing mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
+```
+
+`body` reads `codec` for `ENCODE USING`, and `without body`, with `codec: none`, for `WITHOUT BODY`.
+Header invocations appear in `SHOW CREATE EMITTER` rather than in `DESCRIBE`.
+
+While a request is pending after a failed attempt — waiting out its backoff or `Retry-After`,
+or sent again and not yet answered — `DESCRIBE EMITTER` reports that failure as its
+`transient error`, with the `reconnect backoff` the retry waited and the `reconnect wait` still
+left, and the node reports it as a runtime event. It clears once the pending request is delivered.
+The failure names its cause and, for a response, its status, such as
+`HTTP endpoint answered with retryable status 503`,
+`HTTP endpoint answered with authentication or authorization status 401`,
+`HTTP request timed out before complete final response headers`, or
+`HTTP TLS handshake failed: invalid peer certificate: UnknownIssuer`. A DNS, connection, TLS, send
+or response-header failure keeps the cause beneath it, such as the resolver's
+`resolving 'api.example.com' failed: the name does not exist`. `ON GENERAL ERROR` has no say over a
+response: a retryable failure stays pending and keeps attached acknowledgements alive, and a
+refusal follows `ON MESSAGE ERROR`, even with `ON GENERAL ERROR IGNORE`.
+
+A record's message error names the operation that rejected it and where applicable the request
+field or invocation: `publish` with the field `method` or `path`, `invoke` with the zero-based
+position of the header write, `encode` for a body the codec cannot produce, and, for a refused
+request, the code `external` with the operation `publish` and a message carrying the numeric status,
+such as `HTTP endpoint answered with status 404`. Message errors, emitter status, runtime events,
+logs and metric labels never carry an evaluated target, a header value, a credential, a request body
+or a response body.
+
+The emitter's `sent` counters count each record once, when its request is delivered, however many
+attempts that took, and never a record the endpoint refused. `messages_total` counts delivered
+records, not attempts. `bytes_total` counts a codec body's record with the ordinary emitter payload
+accounting, the logical Arrow data of the finalized record, while a request without a body adds
+no payload bytes. A request's method, target and headers and the response add nothing to either
+counter, and the counters carry only the ordinary graph labels, never a request value.
 
 ## Batching
 
@@ -914,6 +1001,10 @@ Redis Pub/Sub has no subscriber delivery acknowledgment. The awaited `PUBLISH` r
 server acceptance only. A record-specific server rejection follows `ON MESSAGE ERROR`; connection
 failures retry the undelivered work. A `TYPE REDIS` client declares its connection-pool bounds; see
 [Database Client Connection Pools](database-client-pools.md).
+Each physical pooled command connection resolves the `addr` hostname through the node's
+asynchronous DNS resolver when it opens. A replacement connection can use a changed DNS answer;
+an established connection stays open until Redis or the network closes it. For `rediss://`, TLS
+still verifies the configured hostname and uses its configured CA and optional client identity.
 
 ### MQTT
 

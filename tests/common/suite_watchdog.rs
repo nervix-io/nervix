@@ -44,7 +44,7 @@ use std::{
     sync::{Arc as StdArc, LazyLock},
 };
 
-use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
+use meticulous::OptionExt as _;
 use nervix_recovery::Reported as _;
 use parking_lot::Mutex;
 use tokio::time::Duration;
@@ -60,7 +60,7 @@ use super::{
 /// outside this budget rather than the mechanism that ends a wedged run.
 const WORKFLOW_JOB_LIMIT: Duration = Duration::from_secs(60 * 60);
 /// The `scenarios` job's setup and instrumented server and CLI build before the suite starts.
-/// The first cold kache 0.28.0 PR run took 11m37s from job start to the scenario binary. Round
+/// The first cold kache 0.28.1 PR run took 11m37s from job start to the scenario binary. Round
 /// that measurement up to 14 minutes so another cold runner has room for setup variation.
 const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(14 * 60);
 /// What the job keeps for itself once the suite budget has expired: the bounded cleanup the
@@ -195,13 +195,44 @@ struct LiveClusterEntry {
     nodes: BTreeMap<u64, LiveNodeEntry>,
 }
 
-/// Every cluster the suite has live, keyed by the registration that owns it. A scenario name
-/// repeats across outline examples and retries, so the key is the registration rather than
-/// anything a feature file supplies.
-static LIVE_CLUSTERS: LazyLock<Mutex<BTreeMap<u64, LiveClusterEntry>>> =
-    LazyLock::new(|| Mutex::new(BTreeMap::new()));
-static NEXT_CLUSTER_REGISTRATION: AtomicU64 = AtomicU64::new(0);
-static NEXT_NODE_REGISTRATION: AtomicU64 = AtomicU64::new(0);
+/// Every cluster the suite has live, and the registrations the next cluster and node take.
+#[derive(Default)]
+struct LiveClusters {
+    /// Keyed by the registration that owns each entry. A scenario name repeats across outline
+    /// examples and retries, so the key is the registration rather than anything a feature file
+    /// supplies.
+    entries: BTreeMap<u64, LiveClusterEntry>,
+    next_cluster: u64,
+    next_node: u64,
+}
+
+impl LiveClusters {
+    /// Publishes `entry` under a registration no earlier cluster of the run took.
+    fn register_cluster(&mut self, entry: LiveClusterEntry) -> u64 {
+        let registration = self.next_cluster;
+        self.next_cluster = registration
+            .checked_add(1)
+            .assured("a suite builds far fewer than 2^64 clusters");
+        self.entries.insert(registration, entry);
+        registration
+    }
+
+    /// Publishes `node` in `cluster`, if that cluster is still registered, under a registration no
+    /// earlier node of the run took.
+    fn register_node(&mut self, cluster: u64, node: LiveNodeEntry) -> u64 {
+        let registration = self.next_node;
+        self.next_node = registration
+            .checked_add(1)
+            .assured("a suite starts far fewer than 2^64 nodes");
+        if let Some(cluster) = self.entries.get_mut(&cluster) {
+            cluster.nodes.insert(registration, node);
+        }
+        registration
+    }
+}
+
+static LIVE_CLUSTERS: LazyLock<Mutex<LiveClusters>> =
+    LazyLock::new(|| Mutex::new(LiveClusters::default()));
 
 /// One cluster's entry in the live-cluster registry.
 ///
@@ -215,12 +246,11 @@ pub(crate) struct LiveClusterRegistration {
 impl LiveClusterRegistration {
     /// Publishes a cluster the scenario `scenario` is building.
     pub(crate) fn start(scenario: ScenarioIdentity) -> Self {
-        let registration = NEXT_CLUSTER_REGISTRATION.fetch_add(1, Ordering::Relaxed);
         let entry = LiveClusterEntry {
             scenario,
             nodes: BTreeMap::new(),
         };
-        LIVE_CLUSTERS.lock().insert(registration, entry);
+        let registration = LIVE_CLUSTERS.lock().register_cluster(entry);
         Self { registration }
     }
 
@@ -234,7 +264,7 @@ impl LiveClusterRegistration {
 
 impl Drop for LiveClusterRegistration {
     fn drop(&mut self) {
-        LIVE_CLUSTERS.lock().remove(&self.registration);
+        LIVE_CLUSTERS.lock().entries.remove(&self.registration);
     }
 }
 
@@ -256,16 +286,11 @@ impl LiveClusterHandle {
         name: &str,
         stop: StdArc<dyn NodeStop>,
     ) -> LiveNodeRegistration {
-        let registration = NEXT_NODE_REGISTRATION.fetch_add(1, Ordering::Relaxed);
         let node = LiveNodeEntry {
             name: name.to_string(),
             stop,
         };
-        let mut clusters = LIVE_CLUSTERS.lock();
-        if let Some(cluster) = clusters.get_mut(&self.cluster) {
-            cluster.nodes.insert(registration, node);
-        }
-        drop(clusters);
+        let registration = LIVE_CLUSTERS.lock().register_node(self.cluster, node);
         LiveNodeRegistration {
             cluster: self.cluster,
             node: registration,
@@ -283,7 +308,7 @@ pub(crate) struct LiveNodeRegistration {
 impl Drop for LiveNodeRegistration {
     fn drop(&mut self) {
         let mut clusters = LIVE_CLUSTERS.lock();
-        if let Some(cluster) = clusters.get_mut(&self.cluster) {
+        if let Some(cluster) = clusters.entries.get_mut(&self.cluster) {
             cluster.nodes.remove(&self.node);
         }
     }
@@ -305,7 +330,7 @@ impl LiveCluster {
     pub(crate) fn live() -> Vec<Self> {
         let clusters = LIVE_CLUSTERS.lock();
         let mut live = Vec::new();
-        for cluster in clusters.values() {
+        for cluster in clusters.entries.values() {
             if cluster.nodes.is_empty() {
                 continue;
             }
@@ -340,7 +365,7 @@ impl fmt::Display for LiveCluster {
 fn request_stop_of_every_live_node() -> usize {
     let clusters = LIVE_CLUSTERS.lock();
     let mut stops = Vec::new();
-    for cluster in clusters.values() {
+    for cluster in clusters.entries.values() {
         for node in cluster.nodes.values() {
             stops.push(node.stop.clone());
         }

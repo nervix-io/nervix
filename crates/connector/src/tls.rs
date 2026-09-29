@@ -41,6 +41,12 @@ pub struct RustlsClientConfigSource<'a> {
     entries: &'a [nervix_models::ClientConfigEntry],
 }
 
+#[derive(Clone, Copy)]
+enum CaPlacement {
+    AddToDefaults,
+    ReplaceDefaults,
+}
+
 /// Installs the rustls provider connector transports use unless the host already chose one.
 pub fn install_rustls_crypto_provider() {
     rustls::crypto::aws_lc_rs::default_provider()
@@ -61,22 +67,34 @@ impl<'a> RustlsClientConfigSource<'a> {
             return Ok(None);
         }
 
-        self.build_config(tls).map(Some)
+        self.build_config(tls, CaPlacement::AddToDefaults).map(Some)
     }
 
     pub fn build_with_default_roots(
         &self,
     ) -> Result<Arc<RustlsClientConfig>, Report<TlsClientConfigError>> {
-        self.build_config(client_tls_paths(self.entries))
+        self.build_config(client_tls_paths(self.entries), CaPlacement::AddToDefaults)
+    }
+
+    /// Build a TLS client from native roots, replacing them when a CA file is configured.
+    pub fn build_with_replacement_ca(
+        &self,
+    ) -> Result<Arc<RustlsClientConfig>, Report<TlsClientConfigError>> {
+        self.build_config(client_tls_paths(self.entries), CaPlacement::ReplaceDefaults)
     }
 
     fn build_config(
         &self,
         tls: ClientTlsPaths,
+        ca_placement: CaPlacement,
     ) -> Result<Arc<RustlsClientConfig>, Report<TlsClientConfigError>> {
         install_rustls_crypto_provider();
 
-        let mut roots = Self::root_store_with_default_roots();
+        let mut roots = match (ca_placement, tls.ca_file.as_ref()) {
+            (CaPlacement::ReplaceDefaults, Some(_)) => RootCertStore::empty(),
+            (CaPlacement::ReplaceDefaults, None) => Self::root_store_with_native_roots(),
+            (CaPlacement::AddToDefaults, _) => Self::root_store_with_default_roots(),
+        };
         if let Some(ca_file) = tls.ca_file.as_ref() {
             let ca_pem = read_tls_file(ca_file, "TLS CA certificate").change_context(
                 TlsClientConfigError::ReadCaCertificate {
@@ -137,6 +155,18 @@ impl<'a> RustlsClientConfigSource<'a> {
         let mut roots = RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };
+        Self::add_native_roots(&mut roots);
+        roots
+    }
+
+    /// The native roots used when a caller requests CA replacement but supplies no CA file.
+    fn root_store_with_native_roots() -> RootCertStore {
+        let mut roots = RootCertStore::empty();
+        Self::add_native_roots(&mut roots);
+        roots
+    }
+
+    fn add_native_roots(roots: &mut RootCertStore) {
         let native_roots = rustls_native_certs::load_native_certs();
         for error in &native_roots.errors {
             warn!(%error, "failed to read part of the host TLS trust store");
@@ -146,7 +176,6 @@ impl<'a> RustlsClientConfigSource<'a> {
                 warn!(%error, "rejected a certificate from the host TLS trust store");
             }
         }
-        roots
     }
 }
 
@@ -173,6 +202,9 @@ mod tests {
         RustlsClientConfigSource::new(&entries)
             .build_with_default_roots()
             .expect("default-root TLS config should build");
+        RustlsClientConfigSource::new(&entries)
+            .build_with_replacement_ca()
+            .expect("Redis's native-root TLS config should build");
     }
 
     #[test]

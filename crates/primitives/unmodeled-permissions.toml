@@ -37,10 +37,17 @@ reason = "The highest step count spans every model execution the runner starts a
 
 [[permission]]
 items = ["AtomicBool", "AtomicUsize", "Ordering"]
-limit = "Records observe the node budget and the admission fence and never synchronize them; the budget's and the quiesce control's own atomics are modeled."
+limit = "Records observe the node budget, the admission fence, and a forwarded batch's clearance and never synchronize them; the budget's and the quiesce control's own atomics are modeled, and the clearance travels on the endpoint's modeled channels."
 owner = "The client ingestor's Shuttle checks."
 path = "src/runtime/client_ingestor_shuttle_tests.rs"
-reason = "Each record must change in the same scheduling step as the reservation or drain it records, so recording adds no scheduling point."
+reason = "Each record must change in the same scheduling step as the reservation, drain, or clearance it records, so recording adds no scheduling point."
+
+[[permission]]
+items = ["AtomicU64", "Ordering"]
+limit = "Fixture bookkeeping that no invariant reads; no model builds these fixtures."
+owner = "The application unit-test fixtures."
+path = "src/application/test_fixtures.rs"
+reason = "Test databases and node ports must differ across every unit test the process runs in parallel, so their identities outlive each test and each model execution."
 
 [[permission]]
 items = ["AtomicUsize", "Ordering"]

@@ -72,6 +72,7 @@ use super::{
     session::admission::{CancelledBeforeAdmission, RequestAdmission},
     subscription::{
         SessionCommandOperation, SessionSubscriptions, SessionView, SubscriptionInterests,
+        SubscriptionSampler,
     },
     tls::HttpsListenerCertificates,
     transaction::TransactionRecovery,
@@ -168,6 +169,8 @@ pub(in crate::application) struct SessionServiceInner {
     pub(in crate::application) events: SessionEvents,
     /// Also held by every subscription delivery, whose interest lease releases into it.
     pub(in crate::application) subscription_interests: SubscriptionInterests,
+    /// The draws every subscription on this node samples its rows with.
+    pub(in crate::application) subscription_sampler: SubscriptionSampler,
     pub(in crate::application) interconnect: Transport,
     /// Attaches the producers of this node's sessions, locally or through the node that executes
     /// their ingestor.

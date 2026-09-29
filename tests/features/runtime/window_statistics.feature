@@ -1,4 +1,63 @@
 Feature: Window statistics
+  Scenario Outline: Typed run admission preserves exact aggregates and centered variance across branches
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA run_reading (tenant STRING, amount I64 OPTIONAL, reading F64 OPTIONAL, healthy BOOL OPTIONAL, unsafe_text STRING OPTIONAL);
+      CREATE SCHEMA run_summary (tenant STRING, total I64 OPTIONAL, samples I64, healthy_samples I64, lowest I64 OPTIONAL, highest I64 OPTIONAL, mean_reading F64 OPTIONAL, variance F64 OPTIONAL, median_bucket F64 OPTIONAL, nan_probe F64 OPTIONAL);
+      CREATE CODEC run_codec FROM JSON TO SCHEMA run_reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE SCHEMA run_branch_schema (tenant STRING);
+      CREATE BRANCH run_branch SCHEMA run_branch_schema TTL 5m;
+      CREATE RELAY run_readings SCHEMA run_reading BRANCHED BY run_branch;
+      CREATE RELAY run_summaries SCHEMA run_summary BRANCHED BY run_branch;
+      CREATE VHOST edge run-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/runs' TYPE HTTP;
+      CREATE INGESTOR run_ingestor FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING run_codec
+        TO run_readings INHERIT ALL BRANCHED BY run_branch
+        SET tenant = message.tenant
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WINDOW PROCESSOR run_window FROM run_readings WIDTH 4 MESSAGES STEP 4 MESSAGES
+        BRANCHED BY run_branch TO run_summaries
+        SET tenant = FIRST(input.tenant), total = SUM(input.amount),
+            samples = COUNT(input.amount), healthy_samples = COUNT_IF(input.healthy),
+            lowest = MIN(input.amount), highest = MAX(input.amount),
+            mean_reading = AVG(input.reading), variance = VAR_POP(input.reading),
+            median_bucket = PERCENTILE_LINEAR_HISTOGRAM(input.amount, 50, 4, 0, 4, '2s'),
+            nan_probe = SUM(input.unsafe_text AS F64)
+        ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION run_subscription TO run_summaries;
+      START;
+      """
+    When http payload is posted to node "node-1" with host "run-{{test_id}}.example.com" path "/runs"
+      """
+      [{"tenant":"acme","amount":1,"reading":10000000000000000,"healthy":true},
+       {"tenant":"beta","amount":10,"reading":2,"healthy":true},
+       {"tenant":"acme","amount":2,"reading":10000000000000002,"healthy":false},
+       {"tenant":"beta"},
+       {"tenant":"acme","amount":3,"reading":10000000000000004},
+       {"tenant":"beta","amount":20,"reading":4,"healthy":false},
+       {"tenant":"acme","unsafe_text":"nan"},
+       {"tenant":"acme"},
+       {"tenant":"beta","amount":30,"reading":6,"healthy":true}]
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"acme"} | "total":6 | "samples":4 | "healthy_samples":1 | "lowest":1 | "highest":3 | "mean_reading":1.0000000000000002e+16 | "variance":2.6666666666666665 | "median_bucket":2.5
+      key={"tenant":"beta"} | "total":60 | "samples":4 | "healthy_samples":2 | "lowest":10 | "highest":30 | "mean_reading":4.0 | "variance":2.6666666666666665 | "median_bucket":3.5
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Sliding windows compute exact statistics per branch and retract stepped rows
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
