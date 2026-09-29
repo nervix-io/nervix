@@ -622,6 +622,13 @@ impl TestSession {
         &self.clock_log
     }
 
+    /// Drops unread frames for `domain` that were filed while waiting for a reply already read.
+    /// The caller checks the clock log's wire order before discarding them.
+    pub(crate) fn discard_queued_clock_frames_for(&mut self, domain: &DomainName) {
+        self.pending_clock_frames
+            .retain(|frame| frame.domain() != domain);
+    }
+
     /// Sends a request attaching the session to the clock of `domain`, without waiting for its
     /// reply.
     pub(crate) async fn send_domain_clock_attach(
