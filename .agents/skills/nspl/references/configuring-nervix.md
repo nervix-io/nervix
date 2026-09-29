@@ -337,6 +337,9 @@ Choose checks relevant to the configured graph:
   values: the mapping and tick frontier show which logical centers the admission window has reached.
 - `nervix-cli --domain <domain> domain-clock` follows that clock from a shell until Ctrl-C,
   printing the attach reply, state changes, and tick lines.
+- A host using the shared C binding executes attach and detach through `nx_session_execute` and
+  reads later states and ticks with `nx_session_next_clock_event`; the binding does not expose the
+  initial state from the attach reply as a typed outcome.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.
 - `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
   expiry outcomes.

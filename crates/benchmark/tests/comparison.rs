@@ -17,10 +17,9 @@ struct Fixture<'a> {
     input_messages: u64,
     expected_output_records: u64,
     output_records: u64,
-    generation_rate: f64,
     end_to_end_rate: f64,
     payload_rate: f64,
-    drain_seconds: f64,
+    completion_seconds: f64,
     peak_backlog: u64,
 }
 
@@ -45,6 +44,7 @@ max_backlog_messages = 4096
 output_topic = "benchmark-output"
 partitions = 16
 subject = "container"
+subject_nodes = 1
 value_bytes = 128
 wait_timeout_seconds = 120
 warmup_seconds = 10
@@ -69,10 +69,10 @@ warmup_generation_seconds=10.000001
 warmup_parity_stability_seconds=0.500000
 generation_seconds=30.000000
 producer_flush_seconds=0.100000
-drain_seconds={:.6}
-end_to_end_seconds=30.500000
+completion_seconds={:.6}
+end_to_end_seconds={:.6}
 parity_stability_seconds=0.500000
-wire_bytes_per_message=140
+wire_bytes_per_message=164
 partitions=16
 warmup_messages=16
 max_backlog_messages=4096
@@ -81,17 +81,18 @@ input_messages={}
 expected_output_records={}
 output_messages={}
 output_records={}
+output_validation="ids-and-values"
 output_records_at_generation_end={}
 backlog_messages_at_generation_end=0
 output_records_at_flush={}
 backlog_messages_at_flush=0
 input_messages_per_second={:.3}
-output_records_per_second_during_generation={:.3}
 end_to_end_messages_per_second={:.3}
 input_payload_mib_per_second={:.3}
 end_to_end_payload_mib_per_second={:.3}
 "#,
-            fixture.drain_seconds,
+            fixture.completion_seconds,
+            30.0 + fixture.completion_seconds,
             fixture.peak_backlog,
             fixture.input_messages,
             fixture.expected_output_records,
@@ -99,8 +100,7 @@ end_to_end_payload_mib_per_second={:.3}
             fixture.output_records,
             fixture.output_records,
             fixture.output_records,
-            fixture.generation_rate,
-            fixture.generation_rate,
+            fixture.end_to_end_rate,
             fixture.end_to_end_rate,
             fixture.payload_rate,
             fixture.payload_rate,
@@ -156,10 +156,9 @@ fn renders_a_deterministic_markdown_comparison_from_exact_run_directories() {
             input_messages: 36_000,
             expected_output_records: 13_500,
             output_records: 13_500,
-            generation_rate: 1_250.0,
             end_to_end_rate: 1_200.0,
             payload_rate: 0.16,
-            drain_seconds: 4.5,
+            completion_seconds: 4.5,
             peak_backlog: 4_096,
         },
     );
@@ -171,10 +170,9 @@ fn renders_a_deterministic_markdown_comparison_from_exact_run_directories() {
             input_messages: 30_000,
             expected_output_records: 11_250,
             output_records: 11_250,
-            generation_rate: 1_020.0,
             end_to_end_rate: 1_000.0,
             payload_rate: 0.13,
-            drain_seconds: 0.1,
+            completion_seconds: 0.1,
             peak_backlog: 512,
         },
     );
@@ -185,16 +183,16 @@ fn renders_a_deterministic_markdown_comparison_from_exact_run_directories() {
 
     assert!(markdown.starts_with("## Benchmark comparison\n"));
     assert!(markdown.contains(
-        "**Configuration:** 30 s + 10 s warm-up · 16 partitions · 128 B values (140 B wire) · \
+        "**Configuration:** 30 s + 10 s warm-up · 16 partitions · 128 B values (164 B wire) · \
          backlog cap 4,096"
     ));
     assert!(markdown.contains(
-        "| Nervix | **1,200 msg/s** | **0.16 MiB/s** | **1,250 rec/s** | 4.500 s | ✅ 36,000 in / \
-         13,500 rec | ⚠️ 4,096 (100.0%) | baseline |"
+        "| Nervix | **1,200 msg/s** | **0.16 MiB/s** | 4.500 s | ✅ IDs and values: 36,000 in / \
+         13,500 rec | ⚠️ 4,096 / 0 (100.0% peak) | baseline |"
     ));
     assert!(markdown.contains(
-        "| Vector | 1,000 msg/s | 0.13 MiB/s | 1,020 rec/s | **0.100 s** | ✅ 30,000 in / 11,250 \
-         rec | 512 (12.5%) | −16.7% |"
+        "| Vector | 1,000 msg/s | 0.13 MiB/s | 0.100 s | ✅ IDs and values: 30,000 in / 11,250 \
+         rec | 512 / 0 (12.5% peak) | −16.7% |"
     ));
     assert!(markdown.contains("Nervix reached the configured backlog cap"));
     assert!(markdown.contains("<summary>Nervix runtime observations</summary>"));
@@ -213,6 +211,54 @@ fn renders_a_deterministic_markdown_comparison_from_exact_run_directories() {
 }
 
 #[test]
+fn does_not_rank_one_container_references_against_a_two_node_run() {
+    let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+    let nervix = write_run(
+        artifacts.path(),
+        Fixture {
+            implementation: "nervix",
+            image: "nervix:test",
+            input_messages: 36_000,
+            expected_output_records: 36_000,
+            output_records: 36_000,
+            end_to_end_rate: 1_200.0,
+            payload_rate: 0.16,
+            completion_seconds: 4.5,
+            peak_backlog: 512,
+        },
+    );
+    let vector = write_run(
+        artifacts.path(),
+        Fixture {
+            implementation: "vector",
+            image: "vector:test",
+            input_messages: 30_000,
+            expected_output_records: 30_000,
+            output_records: 30_000,
+            end_to_end_rate: 1_000.0,
+            payload_rate: 0.13,
+            completion_seconds: 0.1,
+            peak_backlog: 512,
+        },
+    );
+    let manifest_path = nervix.join("run.toml");
+    let manifest = fs::read_to_string(&manifest_path).expect("fixture manifest should be readable");
+    write(
+        &manifest_path,
+        &manifest.replace("subject_nodes = 1", "subject_nodes = 2"),
+    );
+
+    let markdown = BenchmarkComparison::from_run_directories(&[nervix, vector])
+        .expect("both valid runs should be reportable")
+        .render_markdown();
+    assert!(markdown.contains("reference only"));
+    assert!(
+        markdown.contains("Implementations with different node counts are shown as references")
+    );
+    assert!(!markdown.contains("**1,200 msg/s**"));
+}
+
+#[test]
 fn reports_every_benchmark_group_in_one_comparison() {
     let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
     let filter_map = write_run(
@@ -223,10 +269,9 @@ fn reports_every_benchmark_group_in_one_comparison() {
             input_messages: 36_000,
             expected_output_records: 13_500,
             output_records: 13_500,
-            generation_rate: 1_250.0,
             end_to_end_rate: 1_200.0,
             payload_rate: 0.16,
-            drain_seconds: 4.5,
+            completion_seconds: 4.5,
             peak_backlog: 4_096,
         },
     );
@@ -239,10 +284,9 @@ fn reports_every_benchmark_group_in_one_comparison() {
             input_messages: 36_000,
             expected_output_records: 13_500,
             output_records: 13_500,
-            generation_rate: 1_250.0,
             end_to_end_rate: 1_200.0,
             payload_rate: 0.16,
-            drain_seconds: 4.5,
+            completion_seconds: 4.5,
             peak_backlog: 4_096,
         },
     );
@@ -275,10 +319,9 @@ fn rejects_a_successful_nervix_run_without_observed_metrics() {
             input_messages: 36_000,
             expected_output_records: 13_500,
             output_records: 13_500,
-            generation_rate: 1_250.0,
             end_to_end_rate: 1_200.0,
             payload_rate: 0.16,
-            drain_seconds: 4.5,
+            completion_seconds: 4.5,
             peak_backlog: 4_096,
         },
     );
@@ -304,10 +347,9 @@ fn suite_report_keeps_successes_and_failed_catalog_entries_together() {
             input_messages: 36_000,
             expected_output_records: 13_500,
             output_records: 13_500,
-            generation_rate: 1_250.0,
             end_to_end_rate: 1_200.0,
             payload_rate: 0.16,
-            drain_seconds: 4.5,
+            completion_seconds: 4.5,
             peak_backlog: 4_096,
         },
     );
@@ -319,10 +361,9 @@ fn suite_report_keeps_successes_and_failed_catalog_entries_together() {
             input_messages: 30_000,
             expected_output_records: 11_250,
             output_records: 11_250,
-            generation_rate: 1_020.0,
             end_to_end_rate: 1_000.0,
             payload_rate: 0.13,
-            drain_seconds: 0.1,
+            completion_seconds: 0.1,
             peak_backlog: 512,
         },
     );
@@ -366,10 +407,9 @@ fn rejects_runs_with_different_workload_configuration() {
             input_messages: 36_000,
             expected_output_records: 13_500,
             output_records: 13_500,
-            generation_rate: 1_250.0,
             end_to_end_rate: 1_200.0,
             payload_rate: 0.16,
-            drain_seconds: 4.5,
+            completion_seconds: 4.5,
             peak_backlog: 4_096,
         },
     );
@@ -381,10 +421,9 @@ fn rejects_runs_with_different_workload_configuration() {
             input_messages: 30_000,
             expected_output_records: 11_250,
             output_records: 11_250,
-            generation_rate: 1_020.0,
             end_to_end_rate: 1_000.0,
             payload_rate: 0.13,
-            drain_seconds: 0.1,
+            completion_seconds: 0.1,
             peak_backlog: 512,
         },
     );
@@ -421,10 +460,9 @@ fn rejects_a_successful_run_without_messages() {
             input_messages: 0,
             expected_output_records: 0,
             output_records: 0,
-            generation_rate: 0.0,
             end_to_end_rate: 0.0,
             payload_rate: 0.0,
-            drain_seconds: 0.0,
+            completion_seconds: 0.1,
             peak_backlog: 0,
         },
     );
@@ -432,6 +470,33 @@ fn rejects_a_successful_run_without_messages() {
     let error = BenchmarkComparison::from_run_directories(&[nervix])
         .expect_err("a run without measured messages must not compare");
     assert!(matches!(error, ComparisonError::InvalidReport { .. }));
+}
+
+#[test]
+fn rejects_a_completion_tail_that_excludes_the_producer_flush() {
+    let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+    let nervix = write_run(
+        artifacts.path(),
+        Fixture {
+            implementation: "nervix",
+            image: "nervix:test",
+            input_messages: 36_000,
+            expected_output_records: 13_500,
+            output_records: 13_500,
+            end_to_end_rate: 1_200.0,
+            payload_rate: 0.16,
+            completion_seconds: 0.001,
+            peak_backlog: 512,
+        },
+    );
+
+    let error = BenchmarkComparison::from_run_directories(&[nervix])
+        .expect_err("completion must include the measured producer flush");
+    assert!(matches!(
+        error,
+        ComparisonError::InvalidReport { reason, .. }
+            if reason == "completion tail is shorter than producer flush"
+    ));
 }
 
 #[test]
@@ -445,10 +510,9 @@ fn rejects_a_run_that_missed_the_output_records_its_shape_expects() {
             input_messages: 36_000,
             expected_output_records: 13_500,
             output_records: 13_499,
-            generation_rate: 1_250.0,
             end_to_end_rate: 1_200.0,
             payload_rate: 0.16,
-            drain_seconds: 4.5,
+            completion_seconds: 4.5,
             peak_backlog: 4_096,
         },
     );

@@ -3,13 +3,16 @@
 It prints the same conformance report as every other probe. Bulk data stays borrowed: an event's
 frame is a memoryview over the binding's buffer that keeps the event alive for as long as the view
 exists, and every column is copied into a ctypes array in one call. ctypes releases the GIL for
-every call, so a blocked wait never stops another Python thread from cancelling it.
+every call, so a blocked wait never stops another Python thread from cancelling it. Run with the
+`clock` argument, it attaches to the domain's clock instead, reads the state and the first tick of
+the generation the scenario starts, and detaches.
 """
 
 import ctypes
 import gc
 import json
 import os
+import struct
 import sys
 import threading
 import time
@@ -29,6 +32,8 @@ PART_ROWS = 1
 PART_BRANCH_KEY = 2
 CELL_VALUE, CELL_NULL, CELL_REDACTED = 1, 2, 3
 EVENT_ROWS = 1
+CLOCK_KINDS = {1: "STATE", 2: "TICK", 3: "ENDED", 4: "INTERRUPTED"}
+CLOCK_PACED = 4
 
 DISPOSITIONS = {
     1: "completed",
@@ -135,6 +140,29 @@ nx_event_column_varlen = declare(
 nx_event_cell_varlen = declare(
     "nx_event_cell_varlen", HANDLE, HANDLE, ctypes.c_int32, SIZE, SIZE, OUT_BYTES, OUT_SIZE
 )
+nx_session_next_clock_event = declare(
+    "nx_session_next_clock_event", HANDLE, HANDLE, HANDLE, OUT_HANDLE
+)
+nx_clock_event_kind_of = declare("nx_clock_event_kind_of", ctypes.c_int32, HANDLE)
+nx_clock_event_domain = declare("nx_clock_event_domain", None, HANDLE, OUT_BYTES, OUT_SIZE)
+nx_clock_event_generation = declare(
+    "nx_clock_event_generation", HANDLE, HANDLE, ctypes.POINTER(ctypes.c_uint64)
+)
+nx_clock_event_state = declare(
+    "nx_clock_event_state", HANDLE, HANDLE, ctypes.POINTER(ctypes.c_int32)
+)
+nx_clock_event_paced = declare(
+    "nx_clock_event_paced", HANDLE, HANDLE, ctypes.POINTER(ctypes.c_uint64),
+    ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_int64),
+    ctypes.POINTER(ctypes.c_int64), ctypes.POINTER(ctypes.c_double),
+)
+nx_clock_event_tick = declare(
+    "nx_clock_event_tick", HANDLE, HANDLE, ctypes.POINTER(ctypes.c_uint64),
+    ctypes.POINTER(ctypes.c_int64), ctypes.POINTER(ctypes.c_int64),
+    ctypes.POINTER(ctypes.c_int64),
+)
+nx_clock_event_retain = declare("nx_clock_event_retain", HANDLE, HANDLE)
+nx_clock_event_release = declare("nx_clock_event_release", None, HANDLE)
 
 
 class Failure(Exception):
@@ -293,6 +321,72 @@ class Event:
         return [f"ROW [{key}] {row}" for row in self.render(PART_ROWS, fields, self.row_count())]
 
 
+class ClockEvent:
+    """One reference to a domain clock event, released when the object is collected."""
+
+    def __init__(self, handle):
+        self.handle = handle
+
+    def retain(self):
+        return ClockEvent(nx_clock_event_retain(self.handle))
+
+    def __del__(self):
+        nx_clock_event_release(self.handle)
+
+    def kind(self):
+        return CLOCK_KINDS[nx_clock_event_kind_of(self.handle)]
+
+    def domain(self):
+        name, name_len = BYTES_P(), SIZE()
+        nx_clock_event_domain(self.handle, ctypes.byref(name), ctypes.byref(name_len))
+        return borrowed(name, name_len).decode()
+
+    def generation(self):
+        generation = ctypes.c_uint64()
+        check(nx_clock_event_generation(self.handle, ctypes.byref(generation)))
+        return generation.value
+
+    def state(self):
+        state = ctypes.c_int32()
+        check(nx_clock_event_state(self.handle, ctypes.byref(state)))
+        return state.value
+
+    def paced(self):
+        """The committed clock of a paced state. The UTC anchor depends on when the scenario's
+        START committed, so it is not read."""
+        period, skew = ctypes.c_uint64(), ctypes.c_uint64()
+        origin, rate = ctypes.c_int64(), ctypes.c_double()
+        check(
+            nx_clock_event_paced(
+                self.handle, ctypes.byref(period), ctypes.byref(skew), ctypes.byref(origin), None,
+                ctypes.byref(rate),
+            )
+        )
+        return {
+            "generation": self.generation(),
+            "period": period.value,
+            "skew": skew.value,
+            "origin": origin.value,
+            "rate": rate.value,
+        }
+
+    def tick(self):
+        tick_id, boundary = ctypes.c_uint64(), ctypes.c_int64()
+        authority_utc, serving_logical = ctypes.c_int64(), ctypes.c_int64()
+        check(
+            nx_clock_event_tick(
+                self.handle, ctypes.byref(tick_id), ctypes.byref(boundary),
+                ctypes.byref(authority_utc), ctypes.byref(serving_logical),
+            )
+        )
+        return {
+            "generation": self.generation(),
+            "id": tick_id.value,
+            "boundary": boundary.value,
+            "serving_logical": serving_logical.value,
+        }
+
+
 class Session:
     def __init__(self, server, domain, username, password):
         self.handle = HANDLE()
@@ -326,6 +420,14 @@ class Session:
         event = HANDLE()
         check(nx_session_next_event(self.handle, cancel.handle, ctypes.byref(event)))
         return Event(event)
+
+    def next_clock_event(self, cancel, domain):
+        event = HANDLE()
+        check(nx_session_next_clock_event(self.handle, cancel.handle, ctypes.byref(event)))
+        clock_event = ClockEvent(event)
+        if clock_event.domain() != domain:
+            raise RuntimeError("a clock event arrived for another domain")
+        return clock_event
 
 
 class Outcome:
@@ -538,18 +640,120 @@ def check_cancellation(session):
         raise RuntimeError("a cancelled command did not report CANCELLED with its reference")
 
 
+def state_line(clock, domain):
+    rate_bits = struct.unpack("<Q", struct.pack("<d", clock["rate"]))[0]
+    return (
+        f"STATE domain={domain} generation={clock['generation']} state=paced "
+        f"period={clock['period']} skew={clock['skew']} origin={clock['origin']} "
+        f"rate=f64:{rate_bits:016x}"
+    )
+
+
+def tick_line(event, domain, clock):
+    """The report line of a tick, after holding it to the committed clock of its generation: its
+    boundary is the logical origin plus one period for every id before it, and the serving node's
+    reading never precedes the origin."""
+    tick = event.tick()
+    if tick["generation"] != clock["generation"]:
+        raise RuntimeError("a tick belongs to another generation than the state before it")
+    if tick["id"] == 0 or tick["boundary"] != clock["origin"] + (tick["id"] - 1) * clock["period"]:
+        raise RuntimeError(
+            "a tick's boundary is not the origin plus one period for every id before it"
+        )
+    if tick["serving_logical"] < clock["origin"]:
+        raise RuntimeError("the serving node's logical reading precedes the logical origin")
+    return f"TICK domain={domain} generation={tick['generation']} boundary=origin+(id-1)*period"
+
+
+def check_clock_cancellation(session, domain):
+    """Cancels a clock wait from another thread, then lets a deadline end another. The session
+    follows no clock yet, so nothing but its token ends either wait."""
+    cancel = Cancel()
+    outcome = {}
+
+    def wait():
+        outcome["failure"] = failure_kind(lambda: session.next_clock_event(cancel, domain))
+
+    waiter = threading.Thread(target=wait)
+    waiter.start()
+    time.sleep(0.1)
+    cancel.trigger()
+    waiter.join(30)
+    if waiter.is_alive() or outcome["failure"].kind != ERROR_CANCELLED:
+        raise RuntimeError("a cancelled clock wait did not report CANCELLED")
+    expired = failure_kind(lambda: session.next_clock_event(Cancel(50), domain))
+    if expired.kind != ERROR_DEADLINE:
+        raise RuntimeError("an expired clock wait did not report DEADLINE")
+
+
+def run_clock(session, domain, report):
+    """Attaches to the domain's clock, reads the state and the first tick of the generation the
+    scenario starts, and detaches."""
+    check_clock_cancellation(session, domain)
+    report(f"ATTACHED {session.execute('ATTACH DOMAIN CLOCK;').disposition()}")
+
+    deadline = Cancel(120_000)
+    while True:
+        state = session.next_clock_event(deadline, domain)
+        if state.kind() != "STATE":
+            raise RuntimeError(f"the clock reported {state.kind()} before the started state")
+        # The serving node may report the started generation uninstalled until it holds the
+        # committed mapping and an assigned clock authority.
+        if state.state() == CLOCK_PACED:
+            break
+    clock = state.paced()
+    reported_state = state_line(clock, domain)
+    report(reported_state)
+
+    while True:
+        tick = session.next_clock_event(deadline, domain)
+        if tick.kind() == "TICK":
+            break
+        if tick.kind() != "STATE":
+            raise RuntimeError(f"the clock reported {tick.kind()} before its first tick")
+        # The serving node reported the installation again; it is still the same generation.
+        if tick.generation() != clock["generation"]:
+            raise RuntimeError("the clock moved to another generation before its first tick")
+    reported_tick = tick_line(tick, domain, clock)
+    report(reported_tick)
+
+    # Keep a second reference to each event and release the first on another thread, so the
+    # events must read the same on the second alone.
+    retained_state, retained_tick = state.retain(), tick.retain()
+    firsts = [state, tick]
+    del state, tick
+    releaser = threading.Thread(target=lambda: (firsts.clear(), gc.collect()))
+    releaser.start()
+    releaser.join()
+    if (
+        state_line(retained_state.paced(), domain) != reported_state
+        or tick_line(retained_tick, domain, clock) != reported_tick
+    ):
+        raise RuntimeError("a retained clock event reads differently than it did")
+
+    report(f"DETACHED {session.execute('DETACH DOMAIN CLOCK;').disposition()}")
+    report("CHECKS ok")
+    session.close()
+    report("PASS")
+
+
 def main():
     environment = os.environ
-    relay = environment["NERVIX_PROBE_RELAY"]
-    subscription = environment["NERVIX_PROBE_SUBSCRIPTION"]
-    expected_rows = int(environment["NERVIX_PROBE_ROWS"])
+    domain = environment["NERVIX_PROBE_DOMAIN"]
     session = Session(
         environment["NERVIX_PROBE_GRPC_URI"],
-        environment["NERVIX_PROBE_DOMAIN"],
+        domain,
         environment["NERVIX_PROBE_USERNAME"],
         environment["NERVIX_PROBE_PASSWORD"],
     )
     report = lambda line: print(line, flush=True)
+    if sys.argv[1:] == ["clock"]:
+        run_clock(session, domain, report)
+        return
+
+    relay = environment["NERVIX_PROBE_RELAY"]
+    subscription = environment["NERVIX_PROBE_SUBSCRIPTION"]
+    expected_rows = int(environment["NERVIX_PROBE_ROWS"])
 
     report(f"OPERATION {session.execute(f'SHOW CREATE RELAY {relay};').disposition()}")
     report(session.execute("CREATE RELAY;").error_line())

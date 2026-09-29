@@ -99,6 +99,8 @@ pub enum DefinitionError {
          without whitespace"
     )]
     ContainerReadinessPath { implementation: String },
+    #[error("container implementation '{implementation}' readiness_log must not be empty")]
+    ContainerReadinessLog { implementation: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -122,10 +124,16 @@ pub struct LoadConfiguration {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum LoadShape {
-    /// Identical payloads, one output message for every accepted input message.
+    /// Distinct record IDs, one unchanged output message per input message.
     UniformPassthrough,
 
-    /// Identical payloads, each copied to a fixed number of output consumers.
+    /// Distinct record IDs, one uppercase output message per input message.
+    UniformUppercase,
+
+    /// One retained and one filtered input per cycle, yielding one uppercase output.
+    UniformFilterMap,
+
+    /// Distinct record IDs, each copied to a fixed number of output consumers.
     UniformFanout { outputs_per_input: u64 },
 
     /// Cycles of distinct keys, each key produced `copies_per_key` times, with `retained_keys` of
@@ -167,6 +175,8 @@ pub struct ContainerImplementation {
     pub command: Option<Vec<String>>,
     pub readiness_port: Option<u16>,
     pub readiness_path: Option<String>,
+    pub readiness_log: Option<String>,
+    pub require_consumer_group_membership: bool,
 }
 
 #[derive(Deserialize)]
@@ -186,6 +196,8 @@ enum SerializedImplementation {
         command: Option<Vec<String>>,
         readiness_port: Option<u16>,
         readiness_path: Option<String>,
+        readiness_log: Option<String>,
+        require_consumer_group_membership: bool,
     },
 }
 
@@ -211,6 +223,8 @@ impl<'de> Deserialize<'de> for Implementation {
                 command,
                 readiness_port,
                 readiness_path,
+                readiness_log,
+                require_consumer_group_membership,
             } => Self::Container(ContainerImplementation {
                 image,
                 template,
@@ -218,6 +232,8 @@ impl<'de> Deserialize<'de> for Implementation {
                 command,
                 readiness_port,
                 readiness_path,
+                readiness_log,
+                require_consumer_group_membership,
             }),
         })
     }
@@ -367,7 +383,8 @@ impl LoadShape {
     #[must_use]
     pub fn messages_per_cycle(&self) -> u64 {
         match self {
-            Self::UniformPassthrough | Self::UniformFanout { .. } => 1,
+            Self::UniformPassthrough | Self::UniformUppercase | Self::UniformFanout { .. } => 1,
+            Self::UniformFilterMap => 2,
             Self::KeyedWindowed {
                 keys_per_cycle,
                 copies_per_key,
@@ -382,7 +399,7 @@ impl LoadShape {
     #[must_use]
     pub fn output_records_per_cycle(&self) -> u64 {
         match self {
-            Self::UniformPassthrough => 1,
+            Self::UniformPassthrough | Self::UniformUppercase | Self::UniformFilterMap => 1,
             Self::UniformFanout { outputs_per_input } => *outputs_per_input,
             Self::KeyedWindowed { retained_keys, .. } => *retained_keys,
         }
@@ -498,6 +515,11 @@ impl ContainerImplementation {
                 implementation: name.to_string(),
             }));
         }
+        if self.readiness_log.as_ref().is_some_and(String::is_empty) {
+            return Err(Report::new(DefinitionError::ContainerReadinessLog {
+                implementation: name.to_string(),
+            }));
+        }
         Ok(())
     }
 }
@@ -556,6 +578,8 @@ mod tests {
             command: None,
             readiness_port: Some(8686),
             readiness_path: Some("/health".to_string()),
+            readiness_log: None,
+            require_consumer_group_membership: true,
         }
     }
 
@@ -857,6 +881,15 @@ mod tests {
                     ..container()
                 },
                 DefinitionError::ContainerReadinessPath {
+                    implementation: implementation(),
+                },
+            ),
+            (
+                ContainerImplementation {
+                    readiness_log: Some(String::new()),
+                    ..container()
+                },
+                DefinitionError::ContainerReadinessLog {
                     implementation: implementation(),
                 },
             ),
