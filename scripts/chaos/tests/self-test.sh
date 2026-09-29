@@ -614,3 +614,4 @@ if docker inspect "${foreign_sidecar}" >/dev/null 2>&1 || docker inspect "${fore
 fi
 
 printf 'chaos harness self-test passed\n'
+"${script_dir}/degraded-self-test.sh"
