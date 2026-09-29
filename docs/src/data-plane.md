@@ -77,6 +77,13 @@ Detached consumers receive the batch without an upstream ACK dependency. The sou
 only when all attached descendants succeed. Any attached failure fails the shared source attempt,
 even when another descendant has already completed an external side effect.
 
+A batch that a relay owner routes to another node for its attached consumers carries record
+acknowledgements for them. If no attached consumer of the relay runs on that node when the batch
+reaches its runtime, because the consumer moved away after the owner routed the batch, the batch
+fails those acknowledgements instead of completing them, and the source redelivers the record along
+the current routes. See
+[Consumers That Leave The Receiver](interconnect.md#consumers-that-leave-the-receiver).
+
 ACK guards, tokens, and maps remain in memory. They do not record a transactional per-sink commit
 ledger. After source redelivery, every attached path processes the record again. This is why an
 already successful non-idempotent sink can receive a duplicate after a sibling path fails. See

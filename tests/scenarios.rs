@@ -37,7 +37,7 @@ use cucumber::{
     writer::{self, Stats as _},
 };
 use futures_util::{
-    TryStreamExt,
+    StreamExt as _, TryStreamExt,
     future::{join_all, try_join_all},
 };
 use iceberg::{
@@ -117,7 +117,11 @@ use crate::common::{
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     raw_session::{TestUpload, TestUploadPart, WireOutcome as _},
-    scenario_phase::{ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase},
+    scenario_phase::{
+        ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
+        begin_suite_measurement, suite_summary,
+    },
+    scenario_schedule::{FeatureLimit, ScenarioAdmission, ScenarioRunSlots, prioritize_features},
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
         ServerProcessLaunch, ServerProcessOption, describe_exit,
@@ -141,13 +145,6 @@ const CUCUMBER_LOG_FILE: &str = "tests/logs/cucumber.log";
 static ONNX_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<StdMutex<BTreeMap<String, String>>> = OnceLock::new();
-// Every scenario holds a read guard; `@exclusive` scenarios hold the write guard.
-static SCENARIO_EXECUTION_LOCK: OnceLock<StdArc<tokio::sync::RwLock<()>>> = OnceLock::new();
-static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> = OnceLock::new();
-static WASM_STATE_RESET_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> =
-    OnceLock::new();
-const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
-const MAX_CONCURRENT_WASM_STATE_RESET_SCENARIOS: usize = 1;
 const WEB_CONSOLE_ASSERTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ZEROMQ_OBSERVER_BIND_ATTEMPTS: usize = 8;
 const DURABLE_CATCH_UP_STORAGE_COMMITS_PER_ENTRY: u32 = 2;
@@ -157,24 +154,8 @@ const MAX_DURABLE_CATCH_UP_WRITES: usize = 128;
 /// The execution class a follower charges its decoded append batches to.
 const COMMANDS_MEMORY_LABEL: &str = "class=\"commands\"";
 const BULK_MEMORY_LABEL: &str = "class=\"bulk\"";
-const WEB_CONSOLE_FEATURE_NAMES: [&str; 3] = [
-    "Web console NSPL REPL",
-    "Web console execution graph",
-    "Web console transaction inspector",
-];
-const WASM_STATE_RESET_FEATURE_NAME: &str = "Coordinated WASM processor state reset";
 const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
 const DEPENDENCY_LIFECYCLE_STARTED: &str = "NERVIX_DEPENDENCY_LIFECYCLE_STARTED=";
-
-#[derive(Debug)]
-enum ScenarioExecutionPermit {
-    Concurrent {
-        _permit: tokio::sync::OwnedRwLockReadGuard<()>,
-    },
-    Exclusive {
-        _permit: tokio::sync::OwnedRwLockWriteGuard<()>,
-    },
-}
 
 /// What a scenario's own steps did, as its after hook sees it.
 ///
@@ -261,9 +242,16 @@ struct SavedHealthyPlacement {
     owner: String,
 }
 
+/// One long-running CLI clock follower and the bounded stdout lines its assertions inspect.
+struct CliClockProcess {
+    child: tokio::process::Child,
+    lines: StdArc<StdMutex<VecDeque<String>>>,
+    _reader: AbortOnDropHandle<()>,
+}
+
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
-    scenario_execution_permit: Option<ScenarioExecutionPermit>,
+    scenario_admission: Option<ScenarioAdmission>,
     /// Publishes which phase this scenario is in for as long as its world lives, so a reader of
     /// the registry sees the work in flight rather than the last work that finished.
     active_scenario: Option<ActiveScenarioRegistration>,
@@ -302,6 +290,7 @@ struct ScenarioWorld {
     cli_subscription_process: Option<tokio::process::Child>,
     cli_subscription_lines: Option<StdArc<StdMutex<VecDeque<String>>>>,
     cli_subscription_reader: Option<AbortOnDropHandle<()>>,
+    cli_clock_process: Option<CliClockProcess>,
     /// The whole outcome of the last command a named client ran, for assertions that read more
     /// than its message.
     last_client_outcome: Option<ClientCommandOutcome>,
@@ -369,8 +358,6 @@ struct ScenarioWorld {
     browser_context: Option<playwright_rs::BrowserContext>,
     browser: Option<playwright_rs::Browser>,
     playwright: Option<Playwright>,
-    web_console_scenario_permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    wasm_state_reset_scenario_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     dependencies: TestDependencies,
     background_nspl: Option<AbortOnDropHandle<Result<String, String>>>,
     background_command_result:
@@ -465,11 +452,17 @@ impl fmt::Debug for ScenarioWorld {
             .field("browser_initialized", &self.browser.is_some())
             .field(
                 "web_console_permit_acquired",
-                &self.web_console_scenario_permit.is_some(),
+                &self
+                    .scenario_admission
+                    .as_ref()
+                    .is_some_and(|admission| admission.limit() == FeatureLimit::WebConsole),
             )
             .field(
                 "wasm_state_reset_permit_acquired",
-                &self.wasm_state_reset_scenario_permit.is_some(),
+                &self
+                    .scenario_admission
+                    .as_ref()
+                    .is_some_and(|admission| admission.limit() == FeatureLimit::WasmStateReset),
             )
             .field("dependencies", &self.dependencies)
             .field(
@@ -525,11 +518,23 @@ impl ScenarioWorld {
         };
         let published = registration.enter(phase);
         let marker = format!(
-            "scenario {phase}: {} age={:?} {detail}",
+            "scenario {phase}: {} suite_age={:?} age={:?} {detail}",
             published.identity,
+            ActiveScenario::suite_age(),
             published.age()
         );
         append_cucumber_log_line(marker.trim_end());
+    }
+
+    fn wait_for_admission(&self, reason: common::scenario_schedule::AdmissionWait) {
+        let Some(registration) = &self.active_scenario else {
+            return;
+        };
+        let published = registration.wait_for(reason);
+        append_cucumber_log_line(&format!(
+            "scenario queued: {} attempt={} waiting_for={reason}",
+            published.identity, published.attempt
+        ));
     }
 
     fn stop_durable_catch_up_work(&mut self) {
@@ -3260,6 +3265,301 @@ async fn then_cli_subscription_output_contains(world: &mut ScenarioWorld, expect
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+#[when(expr = "the CLI follows the clock of domain {string} on node {string}")]
+fn when_cli_follows_domain_clock(world: &mut ScenarioWorld, domain: String, node: String) {
+    let domain = expand_placeholders(world, &domain);
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    start_cli_clock_process(world, &domain, &grpc_uri);
+}
+
+#[given(expr = "the CLI clock connection to node {string} is forwarded")]
+async fn given_cli_clock_connection_is_forwarded(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    let mut url = url::Url::parse(&grpc_uri).assured("a cluster gRPC endpoint is a URL");
+    let target_host = url
+        .host_str()
+        .assured("a cluster gRPC endpoint names a host")
+        .parse::<std::net::IpAddr>()
+        .assured("a cluster gRPC endpoint uses a literal IP address");
+    let target_port = url.port().assured("a cluster gRPC endpoint names a port");
+    let local_host = std::net::IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let forwarders = TcpForwarders::start(
+        &[local_host],
+        std::net::SocketAddr::new(target_host, target_port),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("the CLI clock forwarder could not start: {error}"));
+    url.set_host(Some("127.0.0.1"))
+        .assured("the loopback host is valid in a URL");
+    url.set_port(Some(forwarders.port()))
+        .assured("a reserved TCP port is valid in a URL");
+    world
+        .placeholders
+        .insert("cli_clock_forwarded_server".to_string(), url.to_string());
+    world.tcp_forwarders = Some(forwarders);
+}
+
+#[when(expr = "the CLI follows the clock of domain {string} through its TCP forwarder")]
+fn when_cli_follows_domain_clock_through_forwarder(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let grpc_uri = world
+        .placeholders
+        .get("cli_clock_forwarded_server")
+        .verified("the preceding step forwarded the CLI clock connection")
+        .clone();
+    start_cli_clock_process(world, &domain, &grpc_uri);
+}
+
+fn start_cli_clock_process(world: &mut ScenarioWorld, domain: &str, grpc_uri: &str) {
+    let mut child = tokio::process::Command::new(scenario_cli_binary())
+        .args([
+            "--server",
+            grpc_uri,
+            "--domain",
+            domain,
+            "--username",
+            TEST_AUTH_USERNAME,
+            "--password",
+            TEST_AUTH_PASSWORD,
+            "domain-clock",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap_or_else(|error| panic!("the CLI clock process failed to start: {error}"));
+    let stdout = child
+        .stdout
+        .take()
+        .verified("the CLI clock process was started with piped stdout");
+    let lines = StdArc::new(StdMutex::new(VecDeque::new()));
+    let reader_lines = lines.clone();
+    let reader = tokio::spawn(async move {
+        let mut stdout = tokio::io::BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = stdout.next_line().await {
+            tokio::task::consume_budget().await;
+            let mut retained = reader_lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if retained.len() == 2048 {
+                retained.pop_front();
+            }
+            retained.push_back(line);
+        }
+    });
+    world.cli_clock_process = Some(CliClockProcess {
+        child,
+        lines,
+        _reader: AbortOnDropHandle::new(reader),
+    });
+}
+
+async fn wait_for_cli_clock_output(
+    world: &ScenarioWorld,
+    duration: Duration,
+    described: &str,
+    matches: impl Fn(&VecDeque<String>) -> bool,
+) {
+    let lines = &world
+        .cli_clock_process
+        .as_ref()
+        .verified("the preceding step started the CLI clock process")
+        .lines;
+    let deadline = Instant::now() + duration;
+    loop {
+        tokio::task::consume_budget().await;
+        {
+            let retained = lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if matches(&retained) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("CLI clock output did not show {described}: {retained:?}");
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(expr = "within {string} the CLI clock output contains {string}")]
+async fn then_cli_clock_output_contains(
+    world: &mut ScenarioWorld,
+    duration: String,
+    expected: String,
+) {
+    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let expected = expand_placeholders(world, &expected);
+    wait_for_cli_clock_output(world, duration, &expected, |lines| {
+        lines.iter().any(|line| line.contains(&expected))
+    })
+    .await;
+}
+
+fn cli_clock_tick_id(line: &str, domain: &str, generation: u64) -> Option<u64> {
+    let prefix = format!("[events] domain clock [{domain}] tick: generation {generation}, id ");
+    let (id, fields) = line.strip_prefix(&prefix)?.split_once(", boundary ")?;
+    if !fields.contains(", authority UTC ") || !fields.contains(", node logical ") {
+        return None;
+    }
+    id.parse().ok()
+}
+
+#[then(
+    expr = "within {string} the CLI clock output has {int} increasing ticks for generation {int} \
+            of domain {string}"
+)]
+async fn then_cli_clock_ticks_increase(
+    world: &mut ScenarioWorld,
+    duration: String,
+    count: usize,
+    generation: u64,
+    domain: String,
+) {
+    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let domain = expand_placeholders(world, &domain);
+    wait_for_cli_clock_output(world, duration, "increasing clock ticks", |lines| {
+        let ids: Vec<_> = lines
+            .iter()
+            .filter_map(|line| cli_clock_tick_id(line, &domain, generation))
+            .collect();
+        ids.len() >= count && ids.windows(2).all(|pair| pair[0] < pair[1])
+    })
+    .await;
+}
+
+#[then(
+    expr = "within {string} the CLI clock output has a tick for generation {int} after its state \
+            of domain {string}"
+)]
+async fn then_cli_clock_tick_follows_state(
+    world: &mut ScenarioWorld,
+    duration: String,
+    generation: u64,
+    domain: String,
+) {
+    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let domain = expand_placeholders(world, &domain);
+    let state = format!("[events] domain clock [{domain}]: generation {generation}, paced:");
+    wait_for_cli_clock_output(world, duration, "a tick after its clock state", |lines| {
+        let Some(state_index) = lines.iter().rposition(|line| line.starts_with(&state)) else {
+            return false;
+        };
+        lines
+            .iter()
+            .skip(state_index + 1)
+            .any(|line| cli_clock_tick_id(line, &domain, generation).is_some())
+    })
+    .await;
+}
+
+#[then(
+    expr = "within {string} the CLI clock output has a fresh state for generation {int} after \
+            interruption of domain {string}"
+)]
+async fn then_cli_clock_state_follows_interruption(
+    world: &mut ScenarioWorld,
+    duration: String,
+    generation: u64,
+    domain: String,
+) {
+    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let domain = expand_placeholders(world, &domain);
+    let interrupted =
+        format!("[events] domain clock [{domain}] notice: the session was interrupted;");
+    let state = format!("[events] domain clock [{domain}]: generation {generation}, paced:");
+    wait_for_cli_clock_output(
+        world,
+        duration,
+        "a restored state after interruption",
+        |lines| {
+            let Some(interruption_index) =
+                lines.iter().position(|line| line.starts_with(&interrupted))
+            else {
+                return false;
+            };
+            lines
+                .iter()
+                .skip(interruption_index + 1)
+                .any(|line| line.starts_with(&state))
+        },
+    )
+    .await;
+}
+
+#[when(expr = "the CLI clock process receives Ctrl-C")]
+fn when_cli_clock_receives_ctrl_c(world: &mut ScenarioWorld) {
+    let process = world
+        .cli_clock_process
+        .as_ref()
+        .verified("the preceding step started the CLI clock process");
+    let raw_pid = process
+        .child
+        .id()
+        .verified("the CLI clock process is still running");
+    let pid = nix::unistd::Pid::from_raw(
+        i32::try_from(raw_pid).assured("a process id fits the operating system pid type"),
+    );
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT)
+        .unwrap_or_else(|error| panic!("failed to interrupt the CLI clock process: {error}"));
+}
+
+#[then(expr = "the CLI clock process exits successfully")]
+async fn then_cli_clock_exits_successfully(world: &mut ScenarioWorld) {
+    let process = world
+        .cli_clock_process
+        .as_mut()
+        .verified("the preceding step started the CLI clock process");
+    let status = tokio::time::timeout(Duration::from_secs(10), process.child.wait())
+        .await
+        .unwrap_or_else(|_| panic!("the CLI clock process did not stop after Ctrl-C"))
+        .unwrap_or_else(|error| panic!("the CLI clock process could not be reaped: {error}"));
+    assert!(
+        status.success(),
+        "the CLI clock process exited with {status}"
+    );
+    world.cli_clock_process = None;
+}
+
+#[when(expr = "the CLI attempts to follow the clock of missing domain {string} on node {string}")]
+async fn when_cli_follows_missing_domain(world: &mut ScenarioWorld, domain: String, node: String) {
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new(scenario_cli_binary())
+            .args([
+                "--server",
+                &grpc_uri,
+                "--domain",
+                &domain,
+                "--username",
+                TEST_AUTH_USERNAME,
+                "--password",
+                TEST_AUTH_PASSWORD,
+                "domain-clock",
+            ])
+            .output(),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("the CLI missing-domain request did not finish"))
+    .unwrap_or_else(|error| panic!("the CLI missing-domain process did not start: {error}"));
+    world.last_cli_output = Some(output);
 }
 
 /// The directory holding the NSPL files a formatter scenario writes.
@@ -6443,6 +6743,20 @@ async fn when_the_tcp_forwarder_stops(world: &mut ScenarioWorld, address: String
         .unwrap_or_else(|error| panic!("the forwarder at {address} could not stop: {error}"));
 }
 
+#[when(expr = "the TCP forwarder at {string} restarts")]
+async fn when_the_tcp_forwarder_restarts(world: &mut ScenarioWorld, address: String) {
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .assured("the scenario names a TCP forwarder address");
+    world
+        .tcp_forwarders
+        .as_mut()
+        .verified("the scenario started TCP forwarders")
+        .restart(address)
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder at {address} could not restart: {error}"));
+}
+
 #[then(expr = "the TCP forwarder at {string} eventually accepts a connection")]
 async fn then_the_tcp_forwarder_accepts_a_connection(world: &mut ScenarioWorld, address: String) {
     const ACCEPT_BUDGET: Duration = Duration::from_secs(30);
@@ -9022,6 +9336,37 @@ async fn when_remote_relay_branch_admission_pause_is_released(
     world
         .fault_injection
         .release_remote_relay_admission_pause_for_branch(&domain, Some(&branch));
+}
+
+#[given(expr = "admitted remote relay dispatch for domain {string} is paused")]
+async fn given_remote_relay_dispatch_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world.fault_injection.pause_remote_relay_dispatch(domain);
+}
+
+#[then(expr = "the admitted remote relay dispatch pause for domain {string} is reached")]
+async fn then_remote_relay_dispatch_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_remote_relay_dispatch_pause(&domain),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "admitted remote relay dispatch pause for domain '{domain}' was not reached: {error}"
+        )
+    });
+}
+
+#[when(expr = "the admitted remote relay dispatch pause for domain {string} is released")]
+async fn when_remote_relay_dispatch_pause_is_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .release_remote_relay_dispatch_pause(&domain);
 }
 
 #[given(expr = "ownership handoff for domain {string} pauses after preparation")]
@@ -24672,6 +25017,44 @@ struct ScenarioRunArgs {
     watchdog: SuiteWatchdogArgs,
 }
 
+/// Parse the same Gherkin inputs and CLI options as Cucumber's basic parser, then take the
+/// limited feature chains up before the bulk. Cucumber may schedule all parsed scenarios at
+/// once; admission to a feature and to a run slot happens in the before hook.
+#[derive(Clone, Debug, Default)]
+struct PrioritizedScenarioParser;
+
+impl<I: AsRef<Path>> cucumber::parser::Parser<I> for PrioritizedScenarioParser {
+    type Cli = cucumber::parser::basic::Cli;
+    type Output = futures_util::stream::LocalBoxStream<
+        'static,
+        cucumber::parser::Result<cucumber::gherkin::Feature>,
+    >;
+
+    fn parse(self, input: I, cli: Self::Cli) -> Self::Output {
+        let parsed = cucumber::parser::Parser::parse(cucumber::parser::Basic::new(), input, cli);
+        futures_util::stream::once(async move {
+            let mut features = parsed.collect::<Vec<_>>().await;
+            prioritize_features(&mut features, |feature| {
+                feature.as_ref().ok().map(|feature| feature.name.as_str())
+            });
+            features
+        })
+        .flat_map(futures_util::stream::iter)
+        .boxed_local()
+    }
+}
+
+fn publish_suite_summary() {
+    let summary = suite_summary();
+    print!("{summary}");
+    for line in summary.lines() {
+        append_cucumber_log_line(line);
+    }
+    if let Err(error) = std::fs::write("tests/logs/suite-summary.md", &summary) {
+        eprintln!("failed to write suite summary: {error}");
+    }
+}
+
 async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     let mut cli =
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, ScenarioRunArgs>::parsed();
@@ -24690,9 +25073,14 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         .runner
         .concurrency
         .unwrap_or(default_max_concurrent_scenarios);
+    // Cucumber's cap controls task take-up, not work. All queued scenarios may enter their before
+    // hooks; the harness permits below are the only run capacity charged to a scenario.
+    cli.runner.concurrency = None;
+    let run_slots = StdArc::new(ScenarioRunSlots::new(effective_max_concurrent_scenarios));
     truncate_cucumber_log();
+    begin_suite_measurement(effective_max_concurrent_scenarios, watchdog.budget());
     append_cucumber_log_line(&format!(
-        "scenario parallelism: max_concurrent_scenarios={effective_max_concurrent_scenarios} \
+        "scenario parallelism: run_slots={effective_max_concurrent_scenarios} \
          concurrency_factor={concurrency_factor} tokio_worker_threads={} suite_budget={:?}",
         parallelism.tokio_worker_threads(),
         watchdog.budget()
@@ -24705,19 +25093,15 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     .summarized()
     .normalized()
     .repeat_failed();
-    let run = ScenarioWorld::cucumber()
-        .max_concurrent_scenarios(default_max_concurrent_scenarios)
+    let run = ScenarioWorld::cucumber::<&str>()
+        .with_parser(PrioritizedScenarioParser)
+        .max_concurrent_scenarios(usize::MAX)
         .retries(2)
-        .before(|feature, rule, scenario, world| {
+        .before(move |feature, _rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
             let scenario_line = scenario.position.line;
-            let exclusive = scenario
-                .tags
-                .iter()
-                .chain(rule.iter().flat_map(|rule| &rule.tags))
-                .chain(&feature.tags)
-                .any(|tag| tag == "exclusive");
+            let run_slots = run_slots.clone();
             Box::pin(async move {
                 // Published before the permits below, so a scenario the suite has taken up is
                 // visible while it waits for them rather than only once it runs.
@@ -24726,61 +25110,13 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                     &scenario_name,
                     scenario_line,
                 ));
-                let wasm_state_reset_scenario_permit =
-                    if feature_name == WASM_STATE_RESET_FEATURE_NAME {
-                        // Every reset scenario starts a cluster and compiles WASM. Running more
-                        // than one with the suite's coverage concurrency starves unrelated
-                        // scenario nodes, stretching subsecond assertions into tens of seconds.
-                        // Acquire this before the shared execution guard so queued reset scenarios
-                        // cannot keep an exclusive scenario from taking that guard.
-                        Some(
-                            WASM_STATE_RESET_SCENARIO_PERMITS
-                                .get_or_init(|| {
-                                    StdArc::new(tokio::sync::Semaphore::new(
-                                        MAX_CONCURRENT_WASM_STATE_RESET_SCENARIOS,
-                                    ))
-                                })
-                                .clone()
-                                .acquire_owned()
-                                .await
-                                .expect("WASM state reset scenario semaphore must remain open"),
-                        )
-                    } else {
-                        None
-                    };
-                let execution_lock = SCENARIO_EXECUTION_LOCK
-                    .get_or_init(|| StdArc::new(tokio::sync::RwLock::new(())))
-                    .clone();
-                let execution_permit = if exclusive {
-                    ScenarioExecutionPermit::Exclusive {
-                        _permit: execution_lock.write_owned().await,
-                    }
-                } else {
-                    ScenarioExecutionPermit::Concurrent {
-                        _permit: execution_lock.read_owned().await,
-                    }
-                };
-                world.wasm_state_reset_scenario_permit = wasm_state_reset_scenario_permit;
-                world.scenario_execution_permit = Some(execution_permit);
-                if WEB_CONSOLE_FEATURE_NAMES
-                    .iter()
-                    .any(|name| *name == feature_name)
-                {
-                    // Starting many three-node clusters and optimized WASM consoles together can
-                    // starve Chromium renderer event loops under the suite's global concurrency.
-                    world.web_console_scenario_permit = Some(
-                        WEB_CONSOLE_SCENARIO_PERMITS
-                            .get_or_init(|| {
-                                StdArc::new(tokio::sync::Semaphore::new(
-                                    MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS,
-                                ))
-                            })
-                            .clone()
-                            .acquire_owned()
-                            .await
-                            .expect("web console scenario semaphore must remain open"),
-                    );
-                }
+                let limit = FeatureLimit::for_name(&feature_name);
+                let admission = run_slots
+                    .admit_with(limit, &feature_name, |reason| {
+                        world.wait_for_admission(reason)
+                    })
+                    .await;
+                world.scenario_admission = Some(admission);
                 world.enter_phase(ScenarioPhase::Body, "");
             })
         })
@@ -24823,6 +25159,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.cli_subscription_reader = None;
                 world.cli_subscription_process = None;
                 world.cli_subscription_lines = None;
+                world.cli_clock_process = None;
                 world.server_process_http_load = None;
                 world.held_resource_upload = None;
                 world.server_process = None;
@@ -24867,9 +25204,6 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.stallable_tcp_proxies.clear();
                 world.tcp_forwarders = None;
                 world.silent_interconnect_peers.clear();
-                world.web_console_scenario_permit = None;
-                world.wasm_state_reset_scenario_permit = None;
-                world.scenario_execution_permit = None;
                 // The ZeroMQ and syslog ports the scenario drew for itself were bound by its nodes
                 // and its observers, and both are gone by now, so the ports go back to the pool
                 // the next scenario draws from.
@@ -24880,6 +25214,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                     ScenarioPhase::Finished,
                     &format!("body={body} {cluster_cleanup}"),
                 );
+                world.scenario_admission = None;
             })
         })
         .with_writer(writer)
@@ -24895,7 +25230,10 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     // mid-scenario, leaving logs without the suite's own diagnostic. Cucumber's fail-fast is not
     // this guarantee — it stops scheduling and leaves the scenarios already running exactly where
     // they are — so the retry coverage below keeps running until the budget itself expires.
-    let writer = match watchdog.bound(run).await {
+    let writer = match watchdog
+        .bound_with_timeout_report(run, publish_suite_summary)
+        .await
+    {
         SuiteRun::Completed(writer) => writer,
         SuiteRun::TimedOut(timeout) => {
             for line in timeout.to_string().lines() {
@@ -24931,6 +25269,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         SuiteOutcome::Passed
     };
     drop(writer);
+
+    publish_suite_summary();
 
     execution_failure
 }

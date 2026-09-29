@@ -218,6 +218,17 @@ serde case is a reference cost for this fixture, not the former server codec pat
 The full measurements and generated-instruction inspection are in
 [SIMD kernels 02](reports/simd-kernels-02.md).
 
+### Delivery latency per batch
+
+`just bench-relay-interaction delivery_observation` measures what a node input records for one
+accepted batch of 1, 64, and 1,024 rows: its traffic counters, its latest ingestion watermark, and
+every row's delivery latency, recorded into a node input whose branch-local series sit beside its
+global ones. The rows are one millisecond apart, so the 1,024-row batch spans the unit-resolution
+and doubling ranges of the latency buckets. Use
+`just benchmark-ab origin/main 3 hot-path-processor --partitions 1` for end-to-end server evidence.
+The measurements and generated-instruction inspection are in
+[SIMD kernels 03](reports/simd-kernels-03.md).
+
 ### Expression VM function workbench
 
 `just bench-vm` runs the existing Criterion VM harness. Its `execute_program_batch_size` group
