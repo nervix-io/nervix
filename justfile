@@ -682,6 +682,8 @@ coverage-redis output="target/redis-dns.lcov": tests-deps
         --package nervix-dns \
         --package nervix-connector \
         --package nervix-connector-redis
+    cargo llvm-cov --no-report --lib --package nervix-server -- redis_
+    cargo llvm-cov --no-report --lib --package nervix-server -- sources_that_resolve_names_report_missing_node_dns_as_start_failure
     just coverage-cli-binary
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
@@ -697,6 +699,11 @@ coverage-redis-report output="target/redis-dns.lcov":
 
 coverage-redis-units-append output="target/redis-dns.lcov":
     cargo llvm-cov --no-clean --lib --package nervix-connector-redis
+    just coverage-redis-report {{ quote(output) }}
+
+coverage-redis-server-units-append output="target/redis-dns.lcov":
+    cargo llvm-cov --no-clean --lib --package nervix-server -- redis_
+    cargo llvm-cov --no-clean --lib --package nervix-server -- sources_that_resolve_names_report_missing_node_dns_as_start_failure
     just coverage-redis-report {{ quote(output) }}
 
 # Collect the changed DNS client units and their public one-/three-node paths into one LCOV

@@ -450,3 +450,64 @@ impl Runtime {
             .map(|wait| wait.value().clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use nervix_dns::DnsLookupFailure;
+    use nervix_models::ClientPoolBounds;
+
+    use super::*;
+
+    #[test]
+    fn redis_lookup_failure_keeps_its_cause_when_a_shared_client_reports_it() {
+        let error = OpenClientError::from_redis(Report::new(RedisClientError::Resolve {
+            host: "missing.nervix.test".to_string(),
+            failure: DnsLookupFailure::NameNotFound,
+        }));
+        assert!(matches!(
+            error.current_context(),
+            OpenClientError::Connect {
+                transport: "Redis",
+                reason,
+            } if reason.contains("missing.nervix.test") && reason.contains("the name does not exist")
+        ));
+        assert!(
+            error
+                .frames()
+                .any(|frame| frame.downcast_ref::<RedisClientError>().is_some())
+        );
+    }
+
+    #[tokio::test]
+    async fn redis_pool_reports_a_missing_node_resolver_before_opening() {
+        let client = ClientName::try_from("cache".to_string()).assured("the fixture name is valid");
+        let error = Runtime::default()
+            .open_shared_client(
+                &client,
+                PooledClientPlan {
+                    transport: PooledTransport::Redis,
+                    bounds: ClientPoolBounds::new(0, nonzero_ext::nonzero!(1u32))
+                        .assured("zero is below one"),
+                },
+                &ResolvedClientConfig::default(),
+            )
+            .await
+            .err()
+            .assured("a Redis pool requires the node resolver");
+        assert!(matches!(
+            error.current_context(),
+            SharedClientError::Open { client } if client == "cache"
+        ));
+        let cause = error
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<OpenClientError>())
+            .assured("the shared-client error retains the Redis configuration failure");
+        assert!(matches!(
+            cause,
+            OpenClientError::InvalidConfig {
+                transport: "Redis",
+                reason,
+            } if reason == "the node DNS resolver is not installed"
+        ));
+    }
+}
