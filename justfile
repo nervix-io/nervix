@@ -58,6 +58,9 @@ test-admission-kernels *args:
     cargo test --package nervix-simd-kernels --lib -- {{ args }}
     cargo test --package nervix-models --lib -- {{ args }}
 
+bench-window-admission *args:
+    cargo bench --package nervix-simd-kernels --bench window_admission -- {{ args }}
+
 test-admission-runtime *args: download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
 

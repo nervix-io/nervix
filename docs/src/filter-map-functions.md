@@ -1837,9 +1837,12 @@ only when the window emits. `SUM` over floating-point values carries the roundin
 addition beside the running total, and an `F32` `SUM` accumulates in `F64` and rounds to `F32` when
 it emits. `AVG`, the variances, standard deviations, covariances, and `CORR` convert each argument
 to the nearest `F64` and keep centered moments, so a variance is never the difference of two large
-sums of squares. Stepping a window never subtracts a floating-point value from a statistic: the
-statistic of the rows that remain is rebuilt from the rows themselves, so a value that left the
-window, however large, leaves no rounding behind.
+sums of squares. Admission computes a compensated mean and then centered second moments over each
+typed run; one merge combines that run with the retained aggregate. Floating-point results can
+vary slightly with run and SIMD lane grouping because addition and merging round in a different
+order. Integer sums and counts are independent of grouping. Stepping a window never subtracts a
+floating-point value from a statistic: the statistic of the rows that remain is rebuilt from the
+rows themselves, so even a large value that left the window leaves no rounding behind.
 
 **Errors.** A row is refused at admission, and never changes the window, when an argument
 expression fails for it, when a floating-point argument of `SUM`, `AVG`, a variance, standard
