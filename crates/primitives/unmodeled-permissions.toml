@@ -37,7 +37,11 @@ path = "crates/client-core/src/shuttle_test.rs"
 reason = "The highest step count spans every model execution the runner starts and is read after they end, where no modeled atomic can exist."
 
 [[permission]]
-items = ["sync::atomic::AtomicBool", "sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicUsize",
+  "sync::atomic::Ordering",
+]
 limit = "Records observe the node budget and the admission fence and never synchronize them; the budget's and the quiesce control's own atomics are modeled."
 owner = "The client ingestor's Shuttle checks."
 path = "src/runtime/client_ingestor_shuttle_tests.rs"
@@ -58,56 +62,90 @@ path = "crates/model-harness/src/loom.rs"
 reason = "The number of executions a search explored spans every execution and is reported after the search ends, where no modeled atomic can exist."
 
 [[permission]]
-items = ["sync::atomic::AtomicBool", "sync::atomic::Ordering", "task_local", "thread::Builder", "thread::sleep"]
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::Ordering",
+  "task_local",
+  "thread::Builder",
+  "thread::sleep",
+]
 limit = "The epoch driver and a guest callback's time scope are outside every model: no check covers when the epoch thread observes the flag, and under Shuttle every task shares the storage a time scope sets while it is polled."
 owner = "The WASM runtime: its epoch driver, and the domain time of a guest callback."
 path = "crates/nervix-wasm/src/lib.rs"
 reason = "The epoch driver is a dedicated operating-system thread that no model runs, sleeping for real between ticks and stopped by a flag a modeled atomic could not share with it. A guest callback reads its domain time from Tokio's task-local storage, which no model provides."
 
 [[permission]]
-items = ["sync::atomic::AtomicBool", "sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicUsize",
+  "sync::atomic::Ordering",
+]
 limit = "Benchmark statistics; the benchmark claims nothing about synchronization."
 owner = "The VM benchmarks' allocation probe."
 path = "crates/nervix-vm/benches/vm/allocation_probe.rs"
 reason = "The global allocator counts every allocation of the process, on every thread, including the ones a model checker makes for itself."
 
 [[permission]]
-items = ["sync::atomic::AtomicBool", "sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicUsize",
+  "sync::atomic::Ordering",
+]
 limit = "Records observe the stream slots and never synchronize them; the slots' own atomics are modeled."
 owner = "The interconnect's stream-slot Shuttle checks."
 path = "crates/interconnect/src/connection/stream_slots/shuttle_checks.rs"
 reason = "Each record must change in the same scheduling step as the lease or drain operation it records, so recording adds no scheduling point."
 
 [[permission]]
-items = ["sync::atomic::AtomicBool", "sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicUsize",
+  "sync::atomic::Ordering",
+]
 limit = "Records observe the emitter and never synchronize it; the emitter's own counts are modeled."
 owner = "The emitter record-write Shuttle checks."
 path = "src/runtime/emitter_record_writes_shuttle_tests.rs"
 reason = "Each record must change in the same scheduling step as the operation it records, so recording adds no scheduling point."
 
 [[permission]]
-items = ["sync::atomic::AtomicBool", "sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicUsize",
+  "sync::atomic::Ordering",
+]
 limit = "Records observe the entity gate and never synchronize it; the quiesce counters under test are modeled."
 owner = "The entity gate Shuttle checks."
 path = "src/runtime/entity_gate_shuttle_tests.rs"
 reason = "Each record must change in the same scheduling step as the operation it records, so recording adds no scheduling point."
 
 [[permission]]
-items = ["sync::atomic::AtomicBool", "sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicUsize",
+  "sync::atomic::Ordering",
+]
 limit = "Records observe the relay gate and fan-out and never synchronize them; the relay's own atomics are modeled."
 owner = "The relay dispatch gate and fan-out Shuttle checks."
 path = "src/runtime/relay_channel_shuttle_tests.rs"
 reason = "Each gate and wake record must change in the same scheduling step as the operation it records, so recording adds no scheduling point."
 
 [[permission]]
-items = ["sync::atomic::AtomicBool", "sync::atomic::AtomicU64", "sync::atomic::Ordering"]
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicU64",
+  "sync::atomic::Ordering",
+]
 limit = "Records observe the durability barrier and never synchronize it; the barrier's own atomics are modeled."
 owner = "The state store durability-barrier Shuttle checks."
 path = "src/runtime/state_store/durability_shuttle_tests.rs"
 reason = "Each record must change in the same scheduling step as the operation it records, so recording adds no scheduling point."
 
 [[permission]]
-items = ["sync::atomic::AtomicBool", "sync::atomic::AtomicU64", "sync::atomic::Ordering"]
+items = [
+  "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicU64",
+  "sync::atomic::Ordering",
+]
 limit = "Records observe the checkpoint hold and never synchronize it; the owner's own atomics are modeled."
 owner = "The WASM checkpoint Shuttle checks."
 path = "src/runtime/wasm_checkpoint_shuttle_tests.rs"
@@ -135,7 +173,15 @@ path = "crates/client-ffi/src/session.rs"
 reason = "The binding owns the runtime its host's threads enter, and entering it and shutting it down in the background are the binding's contract with the host, which Shuttle's runtime does not provide."
 
 [[permission]]
-items = ["select", "sync::Mutex", "sync::mpsc", "sync::watch", "task::consume_budget", "task::spawn", "time::sleep"]
+items = [
+  "select",
+  "sync::Mutex",
+  "sync::mpsc",
+  "sync::watch",
+  "task::consume_budget",
+  "task::spawn",
+  "time::sleep",
+]
 limit = "Cluster membership gossip is outside every model: no check covers chitchat or the transport tasks it drives."
 owner = "The cluster membership transport."
 path = "src/cluster.rs"

@@ -72,4 +72,3 @@ tokio = { workspace = true, features = [
 ], optional = true }
 tokio-stream = { workspace = true, features = ["net"], optional = true }
 tokio-util = { workspace = true, features = ["rt"], optional = true }
-
