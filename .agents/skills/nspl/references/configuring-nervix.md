@@ -35,7 +35,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Sink transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
-| Session subscriptions and domain clock attachment | `Sessions` |
+| Session subscriptions and domain clock attachment | `Sessions`; `Command Line Client` for the CLI `subscribe` and `domain-clock` streams |
 | Metrics and runtime inspection | `Metrics And Observability` |
 | Full graph examples | `Examples` |
 | WASM guest ABI and output timing | `WASM Processor Guests` |
@@ -321,11 +321,15 @@ Choose checks relevant to the configured graph:
   anything.
 - `LOOKUP <hash_map> KEY '<key>';` checks a loaded lookup.
 - `CREATE SUBSCRIPTION ...` checks live relay output without modifying the graph. A subscription
-  ends when its relay is redefined or removed; create it again to read the current definition.
+  ends when its relay is redefined or removed; create it again to read the current definition. In
+  the web console the tab turns ended and its resubscribe button does this under the same name.
+- `nervix-cli --domain <domain> subscribe <name> <relay>` streams subscription rows to a shell.
 - `ATTACH DOMAIN CLOCK;` shows the active domain's `START` generation and clock state, including a
   paced domain's committed origin, UTC anchor, and rate, then reports each state change and newest
   accepted tick until `DETACH DOMAIN CLOCK;`. Use it when paced ingestion rejects `TIMESTAMP AT`
   values: the mapping and tick frontier show which logical centers the admission window has reached.
+- `nervix-cli --domain <domain> domain-clock` follows that clock from a shell until Ctrl-C,
+  printing the attach reply, state changes, and tick lines.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.
 - `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
   expiry outcomes.

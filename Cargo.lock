@@ -7414,6 +7414,7 @@ dependencies = [
  "nervix-nspl",
  "nervix-recovery",
  "nervix-roto",
+ "nervix-simd-kernels",
  "nervix-test-environment",
  "nervix-vm",
  "nervix-wasm",
@@ -7484,9 +7485,11 @@ dependencies = [
 name = "nervix-simd-kernels"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "error-stack",
  "fastrand",
  "fearless_simd",
+ "hdrhistogram",
  "meticulous",
  "thiserror 2.0.21",
 ]

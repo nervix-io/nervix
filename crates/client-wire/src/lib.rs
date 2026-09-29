@@ -74,7 +74,7 @@ pub use frame::{
     ClientFrame, EncodedFrame, FrameError, FrameRoot, FrameViolation, ServerFrame, UploadFrame,
     UploadReplyFrame, VerifiedFrame,
 };
-pub use limits::{LimitsError, SessionLimitSettings, SessionLimits};
+pub use limits::{LimitsError, MAX_IN_FLIGHT_REQUESTS, SessionLimitSettings, SessionLimits};
 pub use reply::{
     CancelOutcome, CancelState, CancellationStage, InspectionOutcome, RequestCancelled,
     RequestRejected, RequestRejection, SubscribeDisposition, SubscribeOutcome, SubscriptionOpened,
