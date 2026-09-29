@@ -13,6 +13,8 @@ use clap::Parser;
 use fjall::Database;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{CommandRequest, SuggestRequest};
+#[cfg(feature = "testing")]
+use nervix_consensus::ConsensusTestProbe;
 use nervix_consensus::{Consensus, ConsensusSettings, Proposer, RaftRetentionPolicy};
 use nervix_interconnect::{TlsConfigBundle, Transport, TransportClock};
 use nervix_models::{
@@ -268,6 +270,11 @@ fn test_session_service(
         interconnect.clone(),
         consensus.proposer().local_node_id().clone(),
     );
+    let client_consumers = super::client_consumers::ClientConsumerRouter::new(
+        runtime.clone(),
+        interconnect.clone(),
+        consensus.proposer().local_node_id().clone(),
+    );
     SessionServiceImpl {
         inner: Arc::new(SessionServiceInner {
             cluster: cluster.clone(),
@@ -285,6 +292,7 @@ fn test_session_service(
             subscription_interests,
             subscription_sampler: SubscriptionSampler::default(),
             client_producers,
+            client_consumers,
             interconnect,
             service_tasks: super::service_tasks::ServiceTasks::default(),
             configured_basic_auth: None,
@@ -525,8 +533,31 @@ pub(in crate::application) struct TestService {
     pub(in crate::application) path: PathBuf,
 }
 
+#[cfg(feature = "testing")]
 pub(in crate::application) async fn build_test_service(
     create_default_domain_flag: bool,
+) -> TestService {
+    build_test_service_inner(create_default_domain_flag, None).await
+}
+
+#[cfg(not(feature = "testing"))]
+pub(in crate::application) async fn build_test_service(
+    create_default_domain_flag: bool,
+) -> TestService {
+    build_test_service_inner(create_default_domain_flag).await
+}
+
+#[cfg(feature = "testing")]
+pub(in crate::application) async fn build_test_service_with_probe(
+    create_default_domain_flag: bool,
+    probe: ConsensusTestProbe,
+) -> TestService {
+    build_test_service_inner(create_default_domain_flag, Some(probe)).await
+}
+
+async fn build_test_service_inner(
+    create_default_domain_flag: bool,
+    #[cfg(feature = "testing")] probe: Option<ConsensusTestProbe>,
 ) -> TestService {
     let path = test_db_path();
     let _ = std::fs::remove_dir_all(&path);
@@ -547,22 +578,27 @@ pub(in crate::application) async fn build_test_service(
     let expected_leader = test_node_name(id);
     let interconnect = test_interconnect("test", &expected_leader).await;
     let executor = nervix_execution::Executor::default();
-    let consensus = Consensus::open(
-        path.join("consensus"),
-        ConsensusSettings {
-            cluster_name: "test".to_string(),
-            node_id: expected_leader.clone(),
-            interconnect_advertise_addr: interconnect.local_addr().into(),
-            interconnect: interconnect.clone(),
-            executor: executor.clone(),
-            raft_heartbeat_interval: Duration::from_millis(50),
-            raft_election_timeout_min: Duration::from_millis(150),
-            raft_election_timeout_max: Duration::from_millis(300),
-            raft_retention: RaftRetentionPolicy::default(),
-        },
-    )
-    .await
-    .expect("consensus should open");
+    let settings = ConsensusSettings {
+        cluster_name: "test".to_string(),
+        node_id: expected_leader.clone(),
+        interconnect_advertise_addr: interconnect.local_addr().into(),
+        interconnect: interconnect.clone(),
+        executor: executor.clone(),
+        raft_heartbeat_interval: Duration::from_millis(50),
+        raft_election_timeout_min: Duration::from_millis(150),
+        raft_election_timeout_max: Duration::from_millis(300),
+        raft_retention: RaftRetentionPolicy::default(),
+    };
+    #[cfg(feature = "testing")]
+    let consensus = match probe {
+        Some(probe) => {
+            Consensus::open_with_test_probe(path.join("consensus"), settings, probe).await
+        }
+        None => Consensus::open(path.join("consensus"), settings).await,
+    };
+    #[cfg(not(feature = "testing"))]
+    let consensus = Consensus::open(path.join("consensus"), settings).await;
+    let consensus = consensus.expect("consensus should open");
     consensus
         .administrator()
         .maybe_initialize()

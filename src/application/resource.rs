@@ -729,12 +729,9 @@ impl SessionServiceImpl {
                 )),
             },
             Err(error) => {
-                self.consensus_error_response(
-                    error.current_context(),
-                    format!(
-                        "failed to create resource '{}': {error}",
-                        create.identifier.as_str()
-                    ),
+                self.consensus_report_response(
+                    &error,
+                    format!("failed to create resource '{}'", create.identifier.as_str()),
                 )
                 .await
             }
@@ -1198,6 +1195,8 @@ impl SessionServiceImpl {
 #[cfg(test)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
+    #[cfg(feature = "testing")]
+    use nervix_consensus::{ConsensusTestProbe, StorageBoundary};
     use nervix_models::{
         ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CreateResource,
         CreateStatement, DomainName, ResourceName, ResourceUpload, ResourceUploadIdentity,
@@ -1207,10 +1206,56 @@ mod tests {
     use nervix_nspl::client_statement::local_path_fragment;
     use sorted_vec::SortedVec;
 
+    #[cfg(feature = "testing")]
+    use super::super::test_fixtures::build_test_service_with_probe;
     use super::{
         super::test_fixtures::{TestService, build_test_service, create_test_domain, named},
         *,
     };
+
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn resource_catalog_storage_failure_keeps_resource_undeclared() {
+        let probe = ConsensusTestProbe::default();
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service_with_probe(true, probe.clone()).await;
+        let domain = DomainName::parse("default").assured("the test domain name is valid");
+        let resource =
+            ResourceName::parse("failed_resource").assured("the test resource name is valid");
+        probe.storage_fault().fail_next(
+            "create-resource-catalog:default.failed_resource".to_string(),
+            StorageBoundary::BeforeCommit,
+        );
+
+        let result = service
+            .create_resource(
+                &domain,
+                CreateStatement::new(
+                    CreateResource {
+                        identifier: resource.clone(),
+                    },
+                    false,
+                ),
+            )
+            .await;
+        assert!(!result.succeeded(), "{result:?}");
+        assert!(result.message.contains("consensus storage"), "{result:?}");
+        assert!(
+            !service
+                .inner
+                .consensus
+                .current_resources()
+                .await
+                .is_declared(&domain, &resource)
+        );
+
+        drop(service);
+        drop(registry);
+        let _ = std::fs::remove_dir_all(path);
+    }
 
     fn resource_upload_key(
         domain: &DomainName,

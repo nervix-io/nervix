@@ -310,6 +310,18 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `ENCODE USING`. Include every required variable: all modes declare `RETRY POLICY BACKOFF <d> MAX
   <d>`; asynchronous confirming modes also declare `ACK SEQUENTIAL` or `ACK PARALLEL MAX <n>` and
   `ACK TIMEOUT <d>`. Do not invent a default mode, window, timeout, or retry cadence.
+- When an application receives constructed graph output, use `TO CLIENT SCHEMA <output_schema>
+  MODE ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
+  Follow route construction with required `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` and an
+  explicit `FLUSH` policy. The output schema is exact, and every sensitive value copied into a
+  non-sensitive output field needs `leak_sensitive(...)`. Do not create a `CLIENT` model, codec,
+  header operation, or direct `VALUES` body for this sink. An application opens a competing
+  consumer with the Rust client's `subscribe_emitter` or the session protocol, receives native
+  Arrow, then explicitly ACKs, retries, or rejects each attempt. `ATTACHED` holds source ACKs
+  until the application ACKs; `DETACHED` releases the source earlier. Retries preserve the bytes
+  and delivery identity but use a fresh reference. Consumers are volatile across owner and
+  session loss; design application effects for duplicates. Read `Emitters` → `Client emitters`,
+  `Sessions` → `Emitter Consumers`, and the Client Implementation Manual for limits and recovery.
 - Request/response emitters do not take `ACK TIMEOUT`. When configuring SQS, Sentry, OTEL, or
   ClickHouse, put `timeout_ms` in the referenced client CONFIG when the request needs an explicit
   bound; the emitter's declared retry policy owns pacing after that request fails. OTEL clients
@@ -341,8 +353,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   record once and never a refused one, and a `WITHOUT BODY` emitter sends zero payload bytes; see
   [HTTP inspection](../../../docs/src/emitters.md#http-inspection-and-metrics).
 - Write a supported emitter's optional `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` after the complete
-  sink clause and route construction, before `FLUSH`; it is required for ClickHouse, Postgres,
-  MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a
+  sink clause and route construction, before `FLUSH`; it is required for CLIENT, ClickHouse,
+  Postgres, MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a
   codec with `ON EMITTING BATCH`, and a batching protobuf codec needs `BATCH MESSAGE`. Compatible
   rows from successive Arrow carriers in one flush may share a payload, but rows from different
   source relays or concrete branches cannot. For the database sinks, the clause bounds each insert

@@ -578,6 +578,7 @@ Feature: NSPL transactions
       """
       quiesce level: DYNAMIC
       """
+    And transaction "{{transaction_id}}" eventually has state "COMMITTED"
     When these NSPL commands are executed on the leader node
       """
       SHOW CREATE SCHEMA before_failover;

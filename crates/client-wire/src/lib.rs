@@ -28,6 +28,7 @@ mod choice;
 mod codec;
 mod command;
 mod common;
+mod consumer;
 mod domain;
 mod domain_clock;
 mod event;
@@ -66,6 +67,13 @@ pub use command::{
 pub use common::{
     Diagnostic, LeaderEndpoints, LeaderRedirect, OutcomeOrigin, RequestId, SourceSpan,
     WireValueError,
+};
+pub use consumer::{
+    CloseEmitterOutcome, CloseEmitterRequest, ConsumerId, EmitterBatchDecision,
+    EmitterBatchReceived, EmitterCloseDisposition, EmitterOpenRefusal, EmitterOpened,
+    EmitterSettlement, OpenEmitterDisposition, OpenEmitterOutcome, OpenEmitterRequest,
+    ReadEmitterBatchOutcome, ReadEmitterBatchRequest, ReadEmitterDisposition,
+    SettleEmitterBatchOutcome, SettleEmitterBatchRequest,
 };
 pub use domain::{
     ClusterObserved, DomainEntity, DomainInfo, DomainList, DomainSelection, DomainSnapshotObserved,

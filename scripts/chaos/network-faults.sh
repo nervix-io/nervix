@@ -11,7 +11,7 @@ usage() {
 usage:
   network-faults.sh inspect --run-id RUN_ID --container ID --nettools IMAGE --output FILE
   network-faults.sh heal --run-id RUN_ID --nettools IMAGE --output FILE
-  network-faults.sh preflight --run-id RUN_ID --pumba IMAGE --nettools IMAGE --output DIR
+  network-faults.sh preflight --run-id RUN_ID --pumba IMAGE --nettools IMAGE --probe IMAGE --output DIR
 EOF
 }
 
@@ -28,16 +28,18 @@ run_id=""
 container_id=""
 nettools_image=""
 pumba_image=""
+probe_image=""
 output=""
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
-        --run-id | --container | --nettools | --pumba | --output)
+        --run-id | --container | --nettools | --pumba | --probe | --output)
             [[ "$#" -ge 2 ]] || { usage; exit 2; }
             case "$1" in
                 --run-id) run_id="$2" ;;
                 --container) container_id="$2" ;;
                 --nettools) nettools_image="$2" ;;
                 --pumba) pumba_image="$2" ;;
+                --probe) probe_image="$2" ;;
                 --output) output="$2" ;;
             esac
             shift 2
@@ -228,7 +230,7 @@ preflight_fail() {
 # block the canary's traffic to or from its gateway while installed, and leave its namespace in
 # the default state once Pumba receives SIGTERM.
 preflight() {
-    [[ -n "${pumba_image}" ]] || { usage; exit 2; }
+    [[ -n "${pumba_image}" && -n "${probe_image}" ]] || { usage; exit 2; }
     local directory="${output}"
     mkdir -p "${directory}"
     : >"${directory}/sidecars.txt"
@@ -239,7 +241,7 @@ preflight() {
         --label "${run_label}" \
         --label io.nervix.chaos.role=preflight \
         --name "${canary_name}" \
-        alpine:3.22 sleep 300)"
+        "${probe_image}" sleep 300)"
     local gateway
     gateway="$(bounded 20 docker inspect --format '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' "${preflight_canary}")"
     [[ "${gateway}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
