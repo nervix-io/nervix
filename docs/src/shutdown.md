@@ -404,6 +404,13 @@ Unexpected owner loss is not a handoff. The failed tasks and their volatile buff
 immediately, attached work is negatively acknowledged, and the scheduler promotes a live replica or
 chooses a fresh owner without waiting for a gate.
 
+The scheduler acts on what application health and gossip report, so a forced recovery can also move
+work off a node that is still running. That node stops the moved runtime when it applies the
+published schedule. A batch a relay owner routed to it for a moved consumer, and that reaches its
+runtime afterwards, finds no attached consumer and fails its attached acknowledgements, so the
+source redelivers the record to the new owner rather than committing it; see
+[Consumers That Leave The Receiver](interconnect.md#consumers-that-leave-the-receiver).
+
 Forced recovery is the path that publishes a schedule when the source cannot participate. It stages
 the destination's checkpoint inventory under the destination's process incarnation and the complete
 target-schedule fingerprint, and applying staged checkpoints accepts only that exact preparation. A

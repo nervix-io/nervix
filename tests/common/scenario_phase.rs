@@ -18,8 +18,11 @@ use std::{
 };
 
 use meticulous::OptionExt as _;
+use nervix_approx_into::ApproxInto as _;
 use parking_lot::Mutex;
 use tokio::time::{Duration, Instant};
+
+use super::scenario_schedule::AdmissionWait;
 
 /// Where one scenario is between its first step and the end of its cleanup.
 ///
@@ -80,8 +83,10 @@ pub(crate) struct ActiveScenario {
     /// Which run of this scenario is in flight, counted from one.
     pub(crate) attempt: u32,
     pub(crate) phase: ScenarioPhase,
+    waiting_for: Option<AdmissionWait>,
     started_at: Instant,
     phase_started_at: Instant,
+    slot_started_at: Option<Instant>,
 }
 
 impl ActiveScenario {
@@ -99,6 +104,14 @@ impl ActiveScenario {
     pub(crate) fn active() -> Vec<Self> {
         ACTIVE_SCENARIOS.lock().values().cloned().collect()
     }
+
+    pub(crate) fn suite_age() -> Duration {
+        MEASUREMENTS
+            .lock()
+            .began
+            .map(|began| began.elapsed())
+            .unwrap_or_default()
+    }
 }
 
 impl fmt::Display for ActiveScenario {
@@ -111,7 +124,11 @@ impl fmt::Display for ActiveScenario {
             self.phase,
             self.phase_age(),
             self.age()
-        )
+        )?;
+        if let Some(reason) = self.waiting_for {
+            write!(formatter, " waiting_for={reason}")?;
+        }
+        Ok(())
     }
 }
 
@@ -129,6 +146,137 @@ static NEXT_REGISTRATION: AtomicU64 = AtomicU64::new(0);
 /// before it has ended, so the count a registration reads is its own attempt.
 static SCENARIO_ATTEMPTS: LazyLock<Mutex<BTreeMap<ScenarioIdentity, u32>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+#[derive(Clone, Debug)]
+struct AttemptTime {
+    identity: ScenarioIdentity,
+    attempt: u32,
+    length: Duration,
+}
+
+#[derive(Default)]
+struct SuiteMeasurements {
+    began: Option<Instant>,
+    slots: usize,
+    budget: Duration,
+    slot_work: Duration,
+    waiting: BTreeMap<AdmissionWait, Duration>,
+    completed: Vec<AttemptTime>,
+}
+
+static MEASUREMENTS: LazyLock<Mutex<SuiteMeasurements>> =
+    LazyLock::new(|| Mutex::new(SuiteMeasurements::default()));
+
+pub(crate) fn begin_suite_measurement(slots: usize, budget: Duration) {
+    *MEASUREMENTS.lock() = SuiteMeasurements {
+        began: Some(Instant::now()),
+        slots,
+        budget,
+        ..SuiteMeasurements::default()
+    };
+}
+
+/// Snapshot completed and still-running work before the watchdog drops a timed-out run.
+pub(crate) fn suite_summary() -> String {
+    let active = ActiveScenario::active();
+    let attempts = SCENARIO_ATTEMPTS.lock().clone();
+    let measurements = MEASUREMENTS.lock();
+    let length = measurements
+        .began
+        .map(|began| began.elapsed())
+        .unwrap_or_default();
+    let mut waiting = measurements.waiting.clone();
+    let mut slot_work = measurements.slot_work;
+    let mut longest = measurements.completed.clone();
+    for scenario in &active {
+        if scenario.phase == ScenarioPhase::Finished {
+            continue;
+        }
+        if let Some(reason) = scenario.waiting_for {
+            *waiting.entry(reason).or_default() += scenario.phase_age();
+        }
+        if let Some(started) = scenario.slot_started_at {
+            slot_work += started.elapsed();
+        }
+        if let Some(started) = scenario.slot_started_at {
+            longest.push(AttemptTime {
+                identity: scenario.identity.clone(),
+                attempt: scenario.attempt,
+                length: started.elapsed(),
+            });
+        }
+    }
+    longest.sort_by_key(|attempt| std::cmp::Reverse(attempt.length));
+    let capacity = length.as_secs_f64() * measurements.slots.approx_into::<f64>();
+    let utilization = if capacity > 0.0 {
+        100.0 * slot_work.as_secs_f64() / capacity
+    } else {
+        0.0
+    };
+    let margin = if length <= measurements.budget {
+        format!("{:.1}s", (measurements.budget - length).as_secs_f64())
+    } else {
+        format!("-{:.1}s", (length - measurements.budget).as_secs_f64())
+    };
+    let retries: u32 = attempts.values().map(|attempts| attempts - 1).sum();
+    let mut lines = vec![
+        "## Scenario suite".to_string(),
+        String::new(),
+        format!(
+            "Length: {:.1}s; budget: {:.1}s; margin left: {margin}.",
+            length.as_secs_f64(),
+            measurements.budget.as_secs_f64()
+        ),
+        format!(
+            "Run slots: {}; utilization: {utilization:.1}%; scenario work: {:.1} slot-seconds.",
+            measurements.slots,
+            slot_work.as_secs_f64()
+        ),
+        format!(
+            "Attempts: {} completed, {} active; retries: {retries}.",
+            measurements.completed.len(),
+            active
+                .iter()
+                .filter(|scenario| scenario.phase != ScenarioPhase::Finished)
+                .count()
+        ),
+        String::new(),
+        "| Waiting reason | Cumulative time |".to_string(),
+        "| --- | ---: |".to_string(),
+    ];
+    for reason in [
+        AdmissionWait::WebConsole,
+        AdmissionWait::WasmStateReset,
+        AdmissionWait::RunSlot,
+    ] {
+        lines.push(format!(
+            "| {reason} | {:.1}s |",
+            waiting
+                .get(&reason)
+                .copied()
+                .unwrap_or_default()
+                .as_secs_f64()
+        ));
+    }
+    lines.extend([
+        String::new(),
+        "### 10 longest attempts".to_string(),
+        String::new(),
+        "| Time | Attempt | Feature / scenario |".to_string(),
+        "| ---: | ---: | --- |".to_string(),
+    ]);
+    for attempt in longest.iter().take(10) {
+        lines.push(format!(
+            "| {:.1}s | {} | {} / {} (line {}) |",
+            attempt.length.as_secs_f64(),
+            attempt.attempt,
+            attempt.identity.feature,
+            attempt.identity.scenario,
+            attempt.identity.line
+        ));
+    }
+    lines.join("\n") + "\n"
+}
 
 /// One scenario's entry in the active-scenario registry.
 ///
@@ -160,8 +308,10 @@ impl ActiveScenarioRegistration {
             identity: identity.clone(),
             attempt,
             phase: ScenarioPhase::Queued,
+            waiting_for: None,
             started_at,
             phase_started_at: started_at,
+            slot_started_at: None,
         };
         ACTIVE_SCENARIOS.lock().insert(registration, active);
         Self {
@@ -190,14 +340,66 @@ impl ActiveScenarioRegistration {
         let active = registry
             .get_mut(&self.registration)
             .verified("a registration holds its registry entry until it is dropped");
+        let now = Instant::now();
+        let mut measurement = MEASUREMENTS.lock();
+        if let Some(reason) = active.waiting_for.take() {
+            *measurement.waiting.entry(reason).or_default() += now - active.phase_started_at;
+        }
+        if phase == ScenarioPhase::Body {
+            active.slot_started_at = Some(now);
+        }
+        if phase == ScenarioPhase::Finished {
+            let work = active
+                .slot_started_at
+                .take()
+                .map(|started| now - started)
+                .unwrap_or_default();
+            measurement.slot_work += work;
+            measurement.completed.push(AttemptTime {
+                identity: active.identity.clone(),
+                attempt: active.attempt,
+                length: work,
+            });
+        }
         active.phase = phase;
-        active.phase_started_at = Instant::now();
+        active.phase_started_at = now;
+        active.clone()
+    }
+
+    pub(crate) fn wait_for(&self, reason: AdmissionWait) -> ActiveScenario {
+        let mut registry = ACTIVE_SCENARIOS.lock();
+        let active = registry
+            .get_mut(&self.registration)
+            .verified("a registration holds its registry entry until it is dropped");
+        let now = Instant::now();
+        if let Some(previous) = active.waiting_for.replace(reason) {
+            *MEASUREMENTS.lock().waiting.entry(previous).or_default() +=
+                now - active.phase_started_at;
+        }
+        active.phase_started_at = now;
         active.clone()
     }
 }
 
 impl Drop for ActiveScenarioRegistration {
     fn drop(&mut self) {
-        ACTIVE_SCENARIOS.lock().remove(&self.registration);
+        if let Some(active) = ACTIVE_SCENARIOS.lock().remove(&self.registration)
+            && active.phase != ScenarioPhase::Finished
+        {
+            let mut measurement = MEASUREMENTS.lock();
+            if let Some(reason) = active.waiting_for {
+                *measurement.waiting.entry(reason).or_default() += active.phase_age();
+            }
+            let length = active
+                .slot_started_at
+                .map(|started| started.elapsed())
+                .unwrap_or_default();
+            measurement.slot_work += length;
+            measurement.completed.push(AttemptTime {
+                identity: active.identity,
+                attempt: active.attempt,
+                length,
+            });
+        }
     }
 }
