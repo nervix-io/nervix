@@ -82,4 +82,10 @@ impl ConfiguredFaultInjection {
         _branch: Option<&str>,
     ) {
     }
+
+    pub(in crate::runtime) async fn pause_remote_relay_dispatch_if_armed(
+        &self,
+        _domain: &DomainName,
+    ) {
+    }
 }

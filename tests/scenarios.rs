@@ -9341,6 +9341,37 @@ async fn when_remote_relay_branch_admission_pause_is_released(
         .release_remote_relay_admission_pause_for_branch(&domain, Some(&branch));
 }
 
+#[given(expr = "admitted remote relay dispatch for domain {string} is paused")]
+async fn given_remote_relay_dispatch_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world.fault_injection.pause_remote_relay_dispatch(domain);
+}
+
+#[then(expr = "the admitted remote relay dispatch pause for domain {string} is reached")]
+async fn then_remote_relay_dispatch_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_remote_relay_dispatch_pause(&domain),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "admitted remote relay dispatch pause for domain '{domain}' was not reached: {error}"
+        )
+    });
+}
+
+#[when(expr = "the admitted remote relay dispatch pause for domain {string} is released")]
+async fn when_remote_relay_dispatch_pause_is_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .release_remote_relay_dispatch_pause(&domain);
+}
+
 #[given(expr = "ownership handoff for domain {string} pauses after preparation")]
 async fn given_ownership_handoff_preparation_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);

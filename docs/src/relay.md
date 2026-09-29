@@ -119,6 +119,9 @@ Operationally that means:
   remote session subscriptions, and shares each serialized body across the destination nodes; every
   local runtime consumer on a node shares that node's delivery, and a session subscription on a node
   that also hosts a runtime consumer piggybacks on it
+- a delivery that reaches a node after its attached consumer moved away fails its attached
+  acknowledgements, so the source redelivers the record along the owner's current routes; see
+  [Consumers That Leave The Receiver](interconnect.md#consumers-that-leave-the-receiver)
 
 Lookup and state-replication control paths are separate from this relay payload model. The Arrow batch path applies to relay movement inside the data plane.
 

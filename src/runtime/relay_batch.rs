@@ -656,6 +656,11 @@ impl RelayRecordBatch {
         AckSet::merged(self.acks.iter().cloned())
     }
 
+    /// Whether a row of this batch carries an acknowledgement that a consumer must complete.
+    pub(super) fn carries_record_acknowledgements(&self) -> bool {
+        self.acks.iter().any(|acks| !acks.is_empty())
+    }
+
     /// The batch as a node input that accepted it at `delivered_at` observes it: every row's
     /// delivery latency is measured from its ingestion high watermark to that instant.
     pub(super) fn delivery_observation(&self, delivered_at: Timestamp) -> DeliveryObservation<'_> {

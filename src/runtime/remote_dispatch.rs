@@ -936,6 +936,10 @@ impl Runtime {
             *admission.admitted = true;
             self.send_remote_relay_admission_outcome(admission.registration, RemoteAckOutcome::Ack)
                 .await;
+            self.inner
+                .fault_injection
+                .pause_remote_relay_dispatch_if_armed(&remote.domain)
+                .await;
             return dispatch.await;
         }
         dispatch.await

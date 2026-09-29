@@ -101,6 +101,9 @@ struct FaultInjectionState {
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     remote_relay_admission_pauses:
         DashMap<RemoteRelayAdmissionPauseKey, Arc<TestPause>, RandomState>,
+    /// A receiver pauses after it admitted a remote relay batch and returned the admission to the
+    /// batch's owner, before it hands the batch to its local runtime consumers.
+    remote_relay_dispatch_pauses: DashMap<String, Arc<TestPause>, RandomState>,
     /// A source pauses once inside dispatch so a test can engage quiesce while its loop awaits.
     ingestor_dispatch_pauses: DashMap<DomainNodeRef, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -304,6 +307,7 @@ impl Default for FaultInjection {
                 entity_gate_pauses: DashMap::default(),
                 entity_gate_response_pauses: DashMap::default(),
                 remote_relay_admission_pauses: DashMap::default(),
+                remote_relay_dispatch_pauses: DashMap::default(),
                 ingestor_dispatch_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
                 ownership_handoff_prepare_response_pauses: DashMap::default(),
@@ -1051,6 +1055,23 @@ impl FaultInjection {
         pause.release();
     }
 
+    pub fn pause_remote_relay_dispatch(&self, domain: impl Into<String>) {
+        self.inner.remote_relay_dispatch_pauses.insert(
+            domain.into().to_ascii_lowercase(),
+            Arc::new(TestPause::default()),
+        );
+    }
+
+    pub async fn wait_for_remote_relay_dispatch_pause(&self, domain: &str) {
+        let pause = self.remote_relay_dispatch_pause(&domain.to_ascii_lowercase());
+        pause.wait_until_reached().await;
+    }
+
+    pub fn release_remote_relay_dispatch_pause(&self, domain: &str) {
+        let pause = self.remote_relay_dispatch_pause(&domain.to_ascii_lowercase());
+        pause.release();
+    }
+
     pub fn pause_ingestor_dispatch(&self, ingestor: DomainNodeRef) {
         self.inner
             .ingestor_dispatch_pauses
@@ -1657,6 +1678,21 @@ impl FaultInjection {
         pause.wait_until_released().await;
     }
 
+    pub(crate) async fn pause_remote_relay_dispatch_if_armed(&self, domain: &DomainName) {
+        let key = domain.as_str().to_ascii_lowercase();
+        let Some(pause) = self
+            .inner
+            .remote_relay_dispatch_pauses
+            .get(&key)
+            .map(|pause| pause.value().clone())
+        else {
+            return;
+        };
+        pause.reach();
+        pause.wait_until_released().await;
+        self.inner.remote_relay_dispatch_pauses.remove(&key);
+    }
+
     pub(crate) async fn pause_ownership_handoff_after_preparation_if_armed(
         &self,
         domain: &DomainName,
@@ -1894,6 +1930,13 @@ impl FaultInjection {
                 "remote relay admission pause for domain '{}' and branch {:?} is not armed",
                 key.domain, key.branch
             );
+        };
+        pause.value().clone()
+    }
+
+    fn remote_relay_dispatch_pause(&self, key: &str) -> Arc<TestPause> {
+        let Some(pause) = self.inner.remote_relay_dispatch_pauses.get(key) else {
+            panic!("remote relay dispatch pause for domain '{key}' is not armed");
         };
         pause.value().clone()
     }
