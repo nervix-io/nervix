@@ -4,11 +4,12 @@ use error_stack::Report;
 use flatbuffers::WIPOffset;
 use meticulous::ResultExt as _;
 use nervix_models::{
-    CommandExecutionReference, ResourceDescription, TransactionInspection,
+    BackupArchiveSummary, CommandExecutionReference, ResourceDescription, TransactionInspection,
     TransactionOperationAdmission, TransactionPreviewIdentity, TransactionStatus,
 };
 
 use crate::{
+    backup::{decode_backup_archive, encode_backup_archive},
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
     common::{Diagnostic, LeaderRedirect, OutcomeOrigin},
     resource::{decode_resource_description, encode_resource_description},
@@ -338,6 +339,9 @@ pub struct CommandOutcome {
     /// The versions, entries and bindings read by a description of every version of a resource,
     /// whichever text its message renders them as.
     pub resource: Option<Box<ResourceDescription>>,
+    /// The archive a completed BACKUP assembled, which a download by this outcome's execution
+    /// reference fetches.
+    pub backup: Option<Box<BackupArchiveSummary>>,
 }
 
 impl CommandOutcome {
@@ -392,6 +396,10 @@ impl CommandOutcome {
             Some(description) => Some(encode_resource_description(encoder, description)?),
             None => None,
         };
+        let backup = match &self.backup {
+            Some(archive) => Some(encode_backup_archive(encoder, archive)?),
+            None => None,
+        };
         let outcome = wire::CommandOutcome::create(
             encoder.fbb(),
             &wire::CommandOutcomeArgs {
@@ -407,6 +415,7 @@ impl CommandOutcome {
                 inspection,
                 wasm_state,
                 resource,
+                backup,
             },
         );
         Ok(EncodedUnion::new(wire::ReplyBody::CommandOutcome, outcome))
@@ -475,6 +484,10 @@ impl CommandOutcome {
             Some(description) => Some(Box::new(decode_resource_description(decoder, description)?)),
             None => None,
         };
+        let backup = match outcome.backup() {
+            Some(archive) => Some(Box::new(decode_backup_archive(decoder, archive)?)),
+            None => None,
+        };
         Ok(Self {
             execution_reference,
             origin,
@@ -487,6 +500,7 @@ impl CommandOutcome {
             inspection,
             wasm_state,
             resource,
+            backup,
         })
     }
 }

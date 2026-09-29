@@ -5,6 +5,7 @@ pub(crate) mod client_wire_tls_cost;
 pub(crate) mod cluster;
 pub(crate) mod cluster_teardown;
 pub(crate) mod dependencies;
+pub(crate) mod grpc_receiver;
 pub(crate) mod http_receiver;
 pub(crate) mod node_liveness;
 pub(crate) mod node_startup;

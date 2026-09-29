@@ -6433,6 +6433,23 @@ name = "nervix-approx-into"
 version = "0.1.0-dev"
 
 [[package]]
+name = "nervix-backup"
+version = "0.1.0-dev"
+dependencies = [
+ "arch-into",
+ "blake3",
+ "bolero",
+ "error-stack",
+ "meticulous",
+ "nervix-models",
+ "rkyv",
+ "rstest",
+ "strum 0.26.3",
+ "tar",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "nervix-benchmark"
 version = "0.1.0-dev"
 dependencies = [
@@ -6484,6 +6501,7 @@ dependencies = [
  "clap_complete",
  "error-stack",
  "meticulous",
+ "nervix-backup",
  "nervix-client-core",
  "nervix-models",
  "nervix-nspl",
@@ -6492,6 +6510,7 @@ dependencies = [
  "rpassword",
  "serde_json",
  "strum 0.26.3",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "triomphe",
@@ -6506,6 +6525,7 @@ dependencies = [
  "arch-into",
  "async-tar",
  "base64 0.22.1",
+ "blake3",
  "error-stack",
  "indexmap 2.14.2",
  "meticulous",
@@ -6817,11 +6837,13 @@ dependencies = [
  "nervix-dns",
  "nervix-models",
  "opentelemetry-proto",
+ "parking_lot",
  "prost 0.14.4",
  "reqwest 0.13.5",
  "shuttle-tokio",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-stream",
  "tonic 0.14.6",
  "tonic-types",
  "tracing",
@@ -7252,6 +7274,7 @@ dependencies = [
  "humantime",
  "meticulous",
  "nervix-approx-into",
+ "nervix-backup",
  "nervix-models",
  "nervix-vm",
  "nonzero_ext",
@@ -7358,6 +7381,7 @@ dependencies = [
  "error-stack",
  "fastrand",
  "fjall",
+ "flate2",
  "futures-util",
  "governor",
  "h2",
@@ -7378,6 +7402,7 @@ dependencies = [
  "multer",
  "mysql_async",
  "nervix-approx-into",
+ "nervix-backup",
  "nervix-bounded-write",
  "nervix-client-core",
  "nervix-client-ffi",
@@ -7422,6 +7447,7 @@ dependencies = [
  "nonzero_ext",
  "opentelemetry",
  "opentelemetry-otlp",
+ "opentelemetry-proto",
  "opentelemetry_sdk",
  "ordered-float 4.6.0",
  "ort",
@@ -7430,6 +7456,7 @@ dependencies = [
  "playwright-rs",
  "prometheus",
  "prost 0.13.5",
+ "prost 0.14.4",
  "prost-reflect",
  "prost-types 0.13.5",
  "protox",

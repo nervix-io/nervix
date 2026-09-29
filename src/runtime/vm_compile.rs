@@ -5,9 +5,9 @@
 //! - **Depends on.** Typed execution plans, the expression VM and runtime infrastructure.
 //! - **Must not know.** NSPL text, parser state or control-plane transactions.
 //!
-//! Ingestor, reingestor and emitter programs arrive lowered by their decision-layer plans. Some
-//! processor compile functions still receive semantic Models directly instead of validated
-//! execution plans.
+//! Ingestor, reingestor, emitter and message-error programs arrive lowered by their decision-layer
+//! plans. Some processor compile functions still receive semantic Models directly instead of
+//! validated execution plans.
 
 use error_stack::ResultExt as _;
 
@@ -77,8 +77,6 @@ pub(in crate::runtime) enum RuntimeVmCompileError {
     },
     #[error("message-error metadata is missing the filter operation")]
     MissingMessageErrorFilterOperation,
-    #[error("message-error SET for '{node}' in domain '{domain}' is invalid")]
-    InvalidMessageErrorSet { domain: DomainName, node: ModelName },
     #[error("failed to rewrite LOOKUP_HASH_MAP calls in message-error SET for '{node}'")]
     RewriteMessageErrorLookups { node: ModelName },
     #[error("failed to compile LOOKUP_HASH_MAP calls in message-error SET for '{node}'")]
@@ -590,26 +588,14 @@ pub(super) fn all_optional_arrow_schema(schema: &CompiledSchema) -> StdArc<arrow
 }
 
 pub(super) fn compile_message_error_set_program(
-    domain: &DomainName,
     node: &ModelName,
-    assignments: &[Assignment],
+    program: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     output_schema: Arc<CompiledSchema>,
     schemas: MessageErrorCompileSchemas,
     context: RuntimeVmCompileContext<'_>,
 ) -> RuntimeVmCompileResult<CompiledProgramWithMaterializedInterest> {
-    let parsed = lower_route_construction(
-        &RouteConstruction {
-            assignments: assignments.to_vec(),
-            ..RouteConstruction::default()
-        },
-        SemanticScopePolicy::read_write("error_output", "error_output"),
-    )
-    .change_context(RuntimeVmCompileError::InvalidMessageErrorSet {
-        domain: domain.clone(),
-        node: node.clone(),
-    })?;
-    let set_operations = vec![MessageErrorOperation::Set; parsed.inner.set.len()];
-    let error_sites = compiled_message_error_sites(&parsed, &set_operations, None)?;
+    let set_operations = vec![MessageErrorOperation::Set; program.inner.set.len()];
+    let error_sites = compiled_message_error_sites(program, &set_operations, None)?;
     let mut bindings = vec![
         VmCompileBinding::writable("error_output", output_schema.arrow_schema())
             .with_sensitivity(output_schema.vm_sensitivity()),
@@ -655,14 +641,14 @@ pub(super) fn compile_message_error_set_program(
         "error".to_string(),
     ]);
     let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
-        &parsed,
+        program,
         &local_namespaces,
         context.available_materialized_streams,
         &schemas.current_branching,
     )?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
-        rewrite_lookup_hash_map_program(&parsed, context.available_lookups).map_err(|reason| {
+        rewrite_lookup_hash_map_program(program, context.available_lookups).map_err(|reason| {
             Report::new(RuntimeVmCompileError::RewriteMessageErrorLookups { node: node.clone() })
                 .attach_printable(reason)
         })?;

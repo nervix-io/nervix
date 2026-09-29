@@ -32,6 +32,7 @@ ubyte = { workspace = true }
 ariadne = { workspace = true }
 bolero = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+nervix-backup = { workspace = true }
 nervix-vm = { workspace = true }
 rstest = { workspace = true }
 rustyline = { workspace = true }

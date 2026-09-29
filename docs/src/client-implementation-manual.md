@@ -3,7 +3,7 @@
 This manual is the normative contract for a program that speaks the Nervix client session protocol.
 It states what an implementation must do to frame and verify messages, correlate requests, recover
 commands exactly, follow the leader, hold a transaction, read subscriptions without misreading a
-value, and upload resources. [Client Session Protocol](./client-session-protocol.md) explains why
+value, upload resources, and download backups. [Client Session Protocol](./client-session-protocol.md) explains why
 the system behaves this way. This manual does not repeat those reasons, and the chapter does not
 repeat these rules.
 
@@ -63,7 +63,8 @@ Unsolicited `ServerMessage` bodies carry no request identity:
 | `DomainClockObserved`, `DomainClockTicked`, `DomainClockAttachmentEnded` | State, accepted tick progress, and end frames of one domain clock attachment |
 | `SessionEnding` | The last frame of a session the server ends |
 
-An upload is a separate call with its own frames; see [Resource Uploads](#resource-uploads).
+An upload is a separate call with its own frames; see [Resource Uploads](#resource-uploads). So is
+the download of a backup's archive; see [Backup Downloads](#backup-downloads).
 
 ## Frames
 
@@ -174,9 +175,10 @@ An upload is a separate call with its own frames; see [Resource Uploads](#resour
 ## Structured Choice Lookups
 
 - **Q-1.** A client that sends `ChoiceLookupRequest` MUST use the target's typed dependencies:
-  domain for internal schema, branch, relay, VHOST, signaling protocol, JSON/CBOR/AVRO wire
+  domain for internal schema, branch, relay, codec, VHOST, signaling protocol, JSON/CBOR/AVRO wire
   schema, or resource choices;
-  domain followed by a relay `Model` reference for relay fields; and domain followed by a
+  domain followed by a relay `Model` reference for relay fields; domain followed by a codec
+  `Model` reference for the fields of its output schema; and domain followed by a
   `Resource` reference for completed resource versions. It MUST use the distinct wire-schema
   targets when a form requires an exact format.
 - **Q-2.** A client MUST use the returned `ChoiceValue`, rather than its presentation label, for
@@ -200,6 +202,8 @@ use.
 | `ATTACH DOMAIN CLOCK` | `AttachDomainClockRequest` for the selected domain |
 | `DETACH DOMAIN CLOCK` | `DetachDomainClockRequest` for the selected domain |
 | `UPLOAD RESOURCE ...` | An `UploadResource` call |
+| `BACKUP ...` | `CommandRequest`, then a `DownloadBackup` call for the archive its outcome summarizes |
+| `DESCRIBE BACKUP ...` | Nothing: the client reads the archive file itself. Sent as a command, it is refused. |
 | Every other statement | `CommandRequest` |
 
 - **L-1.** A client MUST put the selected domain in every `CommandRequest`, or leave `domain` absent
@@ -449,6 +453,37 @@ payload, infinity, and nullable and sensitive branch key fields.
   upload's outcome is uncertain. A client MUST send the whole archive again under the same identity
   to learn it, and MUST NOT create a new identity for it.
 
+## Backup Downloads
+
+- **A-1.** A client MUST send `BACKUP` as a `CommandRequest` on its own, under an execution reference
+  that follows E-1 to E-4, and MUST download the archive only after a `CommandCompleted` outcome
+  that carries a `backup` summary. It MUST keep the reference and the summary until the archive is
+  downloaded or its retention ends.
+- **A-2.** A client MUST download one archive per `DownloadBackup` call, sending exactly one
+  `BackupDownloadRequest` that names the backup's execution reference. The answer is one
+  `BackupDownloadFailed` or `LeaderRedirect` frame, or a `BackupArchiveStart`, the archive as
+  `BackupArchiveChunk` frames in order, and a `BackupArchiveComplete`. Any other order is a protocol
+  violation.
+- **A-3.** A client MUST check that the start's size and digest equal the summary's, MUST refuse an
+  archive that grows past that size, and MUST accept the archive only after `BackupArchiveComplete`
+  arrived and the bytes it received have exactly the summary's size and BLAKE3 digest.
+- **A-4.** A client MUST NOT expose a partial or unverified archive under the name the user asked
+  for, and SHOULD write the archive so that only its owner can read it: an archive holds password
+  hashes and secrets.
+- **A-5.** A client MUST act on the answer:
+  - `LeaderRedirect` means the client downloads again from the leader, or backs off when no leader
+    endpoint is named.
+  - `BackupDownloadFailed` with `Expired`, `NotOwner`, `NotRetained`, or `InvalidRequest` is final
+    for this archive, and the client MUST NOT present it as a failure of the backup itself, which
+    completed.
+  - `BackupDownloadFailed` with `ReadFailed` leaves the archive retained, and the client MAY download
+    it again.
+- **A-6.** When a call fails in transport, stalls, or ends before `BackupArchiveComplete`, a client
+  MAY download the archive again, always from its first byte. It MUST NOT bound a download by the
+  command's request deadline, and SHOULD bound the wait for each frame instead. A client that lost
+  the outcome of `BACKUP` itself repeats the command under the same reference, as E-3 requires, to
+  recover the summary.
+
 ## Using The Shared Binding
 
 A host of `nervix-client-ffi` follows the contract in `crates/client-ffi/include/nervix_client.h`
@@ -470,6 +505,10 @@ and these rules:
   or bytes column it first passes a null data buffer to learn the size it needs.
 - **B-7.** A host MUST treat `NX_EVENT_INTERRUPTED` as a gap in every subscription it names, and
   `NX_EVENT_CONSUMER_OVERFLOW` as the end of that subscription's delivery on this session.
+- **B-8.** A host that runs `BACKUP` through `nx_session_execute` receives the archive in the file
+  the statement names, and reads its size and digest with `nx_outcome_backup`. After an error that
+  names the backup's execution reference, the host MAY execute the same `nx_execution` again, which
+  recovers the backup's outcome and downloads its archive while the server retains it.
 
 ## Required State Machines
 
@@ -547,7 +586,9 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | R-1 to R-5 | `A <runtime> client round-trips an operation, typed rows, an error and a closure` in `client_conformance.feature` for every runtime; `a_batch_round_trips_every_cell_kind_at_its_bounds`, `cells_must_follow_their_fields`, `branch_identity_must_match_the_schema`, and `lists_must_follow_their_element_type_and_length`; `a_batch_that_does_not_conform_to_its_schema_is_a_protocol_failure` in the binding |
 | K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; the state, tick, and client pacing outlines in `domain_clock_attachment.feature`; the owner-loss case in `domain_clock_contract.feature`; `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock`, `a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_read`, `ticks_coalesce_per_domain_and_follow_their_generations_state`, and the `server_domain_clock_ticked.nxsm` conformance frame |
 | U-1 to U-5 | `An upload stream the protocol does not allow is refused with a typed failure and admits nothing` in `session_protocol.feature`; in `resource_describe.feature`, `An incomplete upload does not admit content or consume its identity`, `Upload retry reports one assigned version`, `Upload retry after leader change reports the assigned version`, and `An uncertain upload completes once across installation and leader change`; `a_lost_upload_reply_retries_with_the_same_identity_and_archive` and `malformed_upload_replies_are_rejected_by_their_correlations` |
+| A-1 to A-6 | Every scenario of `backup.feature`, including `A client that loses its download fetches the archive again until a download collects it`, `An archive is refused once its execution reference's retry validity ends`, and `Downloads of another user's backup, or under a reference without an archive, are refused`; `every_download_frame_round_trips` and `a_download_request_with_an_invalid_reference_is_refused` in `nervix-client-wire`; the `backup_download_*` conformance frames |
 | B-1 to B-7 | The binding tests of `nervix-client-ffi`, such as `retained_references_keep_the_frame_until_the_last_one_is_released`, `string_and_bytes_columns_are_copied_with_offsets_and_borrowed_per_cell`, and `a_token_bounds_a_call_by_cancellation_and_by_deadline`; the C, C++, Python, Java, and Ruby cases of `client_conformance.feature` |
+| B-8 | `a_backup_outcome_reports_its_archive` and `client_errors_are_classified_and_keep_their_causes` in `nervix-client-ffi` |
 
 ### Executable Examples
 
@@ -614,4 +655,6 @@ A client built on this protocol MUST NOT tell its users that:
 - an uncertain command failed, or succeeded, before its own outcome was recovered;
 - rows arrive in Arrow, or in any encoding other than typed Row frames, or that a columnar form
   exists;
-- a session, its subscriptions, or its clock attachments survive the loss of its connection.
+- a session, its subscriptions, or its clock attachments survive the loss of its connection;
+- a backup's archive can be downloaded more than once, or survives a restart of the node that
+  assembled it.
