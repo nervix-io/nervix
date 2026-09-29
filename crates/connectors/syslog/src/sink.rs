@@ -170,10 +170,12 @@ impl SyslogSink {
             SyslogProtocol::Tls => {
                 let server_name =
                     ServerName::try_from(config.server_name.clone()).map_err(|error| {
-                        Self::config_error(format!(
-                            "invalid Syslog client config key 'addr' TLS server name '{}': {error}",
-                            config.server_name
-                        ))
+                        Report::new(SinkStartError::InvalidConfiguration { sink: SYSLOG })
+                            .attach_printable(format!(
+                                "invalid Syslog client config key 'addr' TLS server name '{}': \
+                                 {error}",
+                                config.server_name
+                            ))
                     })?;
                 let connector =
                     TlsConnector::from(config.tls_client_config().map_err(Self::config_error)?);
@@ -258,9 +260,11 @@ impl SyslogSink {
         Ok(())
     }
 
-    fn config_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
-        Report::new(SinkStartError::InvalidConfiguration { sink: SYSLOG })
-            .attach_printable(error.to_string())
+    fn config_error(error: Report<super::config::SyslogConfigError>) -> Report<SinkStartError> {
+        let reason = error.current_context().to_string();
+        error
+            .change_context(SinkStartError::InvalidConfiguration { sink: SYSLOG })
+            .attach_printable(reason)
     }
 
     fn start_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
@@ -346,6 +350,7 @@ mod tests {
     use tokio::io::AsyncReadExt as _;
 
     use super::*;
+    use crate::SyslogConfigError;
 
     fn config(protocol: &str, framing: Option<&str>) -> SyslogClientConfig {
         let mut entries = vec![
@@ -366,6 +371,18 @@ mod tests {
         }
         SyslogClientConfig::parse(&entries, SyslogDirection::Emit)
             .expect("test Syslog emitter config must parse")
+    }
+
+    #[test]
+    fn startup_keeps_the_typed_syslog_configuration_failure() {
+        let failure = SyslogClientConfig::parse(&[], SyslogDirection::Emit)
+            .expect_err("a client needs a protocol");
+        let report = SyslogSink::config_error(failure);
+        assert!(report.contains::<SyslogConfigError>());
+        assert_eq!(
+            report.current_context(),
+            &SinkStartError::InvalidConfiguration { sink: SYSLOG }
+        );
     }
 
     async fn sink(config: SyslogClientConfig) -> SyslogSink {

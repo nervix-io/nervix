@@ -380,31 +380,41 @@ enum OtelTransportOutcome {
     Failed(Report<SinkPublishError>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
+#[error("{reason}")]
 struct OtelRecordError {
     key: String,
     reason: String,
 }
 
 impl OtelRecordError {
-    fn new(key: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self {
+    fn new(key: impl Into<String>, reason: impl Into<String>) -> Report<Self> {
+        Report::new(Self {
             key: key.into(),
             reason: reason.into(),
-        }
+        })
+    }
+
+    fn from_value(key: impl Into<String>, error: Report<OtelValueError>) -> Report<Self> {
+        let reason = error.current_context().to_string();
+        error.change_context(Self {
+            key: key.into(),
+            reason,
+        })
     }
 
     /// The rejection the host delivers for the row this value came from.
     fn rejected(
-        self,
+        error: Report<Self>,
         position: SinkRecordPosition,
         occurred_at: Timestamp,
     ) -> RejectedSinkRecord<SinkRecordPosition> {
+        let context = error.current_context();
         RejectedSinkRecord::invalid(
             position,
             occurred_at,
-            self.reason,
-            [FieldPath::new(format!("otel.{}", self.key))],
+            context.reason.clone(),
+            [FieldPath::new(format!("otel.{}", context.key))],
         )
     }
 }
@@ -446,7 +456,7 @@ enum OtelValueError {
     MappedColumnCount { expected: usize, actual: usize },
 }
 
-type OtelValueResult<T> = Result<T, Report<OtelValueError>>;
+type OtelValueResult<T> = error_stack::Result<T, OtelValueError>;
 
 /// A configuration this sink cannot start with.
 fn invalid_configuration(reason: impl std::fmt::Display) -> Report<SinkStartError> {
@@ -894,13 +904,16 @@ impl OtelSink {
             || Self::list_element_type(ty).is_some_and(Self::valid_attribute_type)
     }
 
-    fn timestamp_to_unix_nano(value: i64, key: &str) -> Result<u64, OtelRecordError> {
-        u64::try_from(value).map_err(|_| {
-            OtelRecordError::new(key, format!("OTEL {key} cannot be before the Unix epoch"))
+    fn timestamp_to_unix_nano(value: i64, key: &str) -> error_stack::Result<u64, OtelRecordError> {
+        u64::try_from(value).map_err(|source| {
+            Report::new(source).change_context(OtelRecordError {
+                key: key.to_string(),
+                reason: format!("OTEL {key} cannot be before the Unix epoch"),
+            })
         })
     }
 
-    fn observation_time_unix_nano() -> Result<u64, OtelRecordError> {
+    fn observation_time_unix_nano() -> error_stack::Result<u64, OtelRecordError> {
         Self::timestamp_to_unix_nano(
             nervix_connector::physical_time::actual_utc_now().unix_nanos(),
             "observed_time",
@@ -927,8 +940,12 @@ impl RowRequestSink for OtelSink {
         rows: MappedSinkRows<'_>,
     ) -> SinkPublishResult<RowRequestPreparation> {
         let mut preparation = RowRequestPreparation::default();
-        let observed_time = OtelSink::observation_time_unix_nano()
-            .map_err(|error| publish_failure(error.reason))?;
+        let observed_time = OtelSink::observation_time_unix_nano().map_err(|error| {
+            let reason = error.current_context().reason.clone();
+            error
+                .change_context(SinkPublishError::Publish { sink: OTEL })
+                .attach_printable(reason)
+        })?;
         for carrier in &rows.carriers {
             nervix_primitives::task::consume_budget().await;
             self.prepare_carrier(carrier, observed_time, &mut preparation)
@@ -1009,9 +1026,11 @@ impl OtelSink {
                             records.push(record);
                             positions.push(position(*row));
                         }
-                        Err(error) => preparation
-                            .rejected
-                            .push(error.rejected(position(*row), carrier.occurred_at)),
+                        Err(error) => preparation.rejected.push(OtelRecordError::rejected(
+                            error,
+                            position(*row),
+                            carrier.occurred_at,
+                        )),
                     }
                 }
                 OtelExportRequest::Logs(ExportLogsServiceRequest {
@@ -1035,9 +1054,11 @@ impl OtelSink {
                             spans.push(span);
                             positions.push(position(*row));
                         }
-                        Err(error) => preparation
-                            .rejected
-                            .push(error.rejected(position(*row), carrier.occurred_at)),
+                        Err(error) => preparation.rejected.push(OtelRecordError::rejected(
+                            error,
+                            position(*row),
+                            carrier.occurred_at,
+                        )),
                     }
                 }
                 OtelExportRequest::Traces(ExportTraceServiceRequest {
@@ -1473,7 +1494,7 @@ struct OtelMappedBatch<'a> {
 
 impl OtelMappedBatch<'_> {
     /// The column one signal key was mapped to, or nothing when the emitter does not map it.
-    fn value_array(&self, key: &str) -> Result<Option<ArrayRef>, OtelRecordError> {
+    fn value_array(&self, key: &str) -> error_stack::Result<Option<ArrayRef>, OtelRecordError> {
         let Some(index) = self.value_columns.get(key).copied() else {
             return Ok(None);
         };
@@ -1483,13 +1504,21 @@ impl OtelMappedBatch<'_> {
         Ok(Some(array.clone()))
     }
 
-    fn required_string(&self, key: &str, row: usize) -> Result<String, OtelRecordError> {
+    fn required_string(
+        &self,
+        key: &str,
+        row: usize,
+    ) -> error_stack::Result<String, OtelRecordError> {
         self.optional_string(key, row)?.ok_or_else(|| {
             OtelRecordError::new(key, format!("OTEL VALUES key '{key}' cannot be NULL"))
         })
     }
 
-    fn optional_string(&self, key: &str, row: usize) -> Result<Option<String>, OtelRecordError> {
+    fn optional_string(
+        &self,
+        key: &str,
+        row: usize,
+    ) -> error_stack::Result<Option<String>, OtelRecordError> {
         let Some(array) = self.value_array(key)? else {
             return Ok(None);
         };
@@ -1505,13 +1534,21 @@ impl OtelMappedBatch<'_> {
         Ok(Some(array.value(row).to_string()))
     }
 
-    fn required_timestamp(&self, key: &str, row: usize) -> Result<u64, OtelRecordError> {
+    fn required_timestamp(
+        &self,
+        key: &str,
+        row: usize,
+    ) -> error_stack::Result<u64, OtelRecordError> {
         self.optional_timestamp(key, row)?.ok_or_else(|| {
             OtelRecordError::new(key, format!("OTEL VALUES key '{key}' cannot be NULL"))
         })
     }
 
-    fn optional_timestamp(&self, key: &str, row: usize) -> Result<Option<u64>, OtelRecordError> {
+    fn optional_timestamp(
+        &self,
+        key: &str,
+        row: usize,
+    ) -> error_stack::Result<Option<u64>, OtelRecordError> {
         let Some(array) = self.value_array(key)? else {
             return Ok(None);
         };
@@ -1527,7 +1564,7 @@ impl OtelMappedBatch<'_> {
         OtelSink::timestamp_to_unix_nano(array.value(row), key).map(Some)
     }
 
-    fn attributes(&self, row: usize) -> Result<Vec<KeyValue>, OtelRecordError> {
+    fn attributes(&self, row: usize) -> error_stack::Result<Vec<KeyValue>, OtelRecordError> {
         let mut values = Vec::with_capacity(self.attributes.len());
         for (offset, key) in self.attributes.iter().enumerate() {
             let index = self
@@ -1541,7 +1578,7 @@ impl OtelMappedBatch<'_> {
                 )
             })?;
             if let Some(value) = any_value_at(array, row)
-                .map_err(|error| OtelRecordError::new(key.clone(), error.to_string()))?
+                .map_err(|error| OtelRecordError::from_value(key.clone(), error))?
             {
                 values.push(KeyValue {
                     key: key.clone(),
@@ -1552,7 +1589,11 @@ impl OtelMappedBatch<'_> {
         Ok(values)
     }
 
-    fn log_record(&self, row: usize, observed_time: u64) -> Result<LogRecord, OtelRecordError> {
+    fn log_record(
+        &self,
+        row: usize,
+        observed_time: u64,
+    ) -> error_stack::Result<LogRecord, OtelRecordError> {
         let severity_number = match self.value_array("severity_number")? {
             Some(array) if !array.is_null(row) => {
                 let value = array
@@ -1597,7 +1638,7 @@ impl OtelMappedBatch<'_> {
         })
     }
 
-    fn span(&self, row: usize) -> Result<Span, OtelRecordError> {
+    fn span(&self, row: usize) -> error_stack::Result<Span, OtelRecordError> {
         let kind = match self.optional_string("kind", row)?.as_deref() {
             None => i32::from(span::SpanKind::Unspecified),
             Some("INTERNAL") => i32::from(span::SpanKind::Internal),
@@ -1686,7 +1727,11 @@ impl OtelMappedBatch<'_> {
                             points.push(point);
                             positions.push(position(*row));
                         }
-                        Err(error) => rejected.push(error.rejected(position(*row), occurred_at)),
+                        Err(error) => rejected.push(OtelRecordError::rejected(
+                            error,
+                            position(*row),
+                            occurred_at,
+                        )),
                     }
                 }
                 match &model.kind {
@@ -1716,7 +1761,11 @@ impl OtelMappedBatch<'_> {
                             points.push(point);
                             positions.push(position(*row));
                         }
-                        Err(error) => rejected.push(error.rejected(position(*row), occurred_at)),
+                        Err(error) => rejected.push(OtelRecordError::rejected(
+                            error,
+                            position(*row),
+                            occurred_at,
+                        )),
                     }
                 }
                 metric::Data::Histogram(Histogram {
@@ -1738,7 +1787,7 @@ impl OtelMappedBatch<'_> {
         &self,
         row: usize,
         require_start_time: bool,
-    ) -> Result<NumberDataPoint, OtelRecordError> {
+    ) -> error_stack::Result<NumberDataPoint, OtelRecordError> {
         let array = self.value_array("value")?.ok_or_else(|| {
             OtelRecordError::new("value", "OTEL metric VALUES requires key 'value'")
         })?;
@@ -1749,7 +1798,7 @@ impl OtelMappedBatch<'_> {
             ));
         }
         let value = number_value_at(&array, row)
-            .map_err(|error| OtelRecordError::new("value", error.to_string()))?;
+            .map_err(|error| OtelRecordError::from_value("value", error))?;
         Ok(NumberDataPoint {
             attributes: self.attributes(row)?,
             start_time_unix_nano: if require_start_time {
@@ -1768,7 +1817,7 @@ impl OtelMappedBatch<'_> {
         &self,
         row: usize,
         require_start_time: bool,
-    ) -> Result<HistogramDataPoint, OtelRecordError> {
+    ) -> error_stack::Result<HistogramDataPoint, OtelRecordError> {
         let count = self.required_u64("count", row)?;
         let bucket_counts = self.required_u64_list("bucket_counts", row)?;
         let explicit_bounds = self.required_f64_list("explicit_bounds", row)?;
@@ -1792,7 +1841,7 @@ impl OtelMappedBatch<'_> {
         })
     }
 
-    fn required_u64(&self, key: &str, row: usize) -> Result<u64, OtelRecordError> {
+    fn required_u64(&self, key: &str, row: usize) -> error_stack::Result<u64, OtelRecordError> {
         let array = self.value_array(key)?.ok_or_else(|| {
             OtelRecordError::new(key, format!("OTEL VALUES requires key '{key}'"))
         })?;
@@ -1802,10 +1851,14 @@ impl OtelMappedBatch<'_> {
                 format!("OTEL VALUES key '{key}' cannot be NULL"),
             ));
         }
-        integer_as_u64(&array, row).map_err(|error| OtelRecordError::new(key, error.to_string()))
+        integer_as_u64(&array, row).map_err(|error| OtelRecordError::from_value(key, error))
     }
 
-    fn optional_f64(&self, key: &str, row: usize) -> Result<Option<f64>, OtelRecordError> {
+    fn optional_f64(
+        &self,
+        key: &str,
+        row: usize,
+    ) -> error_stack::Result<Option<f64>, OtelRecordError> {
         let Some(array) = self.value_array(key)? else {
             return Ok(None);
         };
@@ -1814,15 +1867,19 @@ impl OtelMappedBatch<'_> {
         }
         numeric_as_f64(&array, row)
             .map(Some)
-            .map_err(|error| OtelRecordError::new(key, error.to_string()))
+            .map_err(|error| OtelRecordError::from_value(key, error))
     }
 
-    fn required_u64_list(&self, key: &str, row: usize) -> Result<Vec<u64>, OtelRecordError> {
+    fn required_u64_list(
+        &self,
+        key: &str,
+        row: usize,
+    ) -> error_stack::Result<Vec<u64>, OtelRecordError> {
         let array = self.value_array(key)?.ok_or_else(|| {
             OtelRecordError::new(key, format!("OTEL VALUES requires key '{key}'"))
         })?;
         let values = list_value(&array, row)
-            .map_err(|error| OtelRecordError::new(key, error.to_string()))?
+            .map_err(|error| OtelRecordError::from_value(key, error))?
             .ok_or_else(|| {
                 OtelRecordError::new(key, format!("OTEL VALUES key '{key}' cannot be NULL"))
             })?;
@@ -1835,17 +1892,21 @@ impl OtelMappedBatch<'_> {
                     ));
                 }
                 integer_as_u64(&values, index)
-                    .map_err(|error| OtelRecordError::new(key, error.to_string()))
+                    .map_err(|error| OtelRecordError::from_value(key, error))
             })
             .collect()
     }
 
-    fn required_f64_list(&self, key: &str, row: usize) -> Result<Vec<f64>, OtelRecordError> {
+    fn required_f64_list(
+        &self,
+        key: &str,
+        row: usize,
+    ) -> error_stack::Result<Vec<f64>, OtelRecordError> {
         let array = self.value_array(key)?.ok_or_else(|| {
             OtelRecordError::new(key, format!("OTEL VALUES requires key '{key}'"))
         })?;
         let values = list_value(&array, row)
-            .map_err(|error| OtelRecordError::new(key, error.to_string()))?
+            .map_err(|error| OtelRecordError::from_value(key, error))?
             .ok_or_else(|| {
                 OtelRecordError::new(key, format!("OTEL VALUES key '{key}' cannot be NULL"))
             })?;
@@ -1858,7 +1919,7 @@ impl OtelMappedBatch<'_> {
                     ));
                 }
                 numeric_as_f64(&values, index)
-                    .map_err(|error| OtelRecordError::new(key, error.to_string()))
+                    .map_err(|error| OtelRecordError::from_value(key, error))
             })
             .collect()
     }
@@ -1871,7 +1932,7 @@ fn aggregation_temporality(value: OtelAggregationTemporality) -> i32 {
     }
 }
 
-fn parse_severity_number(value: i32) -> Result<i32, OtelRecordError> {
+fn parse_severity_number(value: i32) -> error_stack::Result<i32, OtelRecordError> {
     if (0..=24).contains(&value) {
         Ok(value)
     } else {
@@ -1882,7 +1943,11 @@ fn parse_severity_number(value: i32) -> Result<i32, OtelRecordError> {
     }
 }
 
-fn parse_hex_id(value: &str, byte_len: usize, key: &str) -> Result<Vec<u8>, OtelRecordError> {
+fn parse_hex_id(
+    value: &str,
+    byte_len: usize,
+    key: &str,
+) -> error_stack::Result<Vec<u8>, OtelRecordError> {
     let bytes = value.as_bytes();
     if bytes.len() != byte_len * 2 || !bytes.iter().all(u8::is_ascii_hexdigit) {
         return Err(OtelRecordError::new(
@@ -1920,7 +1985,7 @@ fn parse_hex_id(value: &str, byte_len: usize, key: &str) -> Result<Vec<u8>, Otel
 fn validate_histogram_buckets(
     bucket_counts: &[u64],
     explicit_bounds: &[f64],
-) -> Result<(), OtelRecordError> {
+) -> error_stack::Result<(), OtelRecordError> {
     if bucket_counts.len() != explicit_bounds.len() + 1 {
         return Err(OtelRecordError::new(
             "bucket_counts",
@@ -2756,6 +2821,23 @@ mod tests {
             OtelTransport::http_retry_after(Some("3.5"), now),
             Some(Duration::from_millis(3500))
         );
+    }
+
+    #[test]
+    fn row_conversion_keeps_its_typed_cause_without_a_value() {
+        let report =
+            OtelRecordError::from_value("value", Report::new(OtelValueError::NegativeUnsigned));
+        assert!(report.contains::<OtelValueError>());
+        assert_eq!(report.current_context().key, "value");
+        assert_eq!(
+            report.current_context().reason,
+            "OTEL unsigned value cannot be negative"
+        );
+
+        let timestamp = OtelSink::timestamp_to_unix_nano(-1, "time")
+            .expect_err("negative event time is invalid for OTLP");
+        assert!(timestamp.contains::<std::num::TryFromIntError>());
+        assert_eq!(timestamp.current_context().key, "time");
     }
 
     #[test]

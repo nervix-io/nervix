@@ -321,7 +321,10 @@ impl Runtime {
             descriptors,
         )
         .map(Arc::new)
-        .map_err(|error| build_error(error.to_string()))
+        .map_err(|report| RuntimeError::SignalingProtocolCompile {
+            domain: domain.clone(),
+            report,
+        })
     }
 
     /// Compiles the descriptors of the one resource version a codec or signaling protocol pins.

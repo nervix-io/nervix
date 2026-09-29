@@ -144,6 +144,22 @@ connection error, which describes the connection and carries neither credentials
 response from the service keeps its existing description. None is a record rejection, and none
 acknowledges input.
 
+The connector helper errors for OTEL, Syslog, WebSocket signaling, Postgres, MySQL and ClickHouse
+carry `error_stack::Report` from the failing operation. A caller adds context at a connector or
+host ownership transition; it does not recreate the top-level error from its formatted text.
+Syslog TLS material reports keep the file, certificate or rustls cause, and stream frame reports
+remain beneath the connection failure. WebSocket signaling compilation and execution retain jaq,
+frame encoding and transport causes. The runtime's Syslog source-plan and signaling compilation
+errors keep those reports as typed fields while preserving their startup messages.
+
+OTEL keeps a row conversion failure in the invalid-record channel and names its mapped key as the
+affected field. A lower OTEL value type or range error stays in the internal report until the
+rejection is constructed. Database sink insert reports keep transport driver or pool causes while the
+connector inspects the current typed error for definite row rejection. Postgres SQLSTATE, MySQL
+SQLSTATE and code, and ClickHouse named rejection remain the same external classifications.
+Database response text that could quote a bound value is discarded after extracting that safe
+classification; diagnostics do not quote the row payload.
+
 The native Rust session client loads its Hickory resolver before opening a server channel. An
 unreadable or invalid resolver configuration is `ClientError::LoadDnsConfiguration`, carrying the
 resolver's configuration report; the shared binding classifies it as a connection failure. A

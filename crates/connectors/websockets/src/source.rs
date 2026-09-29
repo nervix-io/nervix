@@ -248,10 +248,12 @@ impl SourceConnector for WebsocketSource {
                 .run(&mut relay, &sink)
                 .await
                 .map_err(|error| {
-                    Report::new(SourceError::Resume {
-                        connector: WEBSOCKETS,
-                    })
-                    .attach_printable(format!("websocket signaling failed: {error}"))
+                    let reason = error.current_context().to_string();
+                    error
+                        .change_context(SourceError::Resume {
+                            connector: WEBSOCKETS,
+                        })
+                        .attach_printable(format!("websocket signaling failed: {reason}"))
                 })?;
             drop(sink);
             while let Ok(payload) = payloads_rx.try_recv() {

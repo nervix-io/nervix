@@ -1300,6 +1300,9 @@ with means the endpoint cannot accept the export as configured, and the emitter'
 records follow `ON MESSAGE ERROR`. OTLP `partial_success` cannot be retried safely: Nervix
 acknowledges every record and logs a warning, so records rejected by the receiver in that response
 are lost.
+For a local conversion failure, the rejected record identifies its `otel.<key>` field and gives a
+bounded reason without quoting that field's value. The conversion cause stays in the connector's
+internal report; the failure does not reject other records in the request.
 
 Nervix does not provision collectors, indexes, tenants, or vendor-side telemetry objects. The OTLP
 endpoint must already exist; an unreachable endpoint remains an initialization or publish error.
@@ -1365,6 +1368,9 @@ record-specific failure is isolated by re-executing the insert one record at a t
 land and only poison rows follow `ON MESSAGE ERROR`. Isolation can reapply rows from the failed
 insert; use the sink's idempotent write facilities where available. Dividing a flush into inserts
 also means one flush is not an atomic database transaction.
+For a rejected row, the error names a safe ClickHouse error name, Postgres SQLSTATE, or MySQL
+SQLSTATE and code. Destination response text can quote a bound value, so it is not included in
+diagnostics. Connection and pool failures retain their causes for diagnosing a retry.
 
 ### Postgres
 
