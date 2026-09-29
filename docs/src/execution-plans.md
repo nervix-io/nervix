@@ -148,6 +148,11 @@ The swap sequence fences delivery before stopping an owner, prepares new local p
 programs, replaces relay owner and remote-consumer edges, and publishes the routing snapshot
 before waking materialized-state waiters. An owner that still executes locally across a placement
 change keeps its task; a moved owner rebinds only its affected runtime and state placement.
+
+The affected relay gates remain closed through publication. An already buffered owner batch takes
+a nonwaiting permit before fan-out: it finishes under the prior consumer set if admitted before
+the fence, or fails its record ACKs so its source retries under the published consumer set.
+
 Dynamic processor revisions reuse unchanged prepared plans, while a changed node gets a new
 typed plan identity. [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md)
 owns planned versus actual pause scope; [Control Plane](./control-plane.md) owns schedule

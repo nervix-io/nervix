@@ -10497,6 +10497,127 @@ async fn when_remote_relay_dispatch_pause_is_released(world: &mut ScenarioWorld,
         .release_remote_relay_dispatch_pause(&domain);
 }
 
+#[given(expr = "relay owner fan-out for domain {string} is paused before dispatch")]
+async fn given_owner_relay_fanout_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world.fault_injection.pause_owner_relay_fanout(domain);
+}
+
+#[given(
+    expr = "entity drain on node {string} reports no buffered relay batches in domain {string}"
+)]
+async fn given_stale_owner_buffer_drain_report(
+    world: &mut ScenarioWorld,
+    node: String,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .report_no_owner_buffered_batches_for_entity_drain(
+            nervix_models::DomainName::try_from(domain.as_str()).expect("valid scenario domain"),
+            crate::common::cluster::node_name(&node),
+        );
+}
+
+#[then(expr = "the relay owner fan-out pause for domain {string} is reached")]
+async fn then_owner_relay_fanout_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_owner_relay_fanout_pause(&domain),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("relay owner fan-out pause for domain '{domain}' was not reached: {error}")
+    });
+}
+
+#[when(expr = "the relay owner fan-out pause for domain {string} is released")]
+async fn when_owner_relay_fanout_pause_is_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .release_owner_relay_fanout_pause(&domain);
+}
+
+#[then(expr = "relay owner fan-out for domain {string} has finished")]
+async fn then_owner_relay_fanout_has_finished(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_owner_relay_fanout_completion(&domain),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("relay owner fan-out in domain '{domain}' did not finish: {error}")
+    });
+}
+
+fn emitter_swap_pause_key(
+    world: &ScenarioWorld,
+    domain: &str,
+    emitter: &str,
+) -> (nervix_models::DomainName, nervix_models::EmitterName) {
+    let domain = expand_placeholders(world, domain);
+    let emitter = expand_placeholders(world, emitter);
+    (
+        nervix_models::DomainName::try_from(domain.as_str()).expect("valid scenario domain"),
+        nervix_models::EmitterName::try_from(emitter.as_str()).expect("valid scenario emitter"),
+    )
+}
+
+#[given(expr = "emitter {string} in domain {string} pauses its swap after detaching")]
+async fn given_emitter_swap_after_detach_pause(
+    world: &mut ScenarioWorld,
+    emitter: String,
+    domain: String,
+) {
+    let (domain, emitter) = emitter_swap_pause_key(world, &domain, &emitter);
+    world
+        .fault_injection
+        .pause_emitter_swap_after_detach(domain, emitter);
+}
+
+#[then(expr = "the swap of emitter {string} in domain {string} has detached it")]
+async fn then_emitter_swap_after_detach_pause_is_reached(
+    world: &mut ScenarioWorld,
+    emitter: String,
+    domain: String,
+) {
+    let (domain, emitter) = emitter_swap_pause_key(world, &domain, &emitter);
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_emitter_swap_after_detach_pause(&domain, &emitter),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "swap of emitter '{}' in domain '{}' did not detach it: {error}",
+            emitter.as_str(),
+            domain.as_str()
+        )
+    });
+}
+
+#[when(expr = "the swap of emitter {string} in domain {string} is released")]
+async fn when_emitter_swap_after_detach_pause_is_released(
+    world: &mut ScenarioWorld,
+    emitter: String,
+    domain: String,
+) {
+    let (domain, emitter) = emitter_swap_pause_key(world, &domain, &emitter);
+    world
+        .fault_injection
+        .release_emitter_swap_after_detach_pause(&domain, &emitter);
+}
+
 #[given(expr = "ownership handoff for domain {string} pauses after preparation")]
 async fn given_ownership_handoff_preparation_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
