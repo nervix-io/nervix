@@ -574,6 +574,12 @@ jobs:
               });
             }
 
+      - name: Enforce hosted runner kache store limit
+        if: always()
+        run: |
+          mkdir -p "${RUNNER_TEMP}/kache-report"
+          KACHE_GC_EVICT_SHARED=1 kache gc --json > "${RUNNER_TEMP}/kache-report/gc.json"
+
       - name: Publish kache report
         if: always()
         run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"

@@ -90,7 +90,9 @@ The `tests` and `scenarios` jobs also sample runner CPU utilization and steal ti
 seconds. Every kache-backed job uses kache 0.28.0, records `doctor` output without making it a
 test failure, publishes a cache report, and diagnoses its five most expensive misses with
 `why-miss`. The shared S3 cache keeps executable and test-binary outputs, with stores sized for
-each runner class.
+each runner class. The GitHub-hosted book job keeps kache's default store size and runs a final
+namespace-first garbage collection before reporting it; build outputs remain available while the
+registered cache store stays within that default.
 
 ## Product Deadlines And Harness Deadlines
 
