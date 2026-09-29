@@ -48,11 +48,50 @@ pub(crate) const SESSION_LIMITS: SessionLimits = SessionLimits::DEFAULT;
 /// Request frames queued for an exchange before a sender waits for the transport.
 const REQUEST_FRAME_CAPACITY: usize = 32;
 
-/// Subscription events retained for one exchange, bounded both by records and retained bytes.
-const SUBSCRIPTION_EVENT_CAPACITY: usize = 128;
-pub(crate) const SUBSCRIPTION_EVENT_BYTES: usize = 8 * 1024 * 1024;
+// Subscription events retained for one exchange, bounded both by records and retained bytes, for
+// each subscription and for all of them together.
+
+/// The events one subscription retains.
 const SUBSCRIPTION_RECORD_CAPACITY: usize = 32;
-const SUBSCRIPTION_RETAINED_BYTES: usize = 2 * 1024 * 1024;
+
+/// The most bytes one event is charged. Rows keep the whole frame they were read from alive, and
+/// the exchange verifies every frame against the session's frame limit.
+const SUBSCRIPTION_LARGEST_EVENT_BYTES: usize =
+    SESSION_LIMITS.frame_bytes() + SubscriptionEvent::HEADER_BYTES;
+
+/// How many of the largest events one subscription retains. An event stops counting once its
+/// consumer reads it, so a subscription whose consumer reads each event before the next one
+/// arrives stays within its own allowance, however wide the server's frames are.
+const SUBSCRIPTION_RETAINED_FRAMES: usize = 1;
+
+/// The bytes one subscription retains.
+pub(crate) const SUBSCRIPTION_RETAINED_BYTES: usize =
+    SUBSCRIPTION_LARGEST_EVENT_BYTES * SUBSCRIPTION_RETAINED_FRAMES;
+
+/// How many subscriptions retain everything they are allowed to at the same time.
+pub(crate) const SUBSCRIPTIONS_RETAINED_IN_FULL: usize = 4;
+
+/// The events all subscriptions of an exchange retain together.
+const SUBSCRIPTION_EVENT_CAPACITY: usize =
+    SUBSCRIPTION_RECORD_CAPACITY * SUBSCRIPTIONS_RETAINED_IN_FULL;
+
+/// The bytes all subscriptions of an exchange retain together.
+pub(crate) const SUBSCRIPTION_EVENT_BYTES: usize =
+    SUBSCRIPTION_RETAINED_BYTES * SUBSCRIPTIONS_RETAINED_IN_FULL;
+
+const _: () = assert!(
+    SUBSCRIPTION_RECORD_CAPACITY > 0,
+    "a subscription must retain an event",
+);
+const _: () = assert!(
+    SUBSCRIPTION_RETAINED_BYTES >= SUBSCRIPTION_LARGEST_EVENT_BYTES,
+    "a subscription must retain a frame of the frame limit, which the server may send",
+);
+const _: () = assert!(
+    SUBSCRIPTION_EVENT_CAPACITY >= SUBSCRIPTION_RECORD_CAPACITY
+        && SUBSCRIPTION_EVENT_BYTES >= SUBSCRIPTION_RETAINED_BYTES,
+    "all subscriptions together must retain what one subscription may",
+);
 
 /// Server notices retained for one exchange, bounded both by records and retained bytes.
 const SERVER_NOTICE_CAPACITY: usize = 128;

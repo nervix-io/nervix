@@ -1891,6 +1891,7 @@ async fn reclaimed_command_retry_fence_survives_snapshot_installation() -> TestR
                     statements: Vec::new(),
                     transaction: None,
                     transaction_admission: None,
+                    backup: None,
                 }),
             },
         )

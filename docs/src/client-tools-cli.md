@@ -51,7 +51,7 @@ subcommand for this release.
 
 The client runs in exactly one of three modes, in this order of precedence:
 
-1. **A subcommand**, such as `subscribe`, `domain-clock`, or `drain-node`.
+1. **A subcommand**, such as `subscribe`, `domain-clock`, `backup`, or `drain-node`.
 2. **`--command`**, which submits NSPL, prints the result, and exits.
 3. **The interactive REPL**, when neither of the above is given.
 
@@ -91,9 +91,10 @@ than a local boolean.
 
 `Tab` completes. Suggestions are computed by the server for the exact cursor position, so they
 cover grammar keywords and the identifiers that actually exist: models in the active domain,
-resource names and versions, session subscription names, and domain names. Inside
-`UPLOAD RESOURCE ... VERSION '<path>'` the client completes local filesystem paths instead,
-expanding `~` to your home directory.
+resource names and versions, session subscription names, and domain names. Inside a quoted path
+that names a file or directory on this machine, such as `UPLOAD RESOURCE ... VERSION '<path>'`,
+`BACKUP ... TO '<path>'`, and `DESCRIBE BACKUP '<path>'`, the client completes local filesystem
+paths instead, expanding `~` to your home directory.
 
 The replacement covers the current word even when the cursor is inside it, and keeps the text
 after that word. The CLI reads successive bounded pages when the server has more matches. A
@@ -165,11 +166,13 @@ applying one model change:
 | `BEGIN` / `COMMIT` / `REVERT` | open, apply, or discard a replicated transaction on the leader |
 | `DESCRIBE TRANSACTION ['<id>'] [OPERATION <n>] [FORMAT TEXT \| JSON]` | read the attached transaction, or one named by id, without changing it |
 | `UPLOAD RESOURCE <name> VERSION '<dir>'` | stream a local directory as a new version of that resource in the active domain |
+| `BACKUP CLUSTER TO '<file>'` / `BACKUP DOMAIN [<name>] TO '<file>'` | back up configuration, users and resources into a local archive file |
+| `DESCRIBE BACKUP '<file>' [FORMAT TEXT \| JSON]` | read and verify a local archive without contacting a server |
 | `CREATE SUBSCRIPTION` / `DELETE SUBSCRIPTION` | start and stop a read-only relay subscription |
 | `ATTACH DOMAIN CLOCK` / `DETACH DOMAIN CLOCK` | start and stop following the active domain's clock |
 
-`USE`, `LIST DOMAINS`, `UPLOAD RESOURCE`, and the domain clock statements must be submitted on
-their own, and never inside a transaction. `ATTACH DOMAIN CLOCK` prints the clock the serving node
+`USE`, `LIST DOMAINS`, `UPLOAD RESOURCE`, `BACKUP`, `DESCRIBE BACKUP`, and the domain clock
+statements must be submitted on their own, and never inside a transaction. `ATTACH DOMAIN CLOCK` prints the clock the serving node
 has installed, then each change above the prompt as described in
 [Asynchronous Output](#asynchronous-output):
 
@@ -226,6 +229,29 @@ nervix-cli --domain production --command \
 The command prints the resolved target, changed and selected usage counts, quiesce level, and a
 sorted line for every selected model. In a transaction, the queued response is a provisional plan;
 `COMMIT` resolves `LATEST` again before applying the atomic model step.
+
+## Backing Up
+
+`BACKUP` in the REPL or through `--command` runs the backup and downloads its archive into the
+named file on this machine. The `backup` subcommand does the same with arguments instead of NSPL,
+and exits with a nonzero status whenever the archive was not delivered:
+
+```bash
+nervix-cli backup cluster --output cluster.nvxb
+nervix-cli --domain payments backup domain --output - --without-resources > payments.nvxb
+nervix-cli backup domain payments --output payments.nvxb --format json
+```
+
+`--output -` writes the archive to standard output and the report to standard error. `--format
+json` prints the report, or the failure, as one JSON document. `DESCRIBE BACKUP` reads a local
+archive without connecting to a server, whether it is typed in the REPL or passed to `--command`:
+
+```bash
+nervix-cli --command "DESCRIBE BACKUP 'cluster.nvxb' FORMAT JSON;"
+```
+
+See [Backup And Restore](backup-and-restore.md) for what an archive holds and how long the server
+retains it.
 
 ## Streaming A Relay
 

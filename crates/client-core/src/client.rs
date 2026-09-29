@@ -20,9 +20,9 @@ use nervix_client_wire::{
     ReplyBody, SubscribeRequest, SubscriptionType, UnsubscribeRequest,
 };
 use nervix_models::{
-    CommandExecutionReference, CreateSubscription, DomainName, ResourceUploadIdentity,
-    SubscriptionName, TransactionInspectionTarget, TransactionOperationNumber, TransactionPosition,
-    TransactionPreviewIdentity, TransactionStatus, UploadResource,
+    Backup, CommandExecutionReference, CreateSubscription, DomainName, ResourceUploadIdentity,
+    Statement, SubscriptionName, TransactionInspectionTarget, TransactionOperationNumber,
+    TransactionPosition, TransactionPreviewIdentity, TransactionStatus, UploadResource,
 };
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
 use tokio::{
@@ -89,7 +89,10 @@ impl ExecutionHandle {
     }
 
     pub(crate) fn can_have_admitted_command(&self) -> bool {
-        matches!(self.route, StatementRoute::Command)
+        matches!(
+            self.route,
+            StatementRoute::Command | StatementRoute::Backup(_)
+        )
     }
 }
 
@@ -125,6 +128,9 @@ enum StatementRoute {
     Refused(&'static str),
     /// Statements the server executes as one command.
     Command,
+    /// A BACKUP statement: the server executes it as a command, and the client downloads the
+    /// archive it assembled to the file the statement names.
+    Backup(Backup),
 }
 
 /// A statement the client serves itself, without sending it as a command.
@@ -185,6 +191,10 @@ impl StatementRoute {
             ClientStatement::DeleteSubscription(subscription) => {
                 Self::Unsubscribe(subscription.name)
             }
+            ClientStatement::DescribeBackup(_) => Self::Refused(
+                "DESCRIBE BACKUP reads an archive file on this machine and is served by nervix-cli",
+            ),
+            ClientStatement::Server(Statement::Backup(backup)) => Self::Backup(backup),
             ClientStatement::BeginTransaction
             | ClientStatement::CommitTransaction
             | ClientStatement::RevertTransaction
@@ -428,23 +438,59 @@ impl Client {
     ) -> Result<CommandOutcome, ClientError> {
         let result =
             tokio::time::timeout_at(deadline, self.execute_prepared_within_budget(execution)).await;
-        match result {
-            Ok(Ok(outcome)) => Ok(outcome),
+        let outcome = match result {
+            Ok(Ok(outcome)) => outcome,
             Ok(Err(error))
                 if execution.can_have_admitted_command() && error.can_hide_admitted_work() =>
             {
-                Err(ClientError::UncertainCommand {
+                return Err(ClientError::UncertainCommand {
                     reference: execution.reference.clone(),
                     source: Box::new(error),
-                })
+                });
             }
-            Ok(Err(error)) => Err(error),
-            Err(_) if execution.can_have_admitted_command() => Err(ClientError::UncertainCommand {
+            Ok(Err(error)) => return Err(error),
+            Err(_) if execution.can_have_admitted_command() => {
+                return Err(ClientError::UncertainCommand {
+                    reference: execution.reference.clone(),
+                    source: Box::new(ClientError::RetryDeadline),
+                });
+            }
+            Err(_) => return Err(ClientError::RetryDeadline),
+        };
+        match self.download_backup_of(execution, outcome).await {
+            Ok(outcome) => Ok(outcome),
+            Err(report) => Err(ClientError::BackupDownload {
                 reference: execution.reference.clone(),
-                source: Box::new(ClientError::RetryDeadline),
+                source: report.current_context().clone(),
             }),
-            Err(_) => Err(ClientError::RetryDeadline),
         }
+    }
+
+    /// Downloads the archive a completed BACKUP assembled to the file its statement names. The
+    /// download runs after the command's deadline has done its work, because an archive may take
+    /// far longer to transfer than a command to run; its own frames bound it instead.
+    async fn download_backup_of(
+        &self,
+        execution: &ExecutionHandle,
+        mut outcome: CommandOutcome,
+    ) -> Result<CommandOutcome, Report<crate::backup::BackupDownloadError>> {
+        let StatementRoute::Backup(backup) = &execution.route else {
+            return Ok(outcome);
+        };
+        if !outcome.succeeded() {
+            return Ok(outcome);
+        }
+        let Some(summary) = outcome.backup.as_deref() else {
+            return Ok(outcome);
+        };
+        let destination = PathBuf::from(&backup.destination);
+        self.fetch_backup(summary, &execution.reference, &destination)
+            .await?;
+        outcome.message = format!(
+            "{}; archive written to '{}'",
+            outcome.message, backup.destination
+        );
+        Ok(outcome)
     }
 
     async fn execute_prepared_within_budget(
@@ -772,7 +818,7 @@ impl Client {
                     .map_err(ClientError::SubscriptionTask)?;
                 result.map_err(ClientError::subscription_operation)
             }
-            StatementRoute::Command => {
+            StatementRoute::Command | StatementRoute::Backup(_) => {
                 let request = ClientRequest::Command(CommandRequest {
                     query: query.to_string(),
                     domain: execution.domain.clone(),

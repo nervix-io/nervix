@@ -844,3 +844,54 @@ Feature: Client wire failure regressions
       | cluster_size |
       | 1            |
       | 3            |
+
+  @client_wire_wide_rows
+  Scenario Outline: A native client keeps a subscription active while it receives a row that fills most of a frame
+    Given a <cluster_size> node nervix cluster is started
+    And a repeated text placeholder "wide_note" of 3000000 bytes is prepared
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA wide_record (
+        sequence I64,
+        note STRING
+      );
+      CREATE WIRE JSON SCHEMA wide_record_json MODE STRICT (
+        sequence integer,
+        note string
+      );
+      CREATE CODEC wide_record_codec
+        FROM WIRE JSON SCHEMA wide_record_json
+        TO SCHEMA wide_record;
+      CREATE RELAY wide_records SCHEMA wide_record UNBRANCHED;
+      CREATE VHOST edge wide-rows-{{test_id}}.example.com;
+      CREATE ENDPOINT wide_ingress ON edge PATH '/records' TYPE HTTP;
+      CREATE INGESTOR wide_source
+        FROM ENDPOINT wide_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 32MiB DECODE USING wide_record_codec
+        TO wide_records
+        SET sequence = message.sequence, note = message.note
+        UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And client "subscriber" is connected to node "node-1"
+    When client "subscriber" executes these NSPL commands
+      """
+      CREATE SUBSCRIPTION wide_seen TO wide_records;
+      """
+    And http payload is posted to node "node-1" with host "wide-rows-{{test_id}}.example.com" path "/records"
+      """
+      {"sequence":1,"note":"{{wide_note}}"}
+      """
+    Then within "30s" client "subscriber" receives a subscription payload
+      """
+      {"note":"{{wide_note}}","sequence":1}
+      """
+    And client "subscriber" subscription "wide_seen" is active
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

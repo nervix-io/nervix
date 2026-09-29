@@ -686,6 +686,7 @@ mod tests {
                     batches: &mut batches,
                     payloads: &mut prepared,
                     requests: &mut PreparedPayloads::default(),
+                    row_requests: &mut PreparedPayloads::default(),
                 },
             )
             .await
@@ -706,6 +707,7 @@ mod tests {
                 batches: &mut batches,
                 payloads: &mut prepared,
                 requests: &mut PreparedPayloads::default(),
+                row_requests: &mut PreparedPayloads::default(),
             },
         )
         .await
@@ -755,6 +757,7 @@ mod tests {
                     batches: &mut batches,
                     payloads: &mut prepared,
                     requests: &mut PreparedPayloads::default(),
+                    row_requests: &mut PreparedPayloads::default(),
                 },
             )
             .await
@@ -767,6 +770,7 @@ mod tests {
                 batches: &mut batches,
                 payloads: &mut prepared,
                 requests: &mut PreparedPayloads::default(),
+                row_requests: &mut PreparedPayloads::default(),
             },
         )
         .await

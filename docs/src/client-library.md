@@ -16,6 +16,7 @@ Capabilities:
 - `Client::attach_domain_clock(...)`, `Client::detach_domain_clock(...)`,
   `Client::domain_clock(...)` and `Client::next_domain_clock_event()`
 - `Client::upload_resource_from_directory(...)`
+- `Client::download_backup(...)`
 - `Client::next_server_event()`, `Client::next_domain_list()` and `Client::leadership()`
 - `Client::suggest(...)` behind the `autocomplete` feature
 - `Client::lookup_choices(...)`
@@ -107,6 +108,30 @@ opens, the session ends, or the subscription is deleted. `Client::subscription_l
 reads the state a subscription is in. `subscribe` and `unsubscribe` reopen a closed session like
 every other call. Deleting a subscription that no open session holds, because its session ended or
 the current session refused to open it again, completes without a request and releases the name.
+
+## Backing Up
+
+`execute` runs `BACKUP CLUSTER TO '<file>';` and `BACKUP DOMAIN [<name>] TO '<file>';` as one
+command and then downloads the archive the backup assembled into the named file. The download is
+not bounded by the client's retry deadline; each frame must arrive within the request timeout. The
+client writes a private file beside the destination and moves it over the destination only once
+the archive's size and BLAKE3 digest match the backup's summary, so the file never holds a partial
+archive, and on Unix only its owner may read it. A download that fails in transport starts again
+from the first byte while the server retains the archive.
+
+The outcome's `backup` field carries the summary: the archive's size and digest, the capture time,
+the instant the server stops retaining it, whether resource bytes are included, the number of
+users, and each domain's revision, section count and bytes. A download that still fails returns
+`ClientError::BackupDownload` with the backup's execution reference and a typed
+`BackupDownloadError`. Running the same `ExecutionHandle` again returns the recorded outcome and
+downloads the archive again, and `Client::download_backup(reference, summary, destination)`
+downloads a summary's archive directly. A download that receives the whole archive releases it on
+the server, and a later download of it is refused.
+
+`execute` refuses `DESCRIBE BACKUP`, which `nervix-cli` serves from a local file without a server;
+the `nervix-backup` crate's `describe_archive` reads and verifies an archive for other Rust
+programs. The C binding runs `BACKUP` through `nx_session_execute` the same way and reports the
+archive's size and digest through `nx_outcome_backup`. See [Backup And Restore](backup-and-restore.md).
 
 ## Following A Domain Clock
 

@@ -236,10 +236,9 @@ Feature: ClickHouse name resolution
       """
     And within "2s" Kafka consumer group "clickhouse_dns_group_{{test_id}}" next offset for topic "clickhouse_dns_in_{{test_id}}" partition 0 is "below 2"
     When the cluster is restarted
-    Then within "30s" DESCRIBE EMITTER "to_clickhouse" on the leader node contains
-      """
-      ClickHouse insert request failed: resolving 'clickhouse.nervix.test' failed
-      """
+    # Restart can begin an ownership handoff while the emitting task retains its failed batch.
+    # Observe the retry at the DNS boundary before allowing that batch to drain.
+    Then the DNS fixture eventually receives another question for "clickhouse.nervix.test"
     And within "2s" Kafka consumer group "clickhouse_dns_group_{{test_id}}" next offset for topic "clickhouse_dns_in_{{test_id}}" partition 0 is "below 2"
     When the DNS fixture answers "clickhouse.nervix.test" with addresses "127.0.5.2"
     Then the ClickHouse table eventually contains a row

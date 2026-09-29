@@ -56,3 +56,13 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing = { workspace = true }
 url = { workspace = true }
+
+[dev-dependencies]
+parking_lot = { workspace = true }
+tokio = { workspace = true, features = [
+  "io-util",
+  "macros",
+  "net",
+  "rt-multi-thread",
+] }
+tokio-stream = { workspace = true, features = ["net"] }
