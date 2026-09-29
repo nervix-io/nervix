@@ -33,6 +33,10 @@ use nervix_client_wire::{
     RequestId, SessionLimits, UploadChunk, UploadStart, grpc::UPLOAD_RESOURCE_PATH,
 };
 use nervix_models::{DomainName, ResourceName, ResourceUploadIdentity};
+use nervix_primitives::{
+    sync::{CancellationToken, watch},
+    task::AbortOnDropHandle,
+};
 use nervix_recovery::Discarded as _;
 use nix::{
     sys::signal::{Signal, kill},
@@ -42,10 +46,8 @@ use tempfile::TempDir;
 use tokio::{
     net::TcpStream,
     process::{Child, Command},
-    sync::watch,
     time::{sleep, timeout},
 };
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use super::{
     cluster::{
@@ -398,7 +400,7 @@ impl ServerProcess {
         let endpoint = self.status_endpoint();
         let mut last_readiness = LastReadinessOutcome::NoCompletedProbe;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(status) = self.observe_exit()? {
                 return Err(io::Error::other(format!(
                     "nervix-server exited during startup with {}; last readiness outcome: \
@@ -478,7 +480,7 @@ impl ServerProcess {
         payload: &str,
     ) -> io::Result<()> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(status) = self.observe_exit()? {
                 return Err(io::Error::other(format!(
                     "nervix-server exited with {} before it admitted the HTTP payload\n{}",
@@ -520,7 +522,7 @@ impl ServerProcess {
         let task_cancellation = cancellation.clone();
         let (observation_tx, observation) = watch::channel(HttpLoadObservation::default());
         let host = host.to_string();
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             run_http_load(
                 task_cancellation,
                 observation_tx,
@@ -607,7 +609,7 @@ impl ServerProcess {
 
     async fn poll_for_log(&mut self, fragment: &str) -> io::Result<()> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             // The exit is read before the log, so a process that logged the fragment and then
             // exited is still seen to have logged it.
             let exit = self.observe_exit()?;
@@ -653,7 +655,7 @@ impl ServerProcess {
         let mut ping_pong = connection
             .ping_pong()
             .ok_or_else(|| io::Error::other("the HTTP/2 connection yielded no ping handle"))?;
-        let connection = AbortOnDropHandle::new(tokio::spawn(async move {
+        let connection = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
             connection.await.discarded(
                 "the scenario observes the server process, not the connection it holds open",
             );
@@ -702,8 +704,10 @@ impl ServerProcess {
                     .send_data(upload_start_frame(domain, resource)?, false)
                     .map_err(io::Error::other)?;
                 self.wait_for_staged_upload_archive().await?;
-                let sender =
-                    tokio::spawn(trickle_upload_chunks(request_body, upload_chunk_frame()?));
+                let sender = nervix_primitives::task::spawn(trickle_upload_chunks(
+                    request_body,
+                    upload_chunk_frame()?,
+                ));
                 HeldUploadBody::Trickling {
                     _sender: AbortOnDropHandle::new(sender),
                 }
@@ -733,7 +737,7 @@ impl ServerProcess {
     async fn poll_for_staged_upload_archive(&mut self) -> io::Result<()> {
         let resources = self.root.path().join("db").join("resources");
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(status) = self.observe_exit()? {
                 return Err(io::Error::other(format!(
                     "nervix-server exited with {} before it staged an upload archive\n{}",
@@ -814,7 +818,7 @@ impl ServerProcessHttpLoad {
 
     async fn poll_for_admissions(&mut self, expected: u64) -> io::Result<()> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let current = self.observation.borrow().clone();
             if current.admitted >= expected {
                 return Ok(());
@@ -850,12 +854,12 @@ async fn run_http_load(
     let mut load_id = first_id;
     let mut template_index = 0_usize;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let payload_template = payload_templates
             .get(template_index)
             .assured("the template index is kept below the non-empty template list length");
         let payload = payload_template.replace("{{load_id}}", &load_id.to_string());
-        let published = tokio::select! {
+        let published = nervix_primitives::select! {
             () = cancellation.cancelled() => return,
             result = publish_http_uri_with_headers(
                 uri.clone(),
@@ -907,7 +911,7 @@ async fn run_http_load(
             next_template_index
         };
 
-        tokio::select! {
+        nervix_primitives::select! {
             () = cancellation.cancelled() => return,
             () = sleep(HTTP_LOAD_INTERVAL) => {}
         }
@@ -932,7 +936,7 @@ enum HeldUploadBody {
 /// Sends one chunk per interval until the server closes the stream or the upload is dropped.
 async fn trickle_upload_chunks(mut body: h2::SendStream<Bytes>, chunk: Bytes) {
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         sleep(SLOW_UPLOAD_CHUNK_INTERVAL).await;
         if body.send_data(chunk.clone(), false).is_err() {
             return;

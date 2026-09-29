@@ -108,7 +108,7 @@ impl Default for WorkerCounts {
     /// One reserved control and consensus worker each, data and bulk concurrency at the greater of
     /// one and the available CPU count minus one, and two workers for ordinary filesystem work.
     fn default() -> Self {
-        let available = match std::thread::available_parallelism() {
+        let available = match nervix_primitives::thread::available_parallelism() {
             Ok(available) => available.get(),
             Err(_) => 1,
         };

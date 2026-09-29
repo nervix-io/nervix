@@ -17,7 +17,7 @@ use nervix_client_wire::{
     RestoreUploadFailure, UnknownOutcomeCause,
 };
 use nervix_models::{ResourceName, RestoreStep};
-use tokio_util::task::AbortOnDropHandle;
+use nervix_primitives::task::AbortOnDropHandle;
 
 use super::*;
 use crate::common::{
@@ -610,9 +610,9 @@ async fn when_restore_is_streamed_in_the_background(
         "a background restore stream is already running"
     );
     let request = restore_stream_request(world, &restore, &file, &node, &reference);
-    world.background_restore = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-        stream_restore(&request, None, None).await
-    })));
+    world.background_restore = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move { stream_restore(&request, None, None).await },
+    )));
 }
 
 /// The command outcome a restore stream was answered with.

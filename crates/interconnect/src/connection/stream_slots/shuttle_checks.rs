@@ -9,9 +9,11 @@
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
 // step as the lease or drain operation it records.
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_primitives::unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use nervix_primitives::{
+    sync::Notify,
+    unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use shuttle::rand::{Rng as _, thread_rng};
-use tokio::sync::Notify;
 use triomphe::Arc;
 
 use super::{
@@ -163,7 +165,7 @@ impl DrainObservation {
 
     async fn until_permitted(&self, last_return: LastReturn) {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let changed = self.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
@@ -188,7 +190,7 @@ async fn lease_and_return_a_reservation(
     let subquota = reservation.subquota;
     let mut held = Vec::with_capacity(reservation.slots);
     while held.len() < reservation.slots {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let Some(slot) = quotas.try_lease(subquota) else {
             assert!(
                 observation.has_begun(),
@@ -210,7 +212,7 @@ async fn lease_and_return_a_reservation(
     }
 
     while held.len() > 1 {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let slot = held
             .pop()
             .verified("the loop runs only while more than one slot is held");
@@ -236,7 +238,7 @@ async fn lease_and_return_a_reservation(
         LastReturn::AfterDrainBegan => {}
         LastReturn::AfterEveryOtherSlot => {
             for _ in 0..LAST_SLOT_HOLD_YIELDS {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 assert!(
                     !observation.has_completed(),
                     "the drain completed while the {subquota:?} subquota still held a leased slot"
@@ -292,21 +294,23 @@ fn drain_stops_leasing_and_waits_for_every_leased_slot(class: PoolClass) {
             } else {
                 LastReturn::AfterDrainBegan
             };
-            leases.push(tokio::spawn(lease_and_return_a_reservation(
-                quotas.clone(),
-                *reservation,
-                last_return,
-                Arc::clone(&observation),
-            )));
+            leases.push(nervix_primitives::task::spawn(
+                lease_and_return_a_reservation(
+                    quotas.clone(),
+                    *reservation,
+                    last_return,
+                    Arc::clone(&observation),
+                ),
+            ));
         }
-        let drain = tokio::spawn(drain_while_leased(
+        let drain = nervix_primitives::task::spawn(drain_while_leased(
             quotas,
             reservations,
             Arc::clone(&observation),
         ));
 
         for lease in leases {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             lease
                 .await
                 .assured("a lease task panics only on a violated invariant, which fails the check");

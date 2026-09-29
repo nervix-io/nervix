@@ -196,7 +196,7 @@ impl Runtime {
             "closed local intake; draining local graphs in place"
         );
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut outstanding = Vec::new();
             for (domain, progress) in &mut domains {
                 let status = self.local_domain_drain_status(domain);
@@ -379,7 +379,7 @@ mod tests {
         assert_eq!(progress.advance(&status), LocalDomainDrainStep::Done);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn closing_local_intake_stops_every_registered_ingestor_admitting() {
         let runtime = Runtime::default();
         let domain = domain("default");

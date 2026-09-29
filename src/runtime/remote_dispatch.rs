@@ -317,7 +317,7 @@ impl RemoteDispatchRegistry {
         let mut sweeps = tokio::time::interval(REMOTE_ACK_SILENCE_SWEEP_INTERVAL);
         sweeps.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             sweeps.tick().await;
             let failed = self.fail_silent_acks();
             for (receiver, acknowledgements) in failed {
@@ -492,7 +492,7 @@ impl RemoteDispatcher {
         payload.admission = Some(registration.clone());
         let dispatch = self.dispatch(node_id, Envelope::RelayPayload(payload));
         tokio::pin!(dispatch);
-        let dispatch_result = tokio::select! {
+        let dispatch_result = nervix_primitives::select! {
             biased;
             result = &mut dispatch => result,
             () = branch_channel.cancellation().cancelled() => {
@@ -518,7 +518,7 @@ impl RemoteDispatcher {
         }
         let admission = Self::await_relay_admission(node_id, admission, Self::DISPATCH_TIMEOUT);
         tokio::pin!(admission);
-        let result = tokio::select! {
+        let result = nervix_primitives::select! {
             biased;
             result = &mut admission => result,
             () = branch_channel.cancellation().cancelled() => {
@@ -557,7 +557,7 @@ impl RemoteDispatcher {
             .checked_add(Self::DISPATCH_TIMEOUT)
             .assured("the fixed relay cancellation deadline fits the monotonic clock");
         let status = loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let cancellation = tokio::time::timeout_at(
                 deadline,
                 self.interconnect.cancel_relay(node_id, delivery),
@@ -653,7 +653,7 @@ impl RemoteDispatcher {
             .checked_add(REMOTE_RELAY_TOTAL_TIMEOUT)
             .assured("the fixed relay total timeout fits the monotonic clock");
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let inactivity_deadline = Instant::now()
                 .checked_add(inactivity_timeout)
                 .assured("a bounded relay inactivity timeout fits the monotonic clock");
@@ -714,7 +714,7 @@ impl RemoteDispatcher {
         // overtake an earlier one.
         let mut encoded_body: Option<ChargedBytes> = None;
         for node_id in interested_nodes.keys() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if node_id == local_node_id || excluded_nodes.contains(node_id) {
                 continue;
             }
@@ -782,7 +782,7 @@ impl RemoteDispatcher {
             .checked_add(Self::DISPATCH_TIMEOUT)
             .assured("the fixed remote dispatch timeout fits the monotonic clock");
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let result = tokio::time::timeout_at(
                 deadline,
                 self.interconnect.send(node_id, envelope.clone()),
@@ -802,7 +802,7 @@ impl RemoteDispatcher {
                     target: node_id.clone(),
                 }));
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = sleep_until(deadline) => {
                     return Err(
                         error.change_context(RemoteDispatchError::Send {
@@ -857,7 +857,7 @@ impl Runtime {
             .checked_add(REMOTE_RELAY_INSTANTIATION_WAIT)
             .assured("the fixed relay-instantiation wait fits the monotonic clock");
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(routing) = self.domain_routing(domain) {
                 return Ok(routing);
             }
@@ -1057,7 +1057,7 @@ impl Runtime {
             .checked_add(REMOTE_RELAY_INSTANTIATION_WAIT)
             .assured("the fixed relay-instantiation wait fits the monotonic clock");
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.remote_stream_target(routing.load(), domain, relay) {
                 Ok(target) => return Ok(target),
                 Err(error) => {
@@ -1445,7 +1445,7 @@ impl Runtime {
         self.spawn_remote_ack_watcher_task(async move {
             let mut completion = completion;
             loop {
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => {
                         trace!(
                             domain = domain.as_str(),
@@ -1545,7 +1545,7 @@ impl Runtime {
             return;
         }
         self.inner.remote_ack_watcher_tasks.spawn(async move {
-            tokio::select! {
+            nervix_primitives::select! {
                 biased;
                 _ = shutdown.cancelled() => {}
                 _ = task => {}
@@ -1642,10 +1642,8 @@ impl Runtime {
 mod tests {
     use futures_util::FutureExt as _;
     use nervix_models::{AckMode, ClusterNodeName, RemoteAckOutcome};
-    use tokio::{
-        sync::{oneshot, watch},
-        time::{Duration, Instant, sleep, timeout},
-    };
+    use nervix_primitives::sync::{oneshot, watch};
+    use tokio::time::{Duration, Instant, sleep, timeout};
 
     use super::*;
     use crate::runtime_ack::{AckCompletion, AckOutcome, AckSet};
@@ -1718,7 +1716,7 @@ mod tests {
         assert!(executing.is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn runtime_shutdown_cancels_remote_ack_watcher_tasks() {
         let runtime = Runtime::default();
         let (started_tx, started_rx) = oneshot::channel();
@@ -1747,13 +1745,13 @@ mod tests {
         assert!(runtime.inner.remote_ack_watcher_tasks.is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn ack_alive_resets_ingestor_ack_timeout() {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (acks, completion) = AckSet::root();
         let ack_task = acks.clone();
 
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             sleep(Duration::from_millis(100)).await;
             ack_task.ack_alive();
             sleep(Duration::from_millis(150)).await;
@@ -1808,7 +1806,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn remote_ack_alive_packet_resets_ingestor_ack_timeout() {
         let (runtime, dispatcher) = joined_runtime().await;
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -1817,7 +1815,7 @@ mod tests {
         let runtime_task = runtime.clone();
         let resolved = registration.clone();
 
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             sleep(Duration::from_millis(100)).await;
             runtime_task.handle_remote_ack_resolution(resolved.resolution(RemoteAckOutcome::Alive));
             sleep(Duration::from_millis(150)).await;
@@ -1840,14 +1838,14 @@ mod tests {
         drop(shutdown_tx);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn remote_relay_admission_alive_resets_dispatch_timeout() {
         let (runtime, dispatcher) = joined_runtime().await;
         let (registration, admission_rx) = dispatcher.register_pending_relay_admission();
         let runtime_task = runtime.clone();
         let resolved = registration.clone();
 
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             sleep(Duration::from_millis(100)).await;
             runtime_task.handle_remote_ack_resolution(resolved.resolution(RemoteAckOutcome::Alive));
             sleep(Duration::from_millis(150)).await;
@@ -1872,7 +1870,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_resolution_addressed_to_an_earlier_run_leaves_the_pending_ack_unresolved() {
         let (runtime, dispatcher) = joined_runtime().await;
         let (acks, completion) = AckSet::root();
@@ -1902,7 +1900,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_resolution_addressed_to_an_earlier_run_leaves_the_relay_admission_pending() {
         let (runtime, dispatcher) = joined_runtime().await;
         let (registration, mut admission_rx) = dispatcher.register_pending_relay_admission();
@@ -1931,7 +1929,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_cleared_registration_ignores_a_late_resolution() {
         let (runtime, dispatcher) = joined_runtime().await;
         let (acks, completion) = AckSet::root();
@@ -1957,7 +1955,7 @@ mod tests {
         drop(acks);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn progress_for_an_abandoned_admission_retires_its_registration() {
         let (runtime, dispatcher) = joined_runtime().await;
         let (admission, admission_rx) = dispatcher.register_pending_relay_admission();
@@ -1975,7 +1973,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_node_outside_a_cluster_resolves_nothing() {
         let runtime = Runtime::default();
         let (acks, completion) = AckSet::root();
@@ -2001,7 +1999,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn remote_relay_admission_rejection_preserves_the_typed_reason() {
         let target = ClusterNodeName::parse("relay-owner").expect("valid name");
         let (admission_tx, admission_rx) = watch::channel(RelayAdmissionUpdate::Pending);
@@ -2022,7 +2020,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn remote_relay_admission_reports_a_closed_response_channel() {
         let target = ClusterNodeName::parse("relay-owner").expect("valid name");
         let (admission_tx, admission_rx) = watch::channel(RelayAdmissionUpdate::Pending);
@@ -2041,7 +2039,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn remote_relay_admission_bounds_the_total_wait() {
         let target = ClusterNodeName::parse("relay-owner").expect("valid name");
         let (_admission_tx, admission_rx) = watch::channel(RelayAdmissionUpdate::Pending);
@@ -2063,7 +2061,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn remote_relay_admission_progress_is_coalesced() {
         let (runtime, dispatcher) = joined_runtime().await;
         let (registration, mut admission_rx) = dispatcher.register_pending_relay_admission();
@@ -2098,7 +2096,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn forwarding_to_a_remote_relay_owner_extends_the_ack_chain() {
         let (acks, completion) = AckSet::root();
         let forwarded = RemoteDispatcher::forwarded_ack(&acks);
@@ -2121,7 +2119,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn relay_gate_holds_nonowner_dispatch_before_the_remote_slot() {
         let services = test_relay_boundary_services();
         services.replace_owner_node(Some(ClusterNodeName::parse("node-2").expect("valid name")));
@@ -2132,13 +2130,13 @@ mod tests {
             "relay owner is moving",
         );
         let task_services = services.clone();
-        let dispatch = tokio::spawn(async move {
+        let dispatch = nervix_primitives::task::spawn(async move {
             task_services
                 .dispatch_to_owner(&domain("default"), &named("orders"), &quiesce_test_batch())
                 .await
         });
 
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         assert!(
             !dispatch.is_finished(),
             "a gated nonowner must not enter its remote dispatch slot"
@@ -2152,7 +2150,7 @@ mod tests {
             .expect_err("the isolated test has no remote dispatcher");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn relay_gate_allows_admitted_owner_batches_to_reach_consumers() {
         let domain = domain("default");
         let relay = named("orders");
@@ -2221,7 +2219,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_admitted_acknowledgement_its_receiver_stops_reporting_fails_at_the_silence_bound() {
         let forwarded = ForwardedAck::registered();
         forwarded.registry.admit_ack(forwarded.ack_id);
@@ -2250,7 +2248,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn one_sweep_counts_every_acknowledgement_it_fails_against_its_receiver() {
         let registry = RemoteDispatchRegistry::new();
         let mut completions = Vec::new();
@@ -2276,7 +2274,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_report_restarts_the_silence_of_an_admitted_acknowledgement() {
         let forwarded = ForwardedAck::registered();
         forwarded.registry.admit_ack(forwarded.ack_id);
@@ -2288,7 +2286,7 @@ mod tests {
         forwarded.sweep_failing_it();
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_acknowledgement_is_not_swept_before_its_delivery_is_admitted() {
         let forwarded = ForwardedAck::registered();
         forwarded.sweep_without_failing(REMOTE_ACK_SILENT_SWEEPS);
@@ -2307,7 +2305,7 @@ mod tests {
         forwarded.sweep_failing_it();
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_terminal_outcome_leaves_the_sweep_nothing_to_fail() {
         let forwarded = ForwardedAck::registered();
         forwarded.registry.admit_ack(forwarded.ack_id);
@@ -2328,7 +2326,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn the_running_sweep_fails_an_acknowledgement_at_the_silence_bound() {
         let registry = Arc::new(RemoteDispatchRegistry::new());
         let (acks, completion) = AckSet::root();
@@ -2337,7 +2335,8 @@ mod tests {
         registry.admit_ack(ack_id);
         let admitted_at = Instant::now();
         let sweeping = registry.clone();
-        let sweeps = tokio::spawn(async move { sweeping.sweep_silent_acks().await });
+        let sweeps =
+            nervix_primitives::task::spawn(async move { sweeping.sweep_silent_acks().await });
 
         let outcome = completion.wait().await;
         let silent_for = admitted_at.elapsed();
@@ -2354,7 +2353,7 @@ mod tests {
         sweeps.abort();
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn the_running_sweep_keeps_an_acknowledgement_its_receiver_keeps_reporting() {
         let registry = Arc::new(RemoteDispatchRegistry::new());
         let (acks, completion) = AckSet::root();
@@ -2362,7 +2361,8 @@ mod tests {
         registry.register_ack(ack_id, receiving_node(), acks);
         registry.admit_ack(ack_id);
         let sweeping = registry.clone();
-        let sweeps = tokio::spawn(async move { sweeping.sweep_silent_acks().await });
+        let sweeps =
+            nervix_primitives::task::spawn(async move { sweeping.sweep_silent_acks().await });
 
         for _ in 0..10 {
             sleep(Duration::from_secs(7)).await;
@@ -2376,7 +2376,7 @@ mod tests {
         sweeps.abort();
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_stalled_sweep_counts_once_for_the_time_it_missed() {
         let registry = Arc::new(RemoteDispatchRegistry::new());
         let (acks, _completion) = AckSet::root();
@@ -2384,13 +2384,14 @@ mod tests {
         registry.register_ack(ack_id, receiving_node(), acks);
         registry.admit_ack(ack_id);
         let sweeping = registry.clone();
-        let sweeps = tokio::spawn(async move { sweeping.sweep_silent_acks().await });
-        tokio::task::yield_now().await;
+        let sweeps =
+            nervix_primitives::task::spawn(async move { sweeping.sweep_silent_acks().await });
+        nervix_primitives::task::yield_now().await;
 
         // The node's execution stalls for four silence bounds, as a paused container's does, so no
         // report could have reached it.
         tokio::time::advance(REMOTE_ACK_SILENCE_TIMEOUT * 4).await;
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
 
         assert!(
             registry.holds_ack(ack_id),

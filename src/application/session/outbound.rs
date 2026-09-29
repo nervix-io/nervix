@@ -30,13 +30,13 @@
 
 use futures_util::{Stream, stream};
 use nervix_client_wire::{EncodedFrame, ServerFrame};
-use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
-use parking_lot::Mutex;
-use tokio::sync::mpsc::{
-    self,
-    error::{TryRecvError, TrySendError},
+use nervix_primitives::sync::{
+    CancellationToken,
+    atomic::{AtomicBool, Ordering},
+    blocking::Mutex,
+    mpsc,
+    mpsc::error::{TryRecvError, TrySendError},
 };
-use tokio_util::sync::CancellationToken;
 use triomphe::Arc;
 
 /// How many control frames a session queues for its transport before their producers wait. A
@@ -208,7 +208,7 @@ impl SessionOutbound {
         &self,
         frame: EncodedFrame<ServerFrame>,
     ) -> Result<(), LaneClosed> {
-        tokio::select! {
+        nervix_primitives::select! {
             biased;
             _ = self.inner.ending.ended.cancelled() => Err(LaneClosed),
             sent = self.inner.control.send(ControlFrame::Direct(frame)) => sent.map_err(|_| LaneClosed),
@@ -221,7 +221,7 @@ impl SessionOutbound {
         &self,
         slot: ReplaceableControlFrame,
     ) -> Result<(), LaneClosed> {
-        tokio::select! {
+        nervix_primitives::select! {
             biased;
             _ = self.inner.ending.ended.cancelled() => Err(LaneClosed),
             sent = self.inner.control.send(ControlFrame::Replaceable(slot)) => sent.map_err(|_| LaneClosed),
@@ -273,7 +273,7 @@ impl SubscriptionLane {
             frame,
             withdrawal: self.withdrawal.clone(),
         };
-        tokio::select! {
+        nervix_primitives::select! {
             biased;
             _ = self.withdrawal.stop.cancelled() => Err(LaneClosed),
             sent = self.sender.send(queued) => sent.map_err(|_| LaneClosed),
@@ -341,7 +341,7 @@ impl SessionFrames {
     pub(in crate::application) async fn next(&mut self) -> Option<EncodedFrame<ServerFrame>> {
         let ended = self.ending.ended.clone();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self.finished {
                 return None;
             }
@@ -379,7 +379,7 @@ impl SessionFrames {
             }
             // The branches are polled in priority order, so a subscription frame is taken here
             // only while the control lane is empty and the session has not ended.
-            tokio::select! {
+            nervix_primitives::select! {
                 biased;
                 frame = self.control.recv(), if self.control_open => match frame {
                     Some(frame) => {
@@ -445,7 +445,7 @@ mod tests {
         next.map(text)
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn control_frames_go_ahead_of_queued_subscription_frames() {
         let (outbound, mut frames) = channel(CancellationToken::new());
         let lane = outbound.subscription_lane();
@@ -469,7 +469,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn replaceable_control_slot_keeps_the_newest_frame_while_the_lane_is_full() {
         let (outbound, mut frames) = channel(CancellationToken::new());
         for _ in 0..SESSION_CONTROL_CAPACITY {
@@ -482,9 +482,9 @@ mod tests {
         let sending = {
             let outbound = outbound.clone();
             let slot = slot.clone();
-            tokio::spawn(async move { outbound.send_replaceable(slot).await })
+            nervix_primitives::task::spawn(async move { outbound.send_replaceable(slot).await })
         };
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         slot.replace(frame("tick 2"))
             .assured("the transport has not taken the slot");
         assert_eq!(next_text(&mut frames).await.as_deref(), Some("filler"));
@@ -501,7 +501,7 @@ mod tests {
         assert!(slot.replace(frame("tick 4")).is_err());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn withdrawn_tick_slot_does_not_precede_the_new_state() {
         let (outbound, mut frames) = channel(CancellationToken::new());
         let lane = outbound.subscription_lane();
@@ -521,7 +521,7 @@ mod tests {
         assert!(slot.replace(frame("later tick")).is_err());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_withdrawn_generation_queues_nothing_more_and_its_queued_frames_are_discarded() {
         let (outbound, mut frames) = channel(CancellationToken::new());
         let withdrawn = outbound.subscription_lane();
@@ -562,7 +562,7 @@ mod tests {
         assert_eq!(next_text(&mut frames).await, None);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_ending_follows_the_queued_control_frames_and_nothing_follows_it() {
         let (outbound, mut frames) = channel(CancellationToken::new());
         let lane = outbound.subscription_lane();
@@ -593,7 +593,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn ending_a_session_never_waits_on_a_client_that_reads_nothing() {
         let (outbound, _unread) = channel(CancellationToken::new());
         for index in 0..SESSION_CONTROL_CAPACITY {
@@ -611,9 +611,12 @@ mod tests {
         assert_eq!(lane.try_send(frame("dropped row")), Err(LaneRefusal::Full));
         let waiting_reply = {
             let outbound = outbound.clone();
-            tokio::spawn(async move { outbound.send(frame("waiting reply")).await })
+            nervix_primitives::task::spawn(
+                async move { outbound.send(frame("waiting reply")).await },
+            )
         };
-        let waiting_row = tokio::spawn(async move { lane.send(frame("waiting row")).await });
+        let waiting_row =
+            nervix_primitives::task::spawn(async move { lane.send(frame("waiting row")).await });
 
         outbound.end(Some(frame("ending")));
         let reply = timeout(WAIT, waiting_reply)

@@ -534,7 +534,7 @@ impl Runtime {
         let mut pending_batches = Vec::new();
         let mut pending_errors = Vec::new();
         for (output_index, output) in input.routes.iter().enumerate() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let (batches, errors) = match self
                 .evaluate_reingestor_output_events(
                     context,
@@ -677,7 +677,7 @@ impl Runtime {
             }
         };
         for (output_index, mut batches) in batches_by_output.into_iter().enumerate() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let relay = &output_relays[output_index];
             if !branched_senders.contains_key(relay) {
                 for batch in batches {
@@ -827,7 +827,7 @@ impl Runtime {
                 Err(error) => {
                     let keys = output_buffers.keys();
                     for key in keys {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         let relay = &routes
                             .get(key.output_index)
                             .verified("the buffer key came from this reingestor's route list")
@@ -859,7 +859,7 @@ impl Runtime {
         };
         let keys = output_buffers.keys();
         for key in keys {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let relay = &routes
                 .get(key.output_index)
                 .verified("the buffer key came from this reingestor's route list")
@@ -990,7 +990,7 @@ impl Runtime {
             None,
         );
 
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             let shared_routing = match runtime
                 .wait_for_domain_routing(&task_domain, &task_from_relay)
                 .await
@@ -1049,10 +1049,10 @@ impl Runtime {
                  interaction",
             );
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let output_deadlines = task_output_buffers.deadlines();
                 let has_output_deadlines = !output_deadlines.is_empty();
-                let work = tokio::select! {
+                let work = nervix_primitives::select! {
                     result = wait_for_branch_buffer_deadlines(&domain_clock, output_deadlines),
                         if has_output_deadlines =>
                     {
@@ -1242,10 +1242,8 @@ mod tests {
         AckMode, CreateReingestor, ErrorPolicies, ModelKind, NodeRef, ParseAsType, ProcessorInputs,
         ProcessorOutputs, ReingestorName, RelayName,
     };
-    use tokio::{
-        sync::{Mutex, mpsc, watch},
-        time::{Duration, timeout},
-    };
+    use nervix_primitives::sync::{Mutex, mpsc, watch};
+    use tokio::time::{Duration, timeout};
     use triomphe::Arc;
 
     use super::*;
@@ -1256,7 +1254,7 @@ mod tests {
         runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{RuntimeValue, test_runtime_row},
     };
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn reingestor_branched_entrypoint_splits_precomputed_keys_with_arrow_filters() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1414,7 +1412,7 @@ mod tests {
             .expect("relay owner should stop");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn reingestor_branched_entrypoint_reuses_existing_branches() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1522,7 +1520,7 @@ mod tests {
             .expect("relay owner should stop");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1693,8 +1691,8 @@ mod tests {
         acme_acks.ack_success();
         timeout(Duration::from_secs(1), async {
             while output_counters.admitted_work() != 1 {
-                tokio::task::consume_budget().await;
-                tokio::task::yield_now().await;
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await
@@ -1708,8 +1706,8 @@ mod tests {
         beta_acks.ack_success();
         timeout(Duration::from_secs(1), async {
             while output_counters.admitted_work() != 2 {
-                tokio::task::consume_budget().await;
-                tokio::task::yield_now().await;
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await
@@ -1782,7 +1780,7 @@ mod tests {
             .expect("relay owner should stop");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn reingestor_force_and_shutdown_flush_buffered_routes() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1933,7 +1931,7 @@ mod tests {
         );
         timeout(Duration::from_secs(1), async {
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let pending = runtime
                     .inner
                     .force_flush_by_domain
@@ -1943,7 +1941,7 @@ mod tests {
                 if pending == 0 {
                     break;
                 }
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await

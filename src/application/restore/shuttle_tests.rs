@@ -26,9 +26,11 @@ use nervix_models::{
     ArchiveDigest, CommandExecutionReference, DomainName, RestoreArchive, RestoreStep, Timestamp,
     UserName,
 };
-use nervix_primitives::sync::atomic::Ordering;
-use parking_lot::Mutex;
-use shuttle::{future::block_on, thread};
+use nervix_primitives::{
+    sync::{atomic::Ordering, blocking::Mutex},
+    thread,
+};
+use shuttle::future::block_on;
 
 use super::{
     archives::{
@@ -309,7 +311,7 @@ async fn retried_upload(quota: StdArc<Quota>, archives: RestoreArchives<StagedMe
 fn an_abandoned_upload_releases_its_quota_exactly_once() {
     let quota = StdArc::new(Quota::default());
     let archives = RestoreArchives::<StagedMemory>::default();
-    let abandoned = shuttle::future::spawn(abandoned_upload(quota.clone()));
+    let abandoned = nervix_primitives::task::spawn(abandoned_upload(quota.clone()));
     let disconnect = thread::spawn(move || {
         abandoned.abort();
         block_on(abandoned)

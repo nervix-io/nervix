@@ -7,31 +7,41 @@
 //! binary all receive the same backend. Selection depends only on those features, never on
 //! `cfg(test)`: the library a test links is production code compiled for the selected mode.
 //!
-//! | Mode | Atomics and fences | Threads |
+//! | Family | Path | Capability |
 //! | --- | --- | --- |
-//! | Ordinary | The standard library's, re-exported unchanged | The operating system's |
-//! | Shuttle | Shuttle's: each operation is a scheduling point, every ordering behaves as `SeqCst` | Shuttle's modeled threads |
-//! | Loom | Loom's: each operation is explored under the C11 orderings Loom models | Loom's modeled threads |
-//! | Turmoil | The standard library's, on the simulated host that runs the caller | The operating system's |
+//! | Atomics, orderings and fences | [`sync::atomic`] | Portable |
+//! | Async synchronization: locks, notification, semaphores, channels, cancellation | [`sync`] | `native` |
+//! | Thread-blocking synchronization: locks, condition variables, barriers, one-time initialization, channels | `sync::blocking` | `native` |
+//! | Tasks: spawning, joining, yielding, aborting, tracking, cooperative budgeting | `task` | `native` |
+//! | The async runtime, and the attributes and macro that build and drive it | `runtime`, `test`, `main`, `select!` | `native` |
+//! | Streams over channels | `stream` | `native` |
+//! | Atomic reference publication | `publication` | `native` |
+//! | Concurrent maps and queues | `collections` | `native` |
+//! | Operating-system threads and thread-local storage | `thread`, `thread_local!` | `native` |
+//! | Real primitives outside every model | [`unmodeled`] | As the family |
+//!
+//! Loom models isolated synchronous owners: atomics, the threads a model spawns, joins, parks and
+//! yields, and thread-local storage. It models no async family, lock, collection or publication,
+//! so a Loom build takes the ordinary libraries for those, outside every model, and the boundary
+//! check rejects them in Loom model code: a model never reaches a real primitive silently.
 //!
 //! Ordinary execution pays nothing for the boundary: every path is a direct re-export of the
-//! standard library item, with no wrapper, allocation, dispatch or scheduling point. A modeled
-//! primitive exists only inside a run of its model, and using one outside that run is a test
-//! configuration failure that the backend reports; there is no fallback to a real primitive. A
-//! real primitive that must stay outside every model is reached through [`unmodeled`] and nowhere
-//! else.
+//! library item, with no wrapper, allocation, dispatch or scheduling point. A modeled primitive
+//! exists only inside a run of its model, and using one outside that run is a test configuration
+//! failure that the backend reports; there is no fallback to a real primitive. A real primitive
+//! that must stay outside every model is reached through [`unmodeled`] and nowhere else.
 //!
-//! The portable surface, [`sync::atomic`] and [`unmodeled`], builds for every target, including
-//! the browser. Operating-system threads are the `native` capability, and requesting a capability
-//! or a mode the target cannot provide is a compile error rather than a different implementation.
+//! The portable surface, [`sync::atomic`] and the unmodeled atomics, builds for every target,
+//! including the browser. Everything else is the `native` capability, and requesting a capability or
+//! a mode the target cannot provide is a compile error rather than a different implementation.
 //!
 //! Layer: primitives.
 //!
 //! - **Owns.** Selecting the backend of every governed primitive for the build's execution mode,
 //!   rejecting incompatible modes and target capabilities, and the one named path to a real
 //!   primitive that stays outside every model.
-//! - **Depends on.** The standard library, and the Shuttle or Loom runtime while that mode is
-//!   selected.
+//! - **Depends on.** The standard library, the synchronization and runtime libraries it selects
+//!   from, and the Shuttle or Loom runtime while that mode is selected.
 //! - **Must not know.** Anything in Nervix, and any scenario, exploration bound or assertion of a
 //!   check. It selects a backend; the harness that runs a model owns how the model is explored.
 
@@ -55,8 +65,8 @@ compile_error!(
 );
 #[cfg(all(target_family = "wasm", feature = "native"))]
 compile_error!(
-    "nervix-primitives: the `native` capability provides operating-system threads, which a wasm \
-     target does not have."
+    "nervix-primitives: the `native` capability provides operating-system threads and the async \
+     runtime, which a wasm target does not have."
 );
 #[cfg(all(
     target_family = "wasm",
@@ -67,10 +77,94 @@ compile_error!(
      only."
 );
 
+// The runtime attributes name the boundary by its crate name, including in this crate's own tests.
+#[cfg(feature = "native")]
+extern crate self as nervix_primitives;
+
+#[cfg(feature = "native")]
+pub mod collections;
+#[cfg(feature = "native")]
+pub mod publication;
+#[cfg(feature = "native")]
+pub mod runtime;
+#[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
+mod scheduling;
+#[cfg(feature = "native")]
+pub mod stream;
 pub mod sync;
+#[cfg(feature = "native")]
+pub mod task;
 #[cfg(feature = "native")]
 pub mod thread;
 pub mod unmodeled;
+
+#[cfg(all(feature = "native", not(any(feature = "loom", feature = "shuttle"))))]
+pub use std::thread_local;
+
+/// Run an async `main` on the runtime of the build's execution mode.
+#[cfg(feature = "native")]
+pub use nervix_primitives_macros::main;
+/// Run an async test on the runtime of the build's execution mode.
+///
+/// The arguments are Tokio's test attribute's, except `crate`: the execution mode decides the
+/// runtime, so naming one fails to compile.
+///
+/// ```compile_fail
+/// #[nervix_primitives::test(crate = "tokio")]
+/// async fn picks_its_own_runtime() {}
+/// ```
+#[cfg(feature = "native")]
+pub use nervix_primitives_macros::test;
+#[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
+pub use shuttle::thread_local;
+#[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
+pub use shuttle_tokio::select;
+#[cfg(all(feature = "native", not(feature = "shuttle")))]
+pub use tokio::select;
+
+/// What the boundary's attributes and macros expand to. Not a path for any other code.
+///
+/// The runtime attributes are Tokio's in every mode, with the items their expansion names through
+/// its crate path, which are the selected runtime's: Tokio's attributes build their runtime only
+/// through the crate path they are given. Shuttle's own test attribute instead finds its runtime by
+/// reading the calling package's manifest for a dependency of a fixed name, so it is not used. A
+/// Loom build's thread-local macro forwards to Loom's.
+/// Declare thread-local storage for the build's execution mode: Loom's in a Loom build, where each of
+/// a model's threads sees its own value.
+///
+/// Loom's own macro takes no `const` initializer, so this one accepts the standard library's form
+/// and initializes each thread's value from the same expression.
+#[cfg(all(feature = "native", feature = "loom"))]
+#[macro_export]
+macro_rules! thread_local {
+    () => {};
+    ($(#[$attr:meta])* $vis:vis static $name:ident: $t:ty = const { $init:expr }; $($rest:tt)*) => (
+        $crate::__private::loom_thread_local!($(#[$attr])* $vis static $name: $t = $init);
+        $crate::thread_local!($($rest)*);
+    );
+    ($(#[$attr:meta])* $vis:vis static $name:ident: $t:ty = const { $init:expr }) => (
+        $crate::__private::loom_thread_local!($(#[$attr])* $vis static $name: $t = $init);
+    );
+    ($(#[$attr:meta])* $vis:vis static $name:ident: $t:ty = $init:expr; $($rest:tt)*) => (
+        $crate::__private::loom_thread_local!($(#[$attr])* $vis static $name: $t = $init);
+        $crate::thread_local!($($rest)*);
+    );
+    ($(#[$attr:meta])* $vis:vis static $name:ident: $t:ty = $init:expr) => (
+        $crate::__private::loom_thread_local!($(#[$attr])* $vis static $name: $t = $init);
+    );
+}
+
+#[cfg(feature = "native")]
+#[doc(hidden)]
+pub mod __private {
+    #[cfg(feature = "loom")]
+    pub use loom::thread_local as loom_thread_local;
+    #[cfg(feature = "shuttle")]
+    pub use shuttle_tokio::{pin, runtime};
+    pub use tokio::{main, test};
+    #[cfg(not(feature = "shuttle"))]
+    pub use tokio::{pin, runtime};
+}
 
 #[cfg(test)]
 mod tests;

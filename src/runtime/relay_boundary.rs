@@ -116,7 +116,7 @@ pub(super) struct RelayOutboundChannel {
 #[derive(Debug)]
 pub(super) struct RelayOutboundSlot {
     pub(super) gate: Mutex<()>,
-    sequence: parking_lot::Mutex<RelayOutboundSequence>,
+    sequence: nervix_primitives::sync::blocking::Mutex<RelayOutboundSequence>,
     cancellation: CancellationToken,
 }
 
@@ -139,7 +139,7 @@ impl RelayOutboundSlot {
     fn new() -> Self {
         Self {
             gate: Mutex::new(()),
-            sequence: parking_lot::Mutex::new(RelayOutboundSequence {
+            sequence: nervix_primitives::sync::blocking::Mutex::new(RelayOutboundSequence {
                 channel_incarnation: uuid::Uuid::now_v7().into_bytes(),
                 next_sequence: 0,
                 last_delivery_at: None,
@@ -612,7 +612,7 @@ impl RelayConsumerFanout {
         let gates = self.branch_dispatch_gates.entries.load_full();
         let mut permits = Vec::new();
         for scoped in gates.iter() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if scoped.scope.contains(fingerprint.as_ref()) {
                 permits.push(RelayDispatchGate::acquire_owned(&scoped.gate).await);
             }
@@ -1033,7 +1033,7 @@ impl RelayRuntimeFanIn {
     }
 
     pub(super) async fn recv(&mut self) -> Option<RelayRecordBatch> {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         self.receiver.recv().await
     }
 
@@ -1386,7 +1386,7 @@ impl RelayBoundaryServices {
         // and reach the slot ahead of an earlier one, delivering the relay out of order.
         let mut encoded_body: Option<ChargedBytes> = None;
         for consumer in remote_runtime_consumers.iter() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let outbound_slot = self.outbound_slot(
                 &consumer.node_id,
                 &consumer.relay,
@@ -1788,7 +1788,7 @@ impl Runtime {
             branch_capacity,
         } = retention;
         let expiration_scan_interval = self.inner.branch_instance_expiration_scan_interval;
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let mut branches = RelayOwnerBranchState {
                 registry,
                 instances: BranchInstanceRegistry::new(),
@@ -1799,8 +1799,8 @@ impl Runtime {
             };
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     biased;
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
@@ -1857,7 +1857,7 @@ impl Runtime {
             }
 
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let batch = match receiver.try_recv() {
                     RelayTryRecv::Batch(batch) => batch,
                     RelayTryRecv::Empty | RelayTryRecv::Closed => {
@@ -1903,7 +1903,7 @@ impl Runtime {
         let quiesce_counters =
             self.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Relay, &relay));
         let force_flush = self.force_flush_participant(&domain, quiesce_counters.clone());
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let interaction_input = RelayInteractionInput::immediate(relay.clone(), receiver);
             let mut interaction = RelayInteraction::new(
                 vec![interaction_input],
@@ -1926,7 +1926,7 @@ impl Runtime {
             }
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             'state_task: loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if !runtime.ownership_handoff_entity_is_frozen(&ownership_entity)
                     && let Some(branch_ttl) = branch_ttl
                     && Instant::now() >= next_expiration_scan
@@ -1943,7 +1943,7 @@ impl Runtime {
                         }
                     };
                     for (key, _) in branch_instances.expire(now, branch_ttl) {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         runtime.invalidate_branch_relay_generation(&domain, &key);
                         if let Err(error) = runtime.delete_materialized_stream_key(&state, &key) {
                             warn!(
@@ -2050,7 +2050,7 @@ impl Runtime {
                 if let Some(branch_capacity) = branch_capacity {
                     for (evicted_key, _) in branch_instances.evict_lru_to_capacity(branch_capacity)
                     {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         runtime.invalidate_branch_relay_generation(&domain, &evicted_key);
                         if let Err(error) =
                             runtime.delete_materialized_stream_key(&state, &evicted_key)

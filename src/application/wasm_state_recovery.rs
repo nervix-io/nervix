@@ -84,14 +84,14 @@ impl SessionServiceImpl {
     /// lifetime reaches exactly one decision wherever its branch happens to run.
     pub(super) fn register_wasm_state_recovery_coordinator(
         &self,
-        shutdown: tokio_util::sync::CancellationToken,
+        shutdown: nervix_primitives::sync::CancellationToken,
     ) {
         let mut requests = self.inner.runtime.attach_wasm_state_recovery_coordinator();
         let service = self.clone();
         self.inner.service_tasks.spawn(async move {
             loop {
-                tokio::task::consume_budget().await;
-                let request = tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                let request = nervix_primitives::select! {
                     _ = shutdown.cancelled() => break,
                     request = requests.recv() => request,
                 };

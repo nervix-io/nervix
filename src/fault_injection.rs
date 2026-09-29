@@ -17,17 +17,22 @@ use std::{
 use ahash::RandomState;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{CpuClass, Executor, MemoryClass, sync::DashMap};
+use nervix_execution::{CpuClass, Executor, MemoryClass};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
     DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RemoteRuntimeField,
     RestoreStep,
 };
-use nervix_primitives::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use nervix_primitives::{
+    collections::DashMap,
+    sync::{
+        CancellationToken,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        blocking::{Mutex, RwLock},
+        broadcast, mpsc, oneshot, watch,
+    },
+};
 use nervix_recovery::{Discarded as _, NoReceiver as _};
-use parking_lot::{Mutex, RwLock};
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
-use tokio_util::sync::CancellationToken;
 use triomphe::Arc;
 
 use crate::registry::SchedulerMode;
@@ -190,7 +195,7 @@ impl std::fmt::Debug for ConsensusProbe {
 struct NodeBulkExecution {
     executor: Executor,
     /// Occupying jobs outlive the map guard while they run, so their release senders are shared.
-    holders: Arc<Mutex<Vec<std::sync::mpsc::Sender<()>>>>,
+    holders: Arc<Mutex<Vec<nervix_primitives::sync::blocking::mpsc::Sender<()>>>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -740,11 +745,11 @@ impl FaultInjection {
                 .unwrap_or_else(|error| {
                     panic!("bulk admission must accept a zero charge: {error}")
                 });
-            let (holder, held) = std::sync::mpsc::channel();
+            let (holder, held) = nervix_primitives::sync::blocking::mpsc::channel();
             holders.lock().push(holder);
             let executor = executor.clone();
             let started = started.clone();
-            tokio::spawn(async move {
+            nervix_primitives::task::spawn(async move {
                 executor
                     .run_cpu(
                         CpuClass::Bulk,
@@ -767,8 +772,8 @@ impl FaultInjection {
             });
         }
         while started.load(Ordering::Acquire) < workers {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
     }
 
@@ -1927,7 +1932,7 @@ impl FaultInjection {
             return false;
         };
         pause.reach();
-        tokio::select! {
+        nervix_primitives::select! {
             _ = shutdown.cancelled() => false,
             _ = pause.wait_until_released() => true,
         }

@@ -49,7 +49,7 @@ pub async fn provision_topics(
     let admin = StdArc::new(admin);
     for topic in [input_topic, output_topic] {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 return Err(io::Error::other(format!(
@@ -59,7 +59,7 @@ pub async fn provision_topics(
             let request_timeout = remaining.min(METADATA_ATTEMPT_TIMEOUT);
             let admin = StdArc::clone(&admin);
             let topic_name = topic.to_string();
-            let observed = tokio::task::spawn_blocking(move || {
+            let observed = nervix_primitives::task::spawn_blocking(move || {
                 let Ok(metadata) = admin
                     .inner()
                     .fetch_metadata(Some(&topic_name), request_timeout)

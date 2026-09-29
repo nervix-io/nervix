@@ -46,7 +46,10 @@ use std::{
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use parking_lot::Mutex;
+use nervix_primitives::{
+    sync::{CancellationToken, blocking::Mutex, watch},
+    task::{AbortOnDropHandle, JoinSet},
+};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rustls::{
     RootCertStore, ServerConfig,
@@ -59,11 +62,8 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
-    sync::watch,
-    task::JoinSet,
 };
 use tokio_rustls::TlsAcceptor;
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use triomphe::Arc;
 
 /// How long stopping waits for connections to end on their own before it aborts and joins them,
@@ -924,7 +924,7 @@ impl HttpReceiver {
             tls_files,
             state,
             cancellation,
-            accept_loop: AbortOnDropHandle::new(tokio::spawn(accept_loop.run())),
+            accept_loop: AbortOnDropHandle::new(nervix_primitives::task::spawn(accept_loop.run())),
         })
     }
 
@@ -1071,7 +1071,7 @@ pub(crate) enum AcceptLoopEnding {
     /// The accept loop outlived the stop budget and was aborted and joined.
     Aborted,
     /// The accept loop panicked.
-    Failed(tokio::task::JoinError),
+    Failed(nervix_primitives::task::JoinError),
 }
 
 impl HttpReceiverStop {
@@ -1130,7 +1130,7 @@ impl ConnectionSummary {
     }
 
     /// Counts how a connection's task ended once the accept loop joined it.
-    pub(crate) fn joined(&mut self, joined: Result<(), tokio::task::JoinError>) {
+    pub(crate) fn joined(&mut self, joined: Result<(), nervix_primitives::task::JoinError>) {
         match joined {
             Ok(()) => {}
             Err(error) if error.is_panic() => {
@@ -1160,8 +1160,8 @@ impl AcceptLoop {
         let mut summary = ConnectionSummary::default();
         let mut next_connection = 0_u64;
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 biased;
                 () = self.cancellation.cancelled() => break,
                 Some(joined) = connections.join_next(), if !connections.is_empty() => {
@@ -1192,14 +1192,14 @@ impl AcceptLoop {
         }
         let deadline = tokio::time::Instant::now() + RECEIVER_CONNECTION_STOP_BUDGET;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match tokio::time::timeout_at(deadline, connections.join_next()).await {
                 Ok(Some(joined)) => summary.joined(joined),
                 Ok(None) => break,
                 Err(_) => {
                     connections.abort_all();
                     while let Some(joined) = connections.join_next().await {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         summary.joined(joined);
                     }
                     break;
@@ -1229,7 +1229,7 @@ impl Connection {
         let ending = match acceptor {
             None => self.serve_requests(stream).await,
             Some(acceptor) => {
-                let accepted = tokio::select! {
+                let accepted = nervix_primitives::select! {
                     () = self.cancellation.cancelled() => return,
                     accepted = acceptor.accept(stream) => accepted,
                 };
@@ -1254,7 +1254,7 @@ impl Connection {
     {
         let mut buffer = Vec::new();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let request = match self.read_request(&mut stream, &mut buffer).await {
                 Ok(Some(request)) => request,
                 Ok(None) => return ConnectionEnd::Closed,
@@ -1309,7 +1309,7 @@ impl Connection {
         S: AsyncRead + AsyncWrite + Unpin,
     {
         if let Some(delay) = response.delay {
-            tokio::select! {
+            nervix_primitives::select! {
                 () = self.cancellation.cancelled() => return Err(ConnectionEnd::Closed),
                 () = tokio::time::sleep(delay) => {}
             }
@@ -1334,7 +1334,7 @@ impl Connection {
     where
         S: AsyncWrite + Unpin,
     {
-        let written = tokio::select! {
+        let written = nervix_primitives::select! {
             () = self.cancellation.cancelled() => return Err(ConnectionEnd::Closed),
             written = async {
                 stream.write_all(bytes).await?;
@@ -1355,8 +1355,8 @@ impl Connection {
     {
         let mut discard = vec![0_u8; READ_CHUNK_BYTES];
         loop {
-            tokio::task::consume_budget().await;
-            let read = tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            let read = nervix_primitives::select! {
                 () = self.cancellation.cancelled() => return ConnectionEnd::Closed,
                 read = stream.read(&mut discard) => read,
             };
@@ -1380,8 +1380,8 @@ impl Connection {
         let mut release = self.state.release.subscribe();
         let mut discard = vec![0_u8; READ_CHUNK_BYTES];
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 () = self.cancellation.cancelled() => return Err(ConnectionEnd::Closed),
                 released = release.wait_for(Option::is_some) => {
                     let released = released.assured(
@@ -1412,7 +1412,7 @@ impl Connection {
         S: AsyncRead + Unpin,
     {
         let head = loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(head) = self.parse_head(buffer)? {
                 break head;
             }
@@ -1522,7 +1522,7 @@ impl Connection {
         S: AsyncRead + Unpin,
     {
         while buffer.len() < length {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.fill(stream, buffer).await? {
                 Filled::Read => {}
                 Filled::Closed => {
@@ -1550,7 +1550,7 @@ impl Connection {
         };
         let mut body = Vec::new();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let parsed =
                 httparse::parse_chunk_size(buffer).map_err(|_| ReceiverFault::MalformedChunk {
                     connection: self.id,
@@ -1581,7 +1581,7 @@ impl Connection {
                 .checked_add(2)
                 .verified("the chunk size was checked against the body limit above");
             while buffer.len() < chunk_with_delimiter {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if !self.fill_body(stream, buffer).await? {
                     return Ok(None);
                 }
@@ -1608,7 +1608,7 @@ impl Connection {
         S: AsyncRead + Unpin,
     {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if buffer.starts_with(b"\r\n") {
                 buffer.drain(..2);
                 return Ok(true);
@@ -1653,7 +1653,7 @@ impl Connection {
         S: AsyncRead + Unpin,
     {
         let mut chunk = vec![0_u8; READ_CHUNK_BYTES];
-        let read = tokio::select! {
+        let read = nervix_primitives::select! {
             () = self.cancellation.cancelled() => return Ok(Filled::Stopped),
             read = stream.read(&mut chunk) => read,
         };

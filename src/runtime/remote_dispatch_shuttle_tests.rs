@@ -10,7 +10,7 @@
 use futures_util::FutureExt as _;
 use meticulous::ResultExt as _;
 use nervix_models::ClusterNodeName;
-use shuttle::thread;
+use nervix_primitives::thread;
 use triomphe::Arc;
 
 use super::{REMOTE_ACK_SILENT_SWEEPS, RemoteDispatchRegistry};

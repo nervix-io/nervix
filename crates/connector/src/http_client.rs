@@ -116,7 +116,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn http_client_validates_timeout_configuration()
     -> Result<(), Report<DnsConfigurationError>> {
         let dns = DnsResolver::load(DnsConfiguration::system()).await?;
@@ -155,7 +155,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn http_client_classifies_invalid_tls_material()
     -> Result<(), Report<DnsConfigurationError>> {
         let dns = DnsResolver::load(DnsConfiguration::system()).await?;

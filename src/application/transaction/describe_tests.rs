@@ -87,7 +87,7 @@ async fn queued_statements(service: &SessionServiceImpl, transaction_id: &str) -
         .len()
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn describing_the_attached_transaction_neither_queues_nor_moves_its_position() {
     let TestService {
         service,
@@ -156,7 +156,7 @@ async fn describing_the_attached_transaction_neither_queues_nor_moves_its_positi
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_selected_operation_in_json_carries_the_same_typed_report() {
     let TestService {
         service,
@@ -193,7 +193,7 @@ async fn a_selected_operation_in_json_carries_the_same_typed_report() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn describe_transaction_is_refused_inside_a_multi_statement_request() {
     let TestService {
         service,
@@ -239,7 +239,7 @@ async fn describe_transaction_is_refused_inside_a_multi_statement_request() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn describing_by_identity_leaves_the_inspecting_session_unbound() {
     let TestService {
         service,
@@ -297,7 +297,7 @@ async fn refusal(
     result.message
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_refused_inspection_names_why_nothing_was_read() {
     let TestService {
         service,

@@ -15,8 +15,8 @@ use meticulous::OptionExt as _;
 #[cfg(test)]
 use meticulous::ResultExt as _;
 use nervix_connector::physical_time::{PhysicalDeadline, PhysicalDeadlineCapability};
+use nervix_primitives::sync::CancellationToken;
 use thiserror::Error;
-use tokio_util::sync::CancellationToken;
 
 use super::{
     DomainClock, DomainExecutionSnapshot, LogicalDeadline, RelayRecordBatch,
@@ -172,7 +172,7 @@ impl RuntimeWake {
                 Ok(())
             }
             (Some(logical), Some(physical)) => {
-                tokio::select! {
+                nervix_primitives::select! {
                     result = logical.wait() => result,
                     () = PhysicalDeadlineCapability::operational().wait_until(physical) => Ok(()),
                 }
@@ -437,7 +437,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn immediate_starts_once_and_reaches_the_physical_minimum() {
         let clock = test_domain_clock(&domain("immediate_timing"));
         let snapshot = clock
@@ -472,7 +472,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_wake_takes_whichever_coordinate_arrives_first() {
         let clock = test_domain_clock(&domain("wake_timing"));
         let snapshot = clock

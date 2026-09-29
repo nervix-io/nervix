@@ -15,7 +15,7 @@ use nervix_models::{
     ClientProducerAdmission, ClientProducerEndReason, ClientSubmissionOutcome,
     ClientSubmissionRefusal,
 };
-use tokio::sync::{mpsc, watch};
+use nervix_primitives::sync::{mpsc, watch};
 
 use super::*;
 

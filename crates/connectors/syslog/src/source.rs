@@ -18,12 +18,14 @@ use nervix_connector::{
     SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
 };
 use nervix_models::ClientConfigEntry;
+use nervix_primitives::{
+    sync::{mpsc, watch},
+    task::JoinSet,
+};
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     net::{TcpListener, UdpSocket},
-    sync::{mpsc, watch},
-    task::JoinSet,
 };
 use tokio_rustls::TlsAcceptor;
 use tracing::debug;
@@ -325,7 +327,7 @@ impl SyslogUdpListener {
         max_message_size: NonZeroUsize,
     ) -> Result<SyslogSourceMessage, Report<SyslogListenerError>> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let (size, peer_addr) = self
                 .socket
                 .recv_from(&mut self.datagram)
@@ -355,8 +357,8 @@ impl SyslogStreamListener {
         tls_acceptor: Option<TlsAcceptor>,
     ) -> Result<SyslogSourceMessage, Report<SyslogListenerError>> {
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 accepted = self.listener.accept() => {
                     let (stream, peer_addr) = accepted.map_err(|source| {
                         Report::new(SyslogListenerError::StreamAccept { source })
@@ -432,7 +434,7 @@ async fn read_stream_connection(
 ) -> Result<(), SyslogConnectionError> {
     let mut decoder = StreamFrameDecoder::new(max_message_size, allow_non_transparent);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if *paused.borrow() {
             if paused.changed().await.is_err() {
                 return Ok(());
@@ -440,7 +442,7 @@ async fn read_stream_connection(
             continue;
         }
         if let Some(frame) = decoder.next_frame()? {
-            tokio::select! {
+            nervix_primitives::select! {
                 sent = tx.send(ReceivedSyslogFrame { payload: frame, peer_addr }) => {
                     if sent.is_err() {
                         return Ok(());
@@ -457,7 +459,7 @@ async fn read_stream_connection(
         let read_capacity = decoder.read_capacity()?;
         let mut chunk = [0_u8; 8_192];
         let read_capacity = read_capacity.min(chunk.len());
-        let read = tokio::select! {
+        let read = nervix_primitives::select! {
             changed = paused.changed() => {
                 if changed.is_err() {
                     return Ok(());

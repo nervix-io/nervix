@@ -57,7 +57,7 @@ pub(super) struct ProcessorBranchTask {
     /// processor task that owns it: a processor task ended before it could stop its branches, as a
     /// shutdown grace ends one, ends every branch with it rather than leaving them running without
     /// an owner.
-    pub(super) task: parking_lot::Mutex<Option<AbortOnDropHandle<()>>>,
+    pub(super) task: nervix_primitives::sync::blocking::Mutex<Option<AbortOnDropHandle<()>>>,
 }
 
 pub(super) struct ProcessorBranchInput {
@@ -176,7 +176,7 @@ pub(in crate::runtime) fn spawn_processor_node_runtime_with_handoffs(
 ) -> ScheduledNodeTask {
     let shutdown_rx = shutdown_tx.subscribe();
     let (commands, command_rx) = mpsc::channel(1);
-    let task = tokio::spawn(run_processor_node_runtime(
+    let task = nervix_primitives::task::spawn(run_processor_node_runtime(
         context,
         template,
         inputs,
@@ -275,7 +275,7 @@ pub(super) async fn run_processor_node_runtime(
         }
         instances.set_version(transferred_lru.lsm);
         for handoff in restored_handoffs {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let key = handoff.key.clone();
             match spawn_processor_branch_task(
                 ProcessorRuntimeContext::new(runtime_handle.clone(), domain.clone()),
@@ -344,7 +344,7 @@ pub(super) async fn run_processor_node_runtime(
 
     let mut handoff_response = None;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let ownership_frozen = runtime_handle.ownership_handoff_entity_is_frozen(&ownership_entity);
         let snapshot = match domain_clock.snapshot() {
             Ok(snapshot) => snapshot,
@@ -676,7 +676,7 @@ async fn restore_processor_wasm_state_reset_branches(
 ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
     let processor = ModelName::from(&template.source);
     for mut branch in branches.drain(..) {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let Some(handoff) = branch.previous.take() else {
             continue;
         };
@@ -732,7 +732,7 @@ impl ProcessorWasmStateResetContext<'_> {
             processor_reset_target_keys(&processor, template, instances, scope, branch_key)?;
         let mut branches = Vec::with_capacity(targets.len());
         for key in targets {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let previous = if let Some(entry) = instances.remove(&key) {
                 runtime.observe_branch_instance_removed(
                     domain,
@@ -886,7 +886,7 @@ impl ProcessorWasmStateResetContext<'_> {
             })?
             .now();
         for branch in &mut current.branches {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if branch.activated {
                 continue;
             }
@@ -938,7 +938,7 @@ impl ProcessorWasmStateResetContext<'_> {
             })?;
 
         for branch in &mut current.branches {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(initial_state) = branch.initial_state.as_ref() else {
                 continue;
             };
@@ -1206,7 +1206,7 @@ pub(super) async fn spawn_processor_branch_task(
         &context.domain,
         NodeRef::new(template.source_kind, &processor),
     );
-    let task = tokio::spawn(run_processor_branch_task(
+    let task = nervix_primitives::task::spawn(run_processor_branch_task(
         context,
         ProcessorBranchRunIdentity {
             processor: ModelName::from(&processor),
@@ -1221,7 +1221,7 @@ pub(super) async fn spawn_processor_branch_task(
     Ok(ProcessorBranchTask {
         input: input_tx,
         commands: command_tx,
-        task: parking_lot::Mutex::new(Some(AbortOnDropHandle::new(task))),
+        task: nervix_primitives::sync::blocking::Mutex::new(Some(AbortOnDropHandle::new(task))),
     })
 }
 
@@ -1233,7 +1233,7 @@ pub(super) async fn stop_processor_snapshot_task(
     if let Some(requests) = snapshot.requests.as_mut() {
         requests.close();
         while let Some(response) = requests.recv().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let result = branch.snapshot_processor_live_state(processor);
             response
                 .send(result)
@@ -1296,7 +1296,7 @@ async fn run_processor_branch_task(
     let stop_mode;
     let mut handoff_execution_snapshot = None;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let freeze = ownership_freeze.observe();
         let ownership_frozen = freeze.is_frozen();
         let execution_snapshot = match domain_clock.snapshot() {
@@ -1356,7 +1356,7 @@ async fn run_processor_branch_task(
         };
         let has_buffer_deadlines = !buffer_deadlines.is_empty();
         let has_pending_materialized = branch.processor_has_pending_materialized(&processor);
-        tokio::select! {
+        nervix_primitives::select! {
             biased;
             command = command_rx.recv() => {
                 match command {
@@ -1436,7 +1436,7 @@ async fn run_processor_branch_task(
                 }
             }
             _ = async {
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = runtime_handle.inner.materialized_state_changed.notified() => {}
                     _ = sleep(runtime_handle.inner.state_replication_poll_interval) => {}
                 }
@@ -1627,7 +1627,7 @@ pub(super) async fn checkpoint_all_processor_branch_instances(
     let processor = processor.into();
     let states = instances.states();
     for entry in states {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let (response, receiver) = oneshot::channel();
         entry
             .commands
@@ -1803,7 +1803,7 @@ pub(super) async fn restore_processor_branch_lru_snapshot(
     let restored = decode_branch_lru_snapshot(&snapshot.payload)
         .change_context(ProcessorBranchTaskError::DecodeLruSnapshot)?;
     for restored_entry in restored {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let key = restored_entry.key;
         let last_ingestion = restored_entry.last_ingestion;
         let incarnation = restored_entry.incarnation;
@@ -1830,11 +1830,11 @@ mod tests {
         CommandExecutionReference, CreateSchema, ErrorPolicies, MessageErrorPolicy, ModelKind,
         ModelName, NodeRef, ParseAsType, RelayName, SchemaField,
     };
-    use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
-    use tokio::{
-        sync::{mpsc, watch},
-        time::{Duration, timeout},
+    use nervix_primitives::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, watch,
     };
+    use tokio::time::{Duration, timeout};
     use triomphe::Arc;
 
     use super::*;
@@ -1964,19 +1964,19 @@ mod tests {
     /// the handles of every branch it still holds. Each of those branches ends with its handle, so
     /// none keeps running, holding the node's state store or settling acknowledgements, after the
     /// processor that owned it is gone.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_branch_task_ends_with_the_handle_its_processor_task_holds() {
-        let (ended_tx, ended_rx) = tokio::sync::oneshot::channel::<()>();
+        let (ended_tx, ended_rx) = nervix_primitives::sync::oneshot::channel::<()>();
         let (input, _input_rx) = mpsc::channel(1);
         let (commands, _command_rx) = mpsc::channel(1);
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let _ended = ended_tx;
             std::future::pending::<()>().await;
         });
         let entry = ProcessorBranchTask {
             input,
             commands,
-            task: parking_lot::Mutex::new(Some(AbortOnDropHandle::new(task))),
+            task: nervix_primitives::sync::blocking::Mutex::new(Some(AbortOnDropHandle::new(task))),
         };
 
         drop(entry);
@@ -1988,7 +1988,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2147,7 +2147,7 @@ mod tests {
         assert!(instances.states().is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn processor_dispatch_hands_dequeued_work_into_branch_mailbox() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2159,7 +2159,7 @@ mod tests {
             runtime.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Junction, &processor));
         let (input_tx, mut input_rx) = mpsc::channel(1);
         let (commands, _command_rx) = mpsc::channel(1);
-        let task = tokio::spawn(std::future::pending::<()>());
+        let task = nervix_primitives::task::spawn(std::future::pending::<()>());
         let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
         instances.insert_restored(
             None,
@@ -2168,7 +2168,9 @@ mod tests {
             ProcessorBranchTask {
                 input: input_tx,
                 commands,
-                task: parking_lot::Mutex::new(Some(AbortOnDropHandle::new(task))),
+                task: nervix_primitives::sync::blocking::Mutex::new(Some(AbortOnDropHandle::new(
+                    task,
+                ))),
             },
         );
 
@@ -2210,7 +2212,7 @@ mod tests {
         let _ = task.await;
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn accepted_processor_input_records_branch_activity_at_its_own_domain_time() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2222,7 +2224,7 @@ mod tests {
             runtime.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Junction, &processor));
         let (input_tx, mut input_rx) = mpsc::channel(1);
         let (commands, _command_rx) = mpsc::channel(1);
-        let task = tokio::spawn(std::future::pending::<()>());
+        let task = nervix_primitives::task::spawn(std::future::pending::<()>());
         let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
         // A supervisor that started waiting long before this batch arrived would hold a sample
         // this old. Accepting the input must replace it with the domain time of the acceptance.
@@ -2234,7 +2236,9 @@ mod tests {
             ProcessorBranchTask {
                 input: input_tx,
                 commands,
-                task: parking_lot::Mutex::new(Some(AbortOnDropHandle::new(task))),
+                task: nervix_primitives::sync::blocking::Mutex::new(Some(AbortOnDropHandle::new(
+                    task,
+                ))),
             },
         );
         let domain_clock = runtime
@@ -2289,7 +2293,7 @@ mod tests {
             .discarded("an aborted fixture task reports only its own cancellation");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn detached_branch_publishes_buffered_route_output_before_it_stops() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2407,7 +2411,7 @@ mod tests {
             .expect("the fixture relay owner stops");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn processor_handoff_drains_ready_batches_from_every_input() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2449,12 +2453,12 @@ mod tests {
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (commands, command_rx) = mpsc::channel(1);
-        let (response, handoffs) = tokio::sync::oneshot::channel();
+        let (response, handoffs) = nervix_primitives::sync::oneshot::channel();
         commands
             .send(ProcessorNodeCommand::Handoff { response })
             .await
             .expect("handoff command should queue before the processor starts");
-        let task = tokio::spawn(run_processor_node_runtime(
+        let task = nervix_primitives::task::spawn(run_processor_node_runtime(
             ProcessorRuntimeContext::new(runtime.clone(), domain.clone()),
             template,
             vec![(orders, orders_input), (returns, returns_input)],
@@ -2484,7 +2488,7 @@ mod tests {
         drop(shutdown_tx);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_processor_handoff_bounds_command_backpressure_and_aborts_the_task() {
         struct Dropped(Arc<AtomicBool>);
 
@@ -2495,7 +2499,7 @@ mod tests {
         }
 
         let (commands, _command_rx) = mpsc::channel(1);
-        let (first_response, _first_receiver) = tokio::sync::oneshot::channel();
+        let (first_response, _first_receiver) = nervix_primitives::sync::oneshot::channel();
         commands
             .send(ProcessorNodeCommand::Handoff {
                 response: first_response,
@@ -2504,7 +2508,7 @@ mod tests {
             .expect("first command should fill the processor mailbox");
         let dropped = Arc::new(AtomicBool::new(false));
         let task_dropped = dropped.clone();
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let _dropped = Dropped(task_dropped);
             std::future::pending::<()>().await;
         });
@@ -2522,7 +2526,7 @@ mod tests {
         assert!(dropped.load(Ordering::Acquire));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_processor_handoff_aborts_a_task_that_drops_its_response() {
         struct Dropped(Arc<AtomicBool>);
 
@@ -2535,7 +2539,7 @@ mod tests {
         let (commands, mut command_rx) = mpsc::channel(1);
         let dropped = Arc::new(AtomicBool::new(false));
         let task_dropped = dropped.clone();
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let _dropped = Dropped(task_dropped);
             let Some(ProcessorNodeCommand::Handoff { response }) = command_rx.recv().await else {
                 panic!("scheduled processor must receive its handoff command")
@@ -2557,11 +2561,11 @@ mod tests {
         assert!(dropped.load(Ordering::Acquire));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_processor_handoff_reports_an_unavailable_command_receiver() {
         let (commands, command_rx) = mpsc::channel(1);
         drop(command_rx);
-        let task = tokio::spawn(std::future::pending::<()>());
+        let task = nervix_primitives::task::spawn(std::future::pending::<()>());
         let scheduled = ScheduledNodeTask { commands, task };
 
         let error = scheduled
@@ -2575,10 +2579,10 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_processor_handoff_bounds_the_response_wait() {
         let (commands, mut command_rx) = mpsc::channel(1);
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let Some(ProcessorNodeCommand::Handoff { response }) = command_rx.recv().await else {
                 panic!("scheduled processor must receive its handoff command")
             };
@@ -2598,10 +2602,10 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_processor_handoff_reports_a_failed_task_join() {
         let (commands, mut command_rx) = mpsc::channel(1);
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let Some(ProcessorNodeCommand::Handoff { response }) = command_rx.recv().await else {
                 panic!("scheduled processor must receive its handoff command")
             };
@@ -2623,10 +2627,10 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn scheduled_processor_handoff_bounds_task_shutdown() {
         let (commands, mut command_rx) = mpsc::channel(1);
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let Some(ProcessorNodeCommand::Handoff { response }) = command_rx.recv().await else {
                 panic!("scheduled processor must receive its handoff command")
             };
