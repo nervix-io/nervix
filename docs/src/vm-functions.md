@@ -383,14 +383,25 @@ VM applies the `WHERE` itself, and always keeps a row that carries an error in t
 the caller sees every failure. A caller must therefore check `batch.errors()` for each selected row
 before treating that row as a result.
 
+The kept rows are bitmap operations over the batch: the predicate's values under its validity,
+where a null keeps no row, ORed with the bitmap of rows that carry an error when any row does. The
+selection is read from the set bits of that bitmap, and the same bitmap filters every output column
+and invocation argument.
+
 `src/runtime/filter_map.rs` shows the complete handling:
 
-1. It acknowledges each row the `WHERE` dropped.
+1. It acknowledges each row the `WHERE` dropped. The kept rows are set in a bitmap directly from
+   the selection, and the dropped rows are its clear bits.
 2. It turns each row that carries an error into a structured message error. The error holds the
    stable reference, the code, the operation and its index, the fields, and the execution's domain
    time, together with the partial output when the error route reads it.
-3. It passes every remaining row on as output.
-4. A returned `RuntimeError` fails the whole batch through the node's general error handling.
+3. It rejects each row on which a required output field is uninitialized or null. The rows are found
+   once per batch, as the OR of the inverted validity bitmaps of the required columns, and a batch
+   whose required columns hold no null skips the bitmaps on their null counts. Only a rejected row
+   names its fields.
+4. It passes every remaining row on as output. The rows it exports are set in a filter bitmap
+   directly from their indices.
+5. A returned `RuntimeError` fails the whole batch through the node's general error handling.
 
 ## Implementation Map
 
@@ -408,6 +419,7 @@ All paths are relative to the repository root.
 | `crates/nervix-vm/src/batch.rs`, `operand.rs` | Typed batches and arrays; column versus scalar operands and broadcasting |
 | `crates/nervix-vm/src/error.rs` | `CompileError`, `RuntimeError`, `SideError`, error codes, and sparse `RowErrors` |
 | `crates/nervix-vm/src/numeric.rs` and `numeric/` | Checked numeric lanes, comparisons, math, bit operations, and decimal rounding |
+| `crates/simd-kernels/src/flags.rs` | Packing the checked lanes' per-lane failure bytes into bitmap words at the selected SIMD level |
 | `crates/nervix-vm/src/datetime.rs` and `datetime/` | Fixed-unit datetime kernels, calendar arithmetic, time zones, and formats |
 | `crates/nervix-vm/src/text_column.rs` | The bounded builder for `STRING` and `BYTES` values whose length an argument chooses |
 | `crates/nervix-vm/src/text_search.rs`, `regexp.rs` | Splitting, joining, `LIKE`, `contains_any`, NFC normalization, and regular expressions with their caches |
@@ -424,10 +436,10 @@ All paths are relative to the repository root.
 | `src/runtime/entrypoint_routes.rs` | Binding lowered ingestor and reingestor programs to a node's schemas, state, lookups, and UDFs |
 | `src/runtime/message_error_plan.rs` | Binding each error-route VM program once to installed relay services and node-local capabilities |
 | `src/runtime/vm_compile.rs` | Runtime compilation and message-error sites |
-| `src/runtime/vm_input.rs` | Input projection and lookup key execution |
+| `src/runtime/vm_input.rs` | Input projection, lookup key execution, and exporting selected output rows |
 | `src/runtime/filter_map.rs` | Program execution and result handling for routes and filters |
 | `src/runtime/ingest_metadata.rs`, `lookup_hash_map.rs` | The header injector and hash-map lookup calls |
-| `src/runtime/message_error.rs` | Structured message errors and execution of prepared error-record programs |
+| `src/runtime/message_error.rs` | Structured message errors, the rows whose required outputs are missing, and execution of prepared error-record programs |
 | `src/runtime/window_processor.rs`, `window_accumulator/`, `window_state.rs` | Branch-local windows, their aggregate structures, and their snapshots |
 | `src/runtime/subscription_predicate.rs` | Session subscription filters |
 
@@ -745,8 +757,11 @@ List `min` and `max` are the one place that intentionally keeps Arrow's total or
 
 `numeric.rs` computes every lane of a checked operation in one branch-free loop:
 
-- **Failure bitmap.** Each lane returns its value and whether it failed, and the loop packs the
-  failure flags into a bitmap 64 lanes at a time.
+- **Failure bitmap.** Each lane returns its value and whether it failed. A block of up to 1,024
+  lanes runs in one loop that stores each lane's failure as one byte, and one call to
+  `nervix-simd-kernels` packs the block's bytes into its failure words with vector compares and
+  bitmask extraction at the SIMD level the process selected. No lane shifts its failure into a
+  word, so packing does not decide whether the lane loop vectorizes.
 - **Failed lanes.** A failed lane becomes null and its value is zeroed, so a wrapped result never
   escapes.
 - **Validity.** A result lane is null wherever any operand lane is null.
@@ -760,7 +775,11 @@ elapsed-time arithmetic, fail a lane rather than wrap it.
 
 Floating-point operations fail a lane that produces NaN or infinity. The transcendental functions
 come from the platform math library as opaque calls per lane that no loop vectorizes, so those
-kernels skip runs of null lanes instead. `round(value, digits)` rounds exactly in integer arithmetic
+kernels compute valid lanes only, as the decimal rounding and calendar kernels do. They read
+validity one 64-lane word at a time: a word without a valid lane computes nothing and fails no
+lane, a fully valid word runs the ordinary lane loop over its 64 lanes, and any other word computes
+its valid lanes alone with the failure bytes of its null lanes cleared. The word's bytes are then
+packed as a block's are, so a null lane never fails and no lane writes the failure word. `round(value, digits)` rounds exactly in integer arithmetic
 on the value's significand, and a digit count beyond ±400 rounds as ±400 does. A shift reads its
 count from any integer type and fails a negative one. A count at or beyond the value's width moves
 every bit out, and the lanes stay branch-free.
@@ -779,11 +798,13 @@ These are three different claims, and the implementation makes them separately:
   compiler-vectorized loop needs inspection of the generated instructions for the particular build
   before claiming a specific instruction set.
 - **Explicit SIMD.** The VM still uses library dispatch for simd-json, base64-simd, faster-hex,
-  and sha2; xxhash chooses when the binary is built. Outside the VM, `nervix-simd-kernels` uses
-  `fearless_simd` to select supported instructions at run time, with a scalar fallback, for the
-  schemaful JSON emission classifier and for the delivery-latency fold, which reads a batch's
-  ingestion watermarks once to find its latest watermark and bucket every row's latency. The VM's
-  own kernels do not use `std::arch` or `target_feature`.
+  and sha2; xxhash chooses when the binary is built. `nervix-simd-kernels` uses `fearless_simd` to
+  select supported instructions at run time, with a scalar fallback. Outside the VM it serves the
+  schemaful JSON emission classifier and the delivery-latency fold, which reads a batch's ingestion
+  watermarks once to find its latest watermark and bucket every row's latency. Inside the VM it packs
+  the failure bytes of the checked lanes into bitmap words, with the same word at every level. The
+  lane operations themselves remain compiler-vectorized: no VM kernel names an instruction set, and
+  the VM uses no `std::arch` or `target_feature` of its own.
 
 The [VM functions measurement report](https://github.com/nervix-io/nervix/blob/main/benches/reports/vm-functions-18.md)
 records what the measurements establish, and

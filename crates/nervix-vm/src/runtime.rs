@@ -34,7 +34,7 @@ use arrow_array::{
         TimestampNanosecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
     },
 };
-use arrow_buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
+use arrow_buffer::{BooleanBuffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow_cast::{
     cast::{CastOptions, cast_with_options},
     display::FormatOptions,
@@ -918,27 +918,13 @@ fn execute_program_with_selection_in_context_sync(
     }
 
     let filtered = if let Some(predicate) = global_predicate.as_ref() {
-        let predicate_with_error_rows = if row_errors.is_error_free() {
-            None
-        } else {
-            Some(BooleanArray::from_iter(predicate.iter().enumerate().map(
-                |(row, selected)| {
-                    if row_errors.row(row).is_empty() {
-                        selected
-                    } else {
-                        Some(true)
-                    }
-                },
-            )))
-        };
-        let selection_predicate = predicate_with_error_rows.as_ref().unwrap_or(predicate);
-        let selected = RowSelection::Selected(selected_rows(selection_predicate));
+        let kept = BooleanArray::new(kept_rows(predicate, &row_errors), None);
+        let selected = RowSelection::Selected(kept.values().set_indices().collect());
         for invocation in &mut invocations {
-            invocation.arguments =
-                filter_columns(&invocation.arguments, selection_predicate, selected.len())?;
+            invocation.arguments = filter_columns(&invocation.arguments, &kept, selected.len())?;
         }
         FilteredOutput {
-            columns: filter_columns(&columns, selection_predicate, selected.len())?,
+            columns: filter_columns(&columns, &kept, selected.len())?,
             row_errors: selected.select_errors(&row_errors),
             selected_rows: selected,
         }
@@ -5867,15 +5853,18 @@ fn filter_columns(
         .collect()
 }
 
-fn selected_rows(predicate: &BooleanArray) -> Vec<usize> {
-    predicate
-        .iter()
-        .enumerate()
-        .filter_map(|(index, value)| match value {
-            Some(true) => Some(index),
-            Some(false) | None => None,
-        })
-        .collect()
+/// The rows a program's `WHERE` keeps, as a bitmap over the batch: every row its predicate holds
+/// for, where a null holds for no row, and every row that carries an error, so the caller sees
+/// each failure. It is at most two bitmap operations, whatever the rows hold.
+fn kept_rows(predicate: &BooleanArray, row_errors: &RowErrors) -> BooleanBuffer {
+    let holds = match predicate.nulls() {
+        Some(nulls) => predicate.values() & nulls.inner(),
+        None => predicate.values().clone(),
+    };
+    match row_errors.failed_rows() {
+        Some(failed) => &holds | &failed,
+        None => holds,
+    }
 }
 
 fn row_selected(predicate: &BooleanArray, row: usize) -> bool {
@@ -6594,6 +6583,67 @@ mod tests {
             output.batch.errors().row(1)[0].code(),
             ErrorCode::DivisionByZero
         );
+    }
+
+    #[test]
+    fn filter_keeps_holding_rows_and_every_error_row_across_bitmap_words() {
+        let parsed = parse_program("WHERE input.left / input.right > 0").expect("must parse");
+        let schema = schema(vec![
+            Field::new("left", DataType::Int64, true),
+            Field::new("right", DataType::Int64, false),
+        ]);
+        let compiled = compile_program_with_output_fields(&parsed, schema.clone(), Vec::new());
+        let rows = 3 * 64 + 5;
+        let left = (0..rows)
+            .map(|row| (row % 7 != 3).then(|| i64::try_from(row % 5).expect("below 5") - 2))
+            .collect::<Vec<_>>();
+
+        for zero_divisor_every in [None, Some(11), Some(2)] {
+            let right = (0..rows)
+                .map(|row| match zero_divisor_every {
+                    Some(every) if row % every == 1 => 0,
+                    _ => 1,
+                })
+                .collect::<Vec<i64>>();
+            let batch = TypedBatch::try_new(
+                schema.clone(),
+                vec![
+                    TypedArray::Int64(Int64Array::from(left.clone())),
+                    TypedArray::Int64(Int64Array::from(right.clone())),
+                ],
+            )
+            .expect("batch must build");
+
+            let output =
+                execute_program_with_selection_sync(&compiled, &batch).expect("must execute");
+
+            // A null dividend makes the predicate null, which keeps no row; a zero divisor fails
+            // the row, which is kept for the caller.
+            let mut kept = Vec::new();
+            let mut failed = Vec::new();
+            for row in 0..rows {
+                let Some(dividend) = left[row] else {
+                    continue;
+                };
+                if right[row] == 0 {
+                    failed.push(kept.len());
+                    kept.push(row);
+                } else if dividend / right[row] > 0 {
+                    kept.push(row);
+                }
+            }
+            let context = format!("zero divisor every {zero_divisor_every:?}");
+            assert_eq!(
+                output.selected_rows,
+                RowSelection::Selected(kept.clone()),
+                "{context}"
+            );
+            assert_eq!(output.batch.row_count(), kept.len(), "{context}");
+            let error_rows = (0..kept.len())
+                .filter(|row| !output.batch.errors().row(*row).is_empty())
+                .collect::<Vec<_>>();
+            assert_eq!(error_rows, failed, "{context}");
+        }
     }
 
     #[test]

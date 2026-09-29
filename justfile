@@ -914,6 +914,12 @@ bench-wasm-checkpoint *args:
 bench-vm *args:
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
+# Build the VM Criterion binary for the x86-64-v3 payload the Docker image ships, in its own target
+# directory, so the checked lanes and their failure packing can be inspected with objdump without
+# the host's native CPU tuning.
+build-vm-bench-x86-64-v3:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/vm-x86-64-v3" RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench --package nervix-vm --bench vm --no-run
+
 # Run the same VM Criterion harness with one-shot allocation and output-size probes. The
 # instrumentation is compiled only for this recipe; use `bench-vm` for timing comparisons.
 bench-vm-alloc *args:

@@ -216,6 +216,16 @@ one nullable 4,096-row run. Use `just benchmark-ab` with `kafka-dedup-window`, o
 and the precision-10 sketch for the complete window path. The command, measurements, and
 generated-instruction inspection are in [SIMD kernels 05](reports/simd-kernels-05.md).
 
+### VM failure packing and selections
+
+`just bench-vm numeric_kernels` and `just bench-vm execute_program_batch_size` measure the checked
+lanes, whose failure bytes the kernel crate packs into bitmap words, and complete programs whose
+`WHERE` selects rows through bitmap operations. Build both revisions' Criterion binaries before
+timing, then alternate the baseline and candidate runs so host load affects both alike.
+`just build-vm-bench-x86-64-v3` builds the same harness for the Docker image's x86-64-v3 payload
+for `objdump` inspection. The measurements and generated-instruction inspection are in
+[SIMD kernels 06](reports/simd-kernels-06.md).
+
 ### JSON emission from Arrow columns
 
 `just bench-json-encode` measures a 1,024-row Arrow batch with integer, clean UTF-8, and

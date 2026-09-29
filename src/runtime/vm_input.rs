@@ -1,3 +1,4 @@
+use arrow_buffer::BooleanBufferBuilder;
 use error_stack::ResultExt as _;
 
 use super::*;
@@ -542,6 +543,8 @@ pub(super) fn vm_typed_batch_to_runtime_batch(
     RuntimeRecordBatch::from_record_batch(batch.schema().clone(), record_batch)
 }
 
+/// Exports the rows `selected_rows` names, in batch order. Their bits are set directly in a bitmap
+/// over the batch, one write per selected row, and a row outside the batch is reported.
 pub(super) fn vm_typed_batch_selected_rows_to_runtime_batch(
     batch: &VmTypedBatch,
     selected_rows: &[usize],
@@ -549,9 +552,19 @@ pub(super) fn vm_typed_batch_selected_rows_to_runtime_batch(
     if selected_rows.len() == batch.row_count() {
         return vm_typed_batch_to_runtime_batch(batch);
     }
-    let selected = selected_rows.iter().copied().collect::<HashSet<_>>();
-    let predicate =
-        BooleanArray::from_iter((0..batch.row_count()).map(|row| Some(selected.contains(&row))));
+    let row_count = batch.row_count();
+    let mut selected = BooleanBufferBuilder::new(row_count);
+    selected.append_n(row_count, false);
+    for &row in selected_rows {
+        if row >= row_count {
+            return Err(Report::new(RuntimeSchemaError::RowOutOfBounds {
+                row,
+                rows: row_count,
+            }));
+        }
+        selected.set_bit(row, true);
+    }
+    let predicate = BooleanArray::new(selected.finish(), None);
     let columns = batch
         .columns()
         .iter()
@@ -720,6 +733,42 @@ mod tests {
             }
         );
         assert_eq!(expected, &ParseAsType::Datetime);
+    }
+
+    #[test]
+    fn selected_rows_export_in_batch_order_and_report_a_row_outside_the_batch() {
+        let schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "value",
+            ArrowDataType::Int64,
+            false,
+        )]));
+        let batch = VmTypedBatch::try_new(
+            schema,
+            vec![VmTypedArray::Int64(
+                arrow_array::Int64Array::from_iter_values(0..130),
+            )],
+        )
+        .expect("the test schema and typed column have the same shape");
+
+        let exported = vm_typed_batch_selected_rows_to_runtime_batch(&batch, &[129, 3, 64])
+            .expect("rows inside the batch export");
+        let values = exported
+            .batch()
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow_array::Int64Array>()
+            .expect("the exported column keeps its I64 type");
+        assert_eq!(values.values().as_ref(), &[3, 64, 129]);
+
+        let error = vm_typed_batch_selected_rows_to_runtime_batch(&batch, &[5, 130])
+            .expect_err("a row outside the batch must not be dropped silently");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeSchemaError::RowOutOfBounds {
+                row: 130,
+                rows: 130
+            }
+        ));
     }
 
     #[test]

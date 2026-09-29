@@ -6,7 +6,7 @@
 //! - **Must not know.** NSPL parsing, consensus decisions or source transport lifecycle.
 
 use ahash::RandomState;
-use arrow_buffer::BooleanBuffer;
+use arrow_buffer::{BooleanBuffer, BooleanBufferBuilder};
 use bytes::Bytes;
 use error_stack::ResultExt as _;
 use indexmap::{Equivalent, IndexMap};
@@ -613,10 +613,14 @@ impl IngestGroupRows {
         if keep.count_set_bits() == row_count {
             return Ok(self);
         }
-        let selected_rows = (0..row_count)
-            .filter(|row| keep.value(*row))
-            .collect::<Vec<_>>();
+        let selected_rows = keep.set_indices().collect::<Vec<_>>();
         let predicate = BooleanArray::new(keep.clone(), None);
+        let mut acks = Vec::with_capacity(selected_rows.len());
+        for (row_acks, kept) in self.acks.into_iter().zip(keep.iter()) {
+            if kept {
+                acks.push(row_acks);
+            }
+        }
         Ok(Self {
             batch: Arc::new(self.batch.filter(&predicate).change_context(
                 IngestGroupError::RuntimeSchema {
@@ -632,12 +636,7 @@ impl IngestGroupRows {
                     operation: IngestMetadataOperation::Select,
                 },
             )?,
-            acks: self
-                .acks
-                .into_iter()
-                .enumerate()
-                .filter_map(|(row, acks)| keep.value(row).then_some(acks))
-                .collect(),
+            acks,
         })
     }
 }
@@ -1005,7 +1004,9 @@ impl BranchedEntrypointBatch {
                 return Err(IngestGroupFailure::new(error, self.acks.clone()));
             }
         };
-        let selected_rows = selected_rows(&predicate);
+        // The filter keeps rows in batch order, so the metadata and ACKs follow the predicate's set
+        // bits rather than the order the selection lists its rows in.
+        let selected_rows = predicate.values().set_indices().collect::<Vec<_>>();
         let filtered_batch = match self.batch.filter(&predicate) {
             Ok(batch) => batch,
             Err(error) => {
@@ -1045,31 +1046,28 @@ impl BranchedEntrypointBatch {
         }
     }
 
+    /// The branch's rows as a predicate over the batch, with each row's bit set directly from the
+    /// selection rather than from a mask of the batch's length.
     pub(super) fn branch_predicate(
         &self,
         selection: &BranchedBranchSelection,
     ) -> error_stack::Result<BooleanArray, IngestGroupError> {
         let row_count = self.batch.batch().num_rows();
-        let mut selected = vec![false; row_count];
-        for row in &selection.rows {
-            let Some(value) = selected.get_mut(*row) else {
+        let mut selected = BooleanBufferBuilder::new(row_count);
+        selected.append_n(row_count, false);
+        for &row in &selection.rows {
+            if row >= row_count {
                 return Err(Report::new(
                     IngestGroupError::BranchSelectionRowOutOfBounds {
-                        row: *row,
+                        row,
                         batch_rows: row_count,
                     },
                 ));
-            };
-            *value = true;
+            }
+            selected.set_bit(row, true);
         }
-        Ok(BooleanArray::from(selected))
+        Ok(BooleanArray::new(selected.finish(), None))
     }
-}
-
-pub(super) fn selected_rows(predicate: &BooleanArray) -> Vec<usize> {
-    (0..predicate.len())
-        .filter(|row| predicate.is_valid(*row) && predicate.value(*row))
-        .collect()
 }
 
 pub(super) fn branched_entrypoint_inputs_acks(inputs: &[BranchedEntrypointInput]) -> Vec<AckSet> {
@@ -1434,14 +1432,17 @@ impl Runtime {
             .change_context(IngestGroupError::FilterWhere {
                 ingestor: ingestor.clone(),
             })?;
-            let mut keep = vec![false; rows.len()];
+            let mut keep = BooleanBufferBuilder::new(rows.len());
             let mut transformed = Vec::new();
             for (row, outcome) in outcomes.into_iter().enumerate() {
                 tokio::task::consume_budget().await;
                 match outcome {
-                    SingleRecordFilterMapOutcome::Filtered => rows.acks[row].ack_success(),
+                    SingleRecordFilterMapOutcome::Filtered => {
+                        keep.append(false);
+                        rows.acks[row].ack_success();
+                    }
                     SingleRecordFilterMapOutcome::Output(record) => {
-                        keep[row] = true;
+                        keep.append(true);
                         transformed.push((row, record));
                     }
                     SingleRecordFilterMapOutcome::MessageError {
@@ -1449,6 +1450,7 @@ impl Runtime {
                         materialized_state,
                         ..
                     } => {
+                        keep.append(false);
                         let acks = std::mem::replace(&mut rows.acks[row], AckSet::empty());
                         self.handle_ingestor_message_error(IngestorMessageError {
                             domain,
@@ -1465,8 +1467,7 @@ impl Runtime {
                     }
                 }
             }
-            let keep = BooleanBuffer::collect_bool(keep.len(), |row| keep[row]);
-            rows = rows.select(&keep)?;
+            rows = rows.select(&keep.finish())?;
             if !transformed.is_empty() {
                 transformed.sort_unstable_by_key(|(row, _)| *row);
                 let batches = transformed

@@ -9,32 +9,37 @@
 //!   operations and rounding to decimal digits. Each kernel is one pass over its operands' value
 //!   buffers that yields the result column, the lanes whose operation failed, and why a failed lane
 //!   failed.
-//! - **Depends on.** Arrow arrays and buffers, the value contracts of the semantic catalog, and the
-//!   side-error reasons of the VM.
+//! - **Depends on.** Arrow arrays and buffers, the value contracts of the semantic catalog, the
+//!   side-error reasons of the VM, and the flag packing of the SIMD kernel crate.
 //! - **Must not know.** Registers, programs, spans, or how a failed lane is recorded as a row
 //!   error.
 //!
-//! A kernel computes every lane in one branch-free loop, packing whether each lane failed into a
-//! bitmap 64 lanes at a time, so the loop vectorizes wherever the lane operation itself does. It
-//! never reruns a batch: the failure bitmap, restricted to lanes whose operands are valid, is the
-//! only record of a failure, and its set bits are the only lanes an error is built for.
+//! A kernel computes a block of up to 1,024 lanes in one branch-free loop that stores every lane's
+//! value and a byte saying whether the lane failed, so the loop vectorizes wherever the lane
+//! operation itself does. One call to the kernel crate then packs the block's failure bytes into
+//! bitmap words with vector compares, so no lane shifts its failure into a word. A kernel never
+//! reruns a batch: the failure bitmap, restricted to lanes whose operands are valid, is the only
+//! record of a failure, and its set bits are the only lanes an error is built for.
 //!
-//! Vectorization here is LLVM's auto-vectorization, not explicit SIMD. No kernel names a SIMD
+//! The lane loops are LLVM's auto-vectorization, not explicit SIMD: no lane operation names a SIMD
 //! instruction set or intrinsic. A loop whose lane operation compiles to a few instructions, such
 //! as an integer operation, a comparison, `sqrt`, `trunc` or a multiplication by a constant, is
 //! written so the compiler can widen it to the vector instructions of the CPU the binary targets,
-//! and its results are the same whether or not it does. A function the platform math library
-//! computes, such as `sin` or `log2`, is an opaque call per lane that no loop vectorizes, so those
-//! kernels skip null lanes instead.
+//! and its results are the same whether or not it does. The failure packing is explicit SIMD,
+//! selected at run time with a scalar fallback, and gives the same word at every level. A function
+//! the platform math library computes, such as `sin` or `log2`, is an opaque call per lane that no
+//! loop vectorizes, so those kernels read validity a word at a time and compute valid lanes only.
 
 use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
 
+use arch_into::ArchInto as _;
 use arrow_array::{Array, ArrowPrimitiveType, BooleanArray, PrimitiveArray, types::Float64Type};
 use arrow_buffer::{
     ArrowNativeType, BooleanBuffer, Buffer, NullBuffer, ScalarBuffer,
     bit_iterator::BitIndexIterator,
 };
 use nervix_approx_into::ApproxInto as _;
+use nervix_simd_kernels::{FlagPacker, WORD_LANES, lane_mask};
 
 use crate::{
     batch::TypedArray,
@@ -49,8 +54,9 @@ mod decimal_rounding;
 pub(crate) use bitwise::{Shift, ShiftCounts, ShiftedInteger, bit_count, bitwise_complement};
 pub(crate) use decimal_rounding::{DecimalRounding, IntegerRounding, RoundingDigits};
 
-/// The lanes one failure bitmap word covers.
-const LANES_PER_WORD: usize = 64;
+/// The lanes whose failure bytes one call to the kernel crate packs: sixteen bitmap words, so the
+/// call is paid once per 1,024 lanes rather than once per word.
+const BLOCK_LANES: usize = 16 * WORD_LANES;
 
 /// The values a lane operation computed for every lane of a batch, and which lanes failed.
 ///
@@ -62,88 +68,173 @@ pub(crate) struct Lanes<N> {
 }
 
 impl<N: Copy + Default> Lanes<N> {
-    /// Computes `lane` for every operand. Each bitmap word is filled by a loop with a fixed,
-    /// branch-free body, which the compiler vectorizes whenever `lane` is vectorizable.
+    /// Computes `lane` for every operand. The lanes of each block run in one loop with a fixed,
+    /// branch-free body, which the compiler vectorizes whenever `lane` is vectorizable, and one call
+    /// packs the block's failure bytes into its failure words through vector compares.
     pub(crate) fn unary<I: Copy>(operands: &[I], mut lane: impl FnMut(I) -> (N, bool)) -> Self {
+        let packer = FlagPacker::new();
         let mut values = vec![N::default(); operands.len()];
-        let mut words = Vec::with_capacity(operands.len().div_ceil(LANES_PER_WORD));
-        let value_words = values.chunks_mut(LANES_PER_WORD);
-        let operand_words = operands.chunks(LANES_PER_WORD);
-        for (value_word, operand_word) in value_words.zip(operand_words) {
-            let mut failed_word = 0_u64;
-            for (bit, (value, operand)) in value_word.iter_mut().zip(operand_word).enumerate() {
-                let (result, failed) = lane(*operand);
-                *value = result;
-                failed_word |= u64::from(failed) << bit;
-            }
-            words.push(failed_word);
+        let mut words = Vec::with_capacity(operands.len().div_ceil(WORD_LANES));
+        let mut flags = [0_u8; BLOCK_LANES];
+        let value_blocks = values.chunks_mut(BLOCK_LANES);
+        let operand_blocks = operands.chunks(BLOCK_LANES);
+        for (value_block, operand_block) in value_blocks.zip(operand_blocks) {
+            let block_flags = &mut flags[..value_block.len()];
+            Self::unary_run(value_block, operand_block, block_flags, &mut lane);
+            packer.pack(block_flags, &mut words);
         }
         Self::new(values, words)
     }
 
-    /// Computes `lane` for every pair of operands. Both operand slices hold one value per lane of
-    /// the same batch, so they have the same length.
+    /// Computes `lane` for every pair of operands, one block of lanes at a time as
+    /// [`Lanes::unary`] does. Both operand slices hold one value per lane of the same batch, so
+    /// they have the same length.
     pub(crate) fn binary<L: Copy, R: Copy>(
         left: &[L],
         right: &[R],
         mut lane: impl FnMut(L, R) -> (N, bool),
     ) -> Self {
+        let packer = FlagPacker::new();
         let mut values = vec![N::default(); left.len()];
-        let mut words = Vec::with_capacity(left.len().div_ceil(LANES_PER_WORD));
-        let value_words = values.chunks_mut(LANES_PER_WORD);
-        let left_words = left.chunks(LANES_PER_WORD);
-        let right_words = right.chunks(LANES_PER_WORD);
-        for ((value_word, left_word), right_word) in value_words.zip(left_words).zip(right_words) {
-            let mut failed_word = 0_u64;
-            let operands = left_word.iter().zip(right_word);
-            for (bit, (value, (left, right))) in value_word.iter_mut().zip(operands).enumerate() {
-                let (result, failed) = lane(*left, *right);
-                *value = result;
-                failed_word |= u64::from(failed) << bit;
-            }
-            words.push(failed_word);
+        let mut words = Vec::with_capacity(left.len().div_ceil(WORD_LANES));
+        let mut flags = [0_u8; BLOCK_LANES];
+        let value_blocks = values.chunks_mut(BLOCK_LANES);
+        let left_blocks = left.chunks(BLOCK_LANES);
+        let right_blocks = right.chunks(BLOCK_LANES);
+        for ((value_block, left_block), right_block) in
+            value_blocks.zip(left_blocks).zip(right_blocks)
+        {
+            let block_flags = &mut flags[..value_block.len()];
+            Self::binary_run(value_block, left_block, right_block, block_flags, &mut lane);
+            packer.pack(block_flags, &mut words);
         }
         Self::new(values, words)
     }
 
     /// Computes `lane` only for the lanes `valid` marks valid, leaving every other lane at its
-    /// default value and unfailed. Valid lanes are visited one contiguous run at a time, so a
-    /// column with few nulls pays for each run rather than for each lane.
+    /// default value and unfailed.
+    ///
+    /// Validity is read one word at a time. A word with no valid lane computes nothing and fails
+    /// no lane. A word whose lanes are all valid runs the loop [`Lanes::unary`] runs, and any other
+    /// word computes its valid lanes only, with the failure bytes of the rest cleared. Either way
+    /// the word's failure bytes are packed through vector compares, so no lane writes the failure
+    /// word. A lane here is a call into the platform math library or a calendar, so one packing
+    /// call per word costs little beside it.
     pub(crate) fn unary_valid<I: Copy>(
         operands: &[I],
         valid: &NullBuffer,
         mut lane: impl FnMut(I) -> (N, bool),
     ) -> Self {
+        let packer = FlagPacker::new();
         let mut values = vec![N::default(); operands.len()];
-        let mut words = vec![0_u64; operands.len().div_ceil(LANES_PER_WORD)];
-        for (start, end) in valid.valid_slices() {
-            for index in start..end {
-                let (result, failed) = lane(operands[index]);
-                values[index] = result;
-                words[index / LANES_PER_WORD] |= u64::from(failed) << (index % LANES_PER_WORD);
+        let mut words = Vec::with_capacity(operands.len().div_ceil(WORD_LANES));
+        let mut flags = [0_u8; WORD_LANES];
+        let validity = valid.inner().bit_chunks();
+        let value_words = values.chunks_mut(WORD_LANES);
+        let operand_words = operands.chunks(WORD_LANES);
+        let valid_words = validity.iter_padded();
+        for ((value_word, operand_word), valid_bits) in
+            value_words.zip(operand_words).zip(valid_words)
+        {
+            let word_flags = &mut flags[..value_word.len()];
+            match WordValidity::of(valid_bits, value_word.len()) {
+                WordValidity::Empty => {
+                    words.push(0);
+                    continue;
+                }
+                WordValidity::Full => {
+                    Self::unary_run(value_word, operand_word, word_flags, &mut lane);
+                }
+                WordValidity::Partial(valid_bits) => {
+                    word_flags.fill(0);
+                    for index in SetLanes(valid_bits) {
+                        let (result, failed) = lane(operand_word[index]);
+                        value_word[index] = result;
+                        word_flags[index] = u8::from(failed);
+                    }
+                }
             }
+            packer.pack(word_flags, &mut words);
         }
         Self::new(values, words)
     }
 
-    /// Computes `lane` only for the pairs of operands `valid` marks valid, one contiguous run of
-    /// valid lanes at a time.
+    /// Computes `lane` only for the pairs of operands `valid` marks valid, reading validity one
+    /// word at a time as [`Lanes::unary_valid`] does.
     pub(crate) fn binary_valid<L: Copy, R: Copy>(
         left: &[L],
         right: &[R],
         valid: &NullBuffer,
         mut lane: impl FnMut(L, R) -> (N, bool),
     ) -> Self {
+        let packer = FlagPacker::new();
         let mut values = vec![N::default(); left.len()];
-        let mut words = vec![0_u64; left.len().div_ceil(LANES_PER_WORD)];
-        for (start, end) in valid.valid_slices() {
-            for index in start..end {
-                let (result, failed) = lane(left[index], right[index]);
-                values[index] = result;
-                words[index / LANES_PER_WORD] |= u64::from(failed) << (index % LANES_PER_WORD);
+        let mut words = Vec::with_capacity(left.len().div_ceil(WORD_LANES));
+        let mut flags = [0_u8; WORD_LANES];
+        let validity = valid.inner().bit_chunks();
+        let value_words = values.chunks_mut(WORD_LANES);
+        let left_words = left.chunks(WORD_LANES);
+        let right_words = right.chunks(WORD_LANES);
+        let valid_words = validity.iter_padded();
+        for (((value_word, left_word), right_word), valid_bits) in value_words
+            .zip(left_words)
+            .zip(right_words)
+            .zip(valid_words)
+        {
+            let word_flags = &mut flags[..value_word.len()];
+            match WordValidity::of(valid_bits, value_word.len()) {
+                WordValidity::Empty => {
+                    words.push(0);
+                    continue;
+                }
+                WordValidity::Full => {
+                    Self::binary_run(value_word, left_word, right_word, word_flags, &mut lane);
+                }
+                WordValidity::Partial(valid_bits) => {
+                    word_flags.fill(0);
+                    for index in SetLanes(valid_bits) {
+                        let (result, failed) = lane(left_word[index], right_word[index]);
+                        value_word[index] = result;
+                        word_flags[index] = u8::from(failed);
+                    }
+                }
             }
+            packer.pack(word_flags, &mut words);
         }
         Self::new(values, words)
+    }
+
+    /// Computes `lane` for every lane of one run, storing each lane's value and failure byte.
+    fn unary_run<I: Copy>(
+        values: &mut [N],
+        operands: &[I],
+        flags: &mut [u8],
+        lane: &mut impl FnMut(I) -> (N, bool),
+    ) {
+        let run_lanes = values.iter_mut().zip(operands).zip(flags);
+        for ((value, operand), flag) in run_lanes {
+            let (result, failed) = lane(*operand);
+            *value = result;
+            *flag = u8::from(failed);
+        }
+    }
+
+    /// Computes `lane` for every pair of operands of one run, storing each lane's value and
+    /// failure byte.
+    fn binary_run<L: Copy, R: Copy>(
+        values: &mut [N],
+        left: &[L],
+        right: &[R],
+        flags: &mut [u8],
+        lane: &mut impl FnMut(L, R) -> (N, bool),
+    ) {
+        let operands = left.iter().zip(right);
+        let run_lanes = values.iter_mut().zip(operands).zip(flags);
+        for ((value, (left, right)), flag) in run_lanes {
+            let (result, failed) = lane(*left, *right);
+            *value = result;
+            *flag = u8::from(failed);
+        }
     }
 
     fn new(values: Vec<N>, words: Vec<u64>) -> Self {
@@ -152,6 +243,47 @@ impl<N: Copy + Default> Lanes<N> {
             values,
             failed: BooleanBuffer::new(Buffer::from_vec(words), 0, lanes),
         }
+    }
+}
+
+/// Which lanes of one word have valid operands, which decides how the word is computed.
+enum WordValidity {
+    /// No lane is valid, so no lane is computed and none fails.
+    Empty,
+    /// Every lane is valid, so the word runs the loop the compiler can vectorize.
+    Full,
+    /// The set bits are the valid lanes, and only those lanes are computed.
+    Partial(u64),
+}
+
+impl WordValidity {
+    /// Classifies the validity bits of a word of `lanes` lanes. The bits of lanes past the end of
+    /// the batch are clear, as the bitmap's padded remainder leaves them.
+    fn of(valid_bits: u64, lanes: usize) -> Self {
+        if valid_bits == 0 {
+            Self::Empty
+        } else if valid_bits == lane_mask(lanes) {
+            Self::Full
+        } else {
+            Self::Partial(valid_bits)
+        }
+    }
+}
+
+/// The set lanes of one validity word, lowest first.
+struct SetLanes(u64);
+
+impl Iterator for SetLanes {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        if self.0 == 0 {
+            return None;
+        }
+        let lane = self.0.trailing_zeros();
+        // Clearing the lowest set bit moves to the next valid lane.
+        self.0 &= self.0 - 1;
+        Some(lane.arch_into())
     }
 }
 

@@ -431,9 +431,9 @@ use materialized_state::{
     ReplicatedMaterializedRelayState,
 };
 use message_error::{
-    MessageErrorFailure, MessageErrorHandling, MessageErrorSourceContext,
+    InvalidOutputRows, MessageErrorFailure, MessageErrorHandling, MessageErrorSourceContext,
     SingleRecordFilterMapOutcome, captured_partial_output, finalized_partial_output,
-    invalid_output_fields, planned_structured_message_error, structured_message_error,
+    planned_structured_message_error, structured_message_error,
     vm_partial_output_row_to_runtime_batch,
 };
 use message_error_delivery::{
