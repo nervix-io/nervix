@@ -9,13 +9,12 @@
 //! - **Must not know.** Subscription tabs, statement dispatch, or how the server compiles the
 //!   filter.
 
-use futures_channel::mpsc::UnboundedSender;
 use leptos::prelude::*;
 use nervix_models::SubscriptionDeliveryBehavior;
 use strum::IntoEnumIterator as _;
 
 use super::{
-    ChoiceControl, ChoiceGroup, ConsoleRequest, CreateSignals, event_target_checked,
+    ChoiceControl, ChoiceGroup, CreateSignals, RequestSender, event_target_checked,
     event_target_value, subscription_draft::FilterReading,
 };
 
@@ -23,7 +22,7 @@ use super::{
 pub(super) fn SubscriptionEditor(
     signals: CreateSignals,
     name_input: NodeRef<leptos::html::Input>,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     session_generation: RwSignal<u64>,
 ) -> impl IntoView {
     let pending = move || signals.progress.get().is_pending();

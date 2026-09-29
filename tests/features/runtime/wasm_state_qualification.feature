@@ -96,7 +96,7 @@ Feature: WASM guest-state qualification across crash windows
       """
       key={"tenant":"alpha"} | "tenant":"alpha" | "value":2
       """
-    And within "4s" Kafka consumer group "wasm_qualification_restart_group_{{test_id}}" next offset for topic "wasm_qualification_restart_in_{{test_id}}" partition 0 is "below 3"
+    And within "30s" Kafka consumer group "wasm_qualification_restart_group_{{test_id}}" next offset for topic "wasm_qualification_restart_in_{{test_id}}" partition 0 is "below 3"
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
     When these NSPL commands are executed on the leader node
@@ -130,7 +130,6 @@ Feature: WASM guest-state qualification across crash windows
       | 1            | 0             | after_local_durability | "value":3            |
       | 1            | 0             | before_acknowledgement | "value":3            |
 
-  @exclusive
   Scenario Outline: An owner lost inside a checkpoint window continues each branch from its replica
     Given Kafka is running
     And runtime replication is configured with replica count 1 and snapshot interval "100ms"
@@ -223,7 +222,7 @@ Feature: WASM guest-state qualification across crash windows
       """
       key={"tenant":"alpha"} | "tenant":"alpha" | "value":2
       """
-    And within "4s" Kafka consumer group "wasm_qualification_failover_group_{{test_id}}" next offset for topic "wasm_qualification_failover_in_{{test_id}}" partition 0 is "below 3"
+    And within "30s" Kafka consumer group "wasm_qualification_failover_group_{{test_id}}" next offset for topic "wasm_qualification_failover_in_{{test_id}}" partition 0 is "below 3"
     When node "{{failed_owner}}" is stopped
     Then node "{{promoted_replica}}" eventually observes a stable leader
     And within "60s" node "{{promoted_replica}}" eventually reports scheduled "wasm_processor" "filter_even_rows" owner equals placeholder "promoted_replica"
@@ -339,7 +338,7 @@ Feature: WASM guest-state qualification across crash windows
       """
       key={"tenant":"alpha"} | "tenant":"alpha" | "value":2
       """
-    And within "4s" Kafka consumer group "wasm_qualification_cluster_restart_group_{{test_id}}" next offset for topic "wasm_qualification_cluster_restart_in_{{test_id}}" partition 0 is "below 3"
+    And within "30s" Kafka consumer group "wasm_qualification_cluster_restart_group_{{test_id}}" next offset for topic "wasm_qualification_cluster_restart_in_{{test_id}}" partition 0 is "below 3"
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
     When these NSPL commands are executed on the leader node

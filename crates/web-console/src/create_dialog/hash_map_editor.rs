@@ -6,16 +6,15 @@
 //! - **Depends on.** Browser draft signals and the shared typed choice UI.
 //! - **Must not know.** Lookup loading, resource storage, or command execution.
 
-use futures_channel::mpsc::UnboundedSender;
 use leptos::prelude::*;
 
-use super::{ChoiceControl, ChoiceGroup, ConsoleRequest, CreateSignals, event_target_value};
+use super::{ChoiceControl, ChoiceGroup, CreateSignals, RequestSender, event_target_value};
 
 #[component]
 pub(super) fn HashMapEditor(
     signals: CreateSignals,
     name_input: NodeRef<leptos::html::Input>,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     session_generation: RwSignal<u64>,
 ) -> impl IntoView {
     let pending = move || signals.progress.get().is_pending();

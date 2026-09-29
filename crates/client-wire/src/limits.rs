@@ -11,6 +11,13 @@ use flatbuffers::VerifierOptions;
 use meticulous::OptionExt as _;
 use thiserror::Error;
 
+/// How many requests one session may have in flight, counting both of its lanes. A server refuses
+/// a request beyond it with `TooManyRequestsInFlight` rather than queue it, so a client flooding one
+/// session cannot grow what the server holds for it, and it also bounds the queue of ordered
+/// requests waiting for their lane. A client that wants every request served holds the rest until
+/// a reply frees a place.
+pub const MAX_IN_FLIGHT_REQUESTS: usize = 64;
+
 /// The largest single frame by default. It matches the receive limit gRPC applies by default.
 const DEFAULT_FRAME_BYTES: usize = 4 * 1024 * 1024;
 

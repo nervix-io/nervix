@@ -9,10 +9,12 @@ version.workspace = true
 workspace = true
 
 [dependencies]
+arch-into = { workspace = true }
 error-stack = { workspace = true }
 fearless_simd = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 fastrand = { workspace = true }
+hdrhistogram = { workspace = true }
 meticulous = { workspace = true }

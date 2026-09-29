@@ -13,7 +13,6 @@
 use std::collections::BTreeMap;
 
 use error_stack::{Report, ResultExt as _};
-use futures_channel::mpsc::UnboundedSender;
 use leptos::{ev, prelude::*};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
@@ -31,7 +30,7 @@ use nervix_recovery::Discarded as _;
 use thiserror::Error;
 use wasm_bindgen::JsCast as _;
 
-use super::{ConsoleConnectionState, ConsoleRequest};
+use super::{ConsoleConnectionState, ConsoleRequest, request_handoff::RequestSender};
 
 mod choice_group;
 mod client_draft;
@@ -1492,7 +1491,7 @@ pub(crate) fn CreateMenu(
 fn request_choices(
     signals: CreateSignals,
     control: ChoiceControl,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     generation: u64,
     append: bool,
 ) {
@@ -1536,13 +1535,10 @@ fn request_choices(
         ));
         return;
     };
-    if request_tx
-        .unbounded_send(ConsoleRequest::Choice { request, context })
-        .is_err()
-    {
-        control_signals.load.set(ChoiceLoad::Failed(
-            "The session channel is closed".to_string(),
-        ));
+    if let Err(refusal) = request_tx.send(ConsoleRequest::Choice { request, context }) {
+        control_signals
+            .load
+            .set(ChoiceLoad::Failed(refusal.current_context().to_string()));
     }
 }
 
@@ -1652,7 +1648,7 @@ pub(crate) fn CreateDialog(
     active_domain: RwSignal<Option<DomainName>>,
     connection_state: RwSignal<ConsoleConnectionState>,
     session_generation: RwSignal<u64>,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     submit: impl Fn(CreateSubmission, u64, u64) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let name_input = NodeRef::<leptos::html::Input>::new();

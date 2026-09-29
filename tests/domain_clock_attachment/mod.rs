@@ -227,7 +227,6 @@ async fn then_clock_session_is_detached(world: &mut ScenarioWorld, domain: Strin
         DomainClockDetachDisposition::Detached(domain),
         "{outcome:?}"
     );
-    clock_session(world).discard_clock_frames_before_reply();
 }
 
 #[then(
@@ -488,6 +487,21 @@ async fn then_clock_session_receives_no_frame(
     let domain = scenario_domain(world, &domain);
     let duration =
         humantime::parse_duration(&duration).expect("step durations are valid durations");
+    let session = clock_session(world);
+    let reply = session
+        .clock_log()
+        .iter()
+        .rposition(|entry| matches!(entry, TestClockLogEntry::Reply(_)))
+        .assured("the detach reply was read before checking its frames");
+    assert!(
+        session.clock_log()[reply + 1..].iter().all(|entry| {
+            !matches!(entry, TestClockLogEntry::Frame(frame) if frame.domain() == &domain)
+        }),
+        "a frame about the detached clock followed its reply on the wire"
+    );
+    // Waiting for the reply filed any earlier ticks in the unread queue. Only frames read after
+    // the reply are relevant to this assertion, so begin the timed wait with that queue drained.
+    session.discard_queued_clock_frames_for(&domain);
     let deadline = Instant::now() + duration;
     loop {
         tokio::task::consume_budget().await;

@@ -612,14 +612,11 @@ impl TestSession {
         &self.clock_log
     }
 
-    /// A reply reader has already recorded these frames before the reply it returned. Discard
-    /// them before checking whether the detached clock sends anything after that reply.
-    pub(crate) fn discard_clock_frames_before_reply(&mut self) {
-        assert!(
-            matches!(self.clock_log.last(), Some(TestClockLogEntry::Reply(_))),
-            "the clock reply must be the last frame read before discarding earlier frames"
-        );
-        self.pending_clock_frames.clear();
+    /// Drops unread frames for `domain` that were filed while waiting for a reply already read.
+    /// The caller checks the clock log's wire order before discarding them.
+    pub(crate) fn discard_queued_clock_frames_for(&mut self, domain: &DomainName) {
+        self.pending_clock_frames
+            .retain(|frame| frame.domain() != domain);
     }
 
     /// Sends a request attaching the session to the clock of `domain`, without waiting for its
