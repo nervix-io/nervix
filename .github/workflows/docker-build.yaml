@@ -16,7 +16,7 @@ permissions:
   issues: write
 
 env:
-  KACHE_VERSION: "0.28.0"
+  KACHE_VERSION: "0.28.1"
   KACHE_REMOTE_KEY_LISTING: "false"
 
 jobs:
