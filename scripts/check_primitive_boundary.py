@@ -1,23 +1,32 @@
 #!/usr/bin/env python3
 
-"""Hold every Nervix atomic to the primitive boundary, and every mode feature to its owner.
+"""Hold every governed Nervix primitive to the primitive boundary, and every mode to its owner.
 
-`nervix-primitives` selects the atomics, orderings and fences of a build for its execution mode.
-Code that reaches the standard library's, Shuttle's or Loom's atomics any other way escapes that
-selection: a modeled build would run it on real atomics, and a check would claim coverage it does
-not have. The source rules reject every such path in every tracked or new Rust file outside the
-owner, including tests, benchmarks, examples and macro bodies, whether written as an import, a
-renamed or grouped import, a glob, a fully qualified path, or through an alias of `std`, `core` or
-their `sync` module. Comments and literal contents are blanked first, and conditional compilation is
-ignored, so an inactive `cfg` branch is checked like an active one.
+`nervix-primitives` selects the execution-sensitive primitives of a build for its execution mode:
+atomics, orderings and fences; async and thread-blocking synchronization; tasks, the async runtime
+and its attributes and `select!`; streams over channels; publication; concurrent collections;
+threads and thread-local storage. Code that reaches one of them any other way escapes that
+selection: a modeled build would run it on a real primitive, or on a backend the rest of the graph
+does not use, and a check would claim coverage it does not have. The source rules reject every such
+path in every tracked or new Rust file outside the owner, including tests, benchmarks, examples and
+macro bodies, whether written as an import, a renamed or grouped import, a glob, a fully qualified
+path, an attribute, a renamed crate, or through an alias of `std`, `core` or their `sync` module.
+Comments and literal contents are blanked first, and conditional compilation is ignored, so an
+inactive `cfg` branch is checked like an active one. Each violation names the approved path.
 
-A real atomic that must stay outside every model is reached through `nervix_primitives::unmodeled`
-and needs a permission in `crates/primitives/unmodeled-permissions.toml` naming the file, the items
-it uses, its owner, the reason and the verification limit. A use without a permission, an item the
-permission does not list, and a permission nothing uses all fail.
+Tokio's timers, networking, I/O, filesystem, processes, signals and its pure `pin!` and `join!`
+macros are not governed here yet; `extern crate shuttle_tokio as tokio` remains the one accepted
+alias, because it still selects Shuttle's timers for the crates that use them.
+
+A real primitive that must stay outside every model is reached through
+`nervix_primitives::unmodeled` and needs a permission in `crates/primitives/unmodeled-permissions.toml`
+naming the file, the items it uses by their paths below `unmodeled`, its owner, the reason and the
+verification limit. A use without a permission, an item the permission does not list, and a
+permission nothing uses all fail.
 
 The manifest rules keep mode selection in one place. Only the owner selects Loom, and the harness
-runs it, so no other package may depend on `loom`. A package that owns a `loom`, `shuttle` or
+runs it, so no other package may depend on `loom`. Only the owner depends on the libraries whose
+families it selects and on their Shuttle wrappers. A package that owns a `loom`, `shuttle` or
 `turmoil` feature depends on `nervix-primitives` directly and forwards the mode to it, and forwards
 it to every workspace dependency that owns the same mode, so the whole graph of that package uses
 one backend even when it is built on its own.
@@ -46,8 +55,118 @@ PERMISSIONS = PurePosixPath("crates/primitives/unmodeled-permissions.toml")
 HARNESS = "nervix-model-harness"
 MODES = ("loom", "shuttle", "turmoil")
 SELECTED = ("nervix_primitives", "sync", "atomic")
-UNMODELED = ("nervix_primitives", "unmodeled", "sync", "atomic")
+UNMODELED_ROOT = ("nervix_primitives", "unmodeled")
+UNMODELED = UNMODELED_ROOT + ("sync", "atomic")
 PERMISSION_FIELDS = ("path", "items", "owner", "reason", "limit")
+
+ATOMIC_ITEMS = (
+    "AtomicBool",
+    "AtomicI8",
+    "AtomicI16",
+    "AtomicI32",
+    "AtomicI64",
+    "AtomicIsize",
+    "AtomicPtr",
+    "AtomicU8",
+    "AtomicU16",
+    "AtomicU32",
+    "AtomicU64",
+    "AtomicUsize",
+    "Ordering",
+)
+# Every item `nervix_primitives::unmodeled` provides, by its path below `unmodeled`. A permission
+# lists items by these paths.
+UNMODELED_ITEMS = frozenset(
+    {("sync", "atomic", item) for item in ATOMIC_ITEMS}
+    | {
+        ("sync", "LazyLock"),
+        ("sync", "Once"),
+        ("sync", "OnceLock"),
+        ("sync", "Mutex"),
+        ("sync", "mpsc"),
+        ("sync", "watch"),
+        ("runtime", "Builder"),
+        ("runtime", "Runtime"),
+        ("thread", "Builder"),
+        ("thread", "sleep"),
+        ("task", "consume_budget"),
+        ("task", "spawn"),
+        ("time", "sleep"),
+        ("select",),
+        ("task_local",),
+    }
+)
+
+
+@dataclass(frozen=True)
+class Route:
+    """A governed path outside the owner, and the boundary path that replaces it."""
+
+    prefix: tuple[str, ...]
+    replacement: tuple[str, ...]
+
+
+# The families beyond atomics, which have rules of their own below. The longest matching prefix
+# decides a path's replacement.
+ROUTES = (
+    Route(("tokio", "sync"), ("nervix_primitives", "sync")),
+    Route(("tokio", "task"), ("nervix_primitives", "task")),
+    Route(("tokio", "spawn"), ("nervix_primitives", "task", "spawn")),
+    Route(("tokio", "task_local"), ("nervix_primitives", "unmodeled", "task_local")),
+    Route(("tokio", "runtime"), ("nervix_primitives", "runtime")),
+    Route(("tokio", "select"), ("nervix_primitives", "select")),
+    Route(("tokio", "test"), ("nervix_primitives", "test")),
+    Route(("tokio", "main"), ("nervix_primitives", "main")),
+    Route(("tokio_util", "sync"), ("nervix_primitives", "sync")),
+    Route(("tokio_util", "task"), ("nervix_primitives", "task")),
+    Route(("tokio_stream",), ("nervix_primitives", "stream")),
+    Route(("parking_lot",), ("nervix_primitives", "sync", "blocking")),
+    Route(("dashmap", "mapref", "entry"), ("nervix_primitives", "collections", "dash_map")),
+    Route(("dashmap",), ("nervix_primitives", "collections")),
+    Route(("concurrent_queue",), ("nervix_primitives", "collections")),
+    Route(("arc_swap",), ("nervix_primitives", "publication")),
+    Route(("flume",), ("nervix_primitives", "sync", "blocking", "mpsc")),
+    Route(("std", "thread"), ("nervix_primitives", "thread")),
+    Route(("std", "thread_local"), ("nervix_primitives", "thread_local")),
+    Route(("shuttle", "thread"), ("nervix_primitives", "thread")),
+    Route(("shuttle", "thread_local"), ("nervix_primitives", "thread_local")),
+    Route(("shuttle", "lazy_static"), ("nervix_primitives", "sync", "blocking")),
+    Route(("shuttle", "future", "spawn"), ("nervix_primitives", "task", "spawn")),
+    Route(("shuttle", "future", "yield_now"), ("nervix_primitives", "task", "yield_now")),
+    Route(("loom", "thread"), ("nervix_primitives", "thread")),
+    Route(("loom", "thread_local"), ("nervix_primitives", "thread_local")),
+    Route(("loom", "lazy_static"), ("nervix_primitives", "sync", "blocking")),
+    Route(("shuttle_tokio",), ("nervix_primitives",)),
+    Route(("shuttle_tokio_util",), ("nervix_primitives",)),
+    Route(("shuttle_tokio_stream",), ("nervix_primitives", "stream")),
+    Route(("shuttle_parking_lot",), ("nervix_primitives", "sync", "blocking")),
+    Route(("shuttle_dashmap",), ("nervix_primitives", "collections")),
+)
+# The `sync` modules whose non-atomic items are the thread-blocking family, and what stays allowed
+# in them: shared ownership is not governed here.
+SYNC_MODULES = (("std", "sync"), ("core", "sync"), ("shuttle", "sync"), ("loom", "sync"))
+SYNC_UNGOVERNED = frozenset({"Arc", "Weak", "atomic"})
+BLOCKING = ("nervix_primitives", "sync", "blocking")
+GOVERNED_ROOTS = frozenset(
+    {route.prefix[0] for route in ROUTES} | {module[0] for module in SYNC_MODULES}
+)
+# The one accepted crate alias: it still selects Shuttle's timers for the crates that use them.
+ACCEPTED_ALIAS = ("shuttle_tokio", "tokio")
+# Packages whose families the owner selects. No other package depends on them.
+OWNER_ONLY_PACKAGES = frozenset(
+    {
+        "arc-swap",
+        "concurrent-queue",
+        "dashmap",
+        "flume",
+        "parking_lot",
+        "shuttle-dashmap",
+        "shuttle-parking_lot",
+        "shuttle-tokio-stream",
+        "shuttle-tokio-util",
+        "tokio-stream",
+    }
+)
 
 _USE_ITEM = re.compile(r"(?<![A-Za-z0-9_])use\s+(?P<tree>[^;]*);")
 _EXTERN_CRATE = re.compile(
@@ -60,10 +179,13 @@ _QUALIFIED_ATOMIC = re.compile(
 )
 _BARE_ATOMIC = re.compile(r"(?<![A-Za-z0-9_$])sync\s*::\s*atomic(?![A-Za-z0-9_])")
 _UNMODELED_PATH = re.compile(
-    r"(?<![A-Za-z0-9_:])nervix_primitives\s*::\s*unmodeled(?![A-Za-z0-9_])"
-    r"(?:\s*::\s*sync\s*::\s*atomic\s*::\s*(?P<item>[A-Za-z_][A-Za-z0-9_]*))?"
+    r"(?<![A-Za-z0-9_:])nervix_primitives\s*::\s*unmodeled(?P<rest>(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)*)"
 )
 _PRIMITIVES_ALIAS = re.compile(r"(?<![A-Za-z0-9_:])nervix_primitives\s+as\s+")
+_QUALIFIED_PATH = re.compile(
+    r"(?<![A-Za-z0-9_$])(?P<path>[A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)+)"
+)
+_BARE_THREAD_LOCAL = re.compile(r"(?<![A-Za-z0-9_:$])thread_local\s*!")
 
 
 def _selected_replacement(path: Sequence[str]) -> str:
@@ -140,11 +262,57 @@ def _contains_sync_atomic(path: Sequence[str]) -> bool:
     return any(path[index : index + 2] == ("sync", "atomic") for index in range(len(path) - 1))
 
 
+def route_of(path: Sequence[str]) -> tuple[str, ...] | None:
+    """The boundary path that replaces a governed `path`, or `None` when it is not governed.
+
+    Atomic paths have rules of their own and are not answered here.
+    """
+
+    path = tuple(path)
+    best: Route | None = None
+    for route in ROUTES:
+        if path[: len(route.prefix)] == route.prefix:
+            if best is None or len(route.prefix) > len(best.prefix):
+                best = route
+    if best is not None:
+        return best.replacement + path[len(best.prefix) :]
+    for module in SYNC_MODULES:
+        if path[: len(module)] == module and len(path) > len(module):
+            if path[len(module)] not in SYNC_UNGOVERNED:
+                return BLOCKING + path[len(module) :]
+    return None
+
+
+def governs_below(path: Sequence[str]) -> bool:
+    """Whether a governed path lies below `path`, so a glob over it or a new name for it reaches
+    governed items the rules could no longer see."""
+
+    path = tuple(path)
+    for route in ROUTES:
+        if len(path) < len(route.prefix) and route.prefix[: len(path)] == path:
+            return True
+    return any(len(path) <= len(module) and module[: len(path)] == path for module in SYNC_MODULES)
+
+
+def _unmodeled_item(rest: Sequence[str]) -> tuple[str, ...] | None:
+    """The unmodeled item a path below `unmodeled` names, by the longest prefix that is one."""
+
+    rest = tuple(rest)
+    for length in range(len(rest), 0, -1):
+        if rest[:length] in UNMODELED_ITEMS:
+            return rest[:length]
+    return None
+
+
 @dataclass
 class FileUses:
     """What one file takes from the boundary's unmodeled path, and where."""
 
     items: dict[str, int] = field(default_factory=dict)
+
+
+def _segments(text: str) -> tuple[str, ...]:
+    return tuple(segment.strip() for segment in text.split("::") if segment.strip())
 
 
 def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
@@ -155,6 +323,7 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
     code = file.code
     use_spans: list[tuple[int, int]] = []
     sync_aliases: set[str] = set()
+    sync_module_aliases: set[str] = set()
 
     for match in _USE_ITEM.finditer(code):
         use_spans.append((match.start(), match.end()))
@@ -166,26 +335,26 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
         for leaf in leaves:
             path = leaf.path
             if path[:1] == ("nervix_primitives",):
-                if path[:2] == ("nervix_primitives", "unmodeled"):
-                    if path[: len(UNMODELED)] != UNMODELED or len(path) <= len(UNMODELED):
+                if path[:2] == UNMODELED_ROOT:
+                    rest = path[len(UNMODELED_ROOT) :]
+                    if rest[-1:] == ("*",):
                         violations.append(
                             file.site(
                                 match.start(),
-                                f"{RULE}: import unmodeled atomics by name from "
-                                f"{'::'.join(UNMODELED)}, not `{'::'.join(path)}`",
+                                f"{RULE}: import unmodeled items by name, not with a glob",
                             )
                         )
                         continue
-                    item = path[len(UNMODELED)]
-                    if item == "*":
+                    if rest not in UNMODELED_ITEMS:
                         violations.append(
                             file.site(
                                 match.start(),
-                                f"{RULE}: import unmodeled atomics by name, not with a glob",
+                                f"{RULE}: import unmodeled items by name, such as "
+                                f"`{'::'.join(UNMODELED)}::AtomicUsize`, not `{'::'.join(path)}`",
                             )
                         )
                         continue
-                    unmodeled.items.setdefault(item, file.line_of(match.start()))
+                    unmodeled.items.setdefault("::".join(rest), file.line_of(match.start()))
                 elif len(path) == 1 and leaf.alias is not None:
                     violations.append(
                         file.site(
@@ -215,12 +384,43 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
                 continue
             if path in (("std", "sync"), ("core", "sync")):
                 sync_aliases.add(leaf.alias or "sync")
+            if path in SYNC_MODULES:
+                sync_module_aliases.add(leaf.alias or "sync")
+                continue
             if path in (("std",), ("core",)) and leaf.alias is not None:
                 violations.append(
                     file.site(
                         match.start(),
                         f"{RULE}: `{path[0]}` is renamed to `{leaf.alias}`, which hides its atomic "
                         "module from this check",
+                    )
+                )
+                continue
+            replacement = route_of(path)
+            if replacement is not None:
+                violations.append(
+                    file.site(
+                        match.start(),
+                        f"{RULE}: `{'::'.join(path)}` bypasses the boundary; use "
+                        f"`{'::'.join(replacement)}`",
+                    )
+                )
+                continue
+            if path[-1:] == ("*",) and governs_below(path[:-1]):
+                violations.append(
+                    file.site(
+                        match.start(),
+                        f"{RULE}: `use {'::'.join(path)}` brings governed primitives into scope; "
+                        "import them by name from `nervix_primitives`",
+                    )
+                )
+                continue
+            if leaf.alias is not None and governs_below(path):
+                violations.append(
+                    file.site(
+                        match.start(),
+                        f"{RULE}: `{'::'.join(path)}` is renamed to `{leaf.alias}`, which hides "
+                        "the governed primitives below it from this check",
                     )
                 )
 
@@ -241,6 +441,18 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
                     match.start(),
                     f"{RULE}: `nervix_primitives` is renamed to `{alias}`; name the boundary by "
                     "its own name",
+                )
+            )
+        if (
+            alias is not None
+            and name in GOVERNED_ROOTS - {"std", "core"}
+            and (name, alias) != ACCEPTED_ALIAS
+        ):
+            violations.append(
+                file.site(
+                    match.start(),
+                    f"{RULE}: `extern crate {name} as {alias}` selects a backend outside the "
+                    "boundary; use `nervix_primitives`",
                 )
             )
 
@@ -285,22 +497,55 @@ def check_source(file: RustFile) -> tuple[list[Site], FileUses]:
                     f"`sync`; use `{'::'.join(SELECTED)}`",
                 )
             )
+    for match in _QUALIFIED_PATH.finditer(body):
+        path = _segments(match.group("path"))
+        root = path[0]
+        if root in sync_module_aliases and path[1] not in SYNC_UNGOVERNED:
+            violations.append(
+                file.site(
+                    match.start(),
+                    f"{RULE}: `{'::'.join(path)}` reaches thread-blocking synchronization through "
+                    f"an imported `sync` module; use `{'::'.join(BLOCKING + path[1:])}`",
+                )
+            )
+            continue
+        if root not in GOVERNED_ROOTS:
+            continue
+        replacement = route_of(path)
+        if replacement is None:
+            continue
+        violations.append(
+            file.site(
+                match.start(),
+                f"{RULE}: `{'::'.join(path)}` bypasses the boundary; use "
+                f"`{'::'.join(replacement)}`",
+            )
+        )
+    for match in _BARE_THREAD_LOCAL.finditer(body):
+        violations.append(
+            file.site(
+                match.start(),
+                f"{RULE}: `thread_local!` is the standard library's; use "
+                "`nervix_primitives::thread_local!`",
+            )
+        )
     for match in _PRIMITIVES_ALIAS.finditer(body):
         violations.append(
             file.site(match.start(), f"{RULE}: name the boundary by its own name")
         )
     for match in _UNMODELED_PATH.finditer(body):
-        item = match.group("item")
+        rest = _segments(match.group("rest"))
+        item = _unmodeled_item(rest)
         if item is None:
             violations.append(
                 file.site(
                     match.start(),
-                    f"{RULE}: name an unmodeled atomic by its full path, "
-                    f"`{'::'.join(UNMODELED)}::<item>`",
+                    f"{RULE}: name an unmodeled item by its path, such as "
+                    f"`{'::'.join(UNMODELED)}::AtomicUsize`",
                 )
             )
             continue
-        unmodeled.items.setdefault(item, file.line_of(match.start()))
+        unmodeled.items.setdefault("::".join(item), file.line_of(match.start()))
     return violations, unmodeled
 
 
@@ -362,7 +607,7 @@ def check_permissions(
         if permission is None:
             first_line = min(file_uses.items.values())
             problems.append(
-                f"{path}:{first_line}: {RULE}: unmodeled atomics need a permission in "
+                f"{path}:{first_line}: {RULE}: unmodeled items need a permission in "
                 f"{PERMISSIONS}"
             )
             continue
@@ -377,7 +622,7 @@ def check_permissions(
         used_items = set(used.items) if used is not None else set()
         if not used_items:
             problems.append(
-                f"{PERMISSIONS}: stale permission: {permission.path} uses no unmodeled atomic"
+                f"{PERMISSIONS}: stale permission: {permission.path} uses no unmodeled item"
             )
             continue
         for item in sorted(permission.items - used_items):
@@ -458,6 +703,12 @@ def check_manifests(packages: Sequence[Package]) -> list[str]:
     problems: list[str] = []
     by_name = {package.name: package for package in packages}
     for package in packages:
+        if package.name != OWNER:
+            for dependency in sorted(OWNER_ONLY_PACKAGES & set(package.every_kind)):
+                problems.append(
+                    f"{package.manifest}: {RULE}: only {OWNER} depends on `{dependency}`, whose "
+                    "family it selects for the execution mode; take the family from it instead"
+                )
         loom = package.every_kind.get("loom")
         if loom is not None:
             if package.name not in (OWNER, HARNESS):
@@ -552,13 +803,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(problem, file=sys.stderr)
     if problems:
         print(
-            f"{len(problems)} {RULE} violation(s). Every atomic, ordering and fence comes from "
-            f"{'::'.join(SELECTED)}; a real atomic outside every model comes from "
-            f"{'::'.join(UNMODELED)} with a permission in {PERMISSIONS}.",
+            f"{len(problems)} {RULE} violation(s). Every governed primitive comes from {OWNER}; a "
+            f"real primitive outside every model comes from {'::'.join(UNMODELED_ROOT)} with a "
+            f"permission in {PERMISSIONS}.",
             file=sys.stderr,
         )
         return 1
-    print(f"{RULE}: every atomic goes through {OWNER}, and every mode feature is forwarded")
+    print(
+        f"{RULE}: every governed primitive goes through {OWNER}, and every mode feature is "
+        "forwarded"
+    )
     return 0
 
 
