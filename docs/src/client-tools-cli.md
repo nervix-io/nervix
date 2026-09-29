@@ -139,6 +139,35 @@ client may skip tick ids because its pending tick is replaced by the newest one.
 attachment, or the session holding it is interrupted and the clock is attached again on the next
 session, the line reads `[events] domain clock [<domain>] notice: ...` with the reason.
 
+The REPL prints these lines when it draws its next prompt: after the statement that is running
+finishes, or when you press Enter on an empty line.
+
+Output keeps printing across reconnects. When the session is lost, the next statement you run opens
+a new one; the client also opens one at once while a subscription or a followed clock waits to be
+restored. Server notices then resume with the new session, rows arrive from every subscription
+restored on it or opened after it, and a followed clock prints its state again once it is attached
+there. When the client cannot open a session within its 120-second retry deadline, a line names
+what is waiting and why, and the client keeps trying:
+
+```text
+[events] notice: subscription events could not resume yet: failed to connect to server; the client keeps trying
+```
+
+After a reconnect the CLI opens every subscription and attaches every clock again. When the new
+session refuses one, a notice line reports the server's message and when the next attempt follows:
+
+```text
+[events] subscription [watch] notice: opening the subscription again failed: stream 'orders' does not exist in domain 'quickstart'; the next attempt follows in 2s
+[events] domain clock [simulation] notice: attaching the clock again failed: session-scoped and client-local statements cannot be queued in a transaction; the next attempt follows in 1s
+```
+
+`DELETE SUBSCRIPTION` of a subscription no open session holds, because its session ended or the new
+session refused to open it again, completes at once and frees the name.
+
+If server notices arrive faster than the CLI reads them, the client drops the ones it held and
+`[events] notice: server notices were dropped because they arrived faster than they were read`
+marks the gap; the notices after it keep printing.
+
 ### Leaving
 
 `exit`, `quit`, `Ctrl-D`, or `Ctrl-C`.
@@ -268,6 +297,11 @@ nervix-cli --domain quickstart subscribe sampled orders \
 `--dropping` and `--blocking` are mutually exclusive. Subscription semantics, sampling, and
 backpressure are covered in [Sessions](sessions.md).
 
+The subcommand prints server notices beside the rows, and keeps printing both across reconnects:
+the client opens the subscription again on its next session, reports the gap as an interruption
+notice, and resumes the notices of the new session, as described in [Asynchronous
+Output](#asynchronous-output).
+
 ## Following A Domain Clock
 
 The `domain-clock` subcommand attaches to the selected domain's clock and prints its state and
@@ -291,7 +325,9 @@ The domain and generation identify each state. A paced state includes its period
 origin, UTC anchor, and rate. A tick includes its id, logical boundary, the authority's UTC
 observation, and the serving node's logical reading. Tick ids increase within a generation but may
 skip when the client or server coalesces progress. After a redirect or transport loss, an
-interruption line reports the gap and the client's restored attachment prints the fresh state.
+interruption line reports the gap and the client's restored attachment prints the fresh state. When
+the new session refuses to attach the clock again, a notice line reports the refusal and when the
+next attempt follows.
 The server may end an attachment when the domain disappears; the end line is the last clock line
 and the command exits. Ctrl-C detaches the clock and exits successfully. A refused attach,
 including a missing domain, prints the typed reason on stderr and exits nonzero.

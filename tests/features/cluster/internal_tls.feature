@@ -42,6 +42,7 @@ Feature: Internal TLS
     Given a 1 node nervix cluster is started
     When an interconnect peer with "<fault>" credentials attempts to connect to node "node-1"
     Then the interconnect peer is rejected
+    And node "node-1" eventually observes a stable leader
 
     Examples:
       | fault                  |

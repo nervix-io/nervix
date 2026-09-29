@@ -496,7 +496,9 @@ operation's domain semantics.
    so their reserved quotas and typed outcomes apply independently of generic events.
 3. **Streamed response.** The receiver declares the exact byte length, then sends a flow-controlled
    sequence of chunks. The reader rejects early end, extra bytes, and a stalled chunk. Dropping the
-   reader cancels the stream and releases its reservations.
+   reader cancels the stream and releases its reservations. The producer's opening callback and
+   each chunk carry a local `StreamHandlerError` report; an admission, storage, or encoding cause
+   stays beneath that handler context until the response reaches the wire boundary.
 4. **Ordered duplex stream.** Each direction sends length-prefixed, validated frames in order and
    may close independently. Opening the stream is bounded by the operation's declared setup
    deadline. An idle established stream is valid; the owning protocol sets deadlines for answers it
@@ -951,6 +953,15 @@ interval falls back to its gossip liveness, even though no failure was recorded.
 therefore leaves scheduling and runtime availability no later than when gossip declares it dead and
 its last observation has aged out, whether or not any probe to it completes.
 
+Command completion reads the leader's effective availability view through the
+`application_completion_peers` management progress request. The response names the leader's
+incarnation, Raft term, and required process incarnations. A follower uses it only while its own
+Raft leader and term still match, and includes its own incarnation in the barrier. Failure to reach
+the leader leaves the command pending. This avoids conflicting completion sets when application
+health is asymmetric: a connected follower may still probe an unreachable peer successfully after
+the leader has retired that peer. Revision and HTTPS listener progress requests remain bound to the
+reported incarnation.
+
 `SHOW CLUSTER STATUS` exposes the interconnect address, endpoint generation, observation age,
 observation outcome, and derived availability. Its `connected` status means the latest application
 probe is healthy, rather than merely that a transport pool exists.
@@ -1030,6 +1041,12 @@ Transport failures identify name-resolution, setup, authentication, admission, e
 flow-control, timeout, remote-response, and target-departure failures separately. Typed remote
 errors remain available to the operation owner, which decides whether a request is safe to retry.
 The interconnect does not infer idempotency for arbitrary control-plane or runtime operations.
+Local transport operations return `error_stack` reports. TLS and wire failures retain their typed
+causes beneath `TransportError`; typed requests and stream readers add `RequestError` context while
+retaining the transport report. Deadline, shutdown, quota, cancellation, relay-rejection, and
+indeterminate-delivery decisions inspect the current typed context, not formatted report text.
+An answering node sends its established remote failure class or stream rejection text over the
+wire; a local report's cause chain is not serialized into an HTTP/2 response.
 
 Connections, request state, relay grants, delivery reconciliation, progress trackers, and
 acknowledgement maps are never persisted. Durable control-plane state remains in consensus, and

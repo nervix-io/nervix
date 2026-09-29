@@ -54,6 +54,20 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         self.assertNotIn("pull-requests: write", benchmark)
         self.assertNotIn("issues: write", benchmark)
 
+    def test_benchmark_job_installs_flatc_before_running(self) -> None:
+        workflow = Path(".github/workflows/docker-build.yaml").read_text()
+        benchmark = workflow.split("\n  benchmark:", maxsplit=1)[1]
+        benchmark = benchmark.split("\n  benchmark-comment:", maxsplit=1)[0]
+
+        flatc_setup = (
+            "- name: Setup flatc\n"
+            "        uses: Nugine/setup-flatc@v1\n"
+            "        with:\n"
+            '          version: "25.12.19"'
+        )
+        self.assertIn(flatc_setup, benchmark)
+        self.assertLess(benchmark.index(flatc_setup), benchmark.index("- name: Run benchmarks"))
+
 
 if __name__ == "__main__":
     unittest.main()

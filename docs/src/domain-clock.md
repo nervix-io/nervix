@@ -298,6 +298,14 @@ frame. See [Domain Clock Attachment](./sessions.md#domain-clock-attachment) for 
 and [Client Session Protocol](./client-session-protocol.md#domain-clock-attachment) for how the
 attachment travels in the protocol.
 
+The Rust client keeps the attach reply's state as its latest followed clock. The shared C binding
+gives hosts a separate retained `nx_clock_event` handle for later state changes, ticks,
+interruptions, refused restorations, and ends through `nx_session_next_clock_event`. Its typed
+accessors expose the domain, generation, state and paced mapping, tick, or end reason. The binding
+does not expose the initial state in the attach reply as a typed value, so a host attaching to an
+already paced clock can use tick readings as they arrive but needs a later state change to read that
+generation's mapping.
+
 ## Execution-Time Snapshots
 
 The clock is sampled once when a unit of domain work is accepted. The resulting execution snapshot
@@ -334,6 +342,12 @@ Generated records use the snapshot assigned to their generating operation. Buffe
 batches and their retries retain the snapshot from acceptance, while external observation fields
 whose contract is actual UTC obtain that value at the shared source-host intake boundary or their
 connector boundary.
+
+An HTTP emitter's prepared method, target, headers, and optional body retain the execution
+snapshot of the admitted record through retries and an entity-pause drain. Changing the emitter
+does not re-evaluate an admitted request under the replacement. Attempt timeouts, retry backoff,
+an HTTP-date `Retry-After`, and shutdown or drain deadlines remain physical waits; a domain's
+`TIME RATE` does not shorten them.
 
 ## Admission Windows
 
@@ -408,6 +422,12 @@ directly. That boundary and the capability that arms physical deadlines belong t
 contract, which the runtime and every connector crate share, so a connector stamps arrival time
 through the same owner the runtime uses. Repository validation checks these ownership boundaries
 across the workspace, so a new runtime or connector path must choose its time class explicitly.
+
+The web console's clock display is an external observer: its clock-display module reads browser UTC
+to project an attached paced mapping for the screen. That projection does not enter a node's read
+watermark, alter tick progress, or supply domain time to execution. The repository clock-boundary
+check declares this module as the browser observation owner; other console modules receive its UTC
+sample instead of reading the wall clock themselves.
 
 ## Recovery And Distributed Guarantees
 

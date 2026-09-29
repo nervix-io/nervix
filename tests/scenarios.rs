@@ -96,7 +96,11 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uuid::Uuid;
 
 use crate::common::{
-    client_conformance::{ClientProbe, ProbeRuntime, ProbeTarget, SUBSCRIBED_LINE, corpus_report},
+    cli_terminal::{CliTerminal, DisplayWaitError},
+    client_conformance::{
+        ATTACHED_LINE, ClientProbe, ProbeExercise, ProbeRuntime, ProbeTarget, SUBSCRIBED_LINE,
+        corpus_report,
+    },
     cluster::{
         BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
         HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
@@ -138,6 +142,7 @@ use crate::common::{
 
 mod backup;
 mod common;
+mod database_batches;
 mod domain_clock_attachment;
 mod ingestion_time;
 mod session_protocol;
@@ -302,6 +307,8 @@ struct ScenarioWorld {
     cli_subscription_lines: Option<StdArc<StdMutex<VecDeque<String>>>>,
     cli_subscription_reader: Option<AbortOnDropHandle<()>>,
     cli_clock_process: Option<CliClockProcess>,
+    /// The interactive CLI a scenario types into through a pseudo-terminal.
+    cli_terminal: Option<CliTerminal>,
     /// The whole outcome of the last command a named client ran, for assertions that read more
     /// than its message.
     last_client_outcome: Option<ClientCommandOutcome>,
@@ -352,6 +359,7 @@ struct ScenarioWorld {
     fault_injection: FaultInjection,
     consensus_commit_delays: BTreeMap<String, Duration>,
     burst_raft_retention_peak: Option<nervix_consensus::RaftLogRetention>,
+    saved_raft_log_heads: BTreeMap<String, Option<u64>>,
     durable_catch_up: Option<DurableCatchUpObservation>,
     durable_catch_up_writer: Option<DurableCatchUpWriter>,
     follower_commands_memory: Option<FollowerCommandsMemoryObservation>,
@@ -463,6 +471,7 @@ impl fmt::Debug for ScenarioWorld {
                 &self.avro_http_optional_fields.len(),
             )
             .field("burst_raft_retention_peak", &self.burst_raft_retention_peak)
+            .field("saved_raft_log_heads", &self.saved_raft_log_heads)
             .field("transaction_qualification", &self.transaction_qualification)
             .field("temp_root_initialized", &self.temp_root.is_some())
             .field("browser_initialized", &self.browser.is_some())
@@ -3170,9 +3179,59 @@ fn then_client_wire_command_transport_artifact_exists(world: &mut ScenarioWorld)
     );
 }
 
-/// How long a probe may take to open its session and subscription. Starting a JVM or compiling
-/// nothing still costs seconds on a loaded machine, so this bounds a wait, not a race.
+/// How long a probe may take to open its session and subscription or attachment. Starting a JVM
+/// or compiling nothing still costs seconds on a loaded machine, so this bounds a wait, not a race.
 const CLIENT_PROBE_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Where a probe of the scenario's domain connects when it starts on `node_id`.
+fn client_probe_target(
+    world: &ScenarioWorld,
+    node_id: &str,
+    exercise: ProbeExercise,
+) -> ProbeTarget {
+    let cluster = world.cluster();
+    let grpc_uri = cluster
+        .grpc_uri(node_id)
+        .expect("the probe's node belongs to the cluster");
+    let console = cluster
+        .web_console_url(node_id)
+        .expect("the probe's node belongs to the cluster");
+    let mut websocket_uri =
+        url::Url::parse(&console).expect("the harness builds a valid console URL");
+    websocket_uri
+        .set_scheme("ws")
+        .expect("an http URL can take the ws scheme");
+    websocket_uri.set_path("/console/ws");
+    ProbeTarget {
+        grpc_uri,
+        websocket_uri: websocket_uri.to_string(),
+        username: TEST_AUTH_USERNAME.to_string(),
+        password: TEST_AUTH_PASSWORD.to_string(),
+        domain: world.domain.clone(),
+        exercise,
+    }
+}
+
+/// Starts a probe and waits until it prints `ready_line`, the point a scenario continues from.
+async fn start_client_probe(
+    world: &mut ScenarioWorld,
+    runtime: ProbeRuntime,
+    node_id: &str,
+    target: ProbeTarget,
+    ready_line: &str,
+) {
+    append_cucumber_log_line(&format!(
+        "client probe {runtime:?}: node={node_id} target={target:?}"
+    ));
+    let mut probe = ClientProbe::start(runtime, target)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    probe
+        .wait_for_line(ready_line, CLIENT_PROBE_SUBSCRIBE_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    world.client_probe = Some(probe);
+}
 
 #[when(
     expr = "the {string} client probe subscribes as {string} to relay {string} on node {string} \
@@ -3190,40 +3249,27 @@ async fn when_client_probe_subscribes(
         .parse()
         .expect("the step names a known probe runtime");
     let node_id = expand_placeholders(world, &node_id);
-    let cluster = world.cluster();
-    let grpc_uri = cluster
-        .grpc_uri(&node_id)
-        .expect("the probe's node belongs to the cluster");
-    let console = cluster
-        .web_console_url(&node_id)
-        .expect("the probe's node belongs to the cluster");
-    let mut websocket_uri =
-        url::Url::parse(&console).expect("the harness builds a valid console URL");
-    websocket_uri
-        .set_scheme("ws")
-        .expect("an http URL can take the ws scheme");
-    websocket_uri.set_path("/console/ws");
-    let target = ProbeTarget {
-        grpc_uri,
-        websocket_uri: websocket_uri.to_string(),
-        username: TEST_AUTH_USERNAME.to_string(),
-        password: TEST_AUTH_PASSWORD.to_string(),
-        domain: world.domain.clone(),
+    let exercise = ProbeExercise::Subscription {
         relay: expand_placeholders(world, &relay),
         subscription: expand_placeholders(world, &subscription),
         rows,
     };
-    append_cucumber_log_line(&format!(
-        "client probe {runtime:?}: node={node_id} target={target:?}"
-    ));
-    let mut probe = ClientProbe::start(runtime, target)
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-    probe
-        .wait_for_line(SUBSCRIBED_LINE, CLIENT_PROBE_SUBSCRIBE_TIMEOUT)
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-    world.client_probe = Some(probe);
+    let target = client_probe_target(world, &node_id, exercise);
+    start_client_probe(world, runtime, &node_id, target, SUBSCRIBED_LINE).await;
+}
+
+#[when(expr = "the {string} client probe attaches to the domain clock on node {string}")]
+async fn when_client_probe_attaches_to_the_domain_clock(
+    world: &mut ScenarioWorld,
+    runtime: String,
+    node_id: String,
+) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .expect("the step names a known probe runtime");
+    let node_id = expand_placeholders(world, &node_id);
+    let target = client_probe_target(world, &node_id, ProbeExercise::DomainClock);
+    start_client_probe(world, runtime, &node_id, target, ATTACHED_LINE).await;
 }
 
 #[when(expr = "the {string} client probe decodes the conformance corpus")]
@@ -4005,6 +4051,148 @@ async fn when_cli_follows_missing_domain(world: &mut ScenarioWorld, domain: Stri
     .unwrap_or_else(|_| panic!("the CLI missing-domain request did not finish"))
     .unwrap_or_else(|error| panic!("the CLI missing-domain process did not start: {error}"));
     world.last_cli_output = Some(output);
+}
+
+/// How long the interactive CLI may take to display what a step expects. A reconnect after a node
+/// restart happens inside that wait, so it is bounded generously.
+const CLI_TERMINAL_DISPLAY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a repeated post waits for the interactive CLI to display its row before posting again.
+const CLI_TERMINAL_REPOST_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long the interactive CLI may take to exit once it is asked to.
+const CLI_TERMINAL_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[when(expr = "the CLI REPL is started on node {string}")]
+async fn when_cli_repl_is_started(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    let terminal = CliTerminal::start(
+        &scenario_cli_binary(),
+        &[
+            "--server",
+            &grpc_uri,
+            "--domain",
+            &world.domain,
+            "--username",
+            TEST_AUTH_USERNAME,
+            "--password",
+            TEST_AUTH_PASSWORD,
+        ],
+    )
+    .unwrap_or_else(|error| panic!("the CLI REPL failed to start on a terminal: {error}"));
+    // The banner follows the connected session and precedes the first prompt.
+    if let Err(error) = terminal
+        .wait_for_display("nervix-cli connected to", CLI_TERMINAL_DISPLAY_TIMEOUT)
+        .await
+    {
+        panic!(
+            "the CLI REPL did not connect: {error}; it displayed:{}",
+            terminal.transcript()
+        );
+    }
+    world.cli_terminal = Some(terminal);
+}
+
+#[when(expr = "the CLI REPL runs {string}")]
+async fn when_cli_repl_runs(world: &mut ScenarioWorld, line: String) {
+    let line = expand_placeholders(world, &line);
+    let terminal = world
+        .cli_terminal
+        .as_ref()
+        .verified("a preceding step started the CLI REPL");
+    if let Err(error) = terminal.type_line(&line).await {
+        panic!(
+            "the CLI REPL cannot run {line:?}: {error}; it displayed:{}",
+            terminal.transcript()
+        );
+    }
+}
+
+#[then(expr = "the CLI REPL eventually displays {string}")]
+async fn then_cli_repl_eventually_displays(world: &mut ScenarioWorld, expected: String) {
+    let expected = expand_placeholders(world, &expected);
+    let terminal = world
+        .cli_terminal
+        .as_ref()
+        .verified("a preceding step started the CLI REPL");
+    if let Err(error) = terminal
+        .wait_for_display(&expected, CLI_TERMINAL_DISPLAY_TIMEOUT)
+        .await
+    {
+        panic!(
+            "the CLI REPL did not display {expected:?}: {error}; it displayed:{}",
+            terminal.transcript()
+        );
+    }
+}
+
+/// Rows a relay publishes while the cluster is still converging after a node restart can be lost in
+/// transit, so the payload is posted again until the interactive CLI displays the row it expects.
+#[when(
+    expr = "http payload is posted repeatedly to node {string} with host {string} path {string} \
+            until the CLI REPL displays {string}"
+)]
+async fn when_http_payload_is_posted_until_the_cli_repl_displays(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    host: String,
+    path: String,
+    expected: String,
+    #[step] step: &Step,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let expected = expand_placeholders(world, &expected);
+    let payload = expand_placeholders(world, docstring(step));
+    let terminal = world
+        .cli_terminal
+        .as_ref()
+        .verified("a preceding step started the CLI REPL");
+    let deadline = Instant::now() + CLI_TERMINAL_DISPLAY_TIMEOUT;
+    loop {
+        tokio::task::consume_budget().await;
+        world
+            .cluster()
+            .publish_http(&node_id, &host, &path, &payload)
+            .await
+            .unwrap_or_else(|error| panic!("failed to post http payload: {error}"));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let wait = remaining.min(CLI_TERMINAL_REPOST_INTERVAL);
+        match terminal.wait_for_display(&expected, wait).await {
+            Ok(()) => return,
+            Err(DisplayWaitError::Timeout { .. }) if Instant::now() < deadline => {}
+            Err(error) => panic!(
+                "the CLI REPL did not display {expected:?} from repeated posts within \
+                 {CLI_TERMINAL_DISPLAY_TIMEOUT:?}: {error}; it displayed:{}",
+                terminal.transcript()
+            ),
+        }
+    }
+}
+
+#[then("the CLI REPL ends successfully")]
+async fn then_cli_repl_ends_successfully(world: &mut ScenarioWorld) {
+    let terminal = world
+        .cli_terminal
+        .as_mut()
+        .verified("a preceding step started the CLI REPL");
+    let exited = terminal.wait_for_exit(CLI_TERMINAL_EXIT_TIMEOUT).await;
+    match exited {
+        Ok(status) if status.success() => {}
+        Ok(status) => panic!(
+            "the CLI REPL ended with {status}; it displayed:{}",
+            terminal.transcript()
+        ),
+        Err(error) => panic!(
+            "the CLI REPL did not end: {error}; it displayed:{}",
+            terminal.transcript()
+        ),
+    }
 }
 
 /// The directory holding the NSPL files a formatter scenario writes.
@@ -5694,7 +5882,42 @@ async fn then_leader_purged_covered_log(world: &mut ScenarioWorld, duration: Str
     let observer = world
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&leader));
-    await_covered_log_purge(&observer, &duration).await;
+    await_covered_log_purge(&observer, &duration, None).await;
+}
+
+#[given(expr = "node {string} raft log head is saved before stop")]
+async fn given_node_raft_log_head_is_saved_before_stop(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&node_id));
+    let retention = observer.raft_log_retention();
+    world.saved_raft_log_heads.insert(
+        node_id,
+        retention.last_log_index.max(retention.snapshot_index),
+    );
+}
+
+#[then(
+    expr = "within {string} the leader node has purged its covered raft log beyond stopped node \
+            {string}"
+)]
+async fn then_leader_purged_covered_log_beyond_stopped_node(
+    world: &mut ScenarioWorld,
+    duration: String,
+    stopped_node_id: String,
+) {
+    let stopped_node_id = expand_placeholders(world, &stopped_node_id);
+    let stopped_head = world
+        .saved_raft_log_heads
+        .get(&stopped_node_id)
+        .copied()
+        .verified("the scenario saved this follower's log head before stopping it");
+    let leader = running_leader_node(world).await;
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&leader));
+    await_covered_log_purge(&observer, &duration, stopped_head).await;
 }
 
 #[then(
@@ -5789,13 +6012,14 @@ async fn await_purge_beyond_retention_peak(
 async fn await_covered_log_purge(
     observer: &nervix_consensus::Observer,
     duration: &str,
+    beyond: Option<u64>,
 ) -> nervix_consensus::RaftLogRetention {
     let deadline = Instant::now()
         + humantime::parse_duration(duration).expect("step duration must be a valid duration");
     loop {
         tokio::task::consume_budget().await;
         let retention = observer.raft_log_retention();
-        if retention.purged_index.is_some() {
+        if retention.purged_index > beyond {
             assert!(
                 retention.snapshot_index >= retention.purged_index,
                 "the leader purged entries its snapshot does not cover: {retention:?}"
@@ -5804,7 +6028,8 @@ async fn await_covered_log_purge(
         }
         assert!(
             Instant::now() < deadline,
-            "the leader did not purge its covered raft log within {duration}: {retention:?}"
+            "the leader did not purge its covered raft log beyond {beyond:?} within {duration}: \
+             {retention:?}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -7172,6 +7397,44 @@ async fn when_the_dns_fixture_answers_name_with(
         .cluster()
         .answer_dns_service(&name, answer)
         .expect("the cluster has a DNS fixture");
+}
+
+/// Stand a TCP forwarder at `address` in front of the gRPC endpoint of `node_id`, and record the
+/// forwarded endpoint in placeholder `forwarded_grpc`. A client connected through it loses its
+/// session when the forwarder stops, while the node keeps serving every other session.
+#[given(expr = "the gRPC endpoint of node {string} is forwarded from fixture address {string}")]
+async fn given_node_grpc_endpoint_is_forwarded(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    address: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node_id)
+        .expect("failed to resolve the node gRPC URI");
+    let mut url = url::Url::parse(&grpc_uri).expect("a node gRPC URI is a URL");
+    let host = url
+        .host_str()
+        .expect("a node gRPC URI has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("a node listens for gRPC on a literal address");
+    let port = url.port().expect("a node gRPC URI names its port");
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .expect("a forwarder is named by its address");
+    let forwarders = TcpForwarders::start(&[address], std::net::SocketAddr::new(host, port))
+        .await
+        .expect("the gRPC forwarder could not listen");
+    url.set_ip_host(address)
+        .expect("a gRPC URL can carry an address host");
+    url.set_port(Some(forwarders.port()))
+        .expect("a gRPC URL can carry the forwarder port");
+    world.placeholders.insert(
+        "forwarded_grpc".to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
+    world.tcp_forwarders = Some(forwarders);
 }
 
 #[when(expr = "the TCP forwarder at {string} stops")]
@@ -9160,6 +9423,61 @@ async fn given_health_responses_fail(world: &mut ScenarioWorld, responding_node_
     world
         .cluster()
         .fail_health_responses_from(&responding_node_id);
+}
+
+#[when(expr = "application health probes from node {string} to node {string} fail")]
+async fn when_directed_health_probes_fail(
+    world: &mut ScenarioWorld,
+    probing_node_id: String,
+    responding_node_id: String,
+) {
+    let probing_node_id = expand_placeholders(world, &probing_node_id);
+    let responding_node_id = expand_placeholders(world, &responding_node_id);
+    world
+        .cluster()
+        .fail_health_responses_between(&probing_node_id, &responding_node_id);
+}
+
+#[when(expr = "runtime preparation on node {string} is paused")]
+async fn when_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_runtime_preparation_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "node {string} reaches its runtime preparation pause")]
+async fn then_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        world
+            .fault_injection
+            .wait_for_runtime_preparation_pause(&crate::common::cluster::node_name(&node_id)),
+    )
+    .await
+    .expect("runtime preparation did not reach its pause");
+}
+
+#[when(expr = "runtime preparation on node {string} is released")]
+async fn when_runtime_preparation_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_runtime_preparation_pause(&crate::common::cluster::node_name(&node_id));
+}
+
+#[when(expr = "application health probes from node {string} to node {string} are restored")]
+async fn when_directed_health_probes_are_restored(
+    world: &mut ScenarioWorld,
+    probing_node_id: String,
+    responding_node_id: String,
+) {
+    let probing_node_id = expand_placeholders(world, &probing_node_id);
+    let responding_node_id = expand_placeholders(world, &responding_node_id);
+    world
+        .cluster()
+        .restore_health_responses_between(&probing_node_id, &responding_node_id);
 }
 
 #[when(expr = "gossip exchanges involving node {string} are blocked with a {string} send delay")]
@@ -11935,12 +12253,22 @@ async fn connect_named_client_to_node(
     node_id: String,
     seed_nodes: Vec<String>,
 ) {
-    let name = expand_placeholders(world, &name);
     let node_id = expand_placeholders(world, &node_id);
     let grpc_uri = world
         .cluster()
         .grpc_uri(&node_id)
         .expect("failed to resolve client node gRPC URI");
+    connect_named_client(world, name, grpc_uri, seed_nodes).await;
+}
+
+/// Connects a named client to `grpc_uri`, with the gRPC endpoints of `seed_nodes` as its seeds.
+async fn connect_named_client(
+    world: &mut ScenarioWorld,
+    name: String,
+    grpc_uri: String,
+    seed_nodes: Vec<String>,
+) {
+    let name = expand_placeholders(world, &name);
     let mut options =
         client_connect_options(&grpc_uri).expect("failed to build client tls options");
     for seed_node in seed_nodes {
@@ -11955,7 +12283,7 @@ async fn connect_named_client_to_node(
     let client = Client::connect_with_options(&grpc_uri, client_domain(&world.domain), options)
         .await
         .unwrap_or_else(|error| {
-            panic!("failed to connect client '{name}' to '{node_id}': {error}")
+            panic!("failed to connect client '{name}' to '{grpc_uri}': {error}")
         });
     assert!(
         world
@@ -11983,6 +12311,17 @@ async fn given_named_client_is_connected_with_cluster_seeds(
 ) {
     let seeds = world.cluster().node_ids();
     connect_named_client_to_node(world, name, node_id, seeds).await;
+}
+
+#[given(expr = "client {string} is connected to {string} with cluster seeds")]
+async fn given_named_client_is_connected_to_endpoint_with_cluster_seeds(
+    world: &mut ScenarioWorld,
+    name: String,
+    grpc_uri: String,
+) {
+    let grpc_uri = expand_placeholders(world, &grpc_uri);
+    let seeds = world.cluster().node_ids();
+    connect_named_client(world, name, grpc_uri, seeds).await;
 }
 
 #[given(expr = "client {string} is connected to the leader node")]
@@ -14446,6 +14785,71 @@ async fn then_selector_contains_text(
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+async fn wait_for_selector_to_advance<T>(world: &ScenarioWorld, selector: &str, bound: Duration)
+where
+    T: std::str::FromStr + PartialOrd + Copy + fmt::Debug,
+{
+    let page = world
+        .browser_page
+        .as_ref()
+        .assured("the scenario opened the console before observing its clock");
+    let selector = expand_placeholders(world, selector);
+    let locator = page.locator(&selector);
+    let deadline = Instant::now() + bound;
+    let mut first: Option<T> = None;
+    loop {
+        tokio::task::consume_budget().await;
+        let text = locator
+            .all_inner_texts()
+            .await
+            .assured("the browser clock selector is readable")
+            .join("\n");
+        if let Ok(value) = text.trim().parse::<T>() {
+            if let Some(first_value) = &first {
+                if value > *first_value {
+                    return;
+                }
+            } else {
+                first = Some(value);
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "selector '{selector}' did not advance from {first:?} within {bound:?}; last text: \
+             '{text}'"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(expr = "selector {string} advances as a timestamp within {int} milliseconds")]
+async fn then_selector_timestamp_advances(
+    world: &mut ScenarioWorld,
+    selector: String,
+    bound_milliseconds: usize,
+) {
+    wait_for_selector_to_advance::<nervix_models::Timestamp>(
+        world,
+        &selector,
+        Duration::from_millis(bound_milliseconds.arch_into()),
+    )
+    .await;
+}
+
+#[then(expr = "selector {string} advances as a number within {int} milliseconds")]
+async fn then_selector_number_advances(
+    world: &mut ScenarioWorld,
+    selector: String,
+    bound_milliseconds: usize,
+) {
+    wait_for_selector_to_advance::<u64>(
+        world,
+        &selector,
+        Duration::from_millis(bound_milliseconds.arch_into()),
+    )
+    .await;
 }
 
 #[then(regex = r#"^selector "([^"]+)" contains$"#)]
@@ -17934,6 +18338,37 @@ fn gossip_live_nodes_from_status(status: &str) -> BTreeSet<&str> {
     live_nodes
 }
 
+#[then(expr = "node {string} sees node {string} live")]
+async fn then_connected_quorum_observes_lagging_follower(
+    world: &mut ScenarioWorld,
+    connected_node: String,
+    lagging_node: String,
+) {
+    let connected_node = expand_placeholders(world, &connected_node);
+    let lagging_node = expand_placeholders(world, &lagging_node);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::task::consume_budget().await;
+        let connected_status = world
+            .cluster()
+            .status_text(
+                &connected_node,
+                PhaseDeadline::after(STATUS_REQUEST_TIMEOUT),
+            )
+            .await
+            .expect("connected node status request failed");
+        if gossip_live_nodes_from_status(&connected_status).contains(lagging_node.as_str()) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node '{connected_node}' did not see '{lagging_node}' live; \
+             status:\n{connected_status}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[then(expr = "the last cluster status work on healthy nodes {string} is saved")]
 async fn then_save_healthy_scheduled_work(world: &mut ScenarioWorld, node_ids: String) {
     let node_ids = expand_placeholders(world, &node_ids);
@@ -21379,6 +21814,97 @@ async fn then_named_client_observes_subscription_interrupted(
     assert_eq!(interrupted.subscription.name.as_str(), subscription_name);
 }
 
+#[then(
+    expr = "within {string} client {string} observes a failed restoration of subscription {string}"
+)]
+async fn then_named_client_observes_failed_restoration(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_name: String,
+    subscription_name: String,
+    #[step] step: &Step,
+) {
+    let duration = humantime::parse_duration(&duration)
+        .assured("the restoration deadline is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let expected = expand_placeholders(world, docstring(step));
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let event = tokio::time::timeout(duration, client.next_subscription())
+        .await
+        .unwrap_or_else(|_| {
+            panic!("client '{client_name}' did not report a failed restoration within {duration:?}")
+        })
+        .unwrap_or_else(|error| panic!("client '{client_name}' event failed: {error}"));
+    let nervix_client_core::SubscriptionEvent::RestorationFailed(failure) = event else {
+        panic!("client '{client_name}' did not report a failed restoration: {event:?}");
+    };
+    assert_eq!(failure.subscription.name.as_str(), subscription_name);
+    assert!(
+        failure.message.contains(expected.trim()),
+        "client '{client_name}' reported the restoration failure {:?}, expected it to contain \
+         {expected:?}",
+        failure.message
+    );
+}
+
+#[then(expr = "client {string} subscription {string} is interrupted")]
+async fn then_named_client_subscription_is_interrupted(
+    world: &mut ScenarioWorld,
+    client_name: String,
+    subscription_name: String,
+) {
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"));
+    let name = nervix_models::SubscriptionName::parse(&subscription_name)
+        .assured("the scenario subscription name is valid");
+    // A refused restoration is sent again after a wait, so the subscription is briefly restoring
+    // while an attempt is in flight; it is interrupted again once that attempt is refused.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        tokio::task::consume_budget().await;
+        let lifecycle = client.subscription_lifecycle(&name);
+        if let Some(nervix_client_core::SubscriptionLifecycle::Interrupted(_)) = lifecycle {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "client '{client_name}' subscription '{subscription_name}' is not interrupted: \
+             {lifecycle:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(expr = "client {string} no longer holds subscription {string}")]
+async fn then_named_client_no_longer_holds_subscription(
+    world: &mut ScenarioWorld,
+    client_name: String,
+    subscription_name: String,
+) {
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"));
+    let name = nervix_models::SubscriptionName::parse(&subscription_name)
+        .assured("the scenario subscription name is valid");
+    assert_eq!(
+        client.subscription_lifecycle(&name),
+        None,
+        "client '{client_name}' still holds subscription '{subscription_name}'"
+    );
+}
+
 #[then(expr = "client {string} subscription {string} is active")]
 async fn then_named_client_subscription_is_active(
     world: &mut ScenarioWorld,
@@ -22241,7 +22767,7 @@ async fn then_generator_occurrences_preserve_branches(
         .checked_add(duration)
         .assured("scenario durations fit Tokio's monotonic instant range");
     let mut branches_by_timestamp = BTreeMap::<_, BTreeSet<String>>::new();
-    let mut latest_timestamp = None;
+    let mut latest_timestamp_by_branch = BTreeMap::<String, i64>::new();
     let mut observed = Vec::new();
 
     loop {
@@ -22321,19 +22847,21 @@ async fn then_generator_occurrences_preserve_branches(
         let timestamp = timestamp
             .timestamp_nanos_opt()
             .assured("generator scenario timestamps fit signed Unix nanoseconds");
-        if !branches_by_timestamp.contains_key(&timestamp) {
-            if let Some(latest_timestamp) = latest_timestamp.as_ref() {
-                assert!(
-                    &timestamp > latest_timestamp,
-                    "generator occurrence timestamps arrived out of order: {observed:?}, {payload}"
-                );
-            }
-            latest_timestamp = Some(timestamp);
+        if let Some(previous) = latest_timestamp_by_branch.insert(branch.to_string(), timestamp) {
+            assert!(
+                timestamp > previous,
+                "generator timestamps for branch '{branch}' did not increase: {observed:?}, \
+                 {payload}"
+            );
         }
-        branches_by_timestamp
+        let inserted = branches_by_timestamp
             .entry(timestamp)
             .or_default()
             .insert(branch.to_string());
+        assert!(
+            inserted,
+            "generator repeated an occurrence for branch '{branch}': {payload}"
+        );
         world.last_subscription_payload = Some(payload.clone());
         observed.push(payload);
     }
@@ -23263,12 +23791,22 @@ async fn then_otel_collector_receives_split_exports(
             .expect("OpenTelemetry Collector logs must be readable");
         let mut two_record_export = None;
         let mut one_record_export = None;
+        let mut observed = Vec::new();
         for (index, block) in logs.split(export_boundary.as_str()).enumerate() {
             let count = block
                 .lines()
                 .next()
                 .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
                 .and_then(|header| header[count_key].as_u64());
+            let carried = members
+                .iter()
+                .filter(|member| block.contains(**member))
+                .count();
+            if carried > 0 {
+                observed.push(format!(
+                    "export {index}: {count:?} {count_key}, {carried} named"
+                ));
+            }
             if count == Some(2)
                 && block.find(members[0]).is_some_and(|first| {
                     block.find(members[1]).is_some_and(|second| first < second)
@@ -23287,7 +23825,8 @@ async fn then_otel_collector_receives_split_exports(
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for ordered two-member and one-member {signal} exports"
+            "timed out waiting for ordered two-member and one-member {signal} exports; observed \
+             {observed:?}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -25709,6 +26248,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.cli_subscription_process = None;
                 world.cli_subscription_lines = None;
                 world.cli_clock_process = None;
+                world.cli_terminal = None;
                 world.server_process_http_load = None;
                 world.held_resource_upload = None;
                 world.server_process = None;

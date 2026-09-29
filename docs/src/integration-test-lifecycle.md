@@ -37,7 +37,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | In-process nodes | One Tokio task per node on the binary's multi-threaded runtime, which has one worker thread per CPU | The cluster fixture, `tests/common/cluster.rs` |
 | Server processes | Child processes executing the `nervix-server` binary | The server-process fixture, `tests/common/server_process.rs` |
 | Real-process cluster | Three server children with separate durable stores, ports and identities under one test certificate authority | `tests/common/server_process_cluster.rs`, using the server-process fixture |
-| CLI sessions | Child processes executing `nervix-cli`; the subscription reader retains at most 256 output lines and the clock reader retains at most 2,048 | The scenario world, `tests/scenarios.rs` |
+| CLI sessions | Child processes executing `nervix-cli`. One-shot commands and the `subscribe` and `domain-clock` subcommands run on pipes; the subscription reader retains at most 256 output lines and the clock reader retains at most 2,048. The interactive REPL runs on a pseudo-terminal, whose fixture retains the newest 256 KiB the terminal displayed | The scenario world, `tests/scenarios.rs`; the terminal fixture, `tests/common/cli_terminal.rs` |
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
@@ -52,6 +52,10 @@ The raw session fixture records domain-clock replies and frames in the order it 
 for a detach reply can queue ticks that arrived before the reply; the post-detach assertion checks
 the recorded wire order, clears those already queued frames, and waits for any new frame. An unread
 pre-reply tick therefore does not masquerade as delivery after detach.
+
+The generator cadence assertion groups equal logical timestamps across concrete branches and
+checks increasing timestamps within each branch. It allows records from separate branch tasks to
+arrive in either order, as their delivery has no shared ordering contract.
 
 `tests-deps` builds the CLI and NSPL formatter in the normal target directory. The full and focused
 client coverage recipes build a standalone instrumented CLI beside their instrumented server binary
@@ -70,11 +74,12 @@ limit or run slot a waiting scenario needs. No scenario runs alone or prevents u
 from starting.
 
 The coordinated WASM state-reset feature runs one scenario at a time. The web console REPL,
-execution graph, and transaction inspector features share a limit of two. Both limits affect only
-their named features. The parser takes these limited features up before the bulk of the suite, and
+execution graph, transaction inspector, and domain clock features share a limit of two. Both limits
+affect only their named features. The parser takes these limited features up before the bulk of the
+suite, and
 available run slots favor a queued limited successor over queued ordinary work. The web console
 group grants its two slots to the feature with the fewest prior grants, so one feature cannot keep
-the other two waiting behind its whole queue. Their chains can therefore make progress throughout
+the other three waiting behind its whole queue. Their chains can therefore make progress throughout
 the suite rather than after it. Cucumber retries a failed
 scenario twice; `--retry 0` turns retries off for a focused run.
 
@@ -110,6 +115,12 @@ ready, for a cluster to stop, for the whole run. Its expiry changes nothing insi
 wait with a typed failure, takes apart a task the harness owns, or ends the run. Aborting a node
 task is containment rather than a product outcome, and the harness records it as forced cleanup, not
 as something the node did.
+
+The cluster health scenario can fail application-health responses for one ordered probing-node and
+responding-node pair while other probes remain healthy. It can also hold one node immediately before
+that node reports a runtime revision prepared, wait until the hold is reached, and release it after
+asserting command completion. These are per-scenario injected conditions; their waits have harness
+bounds and do not shorten the product's completion deadline.
 
 The boundary between them is kept in four places.
 
@@ -159,6 +170,8 @@ second module runs the operation, it is named after the owner.
 | A server process's readiness, exit, or log line | `server_process.rs` | 120, 120, and 60 seconds | The step fails, quoting the last 80 lines of the process log |
 | Convergence of a restarted real-process cluster | `server_process_cluster.rs` | 120 seconds, with each status request capped at 10 seconds | The step fails with the last status or typed request failure from every member |
 | A one-shot CLI command or a streaming output assertion | `tests/scenarios.rs` | 60 seconds for a command, 30 seconds for a subscription line, 10 or 20 seconds for a clock line, and 10 seconds for clock-process exit after Ctrl-C | The step fails with the process result or retained output lines |
+| Text the interactive CLI is expected to display, its startup banner included | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds, pressing Enter every 250 milliseconds so the REPL draws a prompt and prints the events it queued; a row expected from repeated HTTP posts gets 2 seconds after each post within the same 60 | The step fails quoting the newest 40 lines the terminal displayed, with control sequences removed and repeated lines collapsed |
+| The interactive CLI's exit after the scenario types `exit` | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds | The step fails with the exit status or the elapsed wait, quoting the same transcript |
 | One draw from the port pool | `port_pool.rs` | 65,536 consecutive draws that land on reserved ports | The draw fails with the pool exhausted |
 | The whole scenario run | `suite_watchdog.rs` | 41 minutes, injectable | Every active scenario is reported, live nodes get a 60-second cleanup window, and the process exits `124` |
 | Stopping the test dependencies after the run | `suite_watchdog.rs` | 2 minutes | The containers are left to the runner |
@@ -276,6 +289,11 @@ Interconnect](./interconnect.md#application-health-and-availability).
 A scenario step can also read status inside a window of its own, passing that window as the phase
 deadline. Where the window bounds how long something is watched rather than how long one read may
 take, every read keeps a full request timeout instead.
+
+The harness session client keeps domain-clock replies and frames in arrival order. When a detach
+reply ends an attachment, it retires that domain's unread frames from the pending observation
+queue while preserving them in the ordered log. Assertions about events after detachment therefore
+start at the acknowledged boundary, including when ticks arrived while the client awaited the reply.
 
 ## Node Tasks And Readiness
 
@@ -532,9 +550,10 @@ passed when retried.
 Harness state goes back only after the tasks that used it have ended, so the next scenario never
 finds a port, a fault, or a proxy taken.
 
-- CLI output readers are aborted and their `kill_on_drop` child processes are dropped before node
-  teardown. Background HTTP load, held uploads, server processes and real-process clusters are
-  also dropped first. Dropping any server child kills it and returns its ports.
+- CLI output readers, the terminal task of an interactive CLI among them, are aborted and their
+  `kill_on_drop` child processes are dropped before node teardown, which also removes the REPL's
+  working directory. Background HTTP load, held uploads, server processes and real-process
+  clusters are also dropped first. Dropping any server child kills it and returns its ports.
 - Broker and syslog observers, HTTP and gRPC receivers, the browser, and the session are closed
   before the cluster stops.
 - The TCP proxies and silent interconnect peers a scenario placed in front of its nodes are released
@@ -856,6 +875,10 @@ The suite runs inside `just test-scenarios-coverage` in the CI `scenarios` job, 
 instrumented server and CLI build. The `tests` job runs at the same time on another runner. The
 `scenarios` job's `timeout-minutes` is 60, and the suite budget is derived from it so that the job
 ends on its own.
+
+For focused local coverage, `just coverage-scenarios <lcov-path> <scenario-options>` starts a
+fresh measurement. `just coverage-scenarios-append <lcov-path> <scenario-options>` retains the
+current profiles and reuses unchanged instrumented artifacts for another scenario selection.
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |

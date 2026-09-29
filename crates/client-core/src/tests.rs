@@ -8,7 +8,10 @@
 //! gRPC server.
 
 // A Shuttle build replaces the client's synchronization with models that only run inside a
-// Shuttle test, so the tests over a real connection drive the production build only.
+// Shuttle test, so the tests over a real connection, and those that pause Tokio's clock, drive the
+// production build only.
+#[cfg(not(feature = "shuttle"))]
+mod restoration;
 #[cfg(not(feature = "shuttle"))]
 mod session;
 
@@ -266,6 +269,15 @@ fn detached_exchange(
 }
 
 fn client_on(exchange: Exchange, session_domain: Option<DomainName>) -> Client {
+    client_reaching(exchange, session_domain, ServerDirectory::default())
+}
+
+/// A client on `exchange` that reopens a lost session on the servers `servers` knows.
+fn client_reaching(
+    exchange: Exchange,
+    session_domain: Option<DomainName>,
+    servers: ServerDirectory,
+) -> Client {
     let connector = GrpcConnector::new(ConnectOptions::default())
         .assured("options without credentials build no authorization metadata");
     let sinks = exchange.sinks.clone();
@@ -274,13 +286,7 @@ fn client_on(exchange: Exchange, session_domain: Option<DomainName>) -> Client {
         domains: tokio::sync::Mutex::new(sinks.domains.subscribe()),
         sinks,
     };
-    Client::assemble(
-        exchange,
-        events,
-        connector,
-        session_domain,
-        ServerDirectory::default(),
-    )
+    Client::assemble(exchange, events, connector, session_domain, servers)
 }
 
 /// A client whose exchange lost its transport: every request finds nothing to send it on.
@@ -303,9 +309,24 @@ struct Loopback {
 
 impl Loopback {
     fn new(session_domain: Option<DomainName>) -> Self {
+        Self::reaching(session_domain, ServerDirectory::default())
+    }
+
+    /// A loopback whose client knows a server to reopen a lost session on. The test replaces the
+    /// exchange itself, so the client never has to reach that server.
+    fn reopenable(session_domain: Option<DomainName>) -> Self {
+        let server = Url::parse("http://127.0.0.1:9").assured("the discard port is an HTTP origin");
+        Self::reaching(session_domain, ServerDirectory::connected_to(Some(server)))
+    }
+
+    fn reaching(session_domain: Option<DomainName>, servers: ServerDirectory) -> Self {
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
-        let client = client_on(detached_exchange(frames, pending.clone()), session_domain);
+        let client = client_reaching(
+            detached_exchange(frames, pending.clone()),
+            session_domain,
+            servers,
+        );
         Self {
             client,
             requests,
@@ -337,6 +358,8 @@ impl Loopback {
             .assured("the client waits for the reply to its request");
     }
 
+    /// Replaces the exchange the way a reconnect does, restoring on the replacement what the
+    /// client holds.
     async fn replace_exchange(&mut self) {
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
@@ -344,15 +367,9 @@ impl Loopback {
         let sinks = self.client.inner.events.sinks.clone();
         replacement.generation = sinks.begin_generation();
         replacement.sinks = sinks;
-        let mut current = self.client.inner.exchange.lock().await;
-        let previous = std::mem::replace(&mut *current, replacement);
-        drop(current);
-        previous.close().await;
         self.requests = requests;
         self.pending = pending;
-        let current = self.client.inner.exchange.lock().await;
-        self.client
-            .restore_subscriptions(current.generation.clone(), current.requests());
+        self.client.install(replacement).await;
     }
 }
 
@@ -810,6 +827,25 @@ async fn overflowing_a_notice_stream_is_reported_without_losing_replies() {
         Err(error) if *error.current_context() == EventQueueError::Overflow
     ));
     assert!(matches!(request.reply.await, Ok(ReplyBody::Command(_))));
+}
+
+#[tokio::test]
+async fn a_notice_overflow_is_reported_once_and_later_notices_follow() {
+    let mut fixture = reader_fixture(1);
+    fixture.reader.route(notice_frame("first")).await;
+    fixture.reader.route(notice_frame("second")).await;
+    fixture.reader.route(notice_frame("third")).await;
+
+    assert!(matches!(
+        fixture.notices.next().await,
+        Err(error) if *error.current_context() == EventQueueError::Overflow
+    ));
+    let third = fixture
+        .notices
+        .next()
+        .await
+        .assured("a notice that arrives after the gap is retained");
+    assert_eq!(third.message, "third");
 }
 
 #[tokio::test]
@@ -2098,6 +2134,69 @@ async fn an_acknowledged_subscription_retries_restoration_on_the_replacement_exc
 }
 
 #[tokio::test]
+async fn subscription_events_follow_the_next_session_when_nothing_awaits_restoration() {
+    let mut loopback = Loopback::reopenable(Some(domain("tenant")));
+    let reading = loopback.client.clone();
+    let next = tokio::spawn(async move { reading.next_subscription().await });
+    // The test runs on one thread, so each yield lets the reader run until it waits: first on the
+    // session that is about to end, then on the ended one, before the next session begins.
+    tokio::task::yield_now().await;
+    let ended = loopback
+        .client
+        .inner
+        .exchange
+        .lock()
+        .await
+        .generation
+        .clone();
+    loopback.pending.lock().close();
+    loopback.client.inner.events.sinks.close_generation(&ended);
+    tokio::task::yield_now().await;
+
+    loopback.replace_exchange().await;
+    let client = loopback.client.clone();
+    let creating = tokio::spawn(async move {
+        client
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let request = loopback.next_request().await;
+    loopback
+        .answer(request.request_id, opened_reply(subscription("live", 1)))
+        .await;
+    creating
+        .await
+        .assured("the create task completes")
+        .assured("the subscription opens on the next session");
+    let current = loopback
+        .client
+        .inner
+        .exchange
+        .lock()
+        .await
+        .generation
+        .clone();
+    loopback.client.inner.events.sinks.subscriptions.push(
+        &current,
+        SubscriptionEvent::DeliveryLost(nervix_client_wire::SubscriptionDeliveryLost {
+            subscription: subscription("live", 1),
+            dropped_rows: NonZeroU64::MIN,
+        }),
+        1,
+    );
+
+    let event = tokio::time::timeout(DEADLINE, next)
+        .await
+        .assured("the read completes within the deadline")
+        .assured("the read task completes")
+        .assured("the subscription stream continues on the next session");
+    let SubscriptionEvent::DeliveryLost(lost) = event else {
+        panic!("the event of the subscription opened on the next session is delivered: {event:?}");
+    };
+    assert_eq!(lost.subscription, subscription("live", 1));
+}
+
+#[tokio::test]
 async fn a_session_lost_before_create_acknowledgement_does_not_restore_the_request() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
@@ -2169,7 +2268,15 @@ async fn a_session_lost_during_unsubscribe_releases_the_name_on_the_next_exchang
         .events
         .sinks
         .close_generation(&generation);
-    assert!(deleting.await.assured("the delete task completes").is_err());
+    let deleted = deleting
+        .await
+        .assured("the delete task completes")
+        .assured("the subscription ended with its session");
+    assert!(deleted.succeeded());
+    assert_eq!(
+        deleted.message,
+        "subscription 'live' closed with its session"
+    );
     let name = SubscriptionName::parse("live").assured("the test name is valid");
     assert_eq!(loopback.client.subscription_lifecycle(&name), None);
 
@@ -2577,7 +2684,7 @@ async fn list_domains_is_served_from_a_domain_list_request() {
 }
 
 #[tokio::test]
-async fn next_event_calls_return_session_closed_when_channels_are_closed() {
+async fn event_streams_end_with_a_session_that_no_known_server_can_reopen() {
     let client = test_client("tenant_a");
     client.inner.events.sinks.subscriptions.close_current();
     client.inner.events.sinks.notices.close_current();
@@ -2592,6 +2699,84 @@ async fn next_event_calls_return_session_closed_when_channels_are_closed() {
         .await
         .expect_err("must fail once channel is closed");
     assert!(matches!(server_error, ClientError::SessionClosed));
+}
+
+#[tokio::test]
+async fn an_acknowledged_subscription_that_no_known_server_can_restore_ends_after_its_gap() {
+    let mut loopback = Loopback::new(Some(domain("tenant")));
+    let client = loopback.client.clone();
+    let creating = tokio::spawn(async move {
+        client
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let request = loopback.next_request().await;
+    loopback
+        .answer(request.request_id, opened_reply(subscription("live", 1)))
+        .await;
+    creating
+        .await
+        .assured("the create task completes")
+        .assured("the subscription opens");
+    let ended = loopback
+        .client
+        .inner
+        .exchange
+        .lock()
+        .await
+        .generation
+        .clone();
+    loopback.pending.lock().close();
+    loopback.client.inner.events.sinks.close_generation(&ended);
+
+    let SubscriptionEvent::Interrupted(interrupted) = loopback
+        .client
+        .next_subscription()
+        .await
+        .assured("the lost session is reported as a gap first")
+    else {
+        panic!("the subscription the ended session held is interrupted");
+    };
+    assert_eq!(interrupted.subscription, subscription("live", 1));
+    let error = loopback
+        .client
+        .next_subscription()
+        .await
+        .expect_err("no known server can reopen the session");
+    assert!(matches!(error, ClientError::SessionClosed), "{error:?}");
+}
+
+#[tokio::test]
+async fn the_client_reports_a_notice_gap_once_and_returns_the_notices_after_it() {
+    let client = test_client("tenant");
+    let generation = client.inner.exchange.lock().await.generation.clone();
+    let notice = |message: &str| ServerEvent {
+        level: NoticeLevel::Warning,
+        message: message.to_string(),
+    };
+    let notices = &client.inner.events.sinks.notices;
+    notices.push(&generation, notice("dropped"), 1);
+    notices.push(&generation, notice("too large"), SERVER_NOTICE_BYTES + 1);
+    notices.push(&generation, notice("after the gap"), 1);
+
+    let gap = client
+        .next_server_event()
+        .await
+        .expect_err("the dropped notices are reported as a gap");
+    assert!(
+        matches!(
+            gap,
+            ClientError::EventOverflow {
+                stream: crate::EventStreamKind::ServerNotice
+            }
+        ),
+        "{gap:?}"
+    );
+    let after = client
+        .next_server_event()
+        .await
+        .assured("the notice after the gap is returned");
+    assert_eq!(after, notice("after the gap"));
 }
 
 #[cfg(feature = "autocomplete")]

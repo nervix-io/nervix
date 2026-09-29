@@ -3,10 +3,12 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** ClickHouse client and TLS configuration, the HTTP connector every connection of the
-//!   client is made through, the `JSONEachRow` encoding of each mapped row, insert chunking into
-//!   single rows after a rejected write, and insert-error classification.
-//! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio,
-//!   the node resolver, and the `clickhouse` driver with its Hyper client.
+//!   client is made through, the `JSONEachRow` encoding of each mapped row, the exact body every
+//!   insert carries under the emitter's `BATCH` limits, re-executing a rejected insert one row at a
+//!   time, and insert-error classification.
+//! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, the shared columnar
+//!   JSON writer, `error-stack`, Tokio, the node resolver, and the `clickhouse` driver with its Hyper
+//!   client.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 //!
@@ -22,26 +24,33 @@
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
 
-use std::time::Duration;
+use std::{ops::Range, time::Duration};
 
 use ::clickhouse::{Client as ClickHouseClient, error::Error as ClickHouseError};
+use bytes::Bytes;
 use error_stack::Report;
 use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
     rt::TokioExecutor as HyperTokioExecutor,
 };
-use meticulous::ResultExt as _;
-use nervix_columnar_json::{FieldNulls, Float32Encoding, JsonColumnSpec, JsonColumns, NestedNulls};
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_columnar_json::{
+    BytesEncoding, FieldNulls, Float32Encoding, JsonColumnSpec, JsonColumns, JsonWriteError,
+    NestedNulls,
+};
 use nervix_connector::{
-    MappedSinkRows, PerRecordOutcome, RejectedSinkRecord, RowSink, RustlsClientConfigSource,
-    SinkHost, SinkLifecycle, SinkPublishError, SinkRecordPosition, SinkStartError, SinkStartResult,
-    client_config_value, optional_client_config_value,
+    MappedSinkMember, MappedSinkRows, MeasuredRequest, PerRecordOutcome, RejectedSinkRecord,
+    RowRequest, RowRequestLimits, RowSink, RustlsClientConfigSource, SinkHost, SinkLifecycle,
+    SinkPublishError, SinkRecordPosition, SinkStartError, SinkStartResult, client_config_value,
+    optional_client_config_value,
 };
 use nervix_dns::{DnsLookupError, DnsResolver};
-use nervix_models::{ClientConfigEntry, TableName};
-use tracing::trace;
+use nervix_models::{ClientConfigEntry, EmitterBatchPolicy, TableName};
+use tracing::{debug, trace};
 
 const CLICKHOUSE: &str = "clickhouse";
+/// What `MAX SIZE` measures on a ClickHouse write, which an oversized row's rejection names.
+const MEASURED_REQUEST: &str = "ClickHouse JSONEachRow body";
 /// The TCP keepalive of every connection, the driver's own default.
 const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 /// How long an idle pooled connection may be reused, the driver's own default. ClickHouse closes an
@@ -54,6 +63,8 @@ pub struct ClickHouseSinkConfig {
     pub table: TableName,
     /// The node resolver every connection of the client resolves the host of `addr` through.
     pub dns: DnsResolver,
+    /// The emitter's `BATCH` limits, which bound the rows and the body bytes of every insert.
+    pub batch: EmitterBatchPolicy,
 }
 
 /// The ClickHouse sink, which encodes each mapped row as one `JSONEachRow` line.
@@ -61,6 +72,7 @@ pub struct ClickHouseSink {
     client: ClickHouseClient,
     request_timeout: Option<Duration>,
     table: TableName,
+    limits: RowRequestLimits,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -146,14 +158,91 @@ impl ClickHouseWriteError {
     }
 }
 
+/// The `JSONEachRow` lines of one write's rows, each followed by its newline, in the order the
+/// write carries its rows.
+///
+/// Every line is encoded once. An insert's body is the lines of its rows exactly as they sit here,
+/// so the size a candidate is measured at is the size of the body that is sent.
+struct EncodedLines {
+    body: Bytes,
+    /// Where each row's line ends in `body`, its newline included.
+    ends: Vec<usize>,
+}
+
+impl EncodedLines {
+    fn encode(
+        carriers: &[JsonColumns<'_>],
+        members: &[MappedSinkMember],
+    ) -> error_stack::Result<Self, JsonWriteError> {
+        let mut body = Vec::new();
+        let mut ends = Vec::with_capacity(members.len());
+        for member in members {
+            let columns = carriers
+                .get(member.carrier)
+                .assured("every carrier of the write was mapped before its rows were encoded");
+            columns.write_row(member.row, &mut body)?;
+            body.push(b'\n');
+            ends.push(body.len());
+        }
+        Ok(Self {
+            body: Bytes::from(body),
+            ends,
+        })
+    }
+
+    /// Where the lines of `members` sit in the body.
+    fn span(&self, members: Range<usize>) -> Range<usize> {
+        let start = match members.start.checked_sub(1) {
+            Some(previous) => *self
+                .ends
+                .get(previous)
+                .assured("a request starts at a row the write encoded"),
+            None => 0,
+        };
+        let last = members
+            .end
+            .checked_sub(1)
+            .assured("a request carries at least one row");
+        let end = *self
+            .ends
+            .get(last)
+            .assured("a request ends at a row the write encoded");
+        start..end
+    }
+
+    /// The exact size of the body an insert of `members` sends.
+    fn measure(&self, members: Range<usize>) -> u64 {
+        let span = self.span(members);
+        let length = span
+            .end
+            .checked_sub(span.start)
+            .assured("a later line ends after an earlier one");
+        u64::try_from(length)
+            .assured("Nervix builds for 64-bit targets only, where u64 holds usize")
+    }
+
+    /// The body an insert of `members` sends, which shares this write's encoded bytes.
+    fn body(&self, members: Range<usize>) -> Bytes {
+        self.body.slice(self.span(members))
+    }
+}
+
 impl ClickHouseSink {
     pub fn new(config: ClickHouseSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
-        let ClickHouseSinkConfig { config, table, dns } = config;
+        let ClickHouseSinkConfig {
+            config,
+            table,
+            dns,
+            batch,
+        } = config;
         let (client, request_timeout) = Self::client_from_config(&config, dns)?;
+        // ClickHouse streams an insert body without a limit of its own, so the emitter's limits
+        // are the only ones an insert keeps to.
         Ok(Self {
             client,
             request_timeout,
             table,
+            limits: RowRequestLimits::from(batch),
         })
     }
 
@@ -213,27 +302,32 @@ impl ClickHouseSink {
         Ok((client, request_timeout))
     }
 
-    async fn publish_json_lines(
+    /// How each mapped column is written into a `JSONEachRow` line: a null as `null`, an `F32`
+    /// widened to the `F64` ClickHouse formats, and `BYTES` as the octets a `String` column stores.
+    fn column_specs(target_columns: &[String]) -> Vec<JsonColumnSpec> {
+        target_columns
+            .iter()
+            .map(|name| {
+                JsonColumnSpec::new(name, FieldNulls::Write)
+                    .with_float32_encoding(Float32Encoding::WidenedF64)
+                    .with_bytes_encoding(BytesEncoding::Octets)
+            })
+            .collect()
+    }
+
+    /// One insert whose `JSONEachRow` body is `body`, newline-terminated lines of the rows it
+    /// carries.
+    async fn insert(
         client: &ClickHouseClient,
         table: &str,
-        lines: &[&str],
+        body: Bytes,
         request_timeout: Option<Duration>,
     ) -> Result<(), ClickHouseWriteError> {
-        if lines.is_empty() {
-            return Ok(());
-        }
         let sql = format!("INSERT INTO {table} FORMAT JSONEachRow");
         let mut insert = client
             .insert_formatted_with(sql)
             .with_timeouts(request_timeout, request_timeout);
-        let mut data = lines.join("\n").into_bytes();
-        if !data.ends_with(b"\n") {
-            data.push(b'\n');
-        }
-        insert
-            .send(data.into())
-            .await
-            .map_err(ClickHouseWriteError)?;
+        insert.send(body).await.map_err(ClickHouseWriteError)?;
         insert.end().await.map_err(ClickHouseWriteError)
     }
 }
@@ -243,90 +337,95 @@ impl SinkLifecycle for ClickHouseSink {}
 
 #[async_trait::async_trait]
 impl RowSink for ClickHouseSink {
+    /// Writes the rows of every carrier in inserts of at most `MAX MESSAGES` rows whose body is at
+    /// most `MAX SIZE` bytes.
     async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
-        let mut outcome = PerRecordOutcome::with_capacity(rows.selected_rows.len());
-        let specs = rows
-            .target_columns
-            .iter()
-            .map(|name| {
-                JsonColumnSpec::new(name, FieldNulls::Write)
-                    .with_float32_encoding(Float32Encoding::WidenedF64)
-            })
-            .collect::<Vec<_>>();
-        let columns = match JsonColumns::new(rows.batch, &specs, NestedNulls::Write) {
-            Ok(columns) => columns,
+        let members = rows.members();
+        let mut outcome = PerRecordOutcome::with_capacity(members.len());
+        let specs = Self::column_specs(rows.target_columns);
+        let mut carriers = Vec::with_capacity(rows.carriers.len());
+        for carrier in &rows.carriers {
+            match JsonColumns::new(carrier.batch, &specs, NestedNulls::Write) {
+                Ok(columns) => carriers.push(columns),
+                Err(error) => {
+                    outcome
+                        .fail(error.change_context(SinkPublishError::Publish { sink: CLICKHOUSE }));
+                    return outcome;
+                }
+            }
+        }
+        let lines = match EncodedLines::encode(&carriers, &members) {
+            Ok(lines) => lines,
             Err(error) => {
                 outcome.fail(error.change_context(SinkPublishError::Publish { sink: CLICKHOUSE }));
                 return outcome;
             }
         };
-        let mut previous_row_bytes = 0;
-        for chunk in rows.selected_row_chunks {
+        let requests = self
+            .limits
+            .divide(members.len(), |candidate| MeasuredRequest {
+                size: lines.measure(candidate),
+                request: (),
+            });
+        if requests.subdivisions > 0 {
+            debug!(
+                table = self.table.as_str(),
+                subdivisions = requests.subdivisions,
+                "halved ClickHouse inserts whose body exceeded MAX SIZE"
+            );
+        }
+        for request in requests.requests {
             tokio::task::consume_budget().await;
-            let Some(chunk_rows) = rows.selected_rows.get(chunk.clone()) else {
-                outcome.fail(
-                    Report::new(SinkPublishError::Publish { sink: CLICKHOUSE }).attach_printable(
-                        format!(
-                            "ClickHouse chunk {chunk:?} is outside its {} selected rows",
-                            rows.selected_rows.len()
-                        ),
-                    ),
-                );
-                return outcome;
-            };
-            let mut lines = Vec::with_capacity(chunk_rows.len());
-            for row in chunk_rows {
-                let mut encoded = Vec::with_capacity(previous_row_bytes);
-                if let Err(error) = columns.write_row(*row, &mut encoded) {
-                    outcome
-                        .fail(error.change_context(SinkPublishError::Publish { sink: CLICKHOUSE }));
-                    return outcome;
+            let written = match request {
+                RowRequest::Write {
+                    members: written, ..
+                } => written,
+                RowRequest::Oversize { member, oversize } => {
+                    let member = members[member];
+                    outcome.reject(oversize.rejected(
+                        rows.position(member),
+                        rows.occurred_at(member),
+                        MEASURED_REQUEST,
+                    ));
+                    continue;
                 }
-                previous_row_bytes = encoded.len();
-                lines.push(
-                    String::from_utf8(encoded).assured(
-                        "Arrow strings are UTF-8 and the JSON writer adds only ASCII syntax",
-                    ),
-                );
-            }
-            let chunk_lines = lines.iter().map(String::as_str).collect::<Vec<_>>();
-            match Self::publish_json_lines(
+            };
+            let inserted = Self::insert(
                 &self.client,
                 self.table.as_str(),
-                &chunk_lines,
+                lines.body(written.clone()),
                 self.request_timeout,
             )
-            .await
-            {
+            .await;
+            match inserted {
                 Ok(()) => {
-                    for row in chunk_rows {
-                        outcome.deliver(SinkRecordPosition {
-                            batch_index: rows.batch_index,
-                            row_index: *row,
-                        });
+                    for index in written {
+                        outcome.deliver(rows.position(members[index]));
                     }
                 }
-                Err(error) if error.is_record_error() && chunk_rows.len() > 1 => {
-                    for (offset, row) in chunk_rows.iter().enumerate() {
+                // A record-specific failure of a multi-row insert is isolated by inserting each of
+                // its rows alone, so healthy rows land and only the rejected ones follow the error
+                // policy.
+                Err(error) if error.is_record_error() && written.len() > 1 => {
+                    for index in written {
                         tokio::task::consume_budget().await;
-                        let position = SinkRecordPosition {
-                            batch_index: rows.batch_index,
-                            row_index: *row,
-                        };
-                        let line = [lines[offset].as_str()];
-                        match Self::publish_json_lines(
+                        let member = members[index];
+                        let alone = index
+                            .checked_add(1)
+                            .assured("a row of the write is followed by at most its end");
+                        let inserted = Self::insert(
                             &self.client,
                             self.table.as_str(),
-                            &line,
+                            lines.body(index..alone),
                             self.request_timeout,
                         )
-                        .await
-                        {
-                            Ok(()) => outcome.deliver(position),
+                        .await;
+                        match inserted {
+                            Ok(()) => outcome.deliver(rows.position(member)),
                             Err(error) if error.is_record_error() => {
                                 outcome.reject(RejectedSinkRecord::external(
-                                    position,
-                                    rows.occurred_at,
+                                    rows.position(member),
+                                    rows.occurred_at(member),
                                     error.record_reason(),
                                 ));
                             }
@@ -338,16 +437,12 @@ impl RowSink for ClickHouseSink {
                     }
                 }
                 Err(error) if error.is_record_error() => {
-                    if let Some(row) = chunk_rows.first() {
-                        outcome.reject(RejectedSinkRecord::external(
-                            SinkRecordPosition {
-                                batch_index: rows.batch_index,
-                                row_index: *row,
-                            },
-                            rows.occurred_at,
-                            error.record_reason(),
-                        ));
-                    }
+                    let member = members[written.start];
+                    outcome.reject(RejectedSinkRecord::external(
+                        rows.position(member),
+                        rows.occurred_at(member),
+                        error.record_reason(),
+                    ));
                 }
                 Err(error) => {
                     outcome.fail(error.into_report());
@@ -357,7 +452,7 @@ impl RowSink for ClickHouseSink {
         }
         trace!(
             table = self.table.as_str(),
-            rows = rows.selected_rows.len(),
+            rows = members.len(),
             "emitter published clickhouse rows"
         );
         outcome
@@ -372,7 +467,8 @@ mod tests {
     use std::sync::Arc as StdArc;
 
     use arrow_array::{
-        Float32Array, Int64Array, ListArray, RecordBatch, StringArray, TimestampNanosecondArray,
+        Array as _, BinaryArray, FixedSizeListArray, Float32Array, Int64Array, ListArray,
+        RecordBatch, StringArray, TimestampNanosecondArray,
     };
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
 
@@ -467,13 +563,7 @@ mod tests {
             "tags".to_string(),
         ];
 
-        let specs = columns
-            .iter()
-            .map(|name| {
-                JsonColumnSpec::new(name, FieldNulls::Write)
-                    .with_float32_encoding(Float32Encoding::WidenedF64)
-            })
-            .collect::<Vec<_>>();
+        let specs = ClickHouseSink::column_specs(&columns);
         let mapped = JsonColumns::new(&batch, &specs, NestedNulls::Write)
             .assured("the test columns have supported Arrow types");
 
@@ -494,6 +584,77 @@ mod tests {
             second,
             br#"{"id":null,"name":"second","at":null,"ratio":null,"tags":[]}"#
         );
+    }
+
+    #[test]
+    fn writes_bytes_as_their_own_octets_and_fixed_size_arrays_as_json_arrays() {
+        let pairs = FixedSizeListArray::try_new(
+            StdArc::new(Field::new("item", DataType::Int64, false)),
+            2,
+            StdArc::new(Int64Array::from(vec![1, 10, 2, 20])),
+            None,
+        )
+        .expect("two rows of two elements build");
+        let raw = BinaryArray::from(vec![Some(b"\xff\x00\"\\\n~".as_slice()), None]);
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("pair", pairs.data_type().clone(), true),
+            Field::new("raw", DataType::Binary, true),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![StdArc::new(pairs), StdArc::new(raw)])
+            .expect("the mapped batch should build");
+        let specs = ClickHouseSink::column_specs(&["pair".to_string(), "raw".to_string()]);
+        let mapped = JsonColumns::new(&batch, &specs, NestedNulls::Write)
+            .expect("fixed-size arrays and bytes are supported");
+
+        let mut first = Vec::new();
+        mapped
+            .write_row(0, &mut first)
+            .expect("the first test row should encode");
+        let mut second = Vec::new();
+        mapped
+            .write_row(1, &mut second)
+            .expect("the second test row should encode");
+
+        assert_eq!(
+            first,
+            b"{\"pair\":[1,10],\"raw\":\"\xff\\u0000\\\"\\\\\\u000a~\"}".to_vec()
+        );
+        assert_eq!(second, br#"{"pair":[2,20],"raw":null}"#.to_vec());
+    }
+
+    #[test]
+    fn an_insert_body_is_exactly_the_lines_of_its_rows_and_measures_its_length() {
+        let schema = StdArc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![StdArc::new(Int64Array::from(vec![Some(1), Some(22), None]))],
+        )
+        .expect("the mapped batch should build");
+        let specs = ClickHouseSink::column_specs(&["id".to_string()]);
+        let mapped = [JsonColumns::new(&batch, &specs, NestedNulls::Write)
+            .expect("the test column has a supported Arrow type")];
+        let members = [
+            MappedSinkMember { carrier: 0, row: 2 },
+            MappedSinkMember { carrier: 0, row: 0 },
+            MappedSinkMember { carrier: 0, row: 1 },
+        ];
+
+        let lines = EncodedLines::encode(&mapped, &members).expect("the test rows should encode");
+
+        assert_eq!(
+            lines.body(0..3).as_ref(),
+            b"{\"id\":null}\n{\"id\":1}\n{\"id\":22}\n".as_slice()
+        );
+        assert_eq!(
+            lines.body(1..3).as_ref(),
+            b"{\"id\":1}\n{\"id\":22}\n".as_slice()
+        );
+        for range in [0..1, 0..3, 1..2, 1..3, 2..3] {
+            assert_eq!(
+                lines.measure(range.clone()),
+                u64::try_from(lines.body(range).len()).expect("a test body fits u64")
+            );
+        }
     }
 
     #[tokio::test]
@@ -543,10 +704,10 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_millis(250),
-            ClickHouseSink::publish_json_lines(
+            ClickHouseSink::insert(
                 &client,
                 "events",
-                &[r#"{"id":1}"#],
+                Bytes::from_static(b"{\"id\":1}\n"),
                 request_timeout,
             ),
         )

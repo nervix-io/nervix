@@ -18,6 +18,7 @@ shuttle = [
 
 [dependencies]
 async-trait = { workspace = true }
+bytes = { workspace = true }
 clickhouse = { workspace = true, features = ["inserter", "chrono"] }
 error-stack = { workspace = true }
 hyper-rustls = { workspace = true, features = ["http1"] }
