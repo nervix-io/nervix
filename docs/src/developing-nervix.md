@@ -276,7 +276,10 @@ requires its model to fail.
 checks: which backend each mode selects, the same contract scripts of every family against the
 ordinary libraries and against the Shuttle adapters, the Shuttle checks that a publication between
 a read and a waiter's registration is reached, and the check that a Loom build takes the ordinary
-libraries for the families Loom does not model. Run it after changing an adapter or the families a
+libraries for the families Loom does not model. The timer checks measure every timer on a paused
+clock in ordinary execution and show that Shuttle's timers are scheduling points whose timeouts a
+check triggers, and the Turmoil check shows that sockets, name lookup, timers and admitted CPU jobs
+belong to the simulated host that uses them. Run it after changing an adapter or the families a
 mode provides:
 
 ```bash

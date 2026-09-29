@@ -210,15 +210,19 @@ test-execution *args:
 
 # Run the primitive boundary's conformance checks once per execution mode. Each mode runs the same
 # contract scripts of every family against its own backend and checks that it selected that backend,
-# so an operation a backend lacks or answers differently fails here. The Shuttle build also shows
-# that its adapters let the scheduler reach a publication between a read and a waiter's
-# registration, and the Loom build that it takes the ordinary libraries for the families Loom does
-# not model. The documentation tests show that a runtime attribute refuses a crate path. Every mode
-# is its own build, because Cargo would unify the features of one.
+# so an operation a backend lacks or answers differently fails here. The ordinary build with the
+# `test-util` capability measures every timer on a paused clock. The Shuttle build also shows that
+# its adapters let the scheduler reach a publication between a read and a waiter's registration,
+# that its timers are scheduling points whose timeouts a check triggers, and that a socket fails a
+# check; the Turmoil build that sockets, name lookup, timers and admitted CPU jobs belong to the
+# simulated host that uses them; and the Loom build that it takes the ordinary libraries for the
+# families Loom does not model. The documentation tests show that a runtime attribute refuses a
+# crate path. Every mode is its own build, because Cargo would unify the features of one.
 # The portable surface is also built for the browser target.
 test-primitives:
     cargo test --package nervix-primitives --lib
     cargo test --package nervix-primitives --features native --lib
+    cargo test --package nervix-primitives --features 'native test-util' --lib
     cargo test --package nervix-primitives --features native --doc
     cargo test --package nervix-primitives --features 'shuttle native' --lib
     cargo test --package nervix-primitives --features 'loom native' --lib
@@ -311,17 +315,20 @@ test-loom-replay failure:
 test-loom-qualification:
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} qualify
 
-# Run the Turmoil suite: the execution and library simulation checks, then every interconnect
-# scenario over its committed regression seeds. Tokio's unstable runtime knobs seed per-host
-# scheduling and turn unhandled task panics into runtime failures; the cfg is scoped to this test
-# mode, and ordinary and Shuttle builds keep their flags. After the build, the tests run inside a
-# real-time budget of `budget_seconds` and end with status 124 when it expires. A failed scenario
-# leaves a failure record under target/turmoil-failures for `test-turmoil-replay`.
+# Run the Turmoil suite: the primitive boundary's simulated-host checks, the execution and library
+# simulation checks, then every interconnect scenario over its committed regression seeds. Tokio's
+# unstable runtime knobs seed per-host scheduling and turn unhandled task panics into runtime
+# failures; the cfg is scoped to this test mode, and ordinary and Shuttle builds keep their flags.
+# After the build, the tests run inside a real-time budget of `budget_seconds` and end with status
+# 124 when it expires. A failed scenario leaves a failure record under target/turmoil-failures for
+# `test-turmoil-replay`.
 test-turmoil budget_seconds="480":
     #!/usr/bin/env bash
     set -euo pipefail
     turmoil_rustflags="--cfg tokio_unstable ${RUSTFLAGS:-}"
     export NERVIX_TURMOIL_FAILURES={{ quote(turmoil_failures) }}
+    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
+        --package nervix-primitives --features 'turmoil native' --lib
     RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
         --package nervix-execution --features turmoil --lib
     RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
@@ -342,6 +349,8 @@ test-turmoil budget_seconds="480":
         fi
         return "${status}"
     }
+    within_budget cargo test --package nervix-primitives --features 'turmoil native' --lib -- \
+        simulated_host turmoil_mode --test-threads=1
     within_budget cargo test --package nervix-execution --features turmoil --lib -- \
         --test-threads=1
     within_budget cargo test --package nervix-interconnect --features turmoil --lib -- \
@@ -900,6 +909,9 @@ coverage-turmoil output:
     set -euo pipefail
     export RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}"
     cargo llvm-cov --no-report \
+        --package nervix-primitives --features 'turmoil native' --lib -- \
+        simulated_host turmoil_mode --test-threads=1
+    cargo llvm-cov --no-report \
         --package nervix-execution --features turmoil --lib
     cargo llvm-cov --no-report \
         --package nervix-interconnect --features turmoil --lib -- \
@@ -1158,6 +1170,7 @@ cargo-clippy-all:
         --package nervix-model-harness \
         --package nervix-wasm
     cargo clippy --all-targets --features native --package nervix-primitives
+    cargo clippy --all-targets --features 'native test-util' --package nervix-primitives
     cargo clippy --lib --features 'shuttle testing' \
         --package nervix-client-core \
         --package 'nervix-connector*' \

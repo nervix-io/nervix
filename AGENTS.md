@@ -298,16 +298,32 @@ choose a backend.
   synchronization and cancellation tokens from `nervix_primitives::sync`; thread-blocking locks,
   condition variables, barriers, one-time initialization and synchronous channels from
   `nervix_primitives::sync::blocking`; tasks, the cooperative budget and task tracking from
-  `nervix_primitives::task`; the runtime from `nervix_primitives::runtime`; async tests and mains
-  through `#[nervix_primitives::test]` and `#[nervix_primitives::main]`, and
-  `nervix_primitives::select!`; streams over channels from `nervix_primitives::stream`; atomic
-  reference publication from `nervix_primitives::publication`; concurrent maps and queues from
-  `nervix_primitives::collections`; threads and thread-local storage from `nervix_primitives::thread`
-  and `nervix_primitives::thread_local!`. Tokio's `sync`, `task` and `runtime` modules with their
-  attributes and macros, Tokio Util's `sync` and `task`, Tokio Stream, `parking_lot`, `dashmap`,
-  `concurrent-queue`, `arc-swap`, the standard library's threads and non-atomic `sync` items,
+  `nervix_primitives::task`; timers and monotonic instants from `nervix_primitives::time`; TCP,
+  UDP and local sockets from `nervix_primitives::net`; the runtime from
+  `nervix_primitives::runtime`; async tests and mains through `#[nervix_primitives::test]` and
+  `#[nervix_primitives::main]`, and `nervix_primitives::select!`; streams over channels from
+  `nervix_primitives::stream`; atomic reference publication from `nervix_primitives::publication`;
+  concurrent maps and queues from `nervix_primitives::collections`; threads and thread-local
+  storage from `nervix_primitives::thread` and `nervix_primitives::thread_local!`. Tokio's `sync`,
+  `task`, `runtime`, `time` and `net` modules with their attributes and macros, Tokio Util's `sync`
+  and `task`, Tokio Stream, Turmoil's `net`, `parking_lot`, `dashmap`, `concurrent-queue`,
+  `arc-swap`, the standard library's threads, non-atomic `sync` items, `Instant` and sockets,
   Shuttle's and Loom's primitives, and the Shuttle wrapper crates are rejected however they are
-  spelled, and only `nervix-primitives` depends on the libraries whose families it selects.
+  spelled, and only `nervix-primitives` depends on the libraries whose families it selects. A
+  duration is a value: it is the standard library's `Duration`.
+- The boundary supplies mechanisms, never policy. A node resolves names through its own resolver
+  in `nervix-dns`; `tokio::net::lookup_host` and the `ToSocketAddrs` traits are rejected, and the
+  boundary offers a lookup only in the Turmoil build, where it answers from the simulated host's
+  DNS table. The timers grant no clock permission: actual UTC and physical deadlines keep the owners
+  `scripts/check_clock_boundaries.py` declares, and a logical deadline stays in the domain clock's
+  coordinate. `nervix_primitives::task::spawn_cpu` runs a CPU job the bounded executor admitted,
+  as one task of the simulated host's scheduler under Turmoil; only the executor's worker pools may
+  name it. Pausing, advancing and resuming a runtime's clock needs the `test-util` capability,
+  which only tests of elapsed-time behavior enable.
+- Tokio's unstable runtime controls belong to the Turmoil build: only a Turmoil recipe in the
+  `justfile` passes `--cfg tokio_unstable`, never Cargo configuration, a workflow or a build
+  script. Turmoil is also a runner: beside `nervix-primitives`, a package whose harness drives a
+  simulation may depend on it only as an optional dependency its own `turmoil` feature enables.
 - A real primitive that must stay outside every model comes from `nervix_primitives::unmodeled`,
   and each use needs a permission in `crates/primitives/unmodeled-permissions.toml` naming the
   file, the items by their paths below `unmodeled`, the owner, why a real primitive is required,
@@ -330,7 +346,8 @@ choose a backend.
   model is a test configuration failure. An operation a mode cannot provide is unavailable in that
   mode and fails to compile. Loom models atomics, its threads and thread-local storage; in a Loom
   build every other family is the ordinary library, outside every model, and Loom model code, a
-  module compiled only for Loom, may not name one.
+  module compiled only for Loom, may not name one. No model checker simulates a network: under
+  Shuttle the sockets are Tokio's, and a socket created inside a check panics and fails it.
 - A package that owns a `shuttle`, `loom` or `turmoil` feature depends on `nervix-primitives`
   directly and forwards the mode to it and to every workspace dependency that owns the same mode.
   Cargo unifies features, so ordinary and modeled suites run in separate build invocations with
@@ -345,11 +362,9 @@ choose a backend.
 - Only `nervix-primitives` selects Loom and only `nervix-model-harness` runs Loom models; both take
   it as an optional dependency, and no other package depends on `loom`. Ordinary dependency graphs,
   with default features or without them, contain no model checker or simulator.
-- The remaining families, monotonic scheduling, networking and shared ownership, still use their
-  current access paths until each moves through the boundary with its complete consumer migration
-  and its enforcement; until timers move, a crate that uses them keeps the one accepted
-  `extern crate shuttle_tokio as tokio` alias. A new execution-sensitive primitive joins the
-  boundary before any caller introduces it, and no change adds a new bypass.
+- Shared ownership still uses its current access paths until it moves through the boundary with
+  its complete consumer migration and its enforcement. A new execution-sensitive primitive joins
+  the boundary before any caller introduces it, and no change adds a new bypass.
 
 `just validate-primitive-boundary`, `just validate-loom-dependencies` and
 `just validate-execution-mode-conflicts` enforce these rules in `just validate` and

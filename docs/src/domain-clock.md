@@ -453,6 +453,16 @@ contract, which the runtime and every connector crate share, so a connector stam
 through the same owner the runtime uses. Repository validation checks these ownership boundaries
 across the workspace, so a new runtime or connector path must choose its time class explicitly.
 
+Physical monotonic time is measured with the timers and instants of the primitive boundary,
+`nervix_primitives::time`, which selects them for the build's execution mode and grants no clock
+permission: it reads no actual UTC, arms no physical deadline on a caller's behalf, and a logical
+deadline armed on its timer stays logical, as described above. Its timers follow the clock of the
+runtime that polls them, so an ordinary test on a paused runtime checks a physical deadline's
+elapsed behavior exactly, and a simulated interconnect host waits in simulated time. Shuttle does
+not model time: under Shuttle a timeout never measures its deadline, and a check decides whether it
+wins. HTTP request deadlines and `Retry-After` therefore stay physical, flush cadence keeps the
+domain clock, and no check establishes progress by waiting.
+
 The web console's clock display is an external observer: its clock-display module reads browser UTC
 to project an attached paced mapping for the screen. That projection does not enter a node's read
 watermark, alter tick progress, or supply domain time to execution. The repository clock-boundary

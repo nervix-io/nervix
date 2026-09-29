@@ -17,6 +17,7 @@ mod scenario;
 mod transport;
 
 use std::{
+    net::Ipv4Addr,
     num::NonZeroUsize,
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -24,9 +25,14 @@ use std::{
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_dns::DnsLookupFailure;
 use nervix_execution::{CpuClass, Executor, MemoryClass};
 use nervix_interconnect::{PeerResolver, PeerTarget, TransportEntropy};
 use nervix_models::NodeEndpoint;
+use nervix_primitives::{
+    net::{TcpListener, TcpStream},
+    time::{Instant, sleep},
+};
 use runner::{
     ClockSkew, HostSupervisor, NetworkParameters, SchedulerPhase, SemanticTrace, SimulatedEntropy,
     SimulatedUtc, SimulationBounds, SimulationConfig, SimulationError, Topology,
@@ -92,6 +98,91 @@ fn peer_resolution_uses_simulated_dns() {
             });
         })
     });
+}
+
+/// Every host keeps its own address, listener and clock: two hosts listen on one port, and one
+/// client resolves each through the product's resolver seam, dials it over the boundary's sockets,
+/// learns that a name the simulation does not hold does not exist, and waits on its own clock.
+///
+/// The run's simulated duration is shorter than the client's wait plus any time a real clock could
+/// lend it, so the run completes only because the wait follows the simulated clock.
+#[test]
+fn simulated_hosts_keep_their_own_names_sockets_and_clocks() {
+    const PORT: u16 = 7443;
+    const WAIT: Duration = Duration::from_secs(10);
+    let scenario = Scenario {
+        name: "host isolation",
+        fault_plan: "none; two hosts listen on one port, and one client resolves and dials each, \
+                     asks for a name no host holds, and waits on its own clock",
+        seeds: &[43],
+    };
+    scenario.check(
+        |seed| {
+            let mut configuration = config(seed);
+            configuration.bounds = SimulationBounds {
+                simulated_duration: Duration::from_secs(15),
+                tick: Duration::from_millis(1),
+                max_steps: NonZeroUsize::new(20_000).assured("20,000 is nonzero"),
+                wall_duration: Duration::from_secs(60),
+            };
+            configuration
+        },
+        |run| {
+            let trace = run.trace();
+            run.simulate(move |simulation| {
+                for host in ["alpha", "beta"] {
+                    let trace = trace.clone();
+                    simulation.host(host, move || {
+                        let trace = trace.clone();
+                        async move {
+                            HostSupervisor::run(async move {
+                                let listener =
+                                    TcpListener::bind((Ipv4Addr::UNSPECIFIED, PORT)).await?;
+                                let (_connection, peer) = listener.accept().await?;
+                                assert_eq!(peer.ip(), turmoil::lookup("observer"));
+                                trace.record(host, "accepted the observer on the shared port");
+                                Ok::<(), std::io::Error>(())
+                            })
+                            .await
+                        }
+                    });
+                }
+                simulation.client("observer", async move {
+                    let resolver = PeerResolver::simulated();
+                    for host in ["alpha", "beta"] {
+                        let endpoint = NodeEndpoint::new(host, PORT);
+                        let targets = PeerTarget::resolve(&resolver, &endpoint, Duration::ZERO)
+                            .await
+                            .assured("the simulated DNS table holds every host");
+                        assert_eq!(targets.len(), 1);
+                        let stream = TcpStream::connect(targets[0].addr).await?;
+                        assert_eq!(stream.peer_addr()?.ip(), turmoil::lookup(host));
+                        assert_eq!(stream.local_addr()?.ip(), turmoil::lookup("observer"));
+                        trace.record("observer", format!("reached {host} at its own address"));
+                    }
+
+                    let asked_at = Instant::now();
+                    let unregistered = NodeEndpoint::new("unregistered", PORT);
+                    let Err(missing) =
+                        PeerTarget::resolve(&resolver, &unregistered, Duration::ZERO).await
+                    else {
+                        panic!("no simulated host holds the name 'unregistered'");
+                    };
+                    assert_eq!(
+                        missing.current_context().failure(),
+                        DnsLookupFailure::NameNotFound
+                    );
+                    assert_eq!(asked_at.elapsed(), Duration::ZERO);
+                    trace.record("observer", "an unregistered name does not exist");
+
+                    sleep(WAIT).await;
+                    assert!(asked_at.elapsed() >= WAIT);
+                    trace.record("observer", "waited on its own simulated clock");
+                    Ok(())
+                });
+            })
+        },
+    );
 }
 
 #[test]
