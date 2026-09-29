@@ -179,9 +179,16 @@ learner caught up; the membership change has its own ten-second bound. A timeout
 learner, records `raft membership reconciliation failed`, and the one-second reconciliation loop
 tries again while ordinary replication continues.
 
+When discovery reports a different interconnect endpoint for an existing member, reconciliation
+replaces that member's recorded Raft address. A returning voter keeps its voter role; it is not
+re-added as a learner. Once the committed membership contains the advertised address, subsequent
+reconciliation passes propose no further address change. The stored address supplies recovery
+contact hints; Raft traffic resolves the authenticated node identity through the interconnect.
+
 The consensus event stream and `info` log record `raft add learner`, `raft wait for learner`,
-`raft promote voters`, and `raft membership updated` transitions. `SHOW CLUSTER STATUS` reports the
-local `raft.last_log_index`, `raft.last_applied`, and each member's learner or voter role.
+`raft update address`, `raft promote voters`, and `raft membership updated` transitions.
+`SHOW CLUSTER STATUS` reports the local `raft.last_log_index`, `raft.last_applied`, and each member's
+learner or voter role and recorded address.
 
 ## Bounded Log Reading
 
