@@ -32,13 +32,10 @@ use nervix_models::{
     TransactionResolvedDomainStart, TransactionStatus, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
-use parking_lot::Mutex as ParkingMutex;
+use nervix_primitives::sync::{OwnedMutexGuard, Semaphore, blocking::Mutex as ParkingMutex};
 use serde::Serialize;
 use thiserror::Error;
-use tokio::{
-    sync::{OwnedMutexGuard, Semaphore},
-    time::Duration,
-};
+use tokio::time::Duration;
 use tracing::{info, warn};
 
 use super::{
@@ -1040,7 +1037,7 @@ impl SessionServiceImpl {
         let root_transaction_id = transaction_id;
         let mut attempt_transaction_id = root_transaction_id.clone();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let result = Box::pin(self.execute_standalone_transaction_attempt(
                 attempt_transaction_id.clone(),
                 request_reference.clone(),
@@ -1226,7 +1223,7 @@ impl SessionServiceImpl {
 
         let mut current = transaction;
         let committing = loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match &current.state {
                 TransactionState::Open(_) => {
                     let prepared = match self.prepare_transaction_commit(&current).await {
@@ -1403,7 +1400,7 @@ impl SessionServiceImpl {
             },
         )?;
         for step in plan.steps() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let PlannedTransactionStepKind::Models { plan: model_plan } = &step.kind else {
                 continue;
             };
@@ -1601,7 +1598,7 @@ impl SessionServiceImpl {
                 })?;
         let mut resolved_starts = BTreeMap::new();
         for step in captured.plan.steps() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let PlannedTransactionStepKind::StartDomain { previous } = &step.kind else {
                 continue;
             };
@@ -1964,7 +1961,7 @@ impl SessionServiceImpl {
             .inner
             .transaction_executions
             .entry(id.to_string())
-            .or_insert_with(|| StdArc::new(tokio::sync::Mutex::new(())))
+            .or_insert_with(|| StdArc::new(nervix_primitives::sync::Mutex::new(())))
             .clone();
         let execution_guard = execution.lock_owned().await;
         self.execute_replicated_commit_locked(id, execution_guard)
@@ -2010,7 +2007,7 @@ impl SessionServiceImpl {
             .synchronize_cluster_schedule(&Box::pin(self.inner.consensus.current_schedule()).await)
             .change_context(TransactionCommitError::SynchronizeRegistry { id: id.to_string() })?;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let leader_id = Box::pin(self.inner.consensus.current_leader()).await;
             if leader_id.as_ref() != Some(self.inner.consensus.local_node_id()) {
                 return Err(Report::new(ConsensusError::LeadershipLost { leader_id })
@@ -2266,7 +2263,7 @@ impl SessionServiceImpl {
         }
         let mut completed_model_mutation = false;
         for result in transaction.commit_results() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(statements) = result
                 .first_statement()
                 .checked_add(result.statement_count())
@@ -2743,7 +2740,7 @@ impl SessionServiceImpl {
                 .inner
                 .transaction_executions
                 .entry(id.clone())
-                .or_insert_with(|| StdArc::new(tokio::sync::Mutex::new(())))
+                .or_insert_with(|| StdArc::new(nervix_primitives::sync::Mutex::new(())))
                 .clone();
             let execution_guard = execution.try_lock_owned();
             self.inner.transaction_recovery.considered(id.clone());
@@ -2784,7 +2781,7 @@ impl SessionServiceImpl {
         let mut tombstone_removal_required = false;
 
         for transaction in transactions.values() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match &transaction.state {
                 // A leader-local binding only routes commands. Keeping a socket open and reading
                 // transaction state do not renew this durable administrative deadline.

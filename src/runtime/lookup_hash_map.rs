@@ -598,7 +598,7 @@ mod tests {
         runtime_ack::AckSet,
         runtime_schema::{RuntimeValue, compile_schema, test_runtime_row},
     };
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn filter_map_lookup_hash_map_enriches_rows_and_filters_misses() {
         let input_schema = test_schema(&[
             ("id", ParseAsType::String),

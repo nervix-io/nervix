@@ -13,12 +13,15 @@ use std::{collections::BTreeSet, num::NonZeroU64, sync::Arc as StdArc};
 
 use ahash::RandomState;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::sync::{ArcSwap, ArcSwapOption, DashMap};
 use nervix_interconnect::RuntimeState;
 use nervix_models::{
     ClusterNodeName, WasmCheckpointInspection, WasmCheckpointStage, WasmStateGeneration,
 };
-use tokio::sync::Notify;
+use nervix_primitives::{
+    collections::DashMap,
+    publication::{ArcSwap, ArcSwapOption},
+    sync::Notify,
+};
 
 use super::{PersistedRuntimeStateEntry, RuntimeStatePlacement, lsm_sequence::LsmSequence};
 

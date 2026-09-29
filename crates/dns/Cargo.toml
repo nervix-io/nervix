@@ -16,6 +16,7 @@ hickory-resolver = { workspace = true }
 hyper-util = { workspace = true, features = ["client-legacy", "tokio"] }
 indexmap = { workspace = true }
 meticulous = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 reqwest = { workspace = true }
 reqwest_iceberg = { workspace = true }
 resolv-conf = { workspace = true }

@@ -294,7 +294,7 @@ impl ManagementStreamSlotQuotas {
         ];
         let mut drained = Vec::with_capacity(quotas.len());
         for (subquota, permits) in quotas {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let permits: u32 = permits
                 .try_into()
                 .assured("management stream subquotas are much smaller than u32::MAX");
@@ -337,7 +337,7 @@ impl ReplicationStreamSlotQuotas {
         ];
         let mut drained = Vec::with_capacity(quotas.len());
         for (subquota, permits) in quotas {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let permits: u32 = permits
                 .try_into()
                 .assured("replication stream subquotas are much smaller than u32::MAX");
@@ -381,7 +381,7 @@ impl BulkStreamSlotQuotas {
         ];
         let mut drained = Vec::with_capacity(quotas.len());
         for (subquota, permits) in quotas {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let permits: u32 = permits
                 .try_into()
                 .assured("bulk stream subquotas are much smaller than u32::MAX");

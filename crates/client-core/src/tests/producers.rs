@@ -81,7 +81,7 @@ fn outcome(outcome: ClientSubmissionOutcome) -> ReplyBody {
 /// does: the producer is followed before its waiter completes.
 async fn open(loopback: &mut Loopback, batches: u32) -> Producer {
     let client = loopback.client.clone();
-    let opening = tokio::spawn(async move {
+    let opening = nervix_primitives::task::spawn(async move {
         client
             .open_ingestor(
                 domain("tenant"),
@@ -137,11 +137,11 @@ async fn next_batch(loopback: &mut Loopback) -> (RequestId, SubmitBatchRequest) 
     (request.request_id, submit)
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_refused_open_leaves_nothing_attached() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
-    let opening = tokio::spawn(async move {
+    let opening = nervix_primitives::task::spawn(async move {
         client
             .open_ingestor(
                 domain("tenant"),
@@ -173,12 +173,12 @@ async fn a_refused_open_leaves_nothing_attached() {
     ));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn only_a_temporary_refusal_is_sent_again_and_the_same_bytes_are_sent() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let producer = StdArc::new(open(&mut loopback, 2).await);
 
-    let sending = tokio::spawn({
+    let sending = nervix_primitives::task::spawn({
         let producer = producer.clone();
         async move { producer.send(batch(b"first")).await }
     });
@@ -208,7 +208,7 @@ async fn only_a_temporary_refusal_is_sent_again_and_the_same_bytes_are_sent() {
         .assured("an open producer sends the batch");
     assert_eq!(completed, ProducerOutcome::Completed);
 
-    let failing = tokio::spawn({
+    let failing = nervix_primitives::task::spawn({
         let producer = producer.clone();
         async move { producer.send(batch(b"second")).await }
     });
@@ -237,7 +237,7 @@ async fn only_a_temporary_refusal_is_sent_again_and_the_same_bytes_are_sent() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_cancelled_wait_keeps_its_submission_and_credit_until_the_outcome_is_taken() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let producer = StdArc::new(open(&mut loopback, 1).await);
@@ -246,7 +246,7 @@ async fn a_cancelled_wait_keeps_its_submission_and_credit_until_the_outcome_is_t
         .submit(batch(b"held"))
         .await
         .assured("an open producer with credit takes the batch");
-    let waiting = tokio::spawn({
+    let waiting = nervix_primitives::task::spawn({
         let producer = producer.clone();
         async move { producer.rejoin(id).await }
     });
@@ -257,13 +257,13 @@ async fn a_cancelled_wait_keeps_its_submission_and_credit_until_the_outcome_is_t
         .await;
 
     // The outcome waits for the application, and so does the credit it holds.
-    let blocked = tokio::spawn({
+    let blocked = nervix_primitives::task::spawn({
         let producer = producer.clone();
         async move { producer.submit(batch(b"next")).await }
     });
     let pending = tokio::time::timeout(DEADLINE, async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let pending = producer.pending_submissions();
             if pending
                 .iter()
@@ -298,12 +298,12 @@ async fn a_cancelled_wait_keeps_its_submission_and_credit_until_the_outcome_is_t
     assert_ne!(next, id);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_lost_exchange_leaves_sent_batches_unknown_and_ends_the_producer() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let producer = StdArc::new(open(&mut loopback, 2).await);
 
-    let sending = tokio::spawn({
+    let sending = nervix_primitives::task::spawn({
         let producer = producer.clone();
         async move { producer.send(batch(b"in flight")).await }
     });

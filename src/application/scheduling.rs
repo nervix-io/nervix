@@ -24,8 +24,8 @@ use nervix_models::{
     KafkaPartitionSchedule, Model, ModelKind, ModelName, NodeRef, PlacementGroupSchedule,
     PlacementPolicy, QuiesceLevel, ScheduledNode,
 };
+use nervix_primitives::sync::CancellationToken;
 use tokio::time::{Duration, Instant, sleep};
-use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::{
@@ -1036,7 +1036,7 @@ impl SessionServiceImpl {
 
     async fn wait_for_shutdown_drain_leader(&self) -> ClusterNodeName {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let leader = self.inner.consensus.current_leader().await;
             if let Some(leader) = leader {
                 return leader;
@@ -2004,7 +2004,7 @@ impl SessionServiceImpl {
             let cancel_child = cancel.clone();
             let service = self.clone();
             let spec_for_task = spec.clone();
-            let handle = tokio::spawn(async move {
+            let handle = nervix_primitives::task::spawn(async move {
                 let resolved = match service.inner.runtime.resolve_client_config(
                     &spec_for_task.domain,
                     spec_for_task.client.mount.as_ref(),
@@ -2045,7 +2045,7 @@ impl SessionServiceImpl {
                 };
                 let mut last_observed = None::<Vec<i32>>;
                 loop {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let mut partitions =
                         match inspector.partitions(spec_for_task.topic.as_str()).await {
                             Ok(partitions) => partitions,
@@ -2057,7 +2057,7 @@ impl SessionServiceImpl {
                                     spec_for_task.domain.as_str(),
                                     error
                                 ));
-                                tokio::select! {
+                                nervix_primitives::select! {
                                     _ = service.inner.drain_support_shutdown.cancelled() => break,
                                     _ = cancel_child.cancelled() => break,
                                     _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => continue,
@@ -2087,7 +2087,7 @@ impl SessionServiceImpl {
                             last_observed = Some(partitions);
                         }
                     }
-                    tokio::select! {
+                    nervix_primitives::select! {
                         _ = service.inner.drain_support_shutdown.cancelled() => break,
                         _ = cancel_child.cancelled() => break,
                         _ = sleep(LEADER_KAFKA_PARTITION_WATCH_INTERVAL) => {}

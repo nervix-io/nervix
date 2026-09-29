@@ -24,7 +24,7 @@ use nervix_interconnect::{
 #[cfg(not(feature = "testing"))]
 use nervix_models::ClusterNodeName;
 use nervix_models::{ClusterSchedule, DomainName, ResourceId, ResourceName, VhostName};
-use parking_lot::RwLock;
+use nervix_primitives::sync::{CancellationToken, Mutex as AsyncMutex, blocking::RwLock};
 use rustls::{
     RootCertStore, ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer},
@@ -33,11 +33,7 @@ use rustls::{
 };
 use rustls_pki_types::pem::{Error as PemError, PemObject};
 use thiserror::Error;
-use tokio::{
-    sync::Mutex as AsyncMutex,
-    time::{Duration, interval},
-};
-use tokio_util::sync::CancellationToken;
+use tokio::time::{Duration, interval};
 use tonic::transport::{Identity as TonicIdentity, ServerTlsConfig};
 use tracing::{info, warn};
 use triomphe::Arc;
@@ -113,8 +109,8 @@ pub(in crate::application) async fn reload_interconnect_tls(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
-        tokio::task::consume_budget().await;
-        tokio::select! {
+        nervix_primitives::task::consume_budget().await;
+        nervix_primitives::select! {
             _ = shutdown.cancelled() => break,
             _ = ticker.tick() => {}
         }
@@ -475,7 +471,7 @@ impl ListenerVhosts {
         nervix_interconnect::install_rustls_crypto_provider();
         let mut resolver = ResolvesServerCertUsingSni::new();
         for (key, presented) in &self.vhosts {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let certified_key = load_vhost_tls_materials(resource_store, &presented.resource)
                 .await
                 .change_context_lazy(|| HttpsListenerError::LoadTlsResource {
@@ -760,7 +756,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_failed_installation_is_reported_for_its_revision_and_keeps_the_presented_certificates()
      {
         let TestService { service, path, .. } = build_test_service(false).await;
@@ -850,7 +846,7 @@ mod tests {
         std::fs::remove_dir_all(&path).expect("the test database directory is removed");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn unusable_tls_material_is_classified_by_what_is_wrong_with_it() {
         let TestService { service, path, .. } = build_test_service(false).await;
         let resource_store = &service.inner.resource_store;
@@ -994,7 +990,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_hostname_the_certificate_does_not_name_fails_the_installation() {
         let TestService { service, path, .. } = build_test_service(false).await;
         let certificates = service.inner.https_certificates.clone();
@@ -1035,7 +1031,7 @@ mod tests {
         std::fs::remove_dir_all(&path).expect("the test database directory is removed");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_runtime_state_without_tls_vhosts_stops_presenting_certificates() {
         let TestService { service, path, .. } = build_test_service(false).await;
         let certificates = service.inner.https_certificates.clone();

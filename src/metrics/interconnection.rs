@@ -27,8 +27,11 @@ use nervix_interconnect::{
     ConnectionDirection, ConnectionFailureReason, PoolClass, RelayAdmissionOutcome, RequestOutcome,
     RequestSubquota, StreamResetReason, TransferDirection, Transport, TransportSnapshot,
 };
-use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::RwLock;
+use nervix_primitives::sync::{
+    CancellationToken,
+    atomic::{AtomicU64, Ordering},
+    blocking::RwLock,
+};
 use prometheus::{
     CounterVec, GaugeVec, Opts,
     core::{Collector, Desc},
@@ -36,7 +39,6 @@ use prometheus::{
 };
 use strum::IntoEnumIterator as _;
 use tokio::time::{Instant, MissedTickBehavior, interval};
-use tokio_util::sync::CancellationToken;
 use triomphe::Arc;
 
 /// How often the reactor delay probe asks to be woken. Short enough that one blocked poll is
@@ -83,8 +85,8 @@ impl NodeObservations {
         ticks.tick().await;
         let mut expected_at = Instant::now();
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 _ = shutdown.cancelled() => break,
                 _ = ticks.tick() => {}
             }

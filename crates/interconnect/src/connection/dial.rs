@@ -69,7 +69,7 @@ impl TransportState {
         };
         let mut last_failure = None;
         for attempt in budget.attempts(&addresses) {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let addr = attempt.address;
             let share = attempt.budget;
             match timeout(share, TcpStream::connect(addr)).await {

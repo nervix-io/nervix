@@ -202,7 +202,7 @@ impl RedisPubSubSourcePlan {
             })?;
         let mut last_failure = None;
         for attempt in budget.attempts(&addresses) {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let connected = timeout(attempt.budget, async {
                 let stream = TcpStream::connect(attempt.address).await?;
                 let Some(config) = tls else {
@@ -361,7 +361,7 @@ mod tests {
         .expect("the Redis address is valid")
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_plan_requires_the_address_before_it_subscribes() {
         let channel = ChannelName::parse("events").expect("a plain channel name parses");
         let fixture = Fixture::start().await;
@@ -374,7 +374,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_subscription_dials_the_next_answer_when_the_first_refuses() {
         let fixture = Fixture::start().await;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -405,7 +405,7 @@ mod tests {
         assert!(fixture.authority.questions_for(name) > 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_subscription_keeps_a_missing_name_as_its_typed_cause() {
         let fixture = Fixture::start().await;
         let name = "missing.nervix.test";
@@ -427,7 +427,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_subscription_keeps_an_empty_answer_as_its_typed_cause() {
         let fixture = Fixture::start().await;
         let name = "empty.nervix.test";
@@ -451,7 +451,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_silent_lookup_ends_with_a_typed_timeout() {
         let fixture = Fixture::start().await;
         let name = "silent.nervix.test";
@@ -474,7 +474,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn cancelling_a_lookup_leaves_the_source_ready_for_a_new_answer() {
         let fixture = Fixture::start().await;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -487,13 +487,13 @@ mod tests {
         let name = "changing.nervix.test";
         fixture.authority.set(name, DnsAnswer::Silent);
         let plan = plan(&format!("redis://{name}:{port}"), fixture.dns.clone());
-        let attempting = tokio::spawn({
+        let attempting = nervix_primitives::task::spawn({
             let plan = plan.clone();
             async move { plan.connect().await }
         });
         tokio::time::timeout(Duration::from_secs(2), async {
             while fixture.authority.questions_for(name) == 0 {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -514,7 +514,7 @@ mod tests {
         drop(stream);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_literal_ipv6_subscription_skips_dns() {
         let fixture = Fixture::start().await;
         let listener = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0))
@@ -538,7 +538,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_unix_subscription_skips_dns() {
         let fixture = Fixture::start().await;
         let directory = tempfile::tempdir().expect("a temporary socket directory can be created");
@@ -555,7 +555,7 @@ mod tests {
         assert_eq!(fixture.authority.total_questions(), 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_subscription_keeps_the_clients_auth_database_and_protocol_settings() {
         let fixture = Fixture::start().await;
         let plan = plan(

@@ -695,7 +695,7 @@ impl BranchInstanceTemplate {
         domain: &DomainName,
     ) -> error_stack::Result<(), WasmInstanceError> {
         for processor in self.processors.values_mut() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let RelayProcessorOperationTemplate::WasmProcessor {
                 resource,
                 resource_version,
@@ -750,7 +750,7 @@ impl BranchInstanceTemplate {
         let materialized_states = HashMap::default();
         let mut processors = HashMap::default();
         for (processor, template) in &self.processors {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let node = template
                 .instantiate(runtime, domain, &key, incarnation, &self.revision)
                 .await?;
@@ -871,7 +871,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn processor_template_refresh_is_not_junction_specific() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -967,7 +967,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_template_refresh_keeps_the_guest_and_updates_its_routes() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1067,7 +1067,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn processor_template_refresh_rejects_other_targets_topologies_and_kinds() {
         let runtime = Runtime::default();
         let domain = domain("default");

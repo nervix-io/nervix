@@ -294,14 +294,29 @@ choose a backend.
   library's, `core`'s, Shuttle's or Loom's atomics, and local aliases that select between them, are
   rejected however they are spelled: direct, renamed, grouped, qualified, globbed, through a
   renamed `std`, `core` or `sync`, or inside a macro body or an inactive `cfg` branch.
-- A real atomic that must stay outside every model comes from
-  `nervix_primitives::unmodeled::sync::atomic`, and each use needs a permission in
-  `crates/primitives/unmodeled-permissions.toml` naming the file, the items, the owner, why a real
-  atomic is required, and what that leaves unverified. It may keep runner statistics across model
-  executions, serve a thread no model runs or an external API that requires the standard type, or
-  record what a check observes without adding a scheduling point. It never carries the protocol
-  under test, chooses its branches, supplies its wakeups, or establishes an ordering an assertion
-  relies on. A use without a permission, an unlisted item, and a permission nothing uses all fail.
+- Every other governed family comes from the boundary too, under the same rule: async
+  synchronization and cancellation tokens from `nervix_primitives::sync`; thread-blocking locks,
+  condition variables, barriers, one-time initialization and synchronous channels from
+  `nervix_primitives::sync::blocking`; tasks, the cooperative budget and task tracking from
+  `nervix_primitives::task`; the runtime from `nervix_primitives::runtime`; async tests and mains
+  through `#[nervix_primitives::test]` and `#[nervix_primitives::main]`, and
+  `nervix_primitives::select!`; streams over channels from `nervix_primitives::stream`; atomic
+  reference publication from `nervix_primitives::publication`; concurrent maps and queues from
+  `nervix_primitives::collections`; threads and thread-local storage from `nervix_primitives::thread`
+  and `nervix_primitives::thread_local!`. Tokio's `sync`, `task` and `runtime` modules with their
+  attributes and macros, Tokio Util's `sync` and `task`, Tokio Stream, `parking_lot`, `dashmap`,
+  `concurrent-queue`, `arc-swap`, the standard library's threads and non-atomic `sync` items,
+  Shuttle's and Loom's primitives, and the Shuttle wrapper crates are rejected however they are
+  spelled, and only `nervix-primitives` depends on the libraries whose families it selects.
+- A real primitive that must stay outside every model comes from `nervix_primitives::unmodeled`,
+  and each use needs a permission in `crates/primitives/unmodeled-permissions.toml` naming the
+  file, the items by their paths below `unmodeled`, the owner, why a real primitive is required,
+  and what that leaves unverified. It may keep runner statistics across model executions, serve a
+  thread no model runs, process-wide state initialized once, or an external API that requires the
+  library's own type, or record what a check observes without adding a scheduling point. It never
+  carries the protocol under test, chooses its branches, supplies its wakeups, or establishes an
+  ordering an assertion relies on. A use without a permission, an unlisted item, and a permission
+  nothing uses all fail.
 - A selected atomic belongs to the model execution that constructs it. It never lives in a
   `static`, directly, through a wrapper, an array or a type alias, or in a `thread_local!`, and it
   is never constructed in a const context, which Loom's atomics do not support. Process-wide state
@@ -312,25 +327,29 @@ choose a backend.
   every pair of modes, including a pair that separate dependencies enable, fails to compile there
   with a diagnostic naming both. Selection depends only on features, never on `cfg(test)`; there is
   no fallback from a modeled primitive to a real one, and a modeled primitive used outside its
-  model is a test configuration failure.
+  model is a test configuration failure. An operation a mode cannot provide is unavailable in that
+  mode and fails to compile. Loom models atomics, its threads and thread-local storage; in a Loom
+  build every other family is the ordinary library, outside every model, and Loom model code, a
+  module compiled only for Loom, may not name one.
 - A package that owns a `shuttle`, `loom` or `turmoil` feature depends on `nervix-primitives`
   directly and forwards the mode to it and to every workspace dependency that owns the same mode.
   Cargo unifies features, so ordinary and modeled suites run in separate build invocations with
   explicit features; a workspace-wide `--all-features` command excludes every package that owns a
   mode.
-- Ordinary execution re-exports the standard library items directly and adds no allocation,
-  wrapper, dispatch, lock, reference-count operation or scheduling point.
-- The atomic surface is portable and builds for the browser. Operating-system threads are the
-  explicit `native` capability. Requesting a capability or a mode the target cannot provide fails
-  to compile instead of selecting another implementation.
+- Ordinary execution re-exports each library's items directly and adds no allocation, wrapper,
+  dispatch, lock, reference-count operation or scheduling point. An adapter exists only in a
+  modeled build, keeps the library's semantics, and states what its mode observes.
+- The atomic surface is portable and builds for the browser. Every other family is the explicit
+  `native` capability. Requesting a capability or a mode the target cannot provide fails to
+  compile instead of selecting another implementation.
 - Only `nervix-primitives` selects Loom and only `nervix-model-harness` runs Loom models; both take
   it as an optional dependency, and no other package depends on `loom`. Ordinary dependency graphs,
   with default features or without them, contain no model checker or simulator.
-- The remaining families, synchronous and asynchronous synchronization, tasks and threads,
-  publication and concurrent collections, shared ownership, monotonic scheduling and networking,
-  still use their current access paths until each moves through the boundary with its complete
-  consumer migration and its enforcement. A new execution-sensitive primitive joins the boundary
-  before any caller introduces it, and no change adds a new atomic bypass.
+- The remaining families, monotonic scheduling, networking and shared ownership, still use their
+  current access paths until each moves through the boundary with its complete consumer migration
+  and its enforcement; until timers move, a crate that uses them keeps the one accepted
+  `extern crate shuttle_tokio as tokio` alias. A new execution-sensitive primitive joins the
+  boundary before any caller introduces it, and no change adds a new bypass.
 
 `just validate-primitive-boundary`, `just validate-loom-dependencies` and
 `just validate-execution-mode-conflicts` enforce these rules in `just validate` and
@@ -484,7 +503,8 @@ build and the existing tests, and nothing in it changes behavior.
 - Callers must not choose blocking, yielding, batching, throttling, or similar safety behavior
   unless it is an explicit typed part of the operation's contract.
 - In async code, a loop whose body performs async work must call
-  `tokio::task::consume_budget().await` once per iteration near the top of the loop body.
+  `nervix_primitives::task::consume_budget().await` once per iteration near the top of the loop
+  body.
 
 ### Domains and external systems
 
@@ -652,8 +672,10 @@ build and the existing tests, and nothing in it changes behavior.
   and still resolve by key, use `IndexMap` or a sorted sequence with a binary search rather than
   scanning it, and never keep a map and a parallel order sequence in sync by hand. Any scan that
   survives must state the bound that makes it correct.
-- Prefer synchronous locks from `parking_lot` over `std::sync` lock types.
-- Prefer `DashMap` over `Arc<Mutex<HashMap<...>>>` for shared concurrent maps.
+- Take synchronous locks from `nervix_primitives::sync::blocking`, which has `parking_lot`'s
+  interface; never `std::sync` lock types.
+- Prefer `nervix_primitives::collections::DashMap` over `Arc<Mutex<HashMap<...>>>` for shared
+  concurrent maps.
 - `triomphe::Arc` is the default shared-ownership type for Nervix-owned state. Use
   `std::sync::Arc` only when weak references or an external API require it. In modules that need
   both, import the standard type as `StdArc` and confine it to that boundary.
@@ -710,6 +732,25 @@ build and the existing tests, and nothing in it changes behavior.
 
 ### Test-first changes
 
+- Bolero is the default for lossless encode/decode and representation conversions. Every new or
+  changed pair ships in the same change with a property over bounded, valid current values that
+  asserts the decoded or converted-back value equals the complete original value. Preserve every
+  significant field, order, branch, identity, null, type and sensitivity. If ordinary equality is
+  insufficient, define an explicit complete oracle, such as float bit equality or Arrow schema
+  and logical values with validity. Never compare only selected fields or normalize away a failure.
+- Canonicalizing, lossy and one-way conversions state and test their actual contract; separately
+  test exact round trips on a lossless domain when one exists. Keep malformed-input rejection in
+  separate targets so a generator cannot pass by producing mostly invalid values. Generate bounded
+  current shapes with supported variants and deliberate boundaries; do not retain historical
+  fixtures. Model/reference, operation-sequence, scalar/SIMD differential and encoded-size
+  properties also use Bolero when appropriate.
+- Every Bolero property is an ordinary test and a registered custom fuzz target in
+  `tests/bolero-targets.toml`, with one stable ID, exact package and test identity, required
+  features, domain version, source-adjacent corpus, input/case budgets and invariant. Use the same
+  production path and complete assertion in ordinary randomized/corpus and coverage-guided
+  libFuzzer runs. Registration and both CI modes are mandatory even while other work is concurrent.
+  Keep generators in dev/test code, preserve inward dependencies, and keep modeled execution
+  features and model-checker dependencies out of ordinary and fuzz builds.
 - For a bug, first add or identify a focused test or cucumber scenario and confirm that it fails for
   the expected reason. Implement only after the reproducer is red, rerun it until green, then run
   the appropriate broader validation.
@@ -728,7 +769,10 @@ build and the existing tests, and nothing in it changes behavior.
   production owner that names and asserts its invariant. Run it through `just test-shuttle` in CI
   and preserve a failing schedule for replay. Concurrency tests have no wall-clock bounds or sleep
   polls; express deadline choices and progress with scheduler-visible events. A publicly observable
-  outcome still needs its Cucumber scenario.
+  outcome still needs its Cucumber scenario. A waiter registers for its notification before it
+  reads the state it waits on; the boundary's `Notify` and `watch` channel make each registration
+  a scheduling point under Shuttle, so a check reaches a publication between a read and a
+  registration and holds that order instead of review.
 - A claim that depends on memory ordering, such as cross-location publication or a fence
   protocol, ships with a Loom model over its actual synchronous production owner. Shuttle's
   sequentially consistent scheduler cannot establish such a claim. When the protocol is embedded
@@ -827,6 +871,13 @@ build and the existing tests, and nothing in it changes behavior.
   required dependencies, environment, and ordering for builds, checks, lints, tests, benchmarks,
   and formatting. When the needed invocation has no recipe, add a focused `justfile` recipe and use
   it instead of running Cargo directly.
+- Use `just test-bolero [filter]` for bounded randomized cases and checked-in corpus replay,
+  `just fuzz-list` to inspect registered targets, `just fuzz <target> [duration]` or
+  `just fuzz-all [duration]` for sanitizer-backed libFuzzer, and `just fuzz-replay` /
+  `just fuzz-reduce` for saved exact inputs. `just validate-bolero` enforces inventory and
+  scoped compiled discovery. A random seed identifies one generated case, not an entire
+  entropy-driven campaign. Keep failures, their minimization and revision/toolchain/flag metadata
+  before cleanup.
 - Use `just validate` for formatting and validation.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, `as`
   casts outside imports and qualified paths, bare `unwrap` and `expect`, outcomes dropped with

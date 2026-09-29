@@ -9,7 +9,7 @@
 
 use super::*;
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn leasing_a_stream_from_an_established_pool_does_not_allocate() {
     let ConnectedTransports {
         transport_a,
@@ -19,11 +19,11 @@ async fn leasing_a_stream_from_an_established_pool_does_not_allocate() {
     } = connected_transports().await;
     timeout(Duration::from_secs(5), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if transport_a.is_connected_to(&node_b) {
                 break;
             }
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -40,7 +40,7 @@ async fn leasing_a_stream_from_an_established_pool_does_not_allocate() {
     for (class, subquota) in leases {
         // The lease is polled exactly once, so no other task runs on this thread while the counter
         // is reading. Yielding first gives that poll a fresh scheduling budget to complete in.
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         let (allocations, polled) = alloc_count::alloc_count!({
             transport_a
                 .inner

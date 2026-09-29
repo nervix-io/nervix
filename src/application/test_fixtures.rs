@@ -13,8 +13,9 @@ use clap::Parser;
 use fjall::Database;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{CommandRequest, SuggestRequest};
+#[cfg(feature = "testing")]
+use nervix_consensus::ConsensusTestProbe;
 use nervix_consensus::{Consensus, ConsensusSettings, Proposer, RaftRetentionPolicy};
-use nervix_execution::sync::DashMap;
 use nervix_interconnect::{TlsConfigBundle, Transport, TransportClock};
 use nervix_models::{
     AckMode, BranchSelection, ClusterNodeName, CommandExecutionReference, CreateDeduplicator,
@@ -24,14 +25,17 @@ use nervix_models::{
     PlacementGroupSchedule, ProcessorInputs, ProcessorOutputs, ScheduledNode, SchemaFingerprint,
     TransactionLifecycle, TransactionPosition, WasmProcessorLimits,
 };
-use nervix_primitives::unmodeled::sync::atomic::{AtomicU64, Ordering};
+use nervix_primitives::{
+    collections::DashMap,
+    sync::CancellationToken,
+    unmodeled::sync::atomic::{AtomicU64, Ordering},
+};
 use nonzero_ext::nonzero;
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType,
 };
 use tokio::time::Duration;
-use tokio_util::sync::CancellationToken;
 use triomphe::Arc;
 
 #[cfg(feature = "shuttle")]
@@ -298,7 +302,7 @@ fn test_session_service(
             command_executions: super::command_execution::CommandExecutionOwners::default(),
             transaction_executions: DashMap::with_hasher(RandomState::new()),
             transaction_recovery: Default::default(),
-            ownership_handoff_operations: tokio::sync::Mutex::new(()),
+            ownership_handoff_operations: nervix_primitives::sync::Mutex::new(()),
             resource_upload_executions: DashMap::with_hasher(RandomState::new()),
             resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             retained_backups: Default::default(),
@@ -523,8 +527,31 @@ pub(in crate::application) struct TestService {
     pub(in crate::application) path: PathBuf,
 }
 
+#[cfg(feature = "testing")]
 pub(in crate::application) async fn build_test_service(
     create_default_domain_flag: bool,
+) -> TestService {
+    build_test_service_inner(create_default_domain_flag, None).await
+}
+
+#[cfg(not(feature = "testing"))]
+pub(in crate::application) async fn build_test_service(
+    create_default_domain_flag: bool,
+) -> TestService {
+    build_test_service_inner(create_default_domain_flag).await
+}
+
+#[cfg(feature = "testing")]
+pub(in crate::application) async fn build_test_service_with_probe(
+    create_default_domain_flag: bool,
+    probe: ConsensusTestProbe,
+) -> TestService {
+    build_test_service_inner(create_default_domain_flag, Some(probe)).await
+}
+
+async fn build_test_service_inner(
+    create_default_domain_flag: bool,
+    #[cfg(feature = "testing")] probe: Option<ConsensusTestProbe>,
 ) -> TestService {
     let path = test_db_path();
     let _ = std::fs::remove_dir_all(&path);
@@ -545,22 +572,27 @@ pub(in crate::application) async fn build_test_service(
     let expected_leader = test_node_name(id);
     let interconnect = test_interconnect("test", &expected_leader).await;
     let executor = nervix_execution::Executor::default();
-    let consensus = Consensus::open(
-        path.join("consensus"),
-        ConsensusSettings {
-            cluster_name: "test".to_string(),
-            node_id: expected_leader.clone(),
-            interconnect_advertise_addr: interconnect.local_addr().into(),
-            interconnect: interconnect.clone(),
-            executor: executor.clone(),
-            raft_heartbeat_interval: Duration::from_millis(50),
-            raft_election_timeout_min: Duration::from_millis(150),
-            raft_election_timeout_max: Duration::from_millis(300),
-            raft_retention: RaftRetentionPolicy::default(),
-        },
-    )
-    .await
-    .expect("consensus should open");
+    let settings = ConsensusSettings {
+        cluster_name: "test".to_string(),
+        node_id: expected_leader.clone(),
+        interconnect_advertise_addr: interconnect.local_addr().into(),
+        interconnect: interconnect.clone(),
+        executor: executor.clone(),
+        raft_heartbeat_interval: Duration::from_millis(50),
+        raft_election_timeout_min: Duration::from_millis(150),
+        raft_election_timeout_max: Duration::from_millis(300),
+        raft_retention: RaftRetentionPolicy::default(),
+    };
+    #[cfg(feature = "testing")]
+    let consensus = match probe {
+        Some(probe) => {
+            Consensus::open_with_test_probe(path.join("consensus"), settings, probe).await
+        }
+        None => Consensus::open(path.join("consensus"), settings).await,
+    };
+    #[cfg(not(feature = "testing"))]
+    let consensus = Consensus::open(path.join("consensus"), settings).await;
+    let consensus = consensus.expect("consensus should open");
     consensus
         .administrator()
         .maybe_initialize()

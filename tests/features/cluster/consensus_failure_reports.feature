@@ -1,5 +1,14 @@
 Feature: Consensus failure reports at client mutation boundaries
 
+  Scenario: Creating a domain reports a rejected durable proposal
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And consensus storage on the leader fails before committing operation "put-domain:{{domain}}"
+    When these NSPL commands fail with "consensus storage"
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+
   Scenario Outline: Creating a user reports the storage failure that rejected its proposal
     Given a <cluster_size> node nervix cluster is started
     And consensus storage on the leader fails before committing operation "create-user:report_user"
@@ -20,6 +29,15 @@ Feature: Consensus failure reports at client mutation boundaries
     When these NSPL commands fail with "consensus storage"
       """
       CORDON NODE node-2;
+      """
+
+  Scenario: Draining a node reports a rejected cordon proposal
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And consensus storage on the leader fails before committing operation "cordon-node:node-2"
+    When these NSPL commands fail with "consensus storage"
+      """
+      DRAIN NODE node-2;
       """
 
   Scenario Outline: Queueing a transaction statement reports the storage failure that rejected its proposal

@@ -5,8 +5,8 @@
 //! - **Depends on.** Bound route plans, relay services and the domain clock.
 //! - **Must not know.** Scheduled Models, error-route selection or VM compilation.
 
-use dashmap::mapref::entry::Entry as DashMapEntry;
 use nervix_models::DomainName;
+use nervix_primitives::collections::dash_map::Entry as DashMapEntry;
 
 use super::{message_error::MessageErrorHandlingError, *};
 
@@ -52,7 +52,7 @@ pub(super) struct MessageErrorRouteRuntime {
     plan: Arc<BoundMessageErrorRoute>,
     sender: mpsc::Sender<MessageErrorDelivery>,
     shutdown: watch::Sender<bool>,
-    task: parking_lot::Mutex<Option<JoinHandle<()>>>,
+    task: nervix_primitives::sync::blocking::Mutex<Option<JoinHandle<()>>>,
 }
 
 struct MessageErrorRouteTask {
@@ -71,7 +71,7 @@ impl MessageErrorRouteRuntime {
             plan: plan.clone(),
             sender,
             shutdown,
-            task: parking_lot::Mutex::new(None),
+            task: nervix_primitives::sync::blocking::Mutex::new(None),
         });
         // A route owes the force-flush generations of the node whose messages failed. The
         // obligation is registered before the task starts, so a generation requested between the
@@ -83,7 +83,7 @@ impl MessageErrorRouteRuntime {
         let flush_policy = plan
             .flush_policy
             .assured("only a buffered prepared message-error route creates a delivery task");
-        let task = tokio::spawn(
+        let task = nervix_primitives::task::spawn(
             MessageErrorRouteTask {
                 runtime,
                 route: plan.key.clone(),
@@ -145,7 +145,7 @@ impl MessageErrorRouteTask {
         let mut batches = Vec::with_capacity(pending.deliveries.len());
         let mut source_acks = Vec::new();
         for delivery in pending.deliveries {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             pending_acks.ack_alive();
             batches.push(delivery.batch);
             source_acks.extend(delivery.source_acks);
@@ -267,7 +267,7 @@ impl MessageErrorRouteTask {
             }
         }
         for key in keys {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.flush_key(&key).await;
         }
         Ok(())
@@ -276,7 +276,7 @@ impl MessageErrorRouteTask {
     async fn flush_all(&mut self) {
         let keys = self.pending.keys().cloned().collect::<Vec<_>>();
         for key in keys {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.flush_key(&key).await;
         }
     }
@@ -300,7 +300,7 @@ impl MessageErrorRouteTask {
     ) {
         let ready = input.len();
         for _ in 0..ready {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Ok(delivery) = input.try_recv() else {
                 break;
             };
@@ -321,7 +321,7 @@ impl MessageErrorRouteTask {
     ) {
         input.close();
         while let Some(delivery) = input.recv().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.accept(delivery, domain_clock).await;
         }
         self.flush_all().await;
@@ -346,10 +346,10 @@ impl MessageErrorRouteTask {
             }
         };
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let flush_deadlines = self.flush_deadlines();
             let has_flush_deadlines = !flush_deadlines.is_empty();
-            tokio::select! {
+            nervix_primitives::select! {
                 biased;
                 // A signalled stop and a dropped sender both mean the owner is gone, and this
                 // arm drains and finishes either way, so the outcome carries nothing to read.
@@ -420,9 +420,9 @@ where
 {
     tokio::pin!(future);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         acks.ack_alive();
-        tokio::select! {
+        nervix_primitives::select! {
             biased;
             result = &mut future => return result,
             _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => {}
@@ -475,7 +475,7 @@ impl Runtime {
             .filter_map(|entry| (&entry.key().domain == domain).then_some(entry.key().clone()))
             .collect::<Vec<_>>();
         for key in keys {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some((_, route)) = self.inner.message_error_routes.remove(&key) {
                 route.shutdown().await;
             }
@@ -587,7 +587,7 @@ mod tests {
         (task, owner_task)
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn buffered_message_error_refreshes_source_ack_before_flush_deadline() {
         let interval = REMOTE_ACK_ALIVE_INTERVAL * 4;
         let fanout = RelayBoundaryFanout::direct_with_capacity(
@@ -607,7 +607,7 @@ mod tests {
             task.runtime
                 .node_quiesce_counters(&task.route.domain, task.route.node.clone()),
         );
-        let task = tokio::spawn(task.run(input, shutdown_rx, force_flush));
+        let task = nervix_primitives::task::spawn(task.run(input, shutdown_rx, force_flush));
         let (delivery, mut completion) = test_delivery();
 
         sender
@@ -634,7 +634,7 @@ mod tests {
             .expect("relay owner should stop");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn force_flush_releases_a_buffered_message_error_before_its_cadence() {
         let runtime = Runtime::default();
         let domain = DomainName::try_from("test").expect("valid domain");
@@ -698,7 +698,7 @@ mod tests {
             .expect("relay owner should stop");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn route_replacement_drains_pending_errors_and_uses_the_new_cadence() {
         let runtime = Runtime::default();
         let domain = DomainName::try_from("test").expect("valid domain");
@@ -777,7 +777,7 @@ mod tests {
             .expect("relay owner should stop");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn blocked_message_error_relay_delivery_refreshes_source_ack() {
         let fanout = RelayBoundaryFanout::direct_with_capacity(
             NonZeroUsize::new(1).expect("non-zero test capacity"),
@@ -795,7 +795,7 @@ mod tests {
             task.runtime
                 .node_quiesce_counters(&task.route.domain, task.route.node.clone()),
         );
-        let task = tokio::spawn(task.run(input, shutdown_rx, force_flush));
+        let task = nervix_primitives::task::spawn(task.run(input, shutdown_rx, force_flush));
         let (delivery, mut completion) = test_delivery();
 
         sender
@@ -823,7 +823,7 @@ mod tests {
             .expect("relay owner should stop");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn enqueue_reports_when_the_error_route_has_stopped() {
         let runtime = Runtime::default();
         let domain = DomainName::try_from("test").expect("valid domain");

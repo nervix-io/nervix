@@ -1056,7 +1056,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_input_envelope_retains_one_shared_source_batch_and_source_tokens() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (envelope, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30]).await;
@@ -1082,7 +1082,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_identity_input_reference_reuses_exact_source_array() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (input, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30]).await;
@@ -1101,7 +1101,7 @@ mod tests {
         assert!(StdArc::ptr_eq(&source, outputs[0].batch.batch().column(0)));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_contiguous_input_reference_shares_source_buffers() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (input, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30, 40]).await;
@@ -1137,7 +1137,7 @@ mod tests {
         assert_eq!(values.values().as_ref(), &[20, 30]);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_general_input_selection_filters_reorders_and_duplicates_rows() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (input, ack_map) = wasm_input_for_values(&schema, &[10, 20, 30, 40]).await;
@@ -1168,7 +1168,7 @@ mod tests {
         assert_eq!(values.values().as_ref(), &[40, 20, 20]);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_input_references_materialize_rows_from_multiple_retained_batches() {
         let schema = test_schema(&[("value", ParseAsType::I32)]);
         let (first_input, mut ack_map) = wasm_input_for_values(&schema, &[10]).await;
@@ -1202,7 +1202,7 @@ mod tests {
         assert_eq!(values.values().as_ref(), &[10, 20]);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn wasm_identity_references_support_every_internal_arrow_field_kind() {
         let schema = test_schema(&[
             ("u8", ParseAsType::U8),
@@ -1295,7 +1295,7 @@ mod tests {
 
     /// A node compiles the module a processor pins once, keeps it while the schedule assigns a
     /// processor that pins it to the node, and drops it once no such processor is left.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_pinned_module_is_compiled_once_and_kept_while_assigned() {
         let domain = DomainName::parse("events").expect("valid domain");
         let resource = ResourceName::parse("sessionizer").expect("valid identifier");

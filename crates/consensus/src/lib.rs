@@ -11,11 +11,7 @@
 //!   and scheduling belong above; this crate agrees on values and hands them back.
 
 #[cfg(feature = "shuttle")]
-extern crate shuttle_parking_lot as parking_lot;
-#[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio_util as tokio_util;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -38,7 +34,15 @@ use nervix_models::{
     ResourceName, ResourceNodeStatus, ResourceUpload, ResourceUploadKey, ResourceVersion,
     ResourceVersionStatus, Statement, TransactionImpactReport, UserName,
 };
-use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
+use nervix_primitives::{
+    sync::{
+        Mutex as AsyncMutex,
+        atomic::{AtomicU64, Ordering},
+        blocking::Mutex,
+        broadcast, watch,
+    },
+    task::JoinHandle,
+};
 use nervix_recovery::Discarded as _;
 pub use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,
@@ -59,7 +63,6 @@ use openraft::{
         async_runtime::watch::WatchReceiver,
     },
 };
-use parking_lot::Mutex;
 use rkyv::{
     Archive, Deserialize as RkyvDeserialize, Place, Serialize as RkyvSerialize,
     rancor::Fallible,
@@ -70,11 +73,7 @@ use rkyv::{
 use serde::{Deserialize, Serialize};
 use sorted_vec::SortedSet;
 use thiserror::Error;
-use tokio::{
-    sync::{Mutex as AsyncMutex, broadcast, watch},
-    task::JoinHandle,
-    time::{Instant, timeout},
-};
+use tokio::time::{Instant, timeout};
 use tracing::{error, info};
 use triomphe::Arc;
 
@@ -2083,11 +2082,11 @@ impl Consensus {
         let events = ConsensusEvents::new();
         let metrics_raft = raft.clone();
         let metrics_events = events.clone();
-        let metrics_task = tokio::spawn(async move {
+        let metrics_task = nervix_primitives::task::spawn(async move {
             let mut rx = metrics_raft.metrics();
             let mut last_transition = None;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if rx.changed().await.is_err() {
                     break;
                 }
@@ -2119,7 +2118,7 @@ impl Consensus {
             }
         });
 
-        let retention_task = tokio::spawn(
+        let retention_task = nervix_primitives::task::spawn(
             retention::RetentionTask::new(raft.clone(), store.clone(), retention).run(),
         );
         let consensus = Self {
@@ -2551,7 +2550,7 @@ impl Observer {
     pub async fn wait_for_runtime_revision_after(&self, revision: u64) -> Option<u64> {
         let mut applied = self.subscribe_applied();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let current_revision = self.current_runtime_revision().await;
             if current_revision > revision {
                 return Some(current_revision);
@@ -3633,7 +3632,7 @@ impl Administrator {
         let admission_fences = (&state.node_admission_fences).into();
         let mutations = before.automatic_mutations(&gossip, &admission_fences);
         for mutation in mutations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match mutation {
                 MembershipMutation::UpdateAddress { node_id, endpoint } => {
                     let operation = format!("update address of '{node_id}' to {endpoint}");
@@ -3853,7 +3852,7 @@ impl ConsensusState {
             let deadline = self.raft_retention.retention_admission_timeout;
             let reclaimed = timeout(deadline, async {
                 loop {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     tokio::time::sleep(RETENTION_ADMISSION_POLL).await;
                     if self.store.retained_log_bytes() <= cap {
                         return;
@@ -4342,7 +4341,7 @@ where
                 .map_err(unreachable_err)?;
 
             for section_index in 0..manifest.section_count {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let section = snapshot
                     .section(section_index)
                     .await
@@ -4351,7 +4350,7 @@ where
                     .assured("supported targets have a pointer width no larger than u64");
                 let mut offset = 0_u64;
                 for chunk in section.chunks(chunk_bytes) {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     self.interconnect
                         .request_with_timeout(
                             &self.target,
@@ -4392,7 +4391,7 @@ where
         };
         tokio::pin!(transfer);
         tokio::pin!(cancel);
-        tokio::select! {
+        nervix_primitives::select! {
             closed = &mut cancel => Err(StreamingError::Closed(closed)),
             result = &mut transfer => result.map_err(StreamingError::from),
         }
@@ -9393,7 +9392,7 @@ mod tests {
         let _ = <FjallLogReader as AmbiguousIfImpl<_>>::probe;
     };
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn log_reader_returns_the_requested_range_in_index_order() {
         let mut store =
             FjallStore::from_database(temp_database(), nervix_execution::Executor::default())
@@ -9443,7 +9442,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn log_reader_observes_writes_the_storage_owner_makes() {
         let mut store =
             FjallStore::from_database(temp_database(), nervix_execution::Executor::default())
@@ -9500,7 +9499,7 @@ mod durability_tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn failed_application_does_not_publish_state_or_applied_position()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;

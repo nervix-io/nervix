@@ -260,11 +260,11 @@ impl SessionServiceImpl {
         let mut last_status_error = None;
 
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             polling.tick().await;
             let mut all_drained = true;
             for node in &nodes {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 match self.domain_drain_status_on_node(node, domain).await {
                     Ok(status)
                         if status.active_ingestors == 0
@@ -857,15 +857,235 @@ impl SessionServiceImpl {
 #[cfg(test)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
+    #[cfg(feature = "testing")]
+    use nervix_consensus::{ConsensusError, ConsensusTestProbe, StorageBoundary};
     use nervix_models::{DomainConfig, DomainPace, PlacementPolicy};
     use nervix_recovery::Discarded as _;
 
+    #[cfg(feature = "testing")]
+    use super::super::test_fixtures::build_test_service_with_probe;
     use super::{
         super::test_fixtures::{TestService, build_test_service},
         *,
     };
 
-    #[tokio::test]
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn start_domain_storage_failure_preserves_stopped_state() {
+        let probe = ConsensusTestProbe::default();
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service_with_probe(true, probe.clone()).await;
+        let domain = DomainName::parse("default").assured("the test domain name is valid");
+        let storage_fault = probe.storage_fault();
+
+        storage_fault.fail_next(
+            "start-domain:default".to_string(),
+            StorageBoundary::BeforeCommit,
+        );
+        let start = service
+            .start_domain(
+                &domain,
+                StartDomain {
+                    start: DomainStartPoint::Resume,
+                },
+            )
+            .await;
+        assert!(!start.succeeded(), "{start:?}");
+        assert!(start.message.contains("consensus storage"), "{start:?}");
+        assert!(matches!(
+            service
+                .inner
+                .consensus
+                .current_domain(&domain)
+                .await
+                .map(|state| state.status),
+            Some(DomainStatus::Stopped)
+        ));
+
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+    }
+
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn pause_domain_storage_failure_retains_typed_cause_and_running_state() {
+        let probe = ConsensusTestProbe::default();
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service_with_probe(true, probe.clone()).await;
+        let domain = DomainName::parse("default").assured("the test domain name is valid");
+        let start = service
+            .start_domain(
+                &domain,
+                StartDomain {
+                    start: DomainStartPoint::Resume,
+                },
+            )
+            .await;
+        assert!(start.succeeded(), "{start:?}");
+        probe.storage_fault().fail_next(
+            "pause-domain:default".to_string(),
+            StorageBoundary::BeforeCommit,
+        );
+        let error = service
+            .pause_and_drain_domain_for_alter(&domain, None, None)
+            .await
+            .err()
+            .expect("a failed durable pause must be reported");
+        assert!(matches!(
+            error.downcast_ref::<ConsensusError>(),
+            Some(ConsensusError::Storage | ConsensusError::RaftStorage)
+        ));
+        assert!(error.to_string().contains("failed to pause domain"));
+        assert!(matches!(
+            service
+                .inner
+                .consensus
+                .current_domain(&domain)
+                .await
+                .map(|state| state.status),
+            Some(DomainStatus::Running)
+        ));
+
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+    }
+
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn stop_domain_storage_failure_preserves_running_state() {
+        let probe = ConsensusTestProbe::default();
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service_with_probe(true, probe.clone()).await;
+        let domain = DomainName::parse("default").assured("the test domain name is valid");
+        let start = service
+            .start_domain(
+                &domain,
+                StartDomain {
+                    start: DomainStartPoint::Resume,
+                },
+            )
+            .await;
+        assert!(start.succeeded(), "{start:?}");
+
+        probe.storage_fault().fail_next(
+            "stop-domain:default".to_string(),
+            StorageBoundary::BeforeCommit,
+        );
+        let stop = service.stop_domain(&domain, StopDomain).await;
+        assert!(!stop.succeeded(), "{stop:?}");
+        assert!(stop.message.contains("consensus storage"), "{stop:?}");
+        assert!(matches!(
+            service
+                .inner
+                .consensus
+                .current_domain(&domain)
+                .await
+                .map(|state| state.status),
+            Some(DomainStatus::Running)
+        ));
+
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+    }
+
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn domain_placement_storage_failure_preserves_previous_policy() {
+        let probe = ConsensusTestProbe::default();
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service_with_probe(true, probe.clone()).await;
+        let domain = DomainName::parse("default").assured("the test domain name is valid");
+        probe.storage_fault().fail_next(
+            "put-domain-and-schedule:default".to_string(),
+            StorageBoundary::BeforeCommit,
+        );
+
+        let result = service
+            .alter_domain(
+                &domain,
+                AlterDomain {
+                    policy: PlacementPolicy::RequireColocation,
+                },
+            )
+            .await;
+        assert!(!result.succeeded(), "{result:?}");
+        assert!(result.message.contains("consensus storage"), "{result:?}");
+        assert_eq!(
+            service
+                .inner
+                .consensus
+                .current_domain(&domain)
+                .await
+                .assured("the domain remains present")
+                .config
+                .placement,
+            PlacementPolicy::Neutral
+        );
+
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+    }
+
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn create_domain_storage_failure_keeps_domain_absent() {
+        let probe = ConsensusTestProbe::default();
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service_with_probe(false, probe.clone()).await;
+        let domain = DomainName::parse("failed_domain").assured("the test domain name is valid");
+        probe.storage_fault().fail_next(
+            "put-domain:failed_domain".to_string(),
+            StorageBoundary::BeforeCommit,
+        );
+
+        let result = service
+            .create_domain(CreateStatement::new(
+                CreateDomain {
+                    id: domain.clone(),
+                    config: DomainConfig {
+                        pace: DomainPace::Unpaced,
+                        placement: PlacementPolicy::Neutral,
+                    },
+                },
+                false,
+            ))
+            .await;
+        assert!(!result.succeeded(), "{result:?}");
+        assert!(result.message.contains("consensus storage"), "{result:?}");
+        assert!(
+            service
+                .inner
+                .consensus
+                .current_domain(&domain)
+                .await
+                .is_none()
+        );
+
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+    }
+
+    #[nervix_primitives::test]
     async fn create_domain_if_not_exists_returns_already_existed() {
         let TestService {
             service,
@@ -907,7 +1127,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn admitted_domain_creation_resumes_after_its_domain_record_exists() {
         let TestService {
             service,
@@ -939,7 +1159,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn domain_placement_commit_uses_its_captured_planning_basis() {
         let TestService {
             service,

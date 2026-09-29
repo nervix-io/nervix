@@ -272,7 +272,7 @@ async fn next_observed_clock(
     domain: &DomainName,
 ) -> DomainClockObservation {
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match next_clock_frame(world, duration, domain).await {
             TestClockFrame::Observed(observed) => return observed.clock,
             TestClockFrame::Ticked(_) => {}
@@ -347,7 +347,7 @@ async fn then_clock_session_receives_increasing_ticks(
 async fn then_tick_follows_state(world: &mut ScenarioWorld, duration: String, generation: u64) {
     let domain = scenario_domain(world, &world.domain);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let frame = next_clock_frame(world, &duration, &domain).await;
         match frame {
             TestClockFrame::Ticked(ticked) if ticked.tick.generation == generation => {
@@ -504,7 +504,7 @@ async fn then_clock_session_receives_no_frame(
     session.discard_queued_clock_frames_for(&domain);
     let deadline = Instant::now() + duration;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let remaining = deadline.saturating_duration_since(Instant::now());
         let frame = clock_session(world)
             .try_next_clock_frame(remaining)
@@ -783,7 +783,7 @@ async fn then_client_receives_tick(world: &mut ScenarioWorld, duration: String, 
     let domain = scenario_domain(world, &world.domain);
     let ticked = tokio::time::timeout(duration, async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let event = client
                 .next_domain_clock_event()
                 .await
@@ -889,7 +889,7 @@ async fn then_client_observes_server_error(
     let deadline = Instant::now() + duration;
     let mut seen = Vec::new();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let remaining = deadline.saturating_duration_since(Instant::now());
         let event = tokio::time::timeout(remaining, client.next_server_event()).await;
         let event = match event {

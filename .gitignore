@@ -1,4 +1,7 @@
 /target
+/tests/bolero-qualification/target/
+/.coverage
+**/__fuzz__/**/crashes/
 /lcov.info
 mutants.out*
 .nervix-db

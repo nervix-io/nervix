@@ -255,7 +255,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn client_configuration_failures_keep_typed_context() {
         let error = NatsSourcePlan::client_from_config(&[])
             .await

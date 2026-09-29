@@ -176,7 +176,7 @@ mod tests {
         assert!(report.contains::<nervix_vm::CompileError>());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn missing_record_field_keeps_projection_report() {
         let domain: DomainName = named("test_domain");
         let subscription: SubscriptionName = named("filtered_view");
