@@ -6,11 +6,10 @@
 //! - **Depends on.** Browser drafts and the shared typed choice presentation.
 //! - **Must not know.** Codec compilation, runtime encode/decode, or registry internals.
 
-use futures_channel::mpsc::UnboundedSender;
 use leptos::prelude::*;
 
 use super::{
-    ChoiceControl, ChoiceGroup, ConsoleRequest, CreateSignals,
+    ChoiceControl, ChoiceGroup, CreateSignals, RequestSender,
     codec_draft::{CodecFormatDraft, CodecFormatKind, EncodingRuleDraft},
     event_target_checked, event_target_textarea_value, event_target_value,
     resource_binding_editor::{ResourceBindingEditor, ResourceBindingForm},
@@ -43,7 +42,7 @@ fn program_text(signals: CreateSignals, direction: ProgramDirection) -> String {
 pub(super) fn CodecEditor(
     signals: CreateSignals,
     name_input: NodeRef<leptos::html::Input>,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     session_generation: RwSignal<u64>,
 ) -> impl IntoView {
     let pending = move || signals.progress.get().is_pending();

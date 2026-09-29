@@ -1321,27 +1321,16 @@ impl EmitterTaskLoop<'_> {
                     relay: input_relay,
                     batch,
                 } => {
-                    let delivery_observation = batch.delivery_observation(actual_utc_now());
                     let input_metrics = self
                         .input_metrics
                         .get(&input_relay)
                         .verified("the task resolves metrics for every declared emitter input");
-                    input_metrics.observe_batch(
-                        batch.message_count(),
-                        batch.estimated_bytes(),
-                        delivery_observation.domain_timestamp,
-                    );
+                    input_metrics.observe_delivery(&batch.delivery_observation(actual_utc_now()));
                     self.context.runtime.mark_branch_aggregated_metrics_updated(
                         &self.context.domain,
                         ModelKind::Emitter,
                         &self.context.emitter,
                     );
-                    for seconds in delivery_observation.latency_seconds {
-                        input_metrics.observe_delivery_latency(
-                            seconds,
-                            delivery_observation.domain_timestamp,
-                        );
-                    }
                     let wait_for_required_state = !self.interaction.is_terminal_drain();
                     let publish_batch = match self
                         .batch_context

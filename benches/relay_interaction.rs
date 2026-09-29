@@ -4,14 +4,15 @@ extern crate shuttle_tokio as tokio;
 use std::time::{Duration, Instant};
 
 use arch_into::ArchInto as _;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use nervix_server::runtime::relay_interaction_benchmark::{
-    RelayInteractionBenchmark, RelayInteractionBenchmarkEvent,
+    DeliveryObservationBenchmark, RelayInteractionBenchmark, RelayInteractionBenchmarkEvent,
 };
 
 const READY_CHUNK: u64 = 1_024;
 const COLLECTED_BATCHES: u64 = 64;
 const FAN_IN_SOURCES: usize = 8;
+const DELIVERY_OBSERVATION_ROWS: [usize; 3] = [1, 64, 1_024];
 
 fn consume_ready_batches(source_count: usize, iterations: u64) -> Duration {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -172,6 +173,21 @@ fn relay_interaction_benches(criterion: &mut Criterion) {
         bencher.iter_custom(receiver_shutdowns);
     });
     lifecycle.finish();
+
+    let mut delivery = criterion.benchmark_group("relay_interaction/delivery_observation");
+    for rows in DELIVERY_OBSERVATION_ROWS {
+        let benchmark = DeliveryObservationBenchmark::new(rows, Duration::from_millis(1));
+        delivery.throughput(Throughput::Elements(rows.arch_into()));
+        delivery.bench_function(format!("branched_input_{rows}_rows_1ms_apart"), |bencher| {
+            bencher.iter(|| benchmark.observe());
+        });
+    }
+    let shared = DeliveryObservationBenchmark::new(1_024, Duration::ZERO);
+    delivery.throughput(Throughput::Elements(1_024));
+    delivery.bench_function("branched_input_1024_rows_one_watermark", |bencher| {
+        bencher.iter(|| shared.observe());
+    });
+    delivery.finish();
 }
 
 criterion_group!(benches, relay_interaction_benches);

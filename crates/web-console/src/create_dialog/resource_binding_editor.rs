@@ -6,11 +6,10 @@
 //! - **Depends on.** Shared typed choices and codec or signaling browser drafts.
 //! - **Must not know.** Upload execution, resource storage, or version resolution.
 
-use futures_channel::mpsc::UnboundedSender;
 use leptos::prelude::*;
 
 use super::{
-    ChoiceControl, ChoiceGroup, ConsoleRequest, CreateSignals, event_target_value,
+    ChoiceControl, ChoiceGroup, CreateSignals, RequestSender, event_target_value,
     resource_binding_draft::{ConfigEntryDraft, ResourceBindingDraft},
 };
 
@@ -51,7 +50,7 @@ fn update_binding(
 pub(super) fn ResourceBindingEditor(
     signals: CreateSignals,
     kind: ResourceBindingForm,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     session_generation: RwSignal<u64>,
 ) -> impl IntoView {
     let resource_control = match kind {

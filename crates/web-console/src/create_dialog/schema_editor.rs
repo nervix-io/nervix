@@ -7,13 +7,12 @@
 //! - **Depends on.** Browser draft signals, model-owned type variants, and the shared choice UI.
 //! - **Must not know.** Registry internals, statement parsing, or how a command is dispatched.
 
-use futures_channel::mpsc::UnboundedSender;
 use leptos::prelude::*;
 use nervix_models::{AvroType, JsonType, ParseAsType, WireSchemaStrictness};
 use strum::IntoEnumIterator as _;
 
 use super::{
-    ChoiceControl, ChoiceGroup, ConsoleRequest, CreateSignals, event_target_checked,
+    ChoiceControl, ChoiceGroup, CreateSignals, RequestSender, event_target_checked,
     event_target_value,
     schema_draft::{CollectionLayer, SchemaFieldDraft, WireFieldDraft, WireFieldType, WireFormat},
 };
@@ -365,7 +364,7 @@ fn WireFieldEditor(signals: CreateSignals, format: WireFormat, index: usize) -> 
 pub(super) fn BranchEditor(
     signals: CreateSignals,
     name_input: NodeRef<leptos::html::Input>,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     session_generation: RwSignal<u64>,
 ) -> impl IntoView {
     view! {
