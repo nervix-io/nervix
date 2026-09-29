@@ -5,6 +5,9 @@ from shared coordination that is unrelated to the record being processed. This i
 contentionless data-plane rule. It applies after a runtime task has started and its graph, routing,
 state, metric, and connector handles have been resolved.
 
+[Execution Plans](./execution-plans.md) describes the revision that installs and publishes those
+handles before record and batch work begins.
+
 The hot paths are:
 
 - accepting one record from an ingestor

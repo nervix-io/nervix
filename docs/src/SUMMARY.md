@@ -64,6 +64,7 @@
   - [Cluster Interconnect](./interconnect.md)
   - [Client Session Protocol](./client-session-protocol.md)
   - [Control Plane](./control-plane.md)
+  - [Execution Plans](./execution-plans.md)
   - [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md)
   - [Consensus Storage And Replication](./consensus-storage-and-replication.md)
   - [Command Completion](./command-completion.md)
