@@ -167,6 +167,7 @@ impl EmitterSinkStarter {
                             context.domain.as_str(),
                             context.emitter.as_str()
                         ),
+                        dns: context.dns()?,
                     },
                     context.sink_host(),
                 ),

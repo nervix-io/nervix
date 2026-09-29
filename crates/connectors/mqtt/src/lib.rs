@@ -3,19 +3,23 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The MQTT client a configuration declares, its event loop and reconnect backoff,
-//!   the session, quality of service and shared subscription a source reads through, manual
-//!   acknowledgement and local replay of publishes, the quality of service each record is
-//!   published at, the Maximum Packet Size the broker declares and the rejection of a record whose
-//!   PUBLISH packet would exceed it, and confirmation classification.
-//! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio and
-//!   `rumqttc`.
+//!   the connection it opens to the broker through the node resolver, the session, quality of
+//!   service and shared subscription a source reads through, manual acknowledgement and local
+//!   replay of publishes, the quality of service each record is published at, the Maximum Packet
+//!   Size the broker declares and the rejection of a record whose PUBLISH packet would exceed it,
+//!   and confirmation classification.
+//! - **Depends on.** The connector contract, the node DNS resolver, vocabulary values,
+//!   `error-stack`, Tokio and `rumqttc`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
 
+mod connection;
 mod source;
+#[cfg(test)]
+mod test_fixtures;
 
 use std::{
     collections::VecDeque,
@@ -27,6 +31,8 @@ use std::{
 
 use arch_into::ArchInto as _;
 use async_trait::async_trait;
+pub use connection::MqttConnectionError;
+use connection::MqttDialer;
 use error_stack::Report;
 use futures_util::FutureExt;
 use meticulous::OptionExt as _;
@@ -36,6 +42,7 @@ use nervix_connector::{
     SinkStartResult, client_config_value, client_tls_paths, next_retry_delay,
     optional_client_config_value, read_tls_file,
 };
+use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
 use nervix_primitives::sync::{
     atomic::{AtomicU32, Ordering},
@@ -88,14 +95,15 @@ impl MqttPublishingMode {
 }
 
 /// What one MQTT sink publishes through: its client entries, topic, quality of service, the
-/// backoff its event loop reconnects on, and the client id to use when the configuration
-/// declares none.
+/// backoff its event loop reconnects on, the client id to use when the configuration declares
+/// none, and the node resolver every connection resolves the broker host through.
 pub struct MqttSinkConfig {
     pub config: Vec<ClientConfigEntry>,
     pub topic: TopicName,
     pub mode: MqttPublishingMode,
     pub retry_policy: ParsedRetryPolicy,
     pub default_client_id: String,
+    pub dns: DnsResolver,
 }
 
 pub struct MqttSink {
@@ -275,7 +283,7 @@ impl MqttSink {
     pub fn new(config: MqttSinkConfig, host: SinkHost) -> SinkStartResult<Self> {
         let mode = config.mode;
         let (client, mut eventloop) =
-            Self::client_from_config(&config.config, &config.default_client_id, mode)?;
+            Self::client_from_config(&config.config, &config.default_client_id, mode, config.dns)?;
         let retry_policy = config.retry_policy;
         let broker_limit = Arc::new(MqttBrokerPacketLimit::default());
         let declared_limit = broker_limit.clone();
@@ -304,15 +312,16 @@ impl MqttSink {
                         host.clear_transient_error();
                     }
                     Err(error) => {
+                        let failure = MqttConnectionError::report(error);
+                        let reason = failure.current_context().to_string();
                         let wait = backoff.take_next_delay();
-                        host.record_transient_error(error.to_string(), wait);
+                        host.record_transient_error(reason.clone(), wait);
                         host.report_error(format!(
-                            "mqtt event loop failed; reconnecting in {}: {}",
+                            "mqtt event loop failed; reconnecting in {}: {reason}",
                             humantime::format_duration(wait),
-                            error
                         ));
                         warn!(
-                            error = %error,
+                            error = %reason,
                             retry_in = %humantime::format_duration(wait),
                             "mqtt sink event loop reconnecting"
                         );
@@ -344,6 +353,7 @@ impl MqttSink {
         config: &[ClientConfigEntry],
         default_client_id: &str,
         mode: MqttPublishingMode,
+        dns: DnsResolver,
     ) -> SinkStartResult<(AsyncClient, rumqttc::EventLoop)> {
         let addr = Self::config_value(config, "addr")?;
         let client_id = match optional_client_config_value(config, "client_id") {
@@ -393,6 +403,7 @@ impl MqttSink {
                 confirmation.max_in_flight
             }
         };
+        MqttDialer::install(&mut options, dns);
         AsyncClient::builder(options)
             .capacity(request_capacity.get())
             .try_build()
@@ -697,6 +708,7 @@ impl RecordSink for MqttSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::DnsFixture;
 
     fn pending(
         index: usize,
@@ -923,10 +935,42 @@ mod tests {
         }
     }
 
-    /// A QoS 0 sink on `topic` whose client connects to `addr`, retrying slowly enough that a test
-    /// never sees a second attempt.
-    fn qos0_sink(addr: &str, topic_name: &str) -> MqttSink {
-        let config = MqttSinkConfig {
+    /// A host that keeps the latest transient error the sink records, for tests that read it.
+    struct RecordingHost {
+        transient_error: watch::Sender<Option<String>>,
+    }
+
+    impl nervix_connector::SinkTransientErrorStatus for RecordingHost {
+        fn record_transient_error(&self, reason: String, _retry_after: Duration) {
+            self.transient_error.send_replace(Some(reason));
+        }
+
+        fn clear_transient_error(&self) {}
+    }
+
+    impl nervix_connector::SinkEventReporter for RecordingHost {
+        fn report_error(&self, _message: String) {}
+    }
+
+    impl nervix_connector::SinkStagingDirectory for RecordingHost {
+        fn staging_directory(&self) -> std::path::PathBuf {
+            std::env::temp_dir()
+        }
+    }
+
+    impl nervix_connector::SinkGeneralErrorHandler for RecordingHost {
+        fn handle_general_error(
+            &self,
+            _acks: &nervix_connector::SinkAcknowledgements,
+            _reason: String,
+        ) {
+        }
+    }
+
+    /// The configuration of a QoS 0 sink on `topic` whose client connects to `addr` through `dns`,
+    /// retrying slowly enough that a test never sees a second attempt.
+    fn qos0_config(addr: &str, topic_name: &str, dns: DnsResolver) -> MqttSinkConfig {
+        MqttSinkConfig {
             config: vec![ClientConfigEntry {
                 key: "addr".to_string(),
                 value: addr.to_string(),
@@ -938,8 +982,16 @@ mod tests {
                 max_backoff: Duration::from_secs(60),
             },
             default_client_id: "nervix-mqtt-sink-test".to_string(),
-        };
-        MqttSink::new(config, SinkHost::new(SilentHost)).expect("the test sink config is valid")
+            dns,
+        }
+    }
+
+    fn qos0_sink(addr: &str, topic_name: &str, dns: DnsResolver) -> MqttSink {
+        MqttSink::new(
+            qos0_config(addr, topic_name, dns),
+            SinkHost::new(SilentHost),
+        )
+        .expect("the test sink config is valid")
     }
 
     fn record(index: usize, payload_bytes: usize) -> SinkRecord {
@@ -956,7 +1008,8 @@ mod tests {
     async fn a_record_the_broker_would_refuse_is_rejected_before_the_client_sees_it() {
         // Nothing listens on the discard port, so the client never connects and the accepted
         // record waits in its request queue.
-        let mut sink = qos0_sink("mqtt://127.0.0.1:9", "limited");
+        let fixture = DnsFixture::start().await;
+        let mut sink = qos0_sink("mqtt://127.0.0.1:9", "limited", fixture.dns.clone());
         sink.broker_limit.declare(&connack(Some(64)));
 
         // The topic `limited` takes 12 bytes around a QoS 0 payload: the fixed header byte, one
@@ -990,7 +1043,8 @@ mod tests {
         let addr = broker
             .local_addr()
             .expect("a bound listener has an address");
-        let sink = qos0_sink(&format!("mqtt://{addr}"), "declared");
+        let fixture = DnsFixture::start().await;
+        let sink = qos0_sink(&format!("mqtt://{addr}"), "declared", fixture.dns.clone());
 
         let (mut connection, _) = broker
             .accept()
@@ -1019,6 +1073,41 @@ mod tests {
         .await
         .expect("the event loop records the CONNACK it received");
         assert_eq!(declared.get(), 1024);
+    }
+
+    #[nervix_primitives::test]
+    async fn the_event_loop_reports_a_broker_name_that_does_not_resolve() {
+        let fixture = DnsFixture::start().await;
+        fixture.deny("missing.nervix.test");
+        let (transient_error, mut recorded) = watch::channel(None);
+        let config = qos0_config(
+            "mqtt://missing.nervix.test:1883",
+            "unresolved",
+            fixture.dns.clone(),
+        );
+        let _sink = MqttSink::new(config, SinkHost::new(RecordingHost { transient_error }))
+            .expect("the test sink config is valid");
+
+        let reason = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                if let Some(reason) = recorded.borrow_and_update().clone() {
+                    return reason;
+                }
+                recorded
+                    .changed()
+                    .await
+                    .expect("the sink's host keeps the sender");
+            }
+        })
+        .await
+        .expect("the event loop reports its first failed connection");
+
+        assert_eq!(
+            reason,
+            "resolving MQTT host 'missing.nervix.test' failed: the name does not exist"
+        );
+        assert!(fixture.authority.questions_for("missing.nervix.test") > 0);
     }
 
     #[test]

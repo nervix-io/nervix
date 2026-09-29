@@ -122,6 +122,38 @@ publish; the host resumes the source and retries failed sink work according to i
 policy. A Pub/Sub connection broken by the broker or network is dropped and reopened with a new
 lookup, while an established connection is not interrupted solely because its answer expires.
 
+### DNS for MQTT
+
+Composition passes the node resolver into every MQTT source plan and sink configuration. Both
+connect through `rumqttc`'s event loop, which asks a socket connector for the TCP stream of every
+connection it opens: the first, and each one after a connection is lost. Each client installs its
+own connector with `MqttOptions::set_socket_connector` in place of the driver's default, which
+resolves with Tokio's `lookup_host`. On every call the installed connector resolves the host the
+driver names, the host of the client's `addr`, through the node resolver, so a sink's event loop
+resolves again on each reconnection and a source instance on each resume; a literal IPv4 or IPv6
+address is its own answer. It dials the answers in resolution order with the driver's own
+per-address dialer, `connect_socket_addr`, which applies the driver's `NetworkOptions` to each
+socket. Each attempt gets an equal share of what remains of the driver's connect timeout, five
+seconds, which already bounds DNS, the address attempts, TLS and the MQTT handshake of one
+connection together, so resolution adds no deadline or retry of its own.
+
+The driver layers the rest on the returned stream as before. For `mqtts` it completes TLS with
+the client's CA and optional client identity and verifies the broker certificate against the host
+`addr` names, whichever of its addresses was dialled. It then runs the MQTT handshake with the
+client's identity and session. Nervix's build selects neither the driver's proxy nor its WebSocket
+transport, so no other connection path exists.
+
+A failed lookup reaches the driver as the resolver's `DnsLookupError`, which the driver keeps as the
+cause of its connection error. The connector finds it there and reports `MqttConnectionError::Resolve`
+with the host and the lookup failure; every other failure keeps the driver's own description. A
+source reports the failure as a resume failure and retries on its declared `RETRY POLICY`, or on
+the host's reconnect cadence in a `NO_ACK` mode. A sink's event loop reports it as the emitter's
+transient error and reconnects on the emitter's retry policy. Neither acknowledges undelivered
+data: a source that cannot connect receives nothing, and a QoS 1 or 2 sink confirms a record only
+once the broker acknowledges it, so the input stays unacknowledged while the broker name does not
+resolve. An established connection is not closed because its host's answer changed or expired;
+the next connection uses the new answer.
+
 ### DNS for ClickHouse and SQS
 
 Composition passes the node resolver into every ClickHouse sink configuration and into every SQS

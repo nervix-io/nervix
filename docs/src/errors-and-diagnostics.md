@@ -131,6 +131,20 @@ A Pub/Sub source resolves before opening its dedicated stream and retains `DnsLo
 check or failed Redis protocol setup is also a connection failure. None rejects an input message
 or changes Redis Pub/Sub's server-acceptance boundary for `PUBLISH`.
 
+An MQTT client's event loop reports a failed or lost broker connection as an
+`MqttConnectionError`, owned by the connector's connection module. The socket connector hands the
+driver the resolver's `DnsLookupError` as the failure of a lookup, and the driver keeps it as the
+cause of its connection error. The connector finds it there and reports
+`MqttConnectionError::Resolve`, with the host and the resolver's `DnsLookupFailure` as typed fields
+and the `DnsLookupError` beneath it. Any other failure keeps the driver's own description, such as
+an address that refused the connection, a failed TLS handshake, including a certificate that does
+not name the configured host, or a refused MQTT handshake. A source keeps the error beneath
+`MqttSourceError::Connect` while it connects and `MqttSourceError::Receive` while it reads, and
+those beneath `SourceError`, so `DESCRIBE INGESTOR` shows the deepest cause: the resolver's lookup
+error or the driver's description. A sink's event loop records the connection error's message as
+the emitter's transient error, which `DESCRIBE EMITTER` shows, and reconnects on the emitter's
+retry policy. None rejects a record or acknowledges input.
+
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
 cause of its connection error, and the connector finds it there by type and keeps it as the context

@@ -390,6 +390,8 @@ RabbitMQ resolves the host of its `addr` the same way and verifies an `amqps` br
 against that host; see [RabbitMQ](#rabbitmq).
 Redis Pub/Sub also resolves its `addr` hostname through the node resolver for each dedicated
 subscription connection; see [Redis Pub/Sub](#redis-pubsub).
+MQTT resolves the host of its `addr` through the node resolver for every connection and verifies
+an `mqtts` broker certificate against that host; see [MQTT](#mqtt).
 
 Example Kafka TLS client:
 
@@ -762,6 +764,14 @@ session expires, resume establishes a fresh session and the interim is lost. `BU
 remain connected under any valid session declaration. In ACK modes, Nervix acknowledges a payload
 when it is buffered or deliberately dropped, trading broker redelivery for the declared connected
 behavior.
+
+Each instance resolves the host of its client's `addr` through the node's asynchronous DNS
+resolver whenever it connects: on its first subscription and on every resume after a lost
+connection. It dials the answers in order within the client's five-second connect timeout, which
+also covers TLS and the MQTT handshake. For `mqtts`, TLS verifies the configured host name. A name
+that does not resolve is a connection failure, never a message rejection: the instance resumes
+again on its declared `RETRY POLICY`, or on the host's reconnect cadence in a `NO_ACK` mode. See
+[DNS for MQTT](connector-contract.md#dns-for-mqtt).
 
 ### NATS
 

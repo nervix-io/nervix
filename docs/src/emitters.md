@@ -985,6 +985,11 @@ follows `ON MESSAGE ERROR`. So does a record whose `PUBLISH` packet would exceed
 Size the broker declared when the client connected, or the largest packet MQTT can express: the
 emitter rejects it before handing it to the client, which would otherwise lose its connection on a
 packet the broker refuses to receive.
+The client resolves the host of its `addr` through the node's asynchronous DNS resolver every time
+it connects, first and after every lost connection, and dials the answers in order within its
+five-second connect timeout. For `mqtts`, TLS verifies the configured host name. While the name
+does not resolve, the client reconnects on the declared retry policy, `DESCRIBE EMITTER` shows the
+lookup failure, and a QoS 1 or 2 record stays unacknowledged until the broker acknowledges it.
 
 ### NATS
 
