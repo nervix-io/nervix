@@ -1,6 +1,7 @@
 # Emitters
 
-Emitters publish relay records to external systems.
+Emitters publish relay records to external systems or to application consumers through a client
+session.
 
 A typical emitter:
 
@@ -144,6 +145,43 @@ discard a record.
 | ClickHouse, Postgres, MySQL, MongoDB | `ACK` | Successful insert/write result |
 | Iceberg | `ACK` | Successful catalog commit |
 | HTTP | `ACK` | Complete successful response headers |
+| Client | `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | A current consumer attempt's explicit application ACK |
+
+### Client emitters
+
+`TO CLIENT SCHEMA <output_schema>` constructs native Arrow output for applications. It has no
+connector `CLIENT` object, codec, header operations, or direct `VALUES` form. The emitter still
+uses its ordinary `FROM` predicates, optional collection, materialized dependencies, ordered
+`INHERIT` and `SET`, route `WHERE`, error policies, placement, and `ATTACHED` or `DETACHED`
+boundary. A client sink requires `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n>`, an explicit
+`ACK TIMEOUT` and `RETRY POLICY`, `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>`, and its
+ordinary required `FLUSH` policy. `SHOW CREATE EMITTER` preserves this full contract.
+
+The declared output schema is exact. Construction starts empty; only explicitly inherited or set
+fields are exported. A sensitive input cannot be copied into output without explicit
+`leak_sensitive(...)`. Branch fields do not become expression values. Every prepared Arrow IPC
+stream contains rows from one source relay and one concrete branch, within both declared row and
+encoded byte limits. One row larger than the limit follows `ON MESSAGE ERROR`; it does not weaken
+the batch bound. A delivery carries an opaque branch fingerprint, not the branch key's values.
+
+Consumers of one emitter compete for its output. `ACK SEQUENTIAL` permits one outstanding batch
+per source relay and concrete branch; `ACK PARALLEL MAX <n>` permits at most `n` across all
+workers of that source and branch. The application may `ack`, `retry`, or `reject` a live attempt.
+Only `ack` confirms the batch. A retry keeps the original IPC bytes, member positions, identity,
+and execution snapshot and waits on physical backoff before a fresh attempt. A timeout or lost
+consumer revokes its ACK reference before reassignment. A later ACK for that reference is stale;
+repeating a confirmed ACK is idempotent while its bounded result is retained. `reject` applies the
+route's message error policy to every batch member with a bounded, non-sensitive reason. An
+`ATTACHED` emitter keeps its source acknowledgement waiting for the application ACK; a `DETACHED`
+emitter keeps its existing earlier source boundary. There is no durable consumer cursor or
+delivery history: an owner loss can require upstream replay, and a lost ACK can duplicate an
+application effect.
+
+`DESCRIBE EMITTER` reports active consumers, forwarded consumers and their granted credit,
+retained batches and IPC bytes, the forwarded subset of that retained work, assigned batches still
+awaiting application processing, retries, application ACKs, and application rejections. Retained
+work and forwarding counts describe the executing node's current owner generation; outcome
+counters remain on that node across emitter restarts.
 
 ### HTTP request configuration
 

@@ -263,6 +263,31 @@ A session's producer credit is held under a short mutex, taken by the receive lo
 arrives and returned by the producer's task before it queues that batch's reply, so a client that
 sends only after reading a reply always finds room. The mutex never crosses an await.
 
+### Client emitter attempts
+
+Each running native client emitter has one actor for its volatile output. Its channel serializes
+consumer attach/detach, prepared-payload publication, assignment, settlement, timeout and
+cancellation. An attempt has exactly one owner and ACK reference. Revocation returns its worker's
+batch and byte credit and marks that reference stale before the payload can be assigned again.
+Sequential dispatch checks every earlier unresolved delivery of the same source relay and
+concrete branch; parallel dispatch counts assigned attempts against that stream's shared window.
+The actor keeps only a bounded queue of completed references for duplicate ACK recognition.
+
+The node's consumer grant and retained-output byte counters are separate atomics. A session's
+consumer count and credit use one short mutex; neither that mutex nor a runtime map guard crosses
+an await. A retained payload reserves actual bytes until application settlement or cancellation,
+and its prepared Arrow bytes and source members remain owned by the emitter host until the
+result is applied. A consumer read uses an asynchronous receiver lock only for that consumer; it
+cannot hold the session receive loop or the ordered command lane. Settlement is a concurrent
+request, so a quiescing command cannot prevent the application ACK it waits for.
+The `shuttle_competing_consumer_grants_never_exceed_the_node_budget` check explores competing
+session grants against the production atomic budget. The
+`shuttle_consumer_loss_and_ack_race_release_one_retained_delivery` check runs the production
+delivery owner with deterministic attempt references and no timer wakeups to explore ACK versus
+consumer detachment. The `shuttle_publish_cancellation_and_ack_race_release_one_reservation`
+check also races publisher cancellation against application ACK and verifies retained byte credit
+returns once. Timeout revocation is covered by the ordinary owner and public scenarios.
+
 ### Node quiesce accounting
 
 Every entity on a node keeps one set of quiesce counts. A drain reads them to decide whether the

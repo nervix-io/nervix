@@ -685,6 +685,7 @@ mod tests {
                 EmitterPublication {
                     batches: &mut batches,
                     payloads: &mut prepared,
+                    client_payloads: &mut PreparedPayloads::default(),
                     requests: &mut PreparedPayloads::default(),
                     row_requests: &mut PreparedPayloads::default(),
                 },
@@ -706,6 +707,7 @@ mod tests {
             EmitterPublication {
                 batches: &mut batches,
                 payloads: &mut prepared,
+                client_payloads: &mut PreparedPayloads::default(),
                 requests: &mut PreparedPayloads::default(),
                 row_requests: &mut PreparedPayloads::default(),
             },
@@ -756,6 +758,7 @@ mod tests {
                 EmitterPublication {
                     batches: &mut batches,
                     payloads: &mut prepared,
+                    client_payloads: &mut PreparedPayloads::default(),
                     requests: &mut PreparedPayloads::default(),
                     row_requests: &mut PreparedPayloads::default(),
                 },
@@ -769,6 +772,7 @@ mod tests {
             EmitterPublication {
                 batches: &mut batches,
                 payloads: &mut prepared,
+                client_payloads: &mut PreparedPayloads::default(),
                 requests: &mut PreparedPayloads::default(),
                 row_requests: &mut PreparedPayloads::default(),
             },

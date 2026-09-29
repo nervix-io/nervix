@@ -149,6 +149,22 @@ beyond its producer's credit, is answered by the session and not counted here.
 [Ingestors](ingestors.md#observing-client-ingestors) describes the same counts in `SHOW INGESTORS`
 and `DESCRIBE INGESTOR`.
 
+## Client Emitters
+
+Client emitter metrics use `domain` and `emitter` labels on the executing node. The gauges
+`nervix_client_emitter_consumers`, `nervix_client_emitter_forwarded_consumers`,
+`nervix_client_emitter_forwarded_credit_bytes`, `nervix_client_emitter_retained_batches`, and
+`nervix_client_emitter_retained_bytes` describe current in-memory attachments and prepared Arrow
+IPC awaiting an application decision. `nervix_client_emitter_forwarded_retained_batches` and
+`nervix_client_emitter_forwarded_retained_bytes` count the subset assigned to consumers served on
+another node. `nervix_client_emitter_incomplete_batches` counts assigned batches whose application
+decision is still pending. These gauges return to zero when that endpoint ends. The counters
+`nervix_client_emitter_retries_total`, `nervix_client_emitter_acks_total`, and
+`nervix_client_emitter_rejections_total` retain results across endpoint restarts on the same node.
+Retries include explicit application retry, ACK timeout, and consumer loss; a repeated confirmed
+ACK does not increment the ACK counter. `DESCRIBE EMITTER` reports the same values for the
+scheduled owner.
+
 ## Delivery Latency
 
 Every processor, reingestor, and emitter input records the delivery latency of each batch it

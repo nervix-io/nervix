@@ -364,6 +364,44 @@ reason, or `SessionLost`. This release restores no producer across a reconnect; 
 opens another one, and `open_ingestor` reopens a lost session before it sends the open. Dropping a
 producer closes it without waiting.
 
+## Emitter Consumers
+
+`Client::subscribe_emitter(domain, emitter, expected_fields, limits)` opens a competing consumer
+of a native `TO CLIENT` emitter on the current session. The field list is exact, including order,
+optionality and sensitivity. The open reserves its requested credit before it succeeds. The
+returned `EmitterConsumer::description()` reports the schema, emitter ACK window, timeout and
+retry pacing, maximum batch rows and bytes, and granted credit. A refusal is
+`ClientError::ConsumerRefused` with a typed reason.
+
+```rust
+use std::num::{NonZeroU32, NonZeroU64};
+use nervix_client_core::{ClientConsumerLimits, DomainName, EmitterName, EmitterSettlement};
+
+let consumer = client.subscribe_emitter(
+    DomainName::parse("shop")?,
+    EmitterName::parse("app_output")?,
+    expected_output_fields,
+    ClientConsumerLimits {
+        batches: NonZeroU32::try_from(8)?,
+        bytes: NonZeroU64::try_from(8 * 1024 * 1024)?,
+    },
+).await?;
+while let Some(delivery) = consumer.next_batch().await? {
+    let batch = delivery.record_batch()?; // `arrow` feature
+    process(batch).await?;
+    assert_eq!(delivery.ack().await?, EmitterSettlement::Confirmed);
+}
+consumer.close().await?;
+```
+
+`delivery.retry().await` keeps the same bytes and asks the server to reassign after physical
+backoff. `delivery.reject(reason).await` sends one bounded, non-sensitive reason through the
+emitter's message error policy for all members. Each reassignment carries a new reference; a
+stale reference reports `StaleReference`. Reading, receiving, or decoding the batch is never an
+ACK. A consumer ends when its session or endpoint ends; it is not restored across reconnects.
+The application explicitly opens another one. The Rust client's exchange reader continues to
+route producer outcomes and command or clock replies while application processing awaits ACK.
+
 ## Transaction Handles And Attach
 
 `CommandOutcome::transaction` describes the session's transaction binding. Its `TransactionStatus`

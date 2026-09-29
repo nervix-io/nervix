@@ -113,6 +113,11 @@ pub(in crate::runtime) struct RuntimeInner {
     /// Also held by every reservation taken from it, which returns its bytes when it is dropped,
     /// possibly after the handle's borrow ended.
     pub(in crate::runtime) client_producer_budget: client_ingestor::ClientProducerBudget,
+    /// Volatile consumers and assignments for each client emitter executing on this node.
+    pub(in crate::runtime) client_emitters:
+        DashMap<DomainNodeRef, Arc<client_emitter::ClientEmitterEndpoint>, RandomState>,
+    /// The node's independent native-output byte reservation.
+    pub(in crate::runtime) client_emitter_budget: client_emitter::ClientEmitterBudget,
     pub(in crate::runtime) endpoint_bindings:
         DashMap<HttpRouteKey, Vec<EndpointIngestBinding>, RandomState>,
     /// Instantiated endpoint routes keyed by the host and path an inbound request carries, so

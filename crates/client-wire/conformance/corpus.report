@@ -18,6 +18,8 @@ FRAME client_choice.nxcm
 REQUEST 15 CHOICE target=PlacementPolicy dependencies=[pace:Paced] search=str:636f page_size=2 cursor=choice-page-two
 FRAME client_choice_relay_field.nxcm
 REQUEST 18 CHOICE target=RelayField dependencies=[domain:tenant,model:relay/orders] search=str:616d6f page_size=100 cursor=none
+FRAME client_close_emitter.nxcm
+REQUEST 25 CLOSE_EMITTER consumer=22
 FRAME client_close_ingestor.nxcm
 REQUEST 21 CLOSE_INGESTOR producer=19
 FRAME client_command.nxcm
@@ -28,10 +30,18 @@ FRAME client_commit.nxcm
 REQUEST 2 COMMAND query=str:434f4d4d49543b domain=none reference=rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr expected_position=18446744073709551615 expected_preview=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44/18446744073709551615/a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5
 FRAME client_detach_domain_clock.nxcm
 REQUEST 17 DETACH_DOMAIN_CLOCK domain=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+FRAME client_open_emitter.nxcm
+REQUEST 22 OPEN_EMITTER domain=tenant emitter=app_output batches=8 bytes=4194304
+FIELD order_id U64 required public
+FIELD card STRING nullable sensitive
 FRAME client_open_ingestor.nxcm
 REQUEST 19 OPEN_INGESTOR domain=tenant ingestor=orders_in batches=8 bytes=4194304
 FIELD order_id U64 required public
 FIELD card STRING nullable sensitive
+FRAME client_read_emitter_batch.nxcm
+REQUEST 23 READ_EMITTER_BATCH consumer=22
+FRAME client_settle_emitter_batch.nxcm
+REQUEST 24 SETTLE_EMITTER_BATCH consumer=22 reference=b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4 decision=ack
 FRAME client_submit_batch.nxcm
 REQUEST 20 SUBMIT_BATCH producer=19 batch=ffffffff4152524f572d4950432d424f4459
 FRAME client_subscribe.nxcm
@@ -135,6 +145,16 @@ CLOCK generation=7 state=uninstalled
 FRAME server_domain_clock_unpaced.nxsm
 EVENT DOMAIN_CLOCK domain=tenant
 CLOCK generation=1 state=unpaced
+FRAME server_emitter_batch.nxsm
+REPLY 23 EMITTER_BATCH identity=a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3 reference=b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4 source=orders branch=c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5 body=4152524f572d4950432d4f5554505554 members=2 now=1700000000000000000
+FRAME server_emitter_closed.nxsm
+REPLY 25 EMITTER_CLOSE disposition=Closed message=str:
+FRAME server_emitter_opened.nxsm
+REPLY 22 EMITTER_OPENED domain=tenant emitter=app_output window=parallel:8 ack_timeout=30000000000 retry=100000000/1000000000 granted=8/4194304 max_batch=1048576/16 message=str:636f6e73756d6572206174746163686564
+FIELD order_id U64 required public
+FIELD card STRING nullable sensitive
+FRAME server_emitter_settled.nxsm
+REPLY 24 EMITTER_SETTLED disposition=Confirmed message=str:
 FRAME server_ingestor_closed.nxsm
 REPLY 21 INGESTOR_CLOSE closed message=str:70726f647563657220313920636c6f736564
 FRAME server_ingestor_opened.nxsm

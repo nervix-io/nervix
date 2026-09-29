@@ -228,6 +228,7 @@ impl EmitterSinkState {
         plan: &EmitterStartPlan,
         context: &EmitterSinkContext,
         input_schema: &CompiledSchema,
+        output_schema: &Arc<CompiledSchema>,
         codec: Option<&Arc<CompiledCodec>>,
         work_cancel_rx: &mut watch::Receiver<bool>,
     ) -> Self {
@@ -236,7 +237,7 @@ impl EmitterSinkState {
             _ = wait_for_emitter_work_cancel(work_cancel_rx) => Self::Unavailable {
                 reason: "emitter sink initialization canceled while stopping".to_string(),
             },
-            sink = Self::open(plan, context, input_schema, codec) => sink,
+            sink = Self::open(plan, context, input_schema, output_schema, codec) => sink,
         }
     }
 
@@ -246,9 +247,10 @@ impl EmitterSinkState {
         plan: &EmitterStartPlan,
         context: &EmitterSinkContext,
         input_schema: &CompiledSchema,
+        output_schema: &Arc<CompiledSchema>,
         codec: Option<&Arc<CompiledCodec>>,
     ) -> Self {
-        match EmitterSinkStarter::start(plan, context, input_schema, codec).await {
+        match EmitterSinkStarter::start(plan, context, input_schema, output_schema, codec).await {
             Ok(sink) => Self::Open(sink),
             Err(error) => {
                 let reason = emitter_error_message(&error);

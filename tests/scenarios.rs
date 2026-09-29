@@ -142,6 +142,7 @@ use crate::common::{
 };
 
 mod backup;
+mod client_consumers;
 mod client_producers;
 mod common;
 mod database_batches;
@@ -420,6 +421,8 @@ struct ScenarioWorld {
     client_probe: Option<ClientProbe>,
     /// The producers a scenario opened on client ingestors, and the batches they submitted.
     producers: client_producers::ScenarioProducers,
+    /// Native and console consumers and the Arrow attempts they received.
+    consumers: client_consumers::ScenarioConsumers,
 }
 
 impl fmt::Debug for ScenarioWorld {
@@ -12508,6 +12511,32 @@ async fn given_named_client_is_connected_to_endpoint_with_cluster_seeds(
 async fn given_named_client_is_connected_to_leader(world: &mut ScenarioWorld, name: String) {
     let leader = current_leader_node(world).await;
     connect_named_client_to_node(world, name, leader, Vec::new(), false).await;
+}
+
+#[given(expr = "client {string} is connected to the server process")]
+async fn given_named_client_is_connected_to_server_process(
+    world: &mut ScenarioWorld,
+    name: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let grpc_uri = world
+        .server_process
+        .as_ref()
+        .verified("the preceding step started a real server process")
+        .grpc_uri();
+    let options = client_connect_options(&grpc_uri).expect("server process client options");
+    let client = Client::connect_with_options(&grpc_uri, client_domain(&world.domain), options)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to connect client '{name}' to the process: {error}")
+        });
+    assert!(
+        world
+            .transaction_clients
+            .insert(name.clone(), client)
+            .is_none(),
+        "client '{name}' is already connected"
+    );
 }
 
 #[given(

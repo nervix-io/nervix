@@ -122,7 +122,8 @@ impl Failure {
             ClientError::EventOverflow { .. } => FailureKind::Overflow,
             ClientError::AttachTransaction(_)
             | ClientError::RequestRejected { .. }
-            | ClientError::ProducerRefused { .. } => FailureKind::Rejected,
+            | ClientError::ProducerRefused { .. }
+            | ClientError::ConsumerRefused { .. } => FailureKind::Rejected,
             ClientError::RequestCancelled { .. } => FailureKind::Cancelled,
             ClientError::UnexpectedReply { .. }
             | ClientError::InvalidUploadReply(_)

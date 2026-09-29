@@ -503,6 +503,8 @@ pub(super) struct EmitterBatchBuffer {
     pending: Vec<EmitterPublishBatch>,
     /// The batch payloads a record sink was handed and has not answered for.
     payloads: PreparedPayloads<EncodedPayload>,
+    /// Native Arrow IPC payloads retained with their members until application ACK.
+    client_payloads: PreparedPayloads<ClientPayload>,
     /// The requests an HTTP sink was handed and has not answered for.
     requests: PreparedPayloads<PreparedHttpRequest>,
     /// The requests a row request sink prepared and has not answered for. An emitter publishes
@@ -519,6 +521,7 @@ pub(super) struct EmitterBatchBuffer {
 pub(super) struct EmitterPublication<'a> {
     pub(super) batches: &'a mut [EmitterPublishBatch],
     pub(super) payloads: &'a mut PreparedPayloads<EncodedPayload>,
+    pub(super) client_payloads: &'a mut PreparedPayloads<ClientPayload>,
     pub(super) requests: &'a mut PreparedPayloads<PreparedHttpRequest>,
     pub(super) row_requests: &'a mut PreparedPayloads<RowRequestBody>,
 }
@@ -533,6 +536,7 @@ impl EmitterBatchBuffer {
             flush_policy: context.parse_flush_policy("emitter", flush_policy),
             pending: Vec::new(),
             payloads: PreparedPayloads::default(),
+            client_payloads: PreparedPayloads::default(),
             requests: PreparedPayloads::default(),
             row_requests: PreparedPayloads::default(),
             pending_messages: 0,
@@ -595,6 +599,7 @@ impl EmitterBatchBuffer {
         EmitterPublication {
             batches: self.pending.as_mut_slice(),
             payloads: &mut self.payloads,
+            client_payloads: &mut self.client_payloads,
             requests: &mut self.requests,
             row_requests: &mut self.row_requests,
         }
@@ -621,6 +626,7 @@ impl EmitterBatchBuffer {
             flush_policy: Some(flush_policy),
             pending: Vec::new(),
             payloads: PreparedPayloads::default(),
+            client_payloads: PreparedPayloads::default(),
             requests: PreparedPayloads::default(),
             row_requests: PreparedPayloads::default(),
             pending_messages: 0,
@@ -707,6 +713,7 @@ impl EmitterBatchBuffer {
     pub(super) fn drain_pending(&mut self) -> Vec<EmitterPublishBatch> {
         let pending = std::mem::take(&mut self.pending);
         self.payloads.clear();
+        self.client_payloads.clear();
         self.requests.clear();
         self.row_requests.clear();
         self.pending_messages = 0;
@@ -719,6 +726,7 @@ impl EmitterBatchBuffer {
     pub(super) fn clear(&mut self) {
         self.pending.clear();
         self.payloads.clear();
+        self.client_payloads.clear();
         self.requests.clear();
         self.row_requests.clear();
         self.pending_messages = 0;

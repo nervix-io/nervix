@@ -31,6 +31,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Syslog wire schema, codec fields, UDP/TCP/TLS framing, clients, sources, and sinks | `Common` → `Syslog` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
 | Typed batches applications publish through client sessions, producer outcomes, and limits | `Ingestors` → `Client Ingestors`, and `Sessions` → `Producers` |
+| Constructed Arrow output applications receive and explicitly ACK, retry or reject | `Emitters` → `Client emitters`, `Sessions` → `Emitter Consumers`, and `Client Implementation Manual` → `Emitter Consumers` |
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
 | Timed generation from materialized state | `NSPL Overview` and `Examples` |
 | Sink transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
@@ -63,7 +64,7 @@ Capture these decisions before choosing syntax:
 | Source | Which connector/client, external entity, offset policy, delivery mode, ordering, timestamp source, and headers are required? Or does an application publish typed batches through a client ingestor, and with which acknowledgement window, ACK timeout, and retry backoff? |
 | Processing | Which records are filtered, transformed, deduplicated, reordered, aggregated, correlated, inferred, enriched, or handled by a trusted Roto UDF? |
 | State | Which relays are materialized? Should missing state wait, skip, or use a typed default? |
-| Output | Which connector/sink, publishing mode, confirmation window/timeout, retry pacing, payload shape, codec or direct mapping, headers, and sensitivity leaks are required? |
+| Output | Which connector or native client emitter, publishing mode, confirmation window/timeout, retry pacing, payload shape and size, codec or direct mapping, headers, sensitivity leaks, and application ACK boundary are required? |
 | Placement | Which connected corridors need hard or preferred colocation, which should spread softly, and what rule ranks express precedence? |
 | Operations | What input collection and output flush size/cadence, error behavior, TLS resources, metrics, and subscriptions are required? |
 
@@ -136,6 +137,7 @@ inputs. Keep placeholders obvious and list provisioning that must happen outside
 | Change or remove branch grouping | `REINGESTOR` |
 | Produce timed records from one materialized relay | `GENERATOR` |
 | Publish records outside Nervix | `EMITTER` |
+| Deliver constructed Arrow batches to competing application consumers | `EMITTER ... TO CLIENT SCHEMA` |
 | Read a session-local filtered view | `CREATE SUBSCRIPTION` |
 | Follow the active domain's clock from a client session | `ATTACH DOMAIN CLOCK` |
 
@@ -175,8 +177,8 @@ relay. Do not use them to scan across branches.
 - Every emitter sink declares its transport-supported `MODE` in the documented position and
   supplies the complete retry policy plus the confirmation window and timeout when that mode
   confirms asynchronously. No operational mode variable is inferred.
-- ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
-  <bytes>` before `FLUSH`; any other emitter may, with `MAX MESSAGES` from 1 to 65,536, a positive
+- CLIENT, ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
+  <bytes>` before `FLUSH`; other supported emitters may, with `MAX MESSAGES` from 1 to 65,536, a positive
   whole-unit `MAX SIZE`, at most `256KiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
   emitter's codec, and `BATCH MESSAGE` in a batching emitter's protobuf codec. A batching Kafka,
   Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS, Sentry or Syslog emitter publishes each run of
@@ -257,6 +259,15 @@ relay. Do not use them to scan across branches.
   its timestamp source. Changing its schema, mode, timestamp, filter, routes other than `FLUSH`, or
   branch declarations ends attached producers. A row that fails on a route follows that route's
   `ON MESSAGE ERROR` policy, so under `LOG` its whole batch fails processing as `rejected`.
+- Every client emitter declares `TO CLIENT SCHEMA <output_schema> MODE ACK SEQUENTIAL|ACK
+  PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`, a required `BATCH` row and
+  byte limit, and an explicit `FLUSH` policy. It constructs exactly that schema as native Arrow;
+  a sensitive input needs explicit leakage, and a row whose encoded IPC cannot fit alone follows
+  `ON MESSAGE ERROR`. There is no external client, codec, header operation, or direct `VALUES`
+  body. An attached emitter holds source acknowledgement until the application ACKs; a detached
+  emitter releases the source earlier. Consumers compete for output and are volatile across
+  session or owner loss, so applications must handle a repeated delivery identity with a fresh
+  ACK reference.
 - HTTP `EVERY`, Prometheus `EVERY`, and generator `EACH` use domain-logical cadence. HTTP and
   generators run once immediately; Prometheus first runs after one interval. Keep later work on
   the original schedule, coalesce missed periods without a catch-up burst, query Prometheus at the
@@ -324,7 +335,9 @@ Choose checks relevant to the configured graph:
 - `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
   `DESCRIBE EMITTER` inspect runtime state and edge metrics. `SHOW INGESTORS;` lists every ingestor
   with its owner and state, and a client ingestor's admission, producers, outstanding batches and
-  bytes, and admitted batches.
+  bytes, and admitted batches. A client emitter's description also counts active consumers,
+  forwarded credit and retained output, incomplete application batches, retries, ACKs and
+  rejections.
 - The observability server's `/metrics` endpoint reports raw graph-edge counters and histograms,
   including batch-size resolution for tuning collection and flush boundaries. Read `Metrics And
   Observability` for the current histogram buckets. The endpoint also reports

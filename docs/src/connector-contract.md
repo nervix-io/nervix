@@ -267,6 +267,16 @@ consumer edges from the new plan; it does not reconstruct the emitter from a Mod
 The host resolves resource mounts and binds the lowered VM programs to installed schemas and UDFs
 when it starts the task. A retry reopens the sink with the same typed configuration.
 
+A `TO CLIENT SCHEMA` emitter is a native sink plan, not an external connector plan. Its typed
+plan carries the exact output schema, declared `BATCH` limit and required ACK window, timeout and
+retry pacing, with no client object or codec. The host constructs Arrow IPC from the projected
+columns, retains each payload's bytes and source member positions through the common prepared
+payload contract, and resolves every member only after the application ACK or route-level message
+error. A failed or interrupted attempt retains the prepared payload for the host's next publish.
+The node's client emitter endpoint owns competing consumer attempts and physical retry; the host
+continues to own flush, branch routing, quiesce, source ACK propagation and message errors. No
+connector crate reads the native output or chooses its graph semantics.
+
 The host prepares one write for one of four sink contracts. A **record sink** receives
 codec-encoded keys, payloads, headers, optional ordering groups, timestamps, and the identity the
 host assigned each record of the write. A **row sink** receives a run of host-projected Arrow

@@ -225,6 +225,29 @@ producers it opens. A producer is not a statement: clients open, feed, and close
 
 ## Suggestions
 
+## Emitter consumers
+
+An application opens a consumer of a `TO CLIENT` emitter by naming its domain, emitter, and the
+exact output fields, including order, optionality, and sensitivity. The open reserves room for
+one maximum-sized Arrow delivery before reporting success. A session holds at most 32 consumers
+and 32 MiB of consumer credit; the serving node reserves at most 128 MiB for this direction,
+independently of its producer budget. Thus one session's producer and consumer ceilings total
+64 MiB and a node's total 256 MiB. No consumer means retained output fills the bounded node
+budget and backpressures the graph.
+
+`OpenEmitter`, `ReadEmitterBatch`, `SettleEmitterBatch`, and `CloseEmitter` are session operations,
+not relay subscriptions. A read is concurrent with the session's ordered control lane; the
+receive loop can keep processing producer submissions, ACKs, commands, and clock observations
+while that read waits. A returned batch is still unacknowledged. Its current reference must be
+confirmed with `ACK`, retried, or rejected; close and session loss revoke unresolved attempts.
+The consumer belongs to its session exchange and is reopened explicitly after that exchange is
+lost. The server does not persist a consumer position. A session may attach through a different
+node from the emitter; that node forwards output and settlement over the authenticated
+interconnect. [Client Session Protocol](./client-session-protocol.md#emitter-consumers) defines
+the frames, and [Emitters](./emitters.md#client-emitters) defines their graph ACK boundary.
+
+## Suggestions
+
 The session's `SuggestRequest` carries the full NSPL input, a UTF-8 byte cursor on a character
 boundary, the selected domain, a page size from 1 through 100, and an optional continuation.
 The server asks the composed client/server grammar for expectations at that cursor, then resolves

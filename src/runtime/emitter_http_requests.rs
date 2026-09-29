@@ -343,10 +343,12 @@ mod tests {
         requests: &'a mut PreparedPayloads<PreparedHttpRequest>,
         payloads: &'a mut PreparedPayloads<EncodedPayload>,
         row_requests: &'a mut PreparedPayloads<RowRequestBody>,
+        client_payloads: &'a mut PreparedPayloads<super::emitter_client::ClientPayload>,
     ) -> EmitterPublication<'a> {
         EmitterPublication {
             batches,
             payloads,
+            client_payloads,
             requests,
             row_requests,
         }
@@ -376,6 +378,7 @@ mod tests {
                     &mut requests,
                     &mut payloads,
                     &mut PreparedPayloads::default(),
+                    &mut PreparedPayloads::default(),
                 ),
             )
             .await
@@ -392,6 +395,7 @@ mod tests {
                 &mut batches,
                 &mut requests,
                 &mut payloads,
+                &mut PreparedPayloads::default(),
                 &mut PreparedPayloads::default(),
             ),
         )
@@ -437,6 +441,7 @@ mod tests {
                 &mut batches,
                 &mut requests,
                 &mut payloads,
+                &mut PreparedPayloads::default(),
                 &mut PreparedPayloads::default(),
             ),
         )
