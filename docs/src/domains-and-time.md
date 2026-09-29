@@ -294,6 +294,13 @@ outstanding-work error. An ALTER on a stopped domain only validates and persists
 Pure `CREATE` and `DROP` batches keep the immediate schedule-rebuild behavior. An all-no-op batch
 writes and publishes nothing and never pauses.
 
+For an HTTP emitter, this means a pending request must finish at the origin selected when it was
+admitted before a new method, path, body mode, or client takes effect. A failed drain keeps that
+emitter definition active. An operator facing a persistently unavailable origin may restore it,
+or `STOP`, change the configuration while stopped, and `START`. Stopping leaves no prepared HTTP
+request or retry state to carry over; an acknowledged source may redeliver unresolved attached
+work, including work the destination applied before its successful response was lost.
+
 Pause is not a restart: domain clock state, start version, broker offsets, branch identity, and
 eligible handoff residue are preserved across the quiesce cycle.
 

@@ -489,6 +489,11 @@ refusals retain the server's message. It exits nonzero for a refusal. Transport 
 while attaching, reading events, or detaching retain their underlying report beneath the CLI
 operation that failed.
 
+The web console shows an automatic attach refusal in the clock panel and event log without
+retrying it. If its bounded request hand-off refuses a clock request before the session sends it,
+the console reports that local refusal in the event log; an automatic attach also leaves the panel
+in the refused state until the selected domain or connection changes.
+
 If a paced clock cannot convert one period through its rate, the authority can still emit its
 already-due first tick. Scheduling a later tick then reports a rate-conversion or cadence error and
 stops production. A next-boundary overflow reports its own clock arithmetic error. None of these

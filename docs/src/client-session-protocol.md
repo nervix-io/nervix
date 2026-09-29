@@ -515,9 +515,11 @@ The leader serializes the requests that carry one reference, then consults its r
 - **Applying.** The request joins the admitted execution and waits for it. After a leader change,
   the new leader resumes every applying record on its own in its next reconciliation pass, which
   runs every 250 milliseconds, so the work completes whether or not anyone repeats it.
-- **Finished.** The request returns the retained outcome once that outcome is authoritative on every
-  live node. If that wait fails, the reply is `OutcomeUnknown` with cause `NotYetAuthoritative`, and
-  a later repetition returns the outcome.
+- **Finished.** The request returns the retained outcome once that outcome is authoritative on each
+  node in the leader's current completion participant set. The leader can retire an unreachable
+  node from that set; the node must catch up before its local reads reflect the completed effect.
+  If the wait fails, the reply is `OutcomeUnknown` with cause `NotYetAuthoritative`, and a later
+  repetition returns the outcome.
 
 The first reply is itself rebuilt from the durable record, so the reply to the original attempt and
 the reply to a repetition are identical except for their origin. The record keeps the disposition,
@@ -693,11 +695,12 @@ and a `COMMITTING` transaction continues without its client.
 
 **Read consistency.** A read, such as `SHOW`, `DESCRIBE`, or `LOOKUP`, is served by the node the
 session is on from its locally applied replicated state; it is not a linearizable read. Once a
-command completes, its effect is applied on every live node, so a read issued afterwards through any
-node observes it. Completion for a session bound to a transaction resolves against the committed
-configuration with the session's own queued statements applied, while every other session sees
-committed configuration alone. Inspecting a transaction reads it without changing its binding,
-domain, activity, or queue position.
+command completes, its effect is applied on every node in the leader's completion participant set,
+so a later read through one of those nodes observes it. A node the leader has retired can still
+serve an older local state until it catches up. Completion for a session bound to a transaction
+resolves against the committed configuration with the session's own queued statements applied,
+while every other session sees committed configuration alone. Inspecting a transaction reads it
+without changing its binding, domain, activity, or queue position.
 
 ## Leader Discovery, Redirect, And Reconnect
 
@@ -712,7 +715,10 @@ session into that domain's observations as well: a `ClusterObserved` summary and
 entities, at once and then every 500 milliseconds. A session that selects no domain receives
 neither. Server notices report runtime and control-plane errors and cluster events as text for
 display. A session that falls behind the node's notice bus skips the notices it missed; the node
-logs how many.
+logs how many. The Rust client holds at most 128 notices and 1 MiB its caller has not read. A
+notice that does not fit drops the ones held, and the caller's next read reports that gap before
+the notices that follow it. Notices end with the session that delivered them, and the client's
+notice stream continues with the next session it opens.
 
 There is no separate discovery request. A client learns where the leader is from these observations
 and from the redirects in its replies. Endpoints come from the cluster's discovery, which carries
@@ -775,6 +781,12 @@ it:
 
 Only then does it repeat outstanding commands, each under its original execution reference and, for
 an append, its original expected position.
+
+The client's event streams outlive the session. A caller reading subscription events, clock events,
+or notices keeps reading across the replacement: the interruptions of step 3 mark the gap, and
+events of the new session follow them. Reading subscription or clock events opens a new session
+while one waits to be restored; reading notices never does, and waits for the session something
+else opens. A failed attempt to open one is returned to the reader, and its next read tries again.
 
 The web console follows the same order on every connection: it selects its domain, opens again the
 subscription of every tab the server had acknowledged, and attaches its transaction before any
@@ -1009,7 +1021,9 @@ copying it, so a retained frame costs about its own size: four subscriptions eac
 4.17 MB frame kept 16.78 MB live for 16.69 MB of frames, and the receiver keeps the allocation of the
 last large frame it read as its receive buffer after that frame is released. The CLI bounds its
 terminal output to 128 lines and 1 MiB, cuts a line above 8 KiB, and reports how many lines it
-omitted. The web console keeps at most 256 lines and 256 KiB per REPL and per subscription
+omitted. It keeps reading every stream across reconnects, and when the client cannot reopen a
+session to restore subscriptions or clocks it prints why while the client keeps trying. The web
+console keeps at most 256 lines and 256 KiB per REPL and per subscription
 tab, and marks where it omitted earlier lines. It keeps the latest 256 commands and 256 KiB of its
 command history and the snapshot of the one domain it observes. It holds at most 64 requests of its
 controls waiting for a connection, carrying at most 4 MiB of text, and at most 256 held or awaiting
@@ -1067,7 +1081,10 @@ interconnect traffic and survives nothing: it ends silently with its session. Th
 attaches every clock it followed again on its next session, clears its previous tick, and reports
 the gap as an interruption. The shared binding exposes this event stream through
 `nx_session_next_clock_event` and a dedicated retained `nx_clock_event` handle. The web console
-does not follow domain clocks. Both requests are refused while the session holds a transaction,
+attaches the selected domain clock once per session, detaches it on selection changes, and restores
+it on reconnect; its REPL sends the same typed requests for explicit attach and detach statements.
+These requests enter the console's bounded session hand-off; a local refusal is shown to the
+operator and sends no request. Both requests are refused while the session holds a transaction,
 like every other session-local request.
 
 A node answers an attach only once it has installed the cluster's committed domains since it
