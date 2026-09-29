@@ -73,6 +73,18 @@ same; [WASM State And Recovery](./wasm-state.md) owns those boundaries.
 HTTP request-field compilation retains the VM report beneath the emitter's request-field context
 and attaches its safe message for diagnostics; an invalid request program never starts the sink.
 
+An HTTP request attempt that fails is an `HttpAttemptError`, owned by the HTTP sink: a timeout, a
+DNS, connection, TLS, send or response-header failure, an invalid destination, or a retryable or
+authentication status with its number. The sink keeps the resolver's `DnsLookupError`, the
+response-header failure, or the socket or TLS error as the context beneath it, and attaches the
+description of the whole chain, such as
+`HTTP TLS handshake failed: invalid peer certificate: UnknownIssuer`, to its publish failure. The
+emitter reports that description as its transient error and runtime event for as long as the
+request stays pending, which `DESCRIBE EMITTER` shows. It names the status or the cause of the
+connection and never the evaluated target, a header value, a credential or a body. A refused
+request is not an attempt failure: it is a record rejection with code `external`, operation
+`publish` and its numeric status.
+
 Resource planning checks the committed lookup key and codec, generator materialized source,
 output branch and route construction, and WASM guest-state generation before runtime binding.
 These failures name the owning node and relevant relay, codec, or field. A missing

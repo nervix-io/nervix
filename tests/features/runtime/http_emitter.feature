@@ -40,6 +40,32 @@ Feature: HTTP emitter
       | encoded | PATH input.request_path     |
       | encoded | ENCODE USING event_codec    |
       | empty   | WITHOUT BODY                |
+    When these NSPL commands are executed on the leader node
+      """
+      DESCRIBE EMITTER encoded;
+      """
+    Then the last command output contains
+      """
+      codec: event_codec
+      body: codec
+      sink: HTTP client=api method=input.request_method path=input.request_path
+      batch: none
+      flush: FLUSH IMMEDIATE
+      publishing mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      DESCRIBE EMITTER empty;
+      """
+    Then the last command output contains
+      """
+      codec: none
+      body: without body
+      sink: HTTP client=api method='DELETE' path=input.request_path
+      batch: none
+      flush: FLUSH IMMEDIATE
+      publishing mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      """
     When these NSPL commands fail with "HTTP METHOD and PATH require exact non-sensitive STRING values"
       """
       CREATE EMITTER invalid_method FROM outgoing TO HTTP api
@@ -57,6 +83,19 @@ Feature: HTTP emitter
       | emitter | clause                             |
       | encoded | RETRY POLICY BACKOFF 500ms MAX 30s |
       | encoded | ENCODE USING event_codec           |
+    When these NSPL commands are executed on the leader node
+      """
+      DESCRIBE EMITTER encoded;
+      """
+    Then the last command output contains
+      """
+      codec: event_codec
+      body: codec
+      sink: HTTP client=api method=input.request_method path=input.request_path
+      batch: none
+      flush: FLUSH IMMEDIATE
+      publishing mode: ACK RETRY POLICY BACKOFF 500ms MAX 30s
+      """
     When these NSPL commands fail with "emitter body selection does not support the retained construction"
       """
       ALTER EMITTER encoded SET TO HTTP api
@@ -91,9 +130,12 @@ Feature: HTTP emitter
       """
     Then the last command output contains
       """
+      codec: none
       body: without body
       sink: HTTP client=api method='HEAD' path='/health'
       batch: none
+      flush: FLUSH IMMEDIATE
+      publishing mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
       """
 
     Examples:
