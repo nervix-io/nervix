@@ -116,6 +116,12 @@ wait with a typed failure, takes apart a task the harness owns, or ends the run.
 task is containment rather than a product outcome, and the harness records it as forced cleanup, not
 as something the node did.
 
+The cluster health scenario can fail application-health responses for one ordered probing-node and
+responding-node pair while other probes remain healthy. It can also hold one node immediately before
+that node reports a runtime revision prepared, wait until the hold is reached, and release it after
+asserting command completion. These are per-scenario injected conditions; their waits have harness
+bounds and do not shorten the product's completion deadline.
+
 The boundary between them is kept in four places.
 
 - **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,
@@ -283,6 +289,11 @@ Interconnect](./interconnect.md#application-health-and-availability).
 A scenario step can also read status inside a window of its own, passing that window as the phase
 deadline. Where the window bounds how long something is watched rather than how long one read may
 take, every read keeps a full request timeout instead.
+
+The harness session client keeps domain-clock replies and frames in arrival order. When a detach
+reply ends an attachment, it retires that domain's unread frames from the pending observation
+queue while preserving them in the ordered log. Assertions about events after detachment therefore
+start at the acknowledged boundary, including when ticks arrived while the client awaited the reply.
 
 ## Node Tasks And Readiness
 
