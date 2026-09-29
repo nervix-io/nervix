@@ -493,24 +493,26 @@ pub(in crate::registry) fn ingestor_statement(
             ),
             branch,
         ),
-        decode_using_codec: named(codec),
-        timestamp_source: None,
-        source: IngestSource::Kafka {
-            client: ClientName::parse(client).expect("valid identifier"),
-            topic: TopicName::parse("notifications").expect("valid identifier"),
-            offset_mode: KafkaOffsetMode::ConsumerGroup(
-                ConsumerGroupName::parse("cg").expect("valid consumer group"),
-            ),
-            instances: nonzero!(1u64),
-            mode: KafkaIngestMode::AckSequential {
-                timeout: "30s".to_string(),
-                retry_policy: nervix_models::RetryPolicy {
-                    backoff: "200ms".to_string(),
-                    max_backoff: "5s".to_string(),
+        input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
+            source: IngestSource::Kafka {
+                client: ClientName::parse(client).expect("valid identifier"),
+                topic: TopicName::parse("notifications").expect("valid identifier"),
+                offset_mode: KafkaOffsetMode::ConsumerGroup(
+                    ConsumerGroupName::parse("cg").expect("valid consumer group"),
+                ),
+                instances: nonzero!(1u64),
+                mode: KafkaIngestMode::AckSequential {
+                    timeout: "30s".to_string(),
+                    retry_policy: nervix_models::RetryPolicy {
+                        backoff: "200ms".to_string(),
+                        max_backoff: "5s".to_string(),
+                    },
                 },
+                quiesce: nervix_models::IngestQuiesceMode::Suspend,
             },
-            quiesce: nervix_models::IngestQuiesceMode::Suspend,
-        },
+            codec: named(codec),
+        }),
+        timestamp_source: None,
         general_error_policy: GeneralErrorPolicy::Log,
 
         filter_where: None,

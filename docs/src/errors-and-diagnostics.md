@@ -25,6 +25,7 @@ are in [Message Errors](./processors.md#message-errors) and [Error Routes](./qui
 | Connector crates and host | Integration-specific configuration, decoding, external source and sink outcomes; host-owned routing, retry, flush, and acknowledgement failures | Separate a record rejection from a source or sink failure and follow the configured retry or acknowledgement contract. [Connector Crates And The Connector Contract](./connector-contract.md) owns those contracts. |
 | Materialized state and lookups | Dependency resolution, field and schema checks, defaults, lookup evaluation, snapshot opening, and state exchange | Use a declared absence policy only for unavailable state; report a genuine failed read or invalid state. |
 | Ingest grouping and relay batching | Route grouping, branch-key construction, Arrow batch assembly, relay admission, and delivery failures | Keep the affected concrete branch and fail or retry the correct in-memory attempt. |
+| Client ingestor endpoint | Whether a submitted batch is a canonical Arrow IPC stream of the input schema (`ClientBatchError`), whether the node had capacity to validate it, and how its acknowledgement root resolved | Answer the batch as not admitted with its defect or a temporary refusal, or with its terminal outcome, and end a producer with the reason its attachment ended. |
 | Registry, placement, and planning | Invalid domain models, references, capabilities, branch relationships, flush contracts, schedules, and placements | Reject the command before activating an invalid graph or refuse a relocation plan. |
 | Backup archive format | Records that do not encode or exceed their size limit, and archives whose structure, record headers, record values, section lengths or digests do not match what the manifest declares | Refuse to write an archive, or refuse a whole archive naming the section and the check that failed. |
 | Restore planning | Archives a restore cannot apply to the cluster: the wrong scope, a domain the archive lacks or the cluster has, an archived user the cluster has under `ON EXISTING USER FAIL`, resource versions the archive does not hold consistently, and models that bind no restored version | Refuse the restore before it changes anything, naming the domain, user, resource, version, or model. |
@@ -550,6 +551,20 @@ The web console shows an automatic attach refusal in the clock panel and event l
 retrying it. If its bounded request hand-off refuses a clock request before the session sends it,
 the console reports that local refusal in the event log; an automatic attach also leaves the panel
 in the refused state until the selected domain or connection changes.
+
+A producer answers with typed values rather than command dispositions. A refused open carries a
+`ClientProducerRefusal`, every submitted batch one `ClientSubmissionOutcome`, and an ended producer
+one `ClientProducerEndReason`; see [Producers](./client-session-protocol.md#producers). The outcome
+classes are the failure classification for a batch, and a client decides from them alone:
+`NotAdmitted` guarantees that no row entered the graph, `ProcessingFailed` reports an admitted batch
+whose acknowledgement failed and may have had effects, and `OutcomeUnknown` reports a batch whose
+effects cannot be established. An invalid batch names one `ClientBatchDefect`; its message and the
+detail of a processing failure are bounded to 1 KiB, never quote a payload value, and are display
+text only. A temporary refusal, `Suspended` or `Busy`, is an ordinary outcome that a producer
+resends on its declared backoff, not a failure. A node that cannot reserve memory or a worker to
+validate a batch answers `Busy` rather than holding the batch, and a batch that fails after it was
+dispatched resolves its acknowledgement root negatively, which the producer receives as
+`ProcessingFailed` with `Rejected`.
 
 If a paced clock cannot convert one period through its rate, the authority can still emit its
 already-due first tick. Scheduling a later tick then reports a rate-conversion or cadence error and

@@ -35,9 +35,7 @@ use super::{
 use crate::{
     registry::{BranchInstanceAckBoundary, BranchedProcessorNodeSpec},
     runtime_ack::AckSet,
-    runtime_schema::{
-        CompiledSchema, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue, arrow_data_type,
-    },
+    runtime_schema::{CompiledSchema, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue},
 };
 
 pub(super) type WasmAckMap = HashMap<u64, WasmAckContext>;
@@ -437,7 +435,7 @@ impl CompiledInferencerInputProgram {
                 .map(|mapping| {
                     arrow_schema::Field::new(
                         &mapping.tensor,
-                        arrow_data_type(&mapping.schema.message_type()),
+                        mapping.schema.message_type().arrow_data_type(),
                         false,
                     )
                 })

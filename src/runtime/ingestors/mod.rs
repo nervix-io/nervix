@@ -3,10 +3,10 @@
 //! Layer: data plane.
 //!
 //! - **Owns.** Starting an ingestor: preparing its quiescence, refusing a second start, compiling
-//!   its dependencies, and mapping its source plan to the connector that runs it, which is the only
-//!   place a source plan's kind selects anything.
+//!   its dependencies, and mapping its input plan to the connector that runs a transport or to the
+//!   client source the node hosts, which is the only place an input plan's kind selects anything.
 //! - **Depends on.** Ingestor start plans, the host source launcher, every source connector, and
-//!   the endpoint source the server keeps.
+//!   the endpoint and client sources the server keeps.
 //! - **Must not know.** NSPL parsing, registry validation, or placement computation.
 
 use super::*;
@@ -36,7 +36,7 @@ impl Runtime {
         &self,
         plan: &IngestorStartPlan,
     ) -> Result<(), RuntimeError> {
-        let IngestorStartPlan { ingestor, source } = plan;
+        let IngestorStartPlan { ingestor, input } = plan;
         let quiesce = self.prepare_ingestor_quiescence(&ingestor.domain, ingestor);
         if self.inner.ingestors.contains_key(&ingestor.runtime_key()) {
             return Err(RuntimeError::IngestorAlreadyRunning {
@@ -45,8 +45,18 @@ impl Runtime {
             });
         }
 
-        let dependencies = self.ingestor_dependencies(ingestor).await?;
-        let source = match source.clone() {
+        let BoundIngestor {
+            input,
+            dependencies,
+        } = self.ingestor_dependencies(ingestor, input).await?;
+        let (codec, source) = match input {
+            BoundIngestorInput::Transport { codec, source } => (codec, source),
+            BoundIngestorInput::Client { plan, generation } => {
+                self.host_client_source(ingestor, &plan, generation, quiesce, dependencies);
+                return Ok(());
+            }
+        };
+        let source = match source {
             SourceStartPlan::Http(plan) => plan.compose(self, ingestor).await?,
             SourceStartPlan::Kafka(plan) => plan.compose(self, ingestor).await?,
             SourceStartPlan::Pulsar(plan) => plan.compose(self, ingestor).await?,
@@ -61,7 +71,7 @@ impl Runtime {
             SourceStartPlan::Websockets(plan) => plan.compose(self, ingestor).await?,
             SourceStartPlan::Syslog(plan) => plan.compose(self, ingestor).await?,
         };
-        self.host_source(ingestor, quiesce, dependencies, source);
+        self.host_source(ingestor, quiesce, dependencies, codec, source);
         Ok(())
     }
 }
@@ -162,9 +172,13 @@ mod tests {
                 )))
                 .with_flush_policy(FlushPolicy::Immediate)
                 .with_branch(OutputBranch::Unbranched),
-                decode_using_codec: named("json"),
+                input: nervix_models::IngestorInput::Transport(
+                    nervix_models::TransportIngestorInput {
+                        source,
+                        codec: named("json"),
+                    },
+                ),
                 timestamp_source: None,
-                source,
                 general_error_policy: GeneralErrorPolicy::Log,
                 filter_where: None,
             };
@@ -211,7 +225,10 @@ mod tests {
             let plan = plans
                 .ingestor(&named("source"))
                 .assured("the fixture schedules the ingestor named source");
-            let result = match plan.source.clone() {
+            let IngestorInputPlan::Transport(transport) = &plan.input else {
+                panic!("the fixture ingestor reads a transport");
+            };
+            let result = match transport.source.clone() {
                 SourceStartPlan::Http(source) => source.compose(&runtime, &plan.ingestor).await,
                 SourceStartPlan::Prometheus(source) => {
                     source.compose(&runtime, &plan.ingestor).await

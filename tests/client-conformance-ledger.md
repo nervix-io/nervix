@@ -119,7 +119,11 @@ the attach and detach requests, a paced clock attached at the largest generation
 signed timestamps and a time rate read by its bits, clock frames in the stopped, uninstalled and
 unpaced states, every refusal of an attach and a detach, and the end of an attachment with its
 typed reason. A tick frame carries its generation, id, boundary, authority UTC observation, and
-serving node logical reading through the Rust, Go, and TypeScript readers.
+serving node logical reading through the Rust, Go, and TypeScript readers. Producers are covered by
+the open, submit, and close requests with a batch carried as opaque bytes, an opened producer with
+its description under a parallel window, a refused open, a closed producer, a submission of
+each of the four outcome classes with a typed cause, and the admission-change and end frames of a
+producer.
 
 `A <runtime> client reads every frame of the conformance corpus the Rust encoder wrote` holds the Go
 reader and the TypeScript reader on Node.js and Bun to the same report. Together with the live

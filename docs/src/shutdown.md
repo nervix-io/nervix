@@ -207,6 +207,14 @@ change wait compares against that publication after registering the waiter, so a
 ownership-handoff engagement during dispatch is observed on the next loop turn even when the
 notification arrived before the wait began.
 
+A [client ingestor](./ingestors.md#client-ingestors) stops intake the same way: from the moment
+intake stops, a batch that arrives or waits unadmitted is refused as `draining`, which its producer
+must not send again to this execution, while admitted batches continue through their routes. Closing
+the node's sessions detaches the producers they held; their admitted batches still drain. Producers
+another node forwards here stay attached through the drain and learn every outcome it decides.
+Terminal teardown then ends every producer still attached with `shutting down`, reporting each batch
+whose acknowledgement is still unresolved as of unknown outcome with cause `interrupted`.
+
 A raw quiesce buffer is not part of the drain. Payloads that a `BUFFER` mode retained during an
 earlier hold are outside runtime graph work: a shutdown does not replay them, and they are discarded
 and counted as dropped when the ingestor stops. Only work already admitted into the graph is
@@ -475,6 +483,7 @@ What that contract is depends on the source, and three groups differ sharply:
 | Kafka, Pulsar, RabbitMQ, SQS, and MQTT in an `ACK` mode | The offset is committed, the broker acknowledged, or the message deleted only after the record is acknowledged through the graph | Redelivered after the restart |
 | HTTP polling, Prometheus | None; the poller re-reads its source each cadence | Read again by a later poll |
 | NATS, Redis Pub/Sub, ZeroMQ, WebSocket clients, HTTP endpoints, Syslog | None exists; these sources offer no acknowledged mode | Lost, with nothing to redeliver it |
+| Client ingestors | The producer receives each batch's outcome once its acknowledgement root resolves | Reported to its producer as of unknown outcome, or not at all when the producer's session ended first; the application decides whether to submit it again |
 
 The last row is the one to plan around. Those sources have no acknowledged delivery mode at all, so
 a record admitted from them and not yet emitted is lost both by a drain that runs out of time and by
@@ -598,6 +607,7 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | WASM guest-state checkpoints | Every checkpoint that released an acknowledgement is already synchronized | Reopen at the newest checkpoint on the node's storage, which covers every acknowledged input |
 | External source offsets and sink commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
 | Relay batches, queued payload attempts, suspended work, ACK guards, ACK tokens, ACK maps, handoff payloads, gate leases, clock progress | The drain tries to resolve them before its deadline | Volatile; lost |
+| Client producers, their credit and queued batches, producer links | Ended as `shutting down` after the drain, or detached with their sessions | Volatile; lost with the process, and every forwarded producer of the node ends as `owner lost` |
 
 Durability is not uniform across those rows, and the difference is operationally visible:
 
@@ -750,7 +760,11 @@ outcome, so `outcome=Completed` distinguishes a finished phase from an abandoned
 Existing metric families move during shutdown without naming it. Interconnect stream resets count
 `reason="shutdown"`. The ingestor quiesce families change as intake stops, but they carry no cause
 label, so a shutdown hold is not distinguishable there from another hold. Live branch instances fall
-without incrementing the eviction counter, because a stopping node is not evicting branches. See
+without incrementing the eviction counter, because a stopping node is not evicting branches. A
+client ingestor's endpoint logs `ended the producers of a client ingestor` at `info` with the count
+and reason `shutting down`, its gauges fall to zero, and the batches it answered while draining are
+counted under `nervix_client_ingestor_submissions_total` as `draining` refusals or as the outcomes
+their roots resolved to. See
 [Metrics And Observability](./metrics-and-observability.md).
 
 The health endpoints do not describe shutdown. `/livez` answers while the process is alive, and

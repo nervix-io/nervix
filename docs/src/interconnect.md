@@ -505,7 +505,7 @@ operation's domain semantics.
    deadline. An idle established stream is valid; the owning protocol sets deadlines for answers it
    is awaiting. The initiator's sender reports when the peer's flow control last accepted its
    bytes, so that protocol can tell a slow answer from a peer that accepts nothing. Consensus append
-   traffic uses this form.
+   traffic and [client producer links](#client-producer-links) use this form.
 5. **Relay delivery.** A management-plane grant reserves receiver capacity before an Arrow body is
    sent, followed by explicit runtime admission and optional downstream record acknowledgements.
 
@@ -868,6 +868,42 @@ authoritative. The [Data Plane](./data-plane.md) defines how a local execution c
 state. The interconnect supplies bounded delivery between those owners and does not reinterpret
 their state.
 
+## Client Producer Links
+
+A client may open a producer for a [client ingestor](./ingestors.md#client-ingestors) through any
+live node. When the serving node does not execute the ingestor, it forwards the producer to the node
+that does over one `client_producer_link`: an ordered duplex stream on the relay pool, admitted
+through the shared relay subquota, with a five-second setup deadline. A serving node keeps at most
+one link to each owning node, opened by the first producer that needs it and shared by every
+producer it forwards there, so forwarding holds one stream per peer however many producers use it.
+Two opens racing for one owner start one link.
+
+The opening frame names the serving node, and the owning node refuses a link whose named node is
+not the peer it authenticated. Each forwarded producer then has a key the serving node assigns and
+never reuses within its process, so a late frame about an ended producer can never reach a later
+one. The serving node sends `Open` with the domain, ingestor, expected fields, credit, and the
+largest batch one submission may carry, then the producer's `Submit` frames carrying the Arrow IPC
+bytes of each batch, and finally `Close` or `Detach`. The owning node answers with `Opened` and the
+producer's description or `Refused` with its refusal, then the producer's `Outcome` and `Admission`
+frames, and finally `Ended` with a reason or `Closed`. Frames of one producer keep their order in
+both directions, so its open precedes its batches and its outcomes, admission changes, and end
+follow the answer to its open. A batch travels at most once over the link, and the frames are
+validated and charged to the relay memory class like every other relay-pool operation.
+
+The serving node waits at most 20 seconds for the owning node to answer a forwarded open, including
+opening the link. Both ends send a heartbeat after two seconds without other frames and treat ten
+seconds without hearing anything as a lost link; the owning node skips a heartbeat rather than queue
+it behind 64 unsent answers. When a link ends for any reason, the serving node refuses the opens it
+has not heard back about as `EndpointUnavailable` and ends every producer the link carried as
+`OwnerLost`, whose batches without outcomes become `OutcomeUnknown` with cause `OwnerLost`. The
+owning node detaches the link's producers: their admitted batches continue through the graph with
+nobody left to answer them. A later producer opens a new link.
+
+Each end reserves the producer's granted bytes in its own 128 MiB producer budget: the serving node
+for the batches its session holds, and the owning node again for the batches it retains for another
+node. The link adds no reservation of its own beyond the transport's per-frame charge.
+[Client Session Protocol](./client-session-protocol.md#producers) describes what the client sees.
+
 ## Domain Clock Progress
 
 A paced domain's mapping, generation, and authority fence are committed control-plane state. The
@@ -1074,7 +1110,10 @@ setup, handshake, capacity, and closed failures, so a DNS outage is visible as i
 
 Typed-request observations identify application health as operation `liveness` and replaceable
 domain-clock delivery and HTTPS listener installation probes as operation `progress`, so their
-request counts, outcomes, latency, and quota failures can be evaluated independently.
+request counts, outcomes, latency, and quota failures can be evaluated independently. A client
+producer link's opening, failure, silence, and the producers it ends or detaches are logged at
+`debug` on both ends; the owning node's client-ingestor metrics count forwarded producers apart
+from local ones.
 
 Metric labels are bounded dimensions such as traffic class, direction, operation, outcome, and
 reason. They do not include peer, domain, relay, branch, delivery identity, or payload values.

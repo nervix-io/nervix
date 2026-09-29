@@ -4,7 +4,7 @@
 //! - **Owns.** Assertions that a reply larger than a frame arrives whole as transfer parts, that a
 //!   reply larger than the transfer limit is refused whole, that a cancellation of a request that
 //!   is not in flight says so, that registration refuses a duplicate or excess request rather
-//!   than queueing it, that a subscription statement the parser rejects is refused with the
+//!   than queueing it while a submitted batch stays outside the in-flight limit, that a subscription statement the parser rejects is refused with the
 //!   stage and the diagnostic located in that statement, and that a domain clock attachment
 //!   delivers its changes between its replies and ends when its domain leaves the node. An attach
 //!   is answered only once its node has installed the committed domains, and the wait for them
@@ -36,7 +36,10 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
 
-use super::{InboundFrame, MAX_IN_FLIGHT_REQUESTS, SessionShared, SessionTransport, outbound};
+use super::{
+    InFlightKind, InFlightRequests, InboundFrame, MAX_IN_FLIGHT_REQUESTS, SessionShared,
+    SessionTransport, outbound, producers::SessionProducers,
+};
 use crate::application::{
     command_result::CommandDisposition,
     session_service::SessionServiceImpl,
@@ -289,15 +292,16 @@ async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
             outbound,
             limits: SessionLimits::DEFAULT,
         },
-        in_flight: parking_lot::Mutex::new(std::collections::BTreeMap::new()),
+        in_flight: parking_lot::Mutex::new(InFlightRequests::default()),
         view: parking_lot::RwLock::new(subscriptions.view()),
         selection,
+        producers: SessionProducers::default(),
     };
 
     shared
-        .register(request_id(1))
+        .register(request_id(1), InFlightKind::Request)
         .assured("the first request registers");
-    let Err(duplicate) = shared.register(request_id(1)) else {
+    let Err(duplicate) = shared.register(request_id(1), InFlightKind::Request) else {
         panic!("a request identity already in flight is refused");
     };
     assert_eq!(duplicate.rejection, RequestRejection::DuplicateRequestId);
@@ -305,21 +309,39 @@ async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
     for id in 2..=MAX_IN_FLIGHT_REQUESTS {
         let id = u64::try_from(id).assured("the in-flight limit fits in u64");
         shared
-            .register(request_id(id))
+            .register(request_id(id), InFlightKind::Request)
             .assured("requests up to the limit register");
     }
     let beyond = u64::try_from(MAX_IN_FLIGHT_REQUESTS)
         .assured("the in-flight limit fits in u64")
         .checked_add(1)
         .assured("one past the limit fits in u64");
-    let Err(refused) = shared.register(request_id(beyond)) else {
+    let Err(refused) = shared.register(request_id(beyond), InFlightKind::Request) else {
         panic!("a request beyond the in-flight limit is refused");
+    };
+    assert_eq!(refused.rejection, RequestRejection::TooManyRequestsInFlight);
+
+    // A submitted batch is bounded by its producer's credit, not by the in-flight limit, and a
+    // duplicate identity is refused for it as for any request.
+    let submission = beyond
+        .checked_add(1)
+        .assured("two past the limit fits in u64");
+    shared
+        .register(request_id(submission), InFlightKind::Submission)
+        .assured("a submission registers while requests fill the limit");
+    let Err(duplicate) = shared.register(request_id(submission), InFlightKind::Submission) else {
+        panic!("a submission identity already in flight is refused");
+    };
+    assert_eq!(duplicate.rejection, RequestRejection::DuplicateRequestId);
+    assert!(shared.finish(request_id(submission)));
+    let Err(refused) = shared.register(request_id(beyond), InFlightKind::Request) else {
+        panic!("an answered submission frees no place a request counts");
     };
     assert_eq!(refused.rejection, RequestRejection::TooManyRequestsInFlight);
 
     assert!(shared.finish(request_id(1)));
     shared
-        .register(request_id(beyond))
+        .register(request_id(beyond), InFlightKind::Request)
         .assured("an answered request frees its place");
 
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");

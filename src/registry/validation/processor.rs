@@ -39,10 +39,9 @@ use crate::registry::{
         },
         materialized_state::referenced_materialized_stream_bindings,
         schema::{
-            arrow_data_type_for_parse_as, arrow_schema_for_internal_schema,
-            ensure_equal_internal_schema, ensure_internal_schema_compatibility,
-            readonly_binding_for_internal_schema, schema_sensitivity_for_internal_schema,
-            writable_binding_for_internal_schema,
+            arrow_schema_for_internal_schema, ensure_equal_internal_schema,
+            ensure_internal_schema_compatibility, readonly_binding_for_internal_schema,
+            schema_sensitivity_for_internal_schema, writable_binding_for_internal_schema,
         },
         vm::{BRANCH_NAMESPACE, INNER_OUTPUT_NAMESPACE, udf_compile_options},
         window_route::validate_window_route_types,
@@ -1498,7 +1497,7 @@ pub(in crate::registry) fn ensure_inferencer_input_mappings(
                 reason: format!("inference input '{}' produced no value", mapping.tensor),
             }));
         };
-        let expected_type = arrow_data_type_for_parse_as(&mapping.schema.message_type());
+        let expected_type = mapping.schema.message_type().arrow_data_type();
         if inferred.data_type != expected_type || inferred.nullable {
             return Err(Report::new(RegistryError::IncompatibleSchema {
                 domain: domain.as_str().to_string(),

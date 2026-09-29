@@ -1859,13 +1859,13 @@ impl SessionServiceImpl {
                 let Model::Ingestor(ingestor) = node.config.as_ref() else {
                     continue;
                 };
-                let IngestSource::Kafka {
+                let Some(IngestSource::Kafka {
                     client,
                     topic,
                     offset_mode: KafkaOffsetMode::Domain,
                     instances,
                     ..
-                } = &ingestor.source
+                }) = ingestor.input.transport_source()
                 else {
                     continue;
                 };
@@ -1922,12 +1922,12 @@ impl SessionServiceImpl {
         let Model::Ingestor(ingestor_model) = ingestor_node.config.as_ref() else {
             return Ok(());
         };
-        let IngestSource::Kafka {
+        let Some(IngestSource::Kafka {
             topic: scheduled_topic,
             offset_mode: KafkaOffsetMode::Domain,
             instances: scheduled_instances,
             ..
-        } = &ingestor_model.source
+        }) = ingestor_model.input.transport_source()
         else {
             return Ok(());
         };

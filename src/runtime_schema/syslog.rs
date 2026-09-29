@@ -19,7 +19,6 @@ use nervix_models::{CodecEncodingRule, CodecName, ParseAsType};
 use super::{
     ArrowCodecRow, CodecError, CompiledCodec, CompiledSchema, RuntimeRecordBatchBuilder,
     RuntimeSchemaError, RuntimeValueLocation, SyslogHeaderIssue, SyslogStructuredDataIssue,
-    arrow_data_type,
 };
 
 const DEFAULT_PRIORITY: u8 = 13;
@@ -908,7 +907,7 @@ fn append_u8(
 ) -> error_stack::Result<(), RuntimeSchemaError> {
     prepare_append(builder, index)?;
     let field = builder.fields[index].name.clone();
-    let expected = arrow_data_type(&builder.fields[index].ty);
+    let expected = builder.fields[index].ty.arrow_data_type();
     if !builder.builders[index].as_any().is::<UInt8Builder>() {
         return Err(Report::new(RuntimeSchemaError::ExactTypeMismatch {
             location: RuntimeValueLocation::CodecField {
@@ -935,7 +934,7 @@ fn append_string(
 ) -> error_stack::Result<(), RuntimeSchemaError> {
     prepare_append(builder, index)?;
     let field = builder.fields[index].name.clone();
-    let expected = arrow_data_type(&builder.fields[index].ty);
+    let expected = builder.fields[index].ty.arrow_data_type();
     if !builder.builders[index].as_any().is::<StringBuilder>() {
         return Err(Report::new(RuntimeSchemaError::ExactTypeMismatch {
             location: RuntimeValueLocation::CodecField {
@@ -969,7 +968,7 @@ fn append_datetime(
         })
         .transpose()?;
     let field = builder.fields[index].name.clone();
-    let expected = arrow_data_type(&builder.fields[index].ty);
+    let expected = builder.fields[index].ty.arrow_data_type();
     if !builder.builders[index]
         .as_any()
         .is::<TimestampNanosecondBuilder>()

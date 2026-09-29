@@ -98,8 +98,11 @@ wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
 });
 
 impl ChoiceTarget {
+    /// The choices of what a source names: its client or endpoint, or, for a client source, the
+    /// input schema its producers' batches carry.
     pub const fn for_ingest_source(kind: IngestSourceKind) -> Self {
         match kind {
+            IngestSourceKind::Client => Self::Schema,
             IngestSourceKind::Http => Self::IngestHttpSource,
             IngestSourceKind::Kafka => Self::IngestKafkaSource,
             IngestSourceKind::Pulsar => Self::IngestPulsarSource,

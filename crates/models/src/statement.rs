@@ -93,6 +93,7 @@ pub enum Statement {
     LookupQuery(LookupQuery),
     ShowCreate(ShowCreate),
     ShowUdfs(ShowUdfs),
+    ShowIngestors(ShowIngestors),
     ShowPlacements(ShowPlacements),
     ShowRelayMaterializedState(ShowRelayMaterializedState),
     ShowClusterStatus(ShowClusterStatus),
@@ -167,6 +168,7 @@ impl Statement {
             | Self::LookupQuery(_)
             | Self::ShowCreate(_)
             | Self::ShowUdfs(_)
+            | Self::ShowIngestors(_)
             | Self::ShowPlacements(_)
             | Self::ShowRelayMaterializedState(_)
             | Self::ShowClusterStatus(_)
@@ -376,6 +378,13 @@ pub struct ShowUdfs;
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct ShowPlacements;
+
+/// Lists the ingestors of the selected domain with their source, schema or codec, execution owner
+/// and state, and the producers each client ingestor has attached.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ShowIngestors;
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -1318,7 +1327,7 @@ declare_models! {
 impl Model {
     pub fn executes_on_every_cluster_node(&self) -> bool {
         if let Self::Ingestor(ingestor) = self {
-            ingestor.source.executes_on_every_cluster_node()
+            ingestor.input.executes_on_every_cluster_node()
         } else {
             false
         }
@@ -3146,9 +3155,9 @@ impl ResolvedBranching {
 pub struct CreateIngestor {
     pub name: IngestorName,
     pub output_routes: ProcessorOutputs,
-    pub decode_using_codec: CodecName,
+    /// What the ingestor reads, and how what it reads becomes records of its input schema.
+    pub input: crate::IngestorInput,
     pub timestamp_source: Option<IngestTimestampSource>,
-    pub source: IngestSource,
     pub general_error_policy: GeneralErrorPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_where: Option<crate::Expression>,
@@ -3180,13 +3189,41 @@ impl CreateIngestor {
     ) -> error_stack::Result<(), AlterIngestorError> {
         match operation {
             AlterIngestorOperation::SetSource { source } => {
-                self.source = source.clone();
+                let crate::IngestorInput::Transport(input) = &mut self.input else {
+                    return Err(Report::new(AlterIngestorError::InputKindChange {
+                        current: self.input.kind().as_ref().to_string(),
+                        requested: crate::IngestorInputKind::Transport.as_ref().to_string(),
+                    }));
+                };
+                input.source = source.clone();
             }
-            AlterIngestorOperation::SetQuiesce { quiesce } => {
-                self.source.set_quiesce(quiesce.clone())?;
+            AlterIngestorOperation::SetClientSource { source } => {
+                let crate::IngestorInput::Client(current) = &mut self.input else {
+                    return Err(Report::new(AlterIngestorError::InputKindChange {
+                        current: self.input.kind().as_ref().to_string(),
+                        requested: crate::IngestorInputKind::Client.as_ref().to_string(),
+                    }));
+                };
+                *current = source.clone();
             }
+            AlterIngestorOperation::SetQuiesce { quiesce } => match &mut self.input {
+                crate::IngestorInput::Transport(input) => {
+                    input.source.set_quiesce(quiesce.clone())?;
+                }
+                crate::IngestorInput::Client(_) => {
+                    if !self.input.supports_quiesce(quiesce) {
+                        return Err(Report::new(AlterIngestorError::UnsupportedQuiesceMode {
+                            transport: self.input.source_label().to_string(),
+                            mode: quiesce.kind_label().to_string(),
+                        }));
+                    }
+                }
+            },
             AlterIngestorOperation::SetDecodeUsing { codec } => {
-                self.decode_using_codec = codec.clone();
+                let crate::IngestorInput::Transport(input) = &mut self.input else {
+                    return Err(Report::new(AlterIngestorError::CodecWithoutTransport));
+                };
+                input.codec = codec.clone();
             }
             AlterIngestorOperation::SetTimestamp { source } => {
                 self.timestamp_source = Some(source.clone());
@@ -3258,6 +3295,7 @@ pub struct AlterIngestor {
 )]
 pub enum AlterIngestorOperation {
     SetSource { source: IngestSource },
+    SetClientSource { source: crate::ClientIngestSource },
     SetQuiesce { quiesce: IngestQuiesceMode },
     SetDecodeUsing { codec: CodecName },
     SetTimestamp { source: IngestTimestampSource },
@@ -3285,6 +3323,13 @@ pub enum AlterIngestorError {
     CannotDropLastRoute,
     #[error("{transport} ingestors do not support ON QUIESCE {mode}")]
     UnsupportedQuiesceMode { transport: String, mode: String },
+    #[error(
+        "SET FROM cannot change a {current} source into a {requested} source; drop the ingestor \
+         and create it again"
+    )]
+    InputKindChange { current: String, requested: String },
+    #[error("a CLIENT ingestor decodes no payloads, so it has no codec to SET DECODE USING")]
+    CodecWithoutTransport,
 }
 
 #[derive(
@@ -4119,6 +4164,7 @@ pub enum IngestSource {
 /// The source transport class used by capability decisions before an ingestor is fully parsed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IngestSourceKind {
+    Client,
     Http,
     Kafka,
     Pulsar,
@@ -4135,6 +4181,8 @@ pub enum IngestSourceKind {
 }
 
 impl IngestSourceKind {
+    /// The transport sources the web console's visual editor offers. A client source takes
+    /// batches applications publish rather than a transport, and is created in NSPL.
     pub const ALL: [Self; 13] = [
         Self::Http,
         Self::Kafka,
@@ -4153,6 +4201,7 @@ impl IngestSourceKind {
 
     pub const fn form_key(self) -> &'static str {
         match self {
+            Self::Client => "client",
             Self::Http => "http",
             Self::Kafka => "kafka",
             Self::Pulsar => "pulsar",
@@ -4171,6 +4220,7 @@ impl IngestSourceKind {
 
     pub const fn form_label(self) -> &'static str {
         match self {
+            Self::Client => "Client batches",
             Self::Http => "HTTP polling",
             Self::Kafka => "Kafka",
             Self::Pulsar => "Pulsar",
@@ -4187,9 +4237,11 @@ impl IngestSourceKind {
         }
     }
 
-    /// The configured client type a source may read. Endpoint ingestion names an endpoint instead.
+    /// The configured client type a source may read. Endpoint ingestion names an endpoint instead,
+    /// and a client source reads the batches producers submit.
     pub const fn client_type_label(self) -> Option<&'static str> {
         match self {
+            Self::Client => None,
             Self::Http => Some("HTTP"),
             Self::Kafka => Some("KAFKA"),
             Self::Pulsar => Some("PULSAR"),
@@ -4220,7 +4272,8 @@ impl IngestSourceKind {
             | Self::Prometheus
             | Self::ZeroMq
             | Self::Websockets
-            | Self::Syslog => false,
+            | Self::Syslog
+            | Self::Client => false,
         }
     }
 }
@@ -4489,10 +4542,21 @@ pub struct RetryPolicy {
     pub max_backoff: String,
 }
 
+/// How many acknowledgements an acknowledging mode keeps outstanding at once: one for
+/// `ACK SEQUENTIAL`, and up to `max` for `ACK PARALLEL MAX <max>`.
 #[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
 )]
-pub enum EmitterAckWindow {
+pub enum AckWindow {
     Sequential,
     Parallel { max: NonZeroU64 },
 }
@@ -4505,7 +4569,7 @@ pub enum EmitterPublishingMode {
         retry_policy: RetryPolicy,
     },
     BrokerAck {
-        window: EmitterAckWindow,
+        window: AckWindow,
         ack_timeout: String,
         retry_policy: RetryPolicy,
     },
@@ -4513,17 +4577,17 @@ pub enum EmitterPublishingMode {
         retry_policy: RetryPolicy,
     },
     MqttQos1 {
-        window: EmitterAckWindow,
+        window: AckWindow,
         ack_timeout: String,
         retry_policy: RetryPolicy,
     },
     MqttQos2 {
-        window: EmitterAckWindow,
+        window: AckWindow,
         ack_timeout: String,
         retry_policy: RetryPolicy,
     },
     NatsJetStream {
-        window: EmitterAckWindow,
+        window: AckWindow,
         ack_timeout: String,
         retry_policy: RetryPolicy,
     },
@@ -5491,10 +5555,11 @@ impl ScheduledNode {
             components.push(OwnershipStateComponent::MaterializedRelay);
         }
         if let Model::Ingestor(ingestor) = self.config.as_ref()
+            && let crate::IngestorInput::Transport(input) = &ingestor.input
             && let IngestSource::Kafka {
                 offset_mode: KafkaOffsetMode::Domain,
                 ..
-            } = &ingestor.source
+            } = &input.source
         {
             components.push(OwnershipStateComponent::KafkaOffsets);
         }
@@ -6655,15 +6720,17 @@ mod tests {
                         max_batch_size: "1MiB".to_string(),
                     },
                 )]),
-                decode_using_codec: named("codec"),
-                timestamp_source: None,
-                source: IngestSource::Endpoint {
-                    endpoint: named("public_http"),
-                    mode: EndpointIngestMode::NoAckSequential,
-                    quiesce: IngestQuiesceMode::EndpointBuffer {
-                        max_size: "1MiB".to_string(),
+                input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                    source: IngestSource::Endpoint {
+                        endpoint: named("public_http"),
+                        mode: EndpointIngestMode::NoAckSequential,
+                        quiesce: IngestQuiesceMode::EndpointBuffer {
+                            max_size: "1MiB".to_string(),
+                        },
                     },
-                },
+                    codec: named("codec"),
+                }),
+                timestamp_source: None,
                 general_error_policy: GeneralErrorPolicy::Log,
 
                 filter_where: None,
@@ -6687,12 +6754,14 @@ mod tests {
                         max_batch_size: "1MiB".to_string(),
                     },
                 )]),
-                decode_using_codec: named("codec"),
+                input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                    source: IngestSource::Syslog {
+                        client: named("syslog_listener"),
+                        quiesce: IngestQuiesceMode::Suspend,
+                    },
+                    codec: named("codec"),
+                }),
                 timestamp_source: None,
-                source: IngestSource::Syslog {
-                    client: named("syslog_listener"),
-                    quiesce: IngestQuiesceMode::Suspend,
-                },
                 general_error_policy: GeneralErrorPolicy::Log,
                 filter_where: None,
             }),
@@ -7712,15 +7781,17 @@ mod tests {
         let mut ingestor = CreateIngestor {
             name: named("event_source"),
             output_routes: ProcessorOutputs::new(vec![route.clone()]),
-            decode_using_codec: named("event_codec"),
-            timestamp_source: None,
-            source: IngestSource::Endpoint {
-                endpoint: named("ingress_a"),
-                mode: EndpointIngestMode::NoAckSequential,
-                quiesce: IngestQuiesceMode::EndpointBuffer {
-                    max_size: "1MiB".to_string(),
+            input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                source: IngestSource::Endpoint {
+                    endpoint: named("ingress_a"),
+                    mode: EndpointIngestMode::NoAckSequential,
+                    quiesce: IngestQuiesceMode::EndpointBuffer {
+                        max_size: "1MiB".to_string(),
+                    },
                 },
-            },
+                codec: named("event_codec"),
+            }),
+            timestamp_source: None,
             general_error_policy: GeneralErrorPolicy::Log,
             filter_where: None,
         };
@@ -7767,16 +7838,18 @@ mod tests {
             .expect("ingestor alter should apply");
 
         assert_eq!(
-            ingestor.source,
-            IngestSource::Endpoint {
-                endpoint: named("ingress_b"),
-                mode: EndpointIngestMode::NoAckSequential,
-                quiesce: IngestQuiesceMode::EndpointBuffer {
-                    max_size: "1MiB".to_string(),
+            ingestor.input,
+            crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                source: IngestSource::Endpoint {
+                    endpoint: named("ingress_b"),
+                    mode: EndpointIngestMode::NoAckSequential,
+                    quiesce: IngestQuiesceMode::EndpointBuffer {
+                        max_size: "1MiB".to_string(),
+                    },
                 },
-            }
+                codec: named("event_codec_v2"),
+            })
         );
-        assert_eq!(ingestor.decode_using_codec, named("event_codec_v2"));
         assert_eq!(
             ingestor.timestamp_source,
             Some(super::IngestTimestampSource::Now)
@@ -7813,15 +7886,17 @@ mod tests {
         let base = CreateIngestor {
             name: named("event_source"),
             output_routes: ProcessorOutputs::new(vec![route.clone()]),
-            decode_using_codec: named("event_codec"),
-            timestamp_source: None,
-            source: IngestSource::Endpoint {
-                endpoint: named("ingress"),
-                mode: EndpointIngestMode::NoAckSequential,
-                quiesce: IngestQuiesceMode::EndpointBuffer {
-                    max_size: "1MiB".to_string(),
+            input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                source: IngestSource::Endpoint {
+                    endpoint: named("ingress"),
+                    mode: EndpointIngestMode::NoAckSequential,
+                    quiesce: IngestQuiesceMode::EndpointBuffer {
+                        max_size: "1MiB".to_string(),
+                    },
                 },
-            },
+                codec: named("event_codec"),
+            }),
+            timestamp_source: None,
             general_error_policy: GeneralErrorPolicy::Log,
             filter_where: None,
         };

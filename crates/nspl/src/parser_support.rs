@@ -16,19 +16,18 @@ use chumsky::{
 };
 use error_stack::Report;
 use nervix_models::{
-    AckMode, AlterProcessorOperation, AssignmentTargetScope, BranchName, BranchSelection,
-    ChannelName, ClientConfigEntry, ClientName, ClusterNodeName, CodecName, CollectionName,
-    ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainClockPeriod, DomainName,
-    EmitterAckWindow, EmitterName, EndpointName, Expression, FieldName, FlushPolicy,
-    GeneralErrorPolicy, GeneratorName, InferencerName, IngestorName, InputCollectPolicy,
-    InspectionFormat, JunctionName, LookupName, MaterializedStateDependency,
-    MaterializedStatePolicy, MessageErrorPolicy, ModelName, NameError, OutputBranch, PlacementName,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-    PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName, ReordererName,
-    RequestedResourceVersion, ResourceName, RetryPolicy, RouteConstruction, SchemaName,
-    SignalingProtocolName, SubjectName, SubscriptionName, TableName, TopicName,
-    TransactionOperationNumber, UdfName, UserName, VhostName, WasmProcessorName,
-    WindowProcessorName, WireSchemaName,
+    AckMode, AckWindow, AlterProcessorOperation, AssignmentTargetScope, BranchName,
+    BranchSelection, ChannelName, ClientConfigEntry, ClientName, ClusterNodeName, CodecName,
+    CollectionName, ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainClockPeriod,
+    DomainName, EmitterName, EndpointName, Expression, FieldName, FlushPolicy, GeneralErrorPolicy,
+    GeneratorName, InferencerName, IngestorName, InputCollectPolicy, InspectionFormat,
+    JunctionName, LookupName, MaterializedStateDependency, MaterializedStatePolicy,
+    MessageErrorPolicy, ModelName, NameError, OutputBranch, PlacementName, ProcessorInputWhere,
+    ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarSubscriptionName, QueueGroupName,
+    QueueName, ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName,
+    RetryPolicy, RouteConstruction, SchemaName, SignalingProtocolName, SubjectName,
+    SubscriptionName, TableName, TopicName, TransactionOperationNumber, UdfName, UserName,
+    VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
 use sorted_vec::SortedSet;
 
@@ -294,11 +293,11 @@ pub fn parallel_ack_window<'src>()
         .boxed()
 }
 
-pub fn emitter_ack_window<'src>()
--> impl Parser<'src, &'src [Token], EmitterAckWindow, extra::Err<ParseError<'src>>> + Clone {
+pub fn ack_window<'src>()
+-> impl Parser<'src, &'src [Token], AckWindow, extra::Err<ParseError<'src>>> + Clone {
     choice((
-        sequential_ack_window().to(EmitterAckWindow::Sequential),
-        parallel_ack_window().map(|max| EmitterAckWindow::Parallel { max }),
+        sequential_ack_window().to(AckWindow::Sequential),
+        parallel_ack_window().map(|max| AckWindow::Parallel { max }),
     ))
     .boxed()
 }

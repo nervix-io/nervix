@@ -97,6 +97,15 @@ Nervix records these raw metric families:
   series stays at `0` once the relay's last subscription on the node closes
 - `nervix_session_subscription_dropped_rows_total`: rows `DROPPING` session subscriptions on the
   node discarded because their session could not take them in time
+- `nervix_client_ingestor_producers`: producers attached to a client ingestor the node executes
+- `nervix_client_ingestor_forwarded_producers`: those of them whose sessions another node serves
+- `nervix_client_ingestor_outstanding_batches`: batches those producers submitted that have no
+  outcome yet
+- `nervix_client_ingestor_outstanding_bytes`: the Arrow IPC bytes of those batches
+- `nervix_client_ingestor_admitted_batches`: batches holding a slot of the ingestor's
+  acknowledgement window
+- `nervix_client_ingestor_submissions_total`: batches the ingestor answered, by `outcome` and
+  `cause`
 - `nervix_jemalloc_active_bytes`: bytes in active allocator pages
 - `nervix_jemalloc_allocated_bytes`: bytes allocated by the process
 - `nervix_jemalloc_mapped_bytes`: bytes mapped by active allocator extents
@@ -121,6 +130,24 @@ exports them: the subscriptions its sessions hold and the rows those sessions lo
 of its own losses directly, as described in [Sessions](sessions.md). The server exports no other
 session metrics; [Client Session Protocol](./client-session-protocol.md#observability) describes
 what clients and operators observe instead.
+
+## Client Ingestors
+
+The six client-ingestor families describe the node that executes the ingestor and use `domain` and
+`ingestor` labels. The first five are gauges, rewritten whenever the ingestor's endpoint changes
+them, and they are `0` once the endpoint ends. `admitted_batches` never exceeds the window the
+ingestor declares, however many producers are attached.
+
+`nervix_client_ingestor_submissions_total` is a counter with two more labels drawn from fixed sets.
+`outcome` is `not_admitted`, `completed`, `processing_failed`, or `outcome_unknown`. `cause` is the
+refusal of a batch that was not admitted (`invalid_batch`, `suspended`, `busy`, `draining`,
+`producer_ended`, `credit_exceeded`), the failure of one that failed (`ack_timeout`, `rejected`),
+the uncertainty of one whose outcome is unknown (`interrupted`, `owner_lost`), or `none` for a
+completed batch. No label carries a payload value, a producer, or an attachment identity. A batch
+the serving session refused before it reached the node that executes the ingestor, such as one
+beyond its producer's credit, is answered by the session and not counted here.
+[Ingestors](ingestors.md#observing-client-ingestors) describes the same counts in `SHOW INGESTORS`
+and `DESCRIBE INGESTOR`.
 
 ## Delivery Latency
 

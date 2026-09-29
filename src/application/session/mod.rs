@@ -6,17 +6,19 @@
 //!   change a session in the order they were written while completion, domain, inspection and
 //!   cancellation requests proceed beside them, deciding each cancellation against its request's
 //!   admission, refusing what a session cannot serve with typed rejections, encoding replies and
-//!   transferring the ones larger than a frame, the unsolicited events a session receives, and the
-//!   domain clocks it follows.
+//!   transferring the ones larger than a frame, the unsolicited events a session receives, the
+//!   domain clocks it follows, and the producers it holds open.
 //! - **Depends on.** The client wire contract, the command pipeline and the control-plane use
 //!   cases behind it, and the execution classes large replies are encoded under.
 //! - **Must not know.** How a transport frames, authenticates or closes a session.
 //!
-//! A request is served on one of two lanes. Commands, transaction and domain clock attachments, and
-//! subscription changes all change the session, so they run one at a time in the order the client
-//! wrote them. Everything else only reads it, from the view the ordered lane last published, and
-//! runs beside them, so a long command never delays a completion, an inspection, a domain request
-//! or a cancellation.
+//! A request is served on one of two lanes. Commands, transaction and domain clock attachments,
+//! subscription changes and producer opens all change the session, so they run one at a time in
+//! the order the client wrote them. Everything else only reads it, from the view the ordered lane
+//! last published, and runs beside them, so a long command never delays a completion, an
+//! inspection, a domain request or a cancellation. A submitted batch and a producer close are
+//! handed to their producer without waiting on either lane: the receive loop never waits for a
+//! batch's outcome.
 //!
 //! Every request has exactly one terminal reply. Whoever takes the request's in-flight entry owes
 //! it: the lane that served it, or a cancellation. A cancellation decides against admission
@@ -33,6 +35,7 @@ mod events;
 pub(in crate::application) mod grpc;
 pub(in crate::application) mod outbound;
 mod outcome;
+mod producers;
 mod restore;
 mod upload;
 pub(in crate::application) mod websocket;
@@ -44,16 +47,17 @@ use std::collections::BTreeMap;
 
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
+use meticulous::OptionExt as _;
 use nervix_client_wire::{
     AttachDomainClockRequest, AttachTransactionRequest, CancelOutcome, CancelRequest, CancelState,
     CancellationStage, ChoiceLookupRequest, ClientFrame, ClientMessage, ClientRequest,
     CommandRequest, DetachDomainClockRequest, DomainClockAttachDisposition,
     DomainClockAttachOutcome, DomainClockDetachDisposition, DomainClockDetachOutcome, DomainList,
     DomainSelection, EncodedFrame, InspectTransactionRequest, InspectionOutcome,
-    MAX_IN_FLIGHT_REQUESTS, Reply, ReplyBody, ReplyDelivery, RequestCancelled, RequestId,
-    RequestRejected, RequestRejection, SelectDomainRequest, ServerFrame, SessionEndReason,
-    SessionEnding, SessionLimits, SubscribeDisposition, SubscribeOutcome, SubscribeRequest,
-    SubscriptionType, SuggestRequest, UnsubscribeDisposition, UnsubscribeOutcome,
+    MAX_IN_FLIGHT_REQUESTS, OpenIngestorRequest, Reply, ReplyBody, ReplyDelivery, RequestCancelled,
+    RequestId, RequestRejected, RequestRejection, SelectDomainRequest, ServerFrame,
+    SessionEndReason, SessionEnding, SessionLimits, SubscribeDisposition, SubscribeOutcome,
+    SubscribeRequest, SubscriptionType, SuggestRequest, UnsubscribeDisposition, UnsubscribeOutcome,
     UnsubscribeRequest, VerifiedFrame, WireDecodeError, WireEncodeError,
 };
 use nervix_execution::{AdmissionError, CpuClass, ExecutionError, MemoryClass};
@@ -76,6 +80,7 @@ use self::{
     clock_attachments::ClockAttachments,
     outbound::{LaneClosed, SessionOutbound},
     outcome::{attach_outcome, command_outcome, leader_redirect, wire_diagnostics},
+    producers::SessionProducers,
 };
 use super::{
     command_result::CommandResult,
@@ -111,6 +116,7 @@ enum OrderedRequest {
     Unsubscribe(UnsubscribeRequest),
     AttachDomainClock(AttachDomainClockRequest),
     DetachDomainClock(DetachDomainClockRequest),
+    OpenIngestor(OpenIngestorRequest),
 }
 
 /// Why a session refuses a session-local request while it holds an active transaction. Such a
@@ -146,12 +152,46 @@ struct InFlight {
     admission: Arc<RequestAdmission>,
     /// The task serving a request that runs beside the ordered lane. An ordered request has none.
     task: Option<AbortHandle>,
+    kind: InFlightKind,
+}
+
+/// What an in-flight entry answers for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InFlightKind {
+    /// A request the session's in-flight limit bounds, which a cancellation can end.
+    Request,
+    /// A submitted batch. Its producer's granted credit bounds these rather than the in-flight
+    /// limit, and its outcome always follows: nothing a client sends withdraws it.
+    Submission,
+}
+
+/// The requests of a session still owed their terminal reply, and how many of them the in-flight
+/// limit counts.
+#[derive(Default)]
+struct InFlightRequests {
+    entries: BTreeMap<RequestId, InFlight>,
+    /// Entries of kind [`InFlightKind::Request`].
+    requests: usize,
+}
+
+impl InFlightRequests {
+    fn remove(&mut self, request_id: &RequestId) -> Option<InFlight> {
+        let removed = self.entries.remove(request_id)?;
+        if let InFlightKind::Request = removed.kind {
+            self.requests = self
+                .requests
+                .checked_sub(1)
+                .verified("every request entry was counted when it was registered");
+        }
+        Some(removed)
+    }
 }
 
 /// The entry a cancellation reads of the request it targets.
 struct CancelTarget {
     admission: Arc<RequestAdmission>,
     task: Option<AbortHandle>,
+    kind: InFlightKind,
 }
 
 /// What a session queued for a reply it owed.
@@ -209,11 +249,12 @@ pub(super) struct SessionShared {
     service: SessionServiceImpl,
     transport: SessionTransport,
     delivery: SessionDelivery,
-    in_flight: Mutex<BTreeMap<RequestId, InFlight>>,
+    in_flight: Mutex<InFlightRequests>,
     /// The session as the ordered lane last left it, for the requests that run beside it.
     view: RwLock<SessionView>,
     /// The domain whose observations the session receives.
     selection: watch::Sender<Option<DomainName>>,
+    producers: SessionProducers,
 }
 
 impl SessionShared {
@@ -352,33 +393,44 @@ impl SessionShared {
         *self.view.write() = subscriptions.view();
     }
 
-    /// Registers a request that is to be served, unless the session is at its limit or the
-    /// request's identity is already in flight.
-    fn register(&self, request_id: RequestId) -> Result<Arc<RequestAdmission>, RequestRejected> {
+    /// Registers a request that is to be served, unless its identity is already in flight or,
+    /// for a request the in-flight limit counts, the session is at that limit.
+    fn register(
+        &self,
+        request_id: RequestId,
+        kind: InFlightKind,
+    ) -> Result<Arc<RequestAdmission>, RequestRejected> {
         let mut in_flight = self.in_flight.lock();
-        if in_flight.contains_key(&request_id) {
+        if in_flight.entries.contains_key(&request_id) {
             return Err(RequestRejected {
                 rejection: RequestRejection::DuplicateRequestId,
                 field: Some("ClientMessage.request_id".to_string()),
                 message: format!("request {request_id} is already in flight in this session"),
             });
         }
-        if in_flight.len() >= MAX_IN_FLIGHT_REQUESTS {
-            return Err(RequestRejected {
-                rejection: RequestRejection::TooManyRequestsInFlight,
-                field: None,
-                message: format!(
-                    "the session already has {MAX_IN_FLIGHT_REQUESTS} requests in flight; send \
-                     this one again once an earlier one is answered"
-                ),
-            });
+        if let InFlightKind::Request = kind {
+            if in_flight.requests >= MAX_IN_FLIGHT_REQUESTS {
+                return Err(RequestRejected {
+                    rejection: RequestRejection::TooManyRequestsInFlight,
+                    field: None,
+                    message: format!(
+                        "the session already has {MAX_IN_FLIGHT_REQUESTS} requests in flight; \
+                         send this one again once an earlier one is answered"
+                    ),
+                });
+            }
+            in_flight.requests = in_flight
+                .requests
+                .checked_add(1)
+                .verified("the count is below the in-flight limit, checked above");
         }
         let admission = Arc::new(RequestAdmission::default());
-        in_flight.insert(
+        in_flight.entries.insert(
             request_id,
             InFlight {
                 admission: admission.clone(),
                 task: None,
+                kind,
             },
         );
         Ok(admission)
@@ -387,24 +439,25 @@ impl SessionShared {
     /// Records the task serving a request that runs beside the ordered lane, so a cancellation
     /// can stop it. A request answered before this runs has no entry left to record it in.
     fn attach_task(&self, request_id: RequestId, task: AbortHandle) {
-        if let Some(entry) = self.in_flight.lock().get_mut(&request_id) {
+        if let Some(entry) = self.in_flight.lock().entries.get_mut(&request_id) {
             entry.task = Some(task);
         }
     }
 
     fn cancel_target(&self, target: RequestId) -> Option<CancelTarget> {
         let in_flight = self.in_flight.lock();
-        let entry = in_flight.get(&target)?;
+        let entry = in_flight.entries.get(&target)?;
         Some(CancelTarget {
             admission: entry.admission.clone(),
             task: entry.task.clone(),
+            kind: entry.kind,
         })
     }
 
     /// Serves a cancel request. The cancel itself is answered first; the target's own terminal
     /// reply follows it, unless the target was answered in the meantime.
     async fn cancel(&self, request_id: RequestId, cancel: CancelRequest) {
-        if self.in_flight.lock().contains_key(&request_id) {
+        if self.in_flight.lock().entries.contains_key(&request_id) {
             let rejection = RequestRejected {
                 rejection: RequestRejection::DuplicateRequestId,
                 field: Some("ClientMessage.request_id".to_string()),
@@ -422,6 +475,18 @@ impl SessionShared {
             self.reply(request_id, ReplyBody::Cancel(outcome)).await;
             return;
         };
+        if let InFlightKind::Submission = entry.kind {
+            let rejection = RequestRejected {
+                rejection: RequestRejection::InvalidRequest,
+                field: Some("CancelRequest.target_request_id".to_string()),
+                message: format!(
+                    "request {target} submitted a batch, which cannot be withdrawn; its outcome \
+                     always follows"
+                ),
+            };
+            self.reject(request_id, rejection).await;
+            return;
+        }
         let stage = entry.admission.cancel();
         let outcome = CancelOutcome {
             target,
@@ -446,7 +511,7 @@ impl SessionShared {
     /// runs to its end without a reply.
     fn abandon_in_flight(&self) {
         let abandoned = std::mem::take(&mut *self.in_flight.lock());
-        for entry in abandoned.into_values() {
+        for entry in abandoned.entries.into_values() {
             let stage = entry.admission.cancel();
             if let CancelledStage::BeforeAdmission = stage
                 && let Some(task) = entry.task
@@ -514,9 +579,10 @@ impl SessionServiceImpl {
             service: self.clone(),
             transport,
             delivery: SessionDelivery { outbound, limits },
-            in_flight: Mutex::new(BTreeMap::new()),
+            in_flight: Mutex::new(InFlightRequests::default()),
             view: RwLock::new(subscriptions.view()),
             selection,
+            producers: SessionProducers::default(),
         });
         // Every queued request is registered in flight first, so the queue holds at most
         // `MAX_IN_FLIGHT_REQUESTS` requests even though the channel itself is unbounded.
@@ -562,7 +628,7 @@ impl SessionServiceImpl {
                     }
                 }
                 Some(InboundFrame::Closed) | None => {
-                    closed_cleanly = shared.in_flight.lock().is_empty();
+                    closed_cleanly = shared.in_flight.lock().entries.is_empty();
                     break;
                 }
                 Some(InboundFrame::Failed) => break,
@@ -624,6 +690,17 @@ async fn accept_frame(
             shared.cancel(request_id, cancel).await;
             return true;
         }
+        ClientRequest::SubmitBatch(submit) => {
+            shared.submit_batch(request_id, submit).await;
+            return true;
+        }
+        ClientRequest::CloseIngestor(close) => {
+            shared.close_producer(request_id, close).await;
+            return true;
+        }
+        ClientRequest::OpenIngestor(open) => {
+            RoutedRequest::Ordered(OrderedRequest::OpenIngestor(open))
+        }
         ClientRequest::Command(command) => RoutedRequest::Ordered(OrderedRequest::Command(command)),
         ClientRequest::AttachTransaction(attach) => {
             RoutedRequest::Ordered(OrderedRequest::Attach(attach))
@@ -654,7 +731,7 @@ async fn accept_frame(
             RoutedRequest::Concurrent(ConcurrentRequest::Inspect(inspect))
         }
     };
-    let admission = match shared.register(request_id) {
+    let admission = match shared.register(request_id, InFlightKind::Request) {
         Ok(admission) => admission,
         Err(rejection) => {
             shared.reject(request_id, rejection).await;
@@ -859,6 +936,16 @@ async fn serve_ordered(
             }
             clock_attachments
                 .attach(shared, request_id, attach.domain)
+                .await;
+        }
+        OrderedRequest::OpenIngestor(open) => {
+            if admission.admit().is_err() {
+                return;
+            }
+            let in_transaction = subscriptions.transaction_active();
+            shared
+                .producers
+                .open(shared, request_id, open, in_transaction)
                 .await;
         }
         OrderedRequest::DetachDomainClock(detach) => {

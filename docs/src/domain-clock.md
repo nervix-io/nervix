@@ -107,6 +107,11 @@ mapping, and advances the authority fence to an unassigned state in the same tra
 runtime clears accepted progress for the generation and wakes bound waiters, which observe a typed
 stopped or stale-generation error. A later `START` creates another generation.
 
+A producer of a [client ingestor](./ingestors.md#client-ingestors) is bound to the generation it
+attached under, which its open reply reports. `STOP` ends it, and so does an execution installed
+under a later generation, both as `domain stopped`; a producer never carries batches from one
+generation into the next.
+
 The internal pause used while altering a running model does not establish a generation. It keeps
 the mapping and authority active while ingestion and generators are withheld, so logical time and
 already-armed deadlines continue through the quiesce cycle.
@@ -388,6 +393,14 @@ is also rejected for that row. The single-timestamp admission check has the same
 
 Unpaced ingestion has no admission window. Its clock snapshot still supplies delivery time, while
 an explicit event timestamp or connector-owned source timestamp remains preserved source time.
+
+A client ingestor takes one ingestion snapshot for each batch its admission worker dispatches, after
+the batch is validated and its acknowledgement root is tracked. `TIMESTAMP NOW` gives every row of
+the batch that snapshot, and `TIMESTAMP AT <field>` preserves each row's own field; paced admission
+then tests each row against the window exactly as for any other ingestor. A client batch carries no
+connector-owned source timestamp, so a paced domain requires its client ingestors to declare a
+timestamp. The batch's `ACK TIMEOUT` and its producer's retry backoff are physical monotonic bounds;
+neither waits on nor stretches domain logical time.
 
 ## Logical And Physical Deadlines
 

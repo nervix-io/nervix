@@ -15,6 +15,9 @@ Capabilities:
 - `Client::subscribe(...)`, `Client::unsubscribe(...)` and `Client::next_subscription()`
 - `Client::attach_domain_clock(...)`, `Client::detach_domain_clock(...)`,
   `Client::domain_clock(...)` and `Client::next_domain_clock_event()`
+- `Client::open_ingestor(...)`, with `Producer::send(...)`, `Producer::submit(...)`,
+  `Producer::rejoin(...)`, `Producer::pending_submissions()`, `Producer::release(...)` and
+  `Producer::close()`
 - `Client::upload_resource_from_directory(...)`
 - `Client::download_backup(...)`
 - `Client::restore(...)` and `Client::restore_with_reference(...)`
@@ -294,6 +297,72 @@ returns the notices that arrived after that gap. An error from reopening a sessi
 waiting to be restored, and the next read tries again. Only `ClientError::SessionClosed` ends a
 stream: the session ended and the client knows no server to open another on, as happens to a
 client built with `Client::from_channel` that has not been redirected.
+
+## Producers
+
+`Client::open_ingestor(domain, ingestor, expected_fields, limits)` attaches a producer to a
+[client ingestor](ingestors.md#client-ingestors) of the domain named explicitly, on the session's
+current exchange. `expected_fields` must be exactly the ingestor's input schema, including each
+field's optionality and sensitivity, and `limits` asks for the batches and bytes the producer may
+have outstanding. A refusal is `ClientError::ProducerRefused` with its typed
+`ClientProducerRefusal`, and leaves nothing attached. The returned `Producer` reports what the open
+established through `description()`: the schema, the `START` generation, the endpoint contract and
+attachment, the ingestor's policy, and the granted credit.
+
+```rust
+use std::num::{NonZeroU32, NonZeroU64};
+
+use arrow_array::{Int64Array, RecordBatch, StringArray};
+use nervix_client_core::{ClientProducerLimits, DomainName, IngestorName, ProducerOutcome};
+
+let producer = client
+    .open_ingestor(
+        DomainName::parse("shop")?,
+        IngestorName::parse("orders_in")?,
+        expected_fields,
+        ClientProducerLimits {
+            batches: NonZeroU32::try_from(16)?,
+            bytes: NonZeroU64::try_from(8 * 1024 * 1024)?,
+        },
+    )
+    .await?;
+let rows = RecordBatch::try_new(
+    std::sync::Arc::new(producer.arrow_schema()),
+    vec![
+        std::sync::Arc::new(StringArray::from(vec!["o-1"])),
+        std::sync::Arc::new(Int64Array::from(vec![1200])),
+    ],
+)?;
+match producer.send(producer.batch(&rows)?).await? {
+    ProducerOutcome::Completed => println!("delivered"),
+    ProducerOutcome::NotAdmitted { refusal, .. } => println!("not admitted: {refusal:?}"),
+    ProducerOutcome::ProcessingFailed { failure, .. } => println!("failed: {failure:?}"),
+    ProducerOutcome::OutcomeUnknown { cause, .. } => println!("replay decision: {cause:?}"),
+}
+producer.close().await?;
+```
+
+`Producer::batch` and `ProducerBatch::from_record_batch`, behind the `arrow` feature, write a record
+batch as the canonical stream the server accepts after checking it against the producer's schema and
+row limit; `ProducerBatch::from_arrow_ipc` takes a stream the application already wrote.
+
+`send` waits for credit, submits the batch, and returns its terminal outcome. `submit` returns once
+the producer holds the batch, and `rejoin` waits for that submission's outcome. A submission keeps
+its share of the credit until the application observes its outcome, so a producer whose application
+stops reading outcomes stops being granted room for new batches. Cancelling a `send` or `rejoin`
+future never loses the batch or its outcome: `pending_submissions()` lists every submission the
+producer holds with its outcome once it has one, `rejoin` resumes the wait without sending the batch
+again, and `release` lets go of a submission and its credit.
+
+The client sends a batch again only when the server refused it temporarily, as `Suspended` or
+`Busy`, after the ingestor's declared backoff, and it waits while the producer's admission is
+suspended. It never replays a batch that failed or whose outcome is unknown. A batch that was sent
+when the session ended is reported as `OutcomeUnknown` with `SubmissionUncertainty::SessionLost`,
+and one still waiting to be sent as not admitted. `Producer::admission()` tells whether batches are
+admitted now and `Producer::end()` how the producer ended: `Closed`, `Ended` with the server's
+reason, or `SessionLost`. This release restores no producer across a reconnect; the application
+opens another one, and `open_ingestor` reopens a lost session before it sends the open. Dropping a
+producer closes it without waiting.
 
 ## Transaction Handles And Attach
 

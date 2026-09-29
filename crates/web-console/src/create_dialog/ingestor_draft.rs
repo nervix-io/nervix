@@ -9,8 +9,8 @@
 
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
-    CodecName, CreateIngestor, FieldName, GeneralErrorPolicy, IngestTimestampSource, IngestorName,
-    ModelKind, NodeRef, ProcessorOutputs,
+    CodecName, CreateIngestor, FieldName, GeneralErrorPolicy, IngestTimestampSource, IngestorInput,
+    IngestorName, ModelKind, NodeRef, ProcessorOutputs, TransportIngestorInput,
 };
 use nervix_nspl::parse_expression;
 use thiserror::Error;
@@ -235,9 +235,11 @@ impl IngestorDraft {
         Ok(CreateIngestor {
             name,
             output_routes: ProcessorOutputs::new(routes),
-            decode_using_codec,
+            input: IngestorInput::Transport(TransportIngestorInput {
+                source,
+                codec: decode_using_codec,
+            }),
             timestamp_source,
-            source,
             general_error_policy,
             filter_where,
         })

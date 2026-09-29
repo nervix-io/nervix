@@ -435,6 +435,7 @@ fn ingestor_source_kind(tokens: &[Token]) -> Option<IngestSourceKind> {
         return None;
     }
     match known_keyword(tokens.get(from.checked_add(1)?)?)? {
+        Keyword::Client => Some(IngestSourceKind::Client),
         Keyword::Http => Some(IngestSourceKind::Http),
         Keyword::Kafka => Some(IngestSourceKind::Kafka),
         Keyword::Pulsar => Some(IngestSourceKind::Pulsar),
@@ -844,6 +845,15 @@ mod tests {
             ))
         ));
 
+        let client = "CREATE INGESTOR source FROM CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK \
+                      TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s ON QUIESCE SUSPEND TO outgoing \
+                      SET value = read_";
+        assert!(suggest_client_expectations(client, client.len()).contains(
+            &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
+                BuiltinFunctionScope::IngestSource(IngestSourceKind::Client),
+            ))
+        ));
+
         let kafka = "CREATE EMITTER sink FROM incoming TO KAFKA broker TOPIC events MODE NO_ACK \
                      RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_";
         assert!(suggest_client_expectations(kafka, kafka.len()).contains(
@@ -1217,6 +1227,7 @@ mod tests {
             "SHOW CREATE WIRE AVRO SCHEMA orders_wire;",
             "SHOW CREATE HASH MAP sites;",
             "SHOW UDFS;",
+            "SHOW INGESTORS;",
             "SHOW PLACEMENTS;",
             "SHOW CLUSTER STATUS;",
             "SHOW TRANSACTIONS;",

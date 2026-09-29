@@ -30,6 +30,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Resources, uploads, mounts, and TLS files | `Resources` |
 | Syslog wire schema, codec fields, UDP/TCP/TLS framing, clients, sources, and sinks | `Common` → `Syslog` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
+| Typed batches applications publish through client sessions, producer outcomes, and limits | `Ingestors` → `Client Ingestors`, and `Sessions` → `Producers` |
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
 | Timed generation from materialized state | `NSPL Overview` and `Examples` |
 | Sink transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
@@ -59,7 +60,7 @@ Capture these decisions before choosing syntax:
 | Input contract | What sample payload and wire format arrive? Which fields are optional or sensitive? |
 | Runtime record | What exact internal type and nullability does each field have? |
 | Isolation | Which fields form the branch key? How long should inactive branches live? Is an instance cap required? |
-| Source | Which connector/client, external entity, offset policy, delivery mode, ordering, timestamp source, and headers are required? |
+| Source | Which connector/client, external entity, offset policy, delivery mode, ordering, timestamp source, and headers are required? Or does an application publish typed batches through a client ingestor, and with which acknowledgement window, ACK timeout, and retry backoff? |
 | Processing | Which records are filtered, transformed, deduplicated, reordered, aggregated, correlated, inferred, enriched, or handled by a trusted Roto UDF? |
 | State | Which relays are materialized? Should missing state wait, skip, or use a typed default? |
 | Output | Which connector/sink, publishing mode, confirmation window/timeout, retry pacing, payload shape, codec or direct mapping, headers, and sensitivity leaks are required? |
@@ -123,6 +124,7 @@ inputs. Keep placeholders obvious and list provisioning that must happen outside
 | Desired behavior | NSPL graph element |
 | --- | --- |
 | Decode an external feed and construct initial branches | `INGESTOR` |
+| Accept typed batches an application publishes and construct initial branches | `INGESTOR ... FROM CLIENT SCHEMA` |
 | Filter, transform, or fan out records without changing branch identity | `JUNCTION` |
 | Suppress repeated keys for a time bound | `DEDUPLICATOR` |
 | Order records by expressions within a time bound | `REORDERER` |
@@ -244,10 +246,17 @@ relay. Do not use them to scan across branches.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default.
-- Every ingestor source ends with its documented `ON QUIESCE` body immediately before `DECODE
-  USING`, with a positive `MAX SIZE`, explicit non-endpoint overflow policy, or endpoint `RETRY
-  AFTER` wherever that mode requires it. MQTT `SUSPEND` also declares `SESSION PERSISTENT QOS 1`.
-  Do not mix mode bodies between source types or infer a default.
+- Every transport ingestor source ends with its documented `ON QUIESCE` body immediately before
+  `DECODE USING`, with a positive `MAX SIZE`, explicit non-endpoint overflow policy, or endpoint
+  `RETRY AFTER` wherever that mode requires it. MQTT `SUSPEND` also declares `SESSION PERSISTENT
+  QOS 1`. Do not mix mode bodies between source types or infer a default.
+- Every client ingestor declares `FROM CLIENT SCHEMA <schema> MODE ACK SEQUENTIAL|ACK PARALLEL MAX
+  <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE SUSPEND` and nothing else as its
+  source: no `CREATE CLIENT`, codec, `DECODE USING`, headers, or `NO_ACK`. The schema is the exact
+  contract producers declare, including optionality and sensitivity, and a paced domain requires
+  its timestamp source. Changing its schema, mode, timestamp, filter, routes other than `FLUSH`, or
+  branch declarations ends attached producers. A row that fails on a route follows that route's
+  `ON MESSAGE ERROR` policy, so under `LOG` its whole batch fails processing as `rejected`.
 - HTTP `EVERY`, Prometheus `EVERY`, and generator `EACH` use domain-logical cadence. HTTP and
   generators run once immediately; Prometheus first runs after one interval. Keep later work on
   the original schedule, coalesce missed periods without a catch-up burst, query Prometheus at the
@@ -313,7 +322,9 @@ Choose checks relevant to the configured graph:
   `DESCRIBE RELAY <relay> WHERE (...);` is owner-authoritative for concrete branch state.
 - `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement.
 - `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
-  `DESCRIBE EMITTER` inspect runtime state and edge metrics.
+  `DESCRIBE EMITTER` inspect runtime state and edge metrics. `SHOW INGESTORS;` lists every ingestor
+  with its owner and state, and a client ingestor's admission, producers, outstanding batches and
+  bytes, and admitted batches.
 - The observability server's `/metrics` endpoint reports raw graph-edge counters and histograms,
   including batch-size resolution for tuning collection and flush boundaries. Read `Metrics And
   Observability` for the current histogram buckets. The endpoint also reports

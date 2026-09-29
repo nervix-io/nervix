@@ -62,7 +62,7 @@ impl IngestorSpec {
     /// The metadata namespace this ingestor's messages expose to its programs, which its source's
     /// transport class decides.
     pub(in crate::runtime) fn metadata_kind(&self) -> IngestMetadataKind {
-        IngestMetadataKind::from(self.declared_source.transport())
+        IngestMetadataKind::from(self.declared_input.source_kind())
     }
 
     /// The capabilities this ingestor's source runs with, derived from the source vocabulary.
@@ -74,8 +74,8 @@ impl IngestorSpec {
         SourceCapabilities::new(
             self.reads_headers(),
             self.metadata_kind().source_scope(),
-            self.declared_source
-                .supports_quiesce(self.declared_source.quiesce_mode()),
+            self.declared_input
+                .supports_quiesce(self.declared_input.quiesce_mode()),
             instances,
             acknowledgement,
         )
@@ -306,6 +306,7 @@ impl Runtime {
         ingestor: &IngestorSpec,
         quiesce: Arc<IngestorQuiesceControl>,
         dependencies: IngestorDependencies,
+        codec: Arc<CompiledCodec>,
         source: SourceStart,
     ) {
         let SourceStart {
@@ -319,7 +320,6 @@ impl Runtime {
         let IngestorDependencies {
             output_routes,
             filter_where,
-            codec,
             branched_templates,
             metrics,
         } = dependencies;

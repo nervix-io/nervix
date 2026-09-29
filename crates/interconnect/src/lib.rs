@@ -446,7 +446,19 @@ pub struct IngestorDescribeEnvelope {
     pub reconnect_backoff: Option<String>,
     pub reconnect_wait_millis: Option<u64>,
     pub kafka_domain_offsets: Option<KafkaDomainOffsetDescribeEnvelope>,
+    pub client_producers: Option<ClientProducersDescribeEnvelope>,
     pub metrics: Vec<String>,
+}
+
+/// The producers attached to a client ingestor on the node that executes it.
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientProducersDescribeEnvelope {
+    pub producers: u64,
+    pub forwarded_producers: u64,
+    pub outstanding_batches: u64,
+    pub outstanding_bytes: u64,
+    /// Batches holding a slot of the ingestor's acknowledgement window.
+    pub admitted_batches: u64,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

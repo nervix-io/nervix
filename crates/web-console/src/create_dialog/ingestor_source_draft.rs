@@ -191,7 +191,10 @@ impl IngestSourceDraft {
                 | IngestSourceKind::Websockets
                 | IngestSourceKind::Syslog,
             ) => &[DeliveryChoice::NoAckSequential],
-            Some(IngestSourceKind::Http | IngestSourceKind::Prometheus) | None => &[],
+            Some(
+                IngestSourceKind::Client | IngestSourceKind::Http | IngestSourceKind::Prometheus,
+            )
+            | None => &[],
         }
     }
 
@@ -222,7 +225,7 @@ impl IngestSourceDraft {
                 &[QuiesceChoice::Suspend, QuiesceChoice::Buffer]
             }
             Some(IngestSourceKind::Endpoint) => &[QuiesceChoice::Reject, QuiesceChoice::Buffer],
-            None => &[],
+            Some(IngestSourceKind::Client) | None => &[],
         }
     }
 
@@ -230,6 +233,10 @@ impl IngestSourceDraft {
         let kind = self
             .kind
             .ok_or_else(|| Report::new(IngestSourceDraftError::Kind))?;
+        // The form offers transport sources only; a client source names no client or endpoint.
+        if let IngestSourceKind::Client = kind {
+            return Err(Report::new(IngestSourceDraftError::ClientSource));
+        }
         if self.current_reference().is_none() {
             return Err(Report::new(if self.reference.is_some() {
                 IngestSourceDraftError::ReferenceChanged
@@ -239,6 +246,9 @@ impl IngestSourceDraft {
         }
         let quiesce = self.build_quiesce(kind)?;
         let source = match kind {
+            IngestSourceKind::Client => {
+                return Err(Report::new(IngestSourceDraftError::ClientSource));
+            }
             IngestSourceKind::Http => IngestSource::Http {
                 client: self.client()?,
                 every: self.every()?,
@@ -514,6 +524,8 @@ impl IngestSourceDraft {
 pub(super) enum IngestSourceDraftError {
     #[error("Choose an ingestor source type")]
     Kind,
+    #[error("A client ingestor reads the batches applications publish and is created in NSPL")]
+    ClientSource,
     #[error("Choose a source client or endpoint")]
     Reference,
     #[error("The selected source belongs to a changed context; select it again")]

@@ -13,9 +13,9 @@ use nervix_jaq::CompiledJaqProgram;
 use nervix_models::{
     AvroType, CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecName,
     CodecWireFormat, CreateAvroWireSchema, CreateCborWireSchema, CreateCodec, CreateJsonWireSchema,
-    CreateLookup, CreateRelay, CreateSchema, CreateWireSchema, DomainName, FieldName, JsonType,
-    LookupName, Model, ModelIndex, ModelKind, ModelName, ParseAsType, RelayName,
-    ResolvedCodecWireFormat, WireSchemaLookup, WireSchemaName,
+    CreateLookup, CreateRelay, CreateSchema, CreateWireSchema, DomainName, FieldName,
+    IngestorInput, JsonType, LookupName, Model, ModelIndex, ModelKind, ModelName, ParseAsType,
+    RelayName, ResolvedCodecWireFormat, WireSchemaLookup, WireSchemaName,
 };
 
 use crate::registry::{error::RegistryError, validation::schema::expect_schema_model};
@@ -179,6 +179,24 @@ pub(in crate::registry) fn schema_for_codec_model<'a>(
 ) -> Result<&'a CreateSchema, Report<RegistryError>> {
     let codec = expect_codec_model(domain, identifier, models, codec_id)?;
     expect_schema_model(domain, identifier, models, &codec.schema)
+}
+
+/// The input schema of an ingestor: what its codec decodes a transport's payloads into, or the
+/// schema a client source's batches carry. Filters, routes and timestamps read this schema.
+pub(in crate::registry) fn ingestor_input_schema<'a>(
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &'a ModelIndex,
+    input: &IngestorInput,
+) -> Result<&'a CreateSchema, Report<RegistryError>> {
+    match input {
+        IngestorInput::Transport(input) => {
+            schema_for_codec_model(domain, identifier, models, &input.codec)
+        }
+        IngestorInput::Client(source) => {
+            expect_schema_model(domain, identifier, models, &source.schema)
+        }
+    }
 }
 
 pub(in crate::registry) fn schema_for_ack_model<'a>(

@@ -30,6 +30,20 @@ reason = "The highest step count spans every model execution the runner starts a
 
 [[permission]]
 items = ["AtomicUsize", "Ordering"]
+limit = "Runner bookkeeping that no invariant reads."
+owner = "The Rust client's Shuttle runner."
+path = "crates/client-core/src/shuttle_test.rs"
+reason = "The highest step count spans every model execution the runner starts and is read after they end, where no modeled atomic can exist."
+
+[[permission]]
+items = ["AtomicBool", "AtomicUsize", "Ordering"]
+limit = "Records observe the node budget and the admission fence and never synchronize them; the budget's and the quiesce control's own atomics are modeled."
+owner = "The client ingestor's Shuttle checks."
+path = "src/runtime/client_ingestor_shuttle_tests.rs"
+reason = "Each record must change in the same scheduling step as the reservation or drain it records, so recording adds no scheduling point."
+
+[[permission]]
+items = ["AtomicUsize", "Ordering"]
 limit = "Runner bookkeeping that no model reads."
 owner = "The Loom runner of nervix-model-harness."
 path = "crates/model-harness/src/loom.rs"

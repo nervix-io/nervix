@@ -120,9 +120,9 @@ impl Failure {
                 FailureKind::Uncertain
             }
             ClientError::EventOverflow { .. } => FailureKind::Overflow,
-            ClientError::AttachTransaction(_) | ClientError::RequestRejected { .. } => {
-                FailureKind::Rejected
-            }
+            ClientError::AttachTransaction(_)
+            | ClientError::RequestRejected { .. }
+            | ClientError::ProducerRefused { .. } => FailureKind::Rejected,
             ClientError::RequestCancelled { .. } => FailureKind::Cancelled,
             ClientError::UnexpectedReply { .. }
             | ClientError::InvalidUploadReply(_)

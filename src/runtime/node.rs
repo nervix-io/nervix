@@ -106,6 +106,13 @@ pub(in crate::runtime) struct RuntimeInner {
         Arc<DashMap<DomainName, ActiveDomainAlter, RandomState>>,
     pub(in crate::runtime) state_identities:
         DashMap<DomainNodeRef, ScheduledStateIdentity, RandomState>,
+    /// The endpoint task of every client ingestor this node executes, kept while the ingestor
+    /// restarts so its producers stay attached.
+    pub(in crate::runtime) client_ingestors:
+        DashMap<DomainNodeRef, client_ingestor::ClientIngestorEndpoint, RandomState>,
+    /// Also held by every reservation taken from it, which returns its bytes when it is dropped,
+    /// possibly after the handle's borrow ended.
+    pub(in crate::runtime) client_producer_budget: client_ingestor::ClientProducerBudget,
     pub(in crate::runtime) endpoint_bindings:
         DashMap<HttpRouteKey, Vec<EndpointIngestBinding>, RandomState>,
     /// Instantiated endpoint routes keyed by the host and path an inbound request carries, so

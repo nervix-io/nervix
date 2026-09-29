@@ -8,8 +8,8 @@
 
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
-    CodecName, DomainName, FlushPolicy, MessageErrorPolicy, Model, NodeRef, ProcessorOutputs,
-    RelayName, ResolvedBranching, RouteConstruction, ScheduledNodes,
+    CodecName, DomainName, FlushPolicy, IngestorInput, MessageErrorPolicy, Model, NodeRef,
+    ProcessorOutputs, RelayName, ResolvedBranching, RouteConstruction, ScheduledNodes, SchemaName,
 };
 use nervix_vm::{
     SemanticScopePolicy, lower_route_construction,
@@ -73,6 +73,8 @@ pub(crate) enum MessageErrorPlanError {
     RelayNotFound { node: NodeRef, relay: RelayName },
     #[error("{node:?} message-error route reads missing codec '{codec}'")]
     CodecNotFound { node: NodeRef, codec: CodecName },
+    #[error("{node:?} message-error route reads missing client input schema '{schema}'")]
+    ClientSchemaNotFound { node: NodeRef, schema: SchemaName },
     #[error("{node:?} message-error route has no {scope} input relay")]
     InputNotDeclared { node: NodeRef, scope: &'static str },
     #[error("{node:?} message-error SET to relay '{relay}' is invalid")]
@@ -111,6 +113,27 @@ impl MessageErrorPlanContext<'_> {
             }));
         };
         Ok(codec_plan.schema.clone())
+    }
+
+    /// The schema an ingestor's rows carry before route construction: the one its transport's
+    /// codec decodes into, or the input schema a client source's batches carry.
+    fn ingestor_input_schema(
+        &self,
+        node: &NodeRef,
+        input: &IngestorInput,
+    ) -> Result<Arc<CompiledSchema>, Report<MessageErrorPlanError>> {
+        match input {
+            IngestorInput::Transport(transport) => self.codec_schema(node, &transport.codec),
+            IngestorInput::Client(client) => {
+                let Some(schema) = self.activation.schemas.get(&client.schema) else {
+                    return Err(Report::new(MessageErrorPlanError::ClientSchemaNotFound {
+                        node: node.clone(),
+                        schema: client.schema.clone(),
+                    }));
+                };
+                Ok(schema.clone())
+            }
+        }
     }
 
     fn input(
@@ -214,8 +237,8 @@ impl MessageErrorRouteSpecs {
             let mut schemas = MessageErrorCompileSchemas::default();
             match scheduled.config.as_ref() {
                 Model::Ingestor(model) => {
-                    schemas.input = Some(context.codec_schema(node, &model.decode_using_codec)?);
-                    schemas.allow_header_reads = model.source.reads_headers();
+                    schemas.input = Some(context.ingestor_input_schema(node, &model.input)?);
+                    schemas.allow_header_reads = model.input.reads_headers();
                     context.add_outputs(node, &model.output_routes, schemas)?;
                 }
                 Model::Reingestor(model) => {
@@ -487,7 +510,10 @@ mod tests {
         let Model::Ingestor(ingestor) = node.config.as_mut() else {
             panic!("the scheduled node is an ingestor");
         };
-        ingestor.decode_using_codec = named("unknown_codec");
+        let IngestorInput::Transport(transport) = &mut ingestor.input else {
+            panic!("the fixture ingestor reads a transport");
+        };
+        transport.codec = named("unknown_codec");
         let error =
             MessageErrorRouteSpecs::from_scheduled_nodes(&domain, &missing_codec, &activation)
                 .expect_err("a missing codec must fail planning");

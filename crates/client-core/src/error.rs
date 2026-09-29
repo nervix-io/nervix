@@ -10,7 +10,9 @@ use nervix_client_wire::{
     CancellationStage, ClientRequest, ReplyBody, RequestRejection, WireDecodeError, WireEncodeError,
 };
 use nervix_dns::DnsConfigurationError;
-use nervix_models::{CommandExecutionReference, NameError, ResourceUploadIdentity};
+use nervix_models::{
+    ClientProducerRefusal, CommandExecutionReference, NameError, ResourceUploadIdentity,
+};
 use thiserror::Error;
 use tonic::metadata::errors::InvalidMetadataValue;
 
@@ -45,6 +47,12 @@ pub enum RequestKind {
     AttachDomainClock,
     #[strum(serialize = "detach domain clock")]
     DetachDomainClock,
+    #[strum(serialize = "open ingestor")]
+    OpenIngestor,
+    #[strum(serialize = "submit batch")]
+    SubmitBatch,
+    #[strum(serialize = "close ingestor")]
+    CloseIngestor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
@@ -70,6 +78,9 @@ impl From<&ClientRequest> for RequestKind {
             ClientRequest::Cancel(_) => Self::Cancel,
             ClientRequest::AttachDomainClock(_) => Self::AttachDomainClock,
             ClientRequest::DetachDomainClock(_) => Self::DetachDomainClock,
+            ClientRequest::OpenIngestor(_) => Self::OpenIngestor,
+            ClientRequest::SubmitBatch(_) => Self::SubmitBatch,
+            ClientRequest::CloseIngestor(_) => Self::CloseIngestor,
         }
     }
 }
@@ -186,6 +197,12 @@ pub enum ClientError {
     },
     #[error("failed to load TLS CA certificate")]
     LoadTlsCaCertificate(#[source] std::io::Error),
+    /// The server refused to open a producer. Nothing was attached.
+    #[error("the server refused to open the producer ({refusal:?}): {message}")]
+    ProducerRefused {
+        refusal: ClientProducerRefusal,
+        message: String,
+    },
     /// The archive a restore names could not be read on this machine.
     #[error("failed to read the restore archive '{}' ({kind})", .path.display())]
     ReadRestoreArchive {
@@ -304,7 +321,10 @@ impl ClientError {
             | ReplyBody::Unsubscribe(_)
             | ReplyBody::Cancel(_)
             | ReplyBody::DomainClockAttach(_)
-            | ReplyBody::DomainClockDetach(_) => Self::UnexpectedReply { request },
+            | ReplyBody::DomainClockDetach(_)
+            | ReplyBody::OpenIngestor(_)
+            | ReplyBody::Submission(_)
+            | ReplyBody::CloseIngestor(_) => Self::UnexpectedReply { request },
         }
     }
 }

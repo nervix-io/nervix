@@ -3,7 +3,7 @@
 The client session protocol is the public boundary between a client and a Nervix node. It carries
 NSPL commands and their outcomes, transaction attachment and inspection, completion and choice
 lookups, domain selection and the observations that follow it, Row subscriptions, domain clock
-attachments, resource uploads, and backup downloads. The CLI, the web console, the Rust client, every host of the
+attachments, producers that submit batches to client ingestors, resource uploads, and backup downloads. The CLI, the web console, the Rust client, every host of the
 shared Rust binding, and independent implementations in other languages all speak it.
 
 The protocol owns framing, verification, the session limits, request correlation, cancellation,
@@ -11,8 +11,8 @@ typed dispositions, the redirect to the leader, the lifecycle of a session, and 
 unsolicited frames a session receives. The operation behind a request still owns what that request
 means: the control plane decides what a command does and when it is complete, the transaction
 planner decides what a transaction affects, the resource catalog decides when a version exists, and
-the runtime decides what a relay delivers. A reply is therefore never more than the statement it
-makes. Four facts stay distinct at this boundary, and a client that confuses them either repeats an
+the runtime decides what a relay delivers and when a submitted batch completes. A reply is therefore
+never more than the statement it makes. Four facts stay distinct at this boundary, and a client that confuses them either repeats an
 effect or reports one that did not happen:
 
 - **Bytes transferred.** A frame reached the other side. Nothing about a request follows from it.
@@ -104,7 +104,8 @@ parses a length that a peer chose.
 A `ClientMessage` holds one request and the request identity that correlates its replies. A
 `ServerMessage` holds either a `Reply` to one request or one unsolicited body: a server notice,
 leadership, the domain list, the selected domain's snapshot and cluster summary, subscription rows
-and the notices about them, a domain clock frame, or the ending of the session. An unsolicited body
+and the notices about them, a domain clock frame, a producer's admission change or end, or the
+ending of the session. An unsolicited body
 carries no request identity and never completes a request.
 
 ### Verification Before Reading
@@ -297,7 +298,8 @@ reference for a retry can apply an effect twice.
 A session serves each request on one of two lanes:
 
 - **The ordered lane** serves the requests that change the session or may change the cluster:
-  commands, transaction attach, subscribe and unsubscribe, and domain clock attach and detach. They
+  commands, transaction attach, subscribe and unsubscribe, domain clock attach and detach, and
+  producer opens. They
   run one at a time in the order the client wrote them. A mutating command never overtakes the
   command written before it, and a subscription never opens before the command that created its
   relay has completed. Every command runs on this lane, including a `SHOW` or `DESCRIBE`, so within
@@ -309,8 +311,11 @@ A session serves each request on one of two lanes:
   arrive in any order. Selecting a domain changes only which domain's observations the session
   receives.
 
-A cancellation is on neither lane: it is answered as soon as it arrives. A session admits at most 64
-requests in flight, counting both lanes. A request beyond that is refused with
+A cancellation is on neither lane: it is answered as soon as it arrives. Neither is a submitted
+batch or a producer close: the receive loop hands both to the producer's own task and reads the
+next request at once; see [Producers](#producers). A session admits at most 64 requests in flight,
+counting both lanes and producer closes but not submitted batches, which their producer's credit
+bounds instead. A request beyond that is refused with
 `TooManyRequestsInFlight` rather than queued, which also bounds the requests waiting for the ordered
 lane; nothing about the refused request was admitted. The web console never sends a request that
 keeps its order past that limit: it holds the request, in the order it was issued, until an
@@ -345,6 +350,8 @@ flowchart LR
     Decode -- commands, attach, subscribe, unsubscribe, clock attach and detach --> Ordered[Ordered lane: one at a time, in written order]
     Decode -- suggest, choices, domains, inspection --> Concurrent[Concurrent tasks]
     Decode -- cancel --> Cancel[Answered at once]
+    Decode -- submit batch, close producer --> Pumps[Producer tasks]
+    Pumps --> Control
     Ordered --> Control[Control lane: 16 frames]
     Concurrent --> Control
     Cancel --> Control
@@ -388,9 +395,13 @@ request cancelled for good. `RequestCancelled` reports which came first:
 - **`AfterAdmission`.** The request was admitted. Cancelling ends only the wait for it; its effect
   continues and is recovered by its execution reference, exactly as after a lost reply.
 
+A submitted batch cannot be cancelled: a `CancelRequest` naming it is refused with
+`InvalidRequest`, and the batch still receives its outcome, because a batch the ingestor may already
+have admitted cannot be withdrawn.
+
 A command admits itself just before its durable admission or first effect. Transaction attach,
-subscribe, unsubscribe, and clock requests admit themselves when the ordered lane starts serving
-them, and a concurrent request never admits itself, so cancelling one always stops it. A command
+subscribe, unsubscribe, clock requests, and producer opens admit themselves when the ordered lane
+starts serving them, and a concurrent request never admits itself, so cancelling one always stops it. A command
 cancelled after admission keeps the ordered lane until its work finishes, and an attach cancelled
 after admission still binds the transaction. A cancellation never rolls back admitted work: it is
 how a client stops waiting, not how it undoes a command, and undoing is a new command.
@@ -402,7 +413,7 @@ when there is one, and a message for display. The session keeps serving after an
 
 | Rejection | Meaning |
 | --- | --- |
-| `InvalidRequest` | A field is missing, malformed, or out of range, such as an execution reference that is not one or a completion cursor inside a character. |
+| `InvalidRequest` | A field is missing, malformed, or out of range, such as an execution reference that is not one or a completion cursor inside a character, or a cancellation names a submitted batch. |
 | `UnsupportedRequest` | The request kind is not one the server's schema declares. |
 | `UnsupportedValue` | An enum value the server does not declare, including a subscription type it does not implement. |
 | `DuplicateRequestId` | The request identity is already in flight in this session. |
@@ -742,8 +753,9 @@ leader without it.
 ### Which Requests Need The Leader
 
 The node a session is on serves completion and choice lookups, listing and selecting domains,
-subscriptions, domain clock attachments, and the reads its locally applied state can answer:
-`SHOW CLUSTER STATUS`, `SHOW TRANSACTIONS`, `SHOW CREATE`, `SHOW UDFS`, `SHOW PLACEMENTS`,
+subscriptions, domain clock attachments, producers, and the reads its locally applied state can
+answer: `SHOW CLUSTER STATUS`, `SHOW TRANSACTIONS`, `SHOW CREATE`, `SHOW UDFS`, `SHOW INGESTORS`,
+`SHOW PLACEMENTS`,
 `SHOW RELAY MATERIALIZED STATE`, `LOOKUP`, and the `DESCRIBE` statements of domains, resources,
 endpoints, lookups, placements, UDFs, relocations, relays, ingestors, junctions, deduplicators,
 reingestors, correlators, reorderers, window processors, WASM processors, and emitters. Every other
@@ -1156,6 +1168,102 @@ stream. It prints the reply and then the same state, tick, interruption, and end
 including the fresh state after the client restores an attachment. Ctrl-C sends a detach request
 before the process exits; an attach refusal exits nonzero with its typed reason.
 
+## Producers
+
+A session can open producers that submit typed batches to a
+[client ingestor](./ingestors.md#client-ingestors). [Ingestors](./ingestors.md#client-ingestors)
+owns what an ingestor admits and how an outcome is decided, and [Sessions](./sessions.md#producers)
+owns the public contract of a producer; this section places producers in the protocol.
+
+### Opening, Submitting, And Closing
+
+`OpenIngestorRequest` names a domain explicitly, the ingestor, the fields the producer expects, and
+the credit it asks for: how many batches and how many bytes it may have outstanding. The open runs
+on the ordered lane. The serving node checks the session's transaction binding, the requested
+limits, the committed domain state and schedule, and the ingestor's kind, reserves room in the
+session's budget of 32 producers and 32 MiB and in its own node budget of 128 MiB, and attaches the
+producer through the node that executes the ingestor, which checks the expected fields against the
+execution it runs. The reply is `ProducerOpened` or a typed `ClientProducerRefusal` with a message;
+a refused open leaves nothing attached and reserves nothing. `ProducerOpened` carries the domain,
+the ingestor, and a `ClientProducerDescription`: the attachment identity, the input schema, the
+domain's `START` generation, the endpoint contract digest, the ingestor's window, ACK timeout and
+retry backoff, the granted credit with the largest batch one submission may carry, and whether
+admission is open.
+
+The request identity of the open names the producer: every later request and frame about it carries
+that identity as its `ProducerId`, so a client needs no second identity space. The producer accepts
+batches from the moment its reply is queued. It belongs to the session: `USE` does not retarget it,
+and it cannot be opened while the session holds a transaction.
+
+`SubmitBatchRequest` carries the producer and one canonical Arrow IPC stream as opaque bytes. The
+receive loop checks the batch against the producer's credit, takes its share, and hands it to the
+producer's task without waiting for anything; the batch's reply, a `SubmissionOutcome`, follows
+whenever its outcome is decided. The session never decodes a batch: the node that executes the
+ingestor validates and admits it. A batch beyond the credit is answered at once as not admitted
+with `CreditExceeded`, and the producer is closed and later ended as `ProtocolViolated`; the batches
+it already submitted still receive their outcomes.
+
+`CloseIngestorRequest` stops admission for the producer: its queued batches are refused, its
+admitted batches are answered as they resolve, and the close is answered `Closed` once every batch
+has its outcome, or `NotOpen` when the session holds no producer by that identity.
+
+### Outcomes, Admission, And Ends
+
+`SubmissionOutcome` carries one terminal `ClientSubmissionOutcome` and a bounded, non-sensitive
+message. The four outcomes keep the boundary's four facts apart:
+
+- **`NotAdmitted`.** No row entered the graph. The cause is an `InvalidBatch` defect, `Suspended`,
+  `Busy`, `Draining`, `ProducerEnded`, or `CreditExceeded`. Only `Suspended` and `Busy` are
+  temporary.
+- **`Completed`.** The batch's source acknowledgement root resolved successfully.
+- **`ProcessingFailed`.** The batch was admitted and its acknowledgement failed, with `AckTimedOut`
+  or `Rejected`. Some effects may have happened.
+- **`OutcomeUnknown`.** The batch may have been admitted, and no terminal result can be established:
+  `Interrupted` when the ingestor's execution stopped or the producer ended with the batch
+  unresolved, `OwnerLost` when the node that executes it, or the connection to that node, was lost.
+
+A transport receipt is never an outcome, and a reply is never sent before the outcome is decided.
+The session never replays a batch: the client decides, and only a temporary refusal is safe to send
+again unchanged.
+
+`ProducerAdmissionChanged` tells the client that admission is `Suspended` or `Open` again. Changes
+are coalesced, so a client that reads late receives the newest state. `ProducerEnded` carries a
+`ClientProducerEndReason` and is the last frame about the producer; every batch it held has its
+outcome before it: `EndpointChanged`, `EndpointRemoved`, `DomainStopped`, `Relocated`,
+`ShuttingDown`, `OwnerLost`, or `ProtocolViolated`. [Ingestors](./ingestors.md#producers) says
+which change causes each. A producer closed by its client ends with the close reply and no
+`ProducerEnded`.
+
+### Ordering And Backpressure
+
+Each producer has one task on the serving node that is the only writer of its replies and frames, so
+a batch's outcome, the producer's admission changes, and its end reach the client in the order the
+ingestor produced them. Outcomes, admission changes, and ends travel on the control lane. A batch
+keeps its share of the credit until its reply is queued, so a client that sends a batch only once an
+earlier reply freed room never exceeds its credit, and a producer whose client stops reading
+outcomes stops receiving room for new batches. The credit therefore bounds what a producer holds on
+the serving node, whatever the graph does, while commands, subscriptions, and clock frames keep
+moving beside it.
+
+### Forwarding To The Executing Node
+
+A client may open a producer through any live node. When the serving node does not execute the
+ingestor, it opens a producer link to the node that does over the interconnect, reserves the
+producer's bytes in its own budget, and relays the batches, outcomes, admission changes, and end;
+the executing node reserves the same bytes again for the batches it retains. [Cluster
+Interconnect](./interconnect.md#client-producer-links) owns the link. The client sees the same
+protocol either way. When the link is lost, the producer ends as `OwnerLost` and its unresolved
+batches have an `OutcomeUnknown` with cause `OwnerLost`.
+
+### When The Session Ends
+
+When the session ends, its producers detach: the executing node stops accepting their batches,
+answers nobody, and lets admitted batches finish in the graph. Nothing about a producer survives the
+session. The Rust client reports every batch that was sent without an outcome as of unknown outcome
+with `SessionLost` and ends the producer as `SessionLost`; it does not reopen producers on its next
+session, so the application opens another one. The shared binding and the web console do not open
+producers.
+
 ## Resource Uploads
 
 A resource archive travels on its own gRPC call, `UploadResource`, beside the session rather than
@@ -1367,6 +1475,7 @@ Nothing a session held survives.
 | Selected domain and its observations | The session | Gone; the client selects the domain again |
 | Subscriptions, generations, interest leases, queued rows | The session and its node | Gone; rows in transit are lost, and a restored subscription is a new generation |
 | Domain clock attachments | The session | Gone; the client attaches again and receives the clock as it is then |
+| Producers, their credit, and the replies they owe | The session and the executing node | Gone; unresolved batches are of unknown outcome, admitted ones finish in the graph, and the client opens a new producer |
 | Waiters, transfer reassembly, previews, desired subscriptions, followed clocks | The client | Kept by the Rust client across reconnects; lost if the client process ends |
 
 A subscription therefore always has a gap across the loss of its session. The server cannot report
@@ -1523,11 +1632,16 @@ The protocol guarantees:
   subscription discarded before its next rows, and its end. The Rust client and its bindings also
   report the loss of the session a subscription lived on, and every attempt to restore it that a
   new session refused.
+- **One outcome per batch.** Every submitted batch receives exactly one terminal outcome, never
+  completed before its acknowledgement root resolved, and a producer's end follows every outcome it
+  owed.
 - **Verifiable archives.** A backup's archive arrives with the size and digest its recorded outcome
   names, and a download that ends early leaves it retained for another attempt.
 
 It does not provide:
 
+- **Exactly-once submission.** A batch whose outcome is unknown or failed may have had effects, and
+  nothing replays or deduplicates it. The application keeps its source data and decides.
 - **Exactly-once delivery.** A subscription is a live view with at-most-once delivery per admitted
   batch. Rows in transit can be lost without a report while relay ownership moves or a node-to-node
   delivery fails, and a source may redeliver a record that the graph then passes again.
@@ -1543,7 +1657,7 @@ It does not provide:
 - **Columnar subscriptions.** `SubscriptionType` has one value, `Row`. A server refuses a type it
   does not declare as `UnsupportedValue` and never substitutes another encoding.
 - **A durable session.** A session, its request identities, its selected domain, its subscriptions,
-  its domain clock attachments, and its transaction binding end with the connection. Only execution
+  its domain clock attachments, its producers, and its transaction binding end with the connection. Only execution
   records, transactions, and upload records outlive it.
 - **Liveness detection.** Neither transport sends keepalives, and the server has no idle timeout. A
   client that needs to detect a half-open connection bounds its own waits.
@@ -1579,15 +1693,21 @@ The protocol makes a client's view of its own work explicit rather than inferred
   only to the client.
 - **Leadership.** `LeadershipObserved` tells every session which node leads and where to reach it,
   and `SHOW CLUSTER STATUS` shows each node's availability.
+- **Producers.** A client learns every batch's outcome and every admission change and end of its
+  producers. `SHOW INGESTORS` and `DESCRIBE INGESTOR` show each client ingestor's attached and
+  forwarded producers, its outstanding batches and bytes, and the batches holding its window, and
+  the node that executes it exports them as metrics with the answered batches by outcome and cause;
+  see [Metrics And Observability](./metrics-and-observability.md#client-ingestors).
 - **Backups.** A completed backup's outcome carries its archive's summary. The node that assembled
   the archive logs its assembly and its collection by a complete download at `info`, naming the
   execution reference, and every other end of a download at `debug`.
 
 The server keeps its own records at the levels the logging contract assigns. Listener startup is
 logged at `info`. A reply replaced by a rejection, a reply the session ended before it could queue,
-a subscription notice or loss report that does not fit a frame, and domain clock attach, detach, and
-end are logged at `debug`. A session that falls behind the notice bus, an event or snapshot that
+a subscription notice or loss report that does not fit a frame, domain clock attach, detach, and
+end, and producer opens, refusals, closes, and ends are logged at `debug`. A session that falls behind the notice bus, an event or snapshot that
 does not fit a frame, a failed revert at a clean close, and a failed remote subscription dispatch
 are logged at `warn`. Session opening and closing, individual requests, and rows are not logged, and
 no log line carries a payload value. The server exports no metric for sessions, requests,
-rejections, or authentication attempts; a client that needs them measures them itself.
+rejections, or authentication attempts; a client that needs them measures them itself. Producer
+counts are exported by the node that executes the client ingestor, not per session.

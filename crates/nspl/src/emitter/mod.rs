@@ -15,9 +15,9 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, ack_mode, ack_timeout, alter_op_separator,
-        bodyless_route_construction, boxed_choice, byte_size_lit, channel_ref, client_ref,
-        codec_ref, collect_for, collection_ref, duration_lit, emitter_ack_window, emitter_name,
+        LexedInput, ParseError, ParseFromSourceError, ack_mode, ack_timeout, ack_window,
+        alter_op_separator, bodyless_route_construction, boxed_choice, byte_size_lit, channel_ref,
+        client_ref, codec_ref, collect_for, collection_ref, duration_lit, emitter_name,
         emitter_ref, expression_before_clause, flush_each, from_relay_clauses,
         general_error_policy, if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3,
         lex_input, materialized_state_dependencies, message_error_policy, queue_ref, relay_ref,
@@ -38,7 +38,7 @@ fn no_ack_publishing_mode<'src>()
 fn broker_ack_publishing_mode<'src>()
 -> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Ack)
-        .ignore_then(emitter_ack_window())
+        .ignore_then(ack_window())
         .then(ack_timeout())
         .then(retry_policy())
         .map(
@@ -79,7 +79,7 @@ fn mqtt_confirming_publishing_mode<'src>(
 ) -> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
     mqtt_qos_level(qos)
         .ignore_then(kw(Identifier::Ack))
-        .ignore_then(emitter_ack_window())
+        .ignore_then(ack_window())
         .then(ack_timeout())
         .then(retry_policy())
         .map(move |((window, ack_timeout), retry_policy)| match qos {
@@ -112,7 +112,7 @@ fn mqtt_publishing_mode<'src>()
 fn nats_jetstream_publishing_mode<'src>()
 -> impl Parser<'src, &'src [Token], EmitterPublishingMode, extra::Err<ParseError<'src>>> + Clone {
     kw_phrase2(Identifier::Jetstream, Identifier::Ack)
-        .ignore_then(emitter_ack_window())
+        .ignore_then(ack_window())
         .then(ack_timeout())
         .then(retry_policy())
         .map(

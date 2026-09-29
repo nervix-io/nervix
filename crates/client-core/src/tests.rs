@@ -4,8 +4,8 @@
 //!
 //! Dispatcher tests hand real frames, encoded by the wire contract, to an exchange's reader.
 //! Loopback tests play the server by hand: they read the frames a client sends and complete the
-//! waiters those requests registered. The `session` tests run the client against an in-process
-//! gRPC server.
+//! waiters those requests registered; the `producers` tests drive producers that way. The
+//! `session` tests run the client against an in-process gRPC server.
 
 // A Shuttle build replaces the client's synchronization with models that only run inside a
 // Shuttle test, so the tests over a real connection, and those that pause Tokio's clock, drive the
@@ -14,6 +14,11 @@
 mod restoration;
 #[cfg(not(feature = "shuttle"))]
 mod session;
+
+// The producer tests poll the client's own state against the wall clock, which a Shuttle build's
+// models do not keep outside a Shuttle test.
+#[cfg(not(feature = "shuttle"))]
+mod producers;
 
 use std::{
     num::{NonZeroU64, NonZeroUsize},
@@ -397,6 +402,7 @@ fn reader_fixture(capacity: usize) -> ReaderFixture {
         leadership,
         domains,
         clocks: crate::domain_clock::DomainClockAttachments::new(),
+        producers: crate::producer::ProducerRegistry::default(),
     };
     let generation = sinks.begin_generation();
     let reader = ExchangeReader::new(pending.clone(), sinks, generation);
@@ -1023,6 +1029,7 @@ async fn event_queue_counts_retained_bytes_as_well_as_records() {
         leadership,
         domains,
         clocks: crate::domain_clock::DomainClockAttachments::new(),
+        producers: crate::producer::ProducerRegistry::default(),
     };
     let generation = sinks.begin_generation();
     notices.push(

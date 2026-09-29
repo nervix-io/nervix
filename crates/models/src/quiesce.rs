@@ -15,8 +15,8 @@ use strum::{AsRefStr, IntoStaticStr};
 use crate::{
     CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
     CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateWireSchema, EmitSink,
-    EmitterName, MessageErrorPolicy, Model, ModelKind, ModelName, NodeRef, ProcessorInputs,
-    ProcessorOutput, ProcessorOutputs, RelayName, VhostName, WasmStateReset,
+    EmitterName, IngestorInput, MessageErrorPolicy, Model, ModelKind, ModelName, NodeRef,
+    ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayName, VhostName, WasmStateReset,
 };
 
 mod commit;
@@ -563,18 +563,16 @@ fn ingestor_change_aspects(
     let CreateIngestor {
         name: base_name,
         output_routes: base_output_routes,
-        decode_using_codec: base_codec,
+        input: base_input,
         timestamp_source: base_timestamp,
-        source: base_source,
         general_error_policy: base_general_error,
         filter_where: base_filter,
     } = base;
     let CreateIngestor {
         name: candidate_name,
         output_routes: candidate_output_routes,
-        decode_using_codec: candidate_codec,
+        input: candidate_input,
         timestamp_source: candidate_timestamp,
-        source: candidate_source,
         general_error_policy: candidate_general_error,
         filter_where: candidate_filter,
     } = candidate;
@@ -584,11 +582,20 @@ fn ingestor_change_aspects(
     }
 
     let mut changes = ModelChangeAspects::default();
-    if base_source != candidate_source {
-        changes.push(ModelChangeAspect::IngestorSource);
-    }
-    if base_codec != candidate_codec {
-        changes.push(ModelChangeAspect::IngestorCodec);
+    match (base_input, candidate_input) {
+        (IngestorInput::Transport(base), IngestorInput::Transport(candidate)) => {
+            if base.source != candidate.source {
+                changes.push(ModelChangeAspect::IngestorSource);
+            }
+            if base.codec != candidate.codec {
+                changes.push(ModelChangeAspect::IngestorCodec);
+            }
+        }
+        (base, candidate) => {
+            if base != candidate {
+                changes.push(ModelChangeAspect::IngestorSource);
+            }
+        }
     }
     if base_timestamp != candidate_timestamp {
         changes.push(ModelChangeAspect::IngestorTimestamp);
@@ -1769,15 +1776,17 @@ mod tests {
                     max_batch_size: "1MiB".to_string(),
                 },
             )]),
-            decode_using_codec: named("event_codec"),
-            timestamp_source: None,
-            source: IngestSource::Endpoint {
-                endpoint: named("ingress_a"),
-                mode: EndpointIngestMode::NoAckSequential,
-                quiesce: crate::IngestQuiesceMode::EndpointBuffer {
-                    max_size: "1MiB".to_string(),
+            input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
+                source: IngestSource::Endpoint {
+                    endpoint: named("ingress_a"),
+                    mode: EndpointIngestMode::NoAckSequential,
+                    quiesce: crate::IngestQuiesceMode::EndpointBuffer {
+                        max_size: "1MiB".to_string(),
+                    },
                 },
-            },
+                codec: named("event_codec"),
+            }),
+            timestamp_source: None,
             general_error_policy: GeneralErrorPolicy::Log,
             filter_where: None,
         }
@@ -2179,7 +2188,10 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate
+                    let crate::IngestorInput::Transport(input) = &mut candidate.input else {
+                        panic!("the fixture ingestor reads an endpoint");
+                    };
+                    input
                         .source
                         .set_quiesce(crate::IngestQuiesceMode::Reject {
                             retry_after: "7s".to_string(),
@@ -2192,7 +2204,10 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate.source = IngestSource::Endpoint {
+                    let crate::IngestorInput::Transport(input) = &mut candidate.input else {
+                        panic!("the fixture ingestor reads an endpoint");
+                    };
+                    input.source = IngestSource::Endpoint {
                         endpoint: named("ingress_b"),
                         mode: EndpointIngestMode::NoAckSequential,
                         quiesce: crate::IngestQuiesceMode::EndpointBuffer {
@@ -2206,7 +2221,10 @@ mod tests {
             (
                 {
                     let mut candidate = base.clone();
-                    candidate.decode_using_codec = named("event_codec_v2");
+                    let crate::IngestorInput::Transport(input) = &mut candidate.input else {
+                        panic!("the fixture ingestor reads an endpoint");
+                    };
+                    input.codec = named("event_codec_v2");
                     candidate
                 },
                 ModelChangeAspect::IngestorCodec,

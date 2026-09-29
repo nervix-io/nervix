@@ -38,10 +38,10 @@ use nervix_connector_otel::{
 use nervix_connector_postgres::PostgresConflictAction;
 use nervix_connector_sqs::SqsPublishingMode;
 use nervix_models::{
-    Assignment, AssignmentTarget, ChannelName, ClickHouseValueMapping, ClientConfigEntry,
-    ClientName, ClientPoolBounds, ClientResourceMount, CollectionName, CreateEmitter, EmitSink,
-    EmitterAckWindow, EmitterBatchPolicy, EmitterPublishingMode, Expression, FieldName, HttpOrigin,
-    IcebergCatalog, IcebergStorageBackend, Literal, Model, QueueName, RetryPolicy,
+    AckWindow, Assignment, AssignmentTarget, ChannelName, ClickHouseValueMapping,
+    ClientConfigEntry, ClientName, ClientPoolBounds, ClientResourceMount, CollectionName,
+    CreateEmitter, EmitSink, EmitterBatchPolicy, EmitterPublishingMode, Expression, FieldName,
+    HttpOrigin, IcebergCatalog, IcebergStorageBackend, Literal, Model, QueueName, RetryPolicy,
     RouteConstruction, SubjectName, TableName, TopicName,
 };
 use nervix_vm::{
@@ -1373,7 +1373,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
 
 /// The confirmation window and timeout an acknowledging publishing mode declares.
 fn decide_ack_confirmation(
-    window: &EmitterAckWindow,
+    window: &AckWindow,
     ack_timeout: &str,
 ) -> Result<AckConfirmation, Report<EmitterStartPlanError>> {
     let timeout = EmitterDurationSetting::AckTimeout.parse(ack_timeout)?;
@@ -1381,8 +1381,8 @@ fn decide_ack_confirmation(
         return Err(Report::new(EmitterStartPlanError::ZeroAckTimeout));
     }
     let max_in_flight = match window {
-        EmitterAckWindow::Sequential => NonZeroUsize::MIN,
-        EmitterAckWindow::Parallel { max } => NonZeroUsize::new(max.get().arch_into())
+        AckWindow::Sequential => NonZeroUsize::MIN,
+        AckWindow::Parallel { max } => NonZeroUsize::new(max.get().arch_into())
             .assured("the configured non-zero ACK window fits the supported target pointer width"),
     };
     Ok(AckConfirmation {
@@ -2268,7 +2268,7 @@ mod tests {
     fn decides_a_broker_confirmation_window_timeout_and_retry_policy() {
         let mut case = SinkKind::Kafka.case();
         case.mode = EmitterPublishingMode::BrokerAck {
-            window: EmitterAckWindow::Parallel {
+            window: AckWindow::Parallel {
                 max: nonzero!(17u64),
             },
             ack_timeout: "3s".to_string(),
@@ -2302,7 +2302,7 @@ mod tests {
     fn decides_transport_specific_mqtt_nats_and_sqs_modes() {
         let mut mqtt = SinkKind::Mqtt.case();
         mqtt.mode = EmitterPublishingMode::MqttQos2 {
-            window: EmitterAckWindow::Sequential,
+            window: AckWindow::Sequential,
             ack_timeout: "7s".to_string(),
             retry_policy: retry_policy("10ms", "1s"),
         };
@@ -2319,7 +2319,7 @@ mod tests {
 
         let mut jetstream = SinkKind::Nats.case();
         jetstream.mode = EmitterPublishingMode::NatsJetStream {
-            window: EmitterAckWindow::Parallel {
+            window: AckWindow::Parallel {
                 max: nonzero!(23u64),
             },
             ack_timeout: "11s".to_string(),
@@ -2439,7 +2439,7 @@ mod tests {
     ) {
         let mut case = SinkKind::RabbitMq.case();
         case.mode = EmitterPublishingMode::BrokerAck {
-            window: EmitterAckWindow::Sequential,
+            window: AckWindow::Sequential,
             ack_timeout: ack_timeout.to_string(),
             retry_policy: retry_policy("25ms", "2s"),
         };

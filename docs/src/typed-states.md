@@ -72,6 +72,16 @@ completed snapshot, and from one made at completed index zero. The trigger holds
 completed index that existed when the request was made; it suppresses duplicate requests for that
 same completed snapshot without confusing its absence with index zero.
 
+**Client ingestors.** An ingestor's input is either a transport, which carries its source and the
+codec that decodes it, or a client source, which carries the schema its batches hold and its
+producer policy. There is no optional codec beside an optional schema, so an ingestor cannot claim
+both or neither. A producer's admission is `Open` or `Suspended`; a batch's outcome is one of four
+variants, each carrying its own typed cause, so a completed batch has no cause and a refused one no
+failure; and a producer's end is one typed reason. A producer's identity is the request identity
+that opened it, and a forwarded producer's link key is never reused within its process, so neither
+has a reserved value meaning none. The client ingestor endpoint's published counts are genuine
+zero counts, never markers.
+
 **Endpoint availability.** Gossip publication carries an optional typed interconnect endpoint.
 Parsing a present advertised endpoint checks its host and port syntax. Membership admission
 requires that validated interconnect endpoint; an incomplete publication cannot become a
@@ -146,6 +156,11 @@ a per-row error before allocating it. UUID-v7 construction reports an unsupporte
 as a row error rather than substituting the epoch. Exact schema types and Arrow validity still
 govern the rest of the expression. The public function results are documented in
 [Expression Functions](./filter-map-functions.md).
+
+A submitted client batch is validated as a whole before any row is admitted: a stream that is not
+exactly one uncompressed record batch of the ingestor's canonical Arrow schema, with valid columns
+and within the row and byte limits, is refused with its typed defect. No value is cast, widened,
+coerced, or defaulted to make a batch fit, and no subset of a malformed batch is admitted.
 
 Session replies carry typed command purpose and outcomes. An upload failure can carry an optional
 assigned nonzero resource version; before assignment, the version is absent. Diagnostic spans can

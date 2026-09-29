@@ -142,6 +142,7 @@ use crate::common::{
 };
 
 mod backup;
+mod client_producers;
 mod common;
 mod database_batches;
 mod domain_clock_attachment;
@@ -417,6 +418,8 @@ struct ScenarioWorld {
     last_server_signal_at: Option<Instant>,
     /// The cross-language client probe a scenario started, until a step reads its report.
     client_probe: Option<ClientProbe>,
+    /// The producers a scenario opened on client ingestors, and the batches they submitted.
+    producers: client_producers::ScenarioProducers,
 }
 
 impl fmt::Debug for ScenarioWorld {
@@ -11423,7 +11426,8 @@ fn record_mqtt_ingestors(world: &mut ScenarioWorld, commands: &str) {
         let nervix_models::Model::Ingestor(ingestor) = *create.body else {
             continue;
         };
-        let nervix_models::IngestSource::Mqtt { .. } = ingestor.source else {
+        let Some(nervix_models::IngestSource::Mqtt { .. }) = ingestor.input.transport_source()
+        else {
             continue;
         };
         world
@@ -26431,6 +26435,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.server_process_cluster = None;
                 world.broker_observer = None;
                 world.syslog_udp_observer = None;
+                world.producers = client_producers::ScenarioProducers::default();
                 stop_receivers(world).await;
                 close_browser(world).await;
                 world.active_session = None;

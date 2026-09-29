@@ -818,7 +818,10 @@ impl TestSession {
             ServerEvent::DomainClockAttachmentEnded(ended) => {
                 self.file_clock_frame(TestClockFrame::Ended(ended));
             }
-            ServerEvent::Leadership(_)
+            // Producers are driven through the producer session, never through this one.
+            ServerEvent::ProducerAdmissionChanged(_)
+            | ServerEvent::ProducerEnded(_)
+            | ServerEvent::Leadership(_)
             | ServerEvent::Domains(_)
             | ServerEvent::DomainSnapshot(_)
             | ServerEvent::Cluster(_) => {}

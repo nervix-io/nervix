@@ -27,7 +27,7 @@ use arrow_array::{
         UInt8Type, UInt16Type, UInt32Type, UInt64Type,
     },
 };
-use arrow_schema::{DataType, Field, TimeUnit};
+use arrow_schema::{DataType, TimeUnit};
 use arrow_select::{nullif::nullif, zip::zip};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -1009,7 +1009,7 @@ impl CompiledUdf {
             arguments.iter().zip(&self.program.arguments).enumerate()
         {
             let argument = argument.to_array_ref();
-            let expected_type = arrow_data_type(&declaration.ty);
+            let expected_type = declaration.ty.arrow_data_type();
             if argument.data_type() != &expected_type || argument.len() != row_count {
                 return Err(Report::new(RuntimeError::InjectedFunctionFailed {
                     function: self.program.name.to_string(),
@@ -1042,7 +1042,7 @@ impl CompiledUdf {
         }
         if propagation.iter().all(|masked| *masked) {
             return Ok(InjectedResult::success(typed_array_from_ref(
-                new_null_array(&arrow_data_type(&self.program.returns.ty), row_count),
+                new_null_array(&self.program.returns.ty.arrow_data_type(), row_count),
             )?));
         }
         if propagation.iter().any(|masked| *masked) {
@@ -1114,7 +1114,7 @@ impl CompiledUdf {
                 message,
             }));
         }
-        let expected_type = arrow_data_type(&self.program.returns.ty);
+        let expected_type = self.program.returns.ty.arrow_data_type();
         if output.data_type() != &expected_type || output.len() != row_count {
             return Err(Report::new(RuntimeError::InvalidInjectedResult {
                 function: self.program.name.to_string(),
@@ -1241,11 +1241,11 @@ pub fn signature_for(model: &UdfProgram) -> UdfSignature {
             .arguments
             .iter()
             .map(|argument| UdfParameter {
-                data_type: arrow_data_type(&argument.ty),
+                data_type: argument.ty.arrow_data_type(),
                 optional: argument.optional,
             })
             .collect(),
-        return_type: arrow_data_type(&model.returns.ty),
+        return_type: model.returns.ty.arrow_data_type(),
         return_optional: model.returns.optional,
         volatile: model.volatile,
     }
@@ -1419,37 +1419,6 @@ fn list_bridge_conversion(element: &ParseAsType) -> &'static str {
         ParseAsType::Bytes => "from_vec_bytes",
         ParseAsType::Datetime => "from_vec_datetime",
         ParseAsType::Array { .. } | ParseAsType::Vec { .. } => "from_any",
-    }
-}
-
-pub fn arrow_data_type(ty: &ParseAsType) -> DataType {
-    match ty {
-        ParseAsType::U8 => DataType::UInt8,
-        ParseAsType::I8 => DataType::Int8,
-        ParseAsType::U16 => DataType::UInt16,
-        ParseAsType::I16 => DataType::Int16,
-        ParseAsType::U32 => DataType::UInt32,
-        ParseAsType::I32 => DataType::Int32,
-        ParseAsType::U64 => DataType::UInt64,
-        ParseAsType::I64 => DataType::Int64,
-        ParseAsType::F32 => DataType::Float32,
-        ParseAsType::F64 => DataType::Float64,
-        ParseAsType::Bool => DataType::Boolean,
-        ParseAsType::String => DataType::Utf8,
-        ParseAsType::Bytes => DataType::Binary,
-        ParseAsType::Datetime => DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
-        ParseAsType::Array { element, len } => DataType::FixedSizeList(
-            StdArc::new(Field::new("item", arrow_data_type(element), false)),
-            i32::try_from(len.get()).verified(
-                "the schema parser rejects an array length that does not fit an Arrow fixed-size \
-                 list",
-            ),
-        ),
-        ParseAsType::Vec { element } => DataType::List(StdArc::new(Field::new(
-            "item",
-            arrow_data_type(element),
-            false,
-        ))),
     }
 }
 

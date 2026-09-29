@@ -22,9 +22,12 @@ physical time. It must not name the registry, runtime, relays, branches, schedul
 An integration crate may depend on the contract, vocabulary, Arrow, and its own driver stack. It
 must not depend on the server, another integration crate, or runtime collectors. Driver libraries
 belong in that integration's manifest, with test-harness dependencies kept separately. A
-connector receives resolved configuration and a typed plan, not graph routing authority. The
-exception among sources is the node's own HTTP/HTTPS endpoint: it has no external driver and lives
-in the server, but uses the same source lifecycle and host intake.
+connector receives resolved configuration and a typed plan, not graph routing authority. Two
+sources have no external driver and live in the server. The node's own HTTP/HTTPS endpoint uses the
+same source lifecycle and host intake. A client source admits the batches applications submit
+through their sessions; it has no connector crate, because the session protocol is its transport,
+and its host is the client ingestor endpoint described under
+[Integration-specific boundaries](#integration-specific-boundaries).
 
 ### DNS for HTTP and Iceberg
 
@@ -183,6 +186,10 @@ the meaning of acknowledging or rejecting its own position. A broker message len
 headers, typed metadata, and transport position to the host. Positions remain connector-owned;
 the host never interprets one as a graph identity.
 
+A client source's plan is not a connector plan: it carries the input schema, its compiled form, the
+producer policy of window, ACK timeout, and retry backoff, and the endpoint contract digest producers
+attach to. It declares no header or metadata scope and supports only `SUSPEND`.
+
 The metadata boundary has distinct header, Kafka, and Syslog scopes. Kafka carries topic,
 partition, offset, and headers; Syslog carries the peer address. Transport headers are visited
 from the borrowed message in arrival order. The host copies them only when quiesce buffering or a
@@ -217,6 +224,7 @@ The host runs three source loop families, with a listener using the broker loop:
 | Broker and listener | Open instances, manage readiness and quiesce, request batches, decode and dispatch, wait for ACK roots when configured, then acknowledge or reject positions and pace retry. | Subscribe, receive, expose transport positions and metadata, and perform transport ACK or rejection. Syslog is a listener with no broker ACK. |
 | Paced | Bind and wait on the domain cadence, hand the scheduled instant to one poll, admit its returned messages without broker ACKs, and report poll failures. | HTTP and Prometheus perform one transport poll; they do not bind a domain clock or choose the cadence. |
 | Request scoped | Bind endpoint routes to request intake, admit and dispatch each request there, replay retained quiesce work, then unbind on close. | The endpoint source has no polling transport or broker position. |
+| Client batches | Keep the producers of one client ingestor, admit their batches one at a time through one admission worker per execution, give each admitted batch one ACK root, and answer each batch with its outcome. | There is no source connector: producers submit Arrow IPC batches through the session protocol. |
 
 For broker sources, `None` admits without an ACK root; `Sequential` requests one message and
 waits for its ACK tree; `Parallel` requests up to the declared in-flight limit within its batch
@@ -563,6 +571,18 @@ sequenceDiagram
   the refused one may be in its queue, so the attempt then fails for the host's retry. Any other
   loss is an infrastructure failure, and the host reopens the sink. [RabbitMQ
   emission](./emitters.md#rabbitmq) defines the public behavior.
+- **Client source.** Each client ingestor a node executes has one endpoint task that outlives
+  a single execution of the ingestor. It owns the attached producers, the batches each queued,
+  their round-robin admission into the execution's one acknowledgement window, and every batch's
+  outcome. The execution's admission worker validates a batch as one canonical Arrow IPC stream of
+  the input schema, tracks a new ACK root with the ingestor's drain accounting, reads the quiesce
+  state, and only then dispatches the batch through the ingestor's filter and routes, so a quiesce
+  either counts the batch or refuses it with nothing dispatched. The batch's outcome is its ACK
+  root's resolution under the declared ACK timeout, which counts time without acknowledgement
+  progress. An alteration that keeps the endpoint contract finds the same producers attached once
+  the new execution is installed; a changed contract, a new domain generation, removal,
+  relocation, and shutdown end them with the reason that applies.
+  [Ingestors](./ingestors.md#client-ingestors) defines the public behavior.
 - **Pooled sinks.** The connector owns the driver's pool and borrowed connection. The host owns
   the lease on the node's named client and the runtime wait while no connection is available.
   [Database client pools](./database-client-pools.md) defines the bounds.
@@ -605,7 +625,9 @@ ACK state, leaving external redelivery to each source's contract.
 The host owns ingestor and emitter metric updates, transient status, and runtime events. Source
 open, resume, suspend, and close transitions have lifecycle logs; publish, retry, and commit
 failures carry connector identity without sensitive payload values. For metric names and
-`DESCRIBE` fields, use [Metrics And Observability](./metrics-and-observability.md). The
+`DESCRIBE` fields, use [Metrics And Observability](./metrics-and-observability.md). A client
+source's endpoint publishes its producer, outstanding, and window counts after every change and
+counts every batch it answers by outcome and cause. The
 [Ingestors](./ingestors.md) and [Emitters](./emitters.md) manuals document connector-specific
 status and delivery output; [Shutdown And Recovery](./shutdown.md#connector-contracts) owns the
 drain boundary. This chapter does not redefine those output formats.

@@ -102,6 +102,13 @@ impl Runtime {
                 ScheduledIngestorStart::Complete => break,
             }
         }
+        // Every ingestor this node should run is running now, so the endpoint of a client ingestor
+        // that is not running here ends its producers for good.
+        let dispatcher = self.inner.remote_dispatcher.load();
+        if let Some(dispatcher) = dispatcher.as_deref() {
+            self.reconcile_client_ingestor_endpoints(dispatcher.local_node_id())
+                .await;
+        }
         Ok(())
     }
 
@@ -200,6 +207,9 @@ impl Runtime {
         }
 
         self.clear_ingestor_readiness(domain, ingestor);
+        // A client ingestor's producers outlive this execution until the endpoint learns whether a
+        // restart keeps their contract.
+        self.uninstall_client_execution(domain, ingestor);
         if self
             .ingestor_quiesce_control(domain, ingestor)
             .is_some_and(|control| !control.is_quiesced())
@@ -217,15 +227,29 @@ impl Runtime {
         Ok(())
     }
 
-    /// Binds what every source of `ingestor` dispatches through: its codec, its compiled node filter
-    /// and routes, and the branched entrypoints its routes feed.
+    /// Binds what every execution of `ingestor` dispatches through: its compiled node filter and
+    /// routes over its input schema, and the branched entrypoints its routes feed. The input
+    /// schema is what a transport's codec decodes its payloads into, as the staged routing
+    /// revision installed that codec, or the schema a client source's batches carry.
     pub(in crate::runtime) async fn ingestor_dependencies(
         &self,
         ingestor: &IngestorSpec,
-    ) -> Result<IngestorDependencies, RuntimeError> {
+        input: &IngestorInputPlan,
+    ) -> Result<BoundIngestor, RuntimeError> {
         let domain = &ingestor.domain;
-        let routing = match self.inner.executions.get(domain) {
-            Some(execution) => execution.routing.staged(),
+        /// What the ingestor binds from its domain's execution, read under one lookup.
+        struct BindingExecution {
+            routing: StdArc<DomainRoutingSnapshot>,
+            generation: u64,
+        }
+        let BindingExecution {
+            routing,
+            generation,
+        } = match self.inner.executions.get(domain) {
+            Some(execution) => BindingExecution {
+                routing: execution.routing.staged(),
+                generation: execution.start_version,
+            },
             None => {
                 return Err(RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
@@ -236,14 +260,27 @@ impl Runtime {
                 });
             }
         };
-        let Some(codec) = routing.codecs.get(&ingestor.decode_using_codec).cloned() else {
-            return Err(RuntimeError::CodecNotInstantiated {
-                domain: domain.as_str().to_string(),
-                codec: ingestor.decode_using_codec.as_str().to_string(),
-            });
+        let input = match input {
+            IngestorInputPlan::Transport(transport) => {
+                let Some(codec) = routing.codecs.get(&transport.codec).cloned() else {
+                    return Err(RuntimeError::CodecNotInstantiated {
+                        domain: domain.as_str().to_string(),
+                        codec: transport.codec.as_str().to_string(),
+                    });
+                };
+                BoundIngestorInput::Transport {
+                    codec,
+                    source: transport.source.clone(),
+                }
+            }
+            IngestorInputPlan::Client(plan) => BoundIngestorInput::Client {
+                plan: plan.clone(),
+                generation,
+            },
         };
+        let input_schema = input.schema();
         let programs = ExecutionBuildDeps::from_routing(domain, &routing)
-            .bind_ingestor(ingestor, &codec)
+            .bind_ingestor(ingestor, &input_schema)
             .map_err(|report| RuntimeError::entrypoint_binding(domain, report))?;
         let relays = RelayRuntimeHandles {
             registries: &routing.relay_registries,
@@ -265,12 +302,14 @@ impl Runtime {
             physical_node_id,
             "received",
         );
-        Ok(IngestorDependencies {
-            output_routes: programs.routes,
-            filter_where: programs.filter_where,
-            codec,
-            branched_templates,
-            metrics,
+        Ok(BoundIngestor {
+            input,
+            dependencies: IngestorDependencies {
+                output_routes: programs.routes,
+                filter_where: programs.filter_where,
+                branched_templates,
+                metrics,
+            },
         })
     }
 
@@ -485,18 +524,22 @@ mod tests {
                                 max_batch_size: "1MiB".to_string(),
                             })
                             .with_branch(OutputBranch::Unbranched),
-                            decode_using_codec: codec.clone(),
-                            timestamp_source: None,
-                            source: IngestSource::Mqtt {
-                                client,
-                                topic: "notifications".to_string(),
-                                instances: nonzero!(2u64),
-                                mode: MqttIngestMode::NoAckSequential {
-                                    session: MqttSession::Clean,
-                                    qos: MqttQos::AtMostOnce,
+                            input: nervix_models::IngestorInput::Transport(
+                                nervix_models::TransportIngestorInput {
+                                    source: IngestSource::Mqtt {
+                                        client,
+                                        topic: "notifications".to_string(),
+                                        instances: nonzero!(2u64),
+                                        mode: MqttIngestMode::NoAckSequential {
+                                            session: MqttSession::Clean,
+                                            qos: MqttQos::AtMostOnce,
+                                        },
+                                        quiesce: nervix_models::IngestQuiesceMode::Drop,
+                                    },
+                                    codec: codec.clone(),
                                 },
-                                quiesce: nervix_models::IngestQuiesceMode::Drop,
-                            },
+                            ),
+                            timestamp_source: None,
                             general_error_policy: GeneralErrorPolicy::Log,
                             filter_where: None,
                         })),
@@ -615,21 +658,25 @@ mod tests {
                                 max_batch_size: "1MiB".to_string(),
                             })
                             .with_branch(OutputBranch::Unbranched),
-                            decode_using_codec: codec.clone(),
-                            timestamp_source: None,
-                            source: IngestSource::Mqtt {
-                                client,
-                                topic: "notifications".to_string(),
-                                instances: nonzero!(1u64),
-                                mode: MqttIngestMode::AckSequential {
-                                    timeout: "oops".to_string(),
-                                    retry_policy: RetryPolicy {
-                                        backoff: "100ms".to_string(),
-                                        max_backoff: "200ms".to_string(),
+                            input: nervix_models::IngestorInput::Transport(
+                                nervix_models::TransportIngestorInput {
+                                    source: IngestSource::Mqtt {
+                                        client,
+                                        topic: "notifications".to_string(),
+                                        instances: nonzero!(1u64),
+                                        mode: MqttIngestMode::AckSequential {
+                                            timeout: "oops".to_string(),
+                                            retry_policy: RetryPolicy {
+                                                backoff: "100ms".to_string(),
+                                                max_backoff: "200ms".to_string(),
+                                            },
+                                        },
+                                        quiesce: nervix_models::IngestQuiesceMode::Drop,
                                     },
+                                    codec: codec.clone(),
                                 },
-                                quiesce: nervix_models::IngestQuiesceMode::Drop,
-                            },
+                            ),
+                            timestamp_source: None,
                             general_error_policy: GeneralErrorPolicy::Log,
                             filter_where: None,
                         })),

@@ -1,3 +1,12 @@
+//! The transport's tests: connection setup, typed requests, duplex and streamed exchanges, relay
+//! delivery, pools and quotas, discovery and progress, exercised between in-process transports.
+//!
+//! Layer: test harness.
+//!
+//! - **Owns.** Assertions over the transport's public operations and their limits.
+//! - **Depends on.** The transport and its test certificates.
+//! - **Must not know.** The runtime or control plane that uses the transport.
+
 use std::{
     collections::BTreeSet,
     path::PathBuf,
@@ -1222,10 +1231,8 @@ async fn slow_management_work_cannot_consume_cancellation_streams() {
     transport_b.shutdown().await;
 }
 
-#[path = "tests/duplex.rs"]
 mod duplex;
 
-#[path = "tests/progress.rs"]
 mod progress;
 
 #[tokio::test]

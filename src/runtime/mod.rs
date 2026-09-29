@@ -59,8 +59,8 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     AckMode, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClientConfigEntry, ClientName,
-    ClientResourceMount, ClusterNodeIncarnation, ClusterNodeName, CodecName,
-    CommandExecutionReference, CoordinationIdentity, CorrelationTimeoutAction,
+    ClientProducerEndReason, ClientResourceMount, ClusterNodeIncarnation, ClusterNodeName,
+    CodecName, CommandExecutionReference, CoordinationIdentity, CorrelationTimeoutAction,
     CorrelatorMatchPolicy, DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef,
     DomainState, EmitterName, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
     FlushPolicy, GeneralErrorPolicy, GeneratorName, InferencerExecutionMode,
@@ -147,24 +147,26 @@ use crate::{
     emitter_execution_plan::{EmitterExecutionPlan, EmitterOrderingGroupPlan, EmitterRoutePlan},
     emitter_start_plan::*,
     metrics::{
-        BatchMetricsHandle, BranchEvictionReason, IngestorQuiesceMetricLabels,
-        MessageMetricsHandle, NodeBatchMetricsSpec, NodeInputMetricsHandle, RelayMetricRecorders,
-        RelayMetricsHandle, RuntimeMetrics, RuntimeMetricsSnapshot,
+        BatchMetricsHandle, BranchEvictionReason, ClientIngestorSeries,
+        IngestorQuiesceMetricLabels, MessageMetricsHandle, NodeBatchMetricsSpec,
+        NodeInputMetricsHandle, RelayMetricRecorders, RelayMetricsHandle, RuntimeMetrics,
+        RuntimeMetricsSnapshot,
     },
     registry::{
         BranchInstanceAckBoundary, BranchedNodeSpecs, BranchedProcessorNodeSpec,
         BranchedProcessorOperationSpec, BranchedProcessorOutputSpec, BranchedProcessorOutputsSpec,
-        BranchedProcessorSpec, DomainActivationPlan, DynamicExecutionUpdate,
-        EndpointIngestorStartPlan, EntitySwapExecution, EntrypointPlans, ExecutionDelta,
-        ExecutionNode, ExecutionRevision, GeneratorExecutionPlan, GeneratorRoutePlan,
-        HttpIngestorStartPlan, IngestorSpec, IngestorStartPlan, KafkaDomainOffsetPlacement,
-        KafkaIngestorStartPlan, KafkaOffsetPlan, LookupResourcePlan, LoweredConstruction,
-        MessageErrorCompileSchemas, MessageErrorRouteKey, MessageErrorRouteSpecs,
-        MqttIngestorStartPlan, NatsIngestorStartPlan, PlannedClusterRevision, PlannedCodec,
-        PlannedCodecWireFormat, PlannedEntryRoute, PlannedRouteBranch, PlannedSignalingProtocol,
-        PrometheusIngestorStartPlan, PulsarIngestorStartPlan, RabbitMqIngestorStartPlan,
-        RedisPubSubIngestorStartPlan, ReingestorInputPlan, ReingestorPlan, SourceStartPlan,
-        SqsIngestorStartPlan, SyslogIngestorStartPlan, WasmModulePlan, WebsocketsIngestorStartPlan,
+        BranchedProcessorSpec, ClientIngestorStartPlan, DomainActivationPlan,
+        DynamicExecutionUpdate, EndpointIngestorStartPlan, EntitySwapExecution, EntrypointPlans,
+        ExecutionDelta, ExecutionNode, ExecutionRevision, GeneratorExecutionPlan,
+        GeneratorRoutePlan, HttpIngestorStartPlan, IngestorInputPlan, IngestorSpec,
+        IngestorStartPlan, KafkaDomainOffsetPlacement, KafkaIngestorStartPlan, KafkaOffsetPlan,
+        LookupResourcePlan, LoweredConstruction, MessageErrorCompileSchemas, MessageErrorRouteKey,
+        MessageErrorRouteSpecs, MqttIngestorStartPlan, NatsIngestorStartPlan,
+        PlannedClusterRevision, PlannedCodec, PlannedCodecWireFormat, PlannedEntryRoute,
+        PlannedRouteBranch, PlannedSignalingProtocol, PrometheusIngestorStartPlan,
+        PulsarIngestorStartPlan, RabbitMqIngestorStartPlan, RedisPubSubIngestorStartPlan,
+        ReingestorInputPlan, ReingestorPlan, SourceStartPlan, SqsIngestorStartPlan,
+        SyslogIngestorStartPlan, TransportInputPlan, WasmModulePlan, WebsocketsIngestorStartPlan,
         ZeroMqIngestorStartPlan,
     },
     resource::ResourceStore,
@@ -188,6 +190,7 @@ mod branch_instance_registry;
 mod branch_key;
 mod branch_lru_state;
 mod branch_runtime;
+mod client_ingestor;
 mod correlator;
 mod deduplicator;
 mod domain_clock;
@@ -298,6 +301,11 @@ use branch_runtime::{
     internal_processor_error_policies, persist_branch_instance_lru_snapshot,
     publish_branch_instance_lru_snapshot,
 };
+pub(crate) use client_ingestor::{
+    ClientIngestorGauges, ClientProducerEvent, ClientProducerEvents, ClientProducerHandle,
+    ClientProducerOpenRequest, ClientProducerReservation, ClientProducerRetention,
+    ClientSubmissionId, OpenedClientProducer,
+};
 use correlator::{
     CorrelatorMatchedBatch, CorrelatorOutputCompileContext, CorrelatorOutputContext,
     CorrelatorSide, CorrelatorTimeoutContext, compile_correlator_where_program,
@@ -386,10 +394,10 @@ use http_request_fields::{
 use inferencer_output::flush_branch_inferencer_output;
 pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
-    BranchedEntrypointInput, IngestGroupDispatch, IngestRouteCollector, IngestorDependencies,
-    IngestorRouteRuntimes, RawIngestDispatch, branched_branch_filter_blocking,
-    branched_branch_plan_blocking, branched_entrypoint_batch_from_inputs_blocking,
-    decode_ingested_payload,
+    BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,
+    IngestGroupDispatch, IngestRouteCollector, IngestorDependencies, IngestorRouteRuntimes,
+    RawIngestDispatch, branched_branch_filter_blocking, branched_branch_plan_blocking,
+    branched_entrypoint_batch_from_inputs_blocking, decode_ingested_payload,
 };
 pub(in crate::runtime) use ingest_metadata::IngestMetadataKind;
 use ingest_metadata::{

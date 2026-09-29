@@ -233,6 +233,36 @@ share per input. The branch task owns those shares for the length of the callbac
 resolves them itself: it releases them when the checkpoint completes and negatively acknowledges
 them when it fails. Holding them needs no lock and no shared registry.
 
+### Client ingestor endpoints
+
+Each client ingestor a node executes has one endpoint task that owns every producer attached to it:
+the batches each queued, the round-robin order among them, the batches handed to the execution's
+admission worker or admitted and awaiting acknowledgement, and whether admission is open. Producers,
+the admission worker, the quiesce watch, and lifecycle changes reach that state only as commands on
+the task's channel, applied in the order they were sent, so nothing locks it. An execution is installed before its admission worker and quiesce watch start, so the watch's
+first report, which opens admission, is applied after the installation.
+
+The admission worker takes one batch at a time over a channel of one. A worker that stops refuses
+the batch it was handed and never took, and closes the channel so that the endpoint refuses any
+later batch itself. The worker's task is joined before the endpoint learns that the execution
+stopped, so a batch the endpoint still holds then was taken by a worker that was aborted when its
+stop outlasted the grace period, possibly while dispatching it: its outcome is unknown, never
+refused. The endpoint task awaits each admitted batch's acknowledgement itself, among its commands
+and before further ones once it resolves, so an ending endpoint leaves no task behind, and a
+resolution for an attachment that already ended finds nothing to answer.
+
+After each command the task publishes its producer, outstanding, and window counts into plain
+atomics that `DESCRIBE` reads, and into metric gauges it resolved once. Each count is exact when
+written, and a reader may see one count of a change before another.
+
+The node's producer byte budget is one atomic counter. A reservation adds its bytes with a
+compare-and-swap that refuses to pass the budget, and dropping the reservation subtracts exactly
+those bytes, so concurrent opens through different sessions and links never overcommit it.
+
+A session's producer credit is held under a short mutex, taken by the receive loop when a batch
+arrives and returned by the producer's task before it queues that batch's reply, so a client that
+sends only after reading a reply always finds room. The mutex never crosses an await.
+
 ### Node quiesce accounting
 
 Every entity on a node keeps one set of quiesce counts. A drain reads them to decide whether the
@@ -299,6 +329,15 @@ gates. Dispatch loads that list once, compares the batch's branch fingerprint wi
 and waits only on matching gates. Removing a lease atomically republishes the list and releases its
 gate. This gives publication and dispatch one total order while unrelated branches neither acquire
 shared locks nor wait for the reset.
+
+### Client batch admission fence
+
+A client batch is validated before it is dispatched, and a quiesce can engage in between. The
+admission worker therefore tracks the batch's ACK root with the ingestor's drain accounting first,
+and only then reads the quiesce publication. Either the read comes before the engagement, so the
+drain that follows counts the root and waits for it, or the read observes the engagement and the
+batch is refused with its root resolved before anything was dispatched under it. No batch can be
+dispatched after a drain concluded that the ingestor held no admitted work.
 
 ### Assignment generations
 
@@ -428,10 +467,10 @@ owner, why a real atomic is required, and what that leaves unverified:
 
 | Owner | Why the atomic is real | What stays outside every check |
 | --- | --- | --- |
-| The Shuttle runners of execution, the interconnect and the server, and the Loom runner | Their statistics span every model execution they start and are read after the last one | Nothing a check claims; they are runner bookkeeping |
+| The Shuttle runners of execution, the interconnect, the server and the Rust client, and the Loom runner | Their statistics span every model execution they start and are read after the last one | Nothing a check claims; they are runner bookkeeping |
 | The WASM runtime's epoch driver | Its stop flag is read by an operating-system thread no model runs | When the epoch thread observes shutdown |
 | The VM benchmarks' allocation probe | A global allocator counts allocations made on every thread | Nothing; the benchmark claims nothing about synchronization |
-| The records of the relay gate and fan-out, entity gate, emitter record-write, durability barrier, WASM checkpoint, source host-loop, stream-slot and retained-archive Shuttle checks | A record changes in the same scheduling step as the operation it records, so recording adds no scheduling point | Nothing the owner does: records observe and never synchronize, and the owners' own atomics are modeled |
+| The records of the relay gate and fan-out, entity gate, emitter record-write, durability barrier, WASM checkpoint, source host-loop, stream-slot, retained-archive and client ingestor Shuttle checks | A record changes in the same scheduling step as the operation it records, so recording adds no scheduling point | Nothing the owner does: records observe and never synchronize, and the owners' own atomics are modeled |
 
 A real atomic never carries the protocol under test, chooses its branches, supplies its wakeups or
 establishes an ordering an assertion relies on. `just validate-primitive-boundary` rejects every
@@ -515,13 +554,13 @@ read and waiter registration are scheduler-visible, a missed notification leaves
 pending and Shuttle reports the resulting deadlock. Name a bounded number of participants so the
 search remains reviewable; use bounded depth-first search for small races and random plus
 probabilistic concurrency testing (PCT) for larger ones. The server's shared runner supplies
-random, PCT, and bounded DFS modes; interconnect and execution use random and PCT. The runner
-caps each schedule at 10,000 steps. Individual checks choose their iteration counts and PCT
+random, PCT, and bounded DFS modes; interconnect, execution, and the Rust client use random and
+PCT. The runner caps each schedule at 10,000 steps. Individual checks choose their iteration counts and PCT
 depth; `SHUTTLE_REPORT_STEPS=1` reports the highest observed step count when tuning a check. A
 step cap is an exploration bound, not a product timeout.
 
 `just test-shuttle` runs only library tests whose full names contain `shuttle_`, one test per
-process, in `nervix-execution`, `nervix-interconnect`, and `nervix-server`. It then repeats each
+process, in `nervix-execution`, `nervix-interconnect`, `nervix-client-core`, and `nervix-server`. It then repeats each
 package under Shuttle's uncontrolled-nondeterminism detector. The recipe uses the repository's
 kache-backed build and prepares the server's test dependencies; `just test` continues to run the
 ordinary suite. CI runs `just test-shuttle` and uploads `target/shuttle-failures` when a check
@@ -548,6 +587,8 @@ A family of names means each member runs independently through the recipe.
 | Interconnect slots and membership (`crates/interconnect/src/connection/stream_slots/shuttle_checks.rs`, `request/shuttle_checks.rs`) | `management_drain_stops_leasing_and_waits_for_every_leased_slot`, `replication_drain_stops_leasing_and_waits_for_every_leased_slot`, `bulk_drain_stops_leasing_and_waits_for_every_leased_slot`, and `relay_drain_stops_leasing_and_waits_for_every_leased_slot` keep partition and subquota reservations isolated, forbid leases after drain starts, and wait for every lease to return. `racing_registrations_lose_no_handler_and_publish_each_name_once` prevents a lost handler registration and duplicate name. `a_membership_change_between_a_callers_check_and_its_wait_is_never_lost` prevents a missed discovery wakeup. |
 | Shutdown and signals (`src/application/shutdown.rs`, `termination_signals.rs`) | `shuttle_racing_stop_requests_accept_exactly_one_and_keep_its_deadline` retains the first stop request and its deadline. `shuttle_phases_only_advance_and_every_completion_waiter_observes_the_one_outcome` keeps phase order and one completion. `shuttle_an_expired_deadline_and_a_repeated_signal_let_exactly_one_forced_exit_end_the_process` and `shuttle_a_repeated_signal_before_the_deadline_ends_the_process_with_the_status_of_that_signal` give one forced-exit claimant and the exit status of the cause that won. |
 | Emitter batch payloads (`src/runtime/emitter_record_writes_shuttle_tests.rs`) | `shuttle_a_retried_payload_acknowledges_each_fanned_in_member_once_after_every_emitter` and `shuttle_a_sibling_failure_resolves_each_fanned_in_member_once_despite_a_retry` fan two source messages out to a batching emitter and a sibling: each source acknowledgement completes once, successfully only after both emitters confirmed it, and the retry writes the retained payload's first bytes. `shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once` cuts an attempt short at any point and requires the next one to write only unanswered payloads and deliver each rejected member's message error once. `shuttle_a_drain_never_finds_the_emitter_empty_while_a_member_is_retained` races a drain's reads against a stalled write and the force flush that repeats it. |
+| Client ingestors (`src/runtime/client_ingestor_shuttle_tests.rs`) | `shuttle_racing_reservations_never_exceed_the_node_budget_and_return_every_byte` races opens that each need more than half the node's producer budget: at most one holds it at a time and every reservation returns its bytes. `shuttle_a_batch_racing_a_quiesce_is_either_counted_by_its_drain_or_refused_undispatched` races the admission fence against an engagement and its drain: no batch is dispatched after the drain concluded. `shuttle_a_closing_producer_answers_every_admitted_batch_once_before_its_release` and `shuttle_an_ending_endpoint_answers_every_batch_once_and_ends_its_producer_last` race a close or an endpoint end against the worker's admission reports and the batches' acknowledgements: every batch is answered exactly once, a close answers each with its real outcome before the release, and an end reports no admitted batch as not admitted and comes last. |
+| Rust client submission slots (`crates/client-core/src/producer/slots_shuttle_tests.rs`) | `shuttle_a_wait_racing_its_resolution_takes_the_outcome_once_and_returns_the_credit`, `shuttle_a_cancelled_wait_loses_neither_the_outcome_nor_the_credit`, and `shuttle_a_release_racing_its_resolution_returns_the_credit_exactly_once` race a submission's resolution against the application's wait, an aborted wait followed by a new one, and a release: the outcome is taken at most once, a cancelled wait leaves it retrievable, and the credit comes back exactly once. |
 | Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `shuttle_delivery_sends_state_before_ticks_without_regressing_progress` explores the production observer and attachment delivery order across accepted ticks, same-generation unassignment and reassignment, and a generation change. `shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains` races an attach's wait and lookup against the node's first installation of the committed domains and requires the lookup to find the domain and its clock. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |
 
 The checks of WASM checkpoint holds and the durability barrier use the same runner and replay

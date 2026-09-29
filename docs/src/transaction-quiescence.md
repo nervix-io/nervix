@@ -95,6 +95,17 @@ change. [Data Plane](./data-plane.md) explains the runtime work these gates prot
 that normally contribute each level. An ingestor's `ON QUIESCE` mode controls its external-source
 behavior under a hold; it is distinct from the step's quiesce level.
 
+A [client ingestor](./ingestors.md#client-ingestors) under a hold suspends admission: its producers
+are told admission is suspended, batches that were queued but not admitted are refused as
+`suspended`, and batches that arrive during the hold are refused the same way. The drain waits for
+the acknowledgement roots of the batches admitted before the hold, which the admission fence
+guarantees it counts: a batch either has its root tracked before the hold is observed, or is refused
+with nothing dispatched. Whether producers survive the step is decided by the ingestor's endpoint
+contract, not by the quiesce level: an alteration that keeps the contract reopens admission with
+every producer attached once the step is applied, one that changes it ends them as
+`endpoint changed`, and a failed drain releases the hold and reopens admission with the previous
+execution and every producer still attached.
+
 The report keeps separate effect sets for configuration creation/change/drop, resource catalog and
 version bindings, domain lifecycle, ownership moves, activations and deactivations, rebuilds,
 state resets, force flushes, and affected topology. An HTTPS `VHOST` version refresh can therefore

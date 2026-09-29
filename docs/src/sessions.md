@@ -14,7 +14,8 @@ DETACH DOMAIN CLOCK;
 ```
 
 Following a domain clock is not a subscription; see
-[Domain Clock Attachment](#domain-clock-attachment).
+[Domain Clock Attachment](#domain-clock-attachment). Publishing to a client ingestor uses
+[producers](#producers), which are not statements either.
 
 This page describes sessions as a user of NSPL sees them. [Client Session
 Protocol](./client-session-protocol.md) explains the protocol that carries them, and the [Client
@@ -191,6 +192,36 @@ Both statements run in order with the session's commands and are refused, with t
 refusal, while the session holds a transaction. Neither is persisted or becomes transaction
 content. See [Domains And Time](domains-and-time.md#following-a-domain-clock) for what a client
 computes from a paced clock.
+
+## Producers
+
+A session can publish typed batches to a [client ingestor](ingestors.md#client-ingestors) through
+producers it opens. A producer is not a statement: clients open, feed, and close it with the
+`OpenIngestor`, `SubmitBatch`, and `CloseIngestor` requests, and the Rust client exposes it as
+`Client::open_ingestor`; see [Client Library](client-library.md#producers).
+
+- An open names its domain explicitly, so `USE` never retargets a producer, and it is answered on
+  the session's ordered lane with the ingestor's input schema, its `START` generation, the endpoint
+  contract and attachment it bound to, the ingestor's acknowledgement policy, the credit it was
+  granted, and whether admission is open. A refused open leaves nothing attached.
+- Producers belong to the session, not to a transaction: an open is refused while the session holds
+  a transaction.
+- A session holds at most 32 producers and 32 MiB of producer credit; the serving node holds at most
+  128 MiB for every producer it serves or retains batches for.
+- A submitted batch is handed to its producer without the session's receive loop waiting on it, so
+  commands, subscriptions, domain clock frames, and every other request keep moving while batches
+  await their graph outcome. Batches are not counted against the session's in-flight request limit;
+  the producer's credit bounds them instead.
+- Every batch receives exactly one terminal reply: not admitted, completed, processing failed, or of
+  unknown outcome. A batch cannot be cancelled once sent; `CancelRequest` is refused for it, because
+  withdrawing an admitted batch is not possible.
+- A batch sent beyond the producer's credit is refused and ends the producer as a protocol
+  violation. Its earlier batches still receive their outcomes.
+- The session tells the client when a producer's admission is suspended or open again, and when the
+  server ends a producer, which is the last frame about it. Closing a producer refuses its queued
+  batches, waits for its admitted ones, and is answered once every batch has its outcome.
+- When the session ends, its producers detach. Admitted batches continue through the graph with
+  nobody left to answer them, so a client reports them as of unknown outcome.
 
 ## Suggestions
 

@@ -18,9 +18,10 @@ use std::{collections::VecDeque, fmt::Display, num::NonZeroU64};
 use ahash::{HashMap, HashSet};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    self as wire, ClientFrame, DomainInfo, EncodedFrame, Leadership, Reply, ReplyBody, RequestId,
-    RowSchema, ServerFrame, ServerMessage, SessionLimits, SubscribeDisposition, SubscriptionHandle,
-    SubscriptionOpened, TransferAssembly, TransferPart, UnsubscribeDisposition, VerifiedFrame,
+    self as wire, ClientFrame, DomainInfo, EncodedFrame, Leadership, OpenIngestorDisposition,
+    ProducerId, Reply, ReplyBody, RequestId, RowSchema, ServerFrame, ServerMessage, SessionLimits,
+    SubscribeDisposition, SubscriptionHandle, SubscriptionOpened, TransferAssembly, TransferPart,
+    UnsubscribeDisposition, VerifiedFrame,
     grpc::{ClientExchangeCodec, EXCHANGE_PATH},
 };
 use nervix_models::RelayName;
@@ -39,6 +40,7 @@ use crate::{
     domain_clock::DomainClockAttachments,
     error::ClientError,
     events::{ServerEvent, SubscriptionEvent, SubscriptionRowsEvent},
+    producer::ProducerRegistry,
     subscriptions::DesiredSubscriptions,
 };
 
@@ -445,6 +447,8 @@ pub(crate) struct EventSinks {
     pub(crate) domains: watch::Sender<Option<Vec<DomainInfo>>>,
     /// The domain clocks the client follows, and the events about them.
     pub(crate) clocks: DomainClockAttachments,
+    /// The producers opened on each exchange, and the events about them.
+    pub(crate) producers: ProducerRegistry,
 }
 
 impl EventSinks {
@@ -458,6 +462,7 @@ impl EventSinks {
     pub(crate) fn close_generation(&self, generation: &Arc<()>) {
         self.desired.ended(generation);
         self.clocks.exchange_ended(generation);
+        self.producers.exchange_ended(generation);
         self.subscriptions.close(generation);
         self.notices.close(generation);
     }
@@ -485,6 +490,7 @@ impl SessionEvents {
                 leadership,
                 domains,
                 clocks: DomainClockAttachments::new(),
+                producers: ProducerRegistry::default(),
             },
             leadership: observed_leadership,
             domains: Mutex::new(observed_domains),
@@ -796,6 +802,15 @@ impl ExchangeReader {
                 self.sinks.clocks.apply_attach(outcome, &self.generation);
             }
             ReplyBody::DomainClockDetach(outcome) => self.sinks.clocks.apply_detach(outcome),
+            ReplyBody::OpenIngestor(outcome) => {
+                if let OpenIngestorDisposition::Opened(opened) = &outcome.disposition {
+                    self.sinks.producers.opened(
+                        &self.generation,
+                        ProducerId::opened_by(reply.request_id),
+                        opened.description.admission,
+                    );
+                }
+            }
             _ => {}
         }
         let waiter = self.pending.lock().take(reply.request_id);
@@ -891,6 +906,14 @@ impl ExchangeReader {
             }
             wire::ServerEvent::DomainClockAttachmentEnded(ended) => {
                 self.sinks.clocks.apply_ended(ended, &self.generation);
+                ReaderFlow::Continue
+            }
+            wire::ServerEvent::ProducerAdmissionChanged(changed) => {
+                self.sinks.producers.admission(&self.generation, changed);
+                ReaderFlow::Continue
+            }
+            wire::ServerEvent::ProducerEnded(ended) => {
+                self.sinks.producers.ended(&self.generation, ended);
                 ReaderFlow::Continue
             }
             // No reply follows for any request still in flight; the waiters observe the closed

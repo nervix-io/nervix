@@ -3,7 +3,7 @@
 This manual is the normative contract for a program that speaks the Nervix client session protocol.
 It states what an implementation must do to frame and verify messages, correlate requests, recover
 commands exactly, follow the leader, hold a transaction, read subscriptions without misreading a
-value, upload resources, and download backups. [Client Session Protocol](./client-session-protocol.md) explains why
+value, publish batches through producers, upload resources, and download backups. [Client Session Protocol](./client-session-protocol.md) explains why
 the system behaves this way. This manual does not repeat those reasons, and the chapter does not
 repeat these rules.
 
@@ -38,6 +38,9 @@ answers each request with one terminal `Reply`, possibly delivered as transfer p
 | `UnsubscribeRequest` | Ordered lane | The session's node | `UnsubscribeOutcome` |
 | `AttachDomainClockRequest` | Ordered lane | Any node | `DomainClockAttachOutcome` |
 | `DetachDomainClockRequest` | Ordered lane | The session's node | `DomainClockDetachOutcome` |
+| `OpenIngestorRequest` | Ordered lane | Any node | `OpenIngestorOutcome` |
+| `SubmitBatchRequest` | The producer's task | The session's node | `SubmissionOutcome` |
+| `CloseIngestorRequest` | The producer's task | The session's node | `CloseIngestorOutcome` |
 | `SuggestRequest` | Concurrently | Any node | `SuggestOutcome` |
 | `ChoiceLookupRequest` | Concurrently | Any node | `ChoiceOutcome` |
 | `ListDomainsRequest` | Concurrently | Any node | `DomainList` |
@@ -61,6 +64,7 @@ Unsolicited `ServerMessage` bodies carry no request identity:
 | `ServerNotice` | Text for display at `Info`, `Warning`, or `Error` |
 | `SubscriptionRows`, `SubscriptionDeliveryLost`, `SubscriptionRowsSkipped`, `SubscriptionEnded` | Frames of one subscription generation |
 | `DomainClockObserved`, `DomainClockTicked`, `DomainClockAttachmentEnded` | State, accepted tick progress, and end frames of one domain clock attachment |
+| `ProducerAdmissionChanged`, `ProducerEnded` | The admission state and the end of one producer |
 | `SessionEnding` | The last frame of a session the server ends |
 
 An upload is a separate call with its own frames; see [Resource Uploads](#resource-uploads). So is
@@ -454,6 +458,44 @@ payload, infinity, and nullable and sensitive branch key fields.
   other reason or leaves it unanswered, the client MUST keep the attachment interrupted rather than
   drop the domain, and SHOULD send the attach again on that session after a growing wait.
 
+## Producers
+
+- **P-1.** A client MUST open a producer with `OpenIngestorRequest`, naming the domain, the
+  ingestor, the exact fields it expects, including each field's optionality and sensitivity, and
+  positive credit no larger than 1,024 batches and 32 MiB. It MUST handle both dispositions:
+  `Opened` with the producer's description, and `Refused` with a `ClientProducerRefusal`. It MUST
+  NOT open a producer while its session holds a transaction.
+- **P-2.** The producer's identity is the request identity of its open. A client MUST start
+  following that producer before the open's waiter completes, so the admission changes and end that
+  the server sends after the reply find it, and it MUST ignore frames about a producer it does not
+  follow.
+- **P-3.** A batch MUST be one canonical Arrow IPC stream: the schema message, exactly one record
+  batch, and the end-of-stream marker, uncompressed, without dictionary or extension encodings, and
+  with exactly the fields of the producer's description in Nervix's Arrow representation and
+  without field metadata. It MUST carry at most `max_batch_rows` rows and `max_batch_bytes` bytes of
+  the grant.
+- **P-4.** A client MUST track the credit its batches hold: each takes one of the granted batches and
+  its size of the granted bytes from the moment it is sent until its outcome is read. It MUST NOT
+  send a batch that does not fit; the server refuses it as `CreditExceeded` and ends the producer
+  as `ProtocolViolated`.
+- **P-5.** A client MUST expect exactly one `SubmissionOutcome` per batch and MUST NOT report
+  completion before `Completed` arrives; transport receipt is not an outcome. It MAY send a batch
+  again only when its outcome is `NotAdmitted` with `Suspended` or `Busy`, only while admission is
+  open, and only after the ingestor's declared backoff, which starts at `retry_backoff` and doubles
+  up to `retry_max_backoff`. It MUST NOT send again, by itself, a batch whose outcome is
+  `ProcessingFailed` or `OutcomeUnknown`, or one refused for any other reason.
+- **P-6.** A client MUST stop sending new batches while the newest `ProducerAdmissionChanged` says
+  `Suspended`. Admission changes are coalesced, so it MUST NOT expect every intermediate state. It
+  MUST treat `ProducerEnded` as the last frame about the producer, every batch of which has already
+  received its outcome.
+- **P-7.** A client MUST NOT send `CancelRequest` for a submitted batch; the server refuses it with
+  `InvalidRequest`, and the batch's outcome still follows. A caller that stops waiting MUST leave the
+  outcome retrievable, so it is never lost.
+- **P-8.** A client MUST close a producer with `CloseIngestorRequest`, and MUST expect every batch's
+  outcome before the close's reply. When its session is lost, it MUST report every batch sent without
+  an outcome as of unknown outcome, MUST NOT report any of them as not admitted, and MUST open a new
+  producer on the next session; no producer survives a session.
+
 ## Resource Uploads
 
 - **U-1.** A client MUST upload one archive per `UploadResource` call. The first frame is an
@@ -629,6 +671,41 @@ stateDiagram-v2
 Consumers](./client-session-protocol.md#restoration-and-bounded-consumers) shows the lifecycle a
 client keeps for each subscription across sessions.
 
+**A producer and its batches.** A producer lives on one session, and each batch holds its credit
+until its outcome is read:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Opening: OpenIngestorRequest sent
+    Opening --> Refused: Refused
+    Opening --> Open: Opened, followed before the waiter completes
+    Open --> Suspended: ProducerAdmissionChanged Suspended
+    Suspended --> Open: ProducerAdmissionChanged Open
+    Open --> Closing: CloseIngestorRequest sent
+    Suspended --> Closing: CloseIngestorRequest sent
+    Closing --> Closed: every outcome, then the close reply
+    Open --> Ended: every outcome, then ProducerEnded
+    Suspended --> Ended: every outcome, then ProducerEnded
+    Open --> Lost: session lost; sent batches unknown
+    Suspended --> Lost: session lost; sent batches unknown
+    Refused --> [*]
+    Closed --> [*]
+    Ended --> [*]
+    Lost --> [*]
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> AwaitingCredit
+    AwaitingCredit --> Sent: credit taken, frame written
+    Sent --> Retrying: NotAdmitted Suspended or Busy
+    Retrying --> Sent: backoff elapsed, admission open
+    Sent --> Resolved: any other outcome
+    Sent --> Unknown: session lost
+    Resolved --> [*]: outcome read, credit returned
+    Unknown --> [*]: reported unknown, credit returned
+```
+
 ## Conformance Evidence
 
 The rules above are exercised by these tests. The Cucumber scenarios run through
@@ -658,6 +735,7 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | S-7, S-8 | In `client_wire_failures.feature`: `A reconnected native client restores acknowledged subscriptions`, `A native client deletes a subscription its lost session held and opens the name again`, `A native client reports a refused subscription restoration and deletes the subscription without the server`, and `A native client keeps a subscription active while it receives a row that fills most of a frame`; `Subscription restoration and typed transaction inspection survive the same leader loss` in `client_wire_qualification.feature`; `Web console restores a relay tab after its transaction finished while it reconnected`, `Web console restores a relay tab before it attaches its open transaction again`, and `Web console bounds a busy relay tab and keeps its REPL responsive` in `nspl_repl.feature`; `deleting_while_creation_is_in_flight_drains_its_late_success_before_name_reuse`, `cancelling_an_in_flight_restore_cleans_up_its_late_success`, `a_refused_restoration_is_repeated_after_a_growing_delay`, `deleting_a_subscription_whose_restoration_was_refused_needs_no_server`, `a_subscription_requested_on_a_closed_session_opens_on_a_new_session`, `one_subscription_overflow_preserves_other_subscription_events`, `each_subscription_retains_a_frame_of_the_frame_limit_and_overflows_alone_past_it`, `a_subscription_past_the_exchange_allowance_overflows_without_evicting_full_subscriptions`, and `a_row_frame_filled_to_the_frame_limit_reaches_an_active_subscription` |
 | R-1 to R-5 | `A <runtime> client round-trips an operation, typed rows, an error and a closure` in `client_conformance.feature` for every runtime; `a_batch_round_trips_every_cell_kind_at_its_bounds`, `cells_must_follow_their_fields`, `branch_identity_must_match_the_schema`, and `lists_must_follow_their_element_type_and_length`; `a_batch_that_does_not_conform_to_its_schema_is_a_protocol_failure` in the binding |
 | K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; the state, tick, and client pacing outlines in `domain_clock_attachment.feature`; the owner-loss case in `domain_clock_contract.feature`; `The CLI follows a domain clock across a cluster restart` in `cli_session.feature`; `A <runtime> client follows a paced domain clock through the shared binding` in `client_conformance.feature` for every binding host; `an_attach_answers_once_its_node_has_installed_the_committed_domains`, `an_ended_exchange_interrupts_its_attachments_until_a_new_exchange_attaches_them`, `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock`, `a_refused_clock_restoration_is_repeated_on_the_same_session`, `a_clock_restoration_answered_already_attached_follows_the_new_session`, `a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_read`, `ticks_coalesce_per_domain_and_follow_their_generations_state`, and the `server_domain_clock_ticked.nxsm` conformance frame |
+| P-1 to P-8 | Every scenario of `client_ingestors.feature`; `events_reach_the_producer_of_their_own_exchange_only` and `the_backoff_doubles_up_to_its_maximum` in `nervix-client-core`; `every_open_refusal_round_trips`, `every_submission_outcome_round_trips`, `producer_events_round_trip_and_name_no_request`, and `the_largest_submitted_batch_fits_a_frame_and_one_byte_more_does_not` in `nervix-client-wire`; the `client_open_ingestor.nxcm`, `client_submit_batch.nxcm`, `server_ingestor_opened.nxsm`, `server_submission_*.nxsm`, and `server_producer_*.nxsm` conformance frames |
 | U-1 to U-5 | `An upload stream the protocol does not allow is refused with a typed failure and admits nothing` in `session_protocol.feature`; in `resource_describe.feature`, `An incomplete upload does not admit content or consume its identity`, `Upload retry reports one assigned version`, `Upload retry after leader change reports the assigned version`, and `An uncertain upload completes once across installation and leader change`; `a_lost_upload_reply_retries_with_the_same_identity_and_archive` and `malformed_upload_replies_are_rejected_by_their_correlations` |
 | A-1 to A-6 | Every scenario of `backup.feature`, including `A client that loses its download fetches the archive again until a download collects it`, `An archive is refused once its execution reference's retry validity ends`, and `Downloads of another user's backup, or under a reference without an archive, are refused`; `every_download_frame_round_trips` and `a_download_request_with_an_invalid_reference_is_refused` in `nervix-client-wire`; the `backup_download_*` conformance frames |
 | B-1 to B-7 | The binding tests of `nervix-client-ffi`, such as `retained_references_keep_the_frame_until_the_last_one_is_released`, `string_and_bytes_columns_are_copied_with_offsets_and_borrowed_per_cell`, `every_event_kind_reports_its_subscription_and_count`, and `a_token_bounds_a_call_by_cancellation_and_by_deadline`; the C, C++, Python, Java, and Ruby cases of `client_conformance.feature` |
@@ -733,7 +811,10 @@ A client built on this protocol MUST NOT tell its users that:
 - an uncertain command failed, or succeeded, before its own outcome was recovered;
 - rows arrive in Arrow, or in any encoding other than typed Row frames, or that a columnar form
   exists;
-- a session, its subscriptions, or its clock attachments survive the loss of its connection;
+- a session, its subscriptions, its clock attachments, or its producers survive the loss of its
+  connection;
+- a submitted batch was delivered exactly once, or that a batch whose outcome is unknown or failed
+  had no effect;
 - a backup's archive can be downloaded more than once, or survives a restart of the node that
   assembled it;
 - a restore whose outcome is unknown changed nothing, or that a restore which failed at a step

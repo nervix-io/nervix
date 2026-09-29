@@ -49,6 +49,7 @@ use triomphe::Arc;
 use super::{
     authentication::{AuthRateLimiter, BasicAuthCredentials},
     backup::ServerRetainedBackups,
+    client_producers::ClientProducerRouter,
     command_execution::{
         CommandAdmission, CommandExecutionOwners, CommandExecutionPolicy, PersistentCommandRequest,
     },
@@ -167,6 +168,9 @@ pub(in crate::application) struct SessionServiceInner {
     /// Also held by every subscription delivery, whose interest lease releases into it.
     pub(in crate::application) subscription_interests: SubscriptionInterests,
     pub(in crate::application) interconnect: Transport,
+    /// Attaches the producers of this node's sessions, locally or through the node that executes
+    /// their ingestor.
+    pub(in crate::application) client_producers: ClientProducerRouter,
     pub(in crate::application) service_tasks: ServiceTasks,
     pub(in crate::application) configured_basic_auth: Option<BasicAuthCredentials>,
     pub(in crate::application) auth_rate_limiter: AuthRateLimiter,

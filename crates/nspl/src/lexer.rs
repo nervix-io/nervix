@@ -187,6 +187,7 @@ pub enum Identifier {
     Field,
     Codec,
     Ingestor,
+    Ingestors,
     Into,
     Relay,
     Route,

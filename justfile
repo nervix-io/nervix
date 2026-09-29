@@ -161,7 +161,7 @@ test-primitives:
 test-shuttle filter="": build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
-    shuttle_packages=(nervix-execution nervix-interconnect nervix-server)
+    shuttle_packages=(nervix-execution nervix-interconnect nervix-client-core nervix-server)
     for shuttle_package in "${shuttle_packages[@]}"; do
         just test-shuttle-package "${shuttle_package}" {{ quote(filter) }}
         SHUTTLE_CHECK_NONDETERMINISM=1 \

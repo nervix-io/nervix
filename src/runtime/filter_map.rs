@@ -225,7 +225,7 @@ impl InferencerFilterMapTensors<'_> {
                 .map(|declaration| {
                     arrow_schema::Field::new(
                         &declaration.tensor,
-                        crate::runtime_schema::arrow_data_type(&declaration.schema.message_type()),
+                        declaration.schema.message_type().arrow_data_type(),
                         false,
                     )
                 })

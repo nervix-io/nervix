@@ -1200,6 +1200,46 @@ table DomainClockObservation {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Client producers
+// ---------------------------------------------------------------------------------------------
+//
+// A producer submits typed batches to one client ingestor. An OpenIngestorRequest opens it, and
+// every later request and event about it names it by that request's request_id, which the session
+// never reuses. A producer belongs to the session that opened it; no other session can submit to
+// it or close it.
+//
+// A batch is one canonical Arrow IPC stream: the schema message, exactly one record batch message
+// and the end-of-stream marker, each message opened by the continuation marker. The schema is the
+// ingestor's input schema field for field, without schema or field metadata, and the batch is
+// uncompressed and carries no dictionary. The server validates the whole batch before any row of
+// it enters the graph, so a batch is admitted whole or not at all.
+//
+// A producer submits within the credit its open was granted: a batch holds one of the granted
+// batches and its payload bytes from the moment it is sent until its terminal reply is sent back.
+// A batch beyond that credit is refused and ends the producer.
+
+/// Every client ingestor's batches share one acknowledgement window across its producers.
+table SequentialProducerWindow {}
+
+table ParallelProducerWindow {
+  /// Non-zero.
+  max: ulong;
+}
+
+union ProducerWindow {
+  SequentialProducerWindow,
+  ParallelProducerWindow
+}
+
+enum ProducerAdmission : ubyte {
+  /// Batches are admitted.
+  Open,
+  /// A quiesce, memory pressure or a drain holds admission. A batch sent now is refused as not
+  /// admitted; the producer keeps it and sends it again once admission opens.
+  Suspended
+}
+
+// ---------------------------------------------------------------------------------------------
 // Backups
 // ---------------------------------------------------------------------------------------------
 
@@ -1425,6 +1465,37 @@ table DetachDomainClockRequest {
   domain: string (required);
 }
 
+/// Attaches a producer to a client ingestor of a running domain.
+table OpenIngestorRequest {
+  domain: string (required);
+  ingestor: string (required);
+  /// The fields every batch carries, in order, with their types, nullability and sensitivity.
+  /// Never empty. The open is refused unless they are exactly the ingestor's input schema.
+  expected_fields: [RowField] (required);
+  /// The most batches the producer may have without a terminal reply. Non-zero. An open asking
+  /// for more than 1024 is refused with InvalidLimits.
+  max_outstanding_batches: uint;
+  /// The most Arrow IPC bytes those batches may carry together. Non-zero. An open asking for more
+  /// than 32 MiB is refused with InvalidLimits.
+  max_outstanding_bytes: ulong;
+}
+
+/// Submits one batch of an open producer. Its terminal reply is a SubmissionOutcome, which always
+/// follows: a CancelRequest cannot withdraw a submitted batch.
+table SubmitBatchRequest {
+  /// The request_id of the OpenIngestorRequest that opened the producer. Non-zero.
+  producer: ulong;
+  /// One canonical Arrow IPC stream. Never empty.
+  batch: [ubyte] (required);
+}
+
+/// Stops admission for a producer and releases it once every batch it submitted has its terminal
+/// reply, all of which precede this request's reply.
+table CloseIngestorRequest {
+  /// The request_id of the OpenIngestorRequest that opened the producer. Non-zero.
+  producer: ulong;
+}
+
 union ClientRequest {
   CommandRequest,
   SuggestRequest,
@@ -1437,7 +1508,10 @@ union ClientRequest {
   CancelRequest,
   ChoiceLookupRequest,
   AttachDomainClockRequest,
-  DetachDomainClockRequest
+  DetachDomainClockRequest,
+  OpenIngestorRequest,
+  SubmitBatchRequest,
+  CloseIngestorRequest
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1863,6 +1937,179 @@ table DomainClockDetachOutcome {
   message: string (required);
 }
 
+/// The producer is attached, and its batches are admitted into the ingestor's graph from now on.
+table ProducerOpened {
+  domain: string (required);
+  ingestor: string (required);
+  /// The ingestor's input schema. Every batch carries exactly these fields. Never empty.
+  fields: [RowField] (required);
+  /// The number of STARTs the domain had committed when the producer attached. A new START ends
+  /// the producer.
+  generation: ulong;
+  /// The endpoint contract the producer is bound to: the ingestor, its input schema and the
+  /// branches its routes construct.
+  contract: Fingerprint (required);
+  /// The attachment on the node that executes the ingestor. Exactly 16 bytes.
+  attachment: [ubyte] (required);
+  window: ProducerWindow (required);
+  /// The ingestor's ACK TIMEOUT, in nanoseconds. Non-zero.
+  ack_timeout_nanos: ulong;
+  /// The first delay before a batch refused as suspended or busy is sent again, in nanoseconds.
+  /// Non-zero.
+  retry_backoff_nanos: ulong;
+  /// The longest such delay, in nanoseconds. At least retry_backoff_nanos.
+  retry_max_backoff_nanos: ulong;
+  /// The batches the producer may have without a terminal reply. Non-zero.
+  granted_batches: uint;
+  /// The Arrow IPC bytes those batches may carry together. Non-zero.
+  granted_bytes: ulong;
+  /// The largest batch one submission carries, in bytes. Non-zero, and at most granted_bytes.
+  max_batch_bytes: ulong;
+  /// The most rows one batch carries. Non-zero.
+  max_batch_rows: uint;
+  /// Required.
+  admission: ProducerAdmission = null;
+}
+
+/// Why a producer was not opened. Nothing is left attached after any of them.
+enum ProducerRefusal : ubyte {
+  DomainNotFound,
+  /// The domain exists but is not running.
+  DomainStopped,
+  IngestorNotFound,
+  /// The ingestor reads an external transport rather than client batches.
+  NotClientIngestor,
+  /// The ingestor's execution is not running where it is scheduled, or its node could not be
+  /// reached. Opening again later may succeed.
+  EndpointUnavailable,
+  /// The expected fields are not exactly the ingestor's input schema.
+  SchemaMismatch,
+  /// The session already holds 32 producers.
+  TooManyProducers,
+  /// The session's 32 MiB producer budget cannot hold the requested bytes.
+  SessionCapacityExhausted,
+  /// The producer budget of the serving node, or of the node the producer is forwarded to, cannot
+  /// hold the requested bytes.
+  NodeCapacityExhausted,
+  /// The requested limits exceed what one producer may ask for.
+  InvalidLimits,
+  /// The session holds a transaction. Producers belong to the session, not to a transaction.
+  InTransaction
+}
+
+table ProducerRefused {
+  /// Required.
+  refusal: ProducerRefusal = null;
+}
+
+union OpenIngestorDisposition {
+  ProducerOpened,
+  ProducerRefused
+}
+
+table OpenIngestorOutcome {
+  disposition: OpenIngestorDisposition (required);
+  message: string (required);
+}
+
+/// Why no row of a batch entered the graph.
+enum SubmissionRefusal : ubyte {
+  /// The batch is not an Arrow IPC stream.
+  MalformedBatch,
+  /// The stream carries a message besides its schema and one record batch.
+  UnexpectedMessage,
+  /// The record batch is compressed.
+  CompressedBatch,
+  /// The stream's schema is not the producer's.
+  SchemaMismatch,
+  /// The stream carries no record batch, or more than one.
+  NotOneBatch,
+  /// The batch carries more rows than max_batch_rows.
+  TooManyRows,
+  /// The batch, or the columns it decodes to, is larger than one submission may carry.
+  BatchTooLarge,
+  /// The columns do not satisfy their declared types, nullability or buffer bounds.
+  InvalidData,
+  /// Admission is suspended. The same batch can succeed once admission opens.
+  Suspended,
+  /// The node executing the ingestor had no capacity to validate the batch. The same batch can
+  /// succeed after the retry backoff.
+  Busy,
+  /// The ingestor's execution is stopping or moving. The producer ends.
+  Draining,
+  /// The producer was closing, closed or ended, or this session never opened it.
+  ProducerEnded,
+  /// The batch exceeded the producer's granted credit. The producer ends.
+  CreditExceeded
+}
+
+table SubmissionNotAdmitted {
+  /// Required.
+  refusal: SubmissionRefusal = null;
+}
+
+/// The batch's source acknowledgement resolved successfully under the graph's policies.
+table SubmissionCompleted {}
+
+enum ProcessingFailure : ubyte {
+  /// The acknowledgement made no progress within the ACK TIMEOUT. Admitted work may still
+  /// complete.
+  AckTimedOut,
+  /// A route, a policy or a downstream node negatively acknowledged the batch.
+  Rejected
+}
+
+/// The batch was admitted and its source acknowledgement failed. Some of its effects may have
+/// happened.
+table SubmissionFailed {
+  /// Required.
+  failure: ProcessingFailure = null;
+}
+
+enum OutcomeUncertainty : ubyte {
+  /// The ingestor's execution stopped, or the producer ended, while the acknowledgement was
+  /// unresolved.
+  Interrupted,
+  /// The node executing the ingestor, or the connection to it, was lost.
+  OwnerLost
+}
+
+/// The batch may have been admitted and processed, and no terminal result can be established.
+table SubmissionOutcomeUnknown {
+  /// Required.
+  cause: OutcomeUncertainty = null;
+}
+
+union SubmissionDisposition {
+  SubmissionNotAdmitted,
+  SubmissionCompleted,
+  SubmissionFailed,
+  SubmissionOutcomeUnknown
+}
+
+/// The terminal reply to a SubmitBatchRequest.
+table SubmissionOutcome {
+  disposition: SubmissionDisposition (required);
+  /// A non-sensitive description, empty for a completed batch.
+  message: string (required);
+}
+
+/// Every batch the producer submitted has its terminal reply, and the producer is released.
+table ProducerClosed {}
+
+/// The session holds no open producer by that identity. Nothing changed.
+table ProducerNotOpen {}
+
+union CloseIngestorDisposition {
+  ProducerClosed,
+  ProducerNotOpen
+}
+
+table CloseIngestorOutcome {
+  disposition: CloseIngestorDisposition (required);
+  message: string (required);
+}
+
 union ReplyBody {
   CommandOutcome,
   AttachOutcome,
@@ -1878,7 +2125,10 @@ union ReplyBody {
   TransferPart,
   ChoiceOutcome,
   DomainClockAttachOutcome,
-  DomainClockDetachOutcome
+  DomainClockDetachOutcome,
+  OpenIngestorOutcome,
+  SubmissionOutcome,
+  CloseIngestorOutcome
 }
 
 table Reply {
@@ -2035,6 +2285,41 @@ table DomainClockAttachmentEnded {
   reason: DomainClockAttachmentEndReason = null;
 }
 
+/// Whether an open producer's batches are admitted changed.
+table ProducerAdmissionChanged {
+  /// The request_id of the OpenIngestorRequest that opened the producer. Non-zero.
+  producer: ulong;
+  /// Required.
+  admission: ProducerAdmission = null;
+}
+
+enum ProducerEndReason : ubyte {
+  /// An alteration changed the endpoint contract. Opening again validates the new contract.
+  EndpointChanged,
+  /// The ingestor or its domain was removed.
+  EndpointRemoved,
+  /// The domain stopped, or a new START replaced the generation the producer attached under.
+  DomainStopped,
+  /// A planned handoff moved the ingestor's execution to another node.
+  Relocated,
+  /// The serving node, or the node executing the ingestor, is shutting down.
+  ShuttingDown,
+  /// The node executing the ingestor, or the connection to it, was lost.
+  OwnerLost,
+  /// The producer submitted a batch beyond its granted credit.
+  ProtocolViolated
+}
+
+/// The server ended a producer. Every batch it submitted already has its terminal reply, and this
+/// is the last frame about the producer.
+table ProducerEnded {
+  /// The request_id of the OpenIngestorRequest that opened the producer. Non-zero.
+  producer: ulong;
+  /// Required.
+  reason: ProducerEndReason = null;
+  message: string (required);
+}
+
 table ServerShuttingDown {}
 
 table ProtocolViolated {
@@ -2066,7 +2351,9 @@ union ServerBody {
   SessionEnding,
   DomainClockObserved,
   DomainClockAttachmentEnded,
-  DomainClockTicked
+  DomainClockTicked,
+  ProducerAdmissionChanged,
+  ProducerEnded
 }
 
 // ---------------------------------------------------------------------------------------------

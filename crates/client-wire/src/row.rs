@@ -133,7 +133,7 @@ impl RowSchema {
 }
 
 /// Encodes a field as a table at `depth`.
-fn encode_field<'fbb>(
+pub(crate) fn encode_field<'fbb>(
     field: &SchemaField,
     encoder: &mut Encoder<'fbb>,
     depth: usize,
@@ -154,7 +154,7 @@ fn encode_field<'fbb>(
     ))
 }
 
-fn decode_field(
+pub(crate) fn decode_field(
     decoder: Decoder<'_>,
     field: wire::RowField<'_>,
 ) -> Result<SchemaField, Report<WireDecodeError>> {

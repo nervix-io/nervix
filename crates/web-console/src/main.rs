@@ -2706,6 +2706,22 @@ fn apply_event(
             signals.terminal_lines.update(|lines| lines.push(line));
             SessionStep::Continue
         }
+        // The console opens no producers, so these name a producer of no view; they are shown
+        // rather than dropped.
+        ServerEvent::ProducerAdmissionChanged(changed) => {
+            let line = TermLine::info(format!(
+                "producer {}: admission {}",
+                changed.producer,
+                changed.admission.as_ref()
+            ));
+            signals.terminal_lines.update(|lines| lines.push(line));
+            SessionStep::Continue
+        }
+        ServerEvent::ProducerEnded(ended) => {
+            let line = TermLine::error(ended.message);
+            signals.terminal_lines.update(|lines| lines.push(line));
+            SessionStep::Continue
+        }
         ServerEvent::SessionEnding(ending) => match ending.reason {
             SessionEndReason::ServerShuttingDown => {
                 signals.terminal_lines.update(|lines| {

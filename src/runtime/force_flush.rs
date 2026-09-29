@@ -313,6 +313,21 @@ impl IngestorAckRootTrackers {
     pub(in crate::runtime) fn tracked_root(&self) -> (AckSet, AckCompletion) {
         AckSet::tracked_roots(vec![self.domain.clone(), self.ingestor.clone()])
     }
+
+    /// Trackers of one ingestor that no runtime shares, for a check that drives its roots alone.
+    #[cfg(test)]
+    pub(in crate::runtime) fn detached() -> Self {
+        Self {
+            domain: Arc::new(AckRootTracker::default()),
+            ingestor: Arc::new(AckRootTracker::default()),
+        }
+    }
+
+    /// The roots of this ingestor a drain still waits for.
+    #[cfg(test)]
+    pub(in crate::runtime) fn ingestor_outstanding(&self) -> usize {
+        self.ingestor.outstanding()
+    }
 }
 
 impl Runtime {

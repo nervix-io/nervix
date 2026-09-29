@@ -115,6 +115,8 @@ impl Runtime {
                 ownership_handoff_freeze_changed: Arc::new(Notify::new()),
                 active_domain_alters: Arc::new(DashMap::default()),
                 state_identities: DashMap::default(),
+                client_ingestors: DashMap::default(),
+                client_producer_budget: client_ingestor::ClientProducerBudget::default(),
                 endpoint_bindings: DashMap::default(),
                 routed_endpoints: DashMap::default(),
                 relay_boundary_fanouts: DashMap::default(),
@@ -539,6 +541,8 @@ impl Runtime {
     }
 
     pub(crate) async fn shutdown(&self) {
+        self.end_client_ingestor_endpoints(ClientProducerEndReason::ShuttingDown)
+            .await;
         let domains = self
             .inner
             .executions

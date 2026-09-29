@@ -140,7 +140,9 @@ emitter source-predicate, and relay materialized-state changes gate and drain on
 entities. Changing emitter `FROM` membership pauses the domain because it changes topology.
 Deduplicator key and reorderer ordering changes also use entity pause; their `MAX TIME` changes are
 dynamic. In `ALTER INGESTOR`, use a complete transport-specific source body after `SET FROM`, or
-change only the current source's mode with `SET QUIESCE <body>`.
+change only the current source's mode with `SET QUIESCE <body>`; a client ingestor takes the
+complete `SET FROM CLIENT SCHEMA ...` body, and a change to its endpoint contract ends its attached
+producers.
 Every reingestor and generator ALTER uses entity pause; reingestor route bodies retain their
 per-route branch selection, while generator route bodies remain set-only.
 `ALTER DOMAIN SET PLACEMENT` is nameless, targets the active domain, and performs a normal schedule
@@ -388,8 +390,14 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   larger batches.
 - Use delivery-mode `MAX <n>` only with `ACK PARALLEL`; `NO_ACK` has no in-flight ACK window and
   never accepts `MAX`.
-- End every ingestor source specification with an explicit source-supported `ON QUIESCE` body
-  immediately before `DECODE USING`. Include positive `MAX SIZE` and, outside `ENDPOINT`, an
+- When an application publishes typed batches itself, use a client ingestor:
+  `FROM CLIENT SCHEMA <schema> MODE ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY
+  BACKOFF <d> MAX <d> ON QUIESCE SUSPEND`, with no client, codec, headers, or `NO_ACK`. Producers are
+  opened through the client library or session protocol, not with a statement. Read `Ingestors` →
+  `Client Ingestors` before explaining outcomes, limits, or what ends a producer, and never promise
+  that a batch whose outcome is unknown or failed had no effect.
+- End every transport ingestor source specification with an explicit source-supported `ON QUIESCE`
+  body immediately before `DECODE USING`. Include positive `MAX SIZE` and, outside `ENDPOINT`, an
   explicit `ON OVERFLOW DROP OLDEST|DROP NEWEST` for `BUFFER`; include `RETRY AFTER` for endpoint
   `REJECT`. Use MQTT `SUSPEND` only with `SESSION PERSISTENT QOS 1`. Do not invent a default or use a
   mode offered by another source type.
