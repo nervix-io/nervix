@@ -4,7 +4,9 @@
 // the event handle and every borrowed view of its frame belong to that arena, the binding's
 // release function runs when the arena closes, and a view read after that throws instead of
 // reading freed memory. Arenas the garbage collector owns release their events when they become
-// unreachable. Run it with `java --enable-native-access=ALL-UNNAMED Probe.java`.
+// unreachable. Run it with `java --enable-native-access=ALL-UNNAMED Probe.java`; with the `clock`
+// argument it attaches to the domain's clock instead, reads the state and the first tick of the
+// generation the scenario starts, and detaches.
 
 import java.lang.foreign.AddressLayout;
 import java.lang.foreign.Arena;
@@ -42,6 +44,8 @@ public class Probe {
     static final int CELL_NULL = 2;
     static final int CELL_REDACTED = 3;
     static final int EVENT_ROWS = 1;
+    static final String[] CLOCK_KINDS = {null, "STATE", "TICK", "ENDED", "INTERRUPTED"};
+    static final int CLOCK_PACED = 4;
     static final String[] DISPOSITIONS = {
         null, "completed", "failed", "not_leader", "transaction_detached",
         "transaction_taken_over", "outcome_unknown", "execution_reference_conflict",
@@ -110,6 +114,20 @@ public class Probe {
             POINTER, INT, SIZE, POINTER, SIZE, POINTER, SIZE, POINTER);
     static final MethodHandle EVENT_CELL_VARLEN =
             function("nx_event_cell_varlen", POINTER, POINTER, INT, SIZE, SIZE, POINTER, POINTER);
+    static final MethodHandle SESSION_NEXT_CLOCK_EVENT =
+            function("nx_session_next_clock_event", POINTER, POINTER, POINTER, POINTER);
+    static final MethodHandle CLOCK_EVENT_KIND = function("nx_clock_event_kind_of", INT, POINTER);
+    static final MethodHandle CLOCK_EVENT_DOMAIN =
+            function("nx_clock_event_domain", null, POINTER, POINTER, POINTER);
+    static final MethodHandle CLOCK_EVENT_GENERATION =
+            function("nx_clock_event_generation", POINTER, POINTER, POINTER);
+    static final MethodHandle CLOCK_EVENT_STATE = function("nx_clock_event_state", POINTER, POINTER, POINTER);
+    static final MethodHandle CLOCK_EVENT_PACED = function("nx_clock_event_paced", POINTER,
+            POINTER, POINTER, POINTER, POINTER, POINTER, POINTER);
+    static final MethodHandle CLOCK_EVENT_TICK =
+            function("nx_clock_event_tick", POINTER, POINTER, POINTER, POINTER, POINTER, POINTER);
+    static final MethodHandle CLOCK_EVENT_RETAIN = function("nx_clock_event_retain", POINTER, POINTER);
+    static final MethodHandle CLOCK_EVENT_RELEASE = function("nx_clock_event_release", null, POINTER);
 
     /** A failure the binding returned, with its kind and the execution reference it names. */
     static final class Failure extends RuntimeException {
@@ -369,6 +387,103 @@ public class Probe {
         }
     }
 
+    /** The committed clock of the generation the probe follows. */
+    record PacedClock(long generation, long period, long skew, long origin, double rate) {
+        String stateLine(String domain) {
+            return "STATE domain=" + domain + " generation=" + Long.toUnsignedString(generation)
+                    + " state=paced period=" + Long.toUnsignedString(period) + " skew="
+                    + Long.toUnsignedString(skew) + " origin=" + origin + " rate=f64:"
+                    + String.format("%016x", Double.doubleToRawLongBits(rate));
+        }
+
+        /**
+         * The report line of a tick, after holding it to this clock: its boundary is the logical
+         * origin plus one period for every id before it, and the serving node's reading never
+         * precedes the origin.
+         */
+        String tickLine(ClockEvent event, String domain) {
+            if (event.generation() != generation) {
+                throw new IllegalStateException("a tick belongs to another generation than the state before it");
+            }
+            try (Arena scratch = Arena.ofConfined()) {
+                MemorySegment id = scratch.allocate(ValueLayout.JAVA_LONG);
+                MemorySegment boundary = scratch.allocate(ValueLayout.JAVA_LONG);
+                MemorySegment authorityUtc = scratch.allocate(ValueLayout.JAVA_LONG);
+                MemorySegment servingLogical = scratch.allocate(ValueLayout.JAVA_LONG);
+                check(call(CLOCK_EVENT_TICK, event.handle, id, boundary, authorityUtc, servingLogical));
+                long tickId = id.get(ValueLayout.JAVA_LONG, 0);
+                if (tickId == 0 || boundary.get(ValueLayout.JAVA_LONG, 0)
+                        != Math.addExact(origin, Math.multiplyExact(tickId - 1, period))) {
+                    throw new IllegalStateException(
+                            "a tick's boundary is not the origin plus one period for every id before it");
+                }
+                if (servingLogical.get(ValueLayout.JAVA_LONG, 0) < origin) {
+                    throw new IllegalStateException("the serving node's logical reading precedes the logical origin");
+                }
+            }
+            return "TICK domain=" + domain + " generation=" + Long.toUnsignedString(generation)
+                    + " boundary=origin+(id-1)*period";
+        }
+    }
+
+    /** One reference to a domain clock event, owned by an arena: closing it releases the reference. */
+    static final class ClockEvent {
+        final MemorySegment handle;
+        final Arena arena;
+
+        ClockEvent(MemorySegment raw, Arena arena) {
+            this.arena = arena;
+            this.handle = raw.reinterpret(arena, segment -> call(CLOCK_EVENT_RELEASE, segment));
+        }
+
+        ClockEvent retain(Arena into) {
+            return new ClockEvent((MemorySegment) call(CLOCK_EVENT_RETAIN, handle), into);
+        }
+
+        String kind() {
+            return CLOCK_KINDS[(int) call(CLOCK_EVENT_KIND, handle)];
+        }
+
+        String domain() {
+            try (Arena scratch = Arena.ofConfined()) {
+                MemorySegment name = scratch.allocate(POINTER);
+                MemorySegment nameLen = scratch.allocate(SIZE);
+                call(CLOCK_EVENT_DOMAIN, handle, name, nameLen);
+                return utf8(borrowed(name, nameLen));
+            }
+        }
+
+        long generation() {
+            try (Arena scratch = Arena.ofConfined()) {
+                MemorySegment generation = scratch.allocate(ValueLayout.JAVA_LONG);
+                check(call(CLOCK_EVENT_GENERATION, handle, generation));
+                return generation.get(ValueLayout.JAVA_LONG, 0);
+            }
+        }
+
+        int state() {
+            try (Arena scratch = Arena.ofConfined()) {
+                MemorySegment state = scratch.allocate(INT);
+                check(call(CLOCK_EVENT_STATE, handle, state));
+                return state.get(INT, 0);
+            }
+        }
+
+        /** The committed clock; the UTC anchor depends on when START committed and is not read. */
+        PacedClock paced() {
+            try (Arena scratch = Arena.ofConfined()) {
+                MemorySegment period = scratch.allocate(ValueLayout.JAVA_LONG);
+                MemorySegment skew = scratch.allocate(ValueLayout.JAVA_LONG);
+                MemorySegment origin = scratch.allocate(ValueLayout.JAVA_LONG);
+                MemorySegment rate = scratch.allocate(ValueLayout.JAVA_DOUBLE);
+                check(call(CLOCK_EVENT_PACED, handle, period, skew, origin, MemorySegment.NULL, rate));
+                return new PacedClock(generation(), period.get(ValueLayout.JAVA_LONG, 0),
+                        skew.get(ValueLayout.JAVA_LONG, 0), origin.get(ValueLayout.JAVA_LONG, 0),
+                        rate.get(ValueLayout.JAVA_DOUBLE, 0));
+            }
+        }
+    }
+
     record Outcome(MemorySegment handle) {
         String disposition() {
             return DISPOSITIONS[(int) call(OUTCOME_DISPOSITION, handle)];
@@ -410,6 +525,18 @@ public class Probe {
                 MemorySegment event = scratch.allocate(POINTER);
                 check(call(SESSION_NEXT_EVENT, handle, cancel, event));
                 return new Event(event.get(POINTER, 0), into);
+            }
+        }
+
+        ClockEvent nextClockEvent(MemorySegment cancel, Arena into, String domain) {
+            try (Arena scratch = Arena.ofConfined()) {
+                MemorySegment event = scratch.allocate(POINTER);
+                check(call(SESSION_NEXT_CLOCK_EVENT, handle, cancel, event));
+                ClockEvent clockEvent = new ClockEvent(event.get(POINTER, 0), into);
+                if (!clockEvent.domain().equals(domain)) {
+                    throw new IllegalStateException("a clock event arrived for another domain");
+                }
+                return clockEvent;
             }
         }
 
@@ -534,7 +661,120 @@ public class Probe {
         System.out.flush();
     }
 
+    /**
+     * Cancels a clock wait from another thread, then lets a deadline end another. The session
+     * follows no clock yet, so nothing but its token ends either wait.
+     */
+    static void checkClockCancellation(Session session, String domain) throws InterruptedException {
+        try (Arena arena = Arena.ofShared()) {
+            MemorySegment cancel = cancel(arena, null);
+            AtomicReference<Failure> waited = new AtomicReference<>();
+            Thread waiter = new Thread(() -> waited.set(failure(() -> {
+                try (Arena events = Arena.ofConfined()) {
+                    session.nextClockEvent(cancel, events, domain);
+                }
+            })));
+            waiter.start();
+            Thread.sleep(100);
+            call(CANCEL_TRIGGER, cancel);
+            waiter.join(30_000);
+            if (waiter.isAlive() || waited.get().kind != ERROR_CANCELLED) {
+                throw new IllegalStateException("a cancelled clock wait did not report CANCELLED");
+            }
+            MemorySegment deadline = cancel(arena, 50L);
+            Failure expired = failure(() -> {
+                try (Arena events = Arena.ofConfined()) {
+                    session.nextClockEvent(deadline, events, domain);
+                }
+            });
+            if (expired.kind != ERROR_DEADLINE) {
+                throw new IllegalStateException("an expired clock wait did not report DEADLINE");
+            }
+        }
+    }
+
+    /**
+     * Attaches to the domain's clock, reads the state and the first tick of the generation the
+     * scenario starts, and detaches.
+     */
+    static void runClock(Session session, String domain, Arena outcomes) throws InterruptedException {
+        checkClockCancellation(session, domain);
+        report("ATTACHED " + session.execute("ATTACH DOMAIN CLOCK;", MemorySegment.NULL, outcomes).disposition());
+        try (Arena tokens = Arena.ofConfined()) {
+            MemorySegment deadline = cancel(tokens, 120_000L);
+            ClockEvent state;
+            while (true) {
+                state = session.nextClockEvent(deadline, Arena.ofShared(), domain);
+                if (!state.kind().equals("STATE")) {
+                    throw new IllegalStateException("the clock reported " + state.kind() + " before the started state");
+                }
+                // The serving node may report the started generation uninstalled until it holds
+                // the committed mapping and an assigned clock authority.
+                if (state.state() == CLOCK_PACED) {
+                    break;
+                }
+                state.arena.close();
+            }
+            PacedClock clock = state.paced();
+            String reportedState = clock.stateLine(domain);
+            report(reportedState);
+
+            ClockEvent tick;
+            while (true) {
+                tick = session.nextClockEvent(deadline, Arena.ofShared(), domain);
+                if (tick.kind().equals("TICK")) {
+                    break;
+                }
+                if (!tick.kind().equals("STATE")) {
+                    throw new IllegalStateException("the clock reported " + tick.kind() + " before its first tick");
+                }
+                // The serving node reported the installation again; it is still the same generation.
+                if (tick.generation() != clock.generation()) {
+                    throw new IllegalStateException("the clock moved to another generation before its first tick");
+                }
+                tick.arena.close();
+            }
+            String reportedTick = clock.tickLine(tick, domain);
+            report(reportedTick);
+
+            // Keep a second reference to each event and release the first on another thread, so
+            // the events must read the same on the second alone.
+            try (Arena retained = Arena.ofConfined()) {
+                ClockEvent retainedState = state.retain(retained);
+                ClockEvent retainedTick = tick.retain(retained);
+                ClockEvent firstState = state;
+                ClockEvent firstTick = tick;
+                Thread closer = new Thread(() -> {
+                    firstState.arena.close();
+                    firstTick.arena.close();
+                });
+                closer.start();
+                closer.join();
+                if (!retainedState.paced().stateLine(domain).equals(reportedState)
+                        || !clock.tickLine(retainedTick, domain).equals(reportedTick)) {
+                    throw new IllegalStateException("a retained clock event reads differently than it did");
+                }
+            }
+        }
+        report("DETACHED " + session.execute("DETACH DOMAIN CLOCK;", MemorySegment.NULL, outcomes).disposition());
+        report("CHECKS ok");
+    }
+
     public static void main(String[] arguments) throws Exception {
+        if (arguments.length > 0 && arguments[0].equals("clock")) {
+            String domain = System.getenv("NERVIX_PROBE_DOMAIN");
+            try (Session session = new Session(System.getenv("NERVIX_PROBE_GRPC_URI"), domain,
+                    System.getenv("NERVIX_PROBE_USERNAME"), System.getenv("NERVIX_PROBE_PASSWORD"));
+                    Arena outcomes = Arena.ofConfined()) {
+                runClock(session, domain, outcomes);
+            } catch (Throwable error) {
+                System.err.println("probe failed: " + error);
+                error.printStackTrace();
+                System.exit(1);
+            }
+            report("PASS");
+            return;
+        }
         String relay = System.getenv("NERVIX_PROBE_RELAY");
         String subscription = System.getenv("NERVIX_PROBE_SUBSCRIPTION");
         int expectedRows = Integer.parseInt(System.getenv("NERVIX_PROBE_ROWS"));

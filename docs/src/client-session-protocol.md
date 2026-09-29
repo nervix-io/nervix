@@ -70,7 +70,7 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | Control plane | Session subscriptions | Creation and deletion, the generation each subscription opens with, its lifecycle, its filter and sampling, the delivery of one generation to its session, and the interest lease it holds on its relay. |
 | Data plane | Relay subscription fan-out | The subscribers of one relay, the definition they were attached under, and ending every subscriber before a batch of another definition can reach it. |
 | Edges | The Rust client, `nervix-client-core` | Connecting, TLS selection, the dispatcher that pairs replies with requests, execution identity across retries, redirect and reconnect, transaction binding and previews, desired subscriptions and their restoration, followed domain clocks, uploads, and backup downloads verified against their summary. |
-| Edges | The shared binding, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the Rust client's state machine, with borrowed frame access and bulk column copies. |
+| Edges | The shared binding, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the Rust client's state machine, with borrowed frame access, bulk column copies, and retained domain clock events. |
 | Edges | The web console and the CLI | Consumers of the same protocol with bounded buffers of their own. The console speaks it over the WebSocket; the CLI uses the Rust client. |
 
 The server is the composition root: it is the only crate that names the wire crate, the command
@@ -1073,9 +1073,10 @@ Every node serves attachments from its own installation, which it derives from t
 revision as every other node, and from progress it already accepted, so an attachment adds no
 interconnect traffic and survives nothing: it ends silently with its session. The Rust client
 attaches every clock it followed again on its next session, clears its previous tick, and reports
-the gap as an interruption. The web console does not follow domain clocks, and the shared binding
-does not expose them. Both requests are refused while the session holds a transaction, like every
-other session-local request.
+the gap as an interruption. The shared binding exposes this event stream through
+`nx_session_next_clock_event` and a dedicated retained `nx_clock_event` handle. The web console
+does not follow domain clocks. Both requests are refused while the session holds a transaction,
+like every other session-local request.
 
 The CLI's `domain-clock` subcommand uses the Rust client's typed attach reply and clock event
 stream. It prints the reply and then the same state, tick, interruption, and end lines as its REPL,
@@ -1272,6 +1273,11 @@ The binding's lifecycle follows from that choice:
   `nx_event_cell_varlen` borrows one string or bytes value. Events are reference counted:
   `nx_event_retain` adds a reference, and the event and its frame are freed with the last
   `nx_event_release`, from any thread.
+- **Clock events.** `nx_session_next_clock_event` uses the same cancellation and deadline rules as
+  the subscription wait, but returns a separate `nx_clock_event` reference. Its kind, domain,
+  generation, state, paced mapping, tick and end-reason accessors expose the fields each event
+  carries. An accessor for a field its event lacks returns `NX_ERROR_TYPE`. Retain and release
+  preserve the event and its borrowed domain name across threads until the last reference ends.
 - **Typed failures.** A failing call returns an `nx_error` whose kind separates an invalid argument,
   a failed connection, a failed session, an uncertain outcome that carries the execution reference,
   a server refusal, a deadline, a cancellation, a protocol violation, a type mismatch, and a session
@@ -1279,12 +1285,13 @@ The binding's lifecycle follows from that choice:
 
 The binding connects with the Rust client's default options. It exposes no seeds, timeouts, or
 certificate authority, so it reaches a node over plaintext and connects to it directly. It exposes
-commands, completion, subscriptions and their events, and bulk row access, but not the typed
-transaction status, inspection, choice lookups, notices, leadership, or the followed domain clock: a
-host can execute `ATTACH DOMAIN CLOCK;`, and the library attaches again after a reconnect, but the
-host cannot read the clock or its changes. Its column accessors cover scalar, string, and bytes
-fields; a list field reports whether it is fixed-length or variable, and its values are read from
-the borrowed frame with generated code.
+commands, completion, subscriptions and their events, domain clock events, and bulk row access,
+but not the typed transaction status, inspection, choice lookups, notices, or leadership. A host
+can execute `ATTACH DOMAIN CLOCK;`; the Rust client restores the attachment after reconnect and
+the host reads later observations and ticks through the clock-event wait. The binding does not
+expose the initial clock carried by the attach reply as a typed outcome. Its column accessors
+cover scalar, string, and bytes fields; a list field reports whether it is fixed-length or
+variable, and its values are read from the borrowed frame with generated code.
 
 Independent implementations exist as qualification clients rather than supported SDKs. The Go client
 speaks native gRPC with `flatc --go` output and `google.golang.org/grpc`, and the TypeScript client

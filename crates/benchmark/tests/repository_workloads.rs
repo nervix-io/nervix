@@ -28,6 +28,55 @@ fn statements_starting_with(source: &str, prefix: &str) -> usize {
 }
 
 #[test]
+fn every_end_to_end_workload_renders_all_three_implementations() {
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("benchmark crate should be under the repository crates directory");
+    let catalog = BenchmarkCatalog::from_repository_root(repository_root);
+    let benchmarks = catalog
+        .discover()
+        .expect("repository benchmark catalog should load");
+    assert_eq!(benchmarks.len(), 6);
+    let dependency_endpoints = BTreeMap::new();
+    let inputs = KafkaRenderInputs {
+        kafka_bootstrap_servers: "kafka-benchmark:9093",
+        input_topic: "benchmark_input",
+        output_topic: "benchmark_output",
+        consumer_group: "benchmark_consumer",
+        lane_count: 4,
+        dependency_endpoints: &dependency_endpoints,
+    };
+
+    for benchmark in benchmarks {
+        let implementations = benchmark
+            .definition()
+            .implementations
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            implementations,
+            ["flink", "nervix", "vector"],
+            "{}",
+            benchmark.slug()
+        );
+        let settings = RunSettings::resolve(benchmark.definition(), &[], Some(1))
+            .expect("repository workload settings should resolve");
+        for implementation in implementations {
+            let rendered = benchmark
+                .render_implementation_with_parameters(implementation, inputs, &settings.parameters)
+                .expect("repository workload implementation should render");
+            assert!(rendered.contains("kafka-benchmark:9093"));
+            assert!(rendered.contains("benchmark_input"));
+            assert!(rendered.contains("benchmark_output"));
+            assert!(!rendered.contains("{{"));
+            assert!(!rendered.contains("{%"));
+        }
+    }
+}
+
+#[test]
 fn kafka_filter_map_implementations_render_from_one_workload() {
     let benchmark = load("kafka-filter-map");
     let settings = RunSettings::resolve(benchmark.definition(), &[], Some(1))
@@ -46,7 +95,12 @@ fn kafka_filter_map_implementations_render_from_one_workload() {
     };
     assert_eq!(
         benchmark.definition().load.shape,
-        LoadShape::UniformPassthrough
+        LoadShape::UniformFilterMap
+    );
+    assert_eq!(benchmark.definition().load.shape.messages_per_cycle(), 2);
+    assert_eq!(
+        benchmark.definition().load.shape.output_records_per_cycle(),
+        1
     );
 
     let nervix = benchmark
@@ -65,6 +119,12 @@ fn kafka_filter_map_implementations_render_from_one_workload() {
     assert!(vector.contains("timeout_secs: 0.01"));
     assert!(!vector.contains("{%"));
     assert!(!vector.contains("{{"));
+
+    let flink = benchmark
+        .render_implementation_with_parameters("flink", inputs, &settings.parameters)
+        .expect("Flink implementation should render");
+    assert!(flink.contains("SET 'parallelism.default' = '16'"));
+    assert!(flink.contains("SELECT `id`, UPPER(`value`)"));
 }
 
 #[test]
@@ -147,6 +207,13 @@ fn kafka_dedup_window_renders_a_stateful_graph_and_a_matching_competitor() {
     assert!(vector.contains("record_count: sum"));
     assert!(!vector.contains("{%"));
     assert!(!vector.contains("{{"));
+
+    let flink = benchmark
+        .render_implementation_with_parameters("flink", inputs, &settings.parameters)
+        .expect("Flink implementation should render");
+    assert!(flink.contains("ROW_NUMBER() OVER (PARTITION BY `key` ORDER BY proc_time ASC)"));
+    assert!(flink.contains("INTERVAL '1' SECOND"));
+    assert!(flink.contains("SELECT COUNT(*) AS record_count"));
 }
 
 #[test]
@@ -230,7 +297,7 @@ fn hot_path_workloads_render_the_publisher_matrix_and_remote_placement() {
         .render_implementation_with_parameters("nervix", inputs, &settings.parameters)
         .assured("the configured processor expression renders");
     assert_eq!(
-        graph.matches(&format!("SET value = {expression}")).count(),
+        graph.matches(&format!("value = {expression}")).count(),
         LANES.arch_into()
     );
 }

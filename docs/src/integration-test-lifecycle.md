@@ -59,6 +59,10 @@ for a detach reply can queue ticks that arrived before the reply; the post-detac
 the recorded wire order, clears those already queued frames, and waits for any new frame. An unread
 pre-reply tick therefore does not masquerade as delivery after detach.
 
+The generator cadence assertion groups equal logical timestamps across concrete branches and
+checks increasing timestamps within each branch. It allows records from separate branch tasks to
+arrive in either order, as their delivery has no shared ordering contract.
+
 `tests-deps` builds the CLI and NSPL formatter in the normal target directory. The full and focused
 client coverage recipes build a standalone instrumented CLI beside their instrumented server binary
 and place the normal NSPL formatter there. The scenario runner selects the covered CLI through
@@ -862,6 +866,10 @@ The suite runs inside `just test-scenarios-coverage` in the CI `scenarios` job, 
 instrumented server and CLI build. The `tests` job runs at the same time on another runner. The
 `scenarios` job's `timeout-minutes` is 60, and the suite budget is derived from it so that the job
 ends on its own.
+
+For focused local coverage, `just coverage-scenarios <lcov-path> <scenario-options>` starts a
+fresh measurement. `just coverage-scenarios-append <lcov-path> <scenario-options>` retains the
+current profiles and reuses unchanged instrumented artifacts for another scenario selection.
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |

@@ -1827,16 +1827,14 @@ impl Application {
                         .resource_store
                         .open_archive(&request.id)
                         .await
-                        .map_err(|error| StreamHandlerError::new(error.to_string()))?;
+                        .map_err(StreamHandlerError::with_cause)?;
                     let archive_bytes = reader.archive_bytes();
                     let chunks = stream::unfold(Some(reader), |reader| async move {
                         let mut reader = reader?;
                         match reader.next_chunk().await {
                             Ok(Some(chunk)) => Some((Ok(chunk), Some(reader))),
                             Ok(None) => None,
-                            Err(error) => {
-                                Some((Err(StreamHandlerError::new(error.to_string())), None))
-                            }
+                            Err(error) => Some((Err(StreamHandlerError::with_cause(error)), None)),
                         }
                     });
                     Ok(StreamingResponse::new(archive_bytes, chunks))

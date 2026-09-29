@@ -513,6 +513,12 @@ and these rules:
   the statement names, and reads its size and digest with `nx_outcome_backup`. After an error that
   names the backup's execution reference, the host MAY execute the same `nx_execution` again, which
   recovers the backup's outcome and downloads its archive while the server retains it.
+- **B-9.** A host MUST release every `nx_clock_event` that `nx_session_next_clock_event` or
+  `nx_clock_event_retain` returns exactly once, and MAY release it on any thread. It MUST treat
+  `NX_CLOCK_EVENT_INTERRUPTED` as a gap in that domain's clock: the state event that follows
+  reports the clock the restored attachment found, and the changes and ticks in between are not
+  reported. [Rust Client Library](./client-library.md#through-the-shared-c-binding) lists the
+  accessors of each event kind.
 
 ## Required State Machines
 
@@ -588,11 +594,12 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | S-1 to S-6 | Every scenario of `session_subscription_lifecycle.feature` and `session_subscription_options.feature`; `Published interest starts, reopens, and stops remote subscription fan-out` in `subscription_interest.feature`; `Web console ends a relay tab the server ended and resubscribes it on request` in `nspl_repl.feature`; `a_subscription_type_must_be_selected_and_supported` and, in the console, `a_generation_the_server_ended_ends_its_tab_which_keeps_its_rows_and_is_not_restored` |
 | S-7, S-8 | `A reconnected native client restores acknowledged subscriptions` and `A native client keeps a subscription active while it receives a row that fills most of a frame` in `client_wire_failures.feature`; `Subscription restoration and typed transaction inspection survive the same leader loss` in `client_wire_qualification.feature`; `Web console restores a relay tab after its transaction finished while it reconnected`, `Web console restores a relay tab before it attaches its open transaction again`, and `Web console bounds a busy relay tab and keeps its REPL responsive` in `nspl_repl.feature`; `deleting_while_creation_is_in_flight_drains_its_late_success_before_name_reuse`, `cancelling_an_in_flight_restore_cleans_up_its_late_success`, `one_subscription_overflow_preserves_other_subscription_events`, `each_subscription_retains_a_frame_of_the_frame_limit_and_overflows_alone_past_it`, `a_subscription_past_the_exchange_allowance_overflows_without_evicting_full_subscriptions`, and `a_row_frame_filled_to_the_frame_limit_reaches_an_active_subscription` |
 | R-1 to R-5 | `A <runtime> client round-trips an operation, typed rows, an error and a closure` in `client_conformance.feature` for every runtime; `a_batch_round_trips_every_cell_kind_at_its_bounds`, `cells_must_follow_their_fields`, `branch_identity_must_match_the_schema`, and `lists_must_follow_their_element_type_and_length`; `a_batch_that_does_not_conform_to_its_schema_is_a_protocol_failure` in the binding |
-| K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; the state, tick, and client pacing outlines in `domain_clock_attachment.feature`; the owner-loss case in `domain_clock_contract.feature`; `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock`, `ticks_coalesce_per_domain_and_follow_their_generations_state`, and the `server_domain_clock_ticked.nxsm` conformance frame |
+| K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; the state, tick, and client pacing outlines in `domain_clock_attachment.feature`; the owner-loss case in `domain_clock_contract.feature`; `A <runtime> client follows a paced domain clock through the shared binding` in `client_conformance.feature` for every binding host; `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock`, `ticks_coalesce_per_domain_and_follow_their_generations_state`, and the `server_domain_clock_ticked.nxsm` conformance frame |
 | U-1 to U-5 | `An upload stream the protocol does not allow is refused with a typed failure and admits nothing` in `session_protocol.feature`; in `resource_describe.feature`, `An incomplete upload does not admit content or consume its identity`, `Upload retry reports one assigned version`, `Upload retry after leader change reports the assigned version`, and `An uncertain upload completes once across installation and leader change`; `a_lost_upload_reply_retries_with_the_same_identity_and_archive` and `malformed_upload_replies_are_rejected_by_their_correlations` |
 | A-1 to A-6 | Every scenario of `backup.feature`, including `A client that loses its download fetches the archive again until a download collects it`, `An archive is refused once its execution reference's retry validity ends`, and `Downloads of another user's backup, or under a reference without an archive, are refused`; `every_download_frame_round_trips` and `a_download_request_with_an_invalid_reference_is_refused` in `nervix-client-wire`; the `backup_download_*` conformance frames |
 | B-1 to B-7 | The binding tests of `nervix-client-ffi`, such as `retained_references_keep_the_frame_until_the_last_one_is_released`, `string_and_bytes_columns_are_copied_with_offsets_and_borrowed_per_cell`, and `a_token_bounds_a_call_by_cancellation_and_by_deadline`; the C, C++, Python, Java, and Ruby cases of `client_conformance.feature` |
 | B-8 | `a_backup_outcome_reports_its_archive` and `client_errors_are_classified_and_keep_their_causes` in `nervix-client-ffi` |
+| B-9 | `a_retained_clock_event_outlives_a_reference_released_on_another_thread` and `a_session_reads_every_clock_event_kind_and_bounds_its_wait` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for C, C++, Python, Java, and Ruby |
 
 ### Executable Examples
 
@@ -610,6 +617,9 @@ are not UUIDv7, which E-1 allows only for reads.
 | `tests/client_conformance/python/probe.py` | The binding through `ctypes`, with a `memoryview` over a retained frame |
 | `tests/client_conformance/java/Probe.java` | The binding through the Foreign Function and Memory API, with arena-owned events |
 | `tests/client_conformance/ruby/probe.rb` | The binding through Fiddle, with collector-driven release |
+
+Run with the `clock` argument, each binding probe follows a paced domain clock instead: it attaches,
+reads the state and the first tick of the generation the scenario starts, and detaches.
 
 `just test-client-conformance` builds every probe and runs it against one- and three-node clusters;
 [`tests/client-conformance-ledger.md`](https://github.com/nervix-io/nervix/blob/main/tests/client-conformance-ledger.md)

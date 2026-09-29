@@ -1,8 +1,10 @@
 BEGIN;
 CREATE SCHEMA benchmark_record (
+  id STRING,
   value STRING
 );
 CREATE WIRE JSON SCHEMA benchmark_wire MODE STRICT (
+  id string,
   value string
 );
 CREATE CODEC benchmark_codec
@@ -42,7 +44,8 @@ CREATE JUNCTION benchmark_transform_{{ lane }}
   FILTER WHERE contains(input.value, "x")
   UNBRANCHED
   TO benchmark_records_{{ lane }}
-    SET value = upper(input.value)
+    SET id = input.id,
+        value = upper(input.value)
     FLUSH IMMEDIATE
     ON MESSAGE ERROR LOG;
 CREATE EMITTER kafka_out_{{ lane }}

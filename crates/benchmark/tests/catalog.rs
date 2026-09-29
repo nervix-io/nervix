@@ -46,6 +46,7 @@ template = "graph.nspl.upon"
 
 [implementations.flink]
 kind = "container"
+require_consumer_group_membership = false
 image = "flink:2"
 template = "flink.yaml.upon"
 config_path = "/opt/flink/conf/flink-conf.yaml"
@@ -405,6 +406,7 @@ kind = "uniform-passthrough"
 [parameters]
 [implementations.vector]
 kind = "container"
+require_consumer_group_membership = true
 image = "vector:tag"
 template = "vector.yaml"
 config_path = "{config_path}"
