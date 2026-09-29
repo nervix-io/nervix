@@ -202,6 +202,82 @@ or is interrupted heals every run-owned fault before it captures diagnostics, in
 `--keep`, and `just chaos cleanup` also removes Pumba sidecars left joined to run-owned containers.
 A partition run defaults to 1,000 input records paced two seconds apart and a 50-minute bound.
 
+Run measured degradation of the directed relay-to-emitter link (`nervix-2` to `nervix-3`):
+
+```bash
+just chaos run degraded-links --image nervix:debian
+just chaos run degraded-links --image nervix:debian --profile combined
+```
+
+`--profile all` runs `delay`, `jitter`, `random-loss`, `burst-loss`, `rate-limit`, and `combined`
+sequentially. Delay is 180 ms; jitter adds 100 ms variation; independent loss is 30%; burst loss
+uses Pumba's four-state model (`p13=20`, `p31=15`); rate is 256 kbit/s. The combined profile uses
+one Pumba `netem combine` configuration with 180 ms delay, 60 ms jitter, 20% loss and a
+256 kbit/s rate. Each profile targets only the fixed address of `nervix-3` on `nervix-2`'s egress.
+The suite refuses any preexisting qdisc or INPUT rule, checks Pumba's exact selected container,
+inspects the single owned netem qdisc and peer filter, and tests the affected link with ICMP and a
+prebuilt Alpine netcat transfer. The transfer counts all bytes at the receiver and times their
+arrival. It records a healthy ICMP and transfer baseline before any fault.
+Loss, delay, jitter and rate must also show their expected measured effect; an installed qdisc alone
+cannot pass. SIGTERM heals each injector, after which the qdisc and ICMP delay must return to the
+healthy state. The exit trap heals all run-owned faults even with `--keep` or an interrupted run.
+
+The workload uses the separate prebuilt `kcat` producer at a declared fixed interval (750 ms by
+default), with a 1,000-record fixture. `--load-interval-ms`, `--baseline-seconds`,
+`--degrade-seconds`, and `--drain-seconds` set the load and measurement windows. The runner rejects
+a fixture too short to maintain that rate through the selected profiles. Before the first fault it
+records the independently measured healthy output rate. Repeated samples retain
+public metrics from all three nodes, Docker stats, broker source/output boundaries, estimated
+backlog, interconnect pending work, relay attempts and resolved admissions, TCP retransmissions in
+the affected sender's network namespace, reset/connection-failure retry indicators, and delivery
+latency sums/counts. `--max-backlog`, `--max-recovery-backlog`, `--max-memory-bytes`, `--max-pending`,
+and `--min-throughput-pct` are committed numeric inputs. A resource violation
+records the metric, limit, profile, stage and time in `degraded/findings.ndjson`; the command fails
+after final reconciliation. Every healed profile must progress in each of three consecutive
+intervals, reach the declared percent of its independent healthy baseline over their full window,
+and keep backlog at or below the declared recovery limit before its deadline. Source offsets and
+exact branch/content ledgers must reconcile after load stops; identical
+replay duplicates are reported separately.
+A missed recovery deadline fails immediately with a profile-local `recovery-deadline.json` that
+records the baseline, required and observed window, latest backlog, sample timeline and action
+timeline. Its finding also distinguishes a short observation window from stalled or slow output.
+
+The run retains `degraded/worker.json`, the exact image and load inputs in `manifest.json`,
+`degraded/baseline.json`, profile rule/effect/healing evidence, raw metric and Docker samples,
+Docker events, action timelines in `phases.ndjson` and `degraded/actions.ndjson`, and `results/degraded-progress.json` and
+`results/degraded-links.json`. Use `--profile` to repeat one effect on the same worker and image.
+The command uses only the packaged Nervix CLI and prebuilt broker, traffic, observer, Pumba and
+nettools images; the worker needs no Rust toolchain or repository test binary.
+
+### Degraded-link qualification on the selected worker
+
+The qualification worker was Ubuntu 26.04.1, Linux 7.0.0-34-generic, Docker 29.8.1, with 24 CPUs
+and 66.7 GB of memory. The supplied Nervix image was
+`ghcr.io/nervix-io/nervix@sha256:334379691dd189314f67390c28d00f02c99fcc9117b71e4b86c55b9b42d31baf`.
+The default six-profile run used 1,000 available fixture records, one production attempt every
+750 ms, a 15-second healthy baseline, 20-second fault windows and 90-second per-profile recovery
+deadlines. Its independent healthy output rate was 1.11 records/s. In `degraded-all-final2`, all
+six faults were measured and healed, source offsets committed through the 988-record accepted
+boundary, and the exact ledger matched 988 outputs with zero replay duplicates. Peak sampled
+backlog was 71 records, pending operations 8, and per-node Docker memory 88.6 MB; the declared
+limits were 200 records, 128 operations and 1 GiB. The 262,144-byte link transfer took 214 ms
+without a fault, 9,268 ms under the rate limit and 16,545 ms under the combined fault. The
+affected sender recorded 1,200 additional TCP retransmissions over the run.
+
+An earlier full run on the same image, `degraded-all-final1`, correctly failed its 90-second
+burst-loss recovery deadline: after Pumba was stopped, qdiscs returned to default and ICMP
+answered 40/40 probes, but source offsets advanced from 414 to 601 while output stayed at 414.
+Running burst loss by itself passed 158/158, so the stall is intermittent or depends on the
+preceding fault sequence. [Cluster Chaos 32: Resume cross-node delivery after healed burst
+loss](https://app.clickup.com/t/86bc95vz6) owns the product investigation. The verifier retains
+the failed attempt and does not convert it into a pass because another attempt succeeded.
+
+In `degraded-limit-negative`, the same worker and image ran one delay profile with a deliberately
+impossible 1 MiB per-node memory limit. The exact ledger still matched 179/179 records, while the
+command exited nonzero with 30 timestamped memory findings, the source metric samples and the
+action timeline. The baseline, lifecycle and partition commands remain separate `just chaos`
+entries.
+
 The controller resolves the supplied reference to its immutable local image ID before Compose
 starts. If the reference is not local, it performs one bounded pull and then resolves the result.
 The Compose file has no build directives. Every Nervix node and every disposable administration
