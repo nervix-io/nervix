@@ -16,7 +16,7 @@
 use std::{collections::VecDeque, fmt::Display, num::NonZeroU64};
 
 use ahash::{HashMap, HashSet};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     self as wire, ClientFrame, DomainInfo, EncodedFrame, Leadership, Reply, ReplyBody, RequestId,
     RowSchema, ServerFrame, ServerMessage, SessionLimits, SubscribeDisposition, SubscriptionHandle,
@@ -99,9 +99,24 @@ pub(crate) const SERVER_NOTICE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum EventQueueError {
-    #[error("the event stream exceeded its queue")]
+    /// Events arrived faster than they were read, and the queue dropped the ones it held. The
+    /// events that arrive after the gap follow it.
+    #[error("the event queue dropped events that were not read in time")]
     Overflow,
-    #[error("the event stream closed")]
+    /// The generation the read began on ended.
+    #[error("the session of the event queue ended")]
+    Closed,
+}
+
+/// Whether a generation's queue delivers events, owes its reader a gap, or has ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueueCondition {
+    /// Events are retained in the order they arrived.
+    Delivering,
+    /// An event did not fit, so the queue dropped it and every event it held. Events that arrive
+    /// later are retained behind the gap, which the next read reports first.
+    Overflowed,
+    /// The generation ended, and the queue retains nothing more for it.
     Closed,
 }
 
@@ -114,7 +129,7 @@ struct EventQueueState<T> {
     generation: Arc<()>,
     events: VecDeque<QueuedEvent<T>>,
     bytes: usize,
-    terminal: Option<EventQueueError>,
+    condition: QueueCondition,
     subscription_usage: HashMap<SubscriptionHandle, QueueUsage>,
     overflowed_subscriptions: HashSet<SubscriptionHandle>,
     overflow_events: VecDeque<T>,
@@ -229,8 +244,9 @@ struct EventQueueInner<T> {
     subscription: Option<SubscriptionQueuePolicy<T>>,
 }
 
-/// A generation-scoped event queue. An unread consumer cannot hold the exchange reader; if its
-/// bounded queue fills, that generation fails visibly and the reader still routes replies.
+/// A generation-scoped event queue. An unread consumer cannot hold the exchange reader: when the
+/// bounded queue fills, it drops what it held and reports the gap to its reader, and the exchange
+/// reader keeps routing replies.
 pub(crate) struct EventQueue<T> {
     inner: Arc<EventQueueInner<T>>,
 }
@@ -260,7 +276,7 @@ impl<T> EventQueue<T> {
                     generation: Arc::new(()),
                     events: VecDeque::new(),
                     bytes: 0,
-                    terminal: None,
+                    condition: QueueCondition::Delivering,
                     subscription_usage: HashMap::default(),
                     overflowed_subscriptions: HashSet::default(),
                     overflow_events: VecDeque::new(),
@@ -278,7 +294,7 @@ impl<T> EventQueue<T> {
         state.generation = generation.clone();
         state.events.clear();
         state.bytes = 0;
-        state.terminal = None;
+        state.condition = QueueCondition::Delivering;
         state.subscription_usage.clear();
         state.overflowed_subscriptions.clear();
         state.overflow_events.clear();
@@ -293,7 +309,7 @@ impl<T> EventQueue<T> {
         }
         state.events.clear();
         state.bytes = 0;
-        state.terminal = Some(EventQueueError::Closed);
+        state.condition = QueueCondition::Closed;
         state.subscription_usage.clear();
         state.overflowed_subscriptions.clear();
         state.overflow_events.clear();
@@ -302,10 +318,12 @@ impl<T> EventQueue<T> {
     }
 
     /// Retains one event without waiting on its consumer. Subscription overflow ends only the
-    /// affected subscription's delivery; notice overflow closes the notice stream.
+    /// affected subscription's delivery; any other overflow drops every event the queue holds and
+    /// leaves a gap that its next read reports.
     pub(crate) fn push(&self, generation: &Arc<()>, value: T, bytes: usize) -> bool {
         let mut state = self.inner.state.lock();
-        if !Arc::ptr_eq(&state.generation, generation) || state.terminal.is_some() {
+        if !Arc::ptr_eq(&state.generation, generation) || state.condition == QueueCondition::Closed
+        {
             return false;
         }
         if let Some(policy) = &self.inner.subscription {
@@ -328,7 +346,7 @@ impl<T> EventQueue<T> {
         if state.events.len() >= self.inner.max_records || exceeds_bytes {
             state.events.clear();
             state.bytes = 0;
-            state.terminal = Some(EventQueueError::Overflow);
+            state.condition = QueueCondition::Overflowed;
         } else if let Some(next_bytes) = next_bytes {
             state.bytes = next_bytes;
             state.events.push_back(QueuedEvent { value, bytes });
@@ -338,6 +356,8 @@ impl<T> EventQueue<T> {
         false
     }
 
+    /// Waits for the next event of the current generation. A gap is reported once, before the
+    /// events that follow it; `Closed` reports that the generation the read began on ended.
     pub(crate) async fn next(&self) -> error_stack::Result<T, EventQueueError> {
         let mut changed = self.inner.changed.subscribe();
         let generation = self.inner.state.lock().generation.clone();
@@ -348,8 +368,15 @@ impl<T> EventQueue<T> {
                 if !Arc::ptr_eq(&state.generation, &generation) {
                     return Err(error_stack::Report::new(EventQueueError::Closed));
                 }
-                if let Some(terminal) = state.terminal {
-                    return Err(error_stack::Report::new(terminal));
+                match state.condition {
+                    QueueCondition::Delivering => {}
+                    QueueCondition::Overflowed => {
+                        state.condition = QueueCondition::Delivering;
+                        return Err(error_stack::Report::new(EventQueueError::Overflow));
+                    }
+                    QueueCondition::Closed => {
+                        return Err(error_stack::Report::new(EventQueueError::Closed));
+                    }
                 }
                 if let Some(event) = state.pop_event(self.inner.subscription.as_ref()) {
                     return Ok(event);
@@ -358,6 +385,22 @@ impl<T> EventQueue<T> {
             if changed.changed().await.is_err() {
                 return Err(error_stack::Report::new(EventQueueError::Closed));
             }
+        }
+    }
+
+    /// Waits until the queue belongs to a generation that has not ended: at once while the current
+    /// one delivers, and otherwise until the next exchange begins one.
+    pub(crate) async fn resumed(&self) {
+        let mut changed = self.inner.changed.subscribe();
+        loop {
+            tokio::task::consume_budget().await;
+            if self.inner.state.lock().condition != QueueCondition::Closed {
+                return;
+            }
+            changed
+                .changed()
+                .await
+                .assured("the queue holds the sender of its own notifications");
         }
     }
 

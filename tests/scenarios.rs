@@ -96,6 +96,7 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uuid::Uuid;
 
 use crate::common::{
+    cli_terminal::{CliTerminal, DisplayWaitError},
     client_conformance::{
         ATTACHED_LINE, ClientProbe, ProbeExercise, ProbeRuntime, ProbeTarget, SUBSCRIBED_LINE,
         corpus_report,
@@ -306,6 +307,8 @@ struct ScenarioWorld {
     cli_subscription_lines: Option<StdArc<StdMutex<VecDeque<String>>>>,
     cli_subscription_reader: Option<AbortOnDropHandle<()>>,
     cli_clock_process: Option<CliClockProcess>,
+    /// The interactive CLI a scenario types into through a pseudo-terminal.
+    cli_terminal: Option<CliTerminal>,
     /// The whole outcome of the last command a named client ran, for assertions that read more
     /// than its message.
     last_client_outcome: Option<ClientCommandOutcome>,
@@ -4048,6 +4051,148 @@ async fn when_cli_follows_missing_domain(world: &mut ScenarioWorld, domain: Stri
     .unwrap_or_else(|_| panic!("the CLI missing-domain request did not finish"))
     .unwrap_or_else(|error| panic!("the CLI missing-domain process did not start: {error}"));
     world.last_cli_output = Some(output);
+}
+
+/// How long the interactive CLI may take to display what a step expects. A reconnect after a node
+/// restart happens inside that wait, so it is bounded generously.
+const CLI_TERMINAL_DISPLAY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a repeated post waits for the interactive CLI to display its row before posting again.
+const CLI_TERMINAL_REPOST_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long the interactive CLI may take to exit once it is asked to.
+const CLI_TERMINAL_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[when(expr = "the CLI REPL is started on node {string}")]
+async fn when_cli_repl_is_started(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    let terminal = CliTerminal::start(
+        &scenario_cli_binary(),
+        &[
+            "--server",
+            &grpc_uri,
+            "--domain",
+            &world.domain,
+            "--username",
+            TEST_AUTH_USERNAME,
+            "--password",
+            TEST_AUTH_PASSWORD,
+        ],
+    )
+    .unwrap_or_else(|error| panic!("the CLI REPL failed to start on a terminal: {error}"));
+    // The banner follows the connected session and precedes the first prompt.
+    if let Err(error) = terminal
+        .wait_for_display("nervix-cli connected to", CLI_TERMINAL_DISPLAY_TIMEOUT)
+        .await
+    {
+        panic!(
+            "the CLI REPL did not connect: {error}; it displayed:{}",
+            terminal.transcript()
+        );
+    }
+    world.cli_terminal = Some(terminal);
+}
+
+#[when(expr = "the CLI REPL runs {string}")]
+async fn when_cli_repl_runs(world: &mut ScenarioWorld, line: String) {
+    let line = expand_placeholders(world, &line);
+    let terminal = world
+        .cli_terminal
+        .as_ref()
+        .verified("a preceding step started the CLI REPL");
+    if let Err(error) = terminal.type_line(&line).await {
+        panic!(
+            "the CLI REPL cannot run {line:?}: {error}; it displayed:{}",
+            terminal.transcript()
+        );
+    }
+}
+
+#[then(expr = "the CLI REPL eventually displays {string}")]
+async fn then_cli_repl_eventually_displays(world: &mut ScenarioWorld, expected: String) {
+    let expected = expand_placeholders(world, &expected);
+    let terminal = world
+        .cli_terminal
+        .as_ref()
+        .verified("a preceding step started the CLI REPL");
+    if let Err(error) = terminal
+        .wait_for_display(&expected, CLI_TERMINAL_DISPLAY_TIMEOUT)
+        .await
+    {
+        panic!(
+            "the CLI REPL did not display {expected:?}: {error}; it displayed:{}",
+            terminal.transcript()
+        );
+    }
+}
+
+/// Rows a relay publishes while the cluster is still converging after a node restart can be lost in
+/// transit, so the payload is posted again until the interactive CLI displays the row it expects.
+#[when(
+    expr = "http payload is posted repeatedly to node {string} with host {string} path {string} \
+            until the CLI REPL displays {string}"
+)]
+async fn when_http_payload_is_posted_until_the_cli_repl_displays(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    host: String,
+    path: String,
+    expected: String,
+    #[step] step: &Step,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let expected = expand_placeholders(world, &expected);
+    let payload = expand_placeholders(world, docstring(step));
+    let terminal = world
+        .cli_terminal
+        .as_ref()
+        .verified("a preceding step started the CLI REPL");
+    let deadline = Instant::now() + CLI_TERMINAL_DISPLAY_TIMEOUT;
+    loop {
+        tokio::task::consume_budget().await;
+        world
+            .cluster()
+            .publish_http(&node_id, &host, &path, &payload)
+            .await
+            .unwrap_or_else(|error| panic!("failed to post http payload: {error}"));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let wait = remaining.min(CLI_TERMINAL_REPOST_INTERVAL);
+        match terminal.wait_for_display(&expected, wait).await {
+            Ok(()) => return,
+            Err(DisplayWaitError::Timeout { .. }) if Instant::now() < deadline => {}
+            Err(error) => panic!(
+                "the CLI REPL did not display {expected:?} from repeated posts within \
+                 {CLI_TERMINAL_DISPLAY_TIMEOUT:?}: {error}; it displayed:{}",
+                terminal.transcript()
+            ),
+        }
+    }
+}
+
+#[then("the CLI REPL ends successfully")]
+async fn then_cli_repl_ends_successfully(world: &mut ScenarioWorld) {
+    let terminal = world
+        .cli_terminal
+        .as_mut()
+        .verified("a preceding step started the CLI REPL");
+    let exited = terminal.wait_for_exit(CLI_TERMINAL_EXIT_TIMEOUT).await;
+    match exited {
+        Ok(status) if status.success() => {}
+        Ok(status) => panic!(
+            "the CLI REPL ended with {status}; it displayed:{}",
+            terminal.transcript()
+        ),
+        Err(error) => panic!(
+            "the CLI REPL did not end: {error}; it displayed:{}",
+            terminal.transcript()
+        ),
+    }
 }
 
 /// The directory holding the NSPL files a formatter scenario writes.
@@ -25802,6 +25947,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.cli_subscription_process = None;
                 world.cli_subscription_lines = None;
                 world.cli_clock_process = None;
+                world.cli_terminal = None;
                 world.server_process_http_load = None;
                 world.held_resource_upload = None;
                 world.server_process = None;
