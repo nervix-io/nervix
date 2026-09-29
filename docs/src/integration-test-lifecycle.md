@@ -43,6 +43,12 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
+Test dependencies start through one suite-owned environment. If Docker creates a named container
+but cannot bind its randomly selected host port, that owner removes the failed container and tries
+up to three more times with a new port selection. It also removes the failed container when those
+attempts are exhausted, so a scenario retry does not collide with its name. Other startup failures
+reach the scenario directly.
+
 The OpenTelemetry Collector dependency exposes its stdout and stderr to scenario assertions. A
 batching scenario reads the Collector's debug exporter output to check the number and order of
 records in each received export request, using unique test markers to distinguish simultaneous
