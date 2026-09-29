@@ -6,7 +6,9 @@
 //!   is not in flight says so, that registration refuses a duplicate or excess request rather
 //!   than queueing it while a submitted batch stays outside the in-flight limit, that a subscription statement the parser rejects is refused with the
 //!   stage and the diagnostic located in that statement, and that a domain clock attachment
-//!   delivers its changes between its replies and ends when its domain leaves the node.
+//!   delivers its changes between its replies and ends when its domain leaves the node. An attach
+//!   is answered only once its node has installed the committed domains, and the wait for them
+//!   ends with the session.
 //! - **Depends on.** The session engine and the session test fixtures.
 //! - **Must not know.** Production ownership beyond the parent module under test.
 
@@ -488,7 +490,18 @@ impl SessionUnderTest {
             other => panic!("a clock frame comes next: {other:?}"),
         }
     }
+
+    /// Whether the session sends no reply and no clock frame for [`UNANSWERED_WINDOW`].
+    async fn sends_no_clock_message(&mut self) -> bool {
+        let message = tokio::time::timeout(UNANSWERED_WINDOW, self.next_clock_message()).await;
+        message.is_err()
+    }
 }
+
+/// How long a test watches for an answer that must not arrive at all while its precondition holds,
+/// such as the answer to an attach before its node installed the committed domains. A longer
+/// window only strengthens the assertion.
+const UNANSWERED_WINDOW: Duration = Duration::from_millis(500);
 
 fn clocked_domain(start_version: u64, status: DomainStatus) -> DomainState {
     let clock = match status {
@@ -649,6 +662,57 @@ async fn a_session_follows_a_domain_clock_until_it_detaches_or_the_domain_leaves
         DomainClockAttachDisposition::Attached { .. }
     ));
 
+    session.close().await;
+    std::fs::remove_dir_all(&path).assured("the test database directory is removable");
+}
+
+#[tokio::test]
+async fn an_attach_answers_once_its_node_has_installed_the_committed_domains() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(false).await;
+    let mut session = SessionUnderTest::start(&service, SessionLimits::DEFAULT);
+
+    session.attach_clock(1, "clocked");
+    assert!(
+        session.sends_no_clock_message().await,
+        "a node that has installed no committed domains cannot tell whether one exists, so it \
+         does not answer"
+    );
+    let running = clocked_domain(1, DomainStatus::Running);
+    install(&service, std::slice::from_ref(&running));
+    let ReplyBody::DomainClockAttach(outcome) = session.next_clock_reply(1).await else {
+        panic!("an attach request is answered with its outcome");
+    };
+    assert_eq!(
+        outcome.disposition,
+        DomainClockAttachDisposition::Attached {
+            domain: named("clocked"),
+            clock: clocked_observation(&running),
+        }
+    );
+
+    session.close().await;
+    std::fs::remove_dir_all(&path).assured("the test database directory is removable");
+}
+
+#[tokio::test]
+async fn an_attach_waiting_for_the_committed_domains_ends_with_its_session() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(false).await;
+    let mut session = SessionUnderTest::start(&service, SessionLimits::DEFAULT);
+
+    session.attach_clock(1, "clocked");
+    assert!(
+        session.sends_no_clock_message().await,
+        "a node that has installed no committed domains does not answer an attach"
+    );
+    // The session ends while its ordered lane waits in the attach, and the lane stops with it.
     session.close().await;
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
