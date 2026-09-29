@@ -41,6 +41,26 @@ fn tls_path(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// The admission or acknowledgement the first run of `registrar` hands out under `ack_id`.
+fn registration(ack_id: u64, registrar: &ClusterNodeName) -> RemoteAckRegistration {
+    registration_of_run(ack_id, registrar, 1)
+}
+
+/// The admission or acknowledgement run `incarnation` of `registrar` hands out under `ack_id`.
+fn registration_of_run(
+    ack_id: u64,
+    registrar: &ClusterNodeName,
+    incarnation: u64,
+) -> RemoteAckRegistration {
+    RemoteAckRegistration {
+        ack_id,
+        registrar: ClusterNodeIdentity::new(
+            registrar.clone(),
+            ClusterNodeIncarnation::new(incarnation),
+        ),
+    }
+}
+
 pub(crate) fn test_tls() -> TlsConfigBundle {
     static GENERATED: OnceLock<()> = OnceLock::new();
     GENERATED.get_or_init(|| {
@@ -606,10 +626,8 @@ async fn one_way_control_send_refuses_a_typed_request() {
 
 #[test]
 fn relay_acknowledgements_use_the_management_pool() {
-    let envelope = Envelope::Ack(RemoteAckResolution {
-        ack_id: 1,
-        outcome: RemoteAckOutcome::Ack,
-    });
+    let registrar = ClusterNodeName::parse("node-a").assured("the fixture node name is valid");
+    let envelope = Envelope::Ack(registration(1, &registrar).resolution(RemoteAckOutcome::Ack));
 
     assert_eq!(envelope.pool_class(), PoolClass::Management);
 }
@@ -1370,7 +1388,7 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
             NodeEndpoint::new("localhost", transport_a.local_addr().port()),
         )
         .expect("the response target should register");
-    let payload = |ack_id, sequence, reply_node_id| RelayPayload {
+    let payload = |ack_id, sequence, registrar| RelayPayload {
         delivery: RelayDelivery {
             channel_incarnation: [1; 16],
             sequence,
@@ -1384,10 +1402,7 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
             .expect("the test relay body should fit its budget"),
         metadata: Vec::new(),
         acks: Vec::new(),
-        admission: Some(RemoteAckRegistration {
-            ack_id,
-            reply_node_id,
-        }),
+        admission: Some(registration(ack_id, &registrar)),
     };
 
     let error = transport_a
@@ -1429,10 +1444,7 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
     transport_b
         .send(
             &node_a,
-            Envelope::Ack(RemoteAckResolution {
-                ack_id: 1,
-                outcome: RemoteAckOutcome::Ack,
-            }),
+            Envelope::Ack(registration(1, &node_a).resolution(RemoteAckOutcome::Ack)),
         )
         .await
         .expect("the first relay terminal outcome should be sent");
@@ -1499,10 +1511,7 @@ async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
                     .expect("the test relay body should fit its budget"),
                 metadata: Vec::new(),
                 acks: Vec::new(),
-                admission: Some(RemoteAckRegistration {
-                    ack_id: 52,
-                    reply_node_id: node_a.clone(),
-                }),
+                admission: Some(registration(52, &node_a)),
             }),
         )
         .await
@@ -1521,15 +1530,10 @@ async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
 
     let outcome_sender = transport_b.clone();
     let outcome_target = node_a.clone();
+    let terminal = registration(52, &node_a).resolution(RemoteAckOutcome::Ack);
     let mut outcome_task = tokio::spawn(async move {
         outcome_sender
-            .send(
-                &outcome_target,
-                Envelope::Ack(RemoteAckResolution {
-                    ack_id: 52,
-                    outcome: RemoteAckOutcome::Ack,
-                }),
-            )
+            .send(&outcome_target, Envelope::Ack(terminal))
             .await
     });
     assert!(
@@ -1554,13 +1558,10 @@ async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
         .recv()
         .await
         .expect("the terminal outcome must remain queued for the application");
-    assert!(matches!(
+    assert_eq!(
         outcome.envelope,
-        Envelope::Ack(RemoteAckResolution {
-            ack_id: 52,
-            outcome: RemoteAckOutcome::Ack,
-        })
-    ));
+        Envelope::Ack(registration(52, &node_a).resolution(RemoteAckOutcome::Ack))
+    );
 
     transport_a.shutdown().await;
     transport_b.shutdown().await;
@@ -1604,10 +1605,7 @@ async fn confirmed_cancellation_fences_attempt_before_grant_arrives() {
                     .expect("the test relay body should fit its budget"),
                 metadata: Vec::new(),
                 acks: Vec::new(),
-                admission: Some(RemoteAckRegistration {
-                    ack_id: 40,
-                    reply_node_id: node_a,
-                }),
+                admission: Some(registration(40, &node_a)),
             }),
         )
         .await
@@ -1653,10 +1651,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
             .expect("the test relay body should fit its budget"),
         metadata: Vec::new(),
         acks: Vec::new(),
-        admission: Some(RemoteAckRegistration {
-            ack_id: 41,
-            reply_node_id: node_a.clone(),
-        }),
+        admission: Some(registration(41, &node_a)),
     };
 
     transport_a
@@ -1731,10 +1726,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
             .expect("the test relay body should fit its budget"),
         metadata: Vec::new(),
         acks: Vec::new(),
-        admission: Some(RemoteAckRegistration {
-            ack_id: 42,
-            reply_node_id: node_a.clone(),
-        }),
+        admission: Some(registration(42, &node_a)),
     };
     transport_a
         .send(&node_b, Envelope::RelayPayload(next_payload))
@@ -1773,10 +1765,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
             .expect("the test relay body should fit its budget"),
         metadata: Vec::new(),
         acks: Vec::new(),
-        admission: Some(RemoteAckRegistration {
-            ack_id: 43,
-            reply_node_id: node_a.clone(),
-        }),
+        admission: Some(registration(43, &node_a)),
     };
     let error = transport_a
         .send(&node_b, Envelope::RelayPayload(retired_payload.clone()))
@@ -1823,10 +1812,7 @@ async fn same_epoch_retry_of_admitted_relay_does_not_enqueue_twice() {
             .expect("the test relay body should fit its budget"),
         metadata: Vec::new(),
         acks: Vec::new(),
-        admission: Some(RemoteAckRegistration {
-            ack_id: 44,
-            reply_node_id: node_a,
-        }),
+        admission: Some(registration(44, &node_a)),
     };
 
     transport_a
@@ -1859,13 +1845,127 @@ async fn same_epoch_retry_of_admitted_relay_does_not_enqueue_twice() {
         .await
         .expect("the reconciled admission should return its terminal outcome")
         .expect("the sender application queue should remain open");
-    assert!(matches!(
+    assert_eq!(
         outcome.envelope,
-        Envelope::Ack(RemoteAckResolution {
-            ack_id: 44,
-            outcome: RemoteAckOutcome::Ack,
-        })
-    ));
+        Envelope::Ack(registration(44, &node_a).resolution(RemoteAckOutcome::Ack))
+    );
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+/// The next envelope other than admission progress, which the receiver reports while it holds a
+/// reserved admission.
+async fn next_non_progress_envelope(incoming: &mut mpsc::Receiver<ReceivedEnvelope>) -> Envelope {
+    loop {
+        tokio::task::consume_budget().await;
+        let received = timeout(Duration::from_secs(2), incoming.recv())
+            .await
+            .expect("the next envelope should arrive")
+            .expect("the application queue should remain open");
+        if let Envelope::Ack(resolution) = &received.envelope
+            && resolution.outcome == RemoteAckOutcome::Alive
+        {
+            continue;
+        }
+        return received.envelope;
+    }
+}
+
+#[tokio::test]
+async fn an_outcome_addressed_to_an_earlier_registrar_run_leaves_the_current_admission_pending() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_a,
+        node_b,
+        _incoming_a: mut incoming_a,
+        mut incoming_b,
+        ..
+    } = connected_transports().await;
+    transport_b
+        .register_outbound_target(
+            node_a.clone(),
+            NodeEndpoint::new("localhost", transport_a.local_addr().port()),
+        )
+        .expect("the response target should register");
+    let delivery = RelayDelivery {
+        channel_incarnation: [12; 16],
+        sequence: 0,
+    };
+    let current = registration_of_run(53, &node_a, 2);
+    transport_a
+        .send(
+            &node_b,
+            Envelope::RelayPayload(RelayPayload {
+                delivery,
+                kind: RelayPayloadKind::Routed,
+                domain: DomainName::parse("test").expect("test domain should be valid"),
+                relay: RelayName::parse("relay").expect("test relay should be valid"),
+                key: None,
+                batch_ipc: Executor::default()
+                    .try_charge_owned(MemoryClass::Relay, vec![1])
+                    .expect("the test relay body should fit its budget"),
+                metadata: Vec::new(),
+                acks: Vec::new(),
+                admission: Some(current.clone()),
+            }),
+        )
+        .await
+        .expect("the relay body should reach the receiver admission queue");
+    let received = timeout(Duration::from_secs(2), incoming_b.recv())
+        .await
+        .expect("the relay body should enter the application queue")
+        .expect("the application queue should remain open");
+
+    // An earlier run of the sending node registered an admission under the same number.
+    let earlier = registration_of_run(53, &node_a, 1);
+    transport_b
+        .send(
+            &node_a,
+            Envelope::Ack(earlier.resolution(RemoteAckOutcome::Ack)),
+        )
+        .await
+        .expect("the earlier run's outcome is still addressed to the node");
+    assert_eq!(
+        next_non_progress_envelope(&mut incoming_a).await,
+        Envelope::Ack(earlier.resolution(RemoteAckOutcome::Ack)),
+        "the outcome reaches the application with the run it names"
+    );
+    assert_eq!(
+        transport_a
+            .relay_admission_status(&node_b, delivery)
+            .await
+            .expect("relay status should be answered"),
+        RelayAdmissionStatus::BodyReceived,
+        "an outcome addressed to an earlier run must not resolve this run's admission"
+    );
+
+    assert_eq!(
+        received
+            .relay_admission
+            .expect("a relay body must carry its reserved admission")
+            .admit(),
+        RelayAdmissionDecision::Admitted
+    );
+    transport_b
+        .send(
+            &node_a,
+            Envelope::Ack(current.resolution(RemoteAckOutcome::Ack)),
+        )
+        .await
+        .expect("this run's terminal outcome should be sent");
+    assert_eq!(
+        next_non_progress_envelope(&mut incoming_a).await,
+        Envelope::Ack(current.resolution(RemoteAckOutcome::Ack))
+    );
+    assert_eq!(
+        transport_a
+            .relay_admission_status(&node_b, delivery)
+            .await
+            .expect("relay status should be answered"),
+        RelayAdmissionStatus::Admitted
+    );
 
     transport_a.shutdown().await;
     transport_b.shutdown().await;
@@ -1901,10 +2001,7 @@ async fn receiver_process_restart_makes_unresolved_relay_indeterminate() {
                     .expect("the test relay body should fit its budget"),
                 metadata: Vec::new(),
                 acks: Vec::new(),
-                admission: Some(RemoteAckRegistration {
-                    ack_id: 45,
-                    reply_node_id: node_a.clone(),
-                }),
+                admission: Some(registration(45, &node_a)),
             }),
         )
         .await
@@ -1983,10 +2080,7 @@ async fn reserved_relay_work_reports_progress_before_runtime_admission() {
                     .expect("the test relay body should fit its budget"),
                 metadata: Vec::new(),
                 acks: Vec::new(),
-                admission: Some(RemoteAckRegistration {
-                    ack_id: 51,
-                    reply_node_id: node_a.clone(),
-                }),
+                admission: Some(registration(51, &node_a)),
             }),
         )
         .await
@@ -2000,13 +2094,10 @@ async fn reserved_relay_work_reports_progress_before_runtime_admission() {
         .await
         .expect("reserved relay work should report queue-time progress")
         .expect("the sender application queue should remain open");
-    assert!(matches!(
+    assert_eq!(
         progress.envelope,
-        Envelope::Ack(RemoteAckResolution {
-            ack_id: 51,
-            outcome: RemoteAckOutcome::Alive,
-        })
-    ));
+        Envelope::Ack(registration(51, &node_a).resolution(RemoteAckOutcome::Alive))
+    );
 
     transport_a.shutdown().await;
     transport_b.shutdown().await;

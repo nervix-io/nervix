@@ -67,6 +67,8 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
 /// A row a subscription delivered, as a client displays it.
 #[derive(Debug, Clone)]
 pub(crate) struct TestSubscriptionEvent {
+    /// The subscription that delivered the row.
+    pub subscription: SubscriptionName,
     pub payload: String,
 }
 
@@ -777,8 +779,10 @@ impl TestSession {
                     .map_err(io::Error::other)?;
                 for payload in lines {
                     self.delivered_payloads.push(payload.clone());
-                    self.pending_subscriptions
-                        .push_back(TestSubscriptionEvent { payload });
+                    self.pending_subscriptions.push_back(TestSubscriptionEvent {
+                        subscription: rows.subscription().name.clone(),
+                        payload,
+                    });
                 }
             }
             ServerEvent::SubscriptionRowsSkipped(skipped) => {

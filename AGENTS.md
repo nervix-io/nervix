@@ -302,6 +302,12 @@ choose a backend.
   record what a check observes without adding a scheduling point. It never carries the protocol
   under test, chooses its branches, supplies its wakeups, or establishes an ordering an assertion
   relies on. A use without a permission, an unlisted item, and a permission nothing uses all fail.
+- A selected atomic belongs to the model execution that constructs it. It never lives in a
+  `static`, directly, through a wrapper, an array or a type alias, or in a `thread_local!`, and it
+  is never constructed in a const context, which Loom's atomics do not support. Process-wide state
+  moves onto the owner whose lifetime it has, such as a node's service or its Raft network; a count
+  a unit test reads is kept per thread; and state that must outlive every test and model is a real
+  atomic under a permission.
 - The primitive crate owns mode selection. At most one mode is enabled in a dependency graph, and
   every pair of modes, including a pair that separate dependencies enable, fails to compile there
   with a diagnostic naming both. Selection depends only on features, never on `cfg(test)`; there is
@@ -863,7 +869,8 @@ build and the existing tests, and nothing in it changes behavior.
   selects nothing, and leaves a failed model's checkpoint and metadata for
   `just test-loom-replay`. `just test-loom-qualification` shows each model fails under its
   registered weakening. Required CI runs Shuttle, Loom and its qualification, and Turmoil
-  independently of the ordinary tests.
+  independently of the ordinary tests. `just cargo-clippy-loom`, part of `just lint`, keeps every
+  Loom build compiling, including the server and consensus libraries as they ship and in test mode.
 - Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
   user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
   accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.

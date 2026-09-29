@@ -838,7 +838,7 @@ and leaves the irregular remainder per row, still inside one batch call:
 | Calendar and time-zone logic | Fixed-length units in UTC or at a fixed offset use the vectorizable fixed-unit lanes. A time zone resolves once from the bundled database. Consecutive lanes inside one offset span reuse one zone lookup. | Months, quarters, years, and local days or weeks under an IANA zone compute per row through Jiff's civil calendar, including disambiguation and month-end clamping. |
 | `contains_any` and `IN` | Constant pattern lists build one Aho-Corasick matcher. Small fixed-width sets compare in turn and larger ones hash, with the threshold chosen by benchmark. | Each row is scanned or hashed individually. Per-row pattern sets build a matcher per distinct set per batch. |
 | Lists | Counts read offsets. First, last, and nth are index arithmetic plus one `take`. `min` and `max` over fixed-width lists without null elements compare whole columns one element position at a time. | Ragged-list extrema, `mean`, `distance`, `dot`, `contains`, and `overlap` loop over each row's elements. |
-| Sketches and window structures | Aggregate arguments are evaluated once per batch as Arrow columns. Rows are admitted in runs of one argument batch. Structures merge rather than rescan where the algorithm allows. | Admission into accumulators and sketches is per row. Hashing, t-digest insertion, and Misra-Gries counting are irregular by nature. |
+| Sketches and window structures | Aggregate arguments are evaluated once per batch as Arrow columns. Typed runs fold validity by popcount, exact integer sums by split SIMD lanes, floating sums and centered moments by per-lane folds, and histogram indexes before scattering. Non-finite arguments are classified by column bitmaps. | Candidate deque updates, bucket scatter, BLAKE3 per distinct input, t-digest insertion, and Misra-Gries updates remain irregular. Sketch keys reuse a run buffer. |
 | Encodings and hashes | Base64, hex, and SHA-256 use library SIMD dispatch per value. Output lengths are checked before encoding. | Each value is encoded or hashed separately. `md5` is scalar. |
 | IP addresses and URLs | Constant networks parse once. A containment test is one mask and compare on fixed-width integers. A scalar URL parses once per batch. | Address text and URLs parse per row under the URL Standard. |
 | Roto UDFs | One vectorized call per batch or selection, with column methods over Arrow arrays. | Whatever the UDF body does. Its `get` and builder methods are an explicit per-row path. |
@@ -983,10 +983,15 @@ For each batch, the task works through these steps:
 
 1. It evaluates the argument program once. A whole-batch failure fails every message in the batch.
 2. It refuses a row whose argument failed, or whose float argument is not finite where the
-   structure requires finite values.
+   structure requires finite values. Each floating argument column supplies a non-finite bitmap.
 3. It checks the state budget, then admits the rest in runs of consecutive rows. A run ends where
    the window's width fills.
-4. For each run, every structure admits the rows from the shared argument columns. Each retained
+4. For each run, every structure reads one typed value slice and validity bitmap from the shared
+   argument columns. Counts use bitmap popcounts; integer sums use exact high and low lane halves;
+   float sums use per-lane TwoSum; moments use a compensated mean pass and a centered second pass,
+   falling back to a weighted mean when summing finite inputs overflows before division, then one
+   Chan merge into the branch's aggregate. Histogram indexes are computed for the run and
+   scattered into bucket counts. Each retained
    row holds its sequence, its timestamp, and a row view of the Arc'd input and argument batches.
 5. It emits while the width is met, and then steps the window. Stepped rows are acknowledged.
 
@@ -996,10 +1001,10 @@ Tumbling and sliding windows use this same path, with different `WIDTH` and `STE
 | --- | --- | --- | --- |
 | `counter` | `COUNT` | Exact 64-bit count | Subtract |
 | `truth_counter` | `COUNT_IF`, `BOOL_AND`, `BOOL_OR` | Exact true and false counts | Subtract |
-| `sum` over integers | `SUM` | Exact 128-bit sum, checked against the argument type at emission | Subtract |
-| `sum` over floats | `SUM` | Knuth two-sum compensated sum in a two-stack window; `F32` accumulates in `F64` | Recomputed from survivors, never subtracted |
-| `moments` | `AVG`, variances, standard deviations | Centered count, mean, and M2 with pairwise merging, in a two-stack window | Recomputed from survivors |
-| `co_moments` | Covariances, `CORR` | Centered co-moments in a two-stack window; `CORR` clamped to `[-1, 1]` | Recomputed from survivors |
+| `sum` over integers | `SUM` | Exact 128-bit sum from high and low 32-bit SIMD halves, checked against the argument type at emission | Subtract the same run kernel's result |
+| `sum` over floats | `SUM` | Per-lane Knuth two-sum in a two-stack window; `F32` accumulates in `F64` | Refold typed surviving runs, never subtract |
+| `moments` | `AVG`, variances, standard deviations | Two-pass centered count, mean, and M2 with one Chan merge per run, in a two-stack window | Refold typed surviving runs |
+| `co_moments` | Covariances, `CORR` | Two-pass centered co-moments with one Chan merge per run; `CORR` clamped to `[-1, 1]` | Refold typed surviving runs |
 | `extremes`, `sequence`, `arg_extremes` | `MIN`/`MAX`, `FIRST`/`LAST`, `ARG_MIN`/`ARG_MAX` | Monotonic candidate deque ordered by value, arrival, or key; ties keep the earliest row | Drop front candidates older than the first survivor |
 | `linear_histogram` | `PERCENTILE_LINEAR_HISTOGRAM` | Fixed-range buckets, answered with a bucket midpoint | Immediately, or after the configured delay on the domain clock |
 | `hll` | `APPROX_COUNT_DISTINCT` | HyperLogLog over the first 8 bytes of a BLAKE3 hash of a type-tagged key, with linear counting at small cardinalities | Rebuilt from survivors |
@@ -1011,11 +1016,15 @@ The two-stack window keeps its floating-point statistics exact under sliding:
 - **Front.** A stack whose entries aggregate the oldest retained rows. Its top entry covers the
   oldest front row together with every newer front row, so dropping that row pops one entry.
 - **Back.** One aggregate of every retained row after the front, extended as rows are admitted.
-- **Refold.** A retraction that reaches past the front folds the surviving rows from newest to
-  oldest into a fresh front.
+- **Refold.** A retraction that reaches past the front groups survivors by typed argument run and
+  folds each run from newest to oldest into a fresh front.
 
 Nothing is ever subtracted, so a value that left the window leaves no rounding behind, at amortized
 constant cost per row.
+
+Run boundaries and SIMD lane order determine the association of floating-point additions and Chan
+merges. Their results are associative up to floating-point rounding and can differ slightly when
+batching changes. Integer sums and counts remain bit-identical regardless of run boundaries.
 
 ### Sketch Panes, Merge, And Expiry
 

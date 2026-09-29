@@ -1260,17 +1260,23 @@ ingestor, it opens a producer link to the node that does over the interconnect, 
 producer's bytes in its own budget, and relays the batches, outcomes, admission changes, and end;
 the executing node reserves the same bytes again for the batches it retains. [Cluster
 Interconnect](./interconnect.md#client-producer-links) owns the link. The client sees the same
-protocol either way. When the link is lost, the producer ends as `OwnerLost` and its unresolved
-batches have an `OutcomeUnknown` with cause `OwnerLost`.
+protocol either way. The executing node admits a forwarded batch only after the serving node cleared
+it, so when the link is lost, whether the executing node crashed or stopped answering, the serving
+node still knows which batches may have entered the graph. Every batch it never cleared is answered
+`NotAdmitted` with `ProducerEnded`, which the client may submit again on a new producer without
+duplicating its effects; every batch it cleared has an `OutcomeUnknown` with cause `OwnerLost`; and
+the producer then ends as `OwnerLost`. When the serving node itself is lost, its sessions end with
+it, as [When The Session Ends](#when-the-session-ends) describes.
 
 ### When The Session Ends
 
-When the session ends, its producers detach: the executing node stops accepting their batches,
-answers nobody, and lets admitted batches finish in the graph. Nothing about a producer survives the
-session. The Rust client reports every batch that was sent without an outcome as of unknown outcome
-with `SessionLost` and ends the producer as `SessionLost`; it does not reopen producers on its next
-session, so the application opens another one. The shared binding and the web console do not open
-producers.
+When the session ends, including because the node that serves it crashed, its producers detach:
+the executing node stops accepting their batches, drops the ones it held queued or awaiting their
+clearance without admitting them, answers nobody, and lets admitted batches finish in the graph.
+Nothing about a producer survives the session. The Rust client reports every batch that was sent
+without an outcome as of unknown outcome with `SessionLost` and ends the producer as `SessionLost`;
+it does not reopen producers on its next session, so the application opens another one. The shared
+binding and the web console do not open producers.
 
 ## Resource Uploads
 

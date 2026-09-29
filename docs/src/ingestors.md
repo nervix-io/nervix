@@ -563,8 +563,11 @@ ends a producer, as the last event about it, with one of these reasons:
 | `protocol violated` | The producer sent a batch beyond its credit. |
 
 An ended producer's queued batches are refused as `producer ended`, and its admitted batches whose
-acknowledgement is unresolved have an unknown outcome. A new producer can be opened as soon as the
-ingestor runs again. An alteration that keeps the contract, such as one that changes only a route's
+acknowledgement is unresolved have an unknown outcome. That holds when the node that executes the
+ingestor dies or stops answering, too: the node that forwards a producer's batches to it clears each
+batch before it may be admitted, so after the loss it refuses every batch it never cleared as
+`producer ended`, and only the cleared ones have an unknown outcome with cause `owner_lost`. A new
+producer can be opened as soon as the ingestor runs again. An alteration that keeps the contract, such as one that changes only a route's
 `FLUSH`, suspends admission for its hold and reopens it afterwards with every producer attached. A
 planned ownership handoff stops intake for good on the former owner: batches that arrive are
 refused as `draining`, admitted ones complete there, and its producers end as `relocated` once the

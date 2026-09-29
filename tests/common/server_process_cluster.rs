@@ -2,13 +2,23 @@
 //!
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
-//! - **Owns.** Starting, killing and restarting every persisted voter, plus observable membership
-//!   and leader readiness before a scenario sends commands.
+//! - **Owns.** Starting, killing and restarting every persisted voter, signalling, freezing and
+//!   restarting one of them, and observable membership and leader readiness before a scenario
+//!   sends commands.
 //! - **Depends on.** The single-process fixture, its test certificate authority, and bounded
 //!   public cluster-status requests.
 //! - **Must not know.** Server state beyond the command and status surfaces each process exposes.
+//!
+//! A member stopped by SIGSTOP keeps its sockets open and answers nothing, so the cluster asks
+//! only the members it has not frozen which node leads.
 
-use std::{collections::BTreeMap, io, os::unix::process::ExitStatusExt as _, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io,
+    os::unix::process::ExitStatusExt as _,
+    process::ExitStatus,
+    time::Duration,
+};
 
 use nix::sys::signal::Signal;
 use tempfile::TempDir;
@@ -28,6 +38,8 @@ const MEMBERSHIP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 #[derive(Debug)]
 pub(crate) struct ServerProcessCluster {
     nodes: BTreeMap<String, ServerProcess>,
+    /// Members stopped by SIGSTOP and not continued since.
+    frozen: BTreeSet<String>,
     _root: TempDir,
 }
 
@@ -69,9 +81,66 @@ impl ServerProcessCluster {
             process.wait_until_ready().await?;
             nodes.insert(node_id, process);
         }
-        let cluster = Self { nodes, _root: root };
+        let cluster = Self {
+            nodes,
+            frozen: BTreeSet::new(),
+            _root: root,
+        };
         cluster.wait_for_voters().await?;
         Ok(cluster)
+    }
+
+    pub(crate) fn node_ids(&self) -> Vec<String> {
+        self.nodes.keys().cloned().collect()
+    }
+
+    pub(crate) fn grpc_uri(&self, node_id: &str) -> io::Result<String> {
+        Ok(self.member(node_id)?.grpc_uri())
+    }
+
+    /// Delivers `signal` to one member. SIGSTOP freezes it with its sockets open, so peers hear
+    /// nothing from it and see no reset, until SIGCONT lets it run again.
+    pub(crate) fn signal(&mut self, node_id: &str, signal: Signal) -> io::Result<()> {
+        self.member(node_id)?.send_signal(signal)?;
+        match signal {
+            Signal::SIGSTOP => {
+                self.frozen.insert(node_id.to_string());
+            }
+            Signal::SIGCONT => {
+                self.frozen.remove(node_id);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Waits until one member's process exits, and says how it did.
+    pub(crate) async fn wait_for_exit(&mut self, node_id: &str) -> io::Result<ExitStatus> {
+        self.member_mut(node_id)?.wait_for_exit().await
+    }
+
+    /// Starts an exited member again from its own database and ports, then waits until every
+    /// member reports the same leader and all three voters.
+    pub(crate) async fn restart(&mut self, node_id: &str) -> io::Result<()> {
+        self.member_mut(node_id)?.restart().await?;
+        self.wait_for_voters().await
+    }
+
+    /// The node the running members report as leader.
+    pub(crate) async fn leader_id(&self) -> io::Result<String> {
+        Ok(self.leader_entry().await?.0.clone())
+    }
+
+    fn member(&self, node_id: &str) -> io::Result<&ServerProcess> {
+        self.nodes.get(node_id).ok_or_else(|| {
+            io::Error::other(format!("the process cluster has no member {node_id:?}"))
+        })
+    }
+
+    fn member_mut(&mut self, node_id: &str) -> io::Result<&mut ServerProcess> {
+        self.nodes.get_mut(node_id).ok_or_else(|| {
+            io::Error::other(format!("the process cluster has no member {node_id:?}"))
+        })
     }
 
     pub(crate) async fn run_commands(&self, domain: &str, commands: &str) -> io::Result<String> {
@@ -115,22 +184,47 @@ impl ServerProcessCluster {
     }
 
     async fn leader(&self) -> io::Result<&ServerProcess> {
-        let bootstrap = self
-            .nodes
-            .get("node-1")
-            .ok_or_else(|| io::Error::other("the process cluster has no bootstrap node"))?;
-        let status = bootstrap
-            .status_endpoint()
-            .cluster_status(PhaseDeadline::after(STATUS_REQUEST_TIMEOUT))
-            .await
-            .map_err(io::Error::other)?;
-        let leader_id = status
-            .lines()
-            .find_map(|line| line.strip_prefix("raft.current_leader: "))
-            .ok_or_else(|| io::Error::other("cluster status omitted its current leader"))?;
-        self.nodes.get(leader_id).ok_or_else(|| {
-            io::Error::other(format!("cluster status named unknown leader {leader_id:?}"))
-        })
+        Ok(self.leader_entry().await?.1)
+    }
+
+    /// Asks the members that run, in node order, which node leads, and takes the first answer
+    /// that names a running member. A killed or frozen member is neither asked nor taken.
+    async fn leader_entry(&self) -> io::Result<(&String, &ServerProcess)> {
+        let mut answers = Vec::new();
+        for (node_id, process) in &self.nodes {
+            tokio::task::consume_budget().await;
+            if process.has_exited() || self.frozen.contains(node_id) {
+                continue;
+            }
+            let status = process
+                .status_endpoint()
+                .cluster_status(PhaseDeadline::after(STATUS_REQUEST_TIMEOUT))
+                .await;
+            let status = match status {
+                Ok(status) => status,
+                Err(error) => {
+                    answers.push(format!("{node_id}: {error}"));
+                    continue;
+                }
+            };
+            let leader_id = status
+                .lines()
+                .find_map(|line| line.strip_prefix("raft.current_leader: "));
+            let Some(leader_id) = leader_id else {
+                answers.push(format!("{node_id}: the status omitted its current leader"));
+                continue;
+            };
+            if let Some((leader_id, leader)) = self.nodes.get_key_value(leader_id)
+                && !leader.has_exited()
+                && !self.frozen.contains(leader_id)
+            {
+                return Ok((leader_id, leader));
+            }
+            answers.push(format!("{node_id}: named leader {leader_id:?}"));
+        }
+        Err(io::Error::other(format!(
+            "no running member named a running member as leader: {answers:?}"
+        )))
     }
 
     async fn wait_for_voters(&self) -> io::Result<()> {

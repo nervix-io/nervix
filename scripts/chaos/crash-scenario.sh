@@ -60,6 +60,19 @@ observe_crash_target() {
         >"${output_dir}/role.json"
 }
 
+confirm_crash_target_before_fault() {
+    local selected_node="$1"
+    local output_dir="$2"
+    # A committed canary can still leave sequential public status reads at different log indexes.
+    if ! wait_for 'settled public role immediately before SIGKILL' 30 \
+        observe_crash_target "${output_dir}"; then
+        crash_fail injection 'settled public role was unavailable before SIGKILL'
+        return 1
+    fi
+    [[ "${target_node}" == "${selected_node}" ]] \
+        || crash_fail injection "observed role moved from ${selected_node} to ${target_node} before SIGKILL"
+}
+
 control_attempt() {
     local name="$1"
     local host="$2"
@@ -195,10 +208,7 @@ run_crash() {
         && grep -Fq "name=/${container_name} signal=SIGKILL" "${crash_dir}/pumba-dry-run.txt" \
         || crash_fail injection 'Pumba dry run did not resolve the exact observed container'
 
-    observe_crash_target "${crash_dir}/immediately-before" \
-        || crash_fail injection 'public role became unavailable before SIGKILL'
-    [[ "${target_node}" == "${selected_node}" ]] \
-        || crash_fail injection "observed role moved from ${selected_node} to ${target_node} before SIGKILL"
+    confirm_crash_target_before_fault "${selected_node}" "${crash_dir}/immediately-before"
     inspect_target "${container_id}" "${crash_dir}/before.json"
     "${script_dir}/verify-crash-evidence.sh" before "${run_id}" "${project_name}" \
         "${selected_host}" "${image_id}" "${crash_dir}/selected.json" "${crash_dir}/before.json"
