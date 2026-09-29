@@ -333,8 +333,10 @@ published allocation.
 Registry validation compiles or type-infers expressions when a statement is applied and discards
 the result. The exceptions, which are first checked when their domain's execution is built or a
 subscription is created, are listed in
-[Where Expressions Run](./filter-map-functions.md#where-expressions-run). The runtime compiles again
-against runtime schemas:
+[Where Expressions Run](./filter-map-functions.md#where-expressions-run). The decision layer lowers
+the installed revision's expressions into typed plans; node installation binds and compiles those
+programs against runtime schemas. [Execution Plans](./execution-plans.md) describes the complete
+revision and its publication.
 
 | Program | Compiled for execution |
 | --- | --- |
@@ -1220,11 +1222,12 @@ The complete user-facing limits are in [Limits](./filter-map-functions.md#limits
 
 **Current boundaries:**
 
-- The data plane compiles its programs from Models rather than receiving validated plans.
-- Routes compile lazily on each branch instance's first batch. A branched processor therefore
-  pays compilation, and holds its routes' prepared patterns and sets, once for every concrete
-  branch it runs, where window and inferencer programs are compiled once per processor.
-- An error-record program compiles once per record it builds.
+- Validation compiles to reject invalid statements, while installation compiles the programs
+  selected by the typed revision against local schemas and capabilities.
+- Branched processor routes compile before publication and share their prepared patterns and
+  sets across concrete branch tasks of the same installed node revision.
+- A message-error route binds once per installed revision; each failed record executes that bound
+  program with its captured inputs.
 - The text functions listed under [Allocation And Result Bounds](#allocation-and-result-bounds)
   build their columns without the size check.
 - A statement that makes a batch's program slow is bounded only by the input and the limits above.
