@@ -5,7 +5,8 @@
 //!
 //! - **Owns.** The one duplex stream a serving node keeps to each owning node while producers use
 //!   it, the frames it carries in each direction, the link-local key of every forwarded producer,
-//!   the heartbeat each end sends while idle, and ending every producer of a link that fails or
+//!   the clearance the serving node gives each forwarded batch before the owning node may admit
+//!   it, the heartbeat each end sends while idle, and ending every producer of a link that fails or
 //!   falls silent.
 //! - **Depends on.** The interconnect's ordered duplex streams and the runtime's client ingestor
 //!   endpoints on the owning side.
@@ -14,12 +15,17 @@
 //! Every producer a serving node forwards to one owning node shares that node's link, so forwarding
 //! holds one relay stream per peer however many producers use it. Frames of one producer keep
 //! their order in both directions: its open precedes its batches, and its outcomes, admission
-//! changes and end follow the owning node's answer to its open. A link neither end hears from
-//! within the silence limit is treated as lost, which the serving node reports to every producer
-//! of the link as `OwnerLost`; the owning node detaches them, and admitted work continues in its
-//! graph.
+//! changes and end follow the owning node's answer to its open.
+//!
+//! The owning node admits a forwarded batch only once the serving node cleared it: when the
+//! batch's turn comes it sends `Admitting`, and the serving node records that the batch may now be
+//! admitted before it answers `Clear`. A link neither end hears from within the silence limit is
+//! treated as lost. The serving node then answers every batch it never cleared as not admitted,
+//! since the owning node cannot have admitted it, and ends every producer of the link as
+//! `OwnerLost`, which leaves only the cleared batches of unknown outcome; the owning node detaches
+//! them, and admitted work continues in its graph.
 
-use std::{num::NonZeroU64, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroU64, time::Duration};
 
 use ahash::{HashMap, RandomState};
 use bytes::Bytes;
@@ -32,8 +38,8 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
-    ClientProducerLimits, ClientProducerRefusal, ClientSubmissionOutcome, ClusterNodeName,
-    DomainName, IngestorName, SchemaField,
+    ClientProducerLimits, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
+    ClusterNodeName, DomainName, IngestorName, SchemaField,
 };
 use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use nervix_recovery::{Discarded as _, NoReceiver as _};
@@ -46,7 +52,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::debug;
 use triomphe::Arc;
 
-use super::{OpenedRoute, ProducerOpen, ProducerRoute};
+use super::{OpenedRoute, ProducerOpen, ProducerRoute, RouteEnded};
 use crate::runtime::{
     ClientProducerEvent, ClientProducerEvents, ClientProducerHandle, ClientProducerOpenRequest,
     ClientProducerRetention, ClientSubmissionId, OpenedClientProducer, Runtime,
@@ -106,6 +112,12 @@ pub(super) enum ClientProducerLinkItem {
         submission: NonZeroU64,
         batch: Vec<u8>,
     },
+    /// The serving node counts the batch as possibly admitted from now on, and the owning node may
+    /// admit it.
+    Clear {
+        key: u64,
+        submission: NonZeroU64,
+    },
     Close {
         key: u64,
     },
@@ -125,6 +137,12 @@ pub(super) enum ClientProducerLinkEvent {
     Refused {
         key: u64,
         refusal: ClientProducerRefusal,
+    },
+    /// The batch's turn in the ingestor's window has come, and the owning node admits it once the
+    /// serving node cleared it.
+    Admitting {
+        key: u64,
+        submission: NonZeroU64,
     },
     Outcome {
         key: u64,
@@ -205,16 +223,19 @@ pub(in crate::application) struct ForwardedProducer {
 }
 
 impl ForwardedProducer {
-    pub(super) fn submit(&self, submission: ClientSubmissionId, batch: Bytes) {
+    /// Hands one batch to the link. A link that already ended takes nothing: the batch never
+    /// reaches the owning node.
+    pub(super) fn submit(
+        &self,
+        submission: ClientSubmissionId,
+        batch: Bytes,
+    ) -> Result<(), RouteEnded> {
         let command = LinkCommand::Submit {
             key: self.key,
             submission: submission.get(),
             batch,
         };
-        // A link that is gone already ended this producer, and that end answers the batch.
-        self.commands
-            .send(command)
-            .means_shutdown("client producer link");
+        self.commands.send(command).map_err(|_| RouteEnded)
     }
 
     pub(super) fn close(mut self) {
@@ -332,6 +353,87 @@ impl ProducerLinks {
 struct ForwardedRoute {
     events: mpsc::UnboundedSender<ClientProducerEvent>,
     admission: watch::Sender<ClientProducerAdmission>,
+    submissions: ForwardedSubmissions,
+}
+
+impl ForwardedRoute {
+    /// Ends the producer as lost with its owning node. Every batch the owning node cannot have
+    /// admitted, because this side never cleared it, is answered as not admitted before the end,
+    /// which leaves the cleared ones for the producer's session to report as of unknown outcome.
+    fn end_with_lost_owner(self) {
+        for submission in self.submissions.uncleared() {
+            let refusal = ClientProducerEvent::Outcome {
+                submission: ClientSubmissionId::new(submission),
+                outcome: ClientSubmissionOutcome::NotAdmitted(
+                    ClientSubmissionRefusal::ProducerEnded,
+                ),
+                detail: Some(
+                    "the node that executes the ingestor was lost before it admitted the batch"
+                        .to_string(),
+                ),
+            };
+            self.events
+                .send(refusal)
+                .means_peer_left("forwarded producer");
+        }
+        self.events
+            .send(ClientProducerEvent::Ended(
+                ClientProducerEndReason::OwnerLost,
+            ))
+            .means_peer_left("forwarded producer");
+    }
+}
+
+/// Whether the owning node may have admitted a batch this side handed to the link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Clearance {
+    /// Not cleared, so the owning node cannot have admitted it.
+    Uncleared,
+    /// Cleared on the owning node's request, so it may have been admitted.
+    Cleared,
+}
+
+/// The batches of one forwarded producer that this side handed to the link and holds no outcome
+/// for, in submission order, with the clearance of each.
+#[derive(Debug, Default)]
+struct ForwardedSubmissions {
+    submissions: BTreeMap<NonZeroU64, Clearance>,
+}
+
+impl ForwardedSubmissions {
+    /// Records a batch handed to the link, which the owning node may admit only once it is
+    /// cleared.
+    fn track(&mut self, submission: NonZeroU64) {
+        self.submissions
+            .insert(submission, Clearance::Uncleared)
+            .discarded("a submission identity is handed to the link once");
+    }
+
+    /// Clears a batch the owning node asks to admit, and says whether it was cleared. A batch that
+    /// already has its outcome is no longer the owning node's to admit, so it stays uncleared.
+    fn clear(&mut self, submission: NonZeroU64) -> bool {
+        let Some(clearance) = self.submissions.get_mut(&submission) else {
+            return false;
+        };
+        *clearance = Clearance::Cleared;
+        true
+    }
+
+    /// Forgets a batch whose outcome arrived.
+    fn answered(&mut self, submission: NonZeroU64) {
+        self.submissions.remove(&submission);
+    }
+
+    /// The batches the owning node cannot have admitted, in submission order.
+    fn uncleared(&self) -> Vec<NonZeroU64> {
+        let mut uncleared = Vec::new();
+        for (submission, clearance) in &self.submissions {
+            if let Clearance::Uncleared = clearance {
+                uncleared.push(*submission);
+            }
+        }
+        uncleared
+    }
 }
 
 /// The task that owns one serving link.
@@ -376,7 +478,7 @@ impl ServingLink {
                 event = receiver.next() => match event {
                     Ok(Some(event)) => {
                         last_heard = Instant::now();
-                        self.deliver(event);
+                        self.deliver(event, &items);
                     }
                     Ok(None) => {
                         debug!(owner = %self.owner, "the owning node closed a client producer link");
@@ -408,7 +510,8 @@ impl ServingLink {
     }
 
     /// Ends the link: every open it has not answered is refused, and every producer it routes
-    /// ends as lost with its owning node.
+    /// ends as lost with its owning node, after its batches the owning node cannot have admitted
+    /// are answered as not admitted.
     fn end(mut self, commands: &mut mpsc::UnboundedReceiver<LinkCommand>) {
         self.links.forget(
             &self.owner,
@@ -417,12 +520,23 @@ impl ServingLink {
             },
         );
         commands.close();
-        // Opens queued after the registry dropped this link are refused with the rest.
+        // Commands queued after the registry dropped this link: their opens are refused with the
+        // rest, and their batches never left this node, so they were never cleared.
         while let Ok(command) = commands.try_recv() {
-            if let LinkCommand::Open { reply, .. } = command {
-                reply
-                    .send(Err(ClientProducerRefusal::EndpointUnavailable))
-                    .means_peer_left("forwarded producer open");
+            match command {
+                LinkCommand::Open { reply, .. } => {
+                    reply
+                        .send(Err(ClientProducerRefusal::EndpointUnavailable))
+                        .means_peer_left("forwarded producer open");
+                }
+                LinkCommand::Submit {
+                    key, submission, ..
+                } => {
+                    if let Some(route) = self.routes.get_mut(&key) {
+                        route.submissions.track(submission);
+                    }
+                }
+                LinkCommand::Close { .. } | LinkCommand::Detach { .. } => {}
             }
         }
         for (_, reply) in self.pending.drain() {
@@ -431,12 +545,7 @@ impl ServingLink {
                 .means_peer_left("forwarded producer open");
         }
         for (_, route) in self.routes.drain() {
-            route
-                .events
-                .send(ClientProducerEvent::Ended(
-                    ClientProducerEndReason::OwnerLost,
-                ))
-                .means_peer_left("forwarded producer");
+            route.end_with_lost_owner();
         }
     }
 
@@ -469,10 +578,11 @@ impl ServingLink {
                 submission,
                 batch,
             } => {
-                if !self.routes.contains_key(&key) {
+                let Some(route) = self.routes.get_mut(&key) else {
                     // The producer ended; that end answers every batch it still had.
                     return;
-                }
+                };
+                route.submissions.track(submission);
                 ClientProducerLinkItem::Submit {
                     key,
                     submission,
@@ -496,10 +606,14 @@ impl ServingLink {
             .means_shutdown("client producer link writer");
     }
 
-    /// Routes one answer of the owning node to the producer it concerns. A frame about a producer
-    /// this side already let go of is dropped: the owning node learns of that from the detach the
-    /// release sent.
-    fn deliver(&mut self, event: ClientProducerLinkEvent) {
+    /// Routes one answer of the owning node to the producer it concerns, and clears a batch the
+    /// owning node asks to admit. A frame about a producer this side already let go of is dropped:
+    /// the owning node learns of that from the detach the release sent.
+    fn deliver(
+        &mut self,
+        event: ClientProducerLinkEvent,
+        items: &mpsc::UnboundedSender<ClientProducerLinkItem>,
+    ) {
         match event {
             ClientProducerLinkEvent::Opened { key, description } => {
                 let Some(reply) = self.pending.remove(&key) else {
@@ -525,8 +639,12 @@ impl ServingLink {
                 if reply.send(Ok(opened)).is_err() {
                     return;
                 }
-                self.routes
-                    .insert(key, ForwardedRoute { events, admission });
+                let route = ForwardedRoute {
+                    events,
+                    admission,
+                    submissions: ForwardedSubmissions::default(),
+                };
+                self.routes.insert(key, route);
             }
             ClientProducerLinkEvent::Refused { key, refusal } => {
                 let Some(reply) = self.pending.remove(&key) else {
@@ -536,15 +654,29 @@ impl ServingLink {
                     .send(Err(refusal))
                     .means_peer_left("forwarded producer open");
             }
+            ClientProducerLinkEvent::Admitting { key, submission } => {
+                let Some(route) = self.routes.get_mut(&key) else {
+                    return;
+                };
+                // Recorded before the answer leaves, so from the moment the owning node may admit
+                // the batch, a lost link reports it as possibly admitted.
+                if !route.submissions.clear(submission) {
+                    return;
+                }
+                items
+                    .send(ClientProducerLinkItem::Clear { key, submission })
+                    .means_shutdown("client producer link writer");
+            }
             ClientProducerLinkEvent::Outcome {
                 key,
                 submission,
                 outcome,
                 detail,
             } => {
-                let Some(route) = self.routes.get(&key) else {
+                let Some(route) = self.routes.get_mut(&key) else {
                     return;
                 };
+                route.submissions.answered(submission);
                 let event = ClientProducerEvent::Outcome {
                     submission: ClientSubmissionId::new(submission),
                     outcome,
@@ -712,13 +844,14 @@ impl OwnerLink {
                 limits,
                 max_batch_bytes,
             } => {
+                let (clearance_requests, clearances) = mpsc::unbounded_channel();
                 let request = ClientProducerOpenRequest {
                     domain,
                     ingestor,
                     expected_fields,
                     limits,
                     max_batch_bytes,
-                    retention: ClientProducerRetention::Forwarded,
+                    retention: ClientProducerRetention::Forwarded { clearance_requests },
                 };
                 let opened = self.runtime.open_client_producer(request).await;
                 let OpenedClientProducer {
@@ -742,7 +875,12 @@ impl OwnerLink {
                 if answered.is_err() {
                     return false;
                 }
-                tokio::spawn(forward_events(key, events, self.answers.clone()));
+                tokio::spawn(forward_events(
+                    key,
+                    events,
+                    clearances,
+                    self.answers.clone(),
+                ));
                 self.producers.insert(key, handle);
             }
             ClientProducerLinkItem::Submit {
@@ -752,6 +890,11 @@ impl OwnerLink {
             } => {
                 if let Some(handle) = self.producers.get(&key) {
                     handle.submit(ClientSubmissionId::new(submission), Bytes::from(batch));
+                }
+            }
+            ClientProducerLinkItem::Clear { key, submission } => {
+                if let Some(handle) = self.producers.get(&key) {
+                    handle.clear(ClientSubmissionId::new(submission));
                 }
             }
             ClientProducerLinkItem::Close { key } => {
@@ -769,10 +912,12 @@ impl OwnerLink {
 }
 
 /// Carries one attached producer's events over its link, in the order its endpoint produced them,
-/// until the producer ends or is released.
+/// together with the endpoint's requests to clear its batches for admission, until the producer
+/// ends or is released.
 async fn forward_events(
     key: u64,
     events: ClientProducerEvents,
+    mut clearances: mpsc::UnboundedReceiver<ClientSubmissionId>,
     answers: mpsc::Sender<ClientProducerLinkEvent>,
 ) {
     let ClientProducerEvents {
@@ -780,6 +925,7 @@ async fn forward_events(
         mut admission,
     } = events;
     let mut admission_open = true;
+    let mut clearances_open = true;
     loop {
         tokio::task::consume_budget().await;
         let answer = tokio::select! {
@@ -810,6 +956,16 @@ async fn forward_events(
                     return;
                 }
             },
+            request = clearances.recv(), if clearances_open => {
+                let Some(submission) = request else {
+                    clearances_open = false;
+                    continue;
+                };
+                ClientProducerLinkEvent::Admitting {
+                    key,
+                    submission: submission.get(),
+                }
+            }
             changed = admission.changed(), if admission_open => {
                 if changed.is_err() {
                     admission_open = false;
@@ -824,3 +980,7 @@ async fn forward_events(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "link_tests.rs"]
+mod tests;

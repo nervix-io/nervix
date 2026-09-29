@@ -92,6 +92,36 @@ Lapin thread, and a failed handshake ends that thread and closes the socket. An 
 connection is not closed because its host's answer changed or expired; the next connection uses
 the new answer.
 
+### DNS for Redis
+
+Composition gives the node resolver to the shared Redis command pool and to each Pub/Sub source
+plan. Redis 1.7.1 exposes `AsyncConnectionConfig::set_dns_resolver` for command connections. The
+connector's `bb8` manager installs that hook whenever it opens a physical pooled connection;
+pool bounds, health checks and lease ownership remain with the existing pool and host. A pooled
+socket may remain open past an answer's TTL. A replacement socket resolves the host again.
+
+The driver's Pub/Sub convenience connection does not accept that DNS hook. A source instead
+resolves the configured `redis://` or `rediss://` hostname through the node resolver on every
+initial subscribe and resume, and opens a dedicated TCP or TLS stream. It tries the returned
+addresses in order inside a 30-second budget shared by DNS, TCP, TLS, Redis setup, and subscribe.
+It hands the stream and the original client's settings to Redis's `PubSub::new`, so the driver
+still performs its authentication, database selection and protocol setup before `SUBSCRIBE`. A Unix socket remains
+a direct Unix connection with no DNS query. The dedicated subscription never occupies a pooled
+command connection.
+
+For `rediss://`, the configured hostname remains the TLS server name after an address is chosen.
+The source's TLS configuration keeps the same optional client certificate and key as the command
+client. Without a CA file both paths use native roots; a configured `tls_ca_file` replaces those
+roots in both paths. The shared TLS configuration helper exposes that replacement policy
+explicitly because other connectors add a configured CA to their default roots.
+
+The Redis hook gives a lookup at most 30 seconds, and the driver's connection timeout can cancel
+it sooner. Pub/Sub connection attempts have one 30-second budget. Missing names, empty answers,
+silence and transport failures are connection outcomes. They do not reject a record or confirm a
+publish; the host resumes the source and retries failed sink work according to its existing
+policy. A Pub/Sub connection broken by the broker or network is dropped and reopened with a new
+lookup, while an established connection is not interrupted solely because its answer expires.
+
 ### DNS for ClickHouse and SQS
 
 Composition passes the node resolver into every ClickHouse sink configuration and into every SQS
@@ -329,13 +359,17 @@ attempt's failure, can extend, but cannot shorten, the host's retry backoff; the
 advances as it would without it. The host ignores a delay whose end its monotonic clock cannot
 represent, so the backoff alone decides that wait. `finish` lets a transport empty a client-side
 queue within the remaining stop deadline; Kafka uses it. A sink may keep its client after a
-publish failure when reopening it would discard staged work or a persistent session.
+publish failure when reopening it would discard staged work or a persistent session, or, as the
+HTTP request sink does, when it holds nothing between attempts and reopening it would clear the
+transient failure its pending work is still waiting out.
 
 The task loop keeps the connector state, buffer, retry schedule, backoff, and reconnect decision in
 one mutable owner. Force flushes, cadence or retry wakes, and input-triggered publishes all apply one
-outcome transition: success clears retry state and records sent metrics, a retryable failure defers
-the owned work and decides whether to reconnect, and a terminal failure routes every still-owned
-source batch through the emitter's message error policy. Stop requests retain their separate
+outcome transition: success clears retry state and records in the sent metrics the rows the sink
+delivered, each once however many attempts that took and never a rejected one, a retryable failure
+defers the owned work and decides whether to reconnect, and a terminal failure records the rows
+delivered before it and routes every other still-owned source row through the emitter's message
+error policy. Stop requests retain their separate
 deadline-bounded final flush and transport finish, and a stopped interaction performs its final
 drain before the loop exits.
 
@@ -507,6 +541,15 @@ later requests unresolved; the authentication statuses retain a distinct infrast
 Other `3xx`/`4xx` and `101` reject their one request with a structured external message error,
 then publication continues with the next request. The host applies delivered and rejected
 members, branches and acknowledgements and keeps unresolved prepared bytes for retry.
+
+A failed attempt keeps its cause beneath the attempt's own error: the resolver's lookup failure,
+or the socket or TLS error. The connector attaches the description of that chain to the attempt's
+publish failure, and the host reports it as the emitter's transient error and runtime event. It
+names the status or the transport cause and never the evaluated target, a header value or a body.
+The connector keeps its client after a failed attempt, so the host's retry sends the pending
+request without reopening it, and the failure stays reported until the request resolves. The
+host's sent metrics count a delivered request's codec record as payload, or nothing for a request
+without a body; the method, target and headers are request metadata.
 
 When the final head of a retryable or authentication status carries exactly one `Retry-After`
 field, the connector reads it as RFC 9110 `delay-seconds`, whole digits only, or as an HTTP date

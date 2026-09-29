@@ -7019,12 +7019,18 @@ dependencies = [
  "error-stack",
  "futures-util",
  "nervix-connector",
+ "nervix-dns",
  "nervix-models",
  "nervix-primitives",
+ "nervix-test-environment",
  "redis",
+ "rustls",
+ "rustls-pki-types",
  "shuttle-tokio",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-rustls",
  "triomphe",
 ]
 
@@ -7626,11 +7632,13 @@ name = "nervix-simd-kernels"
 version = "0.1.0-dev"
 dependencies = [
  "arch-into",
+ "criterion 0.5.1",
  "error-stack",
  "fastrand",
  "fearless_simd",
  "hdrhistogram",
  "meticulous",
+ "nervix-approx-into",
  "thiserror 2.0.21",
 ]
 

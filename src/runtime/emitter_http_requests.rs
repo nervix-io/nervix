@@ -313,6 +313,17 @@ mod tests {
     /// One buffered batch whose rows carry `values`, each with an acknowledgement root and the
     /// request fields `/events/<value>` with an idempotency key of its own.
     fn batch(values: &[i64]) -> (EmitterPublishBatch, Vec<AckCompletion>) {
+        batch_admitted(values, |requests, _| {
+            AdmittedHttpRequests::published(requests)
+        })
+    }
+
+    /// The same batch, admitted with the requests `admit` builds from its request fields and its
+    /// published rows.
+    fn batch_admitted(
+        values: &[i64],
+        admit: impl FnOnce(Vec<HttpRequestFields>, &RelayRecordBatch) -> AdmittedHttpRequests,
+    ) -> (EmitterPublishBatch, Vec<AckCompletion>) {
         let mut messages = Vec::with_capacity(values.len());
         let mut completions = Vec::with_capacity(values.len());
         let mut requests = Vec::with_capacity(values.len());
@@ -332,8 +343,9 @@ mod tests {
         }
         let batch = RelayRecordBatch::from_messages(input_schema(), messages)
             .expect("the test rows match the emitter input schema");
+        let admitted = admit(requests, &batch);
         let batch = EmitterPublishBatch::from_batch(batch, Timestamp::from_unix_nanos(100))
-            .with_http_requests(AdmittedHttpRequests::published(requests))
+            .with_http_requests(admitted)
             .expect("one request for each row");
         (batch, completions)
     }
@@ -454,6 +466,65 @@ mod tests {
         assert_eq!(delivered.wait().await, AckOutcome::Ack);
         // The rejected row's message error is logged, which does not acknowledge its source.
         assert!(matches!(rejected.wait().await, AckOutcome::NoAck(_)));
+    }
+
+    /// What a flush of `batch`, whose first request the endpoint refuses and whose second it
+    /// delivers, reports as sent through an HTTP sink whose requests carry `body`.
+    async fn sent_by_a_flush_refusing_the_first(
+        body: HttpRequestBody,
+        batch: EmitterPublishBatch,
+    ) -> Option<PublishReport> {
+        let context = sink_context();
+        let fault_injection = ConfiguredFaultInjection::default();
+        let mut backoff = RuntimeReconnectBackoff::default();
+        let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let (_stop_tx, mut stop_rx) = watch::channel(None);
+        let mut control = EmitterPublishControl {
+            fault_injection: &fault_injection,
+            shutdown_rx: &mut shutdown_rx,
+            stop_rx: &mut stop_rx,
+            backoff: &mut backoff,
+        };
+        let mut sink = EmitterSinkState::Open(Box::new(PreparedRequestSink::new(
+            Box::new(ScriptedHttpSink {
+                writes: Arc::new(Mutex::new(Vec::new())),
+                answers: VecDeque::from([Answer::RejectFirst]),
+            }),
+            body,
+        )));
+        let mut buffer = EmitterBatchBuffer::default();
+        buffer.set_flush_policy(RuntimeFlushPolicy::Immediate);
+        buffer
+            .push(&context, batch)
+            .expect("the configured buffer takes the batch");
+        sink.flush_all("HTTP", &context, &mut control, &mut buffer)
+            .await
+            .expect("the flush resolves both requests")
+    }
+
+    #[tokio::test]
+    async fn a_flush_sends_its_delivered_request_once_and_counts_only_a_codec_body_as_payload() {
+        let (bodyless, _completions) = batch(&[7, 8]);
+        let sent = sent_by_a_flush_refusing_the_first(HttpRequestBody::Absent, bodyless)
+            .await
+            .expect("the second request was delivered");
+        assert_eq!(sent.messages, 1, "the refused request is not sent");
+        assert_eq!(sent.bytes, 0, "a request without a body carries no payload");
+
+        let (encoded, _completions) = batch_admitted(&[7, 8], |requests, published| {
+            AdmittedHttpRequests::encoded(requests, published, vec![0, 1])
+        });
+        let sent =
+            sent_by_a_flush_refusing_the_first(HttpRequestBody::Encoded(json_codec()), encoded)
+                .await
+                .expect("the second request was delivered");
+        assert_eq!(sent.messages, 1, "the refused request is not sent");
+        let (delivered_alone, _completions) = batch(&[8]);
+        assert_eq!(
+            sent.bytes,
+            delivered_alone.relay_batch().estimated_bytes(),
+            "only the delivered record counts, without its method, target or headers"
+        );
     }
 
     #[test]

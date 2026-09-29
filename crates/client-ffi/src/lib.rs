@@ -10,7 +10,8 @@
 //!
 //! - **Owns.** The C ABI: the handles a host holds, their ownership and release, blocking calls
 //!   with cancellation and deadlines, the typed failure a host reads, bulk column access to the
-//!   rows of a verified frame, and the typed fields of a domain clock event.
+//!   rows of a verified frame, the typed fields of a domain clock event, and the clock of a
+//!   followed domain with the arithmetic that projects it.
 //! - **Depends on.** The Rust session client and its wire contract, the vocabulary it names, and
 //!   Tokio to run the session on threads the library owns.
 //! - **Must not know.** The server, the parser, Arrow, or anything about a host language beyond
@@ -21,6 +22,7 @@
 mod abi;
 mod cancel;
 mod clock_event;
+mod domain_clock;
 mod event;
 mod failure;
 mod outcome;
@@ -36,6 +38,12 @@ pub use clock_event::{
     nx_clock_event_end_reason, nx_clock_event_generation, nx_clock_event_kind_of,
     nx_clock_event_paced, nx_clock_event_release, nx_clock_event_retain, nx_clock_event_state,
     nx_clock_event_tick,
+};
+pub use domain_clock::{
+    DomainClock, nx_domain_clock_admission_window, nx_domain_clock_admits, nx_domain_clock_domain,
+    nx_domain_clock_generation, nx_domain_clock_logical_time_at, nx_domain_clock_paced,
+    nx_domain_clock_release, nx_domain_clock_retain, nx_domain_clock_state, nx_domain_clock_tick,
+    nx_domain_clock_wall_duration_until,
 };
 pub use event::{
     CellState, Event, EventKind, nx_event_cell_varlen, nx_event_column_fixed,
@@ -57,8 +65,8 @@ pub use schema::{
 };
 pub use session::{
     Execution, Session, nx_execution_free, nx_execution_reference, nx_session_connect,
-    nx_session_execute, nx_session_free, nx_session_next_clock_event, nx_session_next_event,
-    nx_session_prepare,
+    nx_session_domain_clock, nx_session_execute, nx_session_free, nx_session_next_clock_event,
+    nx_session_next_event, nx_session_prepare,
 };
 pub use suggestions::{
     CompletionKind, CompletionStatus, Suggestions, nx_session_suggest, nx_suggestions_at,

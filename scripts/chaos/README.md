@@ -66,6 +66,13 @@ every accepted record with the correct content and branch, reporting identical r
 separately. The run retains per-case Docker, public, broker, observer and Pumba evidence under
 `pauses/` plus `results/pause-progress.json`.
 
+Immediately before each crash or pause, after the control canary and Pumba dry run, the runner
+waits up to 30 seconds for a settled public role read. The read requires the nodes to agree on
+leader, Raft term and last log index, then confirms that the selected role still belongs to the
+same node. A timeout reports the unmet settled-role condition as an injection failure. If the
+settled read shows that the selected leader or owner moved, the run also fails as an injection
+failure before the fault.
+
 The follower and execution-owner variants require three nodes. `--outage-seconds N` holds the
 selected node down for at least 5–120 seconds (default 8). The controller reads the leader and
 ingestor/emitter owners through the packaged CLI, selects the corresponding exact Compose node,
