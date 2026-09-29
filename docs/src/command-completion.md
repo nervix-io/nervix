@@ -122,11 +122,17 @@ start another destructive reset. See [Coordinated Reset](./wasm-state.md#coordin
 
 ## All-live-node barriers
 
-A completion barrier continuously derives the required set from current effective live membership.
-It keys each member by node name and process incarnation. A node joining while the effect is still
-applying joins the required set. A process restarting under the same name must apply the effect in
-its new incarnation. A node leaves the set only through the cluster's actual availability policy;
-a stale observation or one failed probe does not waive its work.
+A completion barrier continuously derives the required set from the current leader's effective
+application-health view. Followers request that view through an authenticated management operation
+and accept it only while their Raft leader and term still match the response. If the leader or its
+view cannot be confirmed, they keep waiting. Every node also requires its own current incarnation
+to finish locally. The set keys each member by node name and process incarnation. A node joining
+while the effect is still applying joins the required set. A process restarting under the same name
+must apply the effect in its new incarnation. A node leaves the set only when the leader's
+availability policy retires it; a stale observation or one failed probe does not waive its work.
+This shared view lets a connected follower finish control commands even when its own health probes
+still see another follower that the leader has already retired. The retired process catches up on
+reconnection before it can participate again.
 
 Runtime activation has two explicit phases. First, every required node applies the authoritative
 models, schedules, clocks, resource bindings, and stopped or running lifecycle state and reports

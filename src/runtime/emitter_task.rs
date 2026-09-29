@@ -767,6 +767,7 @@ impl EmitterTask {
         let mut shutdown_rx = shutdown_tx.subscribe();
         let interaction_shutdown_rx = shutdown_tx.subscribe();
         let mut domain_work_cancel_rx = shutdown_tx.subscribe();
+        let mut terminal_shutdown_rx = shutdown_tx.subscribe();
         let (work_cancel, mut work_cancel_rx) = watch::channel(false);
         let task_work_cancel = work_cancel.clone();
         let quiesce_counters =
@@ -917,7 +918,15 @@ impl EmitterTask {
                 stop_rx: &mut stop_rx,
                 stop_signal: &task_stop_signal,
             };
-            task_loop.run().await;
+            // The interaction observes shutdown while waiting for work, but a connector can be
+            // inside an external publish attempt when terminal teardown begins. Dropping the
+            // task at that boundary releases its volatile prepared requests and unresolved ACK
+            // guards without reporting them as delivered or waiting for the attempt timeout.
+            tokio::select! {
+                biased;
+                _ = super::emitter_publishing::wait_for_emitter_work_cancel(&mut terminal_shutdown_rx) => {}
+                _ = task_loop.run() => {}
+            }
             drop(work_cancel_forwarder);
         });
         Ok(ScheduledEmitterTask {
