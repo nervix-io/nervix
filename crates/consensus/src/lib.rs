@@ -2622,6 +2622,17 @@ impl Observer {
         self.inner.raft.current_leader().await
     }
 
+    /// The leader and term from one Raft metrics observation. Completion barriers use this as a
+    /// fence for a leader's availability view; an observation from another term cannot complete a
+    /// command on this node.
+    pub fn current_leader_tenure(&self) -> Option<LeaderTenure> {
+        let metrics = self.inner.raft.metrics().borrow_watched().clone();
+        Some(LeaderTenure {
+            leader_id: metrics.current_leader?,
+            term: metrics.current_term,
+        })
+    }
+
     pub async fn status_lines(&self) -> Vec<String> {
         let metrics = self.inner.raft.metrics().borrow_watched().clone();
         let mut lines = Vec::new();

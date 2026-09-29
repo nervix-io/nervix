@@ -954,6 +954,15 @@ interval falls back to its gossip liveness, even though no failure was recorded.
 therefore leaves scheduling and runtime availability no later than when gossip declares it dead and
 its last observation has aged out, whether or not any probe to it completes.
 
+Command completion reads the leader's effective availability view through the
+`application_completion_peers` management progress request. The response names the leader's
+incarnation, Raft term, and required process incarnations. A follower uses it only while its own
+Raft leader and term still match, and includes its own incarnation in the barrier. Failure to reach
+the leader leaves the command pending. This avoids conflicting completion sets when application
+health is asymmetric: a connected follower may still probe an unreachable peer successfully after
+the leader has retired that peer. Revision and HTTPS listener progress requests remain bound to the
+reported incarnation.
+
 `SHOW CLUSTER STATUS` exposes the interconnect address, endpoint generation, observation age,
 observation outcome, and derived availability. Its `connected` status means the latest application
 probe is healthy, rather than merely that a transport pool exists.
