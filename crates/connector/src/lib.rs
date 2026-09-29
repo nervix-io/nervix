@@ -2,7 +2,8 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The source and sink contracts, the host handles a connector may call, and the value
+//! - **Owns.** The source and sink contracts, including the rule a row sink divides one write into
+//!   requests by, the host handles a connector may call, and the value
 //!   types that cross the boundary: a client's resolved configuration entries and the resource
 //!   mounts they read files from, the TLS material and HTTP client settings built from those
 //!   entries, service URL parsing, the parsed retry policy, physical deadlines and the actual-UTC
@@ -35,6 +36,7 @@ mod ingest_metadata;
 // Reached through its own path rather than re-exported here, so the owner the clock-boundary check
 // declares stays the only file in this crate that names the capability constructor and UTC read.
 pub mod physical_time;
+mod row_requests;
 mod service_url;
 mod sink;
 mod source;
@@ -50,14 +52,17 @@ pub use http_client::{HttpClientConfig, HttpClientConfigError};
 pub use ingest_metadata::{
     IngestMessageHeaders, IngestMetadataRow, NoIngestHeaders, RetainedIngestHeaders,
 };
+pub use row_requests::{
+    ExceededLimit, MeasuredRequest, RowOversize, RowRequest, RowRequestLimits, RowRequests,
+};
 pub use service_url::{ServiceUrl, ServiceUrlError};
 pub use sink::{
-    AckConfirmation, BrokerPublishingMode, HttpRequestSink, MappedSinkRows, PerRecordOutcome,
-    PerRecordOutcomeParts, RecordSink, RejectedSinkRecord, RowSink, SinkAcknowledgementServices,
-    SinkAcknowledgements, SinkCommitReport, SinkDeadline, SinkEventReporter,
-    SinkGeneralErrorHandler, SinkHost, SinkHostServices, SinkHttpRequest, SinkLifecycle,
-    SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId, SinkRecordPosition,
-    SinkRetryDelay, SinkStagingDirectory, SinkStartError, SinkStartResult,
+    AckConfirmation, BrokerPublishingMode, HttpRequestSink, MappedSinkCarrier, MappedSinkMember,
+    MappedSinkRows, PerRecordOutcome, PerRecordOutcomeParts, RecordSink, RejectedSinkRecord,
+    RowSink, SinkAcknowledgementServices, SinkAcknowledgements, SinkCommitReport, SinkDeadline,
+    SinkEventReporter, SinkGeneralErrorHandler, SinkHost, SinkHostServices, SinkHttpRequest,
+    SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId,
+    SinkRecordPosition, SinkRetryDelay, SinkStagingDirectory, SinkStartError, SinkStartResult,
     SinkTransientErrorStatus,
 };
 pub use source::{

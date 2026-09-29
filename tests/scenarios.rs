@@ -131,6 +131,7 @@ use crate::common::{
 };
 
 mod common;
+mod database_batches;
 mod domain_clock_attachment;
 mod ingestion_time;
 mod session_protocol;
@@ -21919,12 +21920,20 @@ async fn then_otel_collector_receives_split_exports(
             .expect("OpenTelemetry Collector logs must be readable");
         let mut two_record_export = None;
         let mut one_record_export = None;
+        let mut observed = Vec::new();
         for (index, block) in logs.split(export_boundary.as_str()).enumerate() {
             let count = block
                 .lines()
                 .next()
                 .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
                 .and_then(|header| header[count_key].as_u64());
+            let carried = members
+                .iter()
+                .filter(|member| block.contains(**member))
+                .count();
+            if carried > 0 {
+                observed.push(format!("export {index}: {count:?} {count_key}, {carried} named"));
+            }
             if count == Some(2)
                 && block.find(members[0]).is_some_and(|first| {
                     block.find(members[1]).is_some_and(|second| first < second)
@@ -21943,7 +21952,8 @@ async fn then_otel_collector_receives_split_exports(
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for ordered two-member and one-member {signal} exports"
+            "timed out waiting for ordered two-member and one-member {signal} exports; observed \
+             {observed:?}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

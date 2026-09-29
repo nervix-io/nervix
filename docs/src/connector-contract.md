@@ -175,17 +175,19 @@ sequenceDiagram
 
 ## Sink boundary
 
-The host prepares one batch for one of three sink contracts. A **record sink** receives
+The host prepares one write for one of three sink contracts. A **record sink** receives
 codec-encoded keys, payloads, headers, optional ordering groups, timestamps, and the identity the
-host assigned each record of the write. A **row sink** receives host-projected Arrow columns,
-target columns, selected rows, and bounded chunks; it encodes its external representation from
-those columns. An **HTTP request sink** receives prepared requests: each carries the identity the
+host assigned each record of the write. A **row sink** receives a run of host-projected Arrow
+carriers of one source relay and concrete branch, the target columns their mapped columns are
+written to, and each carrier's selected rows, execution time and, for a sink that retains them,
+acknowledgements; it encodes its external representation from those columns. An **HTTP request
+sink** receives prepared requests: each carries the identity the
 host assigned it, the validated method, the target normalized on the client's origin, the
 application headers after case-insensitive replacement, and the exact body bytes the codec
 produced or no body at all. The host evaluates `VALUES` once per batch and excludes rows with
 mapping errors before calling a row sink. It retains the ACKs of the source rows every record,
 mapped row or request carries, so no runtime ACK map enters the connector. Each publish is one call
-per batch, never a virtual call per row.
+per write, never a virtual call per row.
 
 An ordering group exists only where the sink plan declares one; today that is the SQS
 `FIFO GROUP`. The host compiles the declaration, evaluates it once per filtered source batch, and
@@ -268,15 +270,40 @@ the attempt for good releases them, and their members then follow the error poli
 unresolved row. A row sink names every member itself, so its retry writes only the rows it left
 unresolved; MongoDB's per-document results shrink a retried bulk write this way.
 
-OTEL is a row sink. Without `BATCH` it exports the successfully mapped rows of one Arrow carrier
-in one request. With `BATCH`, its typed plan passes the count and byte limits to the connector.
-The connector converts each selected row once, then takes the successful positions in order into
-requests of at most `MAX MESSAGES`. It measures the exact uncompressed protobuf Export request,
-including resource and scope, before optional gzip or transport framing. An oversized candidate
-is halved; an oversized singleton is rejected locally. Every accepted request answers for its own
-positions. A receiver's `partial_success` still acknowledges the whole request with a warning,
-because OTLP does not identify the rejected members. A failed request leaves only its unanswered
-positions for the host to retry.
+A row sink divides its own writes, because only the connector can measure what it sends. The
+host projects each buffered carrier once and hands the sink every run of successive carriers of
+one source relay and concrete branch in one call, so a write never spans relays or branches. The
+typed plan passes the emitter's `BATCH` limits to the connector, which narrows them to what its
+destination takes in one request and divides the run by one rule the contract crate owns:
+candidates in packing order of at most the row limit, a candidate whose exact measured size exceeds
+the byte limit halved and measured again with the rest returned to the front, and a single row that
+still exceeds it rejected alone. A row over `MAX SIZE` is a `validation` error of the `encode`
+operation; a row within it that the destination could never take is the destination's `external`
+rejection of the row. Every request answers for the rows it carried, and a failed request leaves its
+rows and every later request's unresolved for the host to retry, so a retry packs the same rows into
+the same requests again.
+
+The database sinks divide the whole run. ClickHouse measures the `JSONEachRow` body of an insert,
+each row's line encoded once and sent as a slice of one buffer. Postgres measures the one `unnest`
+statement every insert of the write executes and the text arrays it binds, exactly as the driver
+encodes them, and never lets that size exceed the largest protocol message the server reads, which
+bounds the Bind message that carries the arrays. MySQL measures each multi-row statement and every
+value's binary-protocol encoding, and narrows the row limit to the rows whose placeholders fit the
+65,535 one statement binds. MongoDB measures each inserted document with the `_id` the driver
+prepends, or each upsert's filter and update documents, and rejects a row whose document exceeds
+the server's 16 MiB document limit before any write, because the driver would refuse the whole write
+for it. A record-specific failure of a multi-row SQL write is isolated by writing its rows one at a
+time; a Postgres cardinality violation, which is how `ON CONFLICT DO UPDATE` refuses one insert that
+carries a key twice, is isolated the same way. MongoDB answers per document, so it needs no
+isolation pass.
+
+OTEL is a row sink that exports carrier by carrier. Without `BATCH` it exports the successfully
+mapped rows of one carrier in one request. With `BATCH`, it converts each selected row of a carrier
+once and divides the successful positions by the same rule, measuring the exact uncompressed
+protobuf Export request, including resource and scope, before optional gzip or transport framing.
+A receiver's `partial_success` still acknowledges the whole request with a warning, because OTLP
+does not identify the rejected members. Iceberg stages each carrier of the run as its own file,
+which its commit publishes.
 
 An HTTP emitter's request fields are the host's, not the connector's. When the emitter admits a
 batch, the host evaluates one compiled program over each record's original input, its finalized
@@ -310,7 +337,7 @@ sequenceDiagram
     participant External as External system
     Graph->>Host: Arrow batch and attached ACKs
     Host->>Host: Buffer, encode or project, and flush
-    Host->>Sink: One publish call per batch
+    Host->>Sink: One publish call per write
     Sink->>External: Write records or mapped rows
     Sink-->>Host: Delivered, rejected, and attempt failure
     opt Sink retains staged ACKs

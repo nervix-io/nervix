@@ -269,7 +269,8 @@ the encoder having tried to encode it alone.
 
 A payload that fits the emitter's `MAX SIZE` but whose message does not fit the destination's own
 limit is rejected with every member it carries, through `ON MESSAGE ERROR` with one shared
-reference. Where the connector learns that limit, it measures the complete message, framing
+reference. A row sink divides its own writes, so a limit of its destination it knows narrows that
+division instead, as the [native limits](#byte-boundary-and-native-limits) describe. Where the connector learns that limit, it measures the complete message, framing
 outside the bound included, and rejects it before writing anything, as the
 [native limits](#byte-boundary-and-native-limits) below list. Where it cannot, the destination's
 own answer decides the outcome exactly as it does for a single record.
@@ -454,10 +455,10 @@ not an array — and Nervix never changes a destination schema to make an array 
 | Sentry | The event JSON the batch transformation produced | The envelope header, the item header and the newline framing Nervix adds | Sentry rejects events above 200 KB compressed or 1 MB decompressed; a Relay deployment may lower it |
 | Syslog | The encoded batch payload written as the frame content | The octet-count prefix or the trailing LF | 65,507 bytes per UDP datagram; an octet count of at most ten digits; non-transparent TCP framing rejects a payload containing LF |
 | OTEL | The encoded protobuf export request, before optional gzip | The gRPC or HTTP request framing and headers | The receiver's request-size limit; the OpenTelemetry Collector's gRPC default is 4 MiB |
-| ClickHouse | The `JSONEachRow` request body | The HTTP request line, headers and the statement | No fixed body limit; `max_query_size` bounds the statement, not the streamed data |
-| Postgres | The statement text and every bound parameter value as the protocol encodes it | The extended-query protocol messages around them | 1 GB per value, and a 32-bit protocol message length |
-| MySQL | The statement text and every bound value as the protocol encodes it | The packet headers | `max_allowed_packet`, 64 MiB by default on MySQL 8.x |
-| MongoDB | The BSON documents of the members and the command's own fields | The wire-protocol message header | 16 MiB per document, and the `maxWriteBatchSize` and `maxMessageSizeBytes` the server reports — 100,000 operations and 48 MB today |
+| ClickHouse | The `JSONEachRow` request body, one line and newline per member, before the client compresses it | The HTTP request line, headers and the statement | No fixed body limit; `max_query_size` bounds the statement, not the streamed data |
+| Postgres | The statement text and every bound array as the extended-query protocol encodes it: a 20-byte array header, then a four-byte length and the value's text for each member | Each parameter's own length word and the protocol messages around them | 1 GB per value, and at most 1,073,741,822 bytes in one protocol message, which no measured write is smaller than |
+| MySQL | The statement text and every bound value as the binary protocol encodes it | The packet headers, and the parameter types and null bitmap of the execute packet | 65,535 placeholders in one prepared statement, and `max_allowed_packet`, 64 MiB by default on MySQL 8.x, for every packet |
+| MongoDB | The BSON document of every member: an inserted document with the `_id` the driver adds to a document that has none, or an upsert's filter and update documents | The command and operation fields around the documents, the fields the driver adds to every command, and the wire-protocol message header | 16 MiB per document, and the `maxWriteBatchSize` and `maxMessageSizeBytes` the server reports — 100,000 operations and 48 MB today |
 | Iceberg | The Parquet data file as written to object storage | The manifest and snapshot metadata the commit writes | None fixed by Iceberg; without the clause Nervix rolls data files at 512 MiB |
 
 The broker and message connectors that can learn their destination's limit check every message
@@ -483,6 +484,18 @@ broker answers only after it has taken every message written before it, so a ref
 found before any member is acknowledged. Redis answers a value above `proto-max-bulk-len` with a
 rejection, and ZeroMQ fixes no limit of its own.
 
+A row sink divides its own writes, so the destination limits it knows bound that division rather
+than reject a whole batch. A MySQL insert carries no more rows than fit the 65,535 placeholders one
+prepared statement binds, whatever `MAX MESSAGES` allows, and a Postgres write is kept within the
+largest protocol message the server reads, which bounds the message that carries its arrays. A
+single row within `MAX SIZE` that the destination could never take — a Postgres insert above that
+message, or a MongoDB document above the 16 MiB document limit — is rejected alone through
+`ON MESSAGE ERROR` as the destination's rejection before anything is written, and the rows around it
+are written. MongoDB takes 100,000 writes in one command, more than `MAX MESSAGES` allows, and its
+driver divides a write above the `maxMessageSizeBytes` the server reports into several commands
+whose documents it still answers for one by one. MySQL applies `max_allowed_packet` to every packet
+the client sends, so a `MAX SIZE` no larger than it keeps every insert within it.
+
 Iceberg is the one sink with two byte bounds, and they measure different things on purpose:
 `BATCH ... MAX SIZE` bounds one written data file, while `COMMIT EACH ... MAX SIZE` bounds the
 Arrow payload bytes staged before a commit becomes due. A declaration that sets the first above the
@@ -504,7 +517,7 @@ second is valid and simply means every commit publishes one data file.
 | Syslog | The local socket accepts and flushes the complete frame | None |
 | OTEL | The export response arrives; `partial_success` acknowledges the whole request with a warning, as today | None: OTLP does not identify which data points a partial success rejected |
 | ClickHouse | The insert returns | On a record-specific failure the batch is re-executed one row at a time, so healthy rows land and poison rows follow `ON MESSAGE ERROR` |
-| Postgres | The statement returns | Same record-specific isolation as today |
+| Postgres | The statement returns | Same record-specific isolation as today, which also writes an `ON CONFLICT DO UPDATE` insert carrying one key twice row by row |
 | MySQL | The statement returns | Same record-specific isolation as today |
 | MongoDB | The write returns | Per document: MongoDB identifies members, so healthy documents acknowledge and poison documents follow `ON MESSAGE ERROR` without an isolation pass |
 | Iceberg | The catalog commit succeeds | None: a commit publishes every data file it wrote or none of them |

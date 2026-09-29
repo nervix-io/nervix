@@ -228,9 +228,19 @@ follow `ON MESSAGE ERROR` as a failed publish.
 The Sentry sink rejects a final serialized event above its decompressed event limit before sending
 the envelope. The Syslog sink rejects a UDP datagram above its payload limit, a stream frame whose
 octet count needs more than ten digits, or an LF-bearing non-transparent TCP frame before writing.
-A batching OTEL sink measures the full protobuf Export request after mapping; if
-halving still leaves one source record above `MAX SIZE`, that record receives an external publish
-message error. Other members can be sent in bounded requests. An OTLP receiver's
+A row sink — ClickHouse, Postgres, MySQL, MongoDB, or a batching OTEL sink — measures each
+request it would send. If halving still leaves one row whose own request exceeds `MAX SIZE`, that
+row receives a `validation` message error of the `encode` operation naming the measured size and
+the limit, such as `Postgres insert of one row measures 1219 bytes, above MAX SIZE 600B`, and the
+other rows are sent in bounded requests. A row within `MAX SIZE` that its destination could never
+accept is the destination's `external` rejection of the `publish` operation, named with the
+destination's limit: a Postgres insert above the largest protocol message the server reads, or a
+MongoDB document above its 16 MiB document limit, which is rejected before the write that would
+carry it. A SQL write that fails for a reason specific to its rows is written again one row at a
+time, and each row the destination still refuses receives an `external` `publish` error with the
+destination's reason. That includes a violated MySQL `CHECK` constraint, which the server reports
+under the generic SQLSTATE `HY000`, and a Postgres cardinality violation, which is how
+`ON CONFLICT DO UPDATE` refuses one insert that carries a key twice. An OTLP receiver's
 `partial_success` has no member identities, so it acknowledges the entire request and emits a
 warning instead of inventing per-record rejections.
 

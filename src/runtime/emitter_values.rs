@@ -2,19 +2,19 @@
 //!
 //! Layer: data plane.
 //! - **Owns.** Compiling one emitter's `VALUES` mapping once, evaluating it once per batch into an
-//!   Arrow batch of mapped columns, the row selection and chunk ranges that batch is written in,
-//!   and handing each projected batch to the row sink it is mapped for.
+//!   Arrow batch of mapped columns, the rows each batch still has to write, and handing a row sink
+//!   every run of successive projected batches of one source relay and concrete branch in one
+//!   write.
 //! - **Depends on.** The VM's compile and execute API, Arrow batches and the connector contract's
-//!   row sink and mapped-rows value type.
-//! - **Must not know.** Which external system consumes the mapped rows, or how it encodes them.
-
-use std::ops::Range;
+//!   row sink and mapped-carrier value types.
+//! - **Must not know.** Which external system consumes the mapped rows, how it divides a write into
+//!   requests, or how it encodes them.
 
 use async_trait::async_trait;
 use nervix_connector::{
-    MappedSinkRows, RowSink, SinkAcknowledgements, SinkLifecycle, SinkRecordPosition,
+    MappedSinkCarrier, MappedSinkRows, RowSink, SinkAcknowledgements, SinkLifecycle,
+    SinkRecordPosition,
 };
-use nervix_models::BatchMessageLimit;
 
 use super::*;
 
@@ -46,7 +46,8 @@ impl EmitterSink for MappedRowSink {
         &mut *self.sink
     }
 
-    /// Writes every buffered batch, one projection and one virtual call per batch.
+    /// Writes every buffered batch, projecting each once and handing the sink each run of
+    /// successive batches of one source relay and concrete branch in one call.
     ///
     /// A row sink answers for each mapped row by its position, so a row it left unresolved is
     /// projected again by the next attempt and nothing is retained between attempts.
@@ -60,23 +61,30 @@ impl EmitterSink for MappedRowSink {
             true => DeliveredAcknowledgements::Sink,
             false => DeliveredAcknowledgements::Host,
         };
+        let mut open_run: Option<ProjectedRun> = None;
         for batch_index in 0..batches.len() {
             tokio::task::consume_budget().await;
-            let mut projected = {
+            let (source, mut projected) = {
                 let batch = &batches[batch_index];
                 let pending_rows = batch.pending_record_rows();
                 // A batch whose rows a previous attempt already delivered has nothing left to map.
                 if pending_rows.is_empty() {
                     continue;
                 }
-                self.projection
+                let source = CarrierSource {
+                    relay: batch.source_relay().clone(),
+                    branch: batch.relay_batch().key.clone(),
+                };
+                let projected = self
+                    .projection
                     .project(
                         batch_index,
                         batch.relay_batch(),
                         batch.execution_now(),
                         &pending_rows,
                     )
-                    .await?
+                    .await?;
+                (source, projected)
             };
             let rejected = projected.take_rejected();
             finish_rejected_records(context, batches, rejected, MessageErrorOperation::Values)
@@ -84,25 +92,93 @@ impl EmitterSink for MappedRowSink {
             if projected.is_empty() {
                 continue;
             }
+            // One write never spans source relays or branches, so a batch of another one writes
+            // what the open run holds first.
+            let run = match open_run.take() {
+                Some(mut run) if run.source == source => {
+                    run.carriers.push(projected);
+                    run
+                }
+                Some(run) => {
+                    self.publish_run(context, batches, run, acknowledgements)
+                        .await?;
+                    ProjectedRun::open(source, projected)
+                }
+                None => ProjectedRun::open(source, projected),
+            };
+            open_run = Some(run);
+        }
+        match open_run {
+            Some(run) => {
+                self.publish_run(context, batches, run, acknowledgements)
+                    .await
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+impl MappedRowSink {
+    /// Hands the sink one write of every carrier in `run`, then applies its answers.
+    async fn publish_run(
+        &mut self,
+        context: &EmitterSinkContext,
+        batches: &mut [EmitterPublishBatch],
+        run: ProjectedRun,
+        acknowledgements: DeliveredAcknowledgements,
+    ) -> EmitterRuntimeResult<()> {
+        let mut carriers = Vec::with_capacity(run.carriers.len());
+        let mut rows = 0_usize;
+        for projected in &run.carriers {
             // A sink that resolves acknowledgements on its own commit boundary takes the ones its
             // write carries, so the host stops owning them the moment the write accepts the rows.
             let retained = match acknowledgements {
                 DeliveredAcknowledgements::Sink => {
-                    let batch = &batches[batch_index];
+                    let batch = &batches[projected.batch_index];
                     Some(SinkAcknowledgements::new(
                         batch.acks_for_rows(projected.selected_rows()),
                     ))
                 }
                 DeliveredAcknowledgements::Host => None,
             };
-            let rows = projected.selected_rows().len();
-            let outcome = self.sink.publish(projected.rows(retained)).await;
-            let outcome = context.received_outcome(rows, outcome);
-            RowAnswers::from(outcome)
-                .apply(context, batches, acknowledgements)
-                .await?;
+            rows = rows
+                .checked_add(projected.selected_rows().len())
+                .assured("the rows of one write are held in memory");
+            carriers.push(projected.sink_carrier(retained));
         }
-        Ok(())
+        let write = MappedSinkRows {
+            target_columns: self.projection.target_columns(),
+            carriers,
+        };
+        let outcome = self.sink.publish(write).await;
+        let outcome = context.received_outcome(rows, outcome);
+        RowAnswers::from(outcome)
+            .apply(context, batches, acknowledgements)
+            .await
+    }
+}
+
+/// The source relay and concrete branch a buffered batch came from, which every batch of one write
+/// shares. A relay has one fixed named branch declaration, so the relay and the concrete key
+/// together identify the exact branch.
+#[derive(PartialEq)]
+struct CarrierSource {
+    relay: RelayName,
+    branch: Option<BranchKey>,
+}
+
+/// Successive projected batches of one source relay and concrete branch, which one write carries.
+struct ProjectedRun {
+    source: CarrierSource,
+    carriers: Vec<ProjectedValueRows>,
+}
+
+impl ProjectedRun {
+    fn open(source: CarrierSource, first: ProjectedValueRows) -> Self {
+        Self {
+            source,
+            carriers: vec![first],
+        }
     }
 }
 
@@ -289,9 +365,6 @@ pub(in crate::runtime) struct MappedValuesProjectionInit<'a> {
     pub(in crate::runtime) values: &'a [ClickHouseValueMapping],
     pub(in crate::runtime) input_schema: StdArc<arrow_schema::Schema>,
     pub(in crate::runtime) udfs: Option<&'a UdfExecutor>,
-    /// How many rows one write may carry, from the emitter's `BATCH MAX MESSAGES`. A sink that
-    /// publishes a whole batch in one request declares none.
-    pub(in crate::runtime) max_batch: Option<BatchMessageLimit>,
 }
 
 /// One emitter's `VALUES` mapping, compiled once at start and evaluated once per batch.
@@ -305,7 +378,6 @@ pub(in crate::runtime) struct MappedValuesProjection {
     /// nullable because a mapped expression may evaluate to a typed null.
     mapped_schema: StdArc<arrow_schema::Schema>,
     target_columns: Vec<String>,
-    max_rows: Option<NonZeroUsize>,
 }
 
 impl MappedValuesProjection {
@@ -320,7 +392,6 @@ impl MappedValuesProjection {
             values,
             input_schema,
             udfs,
-            max_batch,
         } = init;
         let program = compile_sql_values_program(
             label,
@@ -358,7 +429,6 @@ impl MappedValuesProjection {
             program,
             mapped_schema: StdArc::new(arrow_schema::Schema::new(fields)),
             target_columns,
-            max_rows: max_batch.map(|limit| addressable_count(NonZeroU64::from(limit.get()))),
         })
     }
 
@@ -366,6 +436,11 @@ impl MappedValuesProjection {
     /// before its first batch arrives.
     pub(in crate::runtime) fn mapped_schema(&self) -> &StdArc<arrow_schema::Schema> {
         &self.mapped_schema
+    }
+
+    /// The target column each mapped column is written to, in mapping order.
+    pub(in crate::runtime) fn target_columns(&self) -> &[String] {
+        &self.target_columns
     }
 
     /// Evaluates the mapping once for `batch` and selects the rows the sink still has to write.
@@ -419,13 +494,10 @@ impl MappedValuesProjection {
                     self.program.label
                 ))
             })?;
-        let chunks = self.row_chunks(selected_rows.len());
         Ok(ProjectedValueRows {
             batch_index,
             batch: mapped,
-            target_columns: self.target_columns.clone(),
             selected_rows,
-            chunks,
             rejected,
             execution_now,
         })
@@ -482,41 +554,13 @@ impl MappedValuesProjection {
         }
         Ok(result.batch)
     }
-
-    /// The ranges of selected rows one write may carry, from the emitter's `MAX BATCH`.
-    ///
-    /// The ranges are counted before they are built, so a batch costs one allocation here however
-    /// many rows it selected.
-    fn row_chunks(&self, selected: usize) -> Vec<Range<usize>> {
-        if selected == 0 {
-            return Vec::new();
-        }
-        // A sink that publishes a whole batch in one request writes every selected row at once.
-        let max_rows = match self.max_rows {
-            Some(max_rows) => max_rows.get(),
-            None => selected,
-        };
-        let mut chunks = Vec::with_capacity(selected.div_ceil(max_rows));
-        let mut start = 0;
-        while start < selected {
-            let end = start
-                .checked_add(max_rows)
-                .assured("a chunk starts inside a selection this node already holds in memory")
-                .min(selected);
-            chunks.push(start..end);
-            start = end;
-        }
-        chunks
-    }
 }
 
 /// One batch of mapped columns, with the rows a row sink writes and the rows it never sees.
 pub(in crate::runtime) struct ProjectedValueRows {
     batch_index: usize,
     batch: RecordBatch,
-    target_columns: Vec<String>,
     selected_rows: Vec<usize>,
-    chunks: Vec<Range<usize>>,
     /// The rows whose mapping failed, which the host reports instead of writing them.
     rejected: Vec<RejectedEmitterRecord>,
     execution_now: Timestamp,
@@ -537,16 +581,15 @@ impl ProjectedValueRows {
         &self.selected_rows
     }
 
-    pub(in crate::runtime) fn rows(
+    /// This batch as one carrier of a row sink write.
+    pub(in crate::runtime) fn sink_carrier(
         &self,
         acknowledgements: Option<SinkAcknowledgements>,
-    ) -> MappedSinkRows<'_> {
-        MappedSinkRows {
+    ) -> MappedSinkCarrier<'_> {
+        MappedSinkCarrier {
             batch_index: self.batch_index,
             batch: &self.batch,
-            target_columns: &self.target_columns,
             selected_rows: &self.selected_rows,
-            selected_row_chunks: &self.chunks,
             occurred_at: self.execution_now,
             acknowledgements,
         }
@@ -556,12 +599,115 @@ impl ProjectedValueRows {
 #[cfg(test)]
 mod tests {
     use futures_util::FutureExt as _;
+    use nervix_connector::PerRecordOutcome;
 
     use super::*;
     use crate::{
-        runtime::test_fixtures::{expression, input_schema, named, test_schema},
+        runtime::test_fixtures::{expression, input_schema, named, sink_context, test_schema},
         runtime_schema::test_runtime_row,
     };
+
+    /// One carrier of a write a row sink received: its buffered batch and the rows it selected.
+    #[derive(Debug, PartialEq, Eq)]
+    struct RecordedCarrier {
+        batch_index: usize,
+        rows: Vec<usize>,
+    }
+
+    fn recorded(batch_index: usize, rows: &[usize]) -> RecordedCarrier {
+        RecordedCarrier {
+            batch_index,
+            rows: rows.to_vec(),
+        }
+    }
+
+    /// A row sink that delivers every row it is handed and records the carriers of each write.
+    struct RecordingRowSink {
+        writes: StdArc<parking_lot::Mutex<Vec<Vec<RecordedCarrier>>>>,
+    }
+
+    #[async_trait]
+    impl SinkLifecycle for RecordingRowSink {}
+
+    #[async_trait]
+    impl RowSink for RecordingRowSink {
+        async fn publish(
+            &mut self,
+            rows: MappedSinkRows<'_>,
+        ) -> PerRecordOutcome<SinkRecordPosition> {
+            let mut outcome = PerRecordOutcome::with_capacity(rows.member_count());
+            for member in rows.members() {
+                outcome.deliver(rows.position(member));
+            }
+            let mut write = Vec::new();
+            for carrier in &rows.carriers {
+                write.push(recorded(carrier.batch_index, carrier.selected_rows));
+            }
+            self.writes.lock().push(write);
+            outcome
+        }
+    }
+
+    fn source_batch(relay: &str, rows: i64, branch: Option<&str>) -> EmitterPublishBatch {
+        let mut batch = test_batch(rows);
+        batch.key = branch.map(|tenant| {
+            BranchKey::from_fields([(
+                named::<FieldName>("tenant"),
+                RuntimeValue::String(tenant.to_string()),
+            )])
+            .expect("one string field makes a concrete branch key")
+        });
+        EmitterPublishBatch::from_input(named(relay), batch, Timestamp::from_unix_nanos(7))
+    }
+
+    /// Successive carriers of one relay and branch travel in one write, and a carrier of another
+    /// relay or branch starts the next one, so a write never mixes sources.
+    #[tokio::test]
+    async fn a_write_carries_successive_carriers_of_one_relay_and_branch() {
+        let writes = StdArc::new(parking_lot::Mutex::new(Vec::new()));
+        let mut sink = MappedRowSink::new(
+            Box::new(RecordingRowSink {
+                writes: writes.clone(),
+            }),
+            test_projection(),
+        );
+        let mut batches = vec![
+            source_batch("orders", 2, None),
+            source_batch("orders", 1, None),
+            source_batch("refunds", 1, None),
+            source_batch("refunds", 2, Some("acme")),
+            source_batch("refunds", 1, Some("acme")),
+            source_batch("refunds", 1, Some("beta")),
+            source_batch("orders", 1, None),
+        ];
+
+        sink.publish_batches(
+            &sink_context(),
+            EmitterPublication {
+                batches: &mut batches,
+                payloads: &mut PreparedPayloads::default(),
+                requests: &mut PreparedPayloads::default(),
+            },
+        )
+        .await
+        .expect("every row is delivered");
+
+        assert_eq!(
+            *writes.lock(),
+            vec![
+                vec![recorded(0, &[0, 1]), recorded(1, &[0])],
+                vec![recorded(2, &[0])],
+                vec![recorded(3, &[0, 1]), recorded(4, &[0])],
+                vec![recorded(5, &[0])],
+                vec![recorded(6, &[0])],
+            ]
+        );
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.resolved_rows().iter().all(|resolved| *resolved))
+        );
+    }
 
     fn mapping(column: &str, raw: &str) -> ClickHouseValueMapping {
         ClickHouseValueMapping {
@@ -570,7 +716,7 @@ mod tests {
         }
     }
 
-    fn test_projection(max_batch: Option<BatchMessageLimit>) -> MappedValuesProjection {
+    fn test_projection() -> MappedValuesProjection {
         let domain: DomainName = named("test_domain");
         let emitter: EmitterName = named("test_emitter");
         let schema = test_schema(&[("value", ParseAsType::I64), ("name", ParseAsType::String)]);
@@ -588,7 +734,6 @@ mod tests {
             values: &values,
             input_schema: schema.arrow_schema(),
             udfs: None,
-            max_batch,
         })
         .expect("the test VALUES mapping should compile")
     }
@@ -613,7 +758,7 @@ mod tests {
 
     #[tokio::test]
     async fn mapped_columns_carry_every_selected_row_under_its_target_name() {
-        let projection = test_projection(BatchMessageLimit::try_from(2u32).ok());
+        let projection = test_projection();
         let batch = test_batch(3);
 
         let projected = projection
@@ -621,12 +766,10 @@ mod tests {
             .await
             .expect("the mapping should project");
 
-        let rows = projected.rows(None);
+        let rows = projected.sink_carrier(None);
         assert_eq!(rows.batch_index, 4);
-        assert_eq!(rows.target_columns, ["id", "label", "doubled"]);
+        assert_eq!(projection.target_columns(), ["id", "label", "doubled"]);
         assert_eq!(rows.selected_rows, [0, 2]);
-        assert_eq!(rows.selected_row_chunks.len(), 1);
-        assert_eq!(rows.selected_row_chunks.first(), Some(&(0..2)));
         assert_eq!(rows.occurred_at, Timestamp::from_unix_nanos(7));
         assert_eq!(rows.batch.num_columns(), 3);
         assert_eq!(rows.batch.num_rows(), 3);
@@ -653,7 +796,6 @@ mod tests {
             values: &values,
             input_schema: schema.arrow_schema(),
             udfs: None,
-            max_batch: None,
         })
         .expect("the test VALUES mapping should compile");
         let batch = test_batch(3);
@@ -664,7 +806,7 @@ mod tests {
             .expect("the mapping should project");
 
         let rejected = projected.take_rejected();
-        assert_eq!(projected.rows(None).selected_rows, [1, 2]);
+        assert_eq!(projected.sink_carrier(None).selected_rows, [1, 2]);
         assert_eq!(rejected.len(), 1);
         assert_eq!(rejected[0].position.row_index, 0);
         let error = rejected[0]
@@ -683,7 +825,7 @@ mod tests {
     /// a property of the batch and not of the rows inside it.
     #[tokio::test]
     async fn projecting_allocates_per_batch_and_not_per_row() {
-        let projection = test_projection(BatchMessageLimit::try_from(4u32).ok());
+        let projection = test_projection();
         let narrow = test_batch(8);
         let wide = test_batch(512);
         let narrow_rows = (0..8).collect::<Vec<_>>();
@@ -715,7 +857,7 @@ mod tests {
             narrow_projected
                 .expect("projecting a batch never waits")
                 .expect("the narrow projection should succeed")
-                .rows(None)
+                .sink_carrier(None)
                 .selected_rows
                 .len(),
             8
@@ -724,7 +866,7 @@ mod tests {
             wide_projected
                 .expect("projecting a batch never waits")
                 .expect("the wide projection should succeed")
-                .rows(None)
+                .sink_carrier(None)
                 .selected_rows
                 .len(),
             512
@@ -755,7 +897,6 @@ mod tests {
                     values: &[],
                     input_schema: schema.clone(),
                     udfs: None,
-                    max_batch: None,
                 })
                 .err()
             });
