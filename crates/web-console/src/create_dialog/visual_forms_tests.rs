@@ -125,6 +125,354 @@ fn hash_map_and_roto_udf_forms_render_current_model_controls() {
 }
 
 #[test]
+fn junction_and_reingestor_render_ordered_route_and_state_controls() {
+    use super::{
+        ingestor_route_draft::{
+            AssignmentDraft, FlushDraft, InheritDraft, InheritedFieldDraft, MessageErrorDraft,
+        },
+        processor_draft::StatePolicyDraft,
+    };
+
+    super::super::initialize_test_executor();
+    Owner::new().with(|| {
+        let domain = DomainName::parse("orders").assured("valid domain");
+        let signals = CreateSignals::new();
+        let render = || {
+            let dialog = CreateDialog(
+                CreateDialogProps::builder()
+                    .signals(signals)
+                    .active_domain(RwSignal::new(Some(domain.clone())))
+                    .connection_state(RwSignal::new(super::super::ConsoleConnectionState::Waiting))
+                    .session_generation(RwSignal::new(1))
+                    .request_tx(RwSignal::new(None))
+                    .submit(|_, _, _| {})
+                    .build(),
+            );
+            any_spawner::Executor::poll_local();
+            dialog.to_html()
+        };
+
+        signals.open(
+            CreateKind::Junction,
+            Some(domain.clone()),
+            "global-create-button",
+        );
+        signals.junction.update(|draft| {
+            draft.choose_unbranched();
+            draft.select_input(&node(ModelKind::Relay, "incoming"));
+            draft.add_input();
+            draft.add_state();
+            draft.active_state_mut().assured("state exists").policy =
+                StatePolicyDraft::Default(Vec::new());
+            let route = draft.active_route_mut().assured("route exists");
+            route.inherit = InheritDraft::Fields(Vec::new());
+            route.flush = FlushDraft::Each {
+                interval: "25ms".into(),
+                max_batch_size: "1MiB".into(),
+            };
+            route.message_error = MessageErrorDraft::SendTo {
+                relay: None,
+                assignments: Vec::new(),
+            };
+            route.invocations.push(Default::default());
+        });
+        let junction = render();
+        for control in [
+            "create-processor-branching",
+            "create-processor-input-list",
+            "create-processor-state-policy",
+            "create-processor-state-default",
+            "create-processor-route-list",
+            "create-processor-inherit",
+            "create-processor-invocations",
+            "create-processor-flush-interval",
+            "create-processor-error-relay",
+        ] {
+            assert!(junction.contains(control), "{control} must render");
+        }
+
+        signals.junction.update(|draft| {
+            draft.active_state_mut().assured("state exists").policy =
+                StatePolicyDraft::Default(vec![AssignmentDraft::selected(
+                    FieldName::parse("message").assured("valid field"),
+                )]);
+            let route = draft.active_route_mut().assured("route exists");
+            route.inherit = InheritDraft::Fields(vec![InheritedFieldDraft {
+                field: super::SelectedReference::chosen(
+                    FieldName::parse("message").assured("valid field"),
+                ),
+                leak_sensitive: true,
+            }]);
+            route.add_assignment(FieldName::parse("result").assured("valid field"));
+            route.assignments[0].expression = "input.message".into();
+            route.invocations[0].function = "lower".into();
+            route.invocations[0].arguments = vec!["input.message".into()];
+            route.message_error = MessageErrorDraft::SendTo {
+                relay: None,
+                assignments: vec![AssignmentDraft::selected(
+                    FieldName::parse("reason").assured("valid field"),
+                )],
+            };
+        });
+        let ordered_rows = render();
+        for control in [
+            "create-processor-inherited-field",
+            "create-processor-assignment-row",
+            "create-processor-invocation-argument-row",
+            "create-processor-state-assignment-expression",
+            "create-processor-error-assignment-expression",
+        ] {
+            assert!(ordered_rows.contains(control), "{control} must render");
+        }
+        assert!(ordered_rows.contains("LEAK SENSITIVE"));
+
+        signals.open(
+            CreateKind::Reingestor,
+            Some(domain.clone()),
+            "global-create-button",
+        );
+        signals.reingestor.update(|draft| {
+            draft.select_input(&node(ModelKind::Relay, "incoming"));
+            draft.routes[0].branch.choose_branched();
+            draft.routes[0]
+                .branch
+                .select_branch(&node(ModelKind::Branch, "by_tenant"));
+            draft.add_route();
+            draft.routes[1].branch.choose_preserve();
+            draft.active_route = 0;
+        });
+        let reingestor = render();
+        for control in [
+            "create-processor-route-branching",
+            "create-processor-route-branch",
+            "create-processor-branch-fields",
+            "create-processor-branch-assignments",
+            "create-processor-route-list",
+        ] {
+            assert!(reingestor.contains(control), "{control} must render");
+        }
+    });
+}
+
+#[test]
+fn processor_choices_follow_branch_schema_and_incoming_state_context() {
+    Owner::new().with(|| {
+        let domain = DomainName::parse("orders").assured("valid domain");
+        let signals = CreateSignals::new();
+        signals.open(
+            CreateKind::Junction,
+            Some(domain.clone()),
+            "global-create-button",
+        );
+        assert_eq!(
+            signals
+                .choice_query(ChoiceControl::ProcessorInputRelay)
+                .err(),
+            Some("Choose the junction branch before its input relays")
+        );
+        signals.junction.update(|draft| draft.choose_branched());
+        select_choice(
+            signals,
+            ChoiceControl::ProcessorBranch,
+            ChoiceValue::Model(node(ModelKind::Branch, "by_tenant")),
+        );
+        let input = signals
+            .choice_query(ChoiceControl::ProcessorInputRelay)
+            .assured("branch selected");
+        assert_eq!(input.target, ChoiceTarget::IngestBranchedRelay);
+        assert_eq!(
+            input.dependencies[1].value,
+            ChoiceValue::Model(node(ModelKind::Branch, "by_tenant"))
+        );
+        select_choice(
+            signals,
+            ChoiceControl::ProcessorInputRelay,
+            ChoiceValue::Model(node(ModelKind::Relay, "orders")),
+        );
+        signals.junction.update(|draft| draft.add_input());
+        let another = signals
+            .choice_query(ChoiceControl::ProcessorInputRelay)
+            .assured("first input selected");
+        assert_eq!(another.target, ChoiceTarget::ProcessorCompatibleInputRelay);
+        assert_eq!(
+            another.dependencies[1].value,
+            ChoiceValue::Model(node(ModelKind::Relay, "orders"))
+        );
+        signals.junction.update(|draft| draft.add_state());
+        let state = signals
+            .choice_query(ChoiceControl::ProcessorStateRelay)
+            .assured("incoming branch selected");
+        assert_eq!(state.target, ChoiceTarget::ProcessorMaterializedRelay);
+        assert_eq!(
+            state.dependencies[1].value,
+            ChoiceValue::Model(node(ModelKind::Relay, "orders"))
+        );
+        let output = signals
+            .choice_query(ChoiceControl::ProcessorRouteRelay)
+            .assured("incoming branch selected");
+        assert_eq!(output.target, ChoiceTarget::ProcessorInputBranchRelay);
+
+        signals.open(CreateKind::Reingestor, Some(domain), "global-create-button");
+        assert_eq!(
+            signals
+                .choice_query(ChoiceControl::ProcessorInputRelay)
+                .assured("domain selected")
+                .target,
+            ChoiceTarget::Relay
+        );
+        select_choice(
+            signals,
+            ChoiceControl::ProcessorInputRelay,
+            ChoiceValue::Model(node(ModelKind::Relay, "orders")),
+        );
+        signals
+            .reingestor
+            .update(|draft| draft.routes[0].branch.choose_preserve());
+        assert_eq!(
+            signals
+                .choice_query(ChoiceControl::ProcessorRouteRelay)
+                .assured("preserving input branch")
+                .target,
+            ChoiceTarget::ProcessorInputBranchRelay
+        );
+        signals
+            .reingestor
+            .update(|draft| draft.routes[0].branch.choose_unbranched());
+        assert_eq!(
+            signals
+                .choice_query(ChoiceControl::ProcessorRouteRelay)
+                .assured("unbranched route")
+                .target,
+            ChoiceTarget::IngestUnbranchedRelay
+        );
+    });
+}
+
+#[test]
+fn processor_choices_update_each_selected_ordered_section() {
+    use super::{
+        ingestor_route_draft::{InheritDraft, MessageErrorDraft},
+        processor_draft::StatePolicyDraft,
+    };
+
+    Owner::new().with(|| {
+        let domain = DomainName::parse("orders").assured("valid domain");
+        let signals = CreateSignals::new();
+        signals.open(CreateKind::Junction, Some(domain.clone()), "global-create-button");
+        signals.junction.update(|draft| draft.choose_branched());
+        let junction_branch = ChoiceValue::Model(node(ModelKind::Branch, "by_tenant"));
+        select_choice(signals, ChoiceControl::ProcessorBranch, junction_branch.clone());
+        assert!(selected_choice(signals, ChoiceControl::ProcessorBranch, &junction_branch));
+
+        signals.open(CreateKind::Reingestor, Some(domain), "global-create-button");
+        assert_eq!(
+            signals.choice_query(ChoiceControl::ProcessorStateRelay).err(),
+            Some("Choose an input relay before materialized state")
+        );
+        let input = ChoiceValue::Model(node(ModelKind::Relay, "incoming"));
+        select_choice(signals, ChoiceControl::ProcessorInputRelay, input.clone());
+        assert!(selected_choice(signals, ChoiceControl::ProcessorInputRelay, &input));
+        signals.reingestor.update(|draft| {
+            draft.add_state();
+            draft.active_state_mut().assured("state exists").policy =
+                StatePolicyDraft::Default(Vec::new());
+            let route = draft.active_route_mut().assured("route exists");
+            route.branch.choose_branched();
+            route.inherit = InheritDraft::Fields(Vec::new());
+            route.message_error = MessageErrorDraft::SendTo {
+                relay: None,
+                assignments: Vec::new(),
+            };
+        });
+
+        let state = ChoiceValue::Model(node(ModelKind::Relay, "profile"));
+        select_choice(signals, ChoiceControl::ProcessorStateRelay, state.clone());
+        assert!(selected_choice(signals, ChoiceControl::ProcessorStateRelay, &state));
+        let state_fields = signals
+            .choice_query(ChoiceControl::ProcessorStateField)
+            .assured("materialized relay selected");
+        assert_eq!(state_fields.target, ChoiceTarget::RelayField);
+        assert_eq!(state_fields.dependencies[1].value, state);
+        select_choice(
+            signals,
+            ChoiceControl::ProcessorStateField,
+            ChoiceValue::Field(FieldName::parse("message").assured("valid field")),
+        );
+        let branch = ChoiceValue::Model(node(ModelKind::Branch, "by_tenant"));
+        select_choice(signals, ChoiceControl::ProcessorRouteBranch, branch.clone());
+        assert!(selected_choice(signals, ChoiceControl::ProcessorRouteBranch, &branch));
+        let branch_fields = signals
+            .choice_query(ChoiceControl::ProcessorBranchField)
+            .assured("route branch selected");
+        assert_eq!(branch_fields.target, ChoiceTarget::BranchField);
+        assert_eq!(branch_fields.dependencies[1].value, branch);
+        assert_eq!(
+            signals
+                .choice_query(ChoiceControl::ProcessorRouteRelay)
+                .assured("route branch selected")
+                .target,
+            ChoiceTarget::IngestBranchedRelay
+        );
+        select_choice(
+            signals,
+            ChoiceControl::ProcessorBranchField,
+            ChoiceValue::Field(FieldName::parse("tenant").assured("valid field")),
+        );
+        let output = ChoiceValue::Model(node(ModelKind::Relay, "outgoing"));
+        select_choice(signals, ChoiceControl::ProcessorRouteRelay, output.clone());
+        assert!(selected_choice(signals, ChoiceControl::ProcessorRouteRelay, &output));
+        let input_fields = signals
+            .choice_query(ChoiceControl::ProcessorInputField)
+            .assured("input selected");
+        assert_eq!(input_fields.target, ChoiceTarget::RelayField);
+        assert_eq!(input_fields.dependencies[1].value, input);
+        let output_fields = signals
+            .choice_query(ChoiceControl::ProcessorOutputField)
+            .assured("output selected");
+        assert_eq!(output_fields.target, ChoiceTarget::RelayField);
+        assert_eq!(output_fields.dependencies[1].value, output);
+        select_choice(
+            signals,
+            ChoiceControl::ProcessorInputField,
+            ChoiceValue::Field(FieldName::parse("message").assured("valid field")),
+        );
+        select_choice(
+            signals,
+            ChoiceControl::ProcessorOutputField,
+            ChoiceValue::Field(FieldName::parse("result").assured("valid field")),
+        );
+        let errors = ChoiceValue::Model(node(ModelKind::Relay, "errors"));
+        let error_relays = signals
+            .choice_query(ChoiceControl::ProcessorErrorRelay)
+            .assured("input selected");
+        assert_eq!(error_relays.target, ChoiceTarget::ProcessorInputBranchRelay);
+        assert_eq!(error_relays.dependencies[1].value, input);
+        select_choice(signals, ChoiceControl::ProcessorErrorRelay, errors.clone());
+        assert!(selected_choice(signals, ChoiceControl::ProcessorErrorRelay, &errors));
+        let error_fields = signals
+            .choice_query(ChoiceControl::ProcessorErrorField)
+            .assured("error relay selected");
+        assert_eq!(error_fields.target, ChoiceTarget::RelayField);
+        assert_eq!(error_fields.dependencies[1].value, errors);
+        select_choice(
+            signals,
+            ChoiceControl::ProcessorErrorField,
+            ChoiceValue::Field(FieldName::parse("reason").assured("valid field")),
+        );
+
+        let draft = signals.reingestor.get();
+        assert!(matches!(draft.state[0].policy, StatePolicyDraft::Default(ref rows) if rows.len() == 1));
+        let route = &draft.routes[0];
+        assert!(matches!(route.inherit, InheritDraft::Fields(ref fields) if fields.len() == 1));
+        assert!(matches!(route.branch, super::ingestor_route_draft::RouteBranchDraft::Branched { ref assignments, .. } if assignments.len() == 1));
+        assert_eq!(route.assignments.len(), 1);
+        assert!(matches!(route.message_error, MessageErrorDraft::SendTo { ref assignments, .. } if assignments.len() == 1));
+        assert!(open_form_controls(signals, CreateKind::Reingestor)
+            .contains(&ChoiceControl::ProcessorErrorField));
+    });
+}
+
+#[test]
 fn hash_map_choices_bind_the_key_to_the_selected_codec_and_domain() {
     Owner::new().with(|| {
         let scope = DomainName::parse("orders").assured("valid domain");

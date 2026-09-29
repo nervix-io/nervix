@@ -17,9 +17,9 @@ contract. Refer users to those chapters for cursor edits, transaction-aware cand
 completion status messages.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
-Roto UDFs, ingestors for all supported source families, and session subscriptions; use the same
-web-console chapter for their typed fields, resource versions, program editors, reference lookup,
-and transaction behavior.
+Roto UDFs, ingestors for all supported source families, junctions, reingestors, and session
+subscriptions; use the same web-console chapter for their typed fields, resource versions, program
+editors, reference lookup, and transaction behavior.
 
 ## Gather the configuration contract
 

@@ -60,6 +60,9 @@ pub enum ChoiceTarget {
     IngestUnbranchedRelay,
     IngestBranchedRelay,
     BranchField,
+    ProcessorCompatibleInputRelay,
+    ProcessorInputBranchRelay,
+    ProcessorMaterializedRelay,
 }
 
 wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
@@ -95,6 +98,9 @@ wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
     IngestUnbranchedRelay,
     IngestBranchedRelay,
     BranchField,
+    ProcessorCompatibleInputRelay,
+    ProcessorInputBranchRelay,
+    ProcessorMaterializedRelay,
 });
 
 impl ChoiceTarget {
@@ -152,7 +158,10 @@ impl ChoiceTarget {
             | Self::IngestCodec
             | Self::IngestUnbranchedRelay
             | Self::IngestBranchedRelay
-            | Self::BranchField => None,
+            | Self::BranchField
+            | Self::ProcessorCompatibleInputRelay
+            | Self::ProcessorInputBranchRelay
+            | Self::ProcessorMaterializedRelay => None,
         }
     }
 }

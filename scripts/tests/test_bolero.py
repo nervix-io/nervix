@@ -31,6 +31,7 @@ class InventoryTests(unittest.TestCase):
             "nspl-model",
             "nspl-archive-model",
             "backup-record-manifest",
+            "client-processor-choice-request",
         })
         self.assertEqual({target.package for target in inventory.targets},
                          {"nervix-client-wire", "nervix-nspl", "nervix-backup"})

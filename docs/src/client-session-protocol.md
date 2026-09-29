@@ -336,8 +336,15 @@ offers endpoints. Its decoding-codec target offers codecs that can decode. An un
 target needs a domain; a branched-relay target also needs the selected branch and offers relays
 with exactly that branch. Ingestor error relays use the unbranched target. A branch-field target
 takes a domain and branch reference. Ingestor decoded and output fields use the existing
-codec-field and relay-field targets. The typed target and dependencies remain part of the cursor
-identity. A completed-version value
+codec-field and relay-field targets. A junction or reingestor asks for another input relay with a
+domain and the first relay reference; candidates have that relay's exact named schema and branch.
+The same dependencies with the output-relay target select the input branch, and with the
+materialized-relay target select only relays with materialized state in that branch. Route
+construction of an unbranched or named branch uses the ingestor relay targets, while branch keys
+and record fields use the branch-field and relay-field targets. These processor targets resolve
+against the attached transaction prefix, and their page digests include the selected input
+definition. The typed target and dependencies remain part of the cursor identity. A
+completed-version value
 is either an explicit number or `LATEST`, not a label to parse. Resource catalogs include resources
 staged earlier in the attached transaction, while version choices include completed uploads only.
 The cursor binds the selected candidate set and its definitions; a changed context returns
