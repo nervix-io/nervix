@@ -5,6 +5,69 @@ release_flag := if build_mode == "release" { "--release" } else { "" }
 cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
 turmoil_failures := cargo_target_dir + "/turmoil-failures"
 
+# Show the documented recipes, including the Bolero property and fuzz commands.
+help:
+    just --list
+
+# Install the qualified CLI version with only the libFuzzer engine.
+install-cargo-bolero:
+    cargo install --locked --version 0.13.4 --no-default-features --features libfuzzer cargo-bolero
+
+# Run all registered properties with bounded randomized cases and source-adjacent corpus replay.
+test-bolero filter="":
+    python3 scripts/bolero.py test {{ quote(filter) }}
+
+# List every compiled, registered Bolero target after checking the inventory.
+fuzz-list:
+    python3 scripts/bolero.py list
+
+# Run one target through sanitizer-backed libFuzzer. Duration is in seconds.
+fuzz target duration="30":
+    python3 scripts/bolero.py fuzz {{ quote(target) }} {{ quote(duration) }}
+
+# Run every target through sanitizer-backed libFuzzer. Duration is per target in seconds.
+fuzz-all duration="30":
+    python3 scripts/bolero.py fuzz-all {{ quote(duration) }}
+
+# Replay the exact saved input through its ordinary property assertion.
+fuzz-replay target failure:
+    python3 scripts/bolero.py replay {{ quote(target) }} {{ quote(failure) }}
+
+# Minimize a saved failure with libFuzzer and verify the minimized input still fails.
+fuzz-reduce target failure:
+    python3 scripts/bolero.py reduce {{ quote(target) }} {{ quote(failure) }}
+
+# Compare the inventory, package declarations, test harness and compiled Bolero targets.
+validate-bolero:
+    python3 scripts/bolero.py validate
+
+# Check the dedicated PR and campaign workflow with the pinned Actions linter.
+validate-bolero-workflow:
+    go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/bolero.yaml
+
+# Qualify nonzero failures, saved crashes, minimization, exact replay and case timeouts.
+qualify-bolero:
+    python3 scripts/bolero.py qualify
+
+# Exercise the inventory and runner's validation and failure paths.
+test-bolero-runner:
+    python3 -m unittest scripts.tests.test_bolero
+
+# Collect runner line coverage while exercising real libFuzzer and its failure qualification.
+# The duration is per product target; CI passes 30 on PRs and 300 for campaigns.
+coverage-bolero duration="2":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" erase
+    "${coverage[@]}" run --branch --source=scripts.bolero -m unittest scripts.tests.test_bolero
+    "${coverage[@]}" run --branch -a scripts/bolero.py test
+    "${coverage[@]}" run --branch -a scripts/bolero.py fuzz-all {{ quote(duration) }}
+    "${coverage[@]}" run --branch -a scripts/bolero.py qualify
+    mkdir -p target/bolero
+    "${coverage[@]}" lcov -o target/bolero/python.lcov
+    "${coverage[@]}" report --fail-under=80
+
 build-deps: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests
 
 tests-deps: build-deps build-nspl-format build-test-cli
@@ -1104,7 +1167,7 @@ audit:
 ratchet *args:
     python3 scripts/ratchet.py {{ args }}
 
-validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies
+validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies validate-bolero
 
 # Check each connector as a consumer root. Cargo tree limits feature unification to that root;
 # the full workspace build alone can hide a missing resolver feature in a leaf connector.
@@ -1187,7 +1250,7 @@ validate-dns-dependencies:
         exit 1
     fi
 
-validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies
+validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies validate-bolero
 
 # Hold every atomic to nervix-primitives and every mode feature to its owner. The check rejects a
 # direct, renamed, grouped, qualified, glob, alias or macro path to another backend's atomics, an
