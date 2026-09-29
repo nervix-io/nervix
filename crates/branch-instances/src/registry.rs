@@ -13,7 +13,7 @@ use meticulous::OptionExt as _;
 use nervix_models::Timestamp;
 use triomphe::Arc;
 
-pub(super) struct BranchInstanceRegistry<K, V>
+pub struct BranchInstanceRegistry<K, V>
 where
     K: Clone + Eq + Hash,
 {
@@ -29,53 +29,48 @@ struct BranchInstanceEntry<V> {
 
 /// The branch lifetime recorded by the lifecycle checkpoint, independent of later LRU touches.
 #[derive(Debug, Clone)]
-pub(super) struct BranchInstanceSnapshotEntry<K> {
-    pub(super) key: K,
-    pub(super) last_ingestion: Timestamp,
-    pub(super) incarnation: u64,
+pub struct BranchInstanceSnapshotEntry<K> {
+    pub key: K,
+    pub last_ingestion: Timestamp,
+    pub incarnation: u64,
 }
 
-pub(super) struct GetOrCreateBranchInstance<V> {
-    pub(super) state: Arc<V>,
-    pub(super) created: bool,
+pub struct GetOrCreateBranchInstance<V> {
+    pub state: Arc<V>,
+    pub created: bool,
 }
 
 impl<K, V> BranchInstanceRegistry<K, V>
 where
     K: Clone + Eq + Hash,
 {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             entries: IndexMap::default(),
             version: 0,
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub(super) fn states(&self) -> Vec<Arc<V>> {
+    pub fn states(&self) -> Vec<Arc<V>> {
         self.entries
             .values()
             .map(|entry| entry.state.clone())
             .collect()
     }
 
-    pub(super) fn version(&self) -> u64 {
+    pub fn version(&self) -> u64 {
         self.version
     }
 
-    pub(super) fn next_incarnation(&self) -> u64 {
+    pub fn next_incarnation(&self) -> u64 {
         self.next_version()
     }
 
-    pub(super) fn set_version(&mut self, version: u64) {
+    pub fn set_version(&mut self, version: u64) {
         self.version = version;
     }
 
-    pub(super) fn snapshot_entries(&self) -> Vec<BranchInstanceSnapshotEntry<K>> {
+    pub fn snapshot_entries(&self) -> Vec<BranchInstanceSnapshotEntry<K>> {
         self.entries
             .iter()
             .map(|(key, entry)| BranchInstanceSnapshotEntry {
@@ -86,11 +81,11 @@ where
             .collect()
     }
 
-    pub(super) fn contains_key(&self, key: &K) -> bool {
+    pub fn contains_key(&self, key: &K) -> bool {
         self.entries.contains_key(key)
     }
 
-    pub(super) fn insert_restored(
+    pub fn insert_restored(
         &mut self,
         key: K,
         last_ingestion: Timestamp,
@@ -114,7 +109,7 @@ where
     /// Unlike restore from a checkpoint or an ownership handoff, this advances the lifecycle
     /// snapshot revision. A replica may already hold the preceding revision, so reusing it for a
     /// different branch set would let the replica acknowledge the preceding payload as current.
-    pub(super) fn insert_changed(&mut self, key: K, last_ingestion: Timestamp, state: V) -> Arc<V> {
+    pub fn insert_changed(&mut self, key: K, last_ingestion: Timestamp, state: V) -> Arc<V> {
         let incarnation = self.next_version();
         let state = self.insert_restored(key, last_ingestion, incarnation, state);
         self.bump_version();
@@ -122,7 +117,7 @@ where
     }
 
     #[cfg(test)]
-    pub(super) fn get_or_create_with(
+    pub fn get_or_create_with(
         &mut self,
         key: K,
         now: Timestamp,
@@ -134,7 +129,7 @@ where
         }
     }
 
-    pub(super) fn get_or_try_create_with<E>(
+    pub fn get_or_try_create_with<E>(
         &mut self,
         key: K,
         now: Timestamp,
@@ -166,7 +161,7 @@ where
 
     /// Refresh one existing branch without constructing it. A caller that opens persisted state
     /// asynchronously can perform that work only when this returns `None`, then insert the branch.
-    pub(super) fn touch(&mut self, key: &K, now: Timestamp) -> Option<Arc<V>> {
+    pub fn touch(&mut self, key: &K, now: Timestamp) -> Option<Arc<V>> {
         let index = self.entries.get_index_of(key)?;
         let state = {
             let entry = self
@@ -189,7 +184,7 @@ where
         Some(state)
     }
 
-    pub(super) fn remove(&mut self, key: &K) -> Option<Arc<V>> {
+    pub fn remove(&mut self, key: &K) -> Option<Arc<V>> {
         let entry = self.entries.shift_remove(key);
         if entry.is_some() {
             self.bump_version();
@@ -197,7 +192,7 @@ where
         entry.map(|entry| entry.state)
     }
 
-    pub(super) fn expire(&mut self, now: Timestamp, max_idle: Duration) -> Vec<(K, Arc<V>)> {
+    pub fn expire(&mut self, now: Timestamp, max_idle: Duration) -> Vec<(K, Arc<V>)> {
         let mut expired = Vec::new();
         while let Some((key, entry)) = self.entries.get_index(0) {
             let Ok(idle) = now
@@ -223,7 +218,7 @@ where
         expired
     }
 
-    pub(super) fn evict_lru_to_capacity(&mut self, max_entries: NonZeroUsize) -> Vec<(K, Arc<V>)> {
+    pub fn evict_lru_to_capacity(&mut self, max_entries: NonZeroUsize) -> Vec<(K, Arc<V>)> {
         let mut evicted = Vec::new();
         while self.entries.len() > max_entries.get() {
             let (key, entry) = self
@@ -239,14 +234,14 @@ where
     }
 
     #[cfg(test)]
-    pub(super) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         if !self.entries.is_empty() {
             self.bump_version();
         }
         self.entries.clear();
     }
 
-    pub(super) fn drain(&mut self) -> Vec<(K, Arc<V>)> {
+    pub fn drain(&mut self) -> Vec<(K, Arc<V>)> {
         let entries = std::mem::take(&mut self.entries);
         if !entries.is_empty() {
             self.bump_version();

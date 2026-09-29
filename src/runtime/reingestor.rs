@@ -1512,7 +1512,7 @@ mod tests {
             )
             .await;
 
-            assert_eq!(instances.len(), 64);
+            assert_eq!(instances.states().len(), 64);
         }
         owner_task
             .stop(Duration::from_secs(1))

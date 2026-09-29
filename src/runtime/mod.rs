@@ -47,6 +47,9 @@ use fjall::Database;
 use futures_util::{future::BoxFuture, stream::FuturesUnordered};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
+use nervix_branch_instances::{
+    BranchInstanceRegistry, BranchInstanceSnapshotEntry, GetOrCreateBranchInstance,
+};
 use nervix_dns::DnsResolver;
 use nervix_execution::{ChargedBytes, Executor};
 use nervix_interconnect::{
@@ -189,7 +192,6 @@ use crate::{
 
 mod branch_aggregated_state;
 mod branch_buffering;
-mod branch_instance_registry;
 mod branch_key;
 mod branch_lru_state;
 mod branch_runtime;
@@ -289,9 +291,6 @@ use branch_buffering::{
     BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingError, BranchBufferTimingResult,
     RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector, RuntimeWake,
     wait_for_branch_buffer_deadlines,
-};
-use branch_instance_registry::{
-    BranchInstanceRegistry, BranchInstanceSnapshotEntry, GetOrCreateBranchInstance,
 };
 use branch_key::branch_key_display;
 use branch_lru_state::{
