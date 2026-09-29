@@ -19,7 +19,7 @@ use nervix_consensus::{
     TransactionDiagnostic,
 };
 use nervix_models::{
-    BackupArchiveSummary, ClusterNodeName, NodeServiceUrl, ResourceDescription,
+    BackupArchiveSummary, ClusterNodeName, NodeServiceUrl, ResourceDescription, RestoreReport,
     TransactionInspection, TransactionOperationAdmission, TransactionPreviewIdentity,
     TransactionStatus,
 };
@@ -151,6 +151,9 @@ pub(in crate::application) struct CommandResult {
     pub(in crate::application) resource: Option<Box<ResourceDescription>>,
     /// The archive a completed backup assembled and retains for download.
     pub(in crate::application) backup: Option<Box<BackupArchiveSummary>>,
+    /// What a restore applied, the step it failed at if one failed, or for a dry run what it
+    /// would apply.
+    pub(in crate::application) restore: Option<Box<RestoreReport>>,
 }
 
 impl CommandResult {
@@ -167,6 +170,7 @@ impl CommandResult {
             wasm_state: None,
             resource: None,
             backup: None,
+            restore: None,
         }
     }
 

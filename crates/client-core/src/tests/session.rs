@@ -116,6 +116,7 @@ fn command_outcome(
         wasm_state: None,
         resource: None,
         backup: None,
+        restore: None,
     }))
 }
 

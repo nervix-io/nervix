@@ -20,7 +20,7 @@ use nervix_client_wire::{
 };
 use nervix_models::{
     Backup, CommandExecutionReference, CreateSubscription, DomainName, ResourceUploadIdentity,
-    Statement, SubscriptionName, TransactionInspectionTarget, TransactionOperationNumber,
+    Restore, Statement, SubscriptionName, TransactionInspectionTarget, TransactionOperationNumber,
     TransactionPosition, TransactionPreviewIdentity, TransactionStatus, UploadResource,
 };
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
@@ -86,7 +86,7 @@ impl ExecutionHandle {
     pub(crate) fn can_have_admitted_command(&self) -> bool {
         matches!(
             self.route,
-            StatementRoute::Command | StatementRoute::Backup(_)
+            StatementRoute::Command | StatementRoute::Backup(_) | StatementRoute::Restore(_)
         )
     }
 }
@@ -126,6 +126,9 @@ enum StatementRoute {
     /// A BACKUP statement: the server executes it as a command, and the client downloads the
     /// archive it assembled to the file the statement names.
     Backup(Backup),
+    /// A RESTORE statement: the client streams the archive its statement names to the leader,
+    /// which runs the restore as a command under the execution's reference.
+    Restore(Restore),
 }
 
 /// A statement the client serves itself, without sending it as a command.
@@ -190,6 +193,7 @@ impl StatementRoute {
                 "DESCRIBE BACKUP reads an archive file on this machine and is served by nervix-cli",
             ),
             ClientStatement::Server(Statement::Backup(backup)) => Self::Backup(backup),
+            ClientStatement::Server(Statement::Restore(restore)) => Self::Restore(restore),
             ClientStatement::BeginTransaction
             | ClientStatement::CommitTransaction
             | ClientStatement::RevertTransaction
@@ -431,6 +435,21 @@ impl Client {
         execution: &ExecutionHandle,
         deadline: Instant,
     ) -> Result<CommandOutcome, ClientError> {
+        if let StatementRoute::Restore(restore) = &execution.route {
+            // A client bound to a transaction refuses a restore, as it refuses every client-local
+            // statement.
+            if self.active_transaction_status().await.is_some() {
+                return Ok(CommandOutcome::failed_locally(
+                    "client-local commands are not allowed while a transaction is active"
+                        .to_string(),
+                ));
+            }
+            // An archive may take far longer to send than the retry deadline allows a command, so
+            // a restore bounds each frame and each reply instead.
+            return self
+                .restore_with_reference(restore, &execution.reference, |_| {})
+                .await;
+        }
         let result =
             tokio::time::timeout_at(deadline, self.execute_prepared_within_budget(execution)).await;
         let outcome = match result {
@@ -810,6 +829,10 @@ impl Client {
                 result.map_err(|report| {
                     ClientError::SubscriptionOperation(Box::new(report.into_error()))
                 })
+            }
+            StatementRoute::Restore(restore) => {
+                self.run_restore(restore, &execution.reference, |_| {})
+                    .await
             }
             StatementRoute::Command | StatementRoute::Backup(_) => {
                 let request = ClientRequest::Command(CommandRequest {

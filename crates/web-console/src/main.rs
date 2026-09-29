@@ -1358,13 +1358,14 @@ fn App() -> impl IntoView {
                 }
             }
         } else if let Ok(
-            ClientStatement::DescribeBackup(_) | ClientStatement::Server(Statement::Backup(_)),
+            ClientStatement::DescribeBackup(_)
+            | ClientStatement::Server(Statement::Backup(_) | Statement::Restore(_)),
         ) = parse_client_statement(&command)
         {
             terminal_lines.update(|lines| {
                 lines.push(TermLine::error(
-                    "BACKUP and DESCRIBE BACKUP write and read archive files on the client's \
-                     machine; run them with nervix-cli",
+                    "BACKUP, RESTORE and DESCRIBE BACKUP write and read archive files on the \
+                     client's machine; run them with nervix-cli",
                 ));
             });
         } else if let Ok(ClientStatement::DeleteSubscription(delete)) =
@@ -10751,6 +10752,7 @@ mod tests {
             wasm_state: None,
             resource: None,
             backup: None,
+            restore: None,
         }
     }
 

@@ -41,7 +41,7 @@ pub use failure::{
 pub use outcome::{
     Disposition, Outcome, nx_outcome_backup, nx_outcome_diagnostic, nx_outcome_diagnostic_count,
     nx_outcome_disposition, nx_outcome_execution_reference, nx_outcome_free, nx_outcome_message,
-    nx_outcome_schema, nx_outcome_subscription,
+    nx_outcome_restore, nx_outcome_schema, nx_outcome_subscription,
 };
 pub use schema::{
     FieldType, Part, Schema, nx_schema_branch, nx_schema_field, nx_schema_field_count,

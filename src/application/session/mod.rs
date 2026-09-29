@@ -33,6 +33,7 @@ mod events;
 pub(in crate::application) mod grpc;
 pub(in crate::application) mod outbound;
 mod outcome;
+mod restore;
 mod upload;
 pub(in crate::application) mod websocket;
 

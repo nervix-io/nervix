@@ -725,6 +725,9 @@ pub(crate) struct Cluster {
     /// Publishes this cluster to the suite watchdog for as long as the scenario holds it, so a
     /// suite timeout can name its nodes and ask every one of them to stop.
     live: LiveClusterRegistration,
+    /// What every node's name begins with: the n-th node is `<prefix>-<n>`, and the first one
+    /// bootstraps the cluster.
+    node_name_prefix: String,
 }
 
 #[derive(Debug, Clone)]
@@ -751,6 +754,9 @@ pub(crate) struct TestClusterConfig {
     pub temp_dir: Option<PathBuf>,
     pub dependencies: DependencyEndpoints,
     pub peer_addressing: PeerAddressing,
+    /// What every node's name begins with: the n-th node is `<prefix>-<n>`. A scenario that runs a
+    /// second cluster names its nodes apart from the first one's.
+    pub node_name_prefix: String,
 }
 
 impl Default for TestClusterConfig {
@@ -778,6 +784,7 @@ impl Default for TestClusterConfig {
             temp_dir: None,
             dependencies: DependencyEndpoints::default(),
             peer_addressing: PeerAddressing::default(),
+            node_name_prefix: "node".to_string(),
         }
     }
 }
@@ -815,7 +822,7 @@ impl Cluster {
         let peer_addressing = config.peer_addressing;
         let mut planned = Vec::with_capacity(node_count);
         for position in 1..=node_count {
-            let node_id = format!("node-{position}");
+            let node_id = format!("{}-{position}", config.node_name_prefix);
             let index = NodeSpec::index(&node_id)?;
             let address = peer_addressing.address(&node_id, index);
             planned.push(PlannedNode {
@@ -861,6 +868,7 @@ impl Cluster {
             nodes,
             dependencies: config.dependencies,
             live,
+            node_name_prefix: config.node_name_prefix,
         };
 
         if let Err(error) = cluster.start_nodes_and_wait(node_count).await {
@@ -879,26 +887,27 @@ impl Cluster {
         let nodes_to_start = u32::try_from(node_count)
             .assured("a test cluster is built from a handful of nodes, not billions");
         let construction = PhaseDeadline::after(cluster_startup_budget(nodes_to_start));
-        self.start_node_within("node-1", construction).await?;
+        let bootstrap = self.node_id(1);
+        self.start_node_within(&bootstrap, construction).await?;
         let bootstrap_cluster_addr = self
             .nodes
-            .get("node-1")
+            .get(&bootstrap)
             .expect("bootstrap node exists")
             .spec
             .interconnect_endpoint();
         for (node_id, node) in &mut self.nodes {
-            if node_id != "node-1" {
+            if *node_id != bootstrap {
                 node.spec.bootstrap_host = Some(bootstrap_cluster_addr.clone());
             }
         }
         for index in 2..=node_count {
-            self.start_node_within(&format!("node-{index}"), construction)
+            self.start_node_within(&self.node_id(index), construction)
                 .await?;
         }
-        self.wait_for_any_leader("node-1").await?;
+        self.wait_for_any_leader(&bootstrap).await?;
         if node_count > 1 {
             let expected_nodes = (1..=node_count)
-                .map(|index| format!("node-{index}"))
+                .map(|index| self.node_id(index))
                 .collect::<Vec<_>>();
             for node_id in &expected_nodes {
                 self.wait_for_any_leader(node_id).await?;
@@ -907,11 +916,16 @@ impl Cluster {
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>();
-            self.wait_for_voters("node-1", &voter_refs).await?;
+            self.wait_for_voters(&bootstrap, &voter_refs).await?;
             self.wait_for_consistent_leader_on_all_nodes().await?;
             self.wait_for_full_interconnect(&expected_nodes).await?;
         }
         Ok(())
+    }
+
+    /// The name of the cluster's `position`-th node, counted from 1.
+    fn node_id(&self, position: usize) -> String {
+        format!("{}-{position}", self.node_name_prefix)
     }
 
     async fn wait_for_full_interconnect(&self, node_ids: &[String]) -> io::Result<()> {
@@ -1431,21 +1445,19 @@ impl Cluster {
         let nodes_to_start = u32::try_from(node_ids.len())
             .assured("a test cluster is built from a handful of nodes, not billions");
         let construction = PhaseDeadline::after(cluster_startup_budget(nodes_to_start));
-        self.start_node_within("node-1", construction).await?;
-        for node_id in node_ids
-            .iter()
-            .filter(|node_id| node_id.as_str() != "node-1")
-        {
+        let bootstrap = self.node_id(1);
+        self.start_node_within(&bootstrap, construction).await?;
+        for node_id in node_ids.iter().filter(|node_id| **node_id != bootstrap) {
             self.start_node_within(node_id, construction).await?;
         }
 
-        self.wait_for_any_leader("node-1").await?;
+        self.wait_for_any_leader(&bootstrap).await?;
         if node_ids.len() > 1 {
             for node_id in &node_ids {
                 self.wait_for_any_leader(node_id).await?;
             }
             let voter_refs = node_ids.iter().map(String::as_str).collect::<Vec<_>>();
-            self.wait_for_voters("node-1", &voter_refs).await?;
+            self.wait_for_voters(&bootstrap, &voter_refs).await?;
             self.wait_for_consistent_leader_on_all_nodes().await?;
             self.wait_for_full_interconnect(&node_ids).await?;
         }
@@ -3229,17 +3241,26 @@ impl NodeSpec {
     }
 
     /// The `<n>` of a test node id `node-<n>`.
+    /// The number a test node's name ends with, which places it on its own loopback address.
     fn index(node_id: &str) -> io::Result<u8> {
-        node_id
-            .strip_prefix("node-")
-            .and_then(|value| value.parse::<u8>().ok())
-            .filter(|value| (1..=254).contains(value))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("test node id '{node_id}' must have the form node-1 through node-254"),
-                )
-            })
+        let invalid = || {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "test node id '{node_id}' must have the form <prefix>-1 through <prefix>-254"
+                ),
+            )
+        };
+        let Some((_, number)) = node_id.rsplit_once('-') else {
+            return Err(invalid());
+        };
+        let Ok(index) = number.parse::<u8>() else {
+            return Err(invalid());
+        };
+        if !(1..=254).contains(&index) {
+            return Err(invalid());
+        }
+        Ok(index)
     }
 
     fn syslog_ingestor_host(node_id: &str) -> io::Result<IpAddr> {

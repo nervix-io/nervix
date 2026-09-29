@@ -705,14 +705,15 @@ function openedSchema(reply: wire.Reply): OpenedSchema {
   return { opened, fields, keys, lines };
 }
 
-function commandLines(id: bigint, outcome: wire.CommandOutcome): string[] {
+/** Renders one command outcome, its first line after `head`. */
+function commandLines(head: string, outcome: wire.CommandOutcome): string[] {
   const name = DISPOSITIONS.get(outcome.dispositionType());
   const origin = outcome.origin();
   if (name === undefined || origin === null) {
     throw new Error('a command outcome lacks a declared disposition or its origin');
   }
   const lines = [
-    `REPLY ${id} COMMAND ${name} reference=${outcome.executionReference()} origin=${wire.OutcomeOrigin[origin]} message=${text(bytesOf((encoding) => outcome.message(encoding)))}`,
+    `${head} ${name} reference=${outcome.executionReference()} origin=${wire.OutcomeOrigin[origin]} message=${text(bytesOf((encoding) => outcome.message(encoding)))}`,
   ];
   for (let index = 0; index < outcome.diagnosticsLength(); index += 1) {
     const diagnostic = member(outcome.diagnostics(index));
@@ -737,7 +738,99 @@ function commandLines(id: bigint, outcome: wire.CommandOutcome): string[] {
   if (archive !== null) {
     lines.push(...backupLines(archive));
   }
+  const restore = outcome.restore();
+  if (restore !== null) {
+    lines.push(...restoreReportLines(restore));
+  }
   return lines;
+}
+
+/** Renders what a restore applied, or for a dry run would apply. */
+function restoreReportLines(report: wire.RestoreReport): string[] {
+  const mode = report.mode();
+  const digest = member(report.digest()).bytesArray();
+  if (mode === null || report.totalBytes() === 0n || digest === null || digest.length !== 32) {
+    throw new Error('a restore report lacks its mode, size or digest');
+  }
+  const restored = report.users();
+  const users =
+    restored === null
+      ? 'none'
+      : `created:${restored.created()},skipped:${restored.skipped()},replaced:${restored.replaced()}`;
+  const lines = [
+    `RESTORE mode=${wire.RestoreMode[mode]} total_bytes=${report.totalBytes()} digest=${hex(digest)} captured_at=${report.capturedAt()} users=${users}`,
+  ];
+  for (let index = 0; index < report.domainsLength(); index += 1) {
+    const domain = member(report.domains(index));
+    const planned = domain.plannedModels() === null ? 'none' : 'present';
+    lines.push(
+      `RESTORE_DOMAIN source=${domain.source()} domain=${domain.domain()} resource_versions=${domain.resourceVersions()} models=${domain.models()} planned_models=${planned}`,
+    );
+  }
+  for (let index = 0; index < report.stepsLength(); index += 1) {
+    const step = member(report.steps(index));
+    const kind = step.kind();
+    const outcome = step.outcome();
+    if (kind === null || outcome === null) {
+      throw new Error('a restore step lacks its kind or outcome');
+    }
+    const domain = step.domain();
+    if ((kind === wire.RestoreStepKind.Users) !== (domain === null)) {
+      throw new Error('a restore step names a domain exactly when it changes one');
+    }
+    lines.push(
+      `RESTORE_STEP kind=${wire.RestoreStepKind[kind]} domain=${domain ?? 'none'} outcome=${wire.RestoreStepOutcome[outcome]}`,
+    );
+  }
+  return lines;
+}
+
+/** Renders one frame of a restore stream. */
+function restoreLines(frame: Uint8Array): string[] {
+  const message = wire.RestoreMessage.getRootAsRestoreMessage(frameBuffer(frame, 'NXRM'));
+  switch (message.partType()) {
+    case wire.RestorePart.RestoreStart: {
+      const start = member(message.part(new wire.RestoreStart()) as wire.RestoreStart | null);
+      const digest = member(start.digest()).bytesArray();
+      if (start.requestId() === 0n || start.totalBytes() === 0n || digest === null || digest.length !== 32) {
+        throw new Error('a restore start lacks its request, size or digest');
+      }
+      return [
+        `RESTORE_START request=${start.requestId()} reference=${start.executionReference()} statement=${text(bytesOf((encoding) => start.statement(encoding)))} total_bytes=${start.totalBytes()} digest=${hex(digest)}`,
+      ];
+    }
+    case wire.RestorePart.RestoreChunk: {
+      const chunk = member(message.part(new wire.RestoreChunk()) as wire.RestoreChunk | null);
+      const bytes = chunk.bytesArray();
+      if (bytes === null || bytes.length === 0) {
+        throw new Error('a restore chunk is empty');
+      }
+      return [`RESTORE_CHUNK bytes=${hex(bytes)}`];
+    }
+    default:
+      throw new Error(`undeclared restore part ${message.partType()}`);
+  }
+}
+
+/** Renders the frame that answers a restore stream. */
+function restoreReplyLines(frame: Uint8Array): string[] {
+  const reply = wire.RestoreReply.getRootAsRestoreReply(frameBuffer(frame, 'NXRR'));
+  const request = reply.requestId() ?? 'none';
+  switch (reply.dispositionType()) {
+    case wire.RestoreDisposition.CommandOutcome:
+      return commandLines(
+        `RESTORE_REPLY ${request} COMMAND`,
+        member(reply.disposition(new wire.CommandOutcome()) as wire.CommandOutcome | null),
+      );
+    case wire.RestoreDisposition.RestoreUploadFailed: {
+      const failed = member(reply.disposition(new wire.RestoreUploadFailed()) as wire.RestoreUploadFailed | null);
+      return [
+        `RESTORE_REPLY ${request} FAILED failure=${wire.RestoreUploadFailure[member(failed.failure())]} message=${text(bytesOf((encoding) => failed.message(encoding)))}`,
+      ];
+    }
+    default:
+      throw new Error(`undeclared restore disposition ${reply.dispositionType()}`);
+  }
 }
 
 /** Renders the archive a completed backup reports. */
@@ -839,7 +932,7 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
       const id = reply.requestId();
       switch (reply.bodyType()) {
         case wire.ReplyBody.CommandOutcome:
-          return commandLines(id, member(reply.body(new wire.CommandOutcome()) as wire.CommandOutcome | null));
+          return commandLines(`REPLY ${id} COMMAND`, member(reply.body(new wire.CommandOutcome()) as wire.CommandOutcome | null));
         case wire.ReplyBody.RequestRejected: {
           const rejected = member(reply.body(new wire.RequestRejected()) as wire.RequestRejected | null);
           return [
@@ -1051,7 +1144,9 @@ function clientLines(frame: Uint8Array): string[] {
 /** Decodes every frame of the checked-in corpus and prints its report. */
 function corpus(directory: string): void {
   const files = readdirSync(directory)
-    .filter((file) => ['.nxcm', '.nxsm', '.nxbq', '.nxbd'].some((extension) => file.endsWith(extension)))
+    .filter((file) =>
+      ['.nxcm', '.nxsm', '.nxbq', '.nxbd', '.nxrm', '.nxrr'].some((extension) => file.endsWith(extension)),
+    )
     .sort();
   const opened = new Uint8Array(readFileSync(join(directory, 'server_subscription_opened.nxsm')));
   const openedMessage = wire.ServerMessage.getRootAsServerMessage(frameBuffer(opened, 'NXSM'));
@@ -1065,6 +1160,10 @@ function corpus(directory: string): void {
       lines = downloadRequestLines(frame);
     } else if (file.endsWith('.nxbd')) {
       lines = downloadLines(frame);
+    } else if (file.endsWith('.nxrm')) {
+      lines = restoreLines(frame);
+    } else if (file.endsWith('.nxrr')) {
+      lines = restoreReplyLines(frame);
     } else {
       lines = serverLines(frame, schema);
     }

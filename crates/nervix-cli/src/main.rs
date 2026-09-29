@@ -50,8 +50,12 @@ use tokio::{runtime::Handle, signal, task::block_in_place};
 use triomphe::Arc;
 
 mod backup;
+mod restore;
 
-use self::backup::{BackupRequest, CliBackupScope, CliReportFormat};
+use self::{
+    backup::{BackupRequest, CliBackupScope, CliReportFormat},
+    restore::{CliExistingUsers, CliRestoreScope, RestoreRequest},
+};
 
 const HISTORY_FILE: &str = ".nervix_client_history";
 const EVENT_BUFFER_RECORDS: usize = 128;
@@ -162,6 +166,31 @@ enum Command {
         #[arg(long, value_enum, default_value_t = CliReportFormat::Text)]
         format: CliReportFormat,
     },
+    /// Restore configuration, users and resources from an archive file
+    Restore {
+        /// What to restore: `cluster` for every domain and user of a cluster archive, `domain`
+        /// for one domain of an archive
+        #[arg(value_enum)]
+        scope: CliRestoreScope,
+        /// The archived domain a `domain` restore recreates
+        name: Option<DomainName>,
+        /// The archive file to restore from
+        #[arg(long, short = 'i')]
+        input: String,
+        /// Restore the domain under this name instead of its archived one
+        #[arg(long = "as")]
+        target: Option<DomainName>,
+        /// What a cluster restore does with an archived user the cluster already has; `fail`
+        /// when omitted
+        #[arg(long, value_enum)]
+        on_existing_user: Option<CliExistingUsers>,
+        /// Verify the archive and plan the restore, changing nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// How the restore's report is printed
+        #[arg(long, value_enum, default_value_t = CliReportFormat::Text)]
+        format: CliReportFormat,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -216,6 +245,10 @@ enum ClientError {
     WriteArchive,
     #[error("the backup archive could not be described")]
     DescribeBackup,
+    #[error("invalid restore arguments: {reason}")]
+    RestoreArguments { reason: &'static str },
+    #[error("the restore did not complete: {message}")]
+    RestoreFailed { message: String },
 }
 
 async fn collect_suggestions(
@@ -437,6 +470,30 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 domain: name,
                 output,
                 without_resources,
+                format,
+            })
+            .await;
+        }
+        Some(Command::Restore {
+            scope,
+            name,
+            input,
+            target,
+            on_existing_user,
+            dry_run,
+            format,
+        }) => {
+            let connect_options = connect_options_from_args(&args)?;
+            return restore::run_restore(RestoreRequest {
+                server: args.server,
+                connect_options,
+                session_domain: args.domain,
+                scope,
+                domain: name,
+                target,
+                input,
+                existing_users: on_existing_user,
+                dry_run,
                 format,
             })
             .await;
@@ -980,6 +1037,9 @@ async fn execute_and_print(client: &Client, query: String) -> Result<(), StackRe
         backup::run_describe_backup(&describe)
             .discarded("describing an archive already printed why it failed");
         return Ok(());
+    }
+    if let Some(restore) = restore::restore_statement(&query) {
+        return restore::execute_restore_and_print(client, &restore).await;
     }
     if let Ok(upload) = parse_upload_resource_query(&query) {
         return execute_upload_and_print(

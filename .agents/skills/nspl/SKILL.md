@@ -86,8 +86,8 @@ statement must select that same domain. Transactions and commit progress are rep
 resumable, but their content is deliberately limited to that domain's model mutations, domain
 configuration/lifecycle, `CREATE RESOURCE`, and `RESET WASM PROCESSOR ... STATE`. Keep
 `CREATE DOMAIN`, `CREATE USER`, other read-only statements, subscriptions, `USE`,
-`ATTACH DOMAIN CLOCK`/`DETACH DOMAIN CLOCK`, resource uploads, backups, and node administration
-outside the transaction. Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
+`ATTACH DOMAIN CLOCK`/`DETACH DOMAIN CLOCK`, resource uploads, backups, restores, and node
+administration outside the transaction. Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
 verification. Use `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT | JSON ];` to
 explain what an open, committing, or retained transaction requires and changes before or after
 `COMMIT`. These two reads are allowed while a transaction is open, are sent on their own, and neither

@@ -1,11 +1,13 @@
 //! What became of a command: `nx_outcome`.
 //!
 //! - **Owns.** The dispositions the header names and reading an outcome's message, diagnostics,
-//!   execution reference and opened subscription.
+//!   execution reference, opened subscription, backup archive and restore report.
 //! - **Depends on.** The Rust client's command outcome.
 //! - **Must not know.** How the command was sent, retried or redirected.
 
-use nervix_client_core::{CommandDisposition, CommandOutcome};
+use arch_into::ArchInto as _;
+use meticulous::OptionExt as _;
+use nervix_client_core::{CommandDisposition, CommandOutcome, RestoreMode};
 use triomphe::Arc;
 
 use crate::{
@@ -235,6 +237,45 @@ pub unsafe extern "C" fn nx_outcome_backup(
     unsafe {
         abi::write(total_bytes, summary.total_bytes.get());
         abi::write_bytes(digest, digest_len, summary.digest.as_bytes());
+    }
+    true
+}
+
+/// # Safety
+///
+/// `outcome` is a live outcome this library returned; non-null out-parameters are writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_outcome_restore(
+    outcome: *const Outcome,
+    dry_run: *mut bool,
+    domains: *mut u64,
+    resource_versions: *mut u64,
+    models: *mut u64,
+    failed: *mut bool,
+) -> bool {
+    // SAFETY: the header requires a live outcome.
+    let outcome = unsafe { abi::accessor(outcome) };
+    let Some(report) = &outcome.outcome.restore else {
+        return false;
+    };
+    let mut version_count = 0_u64;
+    let mut model_count = 0_u64;
+    for domain in &report.domains {
+        version_count = version_count
+            .checked_add(domain.resource_versions)
+            .assured("a report's versions are counted from lists a node held in memory");
+        model_count = model_count
+            .checked_add(domain.models)
+            .assured("a report's models are counted from lists a node held in memory");
+    }
+    let domain_count: u64 = report.domains.len().arch_into();
+    // SAFETY: the header requires writable out-parameters.
+    unsafe {
+        abi::write(dry_run, report.mode == RestoreMode::DryRun);
+        abi::write(domains, domain_count);
+        abi::write(resource_versions, version_count);
+        abi::write(models, model_count);
+        abi::write(failed, report.failed_step().is_some());
     }
     true
 }

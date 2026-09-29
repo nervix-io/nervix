@@ -297,6 +297,7 @@ fn test_session_service(
             resource_upload_executions: DashMap::with_hasher(RandomState::new()),
             resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             retained_backups: Default::default(),
+            restore_archives: Default::default(),
         }),
     }
 }

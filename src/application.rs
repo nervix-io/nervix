@@ -149,6 +149,7 @@ mod ownership_handoff;
 mod peer_grpc;
 mod relocation;
 mod resource;
+mod restore;
 mod runtime_admission;
 mod schedule_planning;
 mod scheduling;
@@ -1804,6 +1805,7 @@ impl Application {
                 resource_upload_executions: DashMap::with_hasher(RandomState::new()),
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
                 retained_backups: Default::default(),
+                restore_archives: Default::default(),
             }),
         };
         #[cfg(feature = "testing")]
@@ -2393,6 +2395,7 @@ impl Application {
                 // A backup archive outlives leadership on the node that assembled it, so every
                 // node releases the archives whose retry validity ended.
                 transaction_service.sweep_retained_backups();
+                transaction_service.sweep_restore_archives();
                 tokio::select! {
                     _ = transaction_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_millis(250)) => {}

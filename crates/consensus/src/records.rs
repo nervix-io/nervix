@@ -5,7 +5,7 @@
 //! - **Depends on.** Vocabulary records, persistent ordered maps, and the durable batch owner.
 //! - **Must not know.** Raft transport, graph execution or domain lifecycle policy.
 
-use std::{borrow::Borrow, collections::BTreeMap, io};
+use std::{borrow::Borrow, collections::BTreeMap, io, num::NonZeroU64};
 
 use error_stack::Report;
 use imbl::{OrdMap, ordmap::DiffItem};
@@ -236,6 +236,28 @@ pub(crate) enum ResourceMutationError {
     #[error("resource upload replica does not describe a ready copy of the assigned version")]
     ReplicaMismatch,
     #[error(
+        "version {version} of resource '{}' in domain '{}' lies outside its sequence, which \
+         continues at {next_version}",
+        .identifier.as_str(),
+        .domain.as_str()
+    )]
+    OutsideSequence {
+        domain: DomainName,
+        identifier: ResourceName,
+        version: u64,
+        next_version: u64,
+    },
+    #[error(
+        "version {version} of resource '{}' in domain '{}' is already published",
+        .identifier.as_str(),
+        .domain.as_str()
+    )]
+    VersionPublished {
+        domain: DomainName,
+        identifier: ResourceName,
+        version: u64,
+    },
+    #[error(
         "resource upload identity '{}' is assigned version {} with digest {}, not {}",
         .key.identity,
         .version,
@@ -251,10 +273,101 @@ pub(crate) enum ResourceMutationError {
 }
 
 impl ResourceRecords {
-    #[cfg(test)]
-    pub(crate) fn is_declared(&self, domain: &DomainName, identifier: &ResourceName) -> bool {
+    pub(crate) fn declares(&self, domain: &DomainName, identifier: &ResourceName) -> bool {
         self.counters
             .contains_key(&ResourceCatalogKey::new(domain, identifier))
+    }
+
+    /// Declares `identifier` in `domain` with its version sequence at `next_version`, as a restore
+    /// recreates an archived catalog: every lower number is either imported under its archived
+    /// number or stays assigned to an upload the archive records as failed.
+    pub(crate) fn restore_catalog(
+        &mut self,
+        domain: &DomainName,
+        identifier: &ResourceName,
+        next_version: NonZeroU64,
+    ) {
+        self.counters.insert(
+            ResourceCatalogKey::new(domain, identifier),
+            next_version.get(),
+        );
+    }
+
+    /// Records an imported version under its archived number and publishes it with the leader's
+    /// ready copy, in one change, so an imported number is never assigned without a copy to fetch.
+    ///
+    /// The number must lie below the sequence the restore declared, so no upload ever takes it,
+    /// and must not already be published. Importing the same version under the same key again
+    /// changes nothing.
+    pub(crate) fn import_version(
+        &mut self,
+        key: &ResourceUploadKey,
+        resource: &ResourceVersion,
+        replica: &ResourceNodeStatus,
+    ) -> Result<(), Report<ResourceMutationError>> {
+        let version = resource.id.version;
+        if resource.id.domain != key.domain || resource.id.identifier != key.identifier {
+            return Err(Report::new(ResourceMutationError::ReplicaMismatch));
+        }
+        if replica.key.version_key().resource_id() != resource.id
+            || replica.state != ResourceNodeState::Ready
+            || replica.root_checksum.as_deref() != Some(resource.root_checksum.as_str())
+        {
+            return Err(Report::new(ResourceMutationError::ReplicaMismatch));
+        }
+        if let Some(upload) = self.uploads.get(key) {
+            if upload.version != version {
+                return Err(Report::new(ResourceMutationError::VersionMismatch {
+                    key: key.clone(),
+                    assigned_version: upload.version,
+                    received_version: version,
+                }));
+            }
+            if upload.state.root_checksum() != resource.root_checksum {
+                return Err(Report::new(ResourceMutationError::DigestConflict {
+                    key: Box::new(key.clone()),
+                    version,
+                    expected_checksum: upload.state.root_checksum().to_string(),
+                    received_checksum: resource.root_checksum.clone(),
+                }));
+            }
+            return Ok(());
+        }
+        let catalog_key = ResourceCatalogKey::new(&key.domain, &key.identifier);
+        let Some(next_version) = self.counters.get(&catalog_key).copied() else {
+            return Err(Report::new(ResourceMutationError::MissingCatalog {
+                domain: key.domain.clone(),
+                identifier: key.identifier.clone(),
+            }));
+        };
+        if version == 0 || version >= next_version {
+            return Err(Report::new(ResourceMutationError::OutsideSequence {
+                domain: key.domain.clone(),
+                identifier: key.identifier.clone(),
+                version,
+                next_version,
+            }));
+        }
+        if self.versions.contains_key(&resource.id) {
+            return Err(Report::new(ResourceMutationError::VersionPublished {
+                domain: key.domain.clone(),
+                identifier: key.identifier.clone(),
+                version,
+            }));
+        }
+        self.versions.insert(resource.id.clone(), resource.clone());
+        self.replicas.insert(replica.key.clone(), replica.clone());
+        self.uploads.insert(
+            key.clone(),
+            ResourceUpload {
+                key: key.clone(),
+                version,
+                state: ResourceUploadState::Applying {
+                    root_checksum: resource.root_checksum.clone(),
+                },
+            },
+        );
+        Ok(())
     }
 
     pub(crate) fn ensure_catalog(&mut self, domain: &DomainName, identifier: &ResourceName) {

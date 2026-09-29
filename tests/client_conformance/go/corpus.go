@@ -177,7 +177,8 @@ func schemaLines(frame []byte) (*session.SubscriptionOpened, []field, []field, [
 	return opened, fields, keys, lines, nil
 }
 
-func commandLines(id uint64, outcome *session.CommandOutcome) ([]string, error) {
+// commandLines renders one command outcome, its first line after head.
+func commandLines(head string, outcome *session.CommandOutcome) ([]string, error) {
 	origin := outcome.Origin()
 	if origin == nil {
 		return nil, errors.New("a command outcome has no origin")
@@ -186,7 +187,7 @@ func commandLines(id uint64, outcome *session.CommandOutcome) ([]string, error) 
 	if !known {
 		return nil, fmt.Errorf("undeclared command disposition %d", outcome.DispositionType())
 	}
-	lines := []string{fmt.Sprintf("REPLY %d COMMAND %s reference=%s origin=%s message=%s", id, name,
+	lines := []string{fmt.Sprintf("%s %s reference=%s origin=%s message=%s", head, name,
 		outcome.ExecutionReference(), session.EnumNamesOutcomeOrigin[*origin], text(outcome.Message()))}
 	for index := 0; index < outcome.DiagnosticsLength(); index++ {
 		diagnostic := new(session.Diagnostic)
@@ -227,7 +228,128 @@ func commandLines(id uint64, outcome *session.CommandOutcome) ([]string, error) 
 		}
 		lines = append(lines, backup...)
 	}
+	if report := outcome.Restore(nil); report != nil {
+		restore, err := restoreReportLines(report)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, restore...)
+	}
 	return lines, nil
+}
+
+// restoreReportLines renders what a restore applied, or for a dry run would apply.
+func restoreReportLines(report *session.RestoreReport) ([]string, error) {
+	mode := report.Mode()
+	digest := report.Digest(nil)
+	if mode == nil || report.TotalBytes() == 0 || digest == nil || digest.BytesLength() != 32 {
+		return nil, errors.New("a restore report lacks its mode, size or digest")
+	}
+	users := "none"
+	if restored := report.Users(nil); restored != nil {
+		users = fmt.Sprintf("created:%d,skipped:%d,replaced:%d", restored.Created(),
+			restored.Skipped(), restored.Replaced())
+	}
+	lines := []string{fmt.Sprintf("RESTORE mode=%s total_bytes=%d digest=%s captured_at=%d users=%s",
+		session.EnumNamesRestoreMode[*mode], report.TotalBytes(),
+		hex.EncodeToString(digest.BytesBytes()), report.CapturedAt(), users)}
+	for index := 0; index < report.DomainsLength(); index++ {
+		domain := new(session.RestoredDomain)
+		if !report.Domains(domain, index) {
+			return nil, errors.New("a restored domain is missing")
+		}
+		planned := "none"
+		if domain.PlannedModels(nil) != nil {
+			planned = "present"
+		}
+		lines = append(lines, fmt.Sprintf(
+			"RESTORE_DOMAIN source=%s domain=%s resource_versions=%d models=%d planned_models=%s",
+			domain.Source(), domain.Domain(), domain.ResourceVersions(), domain.Models(), planned))
+	}
+	for index := 0; index < report.StepsLength(); index++ {
+		step := new(session.RestoreStepReport)
+		if !report.Steps(step, index) {
+			return nil, errors.New("a restore step is missing")
+		}
+		kind := step.Kind()
+		outcome := step.Outcome()
+		if kind == nil || outcome == nil {
+			return nil, errors.New("a restore step lacks its kind or outcome")
+		}
+		domain := step.Domain()
+		if (*kind == session.RestoreStepKindUsers) != (domain == nil) {
+			return nil, errors.New("a restore step names a domain exactly when it changes one")
+		}
+		lines = append(lines, fmt.Sprintf("RESTORE_STEP kind=%s domain=%s outcome=%s",
+			session.EnumNamesRestoreStepKind[*kind], orNone(domain),
+			session.EnumNamesRestoreStepOutcome[*outcome]))
+	}
+	return lines, nil
+}
+
+// restoreLines renders one frame of a restore stream.
+func restoreLines(frame []byte) ([]string, error) {
+	if err := frameRoot(frame, "NXRM"); err != nil {
+		return nil, err
+	}
+	message := session.GetRootAsRestoreMessage(frame, 0)
+	switch message.PartType() {
+	case session.RestorePartRestoreStart:
+		start := new(session.RestoreStart)
+		if err := union(message.Part, start); err != nil {
+			return nil, err
+		}
+		digest := start.Digest(nil)
+		if start.RequestId() == 0 || start.TotalBytes() == 0 || digest == nil || digest.BytesLength() != 32 {
+			return nil, errors.New("a restore start lacks its request, size or digest")
+		}
+		return []string{fmt.Sprintf(
+			"RESTORE_START request=%d reference=%s statement=%s total_bytes=%d digest=%s",
+			start.RequestId(), start.ExecutionReference(), text(start.Statement()), start.TotalBytes(),
+			hex.EncodeToString(digest.BytesBytes()))}, nil
+	case session.RestorePartRestoreChunk:
+		chunk := new(session.RestoreChunk)
+		if err := union(message.Part, chunk); err != nil {
+			return nil, err
+		}
+		if chunk.BytesLength() == 0 {
+			return nil, errors.New("a restore chunk is empty")
+		}
+		return []string{"RESTORE_CHUNK bytes=" + hex.EncodeToString(chunk.BytesBytes())}, nil
+	}
+	return nil, fmt.Errorf("undeclared restore part %d", message.PartType())
+}
+
+// restoreReplyLines renders the frame that answers a restore stream.
+func restoreReplyLines(frame []byte) ([]string, error) {
+	if err := frameRoot(frame, "NXRR"); err != nil {
+		return nil, err
+	}
+	reply := session.GetRootAsRestoreReply(frame, 0)
+	request := "none"
+	if id := reply.RequestId(); id != nil {
+		request = fmt.Sprintf("%d", *id)
+	}
+	switch reply.DispositionType() {
+	case session.RestoreDispositionCommandOutcome:
+		outcome := new(session.CommandOutcome)
+		if err := union(reply.Disposition, outcome); err != nil {
+			return nil, err
+		}
+		return commandLines("RESTORE_REPLY "+request+" COMMAND", outcome)
+	case session.RestoreDispositionRestoreUploadFailed:
+		failed := new(session.RestoreUploadFailed)
+		if err := union(reply.Disposition, failed); err != nil {
+			return nil, err
+		}
+		failure := failed.Failure()
+		if failure == nil {
+			return nil, errors.New("a restore refusal has no reason")
+		}
+		return []string{fmt.Sprintf("RESTORE_REPLY %s FAILED failure=%s message=%s", request,
+			session.EnumNamesRestoreUploadFailure[*failure], text(failed.Message()))}, nil
+	}
+	return nil, fmt.Errorf("undeclared restore disposition %d", reply.DispositionType())
 }
 
 // backupLines renders the archive a completed backup reports.
@@ -338,7 +460,7 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 			if err := union(value.Body, outcome); err != nil {
 				return nil, err
 			}
-			return commandLines(id, outcome)
+			return commandLines(fmt.Sprintf("REPLY %d COMMAND", id), outcome)
 		case session.ReplyBodyRequestRejected:
 			rejected := new(session.RequestRejected)
 			if err := union(value.Body, rejected); err != nil {
@@ -667,7 +789,7 @@ func corpus(directory string) error {
 	var files []string
 	for _, entry := range entries {
 		switch filepath.Ext(entry.Name()) {
-		case ".nxcm", ".nxsm", ".nxbq", ".nxbd":
+		case ".nxcm", ".nxsm", ".nxbq", ".nxbd", ".nxrm", ".nxrr":
 			files = append(files, entry.Name())
 		}
 	}
@@ -693,6 +815,10 @@ func corpus(directory string) error {
 			lines, err = downloadRequestLines(frame)
 		case ".nxbd":
 			lines, err = downloadLines(frame)
+		case ".nxrm":
+			lines, err = restoreLines(frame)
+		case ".nxrr":
+			lines, err = restoreReplyLines(frame)
 		default:
 			lines, err = serverLines(frame, fields, keys)
 		}

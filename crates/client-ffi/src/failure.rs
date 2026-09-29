@@ -97,7 +97,9 @@ impl Failure {
             | ClientError::InvalidCompletionPageSize { .. }
             | ClientError::InvalidResourceName { .. }
             | ClientError::EncodeRequest { .. }
-            | ClientError::BuildUploadArchive => FailureKind::InvalidArgument,
+            | ClientError::BuildUploadArchive
+            | ClientError::ReadRestoreArchive { .. }
+            | ClientError::EmptyRestoreArchive { .. } => FailureKind::InvalidArgument,
             ClientError::TlsRequired
             | ClientError::ConfigureTls(_)
             | ClientError::ConnectServer(_)
@@ -109,7 +111,8 @@ impl Failure {
             | ClientError::SubscriptionOperation(_)
             | ClientError::Transport(_)
             | ClientError::RequestInterrupted { .. }
-            | ClientError::UploadResource(_) => FailureKind::Transport,
+            | ClientError::UploadResource(_)
+            | ClientError::Restore(_) => FailureKind::Transport,
             ClientError::RequestDeadline { .. } | ClientError::RetryDeadline => {
                 FailureKind::Deadline
             }
@@ -123,6 +126,7 @@ impl Failure {
             ClientError::RequestCancelled { .. } => FailureKind::Cancelled,
             ClientError::UnexpectedReply { .. }
             | ClientError::InvalidUploadReply(_)
+            | ClientError::InvalidRestoreReply(_)
             | ClientError::ExecutionReferenceMismatch { .. }
             | ClientError::UploadIdentityMismatch { .. } => FailureKind::Protocol,
             ClientError::SessionClosed => FailureKind::Closed,

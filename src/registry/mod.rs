@@ -25,6 +25,7 @@ mod processor_plan;
 mod reingestor_plan;
 mod relocation;
 mod resource_plan;
+mod restore_plan;
 mod schedule_delta;
 mod scheduler;
 mod storage;
@@ -82,6 +83,7 @@ pub(crate) use resource_plan::{
     GeneratorExecutionPlan, GeneratorRoutePlan, LookupResourcePlan, ResourceExecutionPlans,
     WasmModulePlan, udf_program,
 };
+pub(crate) use restore_plan::{ArchiveToRestore, ExistingState, PlannedDomain, RestorePlan};
 pub(crate) use schedule_delta::ScheduleDelta;
 #[cfg(feature = "testing")]
 pub use scheduler::SchedulerMode;

@@ -31,20 +31,21 @@ use crate::{
     CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
     CreateWindowProcessor, CreateWireSchema, DescribeBackup, DescribeTransaction, DomainPace,
     DomainStartPoint, EmitSink, EmitterAckWindow, EmitterBatchPolicy, EmitterBody,
-    EmitterPublishingMode, EndpointIngestMode, Expression, FieldName, FieldScope, Float64Literal,
-    FlushPolicy, GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration,
-    InferencerTensorDimension, InferencerTensorMapping, IngestSource, IngestTimestampSource,
-    Inheritance, InputCollectPolicy, InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode,
-    Literal, MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator,
-    MessageErrorPolicy, Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos,
-    MqttSession, MySqlConflictAction, NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch,
-    ParseAsType, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutputs, PulsarIngestMode, QueueName, RabbitMqIngestMode, RangeOperator,
-    RedisPubSubIngestMode, RelayBranching, RelayName, RetryPolicy, RouteConstruction, SchemaField,
-    SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup,
-    SqsIngestMode, Statement, SubscriptionLiteral, TopicName, TransactionInspectionTarget,
-    UnaryOperator, WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField,
-    ZeroMqIngestMode,
+    EmitterPublishingMode, EndpointIngestMode, ExistingUserPolicy, Expression, FieldName,
+    FieldScope, Float64Literal, FlushPolicy, GeneralErrorPolicy, IcebergCatalog,
+    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
+    IngestTimestampSource, Inheritance, InputCollectPolicy, InspectionFormat, JsonType,
+    KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedStateDependency,
+    MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy, Model, ModelName,
+    MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
+    NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch, ParseAsType, PlacementPolicy,
+    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs,
+    PulsarIngestMode, QueueName, RabbitMqIngestMode, RangeOperator, RedisPubSubIngestMode,
+    RelayBranching, RelayName, Restore, RestoreMode, RestoreScope, RetryPolicy, RouteConstruction,
+    SchemaField, SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+    SqsFifoGroup, SqsIngestMode, Statement, SubscriptionLiteral, TopicName,
+    TransactionInspectionTarget, UnaryOperator, WebsocketsIngestMode, WindowBound,
+    WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
 };
 
 /// The NSPL release canonical rendering writes.
@@ -778,6 +779,7 @@ impl Statement {
                 string_literal(&upload.source_path)
             )),
             Self::Backup(backup) => Ok(backup.to_canonical_nspl()),
+            Self::Restore(restore) => Ok(restore.to_canonical_nspl()),
             Self::StartDomain(start) => Ok(match &start.start {
                 DomainStartPoint::Resume => "START;".to_string(),
                 DomainStartPoint::Now { time_rate } => {
@@ -936,6 +938,37 @@ impl Backup {
             "BACKUP {scope} TO {}{resources};",
             string_literal(&self.destination)
         )
+    }
+}
+
+impl Restore {
+    /// Renders the statement with the clauses it needs, omitting the default `ON EXISTING USER
+    /// FAIL`.
+    pub fn to_canonical_nspl(&self) -> String {
+        let source = string_literal(&self.source);
+        let mut statement = match &self.scope {
+            RestoreScope::Cluster { existing_users } => {
+                let mut statement = format!("RESTORE CLUSTER FROM {source}");
+                if *existing_users != ExistingUserPolicy::default() {
+                    statement.push_str(&format!(" ON EXISTING USER {}", existing_users.as_ref()));
+                }
+                statement
+            }
+            RestoreScope::Domain { domain, target } => {
+                let mut statement = format!("RESTORE DOMAIN {}", domain.as_str());
+                if let Some(target) = target {
+                    statement.push_str(&format!(" AS {}", target.as_str()));
+                }
+                statement.push_str(&format!(" FROM {source}"));
+                statement
+            }
+        };
+        match self.mode {
+            RestoreMode::Apply => {}
+            RestoreMode::DryRun => statement.push_str(" DRY RUN"),
+        }
+        statement.push(';');
+        statement
     }
 }
 

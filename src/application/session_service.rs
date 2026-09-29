@@ -63,6 +63,7 @@ use super::{
         completed_resource_version_suggestions, resource_named_before_version,
         resource_ref_suggestions, resource_version_suggestions,
     },
+    restore::ServerRestoreArchives,
     runtime_admission::RuntimeAdmission,
     scheduling::RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
     service_tasks::ServiceTasks,
@@ -200,6 +201,9 @@ pub(in crate::application) struct SessionServiceInner {
     /// The archives this node's backups assembled, until a download collects each or its retry
     /// validity ends.
     pub(in crate::application) retained_backups: ServerRetainedBackups,
+    /// The verified archives this node's restores read, until each restore finishes or its retry
+    /// validity ends.
+    pub(in crate::application) restore_archives: ServerRestoreArchives,
 }
 
 /// The node-local handles that install the newest admitted runtime state.

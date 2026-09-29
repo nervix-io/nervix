@@ -143,6 +143,20 @@ impl ResourceUploadError {
     }
 }
 
+/// A resource version a restore imports under its archived number.
+pub(in crate::application) struct ImportedResourceVersion<'a> {
+    /// The execution reference of the restore that imports it.
+    pub(in crate::application) restore: &'a nervix_models::CommandExecutionReference,
+    /// The upload identity the version is recorded under.
+    pub(in crate::application) key: ResourceUploadKey,
+    /// The version's catalog metadata as the archive recorded it, under the restored domain.
+    pub(in crate::application) resource: nervix_models::ResourceVersion,
+    /// The staged restore archive that holds the version's original archive.
+    pub(in crate::application) archive_path: &'a Path,
+    /// Where the version's archive starts in it. Its length is the version's archive size.
+    pub(in crate::application) offset: u64,
+}
+
 pub(in crate::application) struct ResourceInstallation {
     pub(in crate::application) version: u64,
     /// Whether this call installed the version, or found the upload identity already completed by
@@ -716,7 +730,7 @@ impl SessionServiceImpl {
             },
             Err(error) => {
                 self.consensus_error_response(
-                    &error,
+                    error.current_context(),
                     format!(
                         "failed to create resource '{}': {error}",
                         create.identifier.as_str()
@@ -980,6 +994,147 @@ impl SessionServiceImpl {
             version: manifest.resource.id.version,
             origin: CommandOrigin::Executed,
         })
+    }
+
+    /// Installs a version a restore imports under its archived number: the leader installs its
+    /// own copy from `import`'s section of the restore's archive, verifying every field the archive
+    /// recorded, records and publishes the version in one consensus command, and then completes it
+    /// exactly as an upload completes, once every live node incarnation holds the same digest.
+    ///
+    /// Importing a version recorded before, by an earlier attempt of the same restore, joins that
+    /// installation: a published version waits for the live set, and a completed one returns once
+    /// every live node holds it.
+    pub(in crate::application) async fn install_imported_resource_version(
+        &self,
+        import: ImportedResourceVersion<'_>,
+    ) -> Result<(), Report<ResourceUploadError>> {
+        let ImportedResourceVersion {
+            restore,
+            key,
+            resource,
+            archive_path,
+            offset,
+        } = import;
+        let execution = self
+            .inner
+            .resource_upload_executions
+            .entry(key.clone())
+            .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
+            .clone();
+        let _execution_guard = execution.lock().await;
+        let id = resource.id.clone();
+        let recorded = self.inner.consensus.current_resources().await;
+        match recorded.upload(&key).map(|upload| upload.state.clone()) {
+            Some(ResourceUploadState::Completed {
+                outcome_revision, ..
+            }) => {
+                self.wait_for_resource_completion(&id).await?;
+                return self
+                    .wait_for_authoritative_revision(outcome_revision)
+                    .await
+                    .map_err(|error| {
+                        Report::new(ResourceUploadError::Terminal {
+                            key: key.clone(),
+                            version: id.version,
+                            reason: error.to_string(),
+                        })
+                    });
+            }
+            Some(ResourceUploadState::Failed { reason, .. }) => {
+                return Err(Report::new(ResourceUploadError::Terminal {
+                    key,
+                    version: id.version,
+                    reason,
+                }));
+            }
+            Some(ResourceUploadState::Applying { .. }) => {}
+            None => {
+                let manifest = self
+                    .inner
+                    .resource_store
+                    .install_replica_from_archive_section(
+                        resource.clone(),
+                        archive_path,
+                        offset,
+                        resource.archive_bytes,
+                    )
+                    .await
+                    .change_context(ResourceUploadError::InstallArchive { id: id.clone() })?;
+                let local = ClusterNodeIdentity::new(
+                    self.inner.consensus.local_node_id().clone(),
+                    self.inner.cluster.local_incarnation(),
+                );
+                let replica = ResourceNodeStatus {
+                    key: ResourceReplicaKey::new(
+                        id.domain.clone(),
+                        id.identifier.clone(),
+                        id.version,
+                        local.clone(),
+                    ),
+                    state: ResourceNodeState::Ready,
+                    root_checksum: Some(manifest.resource.root_checksum.clone()),
+                    last_verified_at: Some(current_timestamp()),
+                    source_node: Some(local),
+                    error: None,
+                };
+                self.inner
+                    .consensus
+                    .import_resource_version(
+                        restore.clone(),
+                        key.clone(),
+                        manifest.resource,
+                        replica,
+                    )
+                    .await
+                    .change_context(ResourceUploadError::Publish { id: id.clone() })?;
+            }
+        }
+        if let Err(error) = self.wait_for_resource_completion(&id).await {
+            let reason = error.to_string();
+            self.inner
+                .consensus
+                .fail_resource_upload(key.clone(), reason.clone())
+                .await
+                .change_context(ResourceUploadError::Publish { id: id.clone() })?;
+            return Err(Report::new(ResourceUploadError::Terminal {
+                key,
+                version: id.version,
+                reason,
+            }));
+        }
+        let completed = self
+            .inner
+            .consensus
+            .complete_resource_upload(key.clone())
+            .await
+            .change_context(ResourceUploadError::Publish { id: id.clone() })?;
+        let outcome_revision = match &completed.state {
+            ResourceUploadState::Completed {
+                outcome_revision, ..
+            } => *outcome_revision,
+            ResourceUploadState::Failed { reason, .. } => {
+                return Err(Report::new(ResourceUploadError::Terminal {
+                    key,
+                    version: id.version,
+                    reason: reason.clone(),
+                }));
+            }
+            ResourceUploadState::Applying { .. } => {
+                return Err(Report::new(ResourceUploadError::Publish { id }));
+            }
+        };
+        self.wait_for_authoritative_revision(outcome_revision)
+            .await
+            .map_err(|error| {
+                Report::new(ResourceUploadError::Terminal {
+                    key,
+                    version: id.version,
+                    reason: error.to_string(),
+                })
+            })?;
+        // As for an upload, a node that joined while the outcome propagated also has to hold the
+        // version before the import reports it complete.
+        self.wait_for_resource_completion(&id).await
     }
 
     async fn wait_for_resource_completion(

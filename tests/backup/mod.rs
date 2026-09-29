@@ -1,4 +1,5 @@
 //! Steps that back up a cluster, download and describe its archives, and check what they hold.
+//! [`restore`] restores them.
 //!
 //! Layer: test harness.
 //! - **Owns.** The directory a scenario's archives are written to, the backup a scenario runs
@@ -7,8 +8,6 @@
 //! - **Depends on.** The public CLI, the harness's own session and download client, the archive
 //!   format's reader, and the language layer to parse an archive's NSPL.
 //! - **Must not know.** How the server assembles, retains or streams an archive.
-
-use std::io::Read as _;
 
 use cucumber::{given, then, when};
 use nervix_backup::{SectionContent, SectionEntry, SectionReader, SectionVisitor, read_archive};
@@ -22,6 +21,8 @@ use crate::common::{
     cluster::test_basic_authorization,
     raw_session::{TestDownload, TestDownloadEnd, download_backup},
 };
+
+pub(crate) mod restore;
 
 /// The backup a scenario ran through its own session.
 #[derive(Debug, Clone)]
@@ -166,6 +167,23 @@ fn then_cli_backup_succeeded(world: &mut ScenarioWorld, domain: String) {
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o600, "only the owner may read an archive");
+}
+
+#[then("the CLI backup succeeded with a JSON report naming no domain")]
+fn then_cli_backup_succeeded_without_domains(world: &mut ScenarioWorld) {
+    let output = last_cli_output(world);
+    assert!(
+        output.status.success(),
+        "the backup failed: status {}; stdout: {}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = cli_json(output);
+    let domains = report["domains"]
+        .as_array()
+        .expect("the report lists its domains");
+    assert!(domains.is_empty(), "the report names no domain: {report}");
 }
 
 #[then(expr = "the CLI backup failed with JSON error code {string}")]

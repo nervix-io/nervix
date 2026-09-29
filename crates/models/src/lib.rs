@@ -35,6 +35,7 @@ mod remote;
 mod reset_wasm_state;
 mod resource;
 mod resource_binding;
+mod restore;
 mod schema;
 mod schema_fingerprint;
 mod statement;
@@ -135,6 +136,10 @@ pub use resource::{
     ResourceVersionResolutionError, ResourceVersionStatus,
 };
 pub use resource_binding::ResourceRebinding;
+pub use restore::{
+    ExistingUserPolicy, Restore, RestoreArchive, RestoreMode, RestoreReport, RestoreScope,
+    RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers,
+};
 pub use schema::{
     AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaError,
     AlterWireSchemaOperation, AvroType, CborType, CreateAvroWireSchema, CreateCborWireSchema,

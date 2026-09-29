@@ -114,6 +114,20 @@ returns the recorded outcome, and the client downloads the archive again while i
 which lasts until a download collects it or the reference's retry validity ends. See
 [Backup And Restore](./backup-and-restore.md#downloading-the-archive).
 
+`RESTORE` uses the same durable execution reference and retained outcome, and its request identity
+includes the size and BLAKE3 digest of the archive the client streams with it, so the same
+reference with another archive is a different request. The leader admits a restore only after the
+archive verified and the whole restore planned, and records every step the restore applies in the
+restore's execution as the step's effect commits. Its success means every step applied: the users,
+each domain created stopped, its resource versions completed under their archived numbers on every
+live node, and its models applied. A failure names the step, and the steps before it stay applied.
+Retrying the reference while the restore applies on the leader returns `OutcomeUnknown` with the
+`StillApplying` cause at once, and after it finished returns the recorded outcome with the typed
+restore report. Only the leader the archive was streamed to holds it, so a new leader resumes an
+applying restore from its first step not recorded when a retry streams the archive again, and ends
+it as failed once the reference's retry validity passes without one. See
+[Backup And Restore](./backup-and-restore.md#retries-disconnects-and-leader-changes).
+
 `RESET WASM PROCESSOR ... STATE` uses the same durable execution reference and retained outcome.
 The ordered transaction records the reset as an effect even though it changes no Model. Success
 waits for the selected guest-state generation to be durable and its replacement execution usable.

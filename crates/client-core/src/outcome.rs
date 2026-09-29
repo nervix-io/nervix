@@ -12,14 +12,15 @@ use meticulous::ResultExt as _;
 use nervix_client_wire::{
     self as wire, AttachDisposition, AttachOutcome, CommandDisposition, Diagnostic,
     DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockDetachDisposition,
-    DomainClockDetachOutcome, InspectionOutcome, LeaderRedirect, OutcomeOrigin, SourceSpan,
-    StatementOutcome, SubscribeDisposition, SubscribeOutcome, SubscriptionOpened,
-    UnsubscribeDisposition, UnsubscribeOutcome, UploadDisposition, UploadFailure, UploadReply,
+    DomainClockDetachOutcome, InspectionOutcome, LeaderRedirect, OutcomeOrigin,
+    RestoreUploadFailure, SourceSpan, StatementOutcome, SubscribeDisposition, SubscribeOutcome,
+    SubscriptionOpened, UnsubscribeDisposition, UnsubscribeOutcome, UploadDisposition,
+    UploadFailure, UploadReply,
 };
 use nervix_models::{
     BackupArchiveSummary, CommandExecutionReference, ResourceDescription, ResourceUploadIdentity,
-    TransactionInspection, TransactionOperationAdmission, TransactionPreviewIdentity,
-    TransactionStatus,
+    RestoreReport, TransactionInspection, TransactionOperationAdmission,
+    TransactionPreviewIdentity, TransactionStatus,
 };
 use url::Url;
 
@@ -57,6 +58,9 @@ pub struct CommandOutcome {
     /// The archive a completed `BACKUP` assembled, which the client downloaded to the file the
     /// statement names.
     pub backup: Option<Box<BackupArchiveSummary>>,
+    /// What a `RESTORE` that verified its archive applied, the step it failed at if one failed, or
+    /// for a dry run what it would apply.
+    pub restore: Option<Box<RestoreReport>>,
 }
 
 /// What became of a resource upload.
@@ -105,6 +109,7 @@ impl CommandOutcome {
             subscription: None,
             resource_upload: None,
             backup: None,
+            restore: None,
         }
     }
 
@@ -119,6 +124,20 @@ impl CommandOutcome {
 
     pub(crate) fn failed_locally(message: String) -> Self {
         Self::local(CommandDisposition::Failed, message)
+    }
+
+    /// The outcome of a restore stream the leader refused before its restore ran.
+    pub(crate) fn restore_refused(
+        reference: CommandExecutionReference,
+        failure: RestoreUploadFailure,
+        message: String,
+    ) -> Self {
+        let mut outcome = Self::local(
+            CommandDisposition::Failed,
+            format!("restore refused ({failure:?}): {message}"),
+        );
+        outcome.execution_reference = Some(reference);
+        outcome
     }
 
     /// The outcome of an upload whose reply the client checked against the identity it sent.
@@ -221,6 +240,7 @@ impl From<wire::CommandOutcome> for CommandOutcome {
             subscription: None,
             resource_upload: None,
             backup: outcome.backup,
+            restore: outcome.restore,
         }
     }
 }

@@ -87,6 +87,7 @@ mod durable_batch;
 mod raft_record;
 mod records;
 mod replication;
+mod restore;
 mod retention;
 mod snapshot;
 pub use command_execution::{
@@ -99,6 +100,7 @@ pub use command_execution::{
     CommandExecutionTransactionTarget, DiagnosticSpan,
 };
 pub use domain_mutation::{DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence};
+pub use restore::{RestoreExecution, RestoreStepEffect, RestoredResource};
 pub use retention::RaftRetentionPolicy;
 pub use snapshot::{SealedSnapshot, SnapshotRetention};
 mod storage;
@@ -447,6 +449,21 @@ pub enum ConsensusCommand {
         key: Box<ResourceUploadKey>,
         reason: String,
     },
+    /// Applies one step of the applying restore `reference` names, and records it, unless it is
+    /// already recorded.
+    ApplyRestoreStep {
+        reference: nervix_models::CommandExecutionReference,
+        step: nervix_models::RestoreStep,
+        effect: Box<RestoreStepEffect>,
+    },
+    /// Records a resource version a restore imports under its archived number, published with the
+    /// leader's ready copy.
+    ImportResourceVersion {
+        reference: nervix_models::CommandExecutionReference,
+        key: Box<ResourceUploadKey>,
+        resource: Box<ResourceVersion>,
+        replica: Box<ResourceNodeStatus>,
+    },
     SetNodeCordoned {
         node_id: ClusterNodeName,
         cordoned: bool,
@@ -695,6 +712,20 @@ impl std::fmt::Display for ConsensusCommand {
             Self::FailResourceUpload { key, .. } => {
                 write!(f, "fail-resource-upload:{}", key.identity)
             }
+            Self::ApplyRestoreStep {
+                reference, step, ..
+            } => write!(f, "apply-restore-step:{reference}:{step}"),
+            Self::ImportResourceVersion {
+                reference,
+                resource,
+                ..
+            } => write!(
+                f,
+                "import-resource-version:{reference}:{}.{}@{}",
+                resource.id.domain.as_str(),
+                resource.id.identifier.as_str(),
+                resource.id.version
+            ),
             Self::SetNodeCordoned { node_id, cordoned } => {
                 if *cordoned {
                     write!(f, "cordon-node:{node_id}")
@@ -3159,7 +3190,7 @@ impl Proposer {
         &self,
         domain_id: DomainName,
         mutation: Option<&DomainMutationLease>,
-    ) -> Result<(), ConsensusError> {
+    ) -> Result<(), Report<ConsensusError>> {
         let response = self
             .inner
             .client_write(ConsensusCommand::ResumeDomain {
@@ -3169,8 +3200,12 @@ impl Proposer {
             .await?;
         match response.data {
             ConsensusResponse::Applied => Ok(()),
-            ConsensusResponse::Conflict(reason) => Err(ConsensusError::Conflict(reason)),
-            ConsensusResponse::Transaction(_) => Err(ConsensusError::UnexpectedResponse),
+            ConsensusResponse::Conflict(reason) => {
+                Err(Report::new(ConsensusError::Conflict(reason)))
+            }
+            ConsensusResponse::Transaction(_) => {
+                Err(Report::new(ConsensusError::UnexpectedResponse))
+            }
         }
     }
 
@@ -3211,18 +3246,66 @@ impl Proposer {
         }
     }
 
+    /// Imports a resource version a restore recreates under its archived number, published with
+    /// the leader's ready copy, and returns the upload it is recorded under.
+    pub async fn import_resource_version(
+        &self,
+        reference: nervix_models::CommandExecutionReference,
+        key: ResourceUploadKey,
+        resource: ResourceVersion,
+        replica: ResourceNodeStatus,
+    ) -> Result<ResourceUpload, Report<ConsensusError>> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::ImportResourceVersion {
+                reference,
+                key: Box::new(key.clone()),
+                resource: Box::new(resource),
+                replica: Box::new(replica),
+            })
+            .await?;
+        self.resource_upload_response(response, &key).await
+    }
+
+    /// Applies one step of an applying restore and records it. A step already recorded is
+    /// accepted and changes nothing.
+    pub async fn apply_restore_step(
+        &self,
+        reference: nervix_models::CommandExecutionReference,
+        step: nervix_models::RestoreStep,
+        effect: RestoreStepEffect,
+    ) -> Result<(), Report<ConsensusError>> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::ApplyRestoreStep {
+                reference,
+                step,
+                effect: Box::new(effect),
+            })
+            .await?;
+        match response.data {
+            ConsensusResponse::Applied => Ok(()),
+            ConsensusResponse::Conflict(reason) => {
+                Err(Report::new(ConsensusError::Conflict(reason)))
+            }
+            ConsensusResponse::Transaction(_) => {
+                Err(Report::new(ConsensusError::UnexpectedResponse))
+            }
+        }
+    }
+
     pub async fn create_resource_catalog(
         &self,
         domain: &DomainName,
         identifier: &ResourceName,
-    ) -> Result<(), ConsensusError> {
+    ) -> Result<(), Report<ConsensusError>> {
         self.inner
             .client_write(ConsensusCommand::CreateResourceCatalog {
                 domain: domain.clone(),
                 identifier: identifier.clone(),
             })
-            .await
-            .map(|_| ())
+            .await?;
+        Ok(())
     }
 
     pub async fn publish_resource_upload(
@@ -3258,13 +3341,13 @@ impl Proposer {
     pub async fn put_resource_replica(
         &self,
         replica: ResourceNodeStatus,
-    ) -> Result<(), ConsensusError> {
+    ) -> Result<(), Report<ConsensusError>> {
         self.inner
             .client_write(ConsensusCommand::PutResourceReplica {
                 replica: Box::new(replica),
             })
-            .await
-            .map(|_| ())
+            .await?;
+        Ok(())
     }
 
     pub async fn complete_resource_upload(
@@ -4852,6 +4935,34 @@ fn apply_consensus_command_at(
                 return AppliedConsensusCommand::conflict(error.to_string());
             }
             changes.resources_changed = true;
+        }
+        ConsensusCommand::ApplyRestoreStep {
+            reference,
+            step,
+            effect,
+        } => {
+            if let Err(error) =
+                restore::apply_restore_step(state, reference, step, effect, &mut changes)
+            {
+                return AppliedConsensusCommand::conflict(format!("{error:#}"));
+            }
+        }
+        ConsensusCommand::ImportResourceVersion {
+            reference,
+            key,
+            resource,
+            replica,
+        } => {
+            if let Err(error) = restore::import_resource_version(
+                state,
+                reference,
+                key,
+                resource,
+                replica,
+                &mut changes,
+            ) {
+                return AppliedConsensusCommand::conflict(format!("{error:#}"));
+            }
         }
         ConsensusCommand::SetNodeCordoned { node_id, cordoned } => {
             if *cordoned {
@@ -7194,6 +7305,7 @@ mod tests {
             transaction: None,
             transaction_admission: None,
             backup: None,
+            restore: None,
         };
         for terminal in [result.clone(), result.clone()] {
             let response = apply_consensus_command(
@@ -7473,6 +7585,7 @@ mod tests {
                     transaction: None,
                     transaction_admission: None,
                     backup: None,
+                    restore: None,
                 }),
             },
         );
@@ -8671,7 +8784,7 @@ mod tests {
             }]
         );
         assert!(
-            !state.resources.is_declared(
+            !state.resources.declares(
                 &domain("other"),
                 &ResourceName::parse("fraud_model").expect("valid resource name")
             ),

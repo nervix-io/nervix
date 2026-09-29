@@ -51,7 +51,7 @@ subcommand for this release.
 
 The client runs in exactly one of three modes, in this order of precedence:
 
-1. **A subcommand**, such as `subscribe`, `domain-clock`, `backup`, or `drain-node`.
+1. **A subcommand**, such as `subscribe`, `domain-clock`, `backup`, `restore`, or `drain-node`.
 2. **`--command`**, which submits NSPL, prints the result, and exits.
 3. **The interactive REPL**, when neither of the above is given.
 
@@ -93,8 +93,8 @@ than a local boolean.
 cover grammar keywords and the identifiers that actually exist: models in the active domain,
 resource names and versions, session subscription names, and domain names. Inside a quoted path
 that names a file or directory on this machine, such as `UPLOAD RESOURCE ... VERSION '<path>'`,
-`BACKUP ... TO '<path>'`, and `DESCRIBE BACKUP '<path>'`, the client completes local filesystem
-paths instead, expanding `~` to your home directory.
+`BACKUP ... TO '<path>'`, `DESCRIBE BACKUP '<path>'`, and `RESTORE ... FROM '<path>'`, the client
+completes local filesystem paths instead, expanding `~` to your home directory.
 
 The replacement covers the current word even when the cursor is inside it, and keeps the text
 after that word. The CLI reads successive bounded pages when the server has more matches. A
@@ -157,11 +157,12 @@ applying one model change:
 | `UPLOAD RESOURCE <name> VERSION '<dir>'` | stream a local directory as a new version of that resource in the active domain |
 | `BACKUP CLUSTER TO '<file>'` / `BACKUP DOMAIN [<name>] TO '<file>'` | back up configuration, users and resources into a local archive file |
 | `DESCRIBE BACKUP '<file>' [FORMAT TEXT \| JSON]` | read and verify a local archive without contacting a server |
+| `RESTORE CLUSTER FROM '<file>'` / `RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>'` | recreate users, domains, resource versions and models from a local archive file |
 | `CREATE SUBSCRIPTION` / `DELETE SUBSCRIPTION` | start and stop a read-only relay subscription |
 | `ATTACH DOMAIN CLOCK` / `DETACH DOMAIN CLOCK` | start and stop following the active domain's clock |
 
-`USE`, `LIST DOMAINS`, `UPLOAD RESOURCE`, `BACKUP`, `DESCRIBE BACKUP`, and the domain clock
-statements must be submitted on their own, and never inside a transaction. `ATTACH DOMAIN CLOCK` prints the clock the serving node
+`USE`, `LIST DOMAINS`, `UPLOAD RESOURCE`, `BACKUP`, `DESCRIBE BACKUP`, `RESTORE`, and the domain
+clock statements must be submitted on their own, and never inside a transaction. `ATTACH DOMAIN CLOCK` prints the clock the serving node
 has installed, then each change above the prompt as described in
 [Asynchronous Output](#asynchronous-output):
 
@@ -241,6 +242,26 @@ nervix-cli --command "DESCRIBE BACKUP 'cluster.nvxb' FORMAT JSON;"
 
 See [Backup And Restore](backup-and-restore.md) for what an archive holds and how long the server
 retains it.
+
+## Restoring
+
+`RESTORE` in the REPL or through `--command` streams the archive the statement names from this
+machine to the leader, and prints the restore's report when it ends. The `restore` subcommand does
+the same with arguments instead of NSPL, shows how much of the archive was sent while it streams,
+and exits with a nonzero status whenever the restore did not complete:
+
+```bash
+nervix-cli restore cluster --input cluster.nvxb --on-existing-user skip
+nervix-cli restore domain payments --as payments_copy --input cluster.nvxb
+nervix-cli restore domain payments --input payments.nvxb --dry-run --format json
+```
+
+`--dry-run` verifies the archive and plans the restore without changing anything, and `--format
+json` prints the report, or the failure, as one JSON document. The Rust client sends the archive
+again under the same execution reference after a redirect or a lost connection, so a restore
+interrupted by a leader change is resumed rather than repeated. See
+[Backup And Restore](backup-and-restore.md#restoring) for what a restore recreates and the order of
+its steps.
 
 ## Streaming A Relay
 

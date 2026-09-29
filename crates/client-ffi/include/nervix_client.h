@@ -248,6 +248,11 @@ bool nx_outcome_subscription(const nx_outcome *outcome, const uint8_t **name, si
    client verified and wrote to the file the statement names. `digest` points at 32 bytes. */
 bool nx_outcome_backup(const nx_outcome *outcome, uint64_t *total_bytes, const uint8_t **digest,
                        size_t *digest_len);
+/* Whether the command was a RESTORE that verified its archive, and what its report says: whether
+   it was a DRY RUN, how many domains, completed resource versions and models it restores, and
+   whether one of its steps failed, which leaves the steps before it applied. */
+bool nx_outcome_restore(const nx_outcome *outcome, bool *dry_run, uint64_t *domains,
+                        uint64_t *resource_versions, uint64_t *models, bool *failed);
 /* The schema of the subscription the command opened. An outcome that opened none fails with
    NX_ERROR_INVALID_ARGUMENT. */
 nx_error *nx_outcome_schema(const nx_outcome *outcome, nx_schema **out);

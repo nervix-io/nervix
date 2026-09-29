@@ -206,6 +206,35 @@ stateDiagram-v2
 Nervix does not delete or expire versions. Every published version, including one that failed after
 publication, stays in the catalog, and every node keeps installing each published version it lacks.
 
+### Restored Versions
+
+A restore brings a domain's catalog from a backup archive instead of uploading it; see
+[Backup And Restore](./backup-and-restore.md#restoring). When it creates the domain, it declares
+every resource the archive declares with the next number of its archived sequence, so the next
+upload of the resource receives the number the source cluster would have assigned next. It then
+imports each completed version of the archive under its archived number, one at a time:
+
+1. The leader installs the version's original upload from its section of the restore's archive,
+   through the same verification as any first copy. The archive must have the version's archived
+   root checksum, and the manifest the leader records must reproduce every archived checksum and
+   count exactly.
+2. One consensus command publishes the version under its archived number, with its archived
+   metadata, creation time, and creating node, together with the leader's ready replica record. It
+   records the import as the upload of an identity derived from the version's number, owned by the
+   user who ran the restore. It refuses a number at or above the declared sequence, a number
+   already published, and a replica other than the leader's ready copy with the version's digest.
+   Importing the same number again under the same identity changes nothing, which is what lets a
+   resumed restore repeat an import whose outcome it did not see.
+3. The version completes as an upload completes: when every live node process incarnation has
+   recorded a ready replica with its digest. The restore waits for that before it imports the next
+   version, and applies the domain's models only after every version is completed.
+
+A number the archive records for an upload that failed, or was still installing when the backup
+read it, is not imported. It stays below the declared sequence, so it stays a gap that no upload
+receives and no binding can name. A restored catalog therefore holds only completed versions, and
+`DESCRIBE RESOURCE` in the restored domain shows the same numbers, gaps, and checksums as in the
+source, with the replicas of the restoring cluster's own nodes.
+
 ## Bindings
 
 Seven model forms bind a resource version, and each requires a `VERSION <n>` or `VERSION LATEST`

@@ -364,7 +364,7 @@ impl SessionServiceImpl {
             .await
             .map_err(|error| {
                 let reason = error.to_string();
-                Report::new(error).change_context(DomainAlterError::ResumeDomain {
+                error.change_context(DomainAlterError::ResumeDomain {
                     domain: domain.clone(),
                     reason,
                 })

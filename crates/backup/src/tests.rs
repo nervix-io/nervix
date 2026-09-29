@@ -17,6 +17,7 @@ use crate::{
     PublishedResourceVersion, RaftLogPosition, RecordKind, ResourceVersionRecord,
     ResourceVersionState, SectionContent, SectionDigester, SectionEntry, SectionPath,
     SectionReader, SectionVisitor, UserRecord, UsersRecord, describe_archive, read_archive,
+    read_archive_contents,
     section::{RECORD_HEADER_BYTES, RECORD_MAGIC, decode_record, encode_record},
     wire::{
         DeclaredResourceWire, DomainWire, ManifestWire, PaceWire, PlacementWire, StartPointWire,
@@ -596,6 +597,150 @@ fn a_long_path_travels_in_a_gnu_long_name_entry() {
             .as_ref()
             .map(|archive| archive.length),
         Some(513)
+    );
+}
+
+/// The bytes a described section's place names inside `archive`.
+fn bytes_at<'archive>(
+    archive: &'archive [u8],
+    section: &crate::DescribedSection,
+) -> &'archive [u8] {
+    let start = usize::try_from(section.offset).assured("test archives are small");
+    let length = usize::try_from(section.length).assured("test archives are small");
+    &archive[start..start + length]
+}
+
+#[test]
+fn every_described_section_names_the_place_of_its_bytes() {
+    let (_, bytes) = cluster_archive(BackupResources::Included);
+    let description = describe_archive(bytes.as_slice()).assured("the archive reads back");
+    let prod = &description.domains[0];
+    let models = bytes_at(&bytes, &prod.models);
+    assert_eq!(models, b"CREATE SCHEMA order_event (\n  id U64\n);\n");
+    assert_eq!(SectionDigester::digest_of(models), prod.models.digest);
+    let archive = prod.resource_versions[0]
+        .archive
+        .as_ref()
+        .assured("the completed version carries its archive");
+    let archived = bytes_at(&bytes, archive);
+    assert_eq!(archived.len(), 1500);
+    assert_eq!(SectionDigester::digest_of(archived), archive.digest);
+    assert_eq!(
+        archive.offset,
+        u64::try_from(section_range(&bytes, "domains/prod/resources/model.v2/1/archive.tar").start)
+            .assured("small archive")
+    );
+}
+
+#[test]
+fn a_long_named_section_names_the_place_of_its_bytes() {
+    let long_domain = domain(&"d".repeat(100));
+    let long_resource = resource(&"r".repeat(128));
+    let record = ResourceVersionRecord {
+        domain: long_domain.clone(),
+        resource: long_resource.clone(),
+        ..completed_version("prod", 1)
+    };
+    let content = (0..700_u32)
+        .map(|value| value.to_le_bytes()[1])
+        .collect::<Vec<_>>();
+    let sections = vec![
+        record_section(
+            SectionPath::domain_record(&long_domain),
+            &DomainRecord {
+                domain: long_domain.clone(),
+                ..unpaced_domain("prod")
+            },
+        ),
+        bytes_section(
+            SectionPath::domain_models(&long_domain),
+            SectionContent::Nspl,
+            Vec::new(),
+        ),
+        record_section(
+            SectionPath::resource_version_record(&long_domain, &long_resource, version(1)),
+            &record,
+        ),
+        bytes_section(
+            SectionPath::resource_archive(&long_domain, &long_resource, version(1)),
+            SectionContent::ResourceArchive,
+            content.clone(),
+        ),
+    ];
+    let manifest = manifest_of(
+        ArchiveScope::Domain(long_domain),
+        sections
+            .iter()
+            .map(|section| section.entry.clone())
+            .collect(),
+    );
+    let (_, bytes) = write_archive(manifest, &sections);
+    let description = describe_archive(bytes.as_slice()).assured("long paths read back");
+    let archive = description.domains[0].resource_versions[0]
+        .archive
+        .as_ref()
+        .assured("the version carries its archive");
+    assert_eq!(bytes_at(&bytes, archive), content.as_slice());
+}
+
+#[test]
+fn the_contents_of_an_archive_hold_every_domains_models() {
+    let (_, bytes) = cluster_archive(BackupResources::Included);
+    let contents = read_archive_contents(bytes.as_slice()).assured("the archive reads back");
+    assert_eq!(
+        contents.description,
+        describe_archive(bytes.as_slice()).assured("the archive describes")
+    );
+    assert_eq!(
+        contents.models.get(&domain("prod")).map(String::as_str),
+        Some("CREATE SCHEMA order_event (\n  id U64\n);\n")
+    );
+    assert_eq!(
+        contents.models.get(&domain("staging")).map(String::as_str),
+        Some("")
+    );
+    assert_eq!(contents.models.len(), 2);
+}
+
+#[test]
+fn models_that_are_not_utf8_are_refused() {
+    let prod = domain("prod");
+    let sections = vec![
+        record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
+        bytes_section(
+            SectionPath::domain_models(&prod),
+            SectionContent::Nspl,
+            vec![0xff, 0xfe, b';'],
+        ),
+    ];
+    let manifest = manifest_of(
+        ArchiveScope::Domain(prod),
+        sections
+            .iter()
+            .map(|section| section.entry.clone())
+            .collect(),
+    );
+    let (_, bytes) = write_archive(manifest, &sections);
+    let error = read_archive_contents(bytes.as_slice()).expect_err("the NSPL is not text");
+    assert_eq!(
+        error.current_context(),
+        &ArchiveReadError::InvalidText {
+            path: "domains/prod/models.nspl".to_string(),
+        }
+    );
+}
+
+#[test]
+fn the_contents_reader_refuses_what_the_description_refuses() {
+    let (_, mut bytes) = cluster_archive(BackupResources::Included);
+    let range = section_range(&bytes, "domains/prod/models.nspl");
+    bytes[range.start] ^= 0x20;
+    let error = read_archive_contents(bytes.as_slice()).expect_err("a changed byte is refused");
+    assert_eq!(
+        error.current_context(),
+        &ArchiveReadError::DigestMismatch {
+            path: "domains/prod/models.nspl".to_string(),
+        }
     );
 }
 

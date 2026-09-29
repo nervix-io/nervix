@@ -81,10 +81,10 @@ serves itself, such as `USE`; everything it knows about the cluster arrives over
 
 ## Wire Format
 
-### One Schema, Six Frame Roots
+### One Schema, Eight Frame Roots
 
-`crates/client-wire/schema/session.fbs` declares every shape of the public boundary, once. Six root
-files name the table a frame is rooted at and the four-byte file identifier it carries:
+`crates/client-wire/schema/session.fbs` declares every shape of the public boundary, once. Eight
+root files name the table a frame is rooted at and the four-byte file identifier it carries:
 
 | Root | Identifier | Direction | Carried by |
 | --- | --- | --- | --- |
@@ -94,6 +94,8 @@ files name the table a frame is rooted at and the four-byte file identifier it c
 | `UploadReply` | `NXUR` | Server to client | The gRPC `UploadResource` stream, exactly once |
 | `BackupDownloadRequest` | `NXBQ` | Client to server | The gRPC `DownloadBackup` call, exactly once |
 | `BackupDownloadMessage` | `NXBD` | Server to client | The gRPC `DownloadBackup` stream |
+| `RestoreMessage` | `NXRM` | Client to server | The gRPC `RestoreBackup` stream |
+| `RestoreReply` | `NXRR` | Server to client | The gRPC `RestoreBackup` stream, exactly once |
 
 A frame is one finished FlatBuffer that carries its root's identifier and no size prefix. The
 transport delimits frames, so a frame never has to describe its own length and a receiver never
@@ -198,7 +200,7 @@ close only when the node begins to stop.
 
 ### Native gRPC
 
-Native clients reach the gRPC service `nervix.session.Session`, which serves three methods and
+Native clients reach the gRPC service `nervix.session.Session`, which serves four methods and
 answers every other path with `UNIMPLEMENTED`:
 
 | Method | Shape | Frames |
@@ -206,6 +208,7 @@ answers every other path with `UNIMPLEMENTED`:
 | `/nervix.session.Session/Exchange` | Bidirectional stream | `ClientMessage` frames answered by `ServerMessage` frames. One call is one session. |
 | `/nervix.session.Session/UploadResource` | Client stream | `UploadMessage` frames answered by exactly one `UploadReply` frame. One call is one upload. |
 | `/nervix.session.Session/DownloadBackup` | Server stream | One `BackupDownloadRequest` frame answered by `BackupDownloadMessage` frames. One call is one download. |
+| `/nervix.session.Session/RestoreBackup` | Client stream | `RestoreMessage` frames answered by exactly one `RestoreReply` frame. One call is one attempt of a restore. |
 
 Each gRPC message holds exactly one frame, delimited by gRPC's own length prefix. The messages are
 not protocol buffers, and no generated gRPC service code is involved: the codec hands the frame
@@ -412,8 +415,8 @@ produced now or recovered from the durable record of an earlier attempt, one typ
 message for display, diagnostics with optional source spans, and, for a request of several
 statements, the outcome of each statement in written order. It also carries the transaction this
 session is bound to while the command was served, the operation admission when the command accepted
-one operation into the transaction, and the typed inspection, WASM state, or resource description a
-describing statement produced.
+one operation into the transaction, the typed inspection, WASM state, or resource description a
+describing statement produced, and the summary of a backup's archive or the report of a restore.
 
 The disposition is the one field a client decides from; the message is for a person. Each
 disposition belongs to one phase of the command and makes one statement about its effect:
@@ -1172,6 +1175,70 @@ The console WebSocket carries no download, so the console refuses `BACKUP` inste
 archive nobody could collect. `DESCRIBE BACKUP` never reaches a node at all: a client reads the
 archive file on its own machine, and a node answers the statement sent as a command with
 `RequestFailed`.
+
+## Restore Streams
+
+A restore reads an archive that exists only on the client's machine, so the archive has to reach
+the leader before the restore can even be planned. `RESTORE` therefore never travels as a
+`CommandRequest`: the client sends the statement together with the archive on a call of its own,
+`RestoreBackup`, and the call's one reply carries the restore's outcome. A node answers `RESTORE`
+sent as a command with `RequestFailed`. [Backup And Restore](./backup-and-restore.md#restoring)
+owns what a restore recreates and the order of its steps.
+
+The client streams one `RestoreStart`, then the archive in order as non-empty `RestoreChunk` frames
+of at most 256 KiB, and half-closes the stream. The start carries the request identity of the
+reply, the restore's execution reference, the statement as canonical NSPL, and the archive's exact
+size and BLAKE3 digest. The reference is a persistent command's execution reference, and the
+request it is bound to is the statement together with the archive's size and digest: a restore is
+admitted once under it, repeating the same statement and archive under it joins that restore, and
+another statement or archive under it is answered `ExecutionReferenceConflict`, like any persistent
+command.
+
+The reply is a `RestoreReply` holding either a `CommandOutcome`, exactly as a command's reply would
+hold it, or a `RestoreUploadFailed` that refuses the stream itself and leaves nothing changed:
+
+| Failure | Meaning |
+| --- | --- |
+| `InvalidStream` | The stream did not begin with exactly one valid start followed only by chunks. |
+| `InvalidStatement` | The start does not name exactly one `RESTORE` statement. |
+| `SizeMismatch` | The chunks add up to more or fewer bytes than the start declared. |
+| `DigestMismatch` | The archive's bytes do not have the digest the start declared. |
+| `QuotaExceeded` | The archive is larger than one staged artifact may be, or the leader's staging area cannot hold it now. |
+| `StagingFailed` | The leader could not write the archive to its staging area. |
+
+A refusal of the stream is not recorded; sending the stream again stages the archive again. Every
+other answer is a `CommandOutcome` under the start's execution reference:
+
+- A follower reads the start, answers `LeaderRedirect`, and reads no chunk.
+- A leader that finds the restore finished answers with its recorded outcome, whose origin is
+  `Recovered`, and reads no chunk.
+- A leader that holds the archive of the restore while it applies answers `OutcomeUnknown` with the
+  `StillApplying` cause, and reads no chunk.
+- Otherwise the leader stages the whole archive, verifies it, and plans the restore. A restore it
+  refuses there is answered `RequestFailed` and is not admitted. A restore it admits, or finds
+  admitted without its archive, runs to its outcome, which carries the typed `RestoreReport`: the
+  mode, the archive's size and digest, the capture time, what the users step did, each restored
+  domain with its counts and, for a dry run, its model run's transaction impact report, and each
+  step with its outcome.
+
+A restore that failed at a step is `RequestFailed`, and its report names the step as `Failed`, the
+steps before it as `Applied`, and those after it as `NotAttempted`. A dry run reports every step as
+`Planned`, and is never admitted or recorded.
+
+The call is not bounded by the request deadline, because an archive can take far longer to send
+than a command takes to run; the Rust client bounds each frame by it, and then the wait for the
+reply once the last frame was sent. Once the leader has received the whole archive, the restore is
+no longer tied to the call: a client that goes away does not stop it, and repeating the stream
+under the same reference returns its outcome. A call that ends before the whole archive arrived
+changes nothing and releases what the leader staged for it.
+
+Only the leader the archive was streamed to holds it, until the restore finishes or the retry
+validity of its reference ends. If leadership moves, or that leader restarts, while the restore
+applies, the reply is a `LeaderRedirect` or the call fails, and repeating the stream on the new
+leader hands it the archive, from which it resumes the restore at its first step not recorded. The
+protocol has no resume offset: every repetition sends the archive from its first byte.
+
+The console WebSocket carries no restore stream, so the console refuses `RESTORE`.
 
 ## Node Stop And Restart As A Client Observes Them
 
