@@ -320,10 +320,11 @@ pub(super) async fn flush_branch_inferencer_output(
             return;
         }
     };
-    let output_metadata = messages
-        .iter()
-        .map(|message| message.record.metadata().clone())
-        .collect::<Vec<_>>();
+    let output_metadata = RecordMetadataColumns::from_rows(
+        messages
+            .iter()
+            .map(|message| message.record.metadata().clone()),
+    );
     let output_acks = messages
         .iter()
         .map(|message| message.acks.clone())

@@ -920,6 +920,137 @@ async fn owner_ingress_touches_expiring_stream_state() {
         .expect("relay owner should drain");
 }
 
+/// A batch for `schema` with one row, acknowledged through `acks`.
+fn routed_test_batch(schema: Arc<CompiledSchema>, acks: AckSet) -> RelayRecordBatch {
+    RelayRecordBatch::single(
+        schema,
+        None,
+        test_runtime_row([("value".to_string(), RuntimeValue::I64(7))]),
+        acks,
+    )
+    .expect("the routed test batch matches its schema")
+}
+
+#[tokio::test]
+async fn a_routed_attached_delivery_fails_on_a_node_that_no_longer_runs_its_consumer() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let relay = named::<RelayName>("orders");
+    let schema = test_schema(&[("value", ParseAsType::I64)]);
+    let services = test_relay_boundary_services();
+    install_test_domain_execution(
+        &runtime,
+        &domain,
+        Vec::new(),
+        DomainRoutingSnapshot {
+            relay_registries: HashMap::from_iter([(relay.clone(), RelayRegistry::new())]),
+            relay_schemas: HashMap::from_iter([(relay.clone(), schema.clone())]),
+            relay_services: HashMap::from_iter([(relay.clone(), services)]),
+            ..DomainRoutingSnapshot::default()
+        },
+    );
+    let batch_ipc = routed_test_batch(schema, AckSet::empty())
+        .batch
+        .encode_arrow_ipc(runtime.executor())
+        .await
+        .expect("the routed test batch encodes");
+
+    let delivery = runtime
+        .handle_remote_stream_payload_with_owner_ingress(
+            RelayPayload {
+                delivery: RelayDelivery {
+                    channel_incarnation: [3; 16],
+                    sequence: 0,
+                },
+                kind: RelayPayloadKind::Routed,
+                domain: domain.clone(),
+                relay: relay.clone(),
+                key: BranchKey::to_remote_key(&None),
+                batch_ipc,
+                metadata: vec![test_runtime_row([]).metadata().to_remote()],
+                acks: vec![Some(RemoteAckRegistration {
+                    ack_id: 229,
+                    reply_node_id: ClusterNodeName::parse("node-1")
+                        .expect("the relay owner name is valid"),
+                })],
+                admission: None,
+            },
+            false,
+        )
+        .await;
+
+    assert!(
+        delivery.is_err(),
+        "an attached record routed to a node without an attached consumer of its relay must not \
+         be acknowledged as delivered"
+    );
+}
+
+#[tokio::test]
+async fn a_routed_attached_batch_fails_its_acknowledgement_without_an_attached_consumer() {
+    let services = test_relay_boundary_services();
+    let (acks, completion) = AckSet::root();
+    let batch = routed_test_batch(test_schema(&[("value", ParseAsType::I64)]), acks);
+
+    services
+        .inject_remote_message(&batch)
+        .await
+        .expect_err("no attached consumer of the relay runs on this node");
+
+    let outcome = timeout(Duration::from_secs(1), completion.wait())
+        .await
+        .expect("the failed delivery resolves the acknowledgement");
+    assert!(
+        matches!(outcome, AckOutcome::NoAck(_)),
+        "the source must redeliver the record, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_routed_attached_batch_completes_when_its_attached_consumer_does() {
+    let services = test_relay_boundary_services();
+    let mut consumer = services.add_local_runtime_consumer(AckMode::Attached);
+    let (acks, completion) = AckSet::root();
+    let batch = routed_test_batch(test_schema(&[("value", ParseAsType::I64)]), acks.clone());
+
+    services
+        .inject_remote_message(&batch)
+        .await
+        .expect("the attached consumer on this node takes the routed batch");
+    acks.ack_success();
+    let completion = completion.wait();
+    tokio::pin!(completion);
+    assert!(
+        timeout(Duration::from_millis(50), &mut completion)
+            .await
+            .is_err(),
+        "the routed batch stays unacknowledged until its consumer completes it"
+    );
+    consumer
+        .recv()
+        .await
+        .expect("the attached consumer receives the routed batch")
+        .ack_success();
+
+    assert_eq!(
+        timeout(Duration::from_secs(1), &mut completion)
+            .await
+            .expect("the consumer's completion resolves the acknowledgement"),
+        AckOutcome::Ack
+    );
+    services.remove_local_runtime_consumer(AckMode::Attached);
+}
+
+#[tokio::test]
+async fn a_routed_detached_batch_needs_no_attached_consumer() {
+    let services = test_relay_boundary_services();
+
+    services
+        .inject_remote_message(&quiesce_test_batch())
+        .await
+        .expect("a detached routed batch carries no acknowledgement to complete");
+}
+
 #[tokio::test]
 async fn relay_owner_enforces_branch_capacity_across_batches() {
     let runtime = Runtime::default();
@@ -1444,12 +1575,13 @@ async fn a_three_destination_fanout_shares_one_encoded_body() {
                 .batch_from_test_rows([[("user_id".to_string(), RuntimeValue::U32(7))]])
                 .expect("the fanout test batch should build"),
         ),
-        metadata: vec![
-            test_runtime_row([("user_id".to_string(), RuntimeValue::U32(7))])
-                .with_ingested_at_watermarks(Timestamp::from_unix_nanos(11))
-                .metadata()
-                .clone(),
-        ],
+        metadata: RecordMetadataColumns::from_rows([test_runtime_row([(
+            "user_id".to_string(),
+            RuntimeValue::U32(7),
+        )])
+        .with_ingested_at_watermarks(Timestamp::from_unix_nanos(11))
+        .metadata()
+        .clone()]),
         acks: vec![AckSet::empty()],
     };
 

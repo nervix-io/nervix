@@ -634,6 +634,26 @@ Removing or evicting a concrete branch cancels its unadmitted channel generation
 reserved work. If the branch appears again, it uses a fresh channel incarnation and sequence. This
 keeps a previous branch lifetime from being confused with the new runtime instance.
 
+### Consumers That Leave The Receiver
+
+The receiver decides admission before it hands the batch to the runtime consumers of the relay, and
+it hands the batch to the consumers that run on the node at that moment. An owner routes an attached
+batch to a node because its schedule places an attached consumer of the relay there. That consumer
+can leave the node after the owner routed the batch: a forced recovery moves every runtime node off
+a node that application health or gossip judged unavailable, including one that is still running,
+and the node stops the moved consumer when it applies the published schedule. The gap between
+admission and dispatch can be long: the receiver sends the terminal admission outcome to the owner
+before it dispatches the batch, and that send can take up to its five-second deadline while the
+owner is unreachable.
+
+A routed batch that carries record acknowledgements and finds no attached consumer of its relay on
+the receiving node fails those acknowledgements. Its admission stands, so the transport does not
+send it again, but the owner receives a failed record acknowledgement and fails its source attempt.
+The source then redelivers the record along the owner's current routes. The receiver never reports
+an attached record acknowledged when no attached consumer took the batch, so an attached record
+cannot be committed at its source without a consumer having completed it. A batch without record
+acknowledgements, such as a detached send, completes at admission as before.
+
 ## Membership, Consensus, And Bulk Transfer
 
 Cluster membership gossip uses management discovery capacity. It discovers topology and
@@ -895,15 +915,16 @@ through a typed management request with reserved liveness capacity.
 A peer becomes a health target and an outbound target once discovery publishes its interconnect
 endpoint. A target with no usable endpoint is neither probed nor dialled, and its availability stays
 unknown until discovery publishes one. A previously established target remains eligible for probes
-and outbound connections through a temporary Chitchat liveness loss. A different incarnation or
-advertised endpoint must establish a new target.
+and outbound connections through a Chitchat liveness loss while application health still has an
+observation of it from the node-unavailability interval, as described below. A different
+incarnation or advertised endpoint must establish a new target.
 
 Each health round has at most one probe in flight for each peer and at most 32 probes across the
 node. A probe has a one-second total deadline. Results are published as they complete, so a silent
 peer occupies only its own concurrency slot. The next regular round begins roughly one second after
-the previous round finishes. Gossip changes observed during a round start the next round immediately
-after its bounded probes finish. They do not cancel the current probes: ordinary metadata updates
-must not repeatedly interrupt the deadline that establishes a silent peer's failure.
+the previous round finishes. Gossip updates remain pending while those bounded probes finish and
+start the next round immediately afterward. They never cancel an in-flight round: repeated gossip
+updates must not prevent an unreachable peer's deadline from becoming a failed observation.
 
 Every result is bound to the exact certificate node identifier, discovery incarnation, endpoint
 generation, advertised address, and observation time that were targeted. A healthy response must
@@ -920,9 +941,15 @@ Health observations distinguish:
 A missing, stale, or capacity-exhausted observation produces unknown availability. It does not mark
 a peer unavailable and does not extend a previous run of failures. Only continuous, fresh failures
 for the configured node-unavailability interval produce unavailable status; a healthy observation
-resets that run. Scheduling and runtime availability retain a previously discovered incarnation
-through a temporary gossip loss until application health marks it unavailable. Consensus membership
-continues to use the cluster topology established by gossip.
+resets that run. Consensus membership continues to use the cluster topology established by gossip.
+
+Scheduling and runtime availability retain a previously discovered incarnation that gossip stops
+listing live only while its latest application observation is younger than the node-unavailability
+interval and has not made it unavailable. A healthy, briefly failing, or capacity-refused
+observation from that interval keeps the peer available. A peer with no completed observation in the
+interval falls back to its gossip liveness, even though no failure was recorded. A stopped peer
+therefore leaves scheduling and runtime availability no later than when gossip declares it dead and
+its last observation has aged out, whether or not any probe to it completes.
 
 `SHOW CLUSTER STATUS` exposes the interconnect address, endpoint generation, observation age,
 observation outcome, and derived availability. Its `connected` status means the latest application

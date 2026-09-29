@@ -115,7 +115,7 @@ pub(in crate::runtime) struct CompiledHttpRequestFields {
 #[derive(Clone)]
 pub(in crate::runtime) struct SourceRecords {
     batch: Arc<RuntimeRecordBatch>,
-    metadata: Vec<RuntimeRecordMetadata>,
+    metadata: RecordMetadataColumns,
 }
 
 impl SourceRecords {
@@ -128,13 +128,13 @@ impl SourceRecords {
 
     /// Row `row`, without copying its values.
     fn row(&self, row: usize) -> error_stack::Result<RuntimeRow, RuntimeSchemaError> {
-        let Some(metadata) = self.metadata.get(row) else {
+        let Some(metadata) = self.metadata.row(row) else {
             return Err(Report::new(RuntimeSchemaError::RowOutOfBounds {
                 row,
                 rows: self.metadata.len(),
             }));
         };
-        RuntimeRow::new(self.batch.clone(), row, metadata.clone())
+        RuntimeRow::new(self.batch.clone(), row, metadata)
     }
 
     /// The rows `rows` names, in that order. Rows that are every row in order share this batch's

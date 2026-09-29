@@ -1689,10 +1689,10 @@ impl Application {
                 }))
                 .buffer_unordered(MAX_CONCURRENT_HEALTH_PROBES);
                 tokio::pin!(probe_results);
-                // Gossip also publishes ordinary metadata changes. Let each bounded probe
-                // finish so that repeated updates cannot starve observations of a silent peer.
-                // The publication boundary rejects results for replaced identities/endpoints;
-                // the retained topology notification starts the next round immediately.
+                // Let each bounded probe finish even when gossip publishes another update.
+                // Cancelling the round on every update can indefinitely hide an unreachable
+                // peer's one-second timeout. Publication checks the current incarnation and
+                // endpoint, so a result superseded by discovery is still discarded.
                 loop {
                     tokio::task::consume_budget().await;
                     tokio::select! {
