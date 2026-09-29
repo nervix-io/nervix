@@ -772,25 +772,6 @@ reconcile_canaries() {
         >"${case_dir}/control-results.json"
 }
 
-# The daemon keeps only a short buffer of past events, so node lifecycle events are recorded by a
-# subscriber that starts before the fault and runs until recovery.
-start_node_event_recorder() {
-    local output="$1"
-    docker events \
-        --filter "label=io.nervix.chaos.run=${run_id}" \
-        --filter label=io.nervix.chaos.role=node \
-        --format '{{json .}}' >"${output}" 2>&1 &
-    partition_event_recorder_pid=$!
-}
-
-stop_node_event_recorder() {
-    if [[ -n "${partition_event_recorder_pid:-}" ]]; then
-        kill "${partition_event_recorder_pid}" 2>/dev/null || true
-        wait "${partition_event_recorder_pid}" 2>/dev/null || true
-        partition_event_recorder_pid=""
-    fi
-}
-
 # Each node must keep its container and process incarnation through the case; only the planned
 # restart may replace one process, exactly once.
 node_incarnations_expected() {
@@ -815,20 +796,17 @@ node_incarnations_expected() {
     done
 }
 
+# Node lifecycle events from the start of the case through recovery: none at all, or exactly the
+# planned SIGKILL, its exit and the explicit restart.
 partition_node_events_expected() {
-    local output="$1"
-    local restarted_id="${2:-}"
-    jq -s -e --arg restarted "${restarted_id}" '
-        [.[] | select(.Action == "die" or .Action == "kill" or .Action == "stop"
-                      or .Action == "start" or .Action == "restart" or .Action == "pause")] as $lifecycle
-        | if $restarted == "" then ($lifecycle | length == 0)
-          else all($lifecycle[]; .Actor.ID == $restarted)
-               and ([$lifecycle[] | select(.Action == "kill" and .Actor.Attributes.signal == "9")] | length == 1)
-               and ([$lifecycle[] | select(.Action == "die" and .Actor.Attributes.exitCode == "137")] | length == 1)
-               and ([$lifecycle[] | select(.Action == "start")] | length == 1)
-               and ([$lifecycle[] | select(.Action == "stop" or .Action == "restart" or .Action == "pause")] | length == 0)
-          end
-    ' "${output}" >/dev/null
+    local case_dir="$1"
+    local restarted_id="$2"
+    local expected=()
+    if [[ -n "${restarted_id}" ]]; then
+        expected=(--target "${restarted_id}" --expect kill:9 --expect die:137 --expect start)
+    fi
+    "${script_dir}/verify-docker-events.sh" lifecycle \
+        --events "${case_dir}/node-events.ndjson" "${expected[@]}"
 }
 
 begin_partition_case() {
@@ -840,7 +818,7 @@ begin_partition_case() {
     phase "partition ${ordinal}/${partition_case_total}: ${case_name}"
     failure_category=product
     case_started_at="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
-    start_node_event_recorder "${case_dir}/node-events.ndjson"
+    case_started_ns="$(date -d "${case_started_at}" +%s%N)"
     wait_for 'settled, fully connected cluster before the partition' 150 \
         observe_partition_roles "${case_dir}/before"
     check_support_containers
@@ -912,13 +890,14 @@ recover_partition() {
     [[ "$(canary_outcome "${case_dir}" "chaos_partition_${ordinal}_after")" == acknowledged ]] \
         || partition_fail product 'the post-heal control canary through the rejoined node was not acknowledged'
     reconcile_canaries "${case_dir}"
-    stop_node_event_recorder
+    docker_event_window "${case_started_ns}" "${case_dir}/node-events.ndjson" --role node \
+        || partition_fail controller 'the live Docker event recording does not cover the partition case'
     local restarted_id=""
     if [[ -n "${restarted_host}" ]]; then
         restarted_id="$(jq -r '.[0].Id' "${case_dir}/restart/started.json")"
     fi
     if ! node_incarnations_expected "${case_dir}" "${restarted_host}" \
-        || ! partition_node_events_expected "${case_dir}/node-events.ndjson" "${restarted_id}"; then
+        || ! partition_node_events_expected "${case_dir}" "${restarted_id}"; then
         partition_finding "${case_dir}" 'a Nervix node restarted or stopped outside the planned fault'
     fi
     check_support_containers
@@ -963,7 +942,7 @@ write_partition_result() {
         --argjson source_after "${source_after}" \
         --argjson output_after "${output_after}" \
         --argjson details "$1" \
-        '{case:$case,placement:$plan[0].placement,intended_blocked:$plan[0].intended_blocked,roles:$role[0],isolation_boundary:$boundary[0],fault_started_at:$fault_started_at,isolation_verified_at:$isolation_verified_at,heal_completed_at:$heal_completed_at,install_ms:$install_ms,isolation_window_ms:$isolation_window_ms,minimum_isolation_window_ms:($minimum_window_seconds * 1000),heal_ms:$heal_ms,convergence_after_heal_ms:$convergence_ms,execution_convergence_after_heal_ms:$execution_ms,delivery_after_heal_ms:$delivery_after_heal_ms,source_offsets:{before:$source_before,after:$source_after},output_offsets:{before:$output_before,after:$output_after},control:$control[0],links:{before:"links-before.json",isolated:"links-isolated.json",healed:"links-healed.json"},samples:"samples.ndjson",node_events:"node-events.ndjson",placement:"placement-before-heal/placement.json",findings:"findings.ndjson"} + $details' \
+        '{case:$case,placement:$plan[0].placement,intended_blocked:$plan[0].intended_blocked,roles:$role[0],isolation_boundary:$boundary[0],fault_started_at:$fault_started_at,isolation_verified_at:$isolation_verified_at,heal_completed_at:$heal_completed_at,install_ms:$install_ms,isolation_window_ms:$isolation_window_ms,minimum_isolation_window_ms:($minimum_window_seconds * 1000),heal_ms:$heal_ms,convergence_after_heal_ms:$convergence_ms,execution_convergence_after_heal_ms:$execution_ms,delivery_after_heal_ms:$delivery_after_heal_ms,source_offsets:{before:$source_before,after:$source_after},output_offsets:{before:$output_before,after:$output_after},control:$control[0],links:{before:"links-before.json",isolated:"links-isolated.json",healed:"links-healed.json"},samples:"samples.ndjson",node_events:"node-events.ndjson",node_event_recording:"node-events.recording.json",placement:"placement-before-heal/placement.json",findings:"findings.ndjson"} + $details' \
         >"${case_dir}/result.json"
     local isolation_window_ms=$((heal_started_ms - isolation_verified_ms))
     ((isolation_window_ms >= partition_seconds * 1000)) \
@@ -1066,8 +1045,8 @@ restart_isolated_node() {
     [[ "$(grep -Fc 'msg="killing container"' "${restart_dir}/pumba-dry-run.txt")" -eq 1 ]] \
         && grep -Fq "dryrun=true id=${container_id}" "${restart_dir}/pumba-dry-run.txt" \
         || partition_fail injection "Pumba kill dry run did not select exactly ${host}"
-    local kill_since
-    kill_since="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+    local kill_since_ns
+    kill_since_ns="$(date +%s%N)"
     partition_restart_id="${container_id}"
     partition_restart_started=false
     run_bounded 30 docker run --rm \
@@ -1080,10 +1059,9 @@ restart_isolated_node() {
         kill --signal SIGKILL --limit 1 "${container_name}" \
         >"${restart_dir}/pumba.txt" 2>&1
     inspect_target "${container_id}" "${restart_dir}/killed.json"
-    run_bounded 20 docker events --since "${kill_since}" \
-        --until "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" \
-        --filter "container=${container_id}" --format '{{json .}}' \
-        >"${restart_dir}/kill-events.ndjson"
+    docker_event_window "${kill_since_ns}" "${restart_dir}/kill-events.ndjson" \
+        --container "${container_id}" \
+        || partition_fail controller 'the live Docker event recording does not cover the isolated node SIGKILL'
     "${script_dir}/verify-crash-evidence.sh" killed "${run_id}" "${project_name}" \
         "${host}" "${image_id}" "${restart_dir}/before.json" \
         "${restart_dir}/killed.json" "${restart_dir}/kill-events.ndjson"
