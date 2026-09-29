@@ -306,6 +306,22 @@ USING` selects a codec body. `DROP ENCODE` is invalid for HTTP; use a complete `
 WITHOUT BODY` replacement. The retained construction and error scopes must be valid for the new
 selection.
 
+Changing the HTTP sink, method, path, client reference, body selection, or publishing mode uses
+`ENTITY_PAUSE`. The emitter drains every admitted request with the client and request fields that
+prepared it before the replacement starts. If that drain fails, the change fails and the old
+definition remains active; an unanswered request is never sent to the proposed destination.
+Changing only `FLUSH` is `DYNAMIC`, while adding or removing a source relay uses `DOMAIN_PAUSE`.
+Changing the `CLIENT` definition itself follows the domain-pause configuration lifecycle.
+
+`ALTER` retains the emitter's `INHERIT`, `SET`, `INVOKE`, and error clauses, so a body-mode change
+must remain valid with all of them. To change construction or header invocations, use `DROP
+EMITTER` and `CREATE EMITTER` for the same name in one transaction. The complete candidate is
+validated before the transaction commits and has the same effective drain obligation as an
+`ALTER` replacement. A destination that remains unavailable can prevent that drain. The operator
+can repair it, or `STOP` the domain, change the emitter while stopped, and `START` again. Stopping
+discards prepared requests and retry state; attached work depends on its source's redelivery
+contract, and an endpoint that applied a request before losing its response may see a duplicate.
+
 While confirmations or infrastructure retries are pending, the emitter stops consuming from its
 relays and keeps upstream ACK leases alive. `FLUSH` still controls when and how much work enters a
 flush; `MODE` controls when each record in that flush counts as published. `ATTACHED` and

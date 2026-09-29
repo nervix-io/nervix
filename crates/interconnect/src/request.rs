@@ -274,6 +274,28 @@ impl InterconnectRequest for ApplicationRevisionRequest {
     const TIMEOUT: Duration = Duration::from_secs(2);
 }
 
+/// The live process incarnations a leader currently requires for command completion.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApplicationCompletionPeersResponse {
+    pub leader: ClusterNodeIdentity,
+    pub term: u64,
+    pub peers: Vec<ClusterNodeIdentity>,
+}
+
+/// Requests the current leader's effective application-health view. A follower must fence the
+/// response against its Raft leader and term before using it for a completion barrier.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApplicationCompletionPeersRequest;
+
+impl InterconnectRequest for ApplicationCompletionPeersRequest {
+    type Response = Option<ApplicationCompletionPeersResponse>;
+
+    const NAME: &'static str = "application_completion_peers";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
+    const TIMEOUT: Duration = Duration::from_secs(2);
+}
+
 /// Where one process incarnation's HTTPS listener stands against a requested runtime revision.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HttpsListenerInstallation {

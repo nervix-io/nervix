@@ -312,8 +312,9 @@ use.
   default, whether or not a session is bound to it. Only attaching, appending, and commit admission
   renew it.
 - **X-9.** A client MUST NOT assume a read is linearizable. A read served by any node reflects that
-  node's applied state, and a command's effect is visible through every node once the command has
-  completed.
+  node's applied state. Once a command completes, its effect is visible through each node in the
+  leader's completion participant set. A node the leader has retired can serve an older state until
+  it catches up.
 
 ## Subscriptions
 
