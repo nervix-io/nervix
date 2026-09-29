@@ -812,12 +812,18 @@ starts with its target in `NERVIX_PROBE_*` variables and its standard input clos
 one report line per observation on standard output, and the fixture keeps every line it read.
 
 A probe's waits are bounded twice. The step that starts it waits at most 180 seconds for the line
-that says its subscription is open, and the step that reads its report waits the duration the step
-names for the probe to end, 180 seconds against a cluster and 60 against the corpus. Each probe also
-ends itself: it gives up on its rows after 120 seconds, or on its whole run after 170. A failure
-quotes every report line read so far, the exit status, and the probe's standard error. Dropping the
-fixture kills a child process, so a failed scenario never leaves a probe running; the in-process
-probe ends when its session fails against the stopped cluster, or at its own deadline.
+that says its subscription is open or its clock attach completed. A later step can wait, for the
+duration it names, for one more line the probe prints, so a scenario acts between the probe's
+observations: the clock probe prints the first tick of a generation before the scenario stops and
+starts the domain, and the interruption before the scenario restarts the TCP forwarder the probe
+entered through. Every line read on the way is kept for the report. The step that reads the report
+waits the duration the step names for the probe to end, 180 seconds against a cluster and 60 against
+the corpus. Each probe also ends itself: a binding probe gives up on its rows, or on each stage of
+the clock it follows, after 120 seconds, and the Go and TypeScript probes give up on their whole run
+after 170. A failure quotes every report line read so far, the exit status, and the probe's
+standard error. Dropping the fixture kills a child process, so a failed scenario never leaves a
+probe running; the in-process probe ends when its session fails against the stopped cluster, or at
+its own deadline.
 
 Every example of a runtime other than the in-process probe is tagged `@client_conformance_toolchain`
 and one `@client_probe_<runtime>` tag, and the suite excludes the first tag unless a run selects its

@@ -1,17 +1,17 @@
 //! A session a host holds: `nx_session` and the commands it prepares, `nx_execution`.
 //!
 //! - **Owns.** The Tokio runtime a session runs on, opening and ending the session, running a
-//!   blocking call on the host's thread, and preparing, executing and waiting for subscription and
-//!   domain clock events.
-//! - **Depends on.** The Rust session client, cancellation, and the outcome, event and clock event
-//!   handles.
+//!   blocking call on the host's thread, preparing and executing commands, waiting for
+//!   subscription and domain clock events, and reading the clock of a domain the session follows.
+//! - **Depends on.** The Rust session client, cancellation, and the outcome, event, clock event
+//!   and domain clock handles.
 //! - **Must not know.** Which host is calling, or how it schedules its threads.
 //!
 //! A host thread blocks in [`Session::block_on`] while the runtime's own threads drive the
 //! exchange, so no host code ever runs on a runtime thread and no runtime thread ever waits for a
 //! host.
 
-use std::future::Future;
+use std::{future::Future, ptr};
 
 use nervix_client_core::{
     AutocompleteOutcome, Client, ConnectOptions, DomainName, ExecutionHandle,
@@ -22,6 +22,7 @@ use crate::{
     abi,
     cancel::Cancel,
     clock_event::ClockEvent,
+    domain_clock::DomainClock,
     event::Event,
     failure::{Failure, FailureKind},
     outcome::Outcome,
@@ -170,6 +171,14 @@ impl Session {
             }
         };
         self.block_on(cancel, waiting)
+    }
+
+    /// The clock of `domain` as the session last received it, as
+    /// [`nervix_client_core::Client::domain_clock`] reads it, or `None` when the session follows
+    /// no clock of that domain. It reads state the client already holds, so it never blocks.
+    pub fn domain_clock(&self, domain: &DomainName) -> Option<DomainClock> {
+        let clock = self.client.domain_clock(domain)?;
+        Some(DomainClock::new(clock))
     }
 
     /// Reads one bounded completion page from the current session context.
@@ -462,5 +471,52 @@ unsafe fn write_next_clock_event(
     let event = session.next_clock_event(cancel)?;
     // SAFETY: `out` is non-null, and the caller guarantees it is writable.
     unsafe { abi::write(out, event.into_shared()) };
+    Ok(())
+}
+
+/// # Safety
+///
+/// `session` is live, `domain` addresses `domain_len` readable bytes, and a non-null `out` is
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_session_domain_clock(
+    session: *const Session,
+    domain: *const u8,
+    domain_len: usize,
+    out: *mut *mut DomainClock,
+) -> *mut Failure {
+    // SAFETY: the header's contract is this function's.
+    abi::outcome(unsafe { write_domain_clock(session, domain, domain_len, out) })
+}
+
+/// # Safety
+///
+/// As [`nx_session_domain_clock`].
+unsafe fn write_domain_clock(
+    session: *const Session,
+    domain: *const u8,
+    domain_len: usize,
+    out: *mut *mut DomainClock,
+) -> Result<(), Failure> {
+    abi::require_out(out, "out")?;
+    // SAFETY: the caller guarantees a live session and a readable domain name.
+    let (session, domain) = unsafe {
+        (
+            abi::handle(session, "session")?,
+            abi::text(domain, domain_len, "domain")?,
+        )
+    };
+    let domain = match DomainName::try_from(domain) {
+        Ok(domain) => domain,
+        Err(error) => return Err(Failure::invalid_argument("domain", &error.to_string())),
+    };
+    // A domain whose clock the session does not follow reads as no clock, which the header
+    // writes as NULL.
+    let clock = match session.domain_clock(&domain) {
+        Some(clock) => clock.into_shared(),
+        None => ptr::null_mut(),
+    };
+    // SAFETY: `out` is non-null, and the caller guarantees it is writable.
+    unsafe { abi::write(out, clock) };
     Ok(())
 }

@@ -4,8 +4,9 @@
  * It reads its target from the NERVIX_PROBE_* environment, runs an operation, a failing command,
  * a subscription and its closure through nervix_client.h, and prints the conformance report the
  * scenario compares. Every column is copied in one call; every string and bytes value is also
- * borrowed and compared with its copy. Run as `c-probe clock`, it attaches to the domain's clock
- * instead, reads the state and the first tick of the generation the scenario starts, and detaches.
+ * borrowed and compared with its copy. Run as `c-probe clock`, it attaches to the domain's running
+ * clock instead, reads the clock the attach reported before its first tick, follows the generation
+ * a STOP and START begin and the attachment restored after its session ends, and detaches.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -357,64 +358,147 @@ static void expect_domain(const nx_clock_event *event, const char *domain) {
     }
 }
 
-/* The committed clock of the generation the probe follows. */
+/* The committed clock of a paced generation. */
 typedef struct paced_clock {
     uint64_t generation;
     uint64_t period;
     uint64_t skew;
     int64_t origin;
+    int64_t anchor;
     double rate;
 } paced_clock;
 
-static paced_clock read_paced(const nx_clock_event *event) {
-    paced_clock clock = {0, 0, 0, 0, 0.0};
+/* The progress a tick event reports. */
+typedef struct tick {
+    uint64_t generation;
+    uint64_t id;
+    int64_t boundary;
+    int64_t serving_logical;
+} tick;
+
+static paced_clock event_paced(const nx_clock_event *event) {
+    paced_clock clock = {0, 0, 0, 0, 0, 0.0};
     check(nx_clock_event_generation(event, &clock.generation), "clock generation");
-    /* The UTC anchor depends on when the scenario's START committed, so it is not reported. */
-    check(nx_clock_event_paced(event, &clock.period, &clock.skew, &clock.origin, NULL, &clock.rate),
+    check(nx_clock_event_paced(event, &clock.period, &clock.skew, &clock.origin, &clock.anchor,
+                               &clock.rate),
           "paced clock");
     return clock;
 }
 
-/* The report line of a paced state event, which the caller frees. */
-static char *state_line(const nx_clock_event *event, const char *domain) {
-    paced_clock clock = read_paced(event);
+static paced_clock read_paced(const nx_domain_clock *read) {
+    paced_clock clock = {nx_domain_clock_generation(read), 0, 0, 0, 0, 0.0};
+    check(nx_domain_clock_paced(read, &clock.period, &clock.skew, &clock.origin, &clock.anchor,
+                                &clock.rate),
+          "paced domain clock");
+    return clock;
+}
+
+static bool same_clock(const paced_clock *left, const paced_clock *right) {
+    return left->generation == right->generation && left->period == right->period &&
+           left->skew == right->skew && left->origin == right->origin &&
+           left->anchor == right->anchor && left->rate == right->rate;
+}
+
+/* The report line of a paced clock, which the caller frees, with `prefix` naming where it was read.
+   The UTC anchor depends on when the scenario's START committed, so it is read but not reported. */
+static char *paced_line(const char *prefix, const paced_clock *clock, const char *domain) {
     uint64_t rate_bits = 0;
-    memcpy(&rate_bits, &clock.rate, sizeof rate_bits);
+    memcpy(&rate_bits, &clock->rate, sizeof rate_bits);
     line result = {NULL, 0};
     append(&result,
-           "STATE domain=%s generation=%" PRIu64 " state=paced period=%" PRIu64 " skew=%" PRIu64
+           "%s domain=%s generation=%" PRIu64 " state=paced period=%" PRIu64 " skew=%" PRIu64
            " origin=%" PRId64 " rate=f64:%016" PRIx64,
-           domain, clock.generation, clock.period, clock.skew, clock.origin, rate_bits);
+           prefix, domain, clock->generation, clock->period, clock->skew, clock->origin, rate_bits);
     return result.text;
 }
 
-/* The report line of a tick, which the caller frees, after holding the tick to the committed clock
-   of its generation: its boundary is the logical origin plus one period for every id before it,
-   and the serving node's reading never precedes the origin. */
-static char *tick_line(const nx_clock_event *event, const char *domain, const paced_clock *clock) {
-    uint64_t generation = 0;
-    check(nx_clock_event_generation(event, &generation), "tick generation");
-    if (generation != clock->generation) {
-        fail("a tick belongs to another generation than the state before it");
+static tick event_tick(const nx_clock_event *event) {
+    tick progress = {0, 0, 0, 0};
+    check(nx_clock_event_generation(event, &progress.generation), "tick generation");
+    /* The authority's UTC observation depends on when the tick was accepted, so it is not read. */
+    check(nx_clock_event_tick(event, &progress.id, &progress.boundary, NULL,
+                              &progress.serving_logical),
+          "tick");
+    return progress;
+}
+
+/* Holds a tick to a clock: the same generation, a boundary of the logical origin plus one period
+   for every id before it, and a serving node's reading that never precedes the origin. */
+static void check_tick(const paced_clock *clock, const tick *progress) {
+    if (progress->generation != clock->generation) {
+        fail("a tick of one generation followed the state of another");
     }
-    uint64_t id = 0;
-    int64_t boundary = 0;
-    int64_t authority_utc = 0;
-    int64_t serving_logical = 0;
-    check(nx_clock_event_tick(event, &id, &boundary, &authority_utc, &serving_logical), "tick");
     uint64_t offset = 0;
     int64_t expected = 0;
-    if (id == 0 || __builtin_mul_overflow(id - 1, clock->period, &offset) ||
+    if (progress->id == 0 || __builtin_mul_overflow(progress->id - 1, clock->period, &offset) ||
         offset > (uint64_t)INT64_MAX ||
-        __builtin_add_overflow(clock->origin, (int64_t)offset, &expected) || boundary != expected) {
+        __builtin_add_overflow(clock->origin, (int64_t)offset, &expected) ||
+        progress->boundary != expected) {
         fail("a tick's boundary is not the origin plus one period for every id before it");
     }
-    if (serving_logical < clock->origin) {
+    if (progress->serving_logical < clock->origin) {
         fail("the serving node's logical reading precedes the logical origin");
     }
+}
+
+/* The report line of a tick a clock holds, which the caller frees. */
+static char *tick_line(const paced_clock *clock, const tick *progress, const char *domain) {
+    check_tick(clock, progress);
     line result = {NULL, 0};
     append(&result, "TICK domain=%s generation=%" PRIu64 " boundary=origin+(id-1)*period", domain,
-           generation);
+           progress->generation);
+    return result.text;
+}
+
+/* An instant as the report names it: `origin` for the logical origin, the instant otherwise. */
+static void append_relative(line *target, const paced_clock *clock, int64_t instant) {
+    if (instant == clock->origin) {
+        append(target, "origin");
+    } else {
+        append(target, "%" PRId64, instant);
+    }
+}
+
+/* The report line of the projections of `read`, which holds `clock`, at its own UTC anchor, which
+   the caller frees: the logical time there, the wait for the next tick center, the admission
+   window, and whether an event at the skew's edge and one nanosecond past it are admitted. */
+static char *projection_line(const paced_clock *clock, const nx_domain_clock *read,
+                             const char *domain) {
+    int64_t next_center = 0;
+    int64_t edge = 0;
+    int64_t beyond = 0;
+    if (clock->period > (uint64_t)INT64_MAX || clock->skew > (uint64_t)INT64_MAX ||
+        __builtin_add_overflow(clock->origin, (int64_t)clock->period, &next_center) ||
+        __builtin_add_overflow(clock->origin, (int64_t)clock->skew, &edge) ||
+        __builtin_add_overflow(edge, 1, &beyond)) {
+        fail("the clock's fields leave the logical time range");
+    }
+    int64_t at_anchor = 0;
+    check(nx_domain_clock_logical_time_at(read, clock->anchor, &at_anchor), "logical time");
+    uint64_t wait = 0;
+    check(nx_domain_clock_wall_duration_until(read, clock->anchor, next_center, &wait), "wait");
+    bool has_window = false;
+    int64_t earliest = 0;
+    int64_t latest = 0;
+    check(nx_domain_clock_admission_window(read, clock->anchor, &has_window, &earliest, &latest),
+          "admission window");
+    if (!has_window) {
+        fail("a paced clock reports no admission window");
+    }
+    bool at_edge = false;
+    bool past_edge = false;
+    check(nx_domain_clock_admits(read, clock->anchor, edge, &at_edge), "admission at the edge");
+    check(nx_domain_clock_admits(read, clock->anchor, beyond, &past_edge), "admission past it");
+    line result = {NULL, 0};
+    append(&result, "PROJECTION domain=%s generation=%" PRIu64 " anchor=", domain,
+           clock->generation);
+    append_relative(&result, clock, at_anchor);
+    append(&result, " wait=%" PRIu64 " window=", wait);
+    append_relative(&result, clock, earliest);
+    append(&result, "..");
+    append_relative(&result, clock, latest);
+    append(&result, " skew=%s beyond=%s", at_edge ? "admitted" : "refused",
+           past_edge ? "admitted" : "refused");
     return result.text;
 }
 
@@ -457,93 +541,270 @@ static void check_clock_cancellation(nx_session *session) {
     nx_cancel_free(deadline);
 }
 
-static void *release_clock_event(void *argument) {
-    nx_clock_event_release(argument);
+/* What the probe has read about the domain's clock: the generation of the newest state, its
+   mapping while it is paced, and whether the session holding the attachment ended since. Every
+   event is held to what was read before it, and a read of the clock taken right after it is held
+   to be no older. */
+typedef struct followed_clock {
+    nx_session *session;
+    const char *domain;
+    uint64_t generation;
+    bool paced;
+    paced_clock clock;
+    bool interrupted;
+} followed_clock;
+
+/* The clock the session holds for the domain, which it must follow; the caller releases it. */
+static nx_domain_clock *read_clock(const followed_clock *followed) {
+    nx_domain_clock *read = NULL;
+    check(nx_session_domain_clock(followed->session, text(followed->domain),
+                                  strlen(followed->domain), &read),
+          "domain clock");
+    if (read == NULL) {
+        fail("the session follows no clock of the domain after an event about it");
+    }
+    return read;
+}
+
+static void observe(followed_clock *followed, const nx_clock_event *event) {
+    uint64_t generation = 0;
+    check(nx_clock_event_generation(event, &generation), "state generation");
+    if (generation < followed->generation) {
+        fail("a state went back to an earlier generation");
+    }
+    nx_clock_state state = NX_CLOCK_STOPPED;
+    check(nx_clock_event_state(event, &state), "clock state");
+    bool paced = state == NX_CLOCK_PACED;
+    paced_clock clock = {generation, 0, 0, 0, 0, 0.0};
+    if (paced) {
+        clock = event_paced(event);
+    }
+    nx_domain_clock *read = read_clock(followed);
+    if (nx_domain_clock_generation(read) < generation) {
+        fail("a read of the clock is older than the state the probe took");
+    }
+    if (nx_domain_clock_generation(read) == generation) {
+        if (nx_domain_clock_state(read) != state) {
+            fail("a read of the clock differs from the state of its generation");
+        }
+        if (paced) {
+            paced_clock held = read_paced(read);
+            if (!same_clock(&held, &clock)) {
+                fail("a read of the clock differs from the mapping of its generation");
+            }
+        }
+    }
+    nx_domain_clock_release(read);
+    followed->generation = generation;
+    followed->paced = paced;
+    followed->clock = clock;
+    followed->interrupted = false;
+}
+
+static void check_event_tick(const followed_clock *followed, const nx_clock_event *event) {
+    if (followed->interrupted) {
+        fail("a tick arrived before the restored attachment reported its clock");
+    }
+    if (!followed->paced) {
+        fail("a tick arrived while the clock was not paced");
+    }
+    tick progress = event_tick(event);
+    check_tick(&followed->clock, &progress);
+    nx_domain_clock *read = read_clock(followed);
+    if (nx_domain_clock_generation(read) < progress.generation) {
+        fail("a read of the clock is older than the tick the probe took");
+    }
+    uint64_t held = 0;
+    if (nx_domain_clock_generation(read) == progress.generation &&
+        nx_domain_clock_tick(read, &held, NULL, NULL, NULL) && held < progress.id) {
+        fail("a read of the clock holds an older tick than the probe took");
+    }
+    nx_domain_clock_release(read);
+}
+
+/* The next event about the domain, held to what the probe read before it; the caller releases
+   it. */
+static nx_clock_event *follow_next(followed_clock *followed, const nx_cancel *deadline) {
+    nx_clock_event *event = NULL;
+    check(nx_session_next_clock_event(followed->session, deadline, &event), "next clock event");
+    expect_domain(event, followed->domain);
+    switch (nx_clock_event_kind_of(event)) {
+    case NX_CLOCK_EVENT_STATE: observe(followed, event); break;
+    case NX_CLOCK_EVENT_TICK: check_event_tick(followed, event); break;
+    case NX_CLOCK_EVENT_INTERRUPTED: followed->interrupted = true; break;
+    case NX_CLOCK_EVENT_RESTORATION_FAILED: break;
+    case NX_CLOCK_EVENT_ENDED: fail("the server ended the attachment");
+    }
+    return event;
+}
+
+static void unexpected(nx_clock_event *event, const char *before) {
+    fprintf(stderr, "probe failed: the clock reported %s before %s\n",
+            clock_kind_name(nx_clock_event_kind_of(event)), before);
+    exit(1);
+}
+
+/* The first tick of the followed generation, which the caller releases. A state reporting that
+   generation again is taken on the way; one of another generation fails the probe. */
+static nx_clock_event *first_tick(followed_clock *followed, const nx_cancel *deadline) {
+    uint64_t generation = followed->generation;
+    for (;;) {
+        nx_clock_event *event = follow_next(followed, deadline);
+        nx_clock_event_kind kind = nx_clock_event_kind_of(event);
+        if (kind == NX_CLOCK_EVENT_TICK) {
+            return event;
+        }
+        if (kind != NX_CLOCK_EVENT_STATE || followed->generation != generation) {
+            unexpected(event, "the first tick of the followed generation");
+        }
+        nx_clock_event_release(event);
+    }
+}
+
+/* The paced state of a generation after the followed one, which the caller releases. The followed
+   generation's ticks and the states before the new paced one are taken on the way. */
+static nx_clock_event *next_generation(followed_clock *followed, const nx_cancel *deadline) {
+    uint64_t previous = followed->generation;
+    for (;;) {
+        nx_clock_event *event = follow_next(followed, deadline);
+        nx_clock_event_kind kind = nx_clock_event_kind_of(event);
+        if (kind == NX_CLOCK_EVENT_STATE && followed->generation > previous && followed->paced) {
+            return event;
+        }
+        if (kind != NX_CLOCK_EVENT_TICK && kind != NX_CLOCK_EVENT_STATE) {
+            unexpected(event, "a generation after the followed one");
+        }
+        nx_clock_event_release(event);
+    }
+}
+
+/* Waits for the interruption of the attachment. The followed generation's ticks and states are
+   taken on the way. */
+static void interruption(followed_clock *followed, const nx_cancel *deadline) {
+    uint64_t generation = followed->generation;
+    for (;;) {
+        nx_clock_event *event = follow_next(followed, deadline);
+        nx_clock_event_kind kind = nx_clock_event_kind_of(event);
+        if (kind == NX_CLOCK_EVENT_INTERRUPTED) {
+            nx_clock_event_release(event);
+            return;
+        }
+        if (kind != NX_CLOCK_EVENT_TICK &&
+            (kind != NX_CLOCK_EVENT_STATE || followed->generation != generation)) {
+            unexpected(event, "the interruption");
+        }
+        nx_clock_event_release(event);
+    }
+}
+
+/* The paced state the restored attachment reports, which the caller releases. A refused
+   restoration, which the session repeats, and a clock reported uninstalled are taken on the way. */
+static nx_clock_event *restored(followed_clock *followed, const nx_cancel *deadline) {
+    for (;;) {
+        nx_clock_event *event = follow_next(followed, deadline);
+        if (nx_clock_event_kind_of(event) == NX_CLOCK_EVENT_STATE && followed->paced) {
+            return event;
+        }
+        nx_clock_event_release(event);
+    }
+}
+
+static void *release_clock_references(void *argument) {
+    void **references = argument;
+    nx_domain_clock_release(references[0]);
+    nx_clock_event_release(references[1]);
     return NULL;
 }
 
-/* Attaches to the domain's clock, reads the state and the first tick of the generation the
-   scenario starts, and detaches. */
+static nx_cancel *clock_deadline(void) {
+    nx_cancel *deadline = NULL;
+    check(nx_cancel_with_deadline(CLOCK_DEADLINE_MILLIS, &deadline), "clock deadline");
+    return deadline;
+}
+
+/* Prints the paced state a STATE event reports and the first tick after it, releasing both. */
+static void report_state_and_first_tick(followed_clock *followed, nx_clock_event *state,
+                                        const nx_cancel *deadline) {
+    paced_clock clock = event_paced(state);
+    char *reported = paced_line("STATE", &clock, followed->domain);
+    printf("%s\n", reported);
+    free(reported);
+    nx_clock_event_release(state);
+    nx_clock_event *event = first_tick(followed, deadline);
+    tick progress = event_tick(event);
+    char *reported_tick = tick_line(&followed->clock, &progress, followed->domain);
+    printf("%s\n", reported_tick);
+    free(reported_tick);
+    nx_clock_event_release(event);
+}
+
+/* Attaches to the domain's running clock and reads the clock the attach reported before its first
+   tick, then follows the generation the scenario's STOP and START begin and the attachment
+   restored after the scenario ends the session, and detaches. */
 static int run_clock(nx_session *session, const char *domain) {
     check_clock_cancellation(session);
     nx_outcome *attached = execute(session, "ATTACH DOMAIN CLOCK;");
     printf("ATTACHED %s\n", disposition_name(nx_outcome_disposition(attached)));
     nx_outcome_free(attached);
 
-    nx_cancel *deadline = NULL;
-    check(nx_cancel_with_deadline(CLOCK_DEADLINE_MILLIS, &deadline), "clock deadline");
-    nx_clock_event *state = NULL;
-    while (state == NULL) {
-        nx_clock_event *event = NULL;
-        check(nx_session_next_clock_event(session, deadline, &event), "next clock event");
-        expect_domain(event, domain);
-        if (nx_clock_event_kind_of(event) != NX_CLOCK_EVENT_STATE) {
-            fprintf(stderr, "probe failed: the clock reported %s before the started state\n",
-                    clock_kind_name(nx_clock_event_kind_of(event)));
-            exit(1);
-        }
-        /* The serving node may report the started generation uninstalled until it holds the
-           committed mapping and an assigned clock authority. */
-        nx_clock_state installed = NX_CLOCK_STOPPED;
-        check(nx_clock_event_state(event, &installed), "clock state");
-        if (installed == NX_CLOCK_PACED) {
-            state = event;
-        } else {
-            nx_clock_event_release(event);
-        }
+    /* The clock the attach reported, read before any event about the attachment. */
+    followed_clock followed = {session, domain, 0, false, {0, 0, 0, 0, 0, 0.0}, false};
+    nx_domain_clock *read = read_clock(&followed);
+    if (nx_domain_clock_state(read) != NX_CLOCK_PACED) {
+        fail("the attach reported a clock other than the running paced one");
     }
-    char *reported_state = state_line(state, domain);
-    printf("%s\n", reported_state);
-    paced_clock clock = read_paced(state);
+    paced_clock clock = read_paced(read);
+    char *reported_clock = paced_line("CLOCK", &clock, domain);
+    printf("%s\n", reported_clock);
+    char *projected = projection_line(&clock, read, domain);
+    printf("%s\n", projected);
+    free(projected);
+    followed.generation = clock.generation;
+    followed.paced = true;
+    followed.clock = clock;
 
-    nx_clock_event *tick = NULL;
-    while (tick == NULL) {
-        nx_clock_event *event = NULL;
-        check(nx_session_next_clock_event(session, deadline, &event), "next clock event");
-        expect_domain(event, domain);
-        nx_clock_event_kind kind = nx_clock_event_kind_of(event);
-        if (kind == NX_CLOCK_EVENT_TICK) {
-            tick = event;
-        } else if (kind == NX_CLOCK_EVENT_STATE) {
-            /* The serving node reported the installation again; it is still the same generation. */
-            uint64_t generation = 0;
-            check(nx_clock_event_generation(event, &generation), "clock generation");
-            if (generation != clock.generation) {
-                fail("the clock moved to another generation before its first tick");
-            }
-            nx_clock_event_release(event);
-        } else {
-            fprintf(stderr, "probe failed: the clock reported %s before its first tick\n",
-                    clock_kind_name(kind));
-            exit(1);
-        }
-    }
-    nx_cancel_free(deadline);
-    char *reported_tick = tick_line(tick, domain, &clock);
+    nx_cancel *deadline = clock_deadline();
+    nx_clock_event *tick_event = first_tick(&followed, deadline);
+    tick progress = event_tick(tick_event);
+    char *reported_tick = tick_line(&clock, &progress, domain);
     printf("%s\n", reported_tick);
+    nx_cancel_free(deadline);
 
-    /* Keep a second reference to each event and release the first on another thread, so the
-       events must read the same on the second alone. */
-    nx_clock_event *retained_state = nx_clock_event_retain(state);
-    nx_clock_event *retained_tick = nx_clock_event_retain(tick);
-    pthread_t releasers[2];
-    if (pthread_create(&releasers[0], NULL, release_clock_event, state) != 0 ||
-        pthread_create(&releasers[1], NULL, release_clock_event, tick) != 0) {
-        fail("starting the releasing threads");
+    /* Keep a second reference to the read and the tick and release the first ones on another
+       thread, so both must read the same on the second alone. */
+    nx_domain_clock *retained_read = nx_domain_clock_retain(read);
+    nx_clock_event *retained_tick = nx_clock_event_retain(tick_event);
+    void *firsts[2] = {read, tick_event};
+    pthread_t releaser;
+    if (pthread_create(&releaser, NULL, release_clock_references, firsts) != 0) {
+        fail("starting the releasing thread");
     }
-    pthread_join(releasers[0], NULL);
-    pthread_join(releasers[1], NULL);
-    char *state_again = state_line(retained_state, domain);
-    char *tick_again = tick_line(retained_tick, domain, &clock);
-    if (strcmp(state_again, reported_state) != 0 || strcmp(tick_again, reported_tick) != 0) {
-        fail("a retained clock event reads differently than it did");
+    pthread_join(releaser, NULL);
+    paced_clock clock_again = read_paced(retained_read);
+    tick progress_again = event_tick(retained_tick);
+    char *clock_line_again = paced_line("CLOCK", &clock_again, domain);
+    char *tick_line_again = tick_line(&clock_again, &progress_again, domain);
+    if (strcmp(clock_line_again, reported_clock) != 0 || strcmp(tick_line_again, reported_tick) != 0) {
+        fail("a retained clock or tick reads differently than it did");
     }
-    free(state_again);
-    free(tick_again);
-    free(reported_state);
+    free(clock_line_again);
+    free(tick_line_again);
+    free(reported_clock);
     free(reported_tick);
-    nx_clock_event_release(retained_state);
+    nx_domain_clock_release(retained_read);
     nx_clock_event_release(retained_tick);
+
+    /* The scenario stops the domain and starts it again at another origin and rate. */
+    deadline = clock_deadline();
+    report_state_and_first_tick(&followed, next_generation(&followed, deadline), deadline);
+    nx_cancel_free(deadline);
+
+    /* The scenario ends the session, and the binding attaches the clock again on the next one. */
+    deadline = clock_deadline();
+    interruption(&followed, deadline);
+    printf("INTERRUPTED domain=%s\n", domain);
+    report_state_and_first_tick(&followed, restored(&followed, deadline), deadline);
+    nx_cancel_free(deadline);
 
     nx_outcome *detached = execute(session, "DETACH DOMAIN CLOCK;");
     printf("DETACHED %s\n", disposition_name(nx_outcome_disposition(detached)));
