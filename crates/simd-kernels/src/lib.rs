@@ -2,9 +2,13 @@
 //!
 //! Layer: primitives.
 //!
-//! - **Owns.** Runtime SIMD selection and exact byte masks for callers with contiguous buffers.
-//! - **Depends on.** `fearless_simd` and self-contained error values.
-//! - **Must not know.** Arrow, Nervix models, codecs, or the consumers of a classified buffer.
+//! - **Owns.** Runtime SIMD selection, exact byte masks, and exact elapsed-time histograms for
+//!   callers with contiguous buffers.
+//! - **Depends on.** `fearless_simd`, pointer-width conversions, and self-contained error values.
+//! - **Must not know.** Arrow, Nervix models, codecs, metric recorders, or the consumers of a
+//!   classified buffer.
+
+mod elapsed;
 
 use std::sync::OnceLock;
 
@@ -12,7 +16,37 @@ use error_stack::Report;
 use fearless_simd::{Level, dispatch, prelude::*};
 use thiserror::Error;
 
+pub use crate::elapsed::{
+    ElapsedBucket, ElapsedHistogram, ElapsedLayout, ElapsedLayoutError, elapsed_nanos,
+    latest_instant,
+};
+
 static LEVEL: OnceLock<Level> = OnceLock::new();
+
+/// Every level the test host supports, the forced scalar fallback, and the baseline, so a kernel
+/// test compares each against its scalar reference.
+#[cfg(test)]
+fn supported_levels() -> Vec<Level> {
+    let detected = Level::new();
+    let mut levels = vec![Level::fallback(), Level::baseline(), detected];
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        use fearless_simd::Simd as _;
+        if let Some(token) = detected.as_sse2() {
+            levels.push(token.level());
+        }
+        if let Some(token) = detected.as_sse4_2() {
+            levels.push(token.level());
+        }
+        if let Some(token) = detected.as_avx2() {
+            levels.push(token.level());
+        }
+        if let Some(token) = detected.as_avx512() {
+            levels.push(token.level());
+        }
+    }
+    levels
+}
 
 /// A byte mask for each 64-byte block and a bit for each string whose offset range contains an
 /// escapable JSON byte. Byte bit zero names the first byte of a block; row bit zero names the first
@@ -186,10 +220,9 @@ impl JsonEscapeClassification {
 
 #[cfg(test)]
 mod tests {
-    use fearless_simd::Level;
     use meticulous::ResultExt as _;
 
-    use super::JsonEscapeClassification;
+    use super::{JsonEscapeClassification, supported_levels};
 
     fn reference_masks(bytes: &[u8]) -> Vec<u64> {
         let mut masks = vec![0; bytes.len().div_ceil(64)];
@@ -199,28 +232,6 @@ mod tests {
             }
         }
         masks
-    }
-
-    fn levels() -> Vec<Level> {
-        let detected = Level::new();
-        let mut levels = vec![Level::fallback(), Level::baseline(), detected];
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        {
-            use fearless_simd::Simd as _;
-            if let Some(token) = detected.as_sse2() {
-                levels.push(token.level());
-            }
-            if let Some(token) = detected.as_sse4_2() {
-                levels.push(token.level());
-            }
-            if let Some(token) = detected.as_avx2() {
-                levels.push(token.level());
-            }
-            if let Some(token) = detected.as_avx512() {
-                levels.push(token.level());
-            }
-        }
-        levels
     }
 
     #[test]
@@ -233,7 +244,7 @@ mod tests {
                 let bytes: Vec<u8> = (0..length).map(|_| rng.u8(..)).collect();
                 let offsets = [0, i32::try_from(length).assured("test input fits i32")];
                 let expected = reference_masks(&bytes);
-                for level in levels() {
+                for level in supported_levels() {
                     let classified = JsonEscapeClassification::with_level(level, &bytes, &offsets)
                         .assured("test offsets are valid");
                     assert_eq!(
@@ -257,7 +268,7 @@ mod tests {
             bytes[index] = b'\\';
         }
         let offsets = [0, 1, 15, 16, 31, 33, 63, 64, 65, 66, 127, 128, 130, 131];
-        for level in levels() {
+        for level in supported_levels() {
             let classified = JsonEscapeClassification::with_level(level, &bytes, &offsets)
                 .assured("test offsets are valid");
             for (row, bounds) in offsets.windows(2).enumerate() {

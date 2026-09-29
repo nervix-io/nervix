@@ -186,7 +186,7 @@ mod tests {
     use crate::{
         runtime::processors::ReordererOutputBatchError,
         runtime_ack::{AckOutcome, AckSet},
-        runtime_schema::{RuntimeRecordMetadata, RuntimeValue, test_runtime_row},
+        runtime_schema::{RuntimeValue, test_runtime_row},
     };
 
     #[test]
@@ -299,8 +299,8 @@ mod tests {
             .collect::<Vec<_>>();
         let watermarks = ordered
             .metadata
-            .iter()
-            .map(RuntimeRecordMetadata::ingested_at_low_watermark)
+            .rows()
+            .map(|metadata| metadata.ingested_at_low_watermark())
             .collect::<Vec<_>>();
 
         assert_eq!(

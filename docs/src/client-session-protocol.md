@@ -303,7 +303,10 @@ A session serves each request on one of two lanes:
 A cancellation is on neither lane: it is answered as soon as it arrives. A session admits at most 64
 requests in flight, counting both lanes. A request beyond that is refused with
 `TooManyRequestsInFlight` rather than queued, which also bounds the requests waiting for the ordered
-lane; nothing about the refused request was admitted. A request identity that is already in flight
+lane; nothing about the refused request was admitted. The web console never sends a request that
+keeps its order past that limit: it holds the request, in the order it was issued, until an
+earlier reply frees a place. Its completions, choice lookups, and domain selections go out at once
+and report the refusal if they find the session full. A request identity that is already in flight
 is refused with `DuplicateRequestId`, and that refusal necessarily names the same identity as the
 request still in flight.
 
@@ -779,6 +782,13 @@ session starts again from one second. An attach answered `DomainClockAlreadyAtta
 session already holds the attachment, so the client follows the clock on that session and reads its
 frames from then on.
 
+The web console follows the same order on every connection: it selects its domain, opens again the
+subscription of every tab the server had acknowledged, and attaches its transaction before any
+ordered request it holds goes out. A restoration belongs to the connection that sent it; when that
+connection ends before the reply, the next connection restores the tab again. A transaction that
+has finished, or can no longer be attached, ends only the commands issued in it: restorations,
+subscription changes, and commands issued outside the transaction keep their place.
+
 ```mermaid
 stateDiagram-v2
     [*] --> Connecting
@@ -1015,7 +1025,20 @@ subscription's queued events, reports a consumer overflow, and marks the subscri
 2 MiB, a single Row frame above 2 MiB, which the server may send, overflows it at once. The CLI
 bounds its terminal output to 128 lines and 1 MiB, cuts a line above 8 KiB, and reports how many
 lines it omitted. The web console keeps at most 256 lines and 256 KiB per REPL and per subscription
-tab, and marks where it omitted earlier lines.
+tab, and marks where it omitted earlier lines. It keeps the latest 256 commands and 256 KiB of its
+command history and the snapshot of the one domain it observes. It holds at most 64 requests of its
+controls waiting for a connection, carrying at most 4 MiB of text, and at most 256 held or awaiting
+their reply, carrying at most 16 MiB, and sends the ordered ones only while the server has room for
+them in flight; a request past either bound is not sent, and the control that issued it reports
+why. It drops the parts of a reply nobody awaits, such as a superseded
+completion.
+
+A tab whose generation the server ended with `SubscriptionEnded` turns ended in the web console. It
+keeps its rows and the reason, and it is not restored on a later connection, which would not change
+why the server ended it. The operator resubscribes it under the same name, which opens a new
+generation announcing the relay's current schema, or closes it. Closing an ended tab sends no
+deletion: the server keeps an ended name only until it is reused or the session ends, and nothing
+of the ended generation remains to release.
 
 ## Domain Clock Attachment
 
@@ -1063,6 +1086,11 @@ session already follows the clock moves the attachment to that session, whose fr
 the clock and its ticks. The web console does not follow domain clocks, and the shared binding does
 not expose them. Both requests are refused while the session holds a transaction, like every other
 session-local request.
+
+The CLI's `domain-clock` subcommand uses the Rust client's typed attach reply and clock event
+stream. It prints the reply and then the same state, tick, interruption, and end lines as its REPL,
+including the fresh state after the client restores an attachment. Ctrl-C sends a detach request
+before the process exits; an attach refusal exits nonzero with its typed reason.
 
 ## Resource Uploads
 
@@ -1351,8 +1379,9 @@ The protocol makes a client's view of its own work explicit rather than inferred
 - **Subscriptions.** A client learns of its own losses from `SubscriptionDeliveryLost`,
   `SubscriptionRowsSkipped`, and `SubscriptionEnded`, and the Rust client reports a lost session as
   an interruption of each subscription and clock, and each refused attempt to restore one as a
-  restoration failure with the server's message. Each node exports `nervix_session_subscriptions`,
-  the number of subscription leases it holds per relay, and
+  restoration failure with the server's message. The web console shows each tab's state on the
+  tab: pending, active, interrupted, restoring, ended, resubscribing, or closing. Each node exports
+  `nervix_session_subscriptions`, the number of subscription leases it holds per relay, and
   `nervix_session_subscription_dropped_rows_total`, the rows its `DROPPING` subscriptions discarded,
   both labeled by `domain` and `relay`; see
   [Metrics And Observability](./metrics-and-observability.md#raw-metrics). Skipped rows are reported
