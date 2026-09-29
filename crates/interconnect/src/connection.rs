@@ -14,10 +14,7 @@ use std::{
     io::Write as _,
     net::SocketAddr,
     ops::Deref,
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-    },
+    sync::Arc as StdArc,
     time::Duration,
 };
 
@@ -36,6 +33,7 @@ use nervix_execution::{
 use nervix_models::{
     ClusterNodeName, CoordinationIdentity, NodeEndpoint, RemoteAckOutcome, RemoteAckRegistration,
 };
+use nervix_primitives::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use strum::EnumCount as _;
 use tokio::{
     sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc},

@@ -7,15 +7,11 @@
 //! - **Depends on.** The store's database and executor.
 //! - **Must not know.** What the writes it makes durable hold, who waits for them, or replicas.
 
-#[cfg(not(feature = "shuttle"))]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
 use error_stack::{Report, ResultExt as _};
 use fjall::PersistMode;
 use meticulous::OptionExt as _;
 use nervix_execution::{MemoryClass, StorageClass};
-#[cfg(feature = "shuttle")]
-use shuttle::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::Notify;
 
 use super::{RuntimePersistenceError, RuntimeStateStore};

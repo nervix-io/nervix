@@ -13,6 +13,7 @@ default = []
 shuttle = [
   "dep:shuttle-tokio",
   "nervix-connector/shuttle",
+  "nervix-primitives/shuttle",
   "shuttle-tokio/shuttle",
 ]
 
@@ -27,6 +28,7 @@ meticulous = { workspace = true }
 mysql_async = { workspace = true, features = ["default-rustls"] }
 nervix-connector = { workspace = true }
 nervix-models = { workspace = true }
+nervix-primitives = { workspace = true }
 serde_json = { workspace = true }
 shuttle-tokio = { workspace = true, features = [
   "macros",

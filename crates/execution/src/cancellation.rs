@@ -1,7 +1,6 @@
 //! The signal a running job checks between its own bounded units.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
+use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 use triomphe::Arc;
 

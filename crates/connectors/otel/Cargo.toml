@@ -13,6 +13,7 @@ default = []
 shuttle = [
   "dep:shuttle-tokio",
   "nervix-connector/shuttle",
+  "nervix-primitives/shuttle",
   "shuttle-tokio/shuttle",
 ]
 
@@ -29,6 +30,7 @@ nervix-approx-into = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
+nervix-primitives = { workspace = true }
 opentelemetry-proto = { workspace = true, features = [
   "gen-tonic",
   "logs",

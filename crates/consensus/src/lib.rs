@@ -22,10 +22,7 @@ use std::{
     future::Future,
     io,
     path::{Path, PathBuf},
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc as StdArc,
     time::Duration,
 };
 
@@ -41,6 +38,7 @@ use nervix_models::{
     ResourceName, ResourceNodeStatus, ResourceUpload, ResourceUploadKey, ResourceVersion,
     ResourceVersionStatus, Statement, TransactionImpactReport, UserName,
 };
+use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use nervix_recovery::Discarded as _;
 pub use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, TransferLeaderRequest,

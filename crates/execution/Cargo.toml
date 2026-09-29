@@ -16,12 +16,13 @@ shuttle = [
   "dep:shuttle-parking-lot",
   "dep:shuttle-tokio",
   "dep:shuttle-tokio-util",
+  "nervix-primitives/shuttle",
   "shuttle-dashmap/shuttle",
   "shuttle-parking-lot/shuttle",
   "shuttle-tokio/shuttle",
   "shuttle-tokio-util/shuttle",
 ]
-turmoil = ["dep:turmoil"]
+turmoil = ["dep:turmoil", "nervix-primitives/turmoil"]
 
 [dependencies]
 arc-swap = { workspace = true }
@@ -29,6 +30,7 @@ arch-into = { workspace = true }
 dashmap = { workspace = true }
 error-stack = { workspace = true }
 meticulous = { workspace = true }
+nervix-primitives = { workspace = true }
 parking_lot = { workspace = true }
 shuttle = { workspace = true, optional = true }
 shuttle-dashmap = { workspace = true, optional = true }

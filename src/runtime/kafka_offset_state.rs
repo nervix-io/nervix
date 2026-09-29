@@ -1,11 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    num::NonZeroU64,
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicI64, AtomicU64, Ordering},
-    },
-};
+use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc as StdArc};
 
 use ahash::{HashMap, RandomState};
 #[cfg(test)]
@@ -18,6 +11,7 @@ use nervix_execution::sync::{ArcSwap, DashMap};
 use nervix_models::ClusterNodeName;
 #[cfg(test)]
 use nervix_models::KafkaPartitionSchedule;
+use nervix_primitives::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use tokio::sync::Notify;
 use triomphe::Arc;

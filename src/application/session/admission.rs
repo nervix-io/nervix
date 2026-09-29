@@ -7,8 +7,7 @@
 //! - **Depends on.** Tokio's notification primitive.
 //! - **Must not know.** What a request does once admitted, or how its replies travel.
 
-use std::sync::atomic::{AtomicU8, Ordering};
-
+use nervix_primitives::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::Notify;
 
 /// The stage a request was cancelled at.

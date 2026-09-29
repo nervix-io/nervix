@@ -1029,7 +1029,7 @@ audit:
 ratchet *args:
     python3 scripts/ratchet.py {{ args }}
 
-validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict validate-dns-dependencies
+validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-execution-mode-conflicts validate-dns-dependencies
 
 # Check each connector as a consumer root. Cargo tree limits feature unification to that root;
 # the full workspace build alone can hide a missing resolver feature in a leaf connector.
@@ -1112,7 +1112,7 @@ validate-dns-dependencies:
         exit 1
     fi
 
-validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict validate-dns-dependencies
+validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-execution-mode-conflicts validate-dns-dependencies
 
 # Shuttle's runner and synchronization wrappers belong only to modeled builds. Production package
 # graphs use the real synchronization crates directly and contain no Shuttle package.
@@ -1144,25 +1144,38 @@ validate-turmoil-dependencies:
         fi
     done
 
-# Keep a precise diagnostic when the two scheduler modes are accidentally selected together, in
-# every package that offers both.
-validate-simulation-feature-conflict:
+# Keep one precise diagnostic when execution modes are selected together. nervix-primitives owns
+# the rejection, so every pair of `loom`, `shuttle` and `turmoil`, and all three, fail there with the
+# modes named, including when separate dependencies enable them.
+validate-execution-mode-conflicts:
     #!/usr/bin/env bash
     set -euo pipefail
     diagnostics="$(mktemp)"
     trap 'rm -f "${diagnostics}"' EXIT
-    for package in nervix-execution nervix-interconnect; do
-        if cargo check --package "${package}" --features 'shuttle turmoil' --lib \
+    expect_conflict() {
+        local package="$1" features="$2"
+        shift 2
+        if cargo check --package "${package}" --features "${features}" --lib \
             >"${diagnostics}" 2>&1; then
-            echo "${package}: Shuttle and Turmoil unexpectedly compiled together" >&2
+            echo "${package} with ${features}: the modes unexpectedly compiled together" >&2
             exit 1
         fi
-        if ! grep -Fq 'Shuttle and Turmoil scheduler modes cannot be enabled together' \
-            "${diagnostics}"; then
-            cat "${diagnostics}" >&2
-            exit 1
-        fi
-    done
+        for pair in "$@"; do
+            if ! grep -Fq "the ${pair} execution modes cannot be enabled together" "${diagnostics}"; then
+                cat "${diagnostics}" >&2
+                echo "${package} with ${features}: no diagnostic naming ${pair}" >&2
+                exit 1
+            fi
+        done
+    }
+    expect_conflict nervix-primitives 'loom shuttle' '`loom` and `shuttle`'
+    expect_conflict nervix-primitives 'loom turmoil' '`loom` and `turmoil`'
+    expect_conflict nervix-primitives 'shuttle turmoil' '`shuttle` and `turmoil`'
+    expect_conflict nervix-primitives 'loom shuttle turmoil' \
+        '`loom` and `shuttle`' '`loom` and `turmoil`' '`shuttle` and `turmoil`'
+    # Two packages each select one mode; Cargo unifies both onto the owner.
+    expect_conflict nervix-interconnect 'shuttle nervix-execution/turmoil' \
+        '`shuttle` and `turmoil`'
 
 validate-clock-boundaries:
     python3 scripts/check_clock_boundaries.py

@@ -1,16 +1,10 @@
 //! One class's bounded pool of workers, and the admission that keeps its queue finite.
 
-use std::{
-    num::NonZeroUsize,
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::{num::NonZeroUsize, sync::Arc as StdArc, time::Duration};
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_primitives::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use thiserror::Error;
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError},

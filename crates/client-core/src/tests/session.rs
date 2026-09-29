@@ -11,7 +11,6 @@ use std::{
     net::SocketAddr,
     num::{NonZeroU64, NonZeroUsize},
     path::Path,
-    sync::atomic::{AtomicU64, Ordering},
     task::{Context, Poll},
     time::Duration,
 };
@@ -22,6 +21,7 @@ use nervix_models::{
     PlacementPolicy, RelayName, SchemaField, SubscriptionName, TransactionInspection,
     TransactionInspectionRejection, TransactionInspectionTarget,
 };
+use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use tokio::{
     net::TcpListener,
     sync::{Mutex, mpsc},

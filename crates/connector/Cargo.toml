@@ -10,7 +10,11 @@ workspace = true
 
 [features]
 default = []
-shuttle = ["dep:shuttle-tokio", "shuttle-tokio/shuttle"]
+shuttle = [
+  "dep:shuttle-tokio",
+  "nervix-primitives/shuttle",
+  "shuttle-tokio/shuttle",
+]
 
 [dependencies]
 arrow-array = { workspace = true }
@@ -18,6 +22,7 @@ async-trait = { workspace = true }
 error-stack = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
+nervix-primitives = { workspace = true }
 nervix-recovery = { workspace = true }
 reqwest = { workspace = true }
 rustls = { workspace = true }

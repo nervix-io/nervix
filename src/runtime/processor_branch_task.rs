@@ -1825,13 +1825,12 @@ pub(super) async fn restore_processor_branch_lru_snapshot(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     use ahash::HashMap;
     use nervix_models::{
         CommandExecutionReference, CreateSchema, ErrorPolicies, MessageErrorPolicy, ModelKind,
         ModelName, NodeRef, ParseAsType, RelayName, SchemaField,
     };
+    use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
     use tokio::{
         sync::{mpsc, watch},
         time::{Duration, timeout},

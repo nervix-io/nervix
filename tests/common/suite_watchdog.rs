@@ -41,12 +41,10 @@ use std::{
     fmt,
     future::Future,
     io::Write as _,
-    sync::{
-        Arc as StdArc, LazyLock,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc as StdArc, LazyLock},
 };
 
+use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use nervix_recovery::Reported as _;
 use parking_lot::Mutex;
 use tokio::time::Duration;
