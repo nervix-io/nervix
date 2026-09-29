@@ -12,7 +12,9 @@ use nervix_models::ModelKind;
 
 use super::{
     ChoiceControl, ChoiceControlSignals, ChoiceLoad, CodecFormatDraft, CreateSignals,
-    RequestSender, event_target_value, request_choices,
+    RequestSender, event_target_value,
+    ingestor_route_draft::{AssignmentDraft, MessageErrorDraft},
+    request_choices,
 };
 
 #[component]
@@ -244,6 +246,39 @@ pub(super) fn selected_choice(
             .key_field
             .as_ref()
             .is_some_and(|selected| selected.is_current() && selected.name() == field),
+        (ChoiceControl::IngestSourceRef, ChoiceValue::Model(node)) => {
+            signals.ingestor.get().source.selects_reference(node)
+        }
+        (ChoiceControl::IngestCodec, ChoiceValue::Model(node)) => signals
+            .ingestor
+            .get()
+            .codec
+            .as_ref()
+            .is_some_and(|selected| selected.selects(ModelKind::Codec, node)),
+        (ChoiceControl::IngestRouteBranch, ChoiceValue::Model(node)) => {
+            signals.ingestor.get().active_route().is_some_and(|route| {
+                node.kind == ModelKind::Branch
+                    && route
+                        .branch
+                        .current_branch()
+                        .is_some_and(|branch| branch.as_str() == node.identifier.as_str())
+            })
+        }
+        (ChoiceControl::IngestRouteRelay, ChoiceValue::Model(node)) => {
+            signals.ingestor.get().active_route().is_some_and(|route| {
+                route
+                    .relay
+                    .as_ref()
+                    .is_some_and(|selected| selected.selects(ModelKind::Relay, node))
+            })
+        }
+        (ChoiceControl::IngestErrorRelay, ChoiceValue::Model(node)) => {
+            signals.ingestor.get().active_route().is_some_and(|route| {
+                route.message_error.current_relay().is_some_and(|relay| {
+                    node.kind == ModelKind::Relay && relay.as_str() == node.identifier.as_str()
+                })
+            })
+        }
         // A field reference is inserted into the filter rather than held as a selection.
         _ => false,
     }
@@ -362,6 +397,66 @@ pub(super) fn select_choice(signals: CreateSignals, control: ChoiceControl, valu
         }
         (ChoiceControl::HashKey, ChoiceValue::Field(field)) => {
             signals.hash_map.update(|draft| draft.select_key(field));
+        }
+        (ChoiceControl::IngestSourceRef, ChoiceValue::Model(node)) => {
+            signals
+                .ingestor
+                .update(|draft| draft.source.select_reference(&node));
+        }
+        (ChoiceControl::IngestCodec, ChoiceValue::Model(node)) => {
+            signals.ingestor.update(|draft| draft.select_codec(&node));
+        }
+        (ChoiceControl::IngestTimestampField, ChoiceValue::Field(field)) => {
+            signals
+                .ingestor
+                .update(|draft| draft.timestamp.select_field(field));
+        }
+        (ChoiceControl::IngestInputField, ChoiceValue::Field(field)) => {
+            signals.ingestor.update(|draft| {
+                if let Some(route) = draft.active_route_mut() {
+                    route.inherit.add_field(field);
+                }
+            });
+        }
+        (ChoiceControl::IngestRouteBranch, ChoiceValue::Model(node)) => {
+            signals.ingestor.update(|draft| draft.select_branch(&node));
+        }
+        (ChoiceControl::IngestRouteRelay, ChoiceValue::Model(node)) => {
+            signals.ingestor.update(|draft| {
+                if let Some(route) = draft.active_route_mut() {
+                    route.select_relay(&node);
+                }
+            });
+        }
+        (ChoiceControl::IngestOutputField, ChoiceValue::Field(field)) => {
+            signals.ingestor.update(|draft| {
+                if let Some(route) = draft.active_route_mut() {
+                    route.add_assignment(field);
+                }
+            });
+        }
+        (ChoiceControl::IngestBranchField, ChoiceValue::Field(field)) => {
+            signals.ingestor.update(|draft| {
+                if let Some(route) = draft.active_route_mut() {
+                    route.branch.add_assignment(field);
+                }
+            });
+        }
+        (ChoiceControl::IngestErrorRelay, ChoiceValue::Model(node)) => {
+            signals.ingestor.update(|draft| {
+                if let Some(route) = draft.active_route_mut() {
+                    route.message_error.select_relay(&node);
+                }
+            });
+        }
+        (ChoiceControl::IngestErrorField, ChoiceValue::Field(field)) => {
+            signals.ingestor.update(|draft| {
+                if let Some(route) = draft.active_route_mut()
+                    && let MessageErrorDraft::SendTo { assignments, .. } = &mut route.message_error
+                {
+                    assignments.push(AssignmentDraft::selected(field));
+                }
+            });
         }
         _ => {}
     }

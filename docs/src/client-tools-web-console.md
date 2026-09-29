@@ -58,9 +58,9 @@ domains, non-relay graph nodes, and relays across the current cluster graph.
 
 The top bar's **Create** menu opens keyboard-accessible forms for domains, users, resource
 catalogs, schemas, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps, Roto UDFs,
-relays, branches, and subscriptions. The resource group in the sidebar also provides a contextual
-create action. A form keeps its unfinished draft when it closes, restores focus to the action that
-opened it, reports validation and server failures inline, and shows the canonical NSPL statement
+relays, branches, ingestors, and subscriptions. The resource group in the sidebar also provides a
+contextual create action. A form keeps its unfinished draft when it closes, restores focus to the
+action that opened it, reports validation and server failures inline, and shows the canonical NSPL statement
 before submission.
 The domain form supports paced and unpaced clocks, period and skew for a paced clock, placement
 policy, and `IF NOT EXISTS`. User and resource forms support their corresponding names and the
@@ -188,6 +188,22 @@ chooses a safe dollar-quote delimiter around it. The server checks the declared 
 and runs the Roto tests before **Completed** appears. Compilation, type, or test failure keeps the
 signature and source editable. A completed function is available to `udf::` calls in later
 commands under the same session and domain.
+
+An ingestor form offers all 13 current source families: HTTP polling, Kafka, Pulsar, MQTT, NATS,
+RabbitMQ, Redis Pub/Sub, Prometheus, ZeroMQ, SQS, endpoint, WebSocket client, and Syslog. Its
+source client or endpoint is a typed choice limited to that source family. The source's own fields,
+delivery mode, quiesce mode, and required durations or sizes appear as explicit controls. The
+decoding codec list contains only codecs that support decoding. Timestamp behavior must be chosen
+explicitly: source timestamp, `NOW`, or `AT` a typed field from the codec's output schema.
+
+Each ingestor route explicitly chooses an unbranched or named branch and a relay with that exact
+branch declaration. Routes can be added, removed, and moved in order. They edit inheritance,
+ordered output assignments and function invocations, an optional `WHERE` expression, branch key
+assignments, an explicit flush policy, and a route-local message error policy. An ingestor error
+route selects an unbranched relay and its own field assignments. The node-wide general error
+policy is also required. The draft retains incomplete values and shows the canonical NSPL preview
+only when every required choice and expression is valid. It submits through the usual durable
+command path, including attached transactions and reconnect recovery.
 
 ## The Execution Graph
 

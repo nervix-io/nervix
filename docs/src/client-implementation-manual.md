@@ -180,7 +180,14 @@ the download of a backup's archive; see [Backup Downloads](#backup-downloads).
   domain followed by a relay `Model` reference for relay fields; domain followed by a codec
   `Model` reference for the fields of its output schema; and domain followed by a
   `Resource` reference for completed resource versions. It MUST use the distinct wire-schema
-  targets when a form requires an exact format.
+  targets when a form requires an exact format. An ingestor source-reference target MUST carry a
+  domain and MUST match the selected source family; the endpoint source target returns endpoints
+  and the others return clients of the matching transport. The ingestor codec target carries a
+  domain and returns only decoding codecs. Its unbranched relay target carries a domain, while its
+  branched relay target carries a domain followed by a branch `Model` reference. Ingestor error
+  relays use the unbranched target. A branch-field lookup carries a domain followed by a branch
+  `Model` reference. Decoded and relay output fields
+  use the codec-field and relay-field targets above.
 - **Q-2.** A client MUST use the returned `ChoiceValue`, rather than its presentation label, for
   selection. For completed resource versions it MUST handle `ResourceVersionNumber` and
   `LatestResourceVersion` as distinct values. It MUST NOT offer a version absent from the result as
