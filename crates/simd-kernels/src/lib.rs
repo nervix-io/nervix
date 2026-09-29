@@ -8,6 +8,7 @@
 //! - **Must not know.** Arrow, Nervix models, codecs, metric recorders, or the consumers of a
 //!   classified buffer.
 
+mod admission;
 mod elapsed;
 
 use std::sync::OnceLock;
@@ -16,9 +17,12 @@ use error_stack::Report;
 use fearless_simd::{Level, dispatch, prelude::*};
 use thiserror::Error;
 
-pub use crate::elapsed::{
-    ElapsedBucket, ElapsedHistogram, ElapsedLayout, ElapsedLayoutError, elapsed_nanos,
-    latest_instant,
+pub use crate::{
+    admission::AdmissionKernel,
+    elapsed::{
+        ElapsedBucket, ElapsedHistogram, ElapsedLayout, ElapsedLayoutError, elapsed_nanos,
+        latest_instant,
+    },
 };
 
 static LEVEL: OnceLock<Level> = OnceLock::new();

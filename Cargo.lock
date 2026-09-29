@@ -7329,6 +7329,8 @@ name = "nervix-models"
 version = "0.1.0-dev"
 dependencies = [
  "ahash",
+ "arrow-array",
+ "arrow-buffer",
  "arrow-schema",
  "blake3",
  "chrono",
@@ -7338,6 +7340,7 @@ dependencies = [
  "meticulous",
  "nervix-approx-into",
  "nervix-primitives",
+ "nervix-simd-kernels",
  "nonzero_ext",
  "rkyv",
  "rstest",

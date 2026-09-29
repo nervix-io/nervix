@@ -35,5 +35,10 @@ triomphe = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["serde"] }
 
+[target.'cfg(target_pointer_width = "64")'.dependencies]
+arrow-array = { workspace = true }
+arrow-buffer = { workspace = true }
+nervix-simd-kernels = { workspace = true }
+
 [dev-dependencies]
 rstest = { workspace = true }

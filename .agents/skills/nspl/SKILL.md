@@ -164,7 +164,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   time at delivery, including after quiescing; explicit source times remain unchanged. Check
   admission against the newest 256 reached logical centers with inclusive `SKEW`, independently
   of tick notification delivery. Never scale source timestamps by `TIME RATE` or admit against
-  an unreached future center.
+  an unreached future center. Rejected or missing timestamps follow the route's message-error
+  policy per row with code `validation` and operation `admit`.
 - Treat HTTP `EVERY`, Prometheus `EVERY`, and generator `EACH` as domain-clock cadence. HTTP and
   generators have an immediate first occurrence; Prometheus first becomes due after one interval.
   Later occurrences stay anchored, coalesce missed periods into one newest-due execution, and

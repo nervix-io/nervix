@@ -6,6 +6,7 @@
 //! - **Must not know.** NSPL parsing, consensus decisions or source transport lifecycle.
 
 use ahash::RandomState;
+use arrow_buffer::BooleanBuffer;
 use bytes::Bytes;
 use error_stack::ResultExt as _;
 use indexmap::{Equivalent, IndexMap};
@@ -347,7 +348,7 @@ pub(super) struct RawIngestDispatch<'a> {
 /// to the record that produced them after filtering.
 pub(super) struct IngestGroupRows {
     pub(super) batch: Arc<RuntimeRecordBatch>,
-    pub(super) record_metadata: Vec<RuntimeRecordMetadata>,
+    pub(super) record_metadata: RecordMetadataColumns,
     pub(super) ingest_metadata: IngestFilterMapMetadata,
     pub(super) acks: Vec<AckSet>,
 }
@@ -542,13 +543,12 @@ impl PendingIngestGroup {
         }
         Ok(IngestGroupRows {
             batch: Arc::new(batch),
-            record_metadata: self
-                .ingested_at
-                .into_iter()
-                .map(|ingested_at| {
-                    RuntimeRecordMetadata::from_ingested_at_watermarks(ingested_at, ingested_at)
-                })
-                .collect(),
+            record_metadata: RecordMetadataColumns::from_ingestion_nanos(
+                self.ingested_at
+                    .into_iter()
+                    .map(Timestamp::unix_nanos)
+                    .collect(),
+            ),
             ingest_metadata,
             acks: self.acks,
         })
@@ -573,7 +573,7 @@ impl IngestGroupRows {
     }
 
     pub(super) fn row(&self, row: usize) -> error_stack::Result<RuntimeRow, IngestGroupError> {
-        let metadata = self.record_metadata.get(row).cloned().ok_or_else(|| {
+        let metadata = self.record_metadata.row(row).ok_or_else(|| {
             Report::new(IngestGroupError::RecordMetadataRowOutOfBounds {
                 row,
                 record_metadata_rows: self.record_metadata.len(),
@@ -588,7 +588,10 @@ impl IngestGroupRows {
 
     /// Keeps only the rows selected by `keep`, moving records, metadata and acks
     /// together so the three stay row-aligned.
-    pub(super) fn select(self, keep: &[bool]) -> error_stack::Result<Self, IngestGroupError> {
+    pub(super) fn select(
+        self,
+        keep: &BooleanBuffer,
+    ) -> error_stack::Result<Self, IngestGroupError> {
         let row_count = self.len();
         if self.record_metadata.len() != row_count
             || self.ingest_metadata.len() != row_count
@@ -607,8 +610,13 @@ impl IngestGroupRows {
                 found: keep.len(),
             }));
         }
-        let selected = |row: usize| keep.get(row).copied().unwrap_or(false);
-        let predicate = BooleanArray::from_iter((0..row_count).map(|row| Some(selected(row))));
+        if keep.count_set_bits() == row_count {
+            return Ok(self);
+        }
+        let selected_rows = (0..row_count)
+            .filter(|row| keep.value(*row))
+            .collect::<Vec<_>>();
+        let predicate = BooleanArray::new(keep.clone(), None);
         Ok(Self {
             batch: Arc::new(self.batch.filter(&predicate).change_context(
                 IngestGroupError::RuntimeSchema {
@@ -617,10 +625,8 @@ impl IngestGroupRows {
             )?),
             record_metadata: self
                 .record_metadata
-                .into_iter()
-                .enumerate()
-                .filter_map(|(row, metadata)| selected(row).then_some(metadata))
-                .collect(),
+                .take(&selected_rows)
+                .verified("the selected rows are within the metadata length checked above"),
             ingest_metadata: self.ingest_metadata.select(keep).change_context(
                 IngestGroupError::Metadata {
                     operation: IngestMetadataOperation::Select,
@@ -630,14 +636,14 @@ impl IngestGroupRows {
                 .acks
                 .into_iter()
                 .enumerate()
-                .filter_map(|(row, acks)| selected(row).then_some(acks))
+                .filter_map(|(row, acks)| keep.value(row).then_some(acks))
                 .collect(),
         })
     }
 }
 
-/// An ingestor `FILTER WHERE` message error, with the row it came from.
-pub(super) struct IngestorFilterWhereError<'a> {
+/// An ingestor-wide message error, with the row it came from.
+pub(super) struct IngestorMessageError<'a> {
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
     pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
@@ -1444,7 +1450,7 @@ impl Runtime {
                         ..
                     } => {
                         let acks = std::mem::replace(&mut rows.acks[row], AckSet::empty());
-                        self.handle_ingestor_filter_where_error(IngestorFilterWhereError {
+                        self.handle_ingestor_message_error(IngestorMessageError {
                             domain,
                             ingestor,
                             output_routes,
@@ -1459,6 +1465,7 @@ impl Runtime {
                     }
                 }
             }
+            let keep = BooleanBuffer::collect_bool(keep.len(), |row| keep[row]);
             rows = rows.select(&keep)?;
             if !transformed.is_empty() {
                 transformed.sort_unstable_by_key(|(row, _)| *row);
@@ -1478,35 +1485,61 @@ impl Runtime {
             return Ok(());
         }
 
-        // Timestamp resolution and admission stay per record: `TIMESTAMP AT` reads a
-        // field of the record itself, and a paced domain admits each event on its own
-        // merits. Either rejection fails the group, exactly as the per-record path did.
-        let mut event_timestamps = Vec::with_capacity(rows.len());
-        for row in 0..rows.len() {
-            let record = rows.row(row)?;
-            let event_timestamp = ingestion_time
-                .select(timestamp_source, &record)
-                .change_context(IngestGroupError::IngestionTime {
-                    domain: domain.clone(),
-                    ingestor: ingestor.clone(),
-                })?;
-            event_timestamps.push(event_timestamp);
+        // Resolve the event timestamp once from the decoded Arrow batch. The window kernel
+        // produces one bit per row, so a rejected event does not discard its admitted neighbors.
+        let event_timestamps = ingestion_time
+            .select_column(timestamp_source, &rows.batch, &rows.record_metadata)
+            .change_context(IngestGroupError::IngestionTime {
+                domain: domain.clone(),
+                ingestor: ingestor.clone(),
+            })?;
+        let admitted = ingestion_time.admit_column(&event_timestamps);
+        let error_fields = match timestamp_source {
+            Some(IngestTimestampSource::At(field)) => vec![FieldPath::new(field.as_str())],
+            _ => Vec::new(),
+        };
+        if admitted.count_set_bits() != rows.len() {
+            for row in 0..rows.len() {
+                tokio::task::consume_budget().await;
+                if admitted.value(row) {
+                    continue;
+                }
+                let missing = event_timestamps.is_null(row);
+                let error = structured_message_error(
+                    execution_now,
+                    MessageErrorCode::Validation,
+                    ingestion_time
+                        .rejection(timestamp_source, missing)
+                        .to_string(),
+                    MessageErrorOperation::Admit,
+                    None,
+                    error_fields.clone(),
+                );
+                let acks = std::mem::replace(&mut rows.acks[row], AckSet::empty());
+                self.handle_ingestor_message_error(IngestorMessageError {
+                    domain,
+                    ingestor,
+                    output_routes,
+                    record: &rows.row(row)?,
+                    ingest_metadata: rows.metadata_row(row),
+                    acks,
+                    error,
+                    materialized_state: HashMap::default(),
+                    execution_now,
+                })
+                .await;
+            }
         }
-        rows.record_metadata = std::mem::take(&mut rows.record_metadata)
-            .into_iter()
-            .zip(&event_timestamps)
-            .map(|(_, event_timestamp)| {
-                RuntimeRecordMetadata::from_ingested_at_watermarks(
-                    *event_timestamp,
-                    *event_timestamp,
-                )
-            })
-            .collect();
+        rows.record_metadata = RecordMetadataColumns::from_timestamp_column(&event_timestamps);
+        rows = rows.select(&admitted)?;
+        if rows.is_empty() {
+            return Ok(());
+        }
         let estimated_bytes = rows.batch.estimated_bytes();
         let row_count: u64 = rows.len().arch_into();
         // One decoded group is one metrics recording unit. Its latest event time gives the
         // rolling domain rate the group's high-water mark.
-        let domain_timestamp = event_timestamps.iter().copied().max();
+        let domain_timestamp = rows.record_metadata.latest_high_watermark();
         collector
             .metrics
             .observe(row_count, estimated_bytes, domain_timestamp);
@@ -1770,13 +1803,10 @@ impl Runtime {
         Ok(())
     }
 
-    /// Fans an ingestor `FILTER WHERE` message error out to every output route's error
-    /// policy, splitting acks the same way a routed message would have.
-    pub(super) async fn handle_ingestor_filter_where_error(
-        &self,
-        handling: IngestorFilterWhereError<'_>,
-    ) {
-        let IngestorFilterWhereError {
+    /// Fans an ingestor-wide message error out to every output route's error policy, splitting
+    /// ACKs the same way a routed message would have.
+    pub(super) async fn handle_ingestor_message_error(&self, handling: IngestorMessageError<'_>) {
+        let IngestorMessageError {
             domain,
             ingestor,
             output_routes,
@@ -1856,11 +1886,9 @@ impl Runtime {
         )?;
         let mut row_acks = Vec::with_capacity(row_count);
         acks.split_into(row_count, &mut row_acks);
+        // Every row of the batch was received at the one instant the batch was admitted.
         let record_metadata =
-            vec![
-                RuntimeRecordMetadata::from_ingested_at_watermarks(ingested_at, ingested_at);
-                row_count
-            ];
+            RecordMetadataColumns::from_ingestion_nanos(vec![ingested_at.unix_nanos(); row_count]);
         let rows = IngestGroupRows {
             batch: Arc::new(batch),
             record_metadata,

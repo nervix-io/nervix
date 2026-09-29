@@ -195,6 +195,11 @@ the connector continues lending immutable payload bytes, and the host reuses its
 group closes. Compiled field keys direct borrowed JSON values into typed columns without a serde
 tree or an intermediate row representation. A rejected payload abandons only the partial Arrow row
 it started, preserving the accepted rows and transport positions around it.
+At group execution, the host resolves event timestamps into one Arrow column and tests paced-domain
+admission with one bitmap. It selects the accepted batch and its ACK and metadata sidecars together.
+Each timestamp rejection retains the source row's ACK for its route-local message-error delivery;
+accepted neighbors continue into the graph. A source position is acknowledged only after every
+message it unfolded into has completed its own route or error delivery.
 
 The host runs three source loop families, with a listener using the broker loop:
 

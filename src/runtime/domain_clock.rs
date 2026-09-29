@@ -1149,8 +1149,8 @@ mod tests {
     use crate::{
         application::{ClockDeliveryOrder, NextClockFrame},
         runtime::{
-            RuntimeValue, domain, named, paced_domain_state, test_domain_clock,
-            test_domain_clock_authority, unpaced_domain_state,
+            RecordMetadataColumns, RuntimeValue, domain, named, paced_domain_state,
+            test_domain_clock, test_domain_clock_authority, unpaced_domain_state,
         },
         runtime_schema::test_runtime_row,
     };
@@ -1644,13 +1644,16 @@ mod tests {
             "occurred_at".to_string(),
             RuntimeValue::Datetime(Timestamp::from_unix_nanos(0).into_datetime().fixed_offset()),
         )]);
-        let admission = time.select(
+        let admission = time.select_column(
             Some(&IngestTimestampSource::At(named("occurred_at"))),
-            &record,
+            &record.one_row_batch(),
+            &RecordMetadataColumns::from_rows([record.metadata().clone()]),
         );
 
         assert!(
-            admission.is_ok(),
+            admission
+                .as_ref()
+                .is_ok_and(|column| time.admit_column(column).value(0)),
             "logical origin was rejected: {admission:?}"
         );
     }

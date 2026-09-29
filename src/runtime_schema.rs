@@ -1557,6 +1557,7 @@ impl RuntimeRow {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn value(
         &self,
         name: &str,
