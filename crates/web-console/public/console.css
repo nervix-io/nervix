@@ -3185,6 +3185,146 @@ button {
   color: var(--cyan);
 }
 
+.create-ingestor-source,
+.create-ingestor-offset,
+.create-ingestor-mode,
+.create-ingestor-mqtt-session,
+.create-ingestor-mqtt-qos,
+.create-ingestor-quiesce,
+.create-ingestor-overflow,
+.create-ingestor-timestamp,
+.create-ingestor-general-error,
+.create-ingestor-branching,
+.create-ingestor-inherit,
+.create-ingestor-flush,
+.create-ingestor-message-error {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.create-ingestor-source legend,
+.create-ingestor-offset legend,
+.create-ingestor-mode legend,
+.create-ingestor-mqtt-session legend,
+.create-ingestor-mqtt-qos legend,
+.create-ingestor-quiesce legend,
+.create-ingestor-overflow legend,
+.create-ingestor-timestamp legend,
+.create-ingestor-general-error legend,
+.create-ingestor-branching legend,
+.create-ingestor-inherit legend,
+.create-ingestor-flush legend,
+.create-ingestor-message-error legend {
+  color: var(--text-d);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.create-ingestor-source button,
+.create-ingestor-offset button,
+.create-ingestor-mode button,
+.create-ingestor-mqtt-session button,
+.create-ingestor-mqtt-qos button,
+.create-ingestor-quiesce button,
+.create-ingestor-overflow button,
+.create-ingestor-timestamp button,
+.create-ingestor-general-error button,
+.create-ingestor-route-list button,
+.create-ingestor-route-actions button,
+.create-ingestor-branching button,
+.create-ingestor-inherit button,
+.create-ingestor-flush button,
+.create-ingestor-message-error button,
+.create-ingestor-assignment button,
+.create-ingestor-inherited-field button,
+.create-ingestor-invocations button {
+  min-height: 29px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-hi);
+  color: var(--text-c);
+  font: inherit;
+  font-size: 10px;
+}
+
+.create-ingestor-source button.active,
+.create-ingestor-offset button.active,
+.create-ingestor-mode button.active,
+.create-ingestor-mqtt-session button.active,
+.create-ingestor-mqtt-qos button.active,
+.create-ingestor-quiesce button.active,
+.create-ingestor-overflow button.active,
+.create-ingestor-timestamp button.active,
+.create-ingestor-general-error button.active,
+.create-ingestor-route-list button.active,
+.create-ingestor-branching button.active,
+.create-ingestor-inherit button.active,
+.create-ingestor-flush button.active,
+.create-ingestor-message-error button.active {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  background: color-mix(in srgb, var(--cyan) 13%, var(--surface));
+}
+
+.create-ingestor-routes,
+.create-ingestor-route,
+.create-ingestor-invocations,
+.create-ingestor-branch-assignments,
+.create-ingestor-output-assignments,
+.create-ingestor-error-assignments {
+  display: grid;
+  gap: 10px;
+}
+
+.create-ingestor-routes,
+.create-ingestor-route {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.create-ingestor-routes h3,
+.create-ingestor-invocations h4 {
+  margin: 0;
+  color: var(--text-c);
+  font-size: 11px;
+}
+
+.create-ingestor-route-list,
+.create-ingestor-route-actions,
+.create-ingestor-assignment,
+.create-ingestor-inherited-field,
+.create-ingestor-invocation,
+.create-ingestor-invocation-argument-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.create-ingestor-assignment-expression,
+.create-ingestor-invocation-function,
+.create-ingestor-invocation-argument {
+  flex: 1 1 150px;
+  min-width: 0;
+  height: 35px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
 .create-choice-state,
 .create-validation,
 .create-error,

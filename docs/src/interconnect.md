@@ -212,11 +212,12 @@ applies only as far as the name server the configuration names applies it, for e
 `systemd-resolved` stub at `127.0.0.53`. Docker's embedded DNS and Kubernetes cluster DNS, with
 their search lists and `ndots`, are reached through the `resolv.conf` those platforms provide.
 
-The node resolver also serves HTTP polling, Prometheus, Sentry, OTEL HTTP, Iceberg REST and
-object-store clients, RabbitMQ sources and sinks, Syslog emission, WebSocket client ingestion,
-ClickHouse emission, and SQS sources and sinks. Other connectors and client libraries still resolve
-through their own drivers. The ledger in `tests/dns-resolution-ledger.md` records each boundary and
-its current owner.
+The node resolver also serves HTTP polling, Prometheus, Sentry, OTEL HTTP and gRPC, Iceberg REST
+and object-store clients, RabbitMQ sources and sinks, Syslog emission, WebSocket client ingestion,
+ClickHouse emission, SQS sources and sinks, and the node's client session calls to a peer's session
+service during shutdown drain. Other connectors still resolve through their own drivers. Native
+CLI and SDK sessions load their own Hickory resolver or reuse one supplied by their owner. The
+ledger in `tests/dns-resolution-ledger.md` records each boundary and its current owner.
 
 ## Peer Identity And Authentication
 

@@ -100,6 +100,7 @@ impl Failure {
             | ClientError::ReadRestoreArchive { .. }
             | ClientError::EmptyRestoreArchive { .. } => FailureKind::InvalidArgument,
             ClientError::TlsRequired
+            | ClientError::LoadDnsConfiguration(_)
             | ClientError::ConfigureTls(_)
             | ClientError::ConnectServer(_)
             | ClientError::StartSession(_)

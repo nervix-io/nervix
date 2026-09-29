@@ -8,7 +8,7 @@
 
 use std::{
     convert::Infallible,
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     num::{NonZeroU64, NonZeroUsize},
     path::Path,
     task::{Context, Poll},
@@ -16,6 +16,7 @@ use std::{
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_dns::{DnsConfiguration, DnsLookupError, DnsLookupFailure, DnsResolver, NameServers};
 use nervix_models::{
     ClusterNodeName, CommandExecutionReference, DomainPace, DomainStatus, FieldName, ParseAsType,
     PlacementPolicy, RelayName, SchemaField, SubscriptionName, TransactionInspection,
@@ -23,6 +24,7 @@ use nervix_models::{
 };
 use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use nervix_recovery::Discarded as _;
+use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
 use tokio::{
     net::TcpListener,
     sync::{Mutex, mpsc},
@@ -42,9 +44,9 @@ use url::Url;
 #[cfg(feature = "autocomplete")]
 use crate::wire::{SuggestOutcome, Suggestion, SuggestionKind, SuggestionStatus, TextEdit};
 use crate::{
-    Client, ClientError, CommandDisposition, ConnectOptions, DomainName, Leadership, OutcomeOrigin,
-    ResourceUploadIdentity, ResourceUploadOutcome, SubscriptionEvent, SubscriptionLifecycle,
-    SubscriptionRequest,
+    Client, ClientError, CommandDisposition, ConnectDns, ConnectOptions, DomainName, Leadership,
+    OutcomeOrigin, ResourceUploadIdentity, ResourceUploadOutcome, SubscriptionEvent,
+    SubscriptionLifecycle, SubscriptionRequest,
     wire::{
         Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection,
         ChoiceStatus, ChoiceTarget, ChoiceValue, ClientFrame, ClientMessage, ClientRequest,
@@ -449,6 +451,144 @@ impl TestServer {
             .await
             .discarded("the server task only ever ends by being aborted");
     }
+}
+
+#[tokio::test]
+async fn native_session_uses_ordered_fixture_addresses_and_original_host() {
+    let mut server = TestServer::start().await;
+    let authority = DnsAuthority::start_on_loopback()
+        .await
+        .assured("the fixture can bind a local DNS port");
+    let name = "session.nervix.test";
+    authority.set(
+        name,
+        DnsAnswer::Addresses {
+            addresses: vec![
+                IpAddr::V4(Ipv4Addr::new(127, 0, 5, 3)),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ],
+            ttl: Duration::from_secs(1),
+        },
+    );
+    let files = tempfile::tempdir().assured("a DNS fixture directory can be created");
+    let resolver_configuration = files.path().join("resolv.conf");
+    let hosts_file = files.path().join("hosts");
+    std::fs::write(
+        &resolver_configuration,
+        "search --\noptions ndots:1 timeout:1 attempts:1\n",
+    )
+    .assured("the fixture resolver configuration can be written");
+    std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
+    let dns = DnsResolver::load(DnsConfiguration {
+        resolver_configuration,
+        hosts_file,
+        name_servers: NameServers::Explicit(vec![authority.address()]),
+    })
+    .await
+    .assured("the fixture DNS configuration is valid");
+    let options = ConnectOptions {
+        dns: ConnectDns::Resolver(dns),
+        connect_timeout: Duration::from_secs(10),
+        ..ConnectOptions::default()
+    };
+    let endpoint = format!("http://{name}:{}", server.address.port());
+    let _client = within_deadline(Client::connect_with_options(endpoint, None, options))
+        .await
+        .assured("the second DNS answer reaches the session server");
+    let _exchange = server.next_exchange().await;
+    assert!(authority.questions_for(name) > 0);
+}
+
+#[tokio::test]
+async fn native_session_connection_deadline_cancels_a_silent_dns_lookup() {
+    let authority = DnsAuthority::start_on_loopback()
+        .await
+        .assured("the fixture can bind a local DNS port");
+    let name = "silent-session.nervix.test";
+    authority.set(name, DnsAnswer::Silent);
+    let files = tempfile::tempdir().assured("a DNS fixture directory can be created");
+    let resolver_configuration = files.path().join("resolv.conf");
+    let hosts_file = files.path().join("hosts");
+    std::fs::write(
+        &resolver_configuration,
+        "search --\noptions ndots:1 timeout:20 attempts:1\n",
+    )
+    .assured("the fixture resolver configuration can be written");
+    std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
+    let dns = DnsResolver::load(DnsConfiguration {
+        resolver_configuration,
+        hosts_file,
+        name_servers: NameServers::Explicit(vec![authority.address()]),
+    })
+    .await
+    .assured("the fixture DNS configuration is valid");
+    let options = ConnectOptions {
+        dns: ConnectDns::Resolver(dns),
+        connect_timeout: Duration::from_millis(200),
+        retry_timeout: Duration::from_secs(1),
+        ..ConnectOptions::default()
+    };
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        Client::connect_with_options(format!("http://{name}:4317"), None, options),
+    )
+    .await
+    .assured(
+        "the client's connection deadline cancels DNS before the authority's 20-second silence",
+    );
+    assert!(matches!(result, Err(ClientError::ConnectServer(_))));
+    assert!(authority.questions_for(name) > 0);
+}
+
+#[tokio::test]
+async fn native_session_connection_error_preserves_the_typed_dns_failure() {
+    let authority = DnsAuthority::start_on_loopback()
+        .await
+        .assured("the fixture can bind a local DNS port");
+    let name = "missing-session.nervix.test";
+    authority.set(
+        name,
+        DnsAnswer::NameNotFound {
+            negative_ttl: Duration::from_secs(1),
+        },
+    );
+    let files = tempfile::tempdir().assured("a DNS fixture directory can be created");
+    let resolver_configuration = files.path().join("resolv.conf");
+    let hosts_file = files.path().join("hosts");
+    std::fs::write(
+        &resolver_configuration,
+        "search --\noptions ndots:1 timeout:1 attempts:1\n",
+    )
+    .assured("the fixture resolver configuration can be written");
+    std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
+    let dns = DnsResolver::load(DnsConfiguration {
+        resolver_configuration,
+        hosts_file,
+        name_servers: NameServers::Explicit(vec![authority.address()]),
+    })
+    .await
+    .assured("the fixture DNS configuration is valid");
+    let Err(error) = Client::connect_with_options(
+        format!("http://{name}:4317"),
+        None,
+        ConnectOptions {
+            dns: ConnectDns::Resolver(dns),
+            connect_timeout: Duration::from_secs(2),
+            ..ConnectOptions::default()
+        },
+    )
+    .await
+    else {
+        panic!("the missing name cannot open a native session");
+    };
+    let ClientError::ConnectServer(connect_error) = error else {
+        panic!("DNS resolution should be classified as a connection failure");
+    };
+    let lookup = DnsLookupError::find_in(&connect_error)
+        .assured("the Tonic connection error retains the resolver's typed cause");
+    assert_eq!(lookup.name(), name);
+    assert_eq!(lookup.failure(), DnsLookupFailure::NameNotFound);
+    assert!(authority.questions_for(name) > 0);
 }
 
 #[tokio::test]
@@ -1534,10 +1674,19 @@ async fn a_command_waits_for_an_election_and_is_sent_again_with_its_reference() 
 }
 
 #[tokio::test]
-async fn a_command_redirect_keeps_its_execution_reference() {
+async fn a_command_redirect_from_a_preopened_channel_keeps_its_execution_reference() {
     let mut primary = TestServer::start().await;
     let mut leader = TestServer::start().await;
-    let client = primary.connect().await;
+    let channel = within_deadline(
+        tonic::transport::Endpoint::from_shared(format!("http://{}", primary.address))
+            .assured("the primary server has an HTTP origin")
+            .connect(),
+    )
+    .await
+    .assured("the primary server accepts a preopened channel");
+    let client = within_deadline(Client::from_channel(channel, Some(domain("tenant"))))
+        .await
+        .assured("the preopened channel starts a session");
     let mut first_exchange = primary.next_exchange().await;
     let command_client = client.clone();
     let command = tokio::spawn(async move {

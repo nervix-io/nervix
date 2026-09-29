@@ -2,6 +2,7 @@ Feature: Integrated client wire qualification
   @client_wire15
   Scenario: Subscription restoration and typed transaction inspection survive the same leader loss
     Given the production sticky scheduler is configured
+    And cluster peers are addressed by "DNS names"
     And a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these NSPL commands
@@ -25,8 +26,9 @@ Feature: Integrated client wire qualification
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    Given client "subscriber" is connected to node "{{old_leader}}" with cluster seeds
-    And client "owner" is connected to node "{{old_leader}}" with cluster seeds
+    Given client "subscriber" is connected to node "{{old_leader}}" through fixture DNS with cluster seeds
+    And client "owner" is connected to node "{{old_leader}}" through fixture DNS with cluster seeds
+    Then the DNS fixture eventually receives a question for "native-session.nervix.test"
     When client "subscriber" executes these NSPL commands
       """
       CREATE SUBSCRIPTION wire_seen TO wire_records;

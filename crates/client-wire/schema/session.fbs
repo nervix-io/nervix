@@ -155,7 +155,28 @@ enum ChoiceTarget : ubyte {
   /// Configured codecs in a domain.
   Codec,
   /// Fields of a codec's output schema. Requires a domain and then a codec model reference.
-  CodecField
+  CodecField,
+  /// A source-specific configured client or endpoint in the selected domain.
+  IngestHttpSource,
+  IngestKafkaSource,
+  IngestPulsarSource,
+  IngestMqttSource,
+  IngestNatsSource,
+  IngestRabbitMqSource,
+  IngestRedisPubSubSource,
+  IngestPrometheusSource,
+  IngestZeroMqSource,
+  IngestSqsSource,
+  IngestEndpointSource,
+  IngestWebsocketsSource,
+  IngestSyslogSource,
+  /// Codecs whose wire format can decode an ingestor payload.
+  IngestCodec,
+  /// Relays with the exact route branch declaration; branched requires a branch reference.
+  IngestUnbranchedRelay,
+  IngestBranchedRelay,
+  /// Fields of the key schema selected by one branch reference.
+  BranchField
 }
 
 enum DomainPaceChoice : ubyte {

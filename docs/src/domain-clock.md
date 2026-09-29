@@ -115,10 +115,11 @@ already-armed deadlines continue through the quiesce cycle.
 
 The current consensus leader reconciles authority ownership whenever domain state, Raft topology,
 or effective node availability changes. Candidate identities are the intersection of effectively
-available gossip incarnations and current Raft voters. A gossip-dead peer can remain available
-while its latest application-health observation is fresh, but an expired observation cannot keep it
-eligible as clock authority. Duplicate observations for one node name collapse to the newest
-incarnation.
+available node incarnations and current Raft voters. Effective availability retains an established
+incarnation through a gossip loss while its latest application-health observation remains within
+the node-unavailability interval and has not marked it unavailable. If that observation becomes
+stale, the node follows gossip's liveness verdict. Duplicate observations for one node name
+collapse to the newest incarnation.
 
 Selection is deterministic. Candidates are ordered by node name, the domain name is hashed, and
 the hash selects one position in that ordered set. Every leader presented with the same domain and

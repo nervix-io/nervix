@@ -11400,6 +11400,21 @@ mod tests {
             ChoiceControl::HashResource => nervix_client_wire::ChoiceTarget::Resource,
             ChoiceControl::HashCodec => nervix_client_wire::ChoiceTarget::Codec,
             ChoiceControl::HashKey => nervix_client_wire::ChoiceTarget::CodecField,
+            ChoiceControl::IngestSourceRef => {
+                nervix_client_wire::ChoiceTarget::IngestEndpointSource
+            }
+            ChoiceControl::IngestCodec => nervix_client_wire::ChoiceTarget::IngestCodec,
+            ChoiceControl::IngestTimestampField | ChoiceControl::IngestInputField => {
+                nervix_client_wire::ChoiceTarget::CodecField
+            }
+            ChoiceControl::IngestRouteBranch => nervix_client_wire::ChoiceTarget::Branch,
+            ChoiceControl::IngestRouteRelay | ChoiceControl::IngestErrorRelay => {
+                nervix_client_wire::ChoiceTarget::IngestUnbranchedRelay
+            }
+            ChoiceControl::IngestOutputField | ChoiceControl::IngestErrorField => {
+                nervix_client_wire::ChoiceTarget::RelayField
+            }
+            ChoiceControl::IngestBranchField => nervix_client_wire::ChoiceTarget::BranchField,
         };
         ConsoleRequest::Choice {
             request: ChoiceLookupRequest::new(target, Vec::new(), String::new()),

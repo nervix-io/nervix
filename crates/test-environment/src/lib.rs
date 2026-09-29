@@ -29,10 +29,12 @@ use tempfile::{TempDir, tempdir, tempdir_in};
 use testcontainers::{
     ContainerAsync, ContainerRequest, CopyTargetOptions, GenericBuildableImage, GenericImage,
     Image, ImageExt, ReuseDirective, TestcontainersError,
-    bollard::{Docker, query_parameters::RemoveContainerOptionsBuilder},
+    bollard::{
+        Docker, errors::Error as DockerError, query_parameters::RemoveContainerOptionsBuilder,
+    },
     core::{
         BuildImageOptions, CmdWaitFor, ContainerPort, ContainerState, ExecCommand,
-        IntoContainerPort, WaitFor, wait::HttpWaitStrategy,
+        IntoContainerPort, WaitFor, client::ClientError, wait::HttpWaitStrategy,
     },
     runners::{AsyncBuilder, AsyncRunner},
 };
@@ -1486,11 +1488,22 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         let mut replaced_failed_start = false;
         let mut replaced_unhealthy = false;
         loop {
+            tokio::task::consume_budget().await;
             let name = self.container_name(role);
             let reusable_was_running =
                 self.mode.is_reusable() && container_is_running_by_name(&name).await?;
             let container = match self.configure_container(role, build()).start().await {
                 Ok(container) => container,
+                Err(error) if !reusable_was_running && host_port_bind_conflict(&error) => {
+                    // Docker created the named container but could not claim its random host port.
+                    // Remove it before another attempt can select a different port.
+                    remove_container_by_name_or_id(&name).await?;
+                    if start_retries < 3 {
+                        start_retries += 1;
+                        continue;
+                    }
+                    return Err(testcontainers_error(operation)(error));
+                }
                 Err(_error)
                     if self.mode.is_reusable() && reusable_was_running && start_retries < 3 =>
                 {
@@ -1892,6 +1905,15 @@ fn container_was_created(error: &TestcontainersError) -> bool {
             | TestcontainersError::PortNotExposed { .. }
             | TestcontainersError::MissingInfo(_)
             | TestcontainersError::Exec(_)
+    )
+}
+
+fn host_port_bind_conflict(error: &TestcontainersError) -> bool {
+    matches!(
+        error,
+        TestcontainersError::Client(ClientError::StartContainer(
+            DockerError::DockerResponseServerError { message, .. }
+        )) if message.contains("address already in use")
     )
 }
 
@@ -2309,7 +2331,10 @@ mod tests {
 
     use clap::{CommandFactory as _, Parser as _};
 
-    use super::{KafkaImage, TEST_CONCURRENCY_FACTOR_ENV, TestParallelism, TestParallelismArgs};
+    use super::{
+        ClientError, DockerError, KafkaImage, TEST_CONCURRENCY_FACTOR_ENV, TestParallelism,
+        TestParallelismArgs, TestcontainersError, host_port_bind_conflict,
+    };
 
     #[derive(clap::Parser)]
     struct TestCli {
@@ -2368,5 +2393,25 @@ mod tests {
             image.advertised_listeners(32_001, 32_002),
             "PLAINTEXT://127.0.0.1:32001,BROKER://nervix-kafka-run:9093,SSL://localhost:32002"
         );
+    }
+
+    #[test]
+    fn only_a_docker_start_port_conflict_allows_container_replacement() {
+        let docker_error = || DockerError::DockerResponseServerError {
+            status_code: 500,
+            message: "failed to listen on TCP socket: address already in use".to_string(),
+        };
+        assert!(host_port_bind_conflict(&TestcontainersError::Client(
+            ClientError::StartContainer(docker_error())
+        )));
+        assert!(!host_port_bind_conflict(&TestcontainersError::Client(
+            ClientError::CreateContainer(docker_error())
+        )));
+        assert!(!host_port_bind_conflict(&TestcontainersError::Client(
+            ClientError::StartContainer(DockerError::DockerResponseServerError {
+                status_code: 500,
+                message: "image startup failed".to_string(),
+            })
+        )));
     }
 }
