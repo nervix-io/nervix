@@ -675,6 +675,40 @@ coverage-scenarios-append output *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov --no-clean --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
+# Measure the Redis DNS connector, its shared TLS/DNS code, and public source/sink scenarios.
+coverage-redis output="target/redis-dns.lcov": tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report --lib \
+        --package nervix-dns \
+        --package nervix-connector \
+        --package nervix-connector-redis
+    cargo llvm-cov --no-report --lib --package nervix-server -- redis_
+    cargo llvm-cov --no-report --lib --package nervix-server -- sources_that_resolve_names_report_missing_node_dns_as_start_failure
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+        --input tests/features/runtime/redis_dns_resolution.feature --name Redis --retry 0 --concurrency 1
+    just coverage-redis-report {{ quote(output) }}
+
+coverage-redis-report output="target/redis-dns.lcov":
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
+        --package nervix-server \
+        --package nervix-dns \
+        --package nervix-connector \
+        --package nervix-connector-redis
+
+coverage-redis-units-append output="target/redis-dns.lcov":
+    cargo llvm-cov --no-clean --lib --package nervix-connector-redis
+    just coverage-redis-report {{ quote(output) }}
+
+coverage-redis-server-units-append output="target/redis-dns.lcov":
+    cargo llvm-cov --no-clean --lib --package nervix-server -- redis_
+    cargo llvm-cov --no-clean --lib --package nervix-server -- sources_that_resolve_names_report_missing_node_dns_as_start_failure
+    just coverage-redis-report {{ quote(output) }}
+
 # Collect the changed DNS client units and their public one-/three-node paths into one LCOV
 # profile so patch coverage can be checked before opening the PR.
 coverage-dns-clients output="target/dns-clients.lcov": tests-deps
@@ -694,6 +728,7 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
         --package nervix-connector-otel \
         --package nervix-connector-iceberg \
         --package nervix-connector-rabbitmq \
+        --package nervix-connector-redis \
         --package nervix-connector-syslog \
         --package nervix-connector-websockets \
         --package nervix-connector-clickhouse \
@@ -716,6 +751,7 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
     run_scenario tests/features/tools/cli_session.feature 'CLI.rejects.a.TLS'
     run_scenario tests/features/runtime/iceberg_emission.feature 'DNS.*fixture|Iceberg.*holds.*ACK'
     run_scenario tests/features/runtime/rabbitmq_dns_resolution.feature 'RabbitMQ|AMQPS'
+    run_scenario tests/features/runtime/redis_dns_resolution.feature 'Redis'
     run_scenario tests/features/runtime/syslog_dns_resolution.feature 'Syslog'
     run_scenario tests/features/runtime/websocket_client_ingestion.feature 'Websocket client ingestor connects'
     run_scenario tests/features/runtime/websocket_client_tls_resource_mounts.feature 'Websocket client keeps'
@@ -739,6 +775,7 @@ coverage-dns-clients-report output="target/dns-clients.lcov":
         --package nervix-connector-otel \
         --package nervix-connector-iceberg \
         --package nervix-connector-rabbitmq \
+        --package nervix-connector-redis \
         --package nervix-connector-syslog \
         --package nervix-connector-websockets \
         --package nervix-connector-clickhouse \
@@ -1166,9 +1203,9 @@ validate-dns-dependencies:
             exit 1
         fi
     done
-    # Syslog and WebSocket client transports resolve through the node resolver before opening
-    # their own concrete-address sockets, even when built without the server's feature graph.
-    for package in nervix-connector-syslog nervix-connector-websockets; do
+    # Syslog, WebSocket and Redis transports resolve through the node resolver, even when each
+    # connector is built without the server's feature graph.
+    for package in nervix-connector-syslog nervix-connector-websockets nervix-connector-redis; do
         graph="$(cargo tree --package "${package}" --edges normal --format '{p} {f}' --prefix none)"
         if ! rg -q '^nervix-dns v' <<< "${graph}" || \
             ! rg -q '^hickory-resolver v0\.26\.[0-9]+ .*tokio' <<< "${graph}"; then
@@ -1176,6 +1213,12 @@ validate-dns-dependencies:
             exit 1
         fi
     done
+    graph="$(cargo tree --package nervix-connector-redis --edges normal --format '{p} {f}' --prefix none)"
+    if ! rg -q '^redis v1\.[0-9]+\.[0-9]+ .*tokio-rustls-comp' <<< "${graph}" || \
+        rg -q '^rustls v[^ ]+ (.*,)?ring(,|$)' <<< "${graph}"; then
+        echo "nervix-connector-redis lacks Redis's AWS-LC TLS path" >&2
+        exit 1
+    fi
     # ClickHouse and SQS hand the node resolver to their drivers' own DNS hooks, Hyper's connector
     # and Smithy's HTTP client, even when built without the server's feature graph, and complete
     # TLS with AWS-LC alone.
