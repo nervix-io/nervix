@@ -606,6 +606,16 @@ async fn given_websocket_session_is_connected(
     );
 }
 
+/// Connects a console WebSocket session to the node that leads, the only node that serves one.
+#[given(expr = "WebSocket session {string} is connected to the leader node")]
+async fn given_websocket_session_is_connected_to_the_leader(
+    world: &mut ScenarioWorld,
+    name: String,
+) {
+    let leader = current_leader_node(world).await;
+    given_websocket_session_is_connected(world, name, leader).await;
+}
+
 #[when(
     expr = "client {string} opens producer {string} on ingestor {string} expecting fields {string}"
 )]

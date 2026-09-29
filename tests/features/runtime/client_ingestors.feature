@@ -68,7 +68,7 @@ Feature: Client ingestors
         ON GENERAL ERROR LOG;
       START;
       """
-    And <session> is connected to node "node-1"
+    And <session> is connected to the leader node
     When these NSPL commands are executed on the leader node
       """
       SHOW CREATE INGESTOR orders_in;
@@ -223,7 +223,7 @@ Feature: Client ingestors
         ON GENERAL ERROR LOG;
       START;
       """
-    And <session> is connected to node "node-1"
+    And <session> is connected to the leader node
     When <session> opens producer "orders" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
     And producer "orders" submits batch "garbage" that is "not an Arrow stream"
     Then batch "garbage" is not admitted because "invalid batch: malformed"
@@ -324,7 +324,7 @@ Feature: Client ingestors
         ON GENERAL ERROR LOG;
       START;
       """
-    And <session> is connected to node "node-1"
+    And <session> is connected to the leader node
     Then <session> cannot open a producer on ingestor "missing" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE" because "ingestor not found"
     And <session> cannot open a producer on ingestor "orders_http" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE" because "not a client ingestor"
     And <session> cannot open a producer on ingestor "orders_in" expecting fields "region STRING, order_id STRING" because "schema mismatch"
@@ -549,7 +549,7 @@ Feature: Client ingestors
         ON GENERAL ERROR LOG;
       START;
       """
-    And <session> is connected to node "node-1"
+    And <session> is connected to the leader node
     When <session> opens producer "orders" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
     And producer "orders" submits batch "held" with rows
       | region | order_id | amount | card   |
@@ -628,7 +628,7 @@ Feature: Client ingestors
         ON GENERAL ERROR LOG;
       START;
       """
-    And <session> is connected to node "node-1"
+    And <session> is connected to the leader node
     When <session> opens producer "orders" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
     And producer "orders" submits batch "held" with rows
       | region | order_id | amount | card   |
@@ -1010,7 +1010,7 @@ Feature: Client ingestors
         ON GENERAL ERROR LOG;
       START;
       """
-    And WebSocket session "app" is connected to node "node-1"
+    And WebSocket session "app" is connected to the leader node
     When WebSocket session "app" opens producer "orders" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE" with 1 batch and "1MiB" of credit
     And producer "orders" submits batch "within" with rows
       | region | order_id | amount | card   |
