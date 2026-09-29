@@ -145,10 +145,8 @@ impl Notify {
 
 /// Wake every waiter that has polled; one only enabled wakes when it is next polled.
 fn wake(waiting: BTreeMap<u64, Option<Waker>>) {
-    for waker in waiting.into_values() {
-        if let Some(waker) = waker {
-            waker.wake();
-        }
+    for waker in waiting.into_values().flatten() {
+        waker.wake();
     }
 }
 

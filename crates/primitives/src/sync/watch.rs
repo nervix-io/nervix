@@ -120,6 +120,14 @@ struct Version(usize);
 #[derive(Clone, Copy)]
 struct Snapshot(usize);
 
+/// How waiting for a value newer than the one a receiver last marked as seen ended.
+enum Waited {
+    /// A newer value was sent, and the receiver marked it as seen.
+    Changed,
+    /// Every sender was dropped, and no unseen value is left.
+    Closed,
+}
+
 const CLOSED: usize = 1;
 const VERSION_STEP: usize = 2;
 
@@ -189,6 +197,25 @@ impl<T> Shared<T> {
     fn receiver_count(&self) -> usize {
         self.receivers.load(Ordering::SeqCst)
     }
+
+    /// Wait for a version newer than `seen`, and mark it as seen.
+    ///
+    /// Registers for the next change before reading the version: a send after the read wakes the
+    /// registration, and a send before it shows as a newer version.
+    async fn wait_for_newer(&self, seen: &mut Version) -> Waited {
+        loop {
+            let notified = self.changed.notified();
+            let state = self.state.load();
+            if *seen != state.version() {
+                *seen = state.version();
+                return Waited::Changed;
+            }
+            if state.is_closed() {
+                return Waited::Closed;
+            }
+            notified.await;
+        }
+    }
 }
 
 impl<T> Receiver<T> {
@@ -227,7 +254,11 @@ impl<T> Receiver<T> {
     /// Wait for a value newer than the one last marked as seen, and mark it as seen. Fails once
     /// every sender was dropped and no unseen value is left.
     pub async fn changed(&mut self) -> Result<(), error::RecvError> {
-        changed(&self.shared, &mut self.seen).await
+        let waited = self.shared.wait_for_newer(&mut self.seen).await;
+        match waited {
+            Waited::Changed => Ok(()),
+            Waited::Closed => Err(error::RecvError(())),
+        }
     }
 
     /// Wait until the value satisfies `condition`, marking each value it checks as seen. Fails
@@ -259,30 +290,16 @@ impl<T> Receiver<T> {
             if closed {
                 return Err(error::RecvError(()));
             }
-            let waited = changed(&self.shared, &mut self.seen).await;
-            closed = waited.is_err();
+            let waited = self.shared.wait_for_newer(&mut self.seen).await;
+            match waited {
+                Waited::Changed => {}
+                Waited::Closed => closed = true,
+            }
         }
     }
 
     pub fn same_channel(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
-    }
-}
-
-/// Register for the next change, then read the version: a send after the read wakes the
-/// registration, and a send before it shows as a newer version.
-async fn changed<T>(shared: &Shared<T>, seen: &mut Version) -> Result<(), error::RecvError> {
-    loop {
-        let notified = shared.changed.notified();
-        let state = shared.state.load();
-        if *seen != state.version() {
-            *seen = state.version();
-            return Ok(());
-        }
-        if state.is_closed() {
-            return Err(error::RecvError(()));
-        }
-        notified.await;
     }
 }
 
