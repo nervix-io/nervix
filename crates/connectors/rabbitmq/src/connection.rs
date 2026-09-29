@@ -39,10 +39,11 @@ use lapin::{
     tcp::TLSConfig,
     uri::{AMQPScheme, AMQPUri},
 };
-use meticulous::ResultExt as _;
+use meticulous::OptionExt as _;
 use nervix_connector::{client_config_value, client_tls_paths, read_tls_file};
 use nervix_dns::{ConnectionBudget, DnsLookupFailure, DnsResolver};
 use nervix_models::ClientConfigEntry;
+use nervix_primitives::collections::ConcurrentQueue;
 use thiserror::Error;
 use tokio::time::timeout;
 use url::{Host, Url};
@@ -234,7 +235,7 @@ impl RabbitMqBroker {
             host: self.host().to_string(),
         });
         for attempt in deadline.attempts(addresses) {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let address = attempt.address;
             let share = attempt.budget;
             match timeout(share, AsyncTcpStream::connect(runtime, address)).await {
@@ -281,21 +282,22 @@ impl RabbitMqBroker {
     /// Run the AMQP handshake over `stream`.
     ///
     /// Lapin asks its transport hook for a stream once per connection, since its own reconnection
-    /// stays off; the hook hands over the stream established here through a one-slot channel.
+    /// stays off; the hook takes the stream established here from a queue of one.
     async fn handshake(
         &self,
         runtime: TokioRuntime,
         stream: BrokerStream,
     ) -> RabbitMqConnectResult<Connection> {
-        let (transport, handed_over) = flume::bounded(1);
-        transport
-            .send(stream)
-            .verified("the channel has room for its one transport, and its receiver is held here");
+        let handed_over = ConcurrentQueue::bounded(1);
+        handed_over
+            .push(stream)
+            .ok()
+            .assured("a new queue of one has room for its one transport");
         let connected = Connection::connector(
             self.uri.clone(),
             runtime,
             async move |_uri, _runtime| {
-                let handed = handed_over.try_recv();
+                let handed = handed_over.pop();
                 match handed {
                     Ok(stream) => Ok(stream),
                     Err(_) => Err(lapin::Error::from(io::Error::other(

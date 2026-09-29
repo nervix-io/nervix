@@ -452,7 +452,7 @@ fn extrema_skip_nulls_and_clamp_fails_only_the_rows_it_evaluates() {
     assert_eq!(nan_bound[0].reason.to_string(), "clamp bound is NaN");
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[nervix_primitives::test(flavor = "current_thread")]
 async fn read_only_predicates_select_rows_with_the_new_tests() {
     let input = StdArc::new(Schema::new(vec![
         Field::new("status", DataType::Utf8, false),

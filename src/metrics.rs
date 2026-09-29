@@ -21,22 +21,23 @@ use std::{
 };
 
 use arch_into::ArchInto as _;
-use dashmap::mapref::entry::Entry;
 use hdrhistogram::Histogram as HdrHistogram;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
-use nervix_execution::sync::DashMap;
 use nervix_models::{
     BranchName, ClusterNodeName, DomainName, IngestorName, ModelKind, ModelName, RelayName,
     Timestamp,
 };
-use nervix_primitives::sync::atomic::{
-    AtomicBool, AtomicI64, AtomicU64, Ordering as AtomicOrdering,
+use nervix_primitives::{
+    collections::{DashMap, dash_map::Entry},
+    sync::{
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering as AtomicOrdering},
+        blocking::Mutex,
+    },
 };
 use nervix_recovery::Discarded as _;
 use nervix_simd_kernels::{ElapsedHistogram, ElapsedLayout, elapsed_nanos};
-use parking_lot::Mutex;
 use prometheus::{
     Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
     IntGaugeVec, Opts, Registry, TextEncoder,

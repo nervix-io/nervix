@@ -9,9 +9,6 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -246,7 +243,7 @@ impl RecordSink for SentrySink {
     async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         for record in records {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let body = match Self::encode_envelope(&record.payload, record.occurred_at) {
                 Ok(body) => body,
                 Err(error) => {

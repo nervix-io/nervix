@@ -13,9 +13,11 @@
 use std::{collections::hash_map::Entry, sync::Arc};
 
 use ahash::{HashMap, HashMapExt};
-use arc_swap::ArcSwapOption;
 use indexmap::IndexMap;
-use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
+use nervix_primitives::{
+    publication::ArcSwapOption,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 use regex_automata::{
     Input, MatchKind,
     meta::{self, BuildError, Cache},

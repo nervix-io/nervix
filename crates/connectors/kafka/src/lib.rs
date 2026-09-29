@@ -91,7 +91,7 @@ impl KafkaSink {
         outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) {
         for record in records {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.enqueue(&record) {
                 Ok(confirmation) => {
                     drop(confirmation);
@@ -119,7 +119,7 @@ impl KafkaSink {
     ) {
         let mut pending: VecDeque<PendingKafkaConfirmation> = VecDeque::new();
         for record in records {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let confirmation = match self.enqueue(&record) {
                 Ok(confirmation) => confirmation,
                 Err(error) if Self::is_record_rejection(&error) => {
@@ -151,7 +151,7 @@ impl KafkaSink {
             }
         }
         while !pending.is_empty() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Err(error) = Self::confirm_oldest(&mut pending, timeout, outcome).await {
                 outcome.fail(error);
                 return;
@@ -203,7 +203,7 @@ impl KafkaSink {
                 humantime::format_duration(timeout)
             )));
         }
-        let result = tokio::select! {
+        let result = nervix_primitives::select! {
             biased;
             result = &mut oldest.confirmation => Some(result),
             _ = sleep(remaining) => None,
@@ -306,7 +306,7 @@ impl SinkLifecycle for KafkaSink {
             return Err(Report::new(SinkPublishError::Finish { sink: KAFKA })
                 .attach_printable("kafka local producer queue drain deadline elapsed"));
         }
-        tokio::task::spawn_blocking(move || producer.flush(remaining))
+        nervix_primitives::task::spawn_blocking(move || producer.flush(remaining))
             .await
             .map_err(|source| {
                 Report::new(SinkPublishError::Finish { sink: KAFKA })

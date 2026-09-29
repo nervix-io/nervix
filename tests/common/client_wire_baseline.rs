@@ -78,7 +78,7 @@ impl Workload {
     ) -> Result<()> {
         let detail = "x".repeat(self.subscription_detail_bytes);
         for offset in 0..RECORDS_PER_CONTROL_COMMAND {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let index = sample * RECORDS_PER_CONTROL_COMMAND + offset;
             let tenant = if index.is_multiple_of(2) {
                 "acme"
@@ -591,7 +591,7 @@ async fn configure_graph(process: &ServerProcess, domain: &str, host: &str) -> R
     let statements = nervix_client_core::split_query_statements(&graph)
         .map_err(|error| anyhow!("failed to split baseline graph: {error:#}"))?;
     for statement in statements {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         process
             .run_commands(domain, statement)
             .await
@@ -614,7 +614,7 @@ async fn measure_commands(
     );
     let mut observations = OperationSamples::new()?;
     for _ in 0..samples {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let started = Instant::now();
         let observed = timeout(OPERATION_TIMEOUT, session.observe_command(COMMAND_QUERY))
             .await
@@ -655,7 +655,7 @@ async fn measure_prepared_native_commands(
     let mut prepare = Samples::new()?;
     let mut execute = Samples::new()?;
     for _ in 0..samples {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let started = Instant::now();
         let prepared = client.prepare_execution(COMMAND_QUERY).await;
         prepare.record_duration(started.elapsed())?;
@@ -703,7 +703,7 @@ async fn measure_subscriptions(
     let detail = "x".repeat(detail_bytes);
     let mut observations = OperationSamples::new()?;
     for index in 0..samples {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let tenant = if index % 2 == 0 { "acme" } else { "beta" };
         let sequence = i64::try_from(index).context("subscription index does not fit i64")?;
         let payload = serde_json::json!({
@@ -778,7 +778,7 @@ async fn measure_control_with_paused_subscriber(
     );
     let mut observations = OperationSamples::new()?;
     for sample in 0..CONTROL_COMMAND_SAMPLES {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         workload
             .publish_control_burst(process, host, sample)
             .await?;
@@ -840,7 +840,7 @@ async fn measure_control_with_slow_subscriber(
     let mut rows_skipped_events = 0_u64;
     let mut drain_timeouts = 0_u64;
     for sample in 0..CONTROL_COMMAND_SAMPLES {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         workload
             .publish_control_burst(process, host, sample)
             .await?;
@@ -907,7 +907,7 @@ async fn measure_graph_snapshots(
         .map_err(|report| anyhow!("the baseline domain is invalid: {report:?}"))?;
     let mut observations = OperationSamples::new()?;
     for sample in 1..=samples {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let request_id = u64::try_from(sample)
             .ok()
             .and_then(std::num::NonZeroU64::new)
@@ -955,7 +955,7 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let message = websocket
             .next()
             .await
@@ -1011,10 +1011,12 @@ async fn measure_uploads(
         .context("failed to create upload input")?;
     let mut observations = OperationSamples::new()?;
     for _ in 0..samples {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let identity = ResourceUploadIdentity::parse(Uuid::now_v7().to_string())
             .map_err(|report| anyhow!("failed to create upload identity: {report}"))?;
-        let chunks = Arc::new(parking_lot::Mutex::new(Vec::<u64>::new()));
+        let chunks = Arc::new(nervix_primitives::sync::blocking::Mutex::new(
+            Vec::<u64>::new(),
+        ));
         let recorded_chunks = chunks.clone();
         let upload_domain = client
             .domain()
@@ -1279,7 +1281,7 @@ fn capture_environment() -> Result<Environment> {
         .to_string();
     let meminfo = fs::read_to_string("/proc/meminfo").context("failed to read /proc/meminfo")?;
     let physical_memory_bytes = status_kib(&meminfo, "MemTotal")?;
-    let logical_cpus = std::thread::available_parallelism()
+    let logical_cpus = nervix_primitives::thread::available_parallelism()
         .context("failed to determine logical CPU count")?
         .get();
     let clock_ticks_per_second = command_output("getconf", &["CLK_TCK"])?

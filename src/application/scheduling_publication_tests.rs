@@ -16,7 +16,7 @@ use super::super::{
     test_fixtures::{TestService, build_test_service, named, test_execution_reference},
 };
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn schedule_publication_keeps_the_basis_it_prepared() {
     let TestService {
         service,
@@ -66,7 +66,7 @@ async fn schedule_publication_keeps_the_basis_it_prepared() {
     std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn drain_reports_when_its_captured_eligibility_has_no_replacement() {
     let TestService {
         service,

@@ -131,7 +131,7 @@ impl ApplicationStartup {
         if let Some(interconnect) = &self.interconnect {
             interconnect.shutdown().await;
         }
-        if let Err(error) = tokio::task::spawn_blocking(move || drop(self)).await {
+        if let Err(error) = nervix_primitives::task::spawn_blocking(move || drop(self)).await {
             error!(error = %error, "failed to join application startup cleanup task");
         }
     }
@@ -339,7 +339,7 @@ mod tests {
     use super::{Application, ApplicationStartup, CONSENSUS_KEYSPACE_PREFIX};
     use crate::application::test_fixtures::{test_addr, test_tls_files};
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn startup_failure_releases_the_split_databases_before_returning() {
         let root = tempfile::tempdir().expect("temporary root should be created");
         let db_path = root.path().join("db");
@@ -379,19 +379,20 @@ mod tests {
             "unexpected startup error: {error:?}"
         );
 
-        let (node_keyspaces, consensus_keyspaces) = tokio::task::spawn_blocking(move || {
-            let consensus_path = ApplicationStartup::consensus_database_path(&db_path);
-            let db = Database::builder(db_path).open()?;
-            let consensus_db = Database::builder(consensus_path).open()?;
-            let node_keyspaces = db.list_keyspace_names();
-            let consensus_keyspaces = consensus_db.list_keyspace_names();
-            drop(consensus_db);
-            drop(db);
-            Ok::<_, fjall::Error>((node_keyspaces, consensus_keyspaces))
-        })
-        .await
-        .expect("database open task should join")
-        .expect("application startup failure must release both database locks");
+        let (node_keyspaces, consensus_keyspaces) =
+            nervix_primitives::task::spawn_blocking(move || {
+                let consensus_path = ApplicationStartup::consensus_database_path(&db_path);
+                let db = Database::builder(db_path).open()?;
+                let consensus_db = Database::builder(consensus_path).open()?;
+                let node_keyspaces = db.list_keyspace_names();
+                let consensus_keyspaces = consensus_db.list_keyspace_names();
+                drop(consensus_db);
+                drop(db);
+                Ok::<_, fjall::Error>((node_keyspaces, consensus_keyspaces))
+            })
+            .await
+            .expect("database open task should join")
+            .expect("application startup failure must release both database locks");
         assert!(
             node_keyspaces
                 .iter()

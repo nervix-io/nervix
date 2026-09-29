@@ -618,7 +618,7 @@ async fn batch_table_records_writes(
         .collect::<Vec<_>>();
     let deadline = Instant::now() + duration;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observed = sink.recorded_writes(world, &table).await;
         if observed == expected {
             break;
@@ -664,7 +664,7 @@ async fn batch_table_holds_exactly_these_rows(
     expected.sort();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observed = sink.rows(world, &table, &columns).await;
         if observed == expected {
             break;
@@ -695,7 +695,7 @@ async fn batch_table_holds_rows(
     let table = expand_placeholders(world, &table);
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let observed = sink.row_count(world, &table).await;
         if observed == expected {
             return;

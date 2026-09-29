@@ -284,7 +284,7 @@ impl BrokerSourceConnector for SqsSource {
         _request: SourceBatchRequest,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let received = self
                 .client
                 .receive_message()
@@ -316,7 +316,7 @@ impl BrokerSourceConnector for SqsSource {
 
     async fn acknowledge(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
         for position in positions {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(receipt_handle) = position.receipt_handle.as_deref() else {
                 continue;
             };

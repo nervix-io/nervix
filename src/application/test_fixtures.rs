@@ -14,7 +14,6 @@ use fjall::Database;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{CommandRequest, SuggestRequest};
 use nervix_consensus::{Consensus, ConsensusSettings, Proposer, RaftRetentionPolicy};
-use nervix_execution::sync::DashMap;
 use nervix_interconnect::{TlsConfigBundle, Transport, TransportClock};
 use nervix_models::{
     AckMode, BranchSelection, ClusterNodeName, CommandExecutionReference, CreateDeduplicator,
@@ -24,14 +23,17 @@ use nervix_models::{
     PlacementGroupSchedule, ProcessorInputs, ProcessorOutputs, ScheduledNode, SchemaFingerprint,
     TransactionLifecycle, TransactionPosition, WasmProcessorLimits,
 };
-use nervix_primitives::unmodeled::sync::atomic::{AtomicU64, Ordering};
+use nervix_primitives::{
+    collections::DashMap,
+    sync::CancellationToken,
+    unmodeled::sync::atomic::{AtomicU64, Ordering},
+};
 use nonzero_ext::nonzero;
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType,
 };
 use tokio::time::Duration;
-use tokio_util::sync::CancellationToken;
 use triomphe::Arc;
 
 #[cfg(feature = "shuttle")]
@@ -298,7 +300,7 @@ fn test_session_service(
             command_executions: super::command_execution::CommandExecutionOwners::default(),
             transaction_executions: DashMap::with_hasher(RandomState::new()),
             transaction_recovery: Default::default(),
-            ownership_handoff_operations: tokio::sync::Mutex::new(()),
+            ownership_handoff_operations: nervix_primitives::sync::Mutex::new(()),
             resource_upload_executions: DashMap::with_hasher(RandomState::new()),
             resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             retained_backups: Default::default(),

@@ -196,7 +196,7 @@ fn bodies(records: &[LogRecord]) -> Vec<String> {
     bodies
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn prepared_requests_divide_records_by_count_and_share_one_observed_time() {
     let mut sink = logs_sink(
         "http://127.0.0.1:9",
@@ -239,7 +239,7 @@ async fn prepared_requests_divide_records_by_count_and_share_one_observed_time()
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_request_prepared_without_batch_carries_every_record_of_the_batch() {
     let mut sink = logs_sink("http://127.0.0.1:9", "http/protobuf", None, None).await;
     let batch = mapped_logs(&[Some("a"), Some("b"), Some("c")]);
@@ -254,7 +254,7 @@ async fn a_request_prepared_without_batch_carries_every_record_of_the_batch() {
     assert_eq!(bodies(&log_records(&request.body)), vec!["a", "b", "c"]);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn preparation_halves_a_candidate_above_max_size_and_refuses_an_oversized_record() {
     let mut unbounded = logs_sink(
         "http://127.0.0.1:9",
@@ -319,7 +319,7 @@ async fn preparation_halves_a_candidate_above_max_size_and_refuses_an_oversized_
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn preparation_refuses_a_record_whose_values_are_invalid_and_carries_the_rest() {
     let mut sink = logs_sink(
         "http://127.0.0.1:9",
@@ -358,7 +358,10 @@ struct ReceivedHttpExport {
 /// with the next of `answers`: a status and a body.
 async fn http_receiver(
     answers: Vec<(u16, Vec<u8>)>,
-) -> (String, StdArc<parking_lot::Mutex<Vec<ReceivedHttpExport>>>) {
+) -> (
+    String,
+    StdArc<nervix_primitives::sync::blocking::Mutex<Vec<ReceivedHttpExport>>>,
+) {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -370,9 +373,9 @@ async fn http_receiver(
             .local_addr()
             .assured("a bound listener has an address")
     );
-    let received = StdArc::new(parking_lot::Mutex::new(Vec::new()));
+    let received = StdArc::new(nervix_primitives::sync::blocking::Mutex::new(Vec::new()));
     let captured = received.clone();
-    tokio::spawn(async move {
+    nervix_primitives::task::spawn(async move {
         let (mut stream, _) = listener
             .accept()
             .await
@@ -467,7 +470,7 @@ fn handed_over(preparation: &RowRequestPreparation) -> Vec<SinkRowRequest> {
         .collect()
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn publish_sends_each_prepared_request_unchanged_over_http_and_answers_for_it() {
     let partial_success = ExportLogsServiceResponse {
         partial_success: Some(ExportLogsPartialSuccess {
@@ -526,8 +529,10 @@ async fn publish_sends_each_prepared_request_unchanged_over_http_and_answers_for
 
 /// Captures every logs Export request it serves and answers each from a script, then accepts.
 struct ScriptedLogsService {
-    received: StdArc<parking_lot::Mutex<Vec<ExportLogsServiceRequest>>>,
-    answers: parking_lot::Mutex<VecDeque<Result<ExportLogsServiceResponse, GrpcStatus>>>,
+    received: StdArc<nervix_primitives::sync::blocking::Mutex<Vec<ExportLogsServiceRequest>>>,
+    answers: nervix_primitives::sync::blocking::Mutex<
+        VecDeque<Result<ExportLogsServiceResponse, GrpcStatus>>,
+    >,
 }
 
 #[async_trait]
@@ -555,7 +560,7 @@ async fn grpc_receiver(
     answers: Vec<Result<ExportLogsServiceResponse, GrpcStatus>>,
 ) -> (
     String,
-    StdArc<parking_lot::Mutex<Vec<ExportLogsServiceRequest>>>,
+    StdArc<nervix_primitives::sync::blocking::Mutex<Vec<ExportLogsServiceRequest>>>,
 ) {
     use opentelemetry_proto::tonic::collector::logs::v1::logs_service_server::LogsServiceServer;
 
@@ -568,22 +573,24 @@ async fn grpc_receiver(
             .local_addr()
             .assured("a bound listener has an address")
     );
-    let received = StdArc::new(parking_lot::Mutex::new(Vec::new()));
+    let received = StdArc::new(nervix_primitives::sync::blocking::Mutex::new(Vec::new()));
     let service = ScriptedLogsService {
         received: received.clone(),
-        answers: parking_lot::Mutex::new(answers.into_iter().collect()),
+        answers: nervix_primitives::sync::blocking::Mutex::new(answers.into_iter().collect()),
     };
-    tokio::spawn(
+    nervix_primitives::task::spawn(
         otel_tonic::transport::Server::builder()
             .add_service(
                 LogsServiceServer::new(service).accept_compressed(CompressionEncoding::Gzip),
             )
-            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+            .serve_with_incoming(nervix_primitives::stream::wrappers::TcpListenerStream::new(
+                listener,
+            )),
     );
     (endpoint, received)
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn publish_sends_each_prepared_request_unchanged_over_grpc_and_answers_for_it() {
     for compression in [None, Some("gzip")] {
         let (endpoint, received) = grpc_receiver(vec![

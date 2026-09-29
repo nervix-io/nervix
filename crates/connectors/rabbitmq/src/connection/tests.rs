@@ -10,14 +10,15 @@ use std::{
     time::Duration,
 };
 
+use meticulous::ResultExt as _;
 use nervix_dns::{DnsConfiguration, DnsLookupFailure, DnsResolver, NameServers};
 use nervix_models::ClientConfigEntry;
+use nervix_primitives::task::JoinHandle;
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpSocket, TcpStream},
-    task::JoinHandle,
     time::Instant,
 };
 
@@ -104,7 +105,7 @@ fn loopback(last: u8) -> IpAddr {
 /// A listener standing in for a broker address: it reads the AMQP protocol header, answers with
 /// bytes that are not AMQP, and then waits for the client to close the connection.
 fn stand_in_broker(listener: TcpListener) -> JoinHandle<[u8; 8]> {
-    tokio::spawn(async move {
+    nervix_primitives::task::spawn(async move {
         let (mut stream, _) = listener
             .accept()
             .await
@@ -168,7 +169,7 @@ fn hosts_are_read_with_the_url_grammar() {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn invalid_addresses_and_ca_files_are_configuration_failures() {
     let fixture = Fixture::start(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
     let root = tempfile::tempdir().assured("a temporary directory can be created");
@@ -215,7 +216,7 @@ async fn invalid_addresses_and_ca_files_are_configuration_failures() {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn connections_dial_the_first_answer_that_accepts_and_hand_lapin_the_transport() {
     let fixture = Fixture::start(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
     let listener = loopback_listener(loopback(1)).await;
@@ -242,7 +243,7 @@ async fn connections_dial_the_first_answer_that_accepts_and_hand_lapin_the_trans
     assert!(fixture.authority.questions_for(BROKER) > 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_address_that_never_answers_leaves_time_for_the_next() {
     let fixture = Fixture::start(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
     let listener = loopback_listener(loopback(3)).await;
@@ -269,7 +270,7 @@ async fn an_address_that_never_answers_leaves_time_for_the_next() {
     assert_eq!(header, AMQP_PROTOCOL_HEADER);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn no_answer_that_accepts_ends_within_the_budget() {
     let fixture = Fixture::start(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
     let refusing = loopback_listener(loopback(5)).await;
@@ -307,7 +308,7 @@ async fn no_answer_that_accepts_ends_within_the_budget() {
     assert!(started.elapsed() < GENEROUS_BUDGET);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn names_that_do_not_resolve_keep_their_dns_failure() {
     let fixture = Fixture::start(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
     for (answer, expected) in [
@@ -333,7 +334,7 @@ async fn names_that_do_not_resolve_keep_their_dns_failure() {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ipv6_literals_are_dialled_as_written() {
     // `localhost` names an address nothing listens on, so dialling it instead of the literal fails
     // before the AMQP handshake.
@@ -363,7 +364,7 @@ async fn ipv6_literals_are_dialled_as_written() {
     assert_eq!(fixture.authority.total_questions(), 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn amqps_handshakes_that_fail_or_stall_are_tls_failures() {
     let fixture = Fixture::start(IpAddr::V4(Ipv4Addr::LOCALHOST)).await;
     let closing = loopback_listener(loopback(10)).await;
@@ -374,14 +375,14 @@ async fn amqps_handshakes_that_fail_or_stall_are_tls_failures() {
     let stalling = TcpListener::bind(SocketAddr::new(loopback(11), port))
         .await
         .assured("the loopback address is free on this port");
-    let closes = tokio::spawn(async move {
+    let closes = nervix_primitives::task::spawn(async move {
         let (stream, _) = closing
             .accept()
             .await
             .assured("the client under test dials this listener");
         drop(stream);
     });
-    let stalls = tokio::spawn(async move {
+    let stalls = nervix_primitives::task::spawn(async move {
         let (mut stream, _) = stalling
             .accept()
             .await
@@ -421,7 +422,7 @@ async fn amqps_handshakes_that_fail_or_stall_are_tls_failures() {
 #[test]
 fn every_runtime_connects_through_the_resolver_it_was_given() {
     for round in 0..2 {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
+        let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .assured("a Tokio runtime can be built");

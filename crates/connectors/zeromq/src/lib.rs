@@ -10,9 +10,6 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 mod source;
 
 use async_trait::async_trait;
@@ -88,7 +85,7 @@ impl RecordSink for ZeroMqSink {
     async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         for record in records {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.socket.send(record.payload.into()).await {
                 Ok(()) => outcome.deliver(record.id),
                 Err(error) => {

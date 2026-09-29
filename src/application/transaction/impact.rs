@@ -12,7 +12,7 @@ use nervix_models::{
     ImpactDiagnosticKind, ImpactEffects, PauseRequirement, QuiesceLevel, QuiescenceOutcome,
     RebuildImpact, TransactionOperationNumber,
 };
-use parking_lot::Mutex;
+use nervix_primitives::sync::blocking::Mutex;
 
 #[derive(Clone, Copy)]
 pub(in crate::application) struct QuiescenceAttempt(usize);

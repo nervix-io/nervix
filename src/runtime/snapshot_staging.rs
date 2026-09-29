@@ -25,8 +25,8 @@ use blake3::Hasher;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, MemoryClass, StorageClass};
+use nervix_primitives::sync::OwnedSemaphorePermit;
 use thiserror::Error;
-use tokio::sync::OwnedSemaphorePermit;
 
 /// Why a snapshot or an artifact could not be staged or read back.
 #[derive(Debug, Error)]
@@ -96,7 +96,7 @@ pub(in crate::runtime) struct SnapshotStaging {
 
 #[derive(Debug)]
 struct StagingQuota {
-    permits: std::sync::Arc<tokio::sync::Semaphore>,
+    permits: std::sync::Arc<nervix_primitives::sync::Semaphore>,
 }
 
 impl SnapshotStaging {
@@ -114,7 +114,7 @@ impl SnapshotStaging {
             executor,
             limits,
             quota: triomphe::Arc::new(StagingQuota {
-                permits: std::sync::Arc::new(tokio::sync::Semaphore::new(permits)),
+                permits: std::sync::Arc::new(nervix_primitives::sync::Semaphore::new(permits)),
             }),
         }
     }

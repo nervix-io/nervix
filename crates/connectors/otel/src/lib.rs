@@ -11,9 +11,6 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 use std::{
     io::Write, num::NonZeroU64, ops::Range, str::FromStr, sync::Arc as StdArc, time::Duration,
 };
@@ -933,7 +930,7 @@ impl RowRequestSink for OtelSink {
         let observed_time = OtelSink::observation_time_unix_nano()
             .map_err(|error| publish_failure(error.reason))?;
         for carrier in &rows.carriers {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.prepare_carrier(carrier, observed_time, &mut preparation)
                 .await;
         }
@@ -948,7 +945,7 @@ impl RowRequestSink for OtelSink {
     async fn publish(&mut self, requests: Vec<SinkRowRequest>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(requests.len());
         for request in requests {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let SinkRowRequest {
                 id,
                 body,
@@ -1006,7 +1003,7 @@ impl OtelSink {
             OtelSignal::Logs => {
                 let mut records = Vec::with_capacity(carrier.selected_rows.len());
                 for row in carrier.selected_rows {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     match mapped.log_record(*row, observed_time) {
                         Ok(record) => {
                             records.push(record);
@@ -1032,7 +1029,7 @@ impl OtelSink {
             OtelSignal::Traces => {
                 let mut spans = Vec::with_capacity(carrier.selected_rows.len());
                 for row in carrier.selected_rows {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     match mapped.span(*row) {
                         Ok(span) => {
                             spans.push(span);
@@ -1683,7 +1680,7 @@ impl OtelMappedBatch<'_> {
                 );
                 let mut points = Vec::with_capacity(selected_rows.len());
                 for row in selected_rows {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     match self.number_point(*row, require_start_time) {
                         Ok(point) => {
                             points.push(point);
@@ -1713,7 +1710,7 @@ impl OtelMappedBatch<'_> {
                 let require_start_time = *temporality == OtelAggregationTemporality::Delta;
                 let mut points = Vec::with_capacity(selected_rows.len());
                 for row in selected_rows {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     match self.histogram_point(*row, require_start_time) {
                         Ok(point) => {
                             points.push(point);
@@ -2561,7 +2558,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn grpc_transport_initialization_does_not_require_a_reachable_endpoint()
     -> Result<(), Report<nervix_dns::DnsConfigurationError>> {
         let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration::system()).await?;
@@ -2588,7 +2585,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn lazy_grpc_channel_resolves_only_when_an_export_needs_a_connection() {
         let authority = DnsAuthority::start_on_loopback()
             .await
@@ -2625,7 +2622,7 @@ mod tests {
             &dns,
         )
         .assured("a named endpoint constructs a lazy gRPC channel");
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         assert_eq!(authority.questions_for(name), 0);
         let outcome = transport
             .export(

@@ -25,7 +25,7 @@ fn rounds(
     iterations: u64,
     round: impl AsyncFn(&WasmCheckpointBenchmark),
 ) -> Duration {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("benchmark runtime must build");
@@ -33,7 +33,7 @@ fn rounds(
         let benchmark = WasmCheckpointBenchmark::new(&state_parent(), branches, STATE_BYTES);
         let started = Instant::now();
         for _ in 0..iterations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             round(&benchmark).await;
         }
         started.elapsed()

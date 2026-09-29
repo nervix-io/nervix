@@ -1,9 +1,13 @@
 use ahash::RandomState;
-use nervix_execution::sync::DashMap;
 use nervix_models::ClusterNodeName;
-use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use nervix_primitives::{
+    collections::DashMap,
+    sync::{
+        Notify,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use tokio::sync::Notify;
 
 use super::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
@@ -19,7 +23,7 @@ pub(super) struct BranchAggregatedRuntimeStateSnapshot {
 #[derive(Debug)]
 pub(super) struct ReplicatedBranchAggregatedState {
     pub(super) placement: RuntimeStatePlacement,
-    roles: parking_lot::RwLock<StateReplicationRoles>,
+    roles: nervix_primitives::sync::blocking::RwLock<StateReplicationRoles>,
     pub(super) physical_node_id: ClusterNodeName,
     pub(super) current_lsm: LsmSequence,
     pub(super) last_persisted_lsm: AtomicU64,
@@ -54,7 +58,9 @@ impl ReplicatedBranchAggregatedState {
         }
         Ok(Self {
             placement,
-            roles: parking_lot::RwLock::new(StateReplicationRoles::owned_by(primary_node)),
+            roles: nervix_primitives::sync::blocking::RwLock::new(StateReplicationRoles::owned_by(
+                primary_node,
+            )),
             physical_node_id,
             current_lsm: LsmSequence::restored(current_lsm),
             last_persisted_lsm: AtomicU64::new(last_persisted_lsm),

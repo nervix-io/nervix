@@ -35,11 +35,11 @@ async fn one_held_submission() -> HeldSubmission {
 fn a_wait_racing_the_resolution_takes_the_outcome_once() {
     shuttle::future::block_on(async {
         let HeldSubmission { slots, id, credit } = one_held_submission().await;
-        let waiter = tokio::spawn({
+        let waiter = nervix_primitives::task::spawn({
             let slots = slots.clone();
             async move { slots.rejoin(id).await }
         });
-        let resolver = tokio::spawn({
+        let resolver = nervix_primitives::task::spawn({
             let slots = slots.clone();
             async move { slots.resolve(id, ProducerOutcome::Completed, credit) }
         });
@@ -70,11 +70,11 @@ fn shuttle_a_wait_racing_its_resolution_takes_the_outcome_once_and_returns_the_c
 fn a_cancelled_wait_loses_neither_the_outcome_nor_the_credit() {
     shuttle::future::block_on(async {
         let HeldSubmission { slots, id, credit } = one_held_submission().await;
-        let cancelled = tokio::spawn({
+        let cancelled = nervix_primitives::task::spawn({
             let slots = slots.clone();
             async move { slots.rejoin(id).await }
         });
-        let resolver = tokio::spawn({
+        let resolver = nervix_primitives::task::spawn({
             let slots = slots.clone();
             async move { slots.resolve(id, ProducerOutcome::Completed, credit) }
         });
@@ -125,11 +125,11 @@ fn shuttle_a_cancelled_wait_loses_neither_the_outcome_nor_the_credit() {
 fn a_release_racing_the_resolution_returns_the_credit_once() {
     shuttle::future::block_on(async {
         let HeldSubmission { slots, id, credit } = one_held_submission().await;
-        let releaser = tokio::spawn({
+        let releaser = nervix_primitives::task::spawn({
             let slots = slots.clone();
             async move { slots.release(id) }
         });
-        let resolver = tokio::spawn({
+        let resolver = nervix_primitives::task::spawn({
             let slots = slots.clone();
             async move { slots.resolve(id, ProducerOutcome::Completed, credit) }
         });

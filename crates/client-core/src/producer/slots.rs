@@ -14,8 +14,9 @@ use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc as StdArc};
 
 use error_stack::Report;
 use meticulous::OptionExt as _;
-use parking_lot::Mutex as SyncMutex;
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use nervix_primitives::sync::{
+    Notify, OwnedSemaphorePermit, Semaphore, blocking::Mutex as SyncMutex,
+};
 
 use super::{PendingSubmission, ProducerError, ProducerOutcome, SubmissionId};
 
@@ -139,7 +140,7 @@ impl SubmissionSlots {
         id: SubmissionId,
     ) -> error_stack::Result<ProducerOutcome, ProducerError> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let resolved = self.resolved.notified();
             let mut resolved = std::pin::pin!(resolved);
             resolved.as_mut().enable();
