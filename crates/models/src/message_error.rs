@@ -33,6 +33,7 @@ pub enum MessageErrorCode {
 #[strum(serialize_all = "snake_case", ascii_case_insensitive)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageErrorOperation {
+    Admit,
     SourceWhere,
     FilterWhere,
     Inferencer,

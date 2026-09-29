@@ -369,6 +369,14 @@ the latest center cannot make a future center eligible. `TIMESTAMP NOW` uses the
 created the window. `TIMESTAMP AT <field>` preserves the decoded event timestamp before testing it
 against that window.
 
+An ingest group resolves its event timestamp column once. Admission compares signed nanosecond
+values against the first and last reached centers in lanes, then tests the exact period remainder
+for values between them. The period reduction is prepared once for that window. A bitmap selects
+accepted Arrow rows and their timestamp and ACK sidecars together. Rejected rows retain their own
+ACKs and follow each output route's message-error policy with code `validation` and operation
+`admit`; a rejected timestamp cannot discard another row of the group. A missing declared timestamp
+is also rejected for that row. The single-timestamp admission check has the same inclusive bounds.
+
 Unpaced ingestion has no admission window. Its clock snapshot still supplies delivery time, while
 an explicit event timestamp or connector-owned source timestamp remains preserved source time.
 

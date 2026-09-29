@@ -49,6 +49,14 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --test scenarios -- {{ args }}
 
+# Focused columnar admission kernel and vocabulary tests.
+test-admission-kernels *args:
+    cargo test --package nervix-simd-kernels --lib -- {{ args }}
+    cargo test --package nervix-models --lib -- {{ args }}
+
+test-admission-runtime *args: download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
+
 test-web-console:
     CARGO_TARGET_DIR={{ cargo_target_dir }} cargo test --package nervix-web-console --bin nervix-web-console
 
