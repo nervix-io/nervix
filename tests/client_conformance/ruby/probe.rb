@@ -6,7 +6,8 @@
 # Fiddle::Pointer whose free function is the binding's release, so the garbage collector releases a
 # reference nothing reaches; the probe also releases references explicitly. Frames are read in
 # place through the pointer the binding lends, and columns are copied into Fiddle buffers one call
-# per column.
+# per column. Run with the `clock` argument, it attaches to the domain's clock instead, reads the
+# state and the first tick of the generation the scenario starts, and detaches.
 
 require 'fiddle'
 
@@ -28,6 +29,8 @@ module Probe
   CELL_NULL = 2
   CELL_REDACTED = 3
   EVENT_ROWS = 1
+  CLOCK_KINDS = [nil, 'STATE', 'TICK', 'ENDED', 'INTERRUPTED', 'RESTORATION_FAILED'].freeze
+  CLOCK_PACED = 4
   DISPOSITIONS = [nil, 'completed', 'failed', 'not_leader', 'transaction_detached',
                   'transaction_taken_over', 'outcome_unknown', 'execution_reference_conflict',
                   'execution_reference_expired', 'preview_stale'].freeze
@@ -81,11 +84,20 @@ module Probe
     event_column_fixed: function('nx_event_column_fixed', [VOIDP, INT, SIZE, VOIDP, SIZE], VOIDP),
     event_column_varlen: function('nx_event_column_varlen',
                                   [VOIDP, INT, SIZE, VOIDP, SIZE, VOIDP, SIZE, VOIDP], VOIDP),
-    event_cell_varlen: function('nx_event_cell_varlen', [VOIDP, INT, SIZE, SIZE, VOIDP, VOIDP], VOIDP)
+    event_cell_varlen: function('nx_event_cell_varlen', [VOIDP, INT, SIZE, SIZE, VOIDP, VOIDP], VOIDP),
+    session_next_clock_event: function('nx_session_next_clock_event', [VOIDP, VOIDP, VOIDP], VOIDP),
+    clock_event_kind: function('nx_clock_event_kind_of', [VOIDP], INT),
+    clock_event_domain: function('nx_clock_event_domain', [VOIDP, VOIDP, VOIDP], Fiddle::TYPE_VOID),
+    clock_event_generation: function('nx_clock_event_generation', [VOIDP, VOIDP], VOIDP),
+    clock_event_state: function('nx_clock_event_state', [VOIDP, VOIDP], VOIDP),
+    clock_event_paced: function('nx_clock_event_paced', [VOIDP, VOIDP, VOIDP, VOIDP, VOIDP, VOIDP], VOIDP),
+    clock_event_tick: function('nx_clock_event_tick', [VOIDP, VOIDP, VOIDP, VOIDP, VOIDP], VOIDP),
+    clock_event_retain: function('nx_clock_event_retain', [VOIDP], VOIDP)
   }.freeze
 
   # The binding's release functions, run by the collector on pointers it frees.
   EVENT_RELEASE = LIBRARY['nx_event_release']
+  CLOCK_EVENT_RELEASE = LIBRARY['nx_clock_event_release']
   OUTCOME_FREE = LIBRARY['nx_outcome_free']
   CANCEL_FREE = LIBRARY['nx_cancel_free']
 
@@ -280,6 +292,80 @@ module Probe
     end
   end
 
+  # The committed clock of the generation the probe follows.
+  PacedClock = Struct.new(:generation, :period, :skew, :origin, :rate) do
+    def state_line(domain)
+      "STATE domain=#{domain} generation=#{generation} state=paced period=#{period} skew=#{skew} " \
+        "origin=#{origin} rate=f64:#{format('%016x', [rate].pack('D').unpack1('Q'))}"
+    end
+
+    # The report line of a tick, after holding it to this clock: its boundary is the logical origin
+    # plus one period for every id before it, and the serving node's reading never precedes the
+    # origin.
+    def tick_line(event, domain)
+      raise 'a tick belongs to another generation than the state before it' unless event.generation == generation
+
+      tick_id, boundary, _authority_utc, serving_logical = event.tick
+      if tick_id.zero? || boundary != origin + ((tick_id - 1) * period)
+        raise "a tick's boundary is not the origin plus one period for every id before it"
+      end
+      raise "the serving node's logical reading precedes the logical origin" if serving_logical < origin
+
+      "TICK domain=#{domain} generation=#{generation} boundary=origin+(id-1)*period"
+    end
+  end
+
+  # One reference to a domain clock event. The collector releases it when nothing reaches it.
+  class ClockEvent
+    def initialize(handle)
+      handle.free = CLOCK_EVENT_RELEASE
+      @handle = handle
+    end
+
+    def retain = ClockEvent.new(F[:clock_event_retain].call(@handle))
+
+    # Releases the reference now instead of waiting for the collector.
+    def release = @handle.call_free
+
+    def kind = CLOCK_KINDS.fetch(F[:clock_event_kind].call(@handle))
+
+    def domain
+      name = Probe.slot
+      name_len = Probe.slot(SIZE_BYTES)
+      F[:clock_event_domain].call(@handle, name, name_len)
+      Probe.borrowed(name, name_len).force_encoding('UTF-8')
+    end
+
+    def generation
+      generation = Probe.slot(8)
+      Probe.check(F[:clock_event_generation].call(@handle, generation))
+      generation[0, 8].unpack1('Q')
+    end
+
+    def state
+      state = Probe.slot(4)
+      Probe.check(F[:clock_event_state].call(@handle, state))
+      state[0, 4].unpack1('l')
+    end
+
+    # The committed clock. The UTC anchor depends on when START committed, so it is not read.
+    def paced
+      period = Probe.slot(8)
+      skew = Probe.slot(8)
+      origin = Probe.slot(8)
+      rate = Probe.slot(8)
+      Probe.check(F[:clock_event_paced].call(@handle, period, skew, origin, nil, rate))
+      PacedClock.new(generation, period[0, 8].unpack1('Q'), skew[0, 8].unpack1('Q'), origin[0, 8].unpack1('q'),
+                     rate[0, 8].unpack1('D'))
+    end
+
+    def tick
+      slots = Array.new(4) { Probe.slot(8) }
+      Probe.check(F[:clock_event_tick].call(@handle, *slots))
+      [slots[0][0, 8].unpack1('Q'), *slots[1..].map { |slot| slot[0, 8].unpack1('q') }]
+    end
+  end
+
   # An open session.
   class Session
     def initialize(server, domain, username, password)
@@ -310,6 +396,15 @@ module Probe
       out = Probe.slot
       Probe.check(F[:session_next_event].call(@handle, cancel, out))
       Event.new(Probe.read_pointer(out))
+    end
+
+    def next_clock_event(cancel, domain)
+      out = Probe.slot
+      Probe.check(F[:session_next_clock_event].call(@handle, cancel, out))
+      event = ClockEvent.new(Probe.read_pointer(out))
+      raise 'a clock event arrived for another domain' unless event.domain == domain
+
+      event
     end
   end
 
@@ -377,12 +472,80 @@ module Probe
     $stdout.flush
   end
 
+  # Cancels a clock wait from another thread, then lets a deadline end another. The session follows
+  # no clock yet, so nothing but its token ends either wait.
+  def self.check_clock_cancellation(session, domain)
+    cancel = cancel()
+    waiter = Thread.new { failure_of { session.next_clock_event(cancel, domain) } }
+    sleep 0.1
+    F[:cancel_trigger].call(cancel)
+    raise 'a cancelled clock wait did not report CANCELLED' unless waiter.join(30)&.value&.kind == ERROR_CANCELLED
+
+    expired = failure_of { session.next_clock_event(cancel(50), domain) }
+    raise 'an expired clock wait did not report DEADLINE' unless expired.kind == ERROR_DEADLINE
+  end
+
+  # Attaches to the domain's clock, reads the state and the first tick of the generation the
+  # scenario starts, and detaches.
+  def self.run_clock(session, domain)
+    check_clock_cancellation(session, domain)
+    report("ATTACHED #{disposition(session.execute('ATTACH DOMAIN CLOCK;'))}")
+
+    deadline = cancel(120_000)
+    state = nil
+    while state.nil?
+      event = session.next_clock_event(deadline, domain)
+      raise "the clock reported #{event.kind} before the started state" unless event.kind == 'STATE'
+
+      # The serving node may report the started generation uninstalled until it holds the
+      # committed mapping and an assigned clock authority.
+      state = event if event.state == CLOCK_PACED
+    end
+    clock = state.paced
+    reported_state = clock.state_line(domain)
+    report(reported_state)
+
+    tick = nil
+    while tick.nil?
+      event = session.next_clock_event(deadline, domain)
+      case event.kind
+      when 'TICK' then tick = event
+      when 'STATE'
+        # The serving node reported the installation again; it is still the same generation.
+        raise 'the clock moved to another generation before its first tick' unless event.generation == clock.generation
+      else raise "the clock reported #{event.kind} before its first tick"
+      end
+    end
+    reported_tick = clock.tick_line(tick, domain)
+    report(reported_tick)
+
+    # Keep a second reference to each event and release the first on another thread, so the
+    # events must read the same on the second alone.
+    retained_state = state.retain
+    retained_tick = tick.retain
+    Thread.new do
+      state.release
+      tick.release
+    end.join
+    if retained_state.paced.state_line(domain) != reported_state || clock.tick_line(retained_tick, domain) != reported_tick
+      raise 'a retained clock event reads differently than it did'
+    end
+
+    report("DETACHED #{disposition(session.execute('DETACH DOMAIN CLOCK;'))}")
+    report('CHECKS ok')
+    session.close
+    report('PASS')
+  end
+
   def self.main
+    domain = ENV.fetch('NERVIX_PROBE_DOMAIN')
+    session = Session.new(ENV.fetch('NERVIX_PROBE_GRPC_URI'), domain,
+                          ENV.fetch('NERVIX_PROBE_USERNAME'), ENV.fetch('NERVIX_PROBE_PASSWORD'))
+    return run_clock(session, domain) if ARGV == ['clock']
+
     relay = ENV.fetch('NERVIX_PROBE_RELAY')
     subscription = ENV.fetch('NERVIX_PROBE_SUBSCRIPTION')
     expected_rows = Integer(ENV.fetch('NERVIX_PROBE_ROWS'))
-    session = Session.new(ENV.fetch('NERVIX_PROBE_GRPC_URI'), ENV.fetch('NERVIX_PROBE_DOMAIN'),
-                          ENV.fetch('NERVIX_PROBE_USERNAME'), ENV.fetch('NERVIX_PROBE_PASSWORD'))
 
     report("OPERATION #{disposition(session.execute("SHOW CREATE RELAY #{relay};"))}")
     report(error_line(session.execute('CREATE RELAY;')))
