@@ -113,7 +113,7 @@ builds and suites at the same time.
 
 | Command | Result |
 | --- | --- |
-| `just test-scenarios --input tests/features/runtime/wasm_state_qualification.feature` | 11 of 11 scenarios passed (the one owner-loss retry of an earlier run led to that outline being `@exclusive`, like its sibling in `wasm_checkpoint_durability.feature`) |
+| `just test-scenarios --input tests/features/runtime/wasm_state_qualification.feature` | 11 of 11 scenarios passed; an earlier owner-loss attempt needed one retry |
 | `just test-scenarios --input 'tests/features/runtime/wasm_\*.feature'` | 5 features, 122 of 122 scenarios passed |
 | `just test-scenarios --input 'tests/features/cluster/\*.feature'` | 30 features, 209 of 209 scenarios passed, including every restart, failover, drain and relocation scenario the voter observation grace touches |
 | `just test-shuttle wasm_checkpoint`, `just test-shuttle durability` | 8 of 8 checks passed under random, PCT and DFS schedules |

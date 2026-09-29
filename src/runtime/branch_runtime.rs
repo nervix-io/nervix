@@ -589,7 +589,6 @@ impl BranchRuntime {
                 return;
             }
         };
-        let delivery_observation = batch.delivery_observation(snapshot.now());
         let input_metrics =
             self.metrics.processor_inputs.get(processor_id).verified(
                 "the branch template resolves metrics for every processor before spawning",
@@ -597,19 +596,12 @@ impl BranchRuntime {
         let input_metrics = input_metrics.get(incoming_relay).verified(
             "the branch template resolves every declared processor input before spawning",
         );
-        input_metrics.observe_batch(
-            batch.message_count(),
-            batch.estimated_bytes(),
-            delivery_observation.domain_timestamp,
-        );
+        input_metrics.observe_delivery(&batch.delivery_observation(snapshot.now()));
         self.runtime.mark_branch_aggregated_metrics_updated(
             &self.domain,
             processor.kind,
             &processor.processor,
         );
-        for seconds in delivery_observation.latency_seconds {
-            input_metrics.observe_delivery_latency(seconds, delivery_observation.domain_timestamp);
-        }
         processor
             .accept_input(self, incoming_relay, batch, &snapshot)
             .await;

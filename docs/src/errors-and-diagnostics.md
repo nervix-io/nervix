@@ -417,6 +417,12 @@ reports a stopped or uninstalled clock, or a projection outside the timestamp ra
 `DomainClockReadError`. See
 [Domain Clock Attachment](./sessions.md#domain-clock-attachment).
 
+The CLI's `domain-clock` subcommand classifies attach refusals from those variants. A missing
+domain and an already attached clock have distinct typed CLI errors; other attach and detach
+refusals retain the server's message. It exits nonzero for a refusal. Transport or session failures
+while attaching, reading events, or detaching retain their underlying report beneath the CLI
+operation that failed.
+
 If a paced clock cannot convert one period through its rate, the authority can still emit its
 already-due first tick. Scheduling a later tick then reports a rate-conversion or cadence error and
 stops production. A next-boundary overflow reports its own clock arithmetic error. None of these
