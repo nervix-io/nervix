@@ -10,6 +10,8 @@ workspace = true
 
 [features]
 default = []
+# Runs the cancellation protocol's Loom models, with Loom's primitives selected for the whole graph.
+loom = ["nervix-model-harness/loom", "nervix-primitives/loom"]
 shuttle = [
   "dep:shuttle",
   "dep:shuttle-dashmap",
@@ -48,4 +50,7 @@ turmoil = { workspace = true, optional = true }
 ubyte = { workspace = true }
 
 [dev-dependencies]
+nervix-model-harness = { workspace = true }
+# The cancellation models run their participants as threads of the selected model.
+nervix-primitives = { workspace = true, features = ["native"] }
 tokio = { workspace = true, features = ["full", "test-util"] }

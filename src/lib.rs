@@ -58,6 +58,8 @@ pub mod runtime;
 pub mod runtime_ack;
 pub mod runtime_schema;
 #[cfg(all(test, feature = "shuttle"))]
+mod shuttle_selection_tests;
+#[cfg(all(test, feature = "shuttle"))]
 mod shuttle_test;
 #[doc(hidden)]
 pub mod subscription_row;

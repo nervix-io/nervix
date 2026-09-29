@@ -1,0 +1,106 @@
+# Every use of `nervix_primitives::unmodeled`: a real atomic that stays outside every model.
+#
+# A permission names the file, the items it uses, the owner that needs a real atomic, why, and what
+# the choice leaves unverified. `just validate-primitive-boundary` rejects an unmodeled use without a
+# permission, an item a permission does not list, and a permission or listed item nothing uses. A
+# real atomic may keep runner statistics, cross an external boundary, or record what a check
+# observes. It never carries the protocol under test, chooses its branches, supplies its wakeups, or
+# establishes an ordering an assertion relies on.
+
+[[permission]]
+items = ["AtomicUsize", "Ordering"]
+limit = "Runner bookkeeping that no invariant reads."
+owner = "The execution crate's Shuttle runner."
+path = "crates/execution/src/tests.rs"
+reason = "The highest step count spans every model execution the runner starts and is read after they end, where no modeled atomic can exist."
+
+[[permission]]
+items = ["AtomicUsize", "Ordering"]
+limit = "Runner bookkeeping that no invariant reads."
+owner = "The interconnect's Shuttle runner."
+path = "crates/interconnect/src/shuttle_test.rs"
+reason = "The highest step count spans every model execution the runner starts and is read after they end, where no modeled atomic can exist."
+
+[[permission]]
+items = ["AtomicUsize", "Ordering"]
+limit = "Runner bookkeeping that no invariant reads."
+owner = "The server's Shuttle runner."
+path = "src/shuttle_test.rs"
+reason = "The highest step count spans every model execution the runner starts and is read after they end, where no modeled atomic can exist."
+
+[[permission]]
+items = ["AtomicUsize", "Ordering"]
+limit = "Runner bookkeeping that no model reads."
+owner = "The Loom runner of nervix-model-harness."
+path = "crates/model-harness/src/loom.rs"
+reason = "The number of executions a search explored spans every execution and is reported after the search ends, where no modeled atomic can exist."
+
+[[permission]]
+items = ["AtomicBool", "Ordering"]
+limit = "The epoch driver's shutdown is outside every model: no check covers when the thread observes the flag."
+owner = "The WASM runtime's epoch driver."
+path = "crates/nervix-wasm/src/lib.rs"
+reason = "The flag stops a dedicated operating-system thread that no model runs, and a modeled atomic cannot be used from a thread outside its model."
+
+[[permission]]
+items = ["AtomicBool", "AtomicUsize", "Ordering"]
+limit = "Benchmark statistics; the benchmark claims nothing about synchronization."
+owner = "The VM benchmarks' allocation probe."
+path = "crates/nervix-vm/benches/vm/allocation_probe.rs"
+reason = "The global allocator counts every allocation of the process, on every thread, including the ones a model checker makes for itself."
+
+[[permission]]
+items = ["AtomicBool", "AtomicUsize", "Ordering"]
+limit = "Records observe the stream slots and never synchronize them; the slots' own atomics are modeled."
+owner = "The interconnect's stream-slot Shuttle checks."
+path = "crates/interconnect/src/connection/stream_slots/shuttle_checks.rs"
+reason = "Each record must change in the same scheduling step as the lease or drain operation it records, so recording adds no scheduling point."
+
+[[permission]]
+items = ["AtomicBool", "AtomicUsize", "Ordering"]
+limit = "Records observe the emitter and never synchronize it; the emitter's own counts are modeled."
+owner = "The emitter record-write Shuttle checks."
+path = "src/runtime/emitter_record_writes_shuttle_tests.rs"
+reason = "Each record must change in the same scheduling step as the operation it records, so recording adds no scheduling point."
+
+[[permission]]
+items = ["AtomicBool", "AtomicUsize", "Ordering"]
+limit = "Records observe the entity gate and never synchronize it; the quiesce counters under test are modeled."
+owner = "The entity gate Shuttle checks."
+path = "src/runtime/entity_gate_shuttle_tests.rs"
+reason = "Each record must change in the same scheduling step as the operation it records, so recording adds no scheduling point."
+
+[[permission]]
+items = ["AtomicBool", "AtomicUsize", "Ordering"]
+limit = "Records observe the relay gate and fan-out and never synchronize them; the relay's own atomics are modeled."
+owner = "The relay dispatch gate and fan-out Shuttle checks."
+path = "src/runtime/relay_channel_shuttle_tests.rs"
+reason = "Each gate and wake record must change in the same scheduling step as the operation it records, so recording adds no scheduling point."
+
+[[permission]]
+items = ["AtomicBool", "AtomicU64", "Ordering"]
+limit = "Records observe the durability barrier and never synchronize it; the barrier's own atomics are modeled."
+owner = "The state store durability-barrier Shuttle checks."
+path = "src/runtime/state_store/durability_shuttle_tests.rs"
+reason = "Each record must change in the same scheduling step as the operation it records, so recording adds no scheduling point."
+
+[[permission]]
+items = ["AtomicBool", "AtomicU64", "Ordering"]
+limit = "Records observe the checkpoint hold and never synchronize it; the owner's own atomics are modeled."
+owner = "The WASM checkpoint Shuttle checks."
+path = "src/runtime/wasm_checkpoint_shuttle_tests.rs"
+reason = "Each record must change in the same scheduling step as the operation it records, so recording adds no scheduling point."
+
+[[permission]]
+items = ["AtomicUsize", "Ordering"]
+limit = "The count observes the source loop and never synchronizes it; the quiesce control under test is modeled."
+owner = "The source host-loop Shuttle checks."
+path = "src/runtime/ingestors/source_shuttle_tests.rs"
+reason = "The dispatch count must change in the same scheduling step as the dispatch it counts, so counting adds no scheduling point."
+
+[[permission]]
+items = ["AtomicUsize", "Ordering"]
+limit = "Release counts observe the retained archive and never synchronize it; the download stream's own synchronization is modeled."
+owner = "The retained backup archive tests and their Shuttle checks."
+path = "src/application/backup/retained.rs"
+reason = "A release count must change in the same scheduling step as the release it counts, so counting adds no scheduling point."

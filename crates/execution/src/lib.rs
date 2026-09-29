@@ -308,5 +308,7 @@ pub enum ExecutionFailure {
 /// this crate uses `triomphe::Arc`.
 type SemaphoreRef = StdArc<tokio::sync::Semaphore>;
 
-#[cfg(test)]
+// The ordinary tests build executors whose atomics would be Loom's in a Loom build, outside any
+// model. That build runs only the cancellation models.
+#[cfg(all(test, not(feature = "loom")))]
 mod tests;

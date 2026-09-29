@@ -5868,6 +5868,8 @@ dependencies = [
  "cfg-if",
  "generator",
  "scoped-tls",
+ "serde",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
 ]
@@ -7190,6 +7192,7 @@ dependencies = [
  "dashmap 6.2.1",
  "error-stack",
  "meticulous",
+ "nervix-model-harness",
  "nervix-primitives",
  "parking_lot",
  "shuttle",
@@ -7285,6 +7288,17 @@ dependencies = [
  "serde_json",
  "strum 0.26.3",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "nervix-model-harness"
+version = "0.1.0-dev"
+dependencies = [
+ "loom",
+ "nervix-primitives",
+ "tracing",
+ "tracing-subscriber",
+ "triomphe",
 ]
 
 [[package]]

@@ -332,6 +332,7 @@ members = [
   "crates/nervix-vm",
   "crates/nspl",
   "crates/nspl-format",
+  "crates/model-harness",
   "crates/models",
   "crates/primitives",
   "crates/recovery",
@@ -535,6 +536,7 @@ nervix-execution = { package = "nervix-execution", path = "crates/execution" }
 nervix-expiry-map = { package = "nervix-expiry-map", path = "crates/expiry-map" }
 nervix-interconnect = { package = "nervix-interconnect", path = "crates/interconnect" }
 nervix-jaq = { package = "nervix-jaq", path = "crates/jaq" }
+nervix-model-harness = { package = "nervix-model-harness", path = "crates/model-harness" }
 nervix-models = { package = "nervix-models", path = "crates/models" }
 nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
   "server",

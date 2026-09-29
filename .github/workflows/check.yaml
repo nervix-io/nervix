@@ -863,6 +863,18 @@ jobs:
       - name: Shuttle concurrency checks
         run: just test-shuttle
 
+      # The primitive boundary's conformance in every execution mode, then every registered Loom
+      # model of a production owner explored to exhaustion, then the proof that each model fails
+      # under the ordering weakening it exists to detect.
+      - name: Primitive boundary conformance
+        run: just test-primitives
+
+      - name: Loom memory-ordering models
+        run: just test-loom
+
+      - name: Loom ordering qualification
+        run: just test-loom-qualification
+
       # The walk saturates every core, and its failures are about completion reachability rather
       # than about any one test.
       - name: NSPL completion walk
@@ -888,6 +900,19 @@ jobs:
         with:
           name: shuttle-failures
           path: target/shuttle-failures
+          if-no-files-found: ignore
+
+      # A failed Loom model is only reproducible from the checkpoint of the execution that failed,
+      # and a failed qualification from its weakened run; this job is the only witness of either.
+      - name: Upload Loom failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loom-failures
+          path: |
+            target/loom-failures
+            target/loom-qualification/*/*.log
+            target/loom-qualification/*/*.json
           if-no-files-found: ignore
 
   # Turmoil's seeded network simulations of the interconnect: every scenario over its committed
