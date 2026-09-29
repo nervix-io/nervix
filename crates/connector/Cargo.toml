@@ -16,6 +16,7 @@ shuttle = ["dep:shuttle-tokio", "shuttle-tokio/shuttle"]
 arrow-array = { workspace = true }
 async-trait = { workspace = true }
 error-stack = { workspace = true }
+meticulous = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 nervix-recovery = { workspace = true }

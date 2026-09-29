@@ -610,6 +610,15 @@ async fn execute_run(
             resolved,
             &host_bootstrap,
             &mut subject,
+            match implementation {
+                Implementation::Nervix(_) => resolved.partitions,
+                Implementation::Container(container)
+                    if container.require_consumer_group_membership =>
+                {
+                    resolved.partitions
+                }
+                Implementation::Container(_) => 0,
+            },
         )
         .await
     }
@@ -1018,6 +1027,7 @@ async fn start_container_subject(
     let readiness_port = implementation.readiness_port.map(ContainerPort::Tcp);
     let mapped_ports = readiness_port.into_iter().collect::<Vec<_>>();
     let readiness_path = implementation.readiness_path.clone();
+    let readiness_log = implementation.readiness_log.clone();
     let command = implementation.command.clone();
     let network = docker_network.to_string();
     let configuration = rendered.as_bytes().to_vec();
@@ -1036,6 +1046,9 @@ async fn start_container_subject(
                             .with_port(port)
                             .with_expected_status_code(200_u16),
                     ));
+                }
+                if let Some(message) = readiness_log.as_deref() {
+                    image = image.with_wait_for(WaitFor::message_on_stdout(message));
                 }
                 let request = image
                     .with_network(network.clone())
@@ -1337,6 +1350,7 @@ async fn run_load_driver(
     resolved: &ResolvedRun,
     bootstrap_servers: &str,
     subject: &mut Subject,
+    minimum_consumers: u32,
 ) -> Result<()> {
     let load_driver = match &args.options.workload.load_driver {
         Some(path) => absolute_or_repository_path(repository_root, path),
@@ -1364,7 +1378,7 @@ async fn run_load_driver(
             "--consumer-group",
             &resolved.consumer_group,
             "--minimum-consumers",
-            &resolved.partitions.to_string(),
+            &minimum_consumers.to_string(),
             "--duration-seconds",
             &resolved.duration_seconds.to_string(),
             "--warmup-seconds",
@@ -1730,9 +1744,11 @@ fn write_run_manifest(
         Implementation::Container(container) => ("container", Some(container.image.as_str())),
     };
     table.insert("subject".to_string(), subject.into());
-    if let Implementation::Nervix(nervix) = implementation {
-        table.insert("nervix_nodes".to_string(), i64::from(nervix.nodes).into());
-    }
+    let subject_nodes = match implementation {
+        Implementation::Nervix(nervix) => nervix.nodes,
+        Implementation::Container(_) => 1,
+    };
+    table.insert("subject_nodes".to_string(), i64::from(subject_nodes).into());
     if let Some(image) = image {
         table.insert("image".to_string(), image.into());
     }
@@ -1858,6 +1874,8 @@ fn absolute_or_repository_path(repository_root: &Path, path: &Path) -> PathBuf {
 fn shape_arguments(shape: &LoadShape) -> Vec<String> {
     match shape {
         LoadShape::UniformPassthrough => vec!["uniform-passthrough".to_string()],
+        LoadShape::UniformUppercase => vec!["uniform-uppercase".to_string()],
+        LoadShape::UniformFilterMap => vec!["uniform-filter-map".to_string()],
         LoadShape::UniformFanout { outputs_per_input } => vec![
             "uniform-fanout".to_string(),
             "--outputs-per-input".to_string(),

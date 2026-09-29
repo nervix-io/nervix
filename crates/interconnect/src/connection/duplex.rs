@@ -87,7 +87,7 @@ impl FrameReader {
         let charge = executor
             .reserve(class, INITIAL_FRAME_CHARGE.min(carry_limit(frame_limit)))
             .await
-            .map_err(|error| Report::new(TransportError::Decode(error.to_string())))?;
+            .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
         Ok(Self {
             body,
             carry: Vec::new(),
@@ -152,7 +152,7 @@ impl FrameReader {
         let charged = target.max(doubled).min(ceiling);
         self.charge
             .grow_to(charged)
-            .map_err(|error| Report::new(TransportError::Decode(error.to_string())))?;
+            .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
         let charged: usize = usize::try_from(charged)
             .assured("a charge bounded by the class limit fits the address space");
         let room = charged
@@ -360,32 +360,23 @@ impl<M: InterconnectDuplexRequest> DuplexSender<M> {
                 M::CLASS.payload_limit(&self.executor),
             )
             .await
-            .map_err(|error| {
-                Report::new(RequestError::Encode { request: M::NAME }).attach_printable(error)
-            })?;
+            .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
         let frame = ChargedBytes::from_owned(payload, reservation);
         let bytes = u64::try_from(frame.len())
             .assured("supported targets have a pointer width no larger than u64");
-        self.writer.send_frame(frame).await.map_err(|error| {
-            Report::new(RequestError::Stream {
-                node: self.node.clone(),
-                request: M::NAME,
-                reason: error.to_string(),
-            })
-        })?;
+        self.writer
+            .send_frame(frame)
+            .await
+            .map_err(|error| RequestError::stream_with_cause(error, self.node.clone(), M::NAME))?;
         Ok(bytes)
     }
 
     /// Stop submitting. The peer finishes the frames it already has and then ends its own
     /// direction.
     pub fn finish(&mut self) -> Result<(), Report<RequestError>> {
-        self.writer.finish().map_err(|error| {
-            Report::new(RequestError::Stream {
-                node: self.node.clone(),
-                request: M::NAME,
-                reason: error.to_string(),
-            })
-        })
+        self.writer
+            .finish()
+            .map_err(|error| RequestError::stream_with_cause(error, self.node.clone(), M::NAME))
     }
 
     /// When the peer last accepted bytes from this sender.
@@ -413,22 +404,17 @@ impl<M: InterconnectDuplexRequest> DuplexReceiver<M> {
     /// deadline for that work and applies it here, and [`DuplexSender::progress`] tells it whether
     /// the peer still accepts what it sends.
     pub async fn next(&mut self) -> Result<Option<M::Response>, Report<RequestError>> {
-        let frame = self.reader.next_frame().await.map_err(|error| {
-            Report::new(RequestError::Stream {
-                node: self.node.clone(),
-                request: M::NAME,
-                reason: error.to_string(),
-            })
-        })?;
+        let frame =
+            self.reader.next_frame().await.map_err(|error| {
+                RequestError::stream_with_cause(error, self.node.clone(), M::NAME)
+            })?;
         let Some(frame) = frame else {
             return Ok(None);
         };
         let (response, _reservation) =
             M::Response::decode_rkyv(self.executor.clone(), M::CLASS, frame)
                 .await
-                .map_err(|error| {
-                    Report::new(RequestError::Decode { request: M::NAME }).attach_printable(error)
-                })?;
+                .map_err(|error| error.change_context(RequestError::Decode { request: M::NAME }))?;
         Ok(Some(response))
     }
 }
@@ -478,7 +464,7 @@ impl<T: RkyvMessage> DuplexItems<T> {
             .reader
             .next_frame()
             .await
-            .map_err(|error| Report::new(StreamHandlerError::new(error.to_string())))?;
+            .map_err(StreamHandlerError::with_cause)?;
         let Some(frame) = frame else {
             return Ok(None);
         };
@@ -543,8 +529,10 @@ impl ClientConnection {
                 .assured("the fixed HTTPS request base is a valid URL");
             request_url
                 .set_host(Some(&self.request_host))
-                .map_err(|_| {
-                    Report::new(TransportError::InvalidServerName(self.request_host.clone()))
+                .map_err(|error| {
+                    Report::new(error).change_context(TransportError::InvalidServerName(
+                        self.request_host.clone(),
+                    ))
                 })?;
             request_url.set_path(path);
             let request = Request::builder()
@@ -552,7 +540,9 @@ impl ClientConnection {
                 .version(Version::HTTP_2)
                 .uri(request_url.as_str())
                 .body(())
-                .map_err(|error| Report::new(TransportError::Http(error.to_string())))?;
+                .map_err(|error| {
+                    TransportError::with_cause(Report::new(error), TransportError::Http)
+                })?;
             let (response, stream) = {
                 let mut sender = sender;
                 sender
@@ -713,7 +703,9 @@ impl TransportState {
             .status(StatusCode::OK)
             .version(Version::HTTP_2)
             .body(())
-            .map_err(|error| TransportError::Http(error.to_string()))?;
+            .map_err(|error| {
+                TransportError::with_cause(Report::new(error), TransportError::Http)
+            })?;
         let mut writer = FrameWriter::new(
             respond
                 .send_response(headers, false)
@@ -726,7 +718,7 @@ impl TransportState {
                 Ok(frame) => frame,
                 Err(error) => {
                     writer.stream.send_reset(Reason::INTERNAL_ERROR);
-                    return Err(Report::new(TransportError::Decode(error.to_string())));
+                    return Err(TransportError::with_cause(error, TransportError::Decode));
                 }
             };
             writer.send_frame(frame).await?;
