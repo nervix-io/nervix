@@ -96,7 +96,10 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uuid::Uuid;
 
 use crate::common::{
-    client_conformance::{ClientProbe, ProbeRuntime, ProbeTarget, SUBSCRIBED_LINE, corpus_report},
+    client_conformance::{
+        ATTACHED_LINE, ClientProbe, ProbeExercise, ProbeRuntime, ProbeTarget, SUBSCRIBED_LINE,
+        corpus_report,
+    },
     cluster::{
         BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
         HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
@@ -352,6 +355,7 @@ struct ScenarioWorld {
     fault_injection: FaultInjection,
     consensus_commit_delays: BTreeMap<String, Duration>,
     burst_raft_retention_peak: Option<nervix_consensus::RaftLogRetention>,
+    saved_raft_log_heads: BTreeMap<String, Option<u64>>,
     durable_catch_up: Option<DurableCatchUpObservation>,
     durable_catch_up_writer: Option<DurableCatchUpWriter>,
     follower_commands_memory: Option<FollowerCommandsMemoryObservation>,
@@ -463,6 +467,7 @@ impl fmt::Debug for ScenarioWorld {
                 &self.avro_http_optional_fields.len(),
             )
             .field("burst_raft_retention_peak", &self.burst_raft_retention_peak)
+            .field("saved_raft_log_heads", &self.saved_raft_log_heads)
             .field("transaction_qualification", &self.transaction_qualification)
             .field("temp_root_initialized", &self.temp_root.is_some())
             .field("browser_initialized", &self.browser.is_some())
@@ -3170,9 +3175,59 @@ fn then_client_wire_command_transport_artifact_exists(world: &mut ScenarioWorld)
     );
 }
 
-/// How long a probe may take to open its session and subscription. Starting a JVM or compiling
-/// nothing still costs seconds on a loaded machine, so this bounds a wait, not a race.
+/// How long a probe may take to open its session and subscription or attachment. Starting a JVM
+/// or compiling nothing still costs seconds on a loaded machine, so this bounds a wait, not a race.
 const CLIENT_PROBE_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Where a probe of the scenario's domain connects when it starts on `node_id`.
+fn client_probe_target(
+    world: &ScenarioWorld,
+    node_id: &str,
+    exercise: ProbeExercise,
+) -> ProbeTarget {
+    let cluster = world.cluster();
+    let grpc_uri = cluster
+        .grpc_uri(node_id)
+        .expect("the probe's node belongs to the cluster");
+    let console = cluster
+        .web_console_url(node_id)
+        .expect("the probe's node belongs to the cluster");
+    let mut websocket_uri =
+        url::Url::parse(&console).expect("the harness builds a valid console URL");
+    websocket_uri
+        .set_scheme("ws")
+        .expect("an http URL can take the ws scheme");
+    websocket_uri.set_path("/console/ws");
+    ProbeTarget {
+        grpc_uri,
+        websocket_uri: websocket_uri.to_string(),
+        username: TEST_AUTH_USERNAME.to_string(),
+        password: TEST_AUTH_PASSWORD.to_string(),
+        domain: world.domain.clone(),
+        exercise,
+    }
+}
+
+/// Starts a probe and waits until it prints `ready_line`, the point a scenario continues from.
+async fn start_client_probe(
+    world: &mut ScenarioWorld,
+    runtime: ProbeRuntime,
+    node_id: &str,
+    target: ProbeTarget,
+    ready_line: &str,
+) {
+    append_cucumber_log_line(&format!(
+        "client probe {runtime:?}: node={node_id} target={target:?}"
+    ));
+    let mut probe = ClientProbe::start(runtime, target)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    probe
+        .wait_for_line(ready_line, CLIENT_PROBE_SUBSCRIBE_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    world.client_probe = Some(probe);
+}
 
 #[when(
     expr = "the {string} client probe subscribes as {string} to relay {string} on node {string} \
@@ -3190,40 +3245,27 @@ async fn when_client_probe_subscribes(
         .parse()
         .expect("the step names a known probe runtime");
     let node_id = expand_placeholders(world, &node_id);
-    let cluster = world.cluster();
-    let grpc_uri = cluster
-        .grpc_uri(&node_id)
-        .expect("the probe's node belongs to the cluster");
-    let console = cluster
-        .web_console_url(&node_id)
-        .expect("the probe's node belongs to the cluster");
-    let mut websocket_uri =
-        url::Url::parse(&console).expect("the harness builds a valid console URL");
-    websocket_uri
-        .set_scheme("ws")
-        .expect("an http URL can take the ws scheme");
-    websocket_uri.set_path("/console/ws");
-    let target = ProbeTarget {
-        grpc_uri,
-        websocket_uri: websocket_uri.to_string(),
-        username: TEST_AUTH_USERNAME.to_string(),
-        password: TEST_AUTH_PASSWORD.to_string(),
-        domain: world.domain.clone(),
+    let exercise = ProbeExercise::Subscription {
         relay: expand_placeholders(world, &relay),
         subscription: expand_placeholders(world, &subscription),
         rows,
     };
-    append_cucumber_log_line(&format!(
-        "client probe {runtime:?}: node={node_id} target={target:?}"
-    ));
-    let mut probe = ClientProbe::start(runtime, target)
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-    probe
-        .wait_for_line(SUBSCRIBED_LINE, CLIENT_PROBE_SUBSCRIBE_TIMEOUT)
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-    world.client_probe = Some(probe);
+    let target = client_probe_target(world, &node_id, exercise);
+    start_client_probe(world, runtime, &node_id, target, SUBSCRIBED_LINE).await;
+}
+
+#[when(expr = "the {string} client probe attaches to the domain clock on node {string}")]
+async fn when_client_probe_attaches_to_the_domain_clock(
+    world: &mut ScenarioWorld,
+    runtime: String,
+    node_id: String,
+) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .expect("the step names a known probe runtime");
+    let node_id = expand_placeholders(world, &node_id);
+    let target = client_probe_target(world, &node_id, ProbeExercise::DomainClock);
+    start_client_probe(world, runtime, &node_id, target, ATTACHED_LINE).await;
 }
 
 #[when(expr = "the {string} client probe decodes the conformance corpus")]
@@ -5694,7 +5736,42 @@ async fn then_leader_purged_covered_log(world: &mut ScenarioWorld, duration: Str
     let observer = world
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&leader));
-    await_covered_log_purge(&observer, &duration).await;
+    await_covered_log_purge(&observer, &duration, None).await;
+}
+
+#[given(expr = "node {string} raft log head is saved before stop")]
+async fn given_node_raft_log_head_is_saved_before_stop(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&node_id));
+    let retention = observer.raft_log_retention();
+    world.saved_raft_log_heads.insert(
+        node_id,
+        retention.last_log_index.max(retention.snapshot_index),
+    );
+}
+
+#[then(
+    expr = "within {string} the leader node has purged its covered raft log beyond stopped node \
+            {string}"
+)]
+async fn then_leader_purged_covered_log_beyond_stopped_node(
+    world: &mut ScenarioWorld,
+    duration: String,
+    stopped_node_id: String,
+) {
+    let stopped_node_id = expand_placeholders(world, &stopped_node_id);
+    let stopped_head = world
+        .saved_raft_log_heads
+        .get(&stopped_node_id)
+        .copied()
+        .verified("the scenario saved this follower's log head before stopping it");
+    let leader = running_leader_node(world).await;
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&leader));
+    await_covered_log_purge(&observer, &duration, stopped_head).await;
 }
 
 #[then(
@@ -5789,13 +5866,14 @@ async fn await_purge_beyond_retention_peak(
 async fn await_covered_log_purge(
     observer: &nervix_consensus::Observer,
     duration: &str,
+    beyond: Option<u64>,
 ) -> nervix_consensus::RaftLogRetention {
     let deadline = Instant::now()
         + humantime::parse_duration(duration).expect("step duration must be a valid duration");
     loop {
         tokio::task::consume_budget().await;
         let retention = observer.raft_log_retention();
-        if retention.purged_index.is_some() {
+        if retention.purged_index > beyond {
             assert!(
                 retention.snapshot_index >= retention.purged_index,
                 "the leader purged entries its snapshot does not cover: {retention:?}"
@@ -5804,7 +5882,8 @@ async fn await_covered_log_purge(
         }
         assert!(
             Instant::now() < deadline,
-            "the leader did not purge its covered raft log within {duration}: {retention:?}"
+            "the leader did not purge its covered raft log beyond {beyond:?} within {duration}: \
+             {retention:?}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -22241,7 +22320,7 @@ async fn then_generator_occurrences_preserve_branches(
         .checked_add(duration)
         .assured("scenario durations fit Tokio's monotonic instant range");
     let mut branches_by_timestamp = BTreeMap::<_, BTreeSet<String>>::new();
-    let mut latest_timestamp = None;
+    let mut latest_timestamp_by_branch = BTreeMap::<String, i64>::new();
     let mut observed = Vec::new();
 
     loop {
@@ -22321,19 +22400,21 @@ async fn then_generator_occurrences_preserve_branches(
         let timestamp = timestamp
             .timestamp_nanos_opt()
             .assured("generator scenario timestamps fit signed Unix nanoseconds");
-        if !branches_by_timestamp.contains_key(&timestamp) {
-            if let Some(latest_timestamp) = latest_timestamp.as_ref() {
-                assert!(
-                    &timestamp > latest_timestamp,
-                    "generator occurrence timestamps arrived out of order: {observed:?}, {payload}"
-                );
-            }
-            latest_timestamp = Some(timestamp);
+        if let Some(previous) = latest_timestamp_by_branch.insert(branch.to_string(), timestamp) {
+            assert!(
+                timestamp > previous,
+                "generator timestamps for branch '{branch}' did not increase: {observed:?}, \
+                 {payload}"
+            );
         }
-        branches_by_timestamp
+        let inserted = branches_by_timestamp
             .entry(timestamp)
             .or_default()
             .insert(branch.to_string());
+        assert!(
+            inserted,
+            "generator repeated an occurrence for branch '{branch}': {payload}"
+        );
         world.last_subscription_payload = Some(payload.clone());
         observed.push(payload);
     }

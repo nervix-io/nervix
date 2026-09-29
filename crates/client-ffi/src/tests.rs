@@ -37,6 +37,8 @@ use crate::{
     nx_schema_free, nx_session_connect, nx_session_free,
 };
 
+mod clock_events;
+
 const ROWS: i32 = 1;
 const BRANCH_KEY: i32 = 2;
 
@@ -1103,6 +1105,20 @@ fn client_errors_are_classified_and_keep_their_causes() {
         assert_eq!(failure.kind(), kind);
         assert_eq!(failure.execution_reference(), None);
     }
+    let layered = crate::Failure::from(
+        error_stack::Report::new(ClientError::RetryDeadline)
+            .change_context(ClientError::SessionClosed),
+    );
+    assert_eq!(
+        layered.kind(),
+        FailureKind::Closed,
+        "a report is classified by its current context"
+    );
+    assert!(
+        layered.message().contains("session retry deadline expired"),
+        "every context beneath the current one stays in the message: {}",
+        layered.message()
+    );
     let downloads = [
         (
             BackupDownloadError::Refused {
