@@ -458,10 +458,10 @@ owner, why a real atomic is required, and what that leaves unverified:
 
 | Owner | Why the atomic is real | What stays outside every check |
 | --- | --- | --- |
-| The Shuttle runners of execution, the interconnect and the server, and the Loom runner | Their statistics span every model execution they start and are read after the last one | Nothing a check claims; they are runner bookkeeping |
+| The Shuttle runners of execution, the interconnect, the server and the Rust client, and the Loom runner | Their statistics span every model execution they start and are read after the last one | Nothing a check claims; they are runner bookkeeping |
 | The WASM runtime's epoch driver | Its stop flag is read by an operating-system thread no model runs | When the epoch thread observes shutdown |
 | The VM benchmarks' allocation probe | A global allocator counts allocations made on every thread | Nothing; the benchmark claims nothing about synchronization |
-| The records of the relay gate and fan-out, entity gate, emitter record-write, durability barrier, WASM checkpoint, source host-loop, stream-slot and retained-archive Shuttle checks | A record changes in the same scheduling step as the operation it records, so recording adds no scheduling point | Nothing the owner does: records observe and never synchronize, and the owners' own atomics are modeled |
+| The records of the relay gate and fan-out, entity gate, emitter record-write, durability barrier, WASM checkpoint, source host-loop, stream-slot, retained-archive and client ingestor Shuttle checks | A record changes in the same scheduling step as the operation it records, so recording adds no scheduling point | Nothing the owner does: records observe and never synchronize, and the owners' own atomics are modeled |
 
 A real atomic never carries the protocol under test, chooses its branches, supplies its wakeups or
 establishes an ordering an assertion relies on. `just validate-primitive-boundary` rejects every

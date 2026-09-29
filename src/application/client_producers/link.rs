@@ -19,11 +19,7 @@
 //! of the link as `OwnerLost`; the owning node detaches them, and admitted work continues in its
 //! graph.
 
-use std::{
-    num::NonZeroU64,
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
+use std::{num::NonZeroU64, time::Duration};
 
 use ahash::{HashMap, RandomState};
 use bytes::Bytes;
@@ -39,6 +35,7 @@ use nervix_models::{
     ClientProducerLimits, ClientProducerRefusal, ClientSubmissionOutcome, ClusterNodeName,
     DomainName, IngestorName, SchemaField,
 };
+use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use tokio::{

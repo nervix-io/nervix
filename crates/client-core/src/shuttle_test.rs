@@ -7,14 +7,9 @@
 //! - **Depends on.** Shuttle's schedulers and runner.
 //! - **Must not know.** The protocol a check holds to its invariant.
 
-use std::{
-    path::PathBuf,
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
+use std::{path::PathBuf, sync::Arc as StdArc};
 
+use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
 use shuttle::{
     Config, FailurePersistence, MaxSteps, Runner,
     scheduler::{

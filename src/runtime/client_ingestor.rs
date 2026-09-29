@@ -27,12 +27,7 @@
 //! routes. The window bounds how many admitted batches may await their acknowledgement across
 //! every producer, so attaching another producer never widens it.
 
-// Producers opening through different sessions and links reserve from one node budget while ended
-// attachments return what they held, so the budget is Shuttle's atomic under the Shuttle feature: a
-// check needs a scheduling point at every read and compare-and-swap to explore racing reservations.
 use std::num::NonZeroU32;
-#[cfg(not(feature = "shuttle"))]
-use std::sync::atomic::AtomicU64 as BudgetBytes;
 
 use bytes::Bytes;
 use futures_util::{future::BoxFuture, stream::FuturesUnordered};
@@ -45,8 +40,7 @@ use nervix_models::{
     ClientProducerPolicy, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
     MAX_CLIENT_BATCH_ROWS, SchemaField,
 };
-#[cfg(feature = "shuttle")]
-use shuttle::sync::atomic::AtomicU64 as BudgetBytes;
+use nervix_primitives::sync::atomic::AtomicU64;
 
 use super::*;
 use crate::runtime_schema::ClientBatchLimits;
@@ -77,13 +71,13 @@ impl ClientSubmissionId {
 /// This is a handle: every clone reserves from the same node budget.
 #[derive(Debug, Clone)]
 pub(crate) struct ClientProducerBudget {
-    reserved: Arc<BudgetBytes>,
+    reserved: Arc<AtomicU64>,
 }
 
 impl Default for ClientProducerBudget {
     fn default() -> Self {
         Self {
-            reserved: Arc::new(BudgetBytes::new(0)),
+            reserved: Arc::new(AtomicU64::new(0)),
         }
     }
 }

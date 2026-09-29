@@ -8,21 +8,21 @@
 //!   roots and their trackers, and the server Shuttle runner.
 //! - **Must not know.** Sessions, the interconnect, or the graph behind the admission worker.
 
-// The standard library's atomics are not Shuttle scheduling points, so each record below changes in
-// the same scheduling step as the operation it records.
 use std::{
     collections::BTreeMap,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicBool, AtomicUsize, Ordering as RecordOrdering},
-    },
+    sync::Arc as StdArc,
 };
 
 use nervix_models::{
     AckWindow, CLIENT_PRODUCER_NODE_BYTES, ClientEndpointContract, ClientProcessingFailure,
     ClientProducerEndReason, ClientProducerLimits, ClientProducerPolicy, ClientSubmissionOutcome,
     FieldName, IngestQuiesceMode, ParseAsType, SchemaField,
+};
+// Real atomics are not Shuttle scheduling points, so each record below changes in the same
+// scheduling step as the operation it records.
+use nervix_primitives::unmodeled::sync::atomic::{
+    AtomicBool, AtomicUsize, Ordering as RecordOrdering,
 };
 use tokio::sync::{mpsc, oneshot};
 
