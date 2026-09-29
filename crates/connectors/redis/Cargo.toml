@@ -25,7 +25,7 @@ futures-util = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
-nervix-primitives = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 redis = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }

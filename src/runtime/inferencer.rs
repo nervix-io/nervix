@@ -8,12 +8,12 @@ use nervix_models::{
     InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorMapping, InferencerTensorSchema,
 };
+use nervix_primitives::sync::blocking::Mutex;
 use ordered_float::OrderedFloat;
 use ort::{
     session::{Session, SessionInputValue},
     value::Tensor,
 };
-use parking_lot::Mutex;
 use triomphe::Arc;
 
 use crate::runtime_schema::{RuntimeRecordBatch, RuntimeValue};
@@ -154,7 +154,7 @@ impl std::fmt::Debug for OnnxInferencerSession {
 impl OnnxInferencerSession {
     pub(super) async fn load(path: &Path) -> error_stack::Result<Self, InferencerError> {
         let path = path.to_path_buf();
-        let session = tokio::task::spawn_blocking(move || {
+        let session = nervix_primitives::task::spawn_blocking(move || {
             let mut builder =
                 Session::builder().change_context(InferencerError::InitializeSession)?;
             builder
@@ -177,7 +177,7 @@ impl OnnxInferencerSession {
     ) -> error_stack::Result<Vec<Vec<RuntimeValue>>, InferencerError> {
         let prepared = PreparedExecution::from_batch(batch, inputs, output_schema, mode)?;
         let session = Arc::clone(&self.session);
-        tokio::task::spawn_blocking(move || prepared.run(&mut session.lock()))
+        nervix_primitives::task::spawn_blocking(move || prepared.run(&mut session.lock()))
             .await
             .change_context(InferencerError::JoinExecution)?
     }

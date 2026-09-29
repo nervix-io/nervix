@@ -8,8 +8,8 @@
 
 use std::{future::Future, time::Duration};
 
+use nervix_primitives::sync::CancellationToken;
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 
 use crate::{abi, failure::Failure};
 
@@ -58,7 +58,7 @@ impl Cancel {
                 None => std::future::pending().await,
             }
         };
-        tokio::select! {
+        nervix_primitives::select! {
             biased;
             () = self.token.cancelled() => Err(Failure::cancelled()),
             () = expiry => Err(Failure::deadline()),

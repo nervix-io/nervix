@@ -44,7 +44,8 @@ impl Loopback {
     async fn open(&mut self, subscription_name: &str, generation: u64) {
         let client = self.client.clone();
         let request = SubscriptionRequest::new(subscription_name, "orders");
-        let creating = tokio::spawn(async move { client.subscribe(&request).await });
+        let creating =
+            nervix_primitives::task::spawn(async move { client.subscribe(&request).await });
         let sent = self.next_request().await;
         let ClientRequest::Subscribe(subscribe) = sent.request else {
             panic!("a subscription opens with a subscribe request");
@@ -81,7 +82,7 @@ impl Loopback {
         let mut changed = self.client.inner.events.sinks.desired.watch();
         tokio::time::timeout(DEADLINE, async {
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if self.client.subscription_lifecycle(&name(subscription_name)) == expected {
                     return;
                 }
@@ -97,10 +98,10 @@ impl Loopback {
 
     /// Answers every request the way a session that holds no subscription does, until `task`
     /// finishes, and returns what it returned.
-    async fn serve_until<T>(&mut self, mut task: tokio::task::JoinHandle<T>) -> T {
+    async fn serve_until<T>(&mut self, mut task: nervix_primitives::task::JoinHandle<T>) -> T {
         loop {
-            tokio::task::consume_budget().await;
-            let received = tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            let received = nervix_primitives::select! {
                 finished = &mut task => {
                     return finished.assured("the served task completes");
                 }
@@ -124,7 +125,7 @@ impl Loopback {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn deleting_a_subscription_its_ended_session_held_releases_the_name() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     loopback.open("live", 1).await;
@@ -152,7 +153,7 @@ async fn deleting_a_subscription_its_ended_session_held_releases_the_name() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn deleting_a_failed_delivery_whose_session_ended_releases_the_name() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     loopback.open("live", 1).await;
@@ -191,7 +192,7 @@ async fn deleting_a_failed_delivery_whose_session_ended_releases_the_name() {
     loopback.open("live", 2).await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn deleting_a_subscription_whose_restoration_was_refused_needs_no_server() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     loopback.open("live", 1).await;
@@ -215,7 +216,7 @@ async fn deleting_a_subscription_whose_restoration_was_refused_needs_no_server()
         .await;
 
     let client = loopback.client.clone();
-    let deleting = tokio::spawn(async move { client.unsubscribe("live").await });
+    let deleting = nervix_primitives::task::spawn(async move { client.unsubscribe("live").await });
     let deleted = loopback
         .serve_until(deleting)
         .await
@@ -224,7 +225,7 @@ async fn deleting_a_subscription_whose_restoration_was_refused_needs_no_server()
     assert_eq!(loopback.client.subscription_lifecycle(&name("live")), None);
 }
 
-#[tokio::test(start_paused = true)]
+#[nervix_primitives::test(start_paused = true)]
 async fn a_refused_restoration_is_repeated_after_a_growing_delay() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     loopback.open("live", 1).await;
@@ -292,7 +293,7 @@ async fn a_refused_restoration_is_repeated_after_a_growing_delay() {
         .await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_restoration_whose_exchange_ends_unanswered_is_sent_again_on_the_next_exchange() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     loopback.open("live", 1).await;
@@ -317,7 +318,7 @@ async fn a_restoration_whose_exchange_ends_unanswered_is_sent_again_on_the_next_
         .await;
 }
 
-#[tokio::test(start_paused = true)]
+#[nervix_primitives::test(start_paused = true)]
 async fn a_rejected_restoration_is_reported_and_sent_again() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     loopback.open("live", 1).await;
@@ -367,11 +368,11 @@ async fn a_rejected_restoration_is_reported_and_sent_again() {
         .await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_deletion_waiting_on_a_creation_completes_when_its_session_ends() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
-    let creating = tokio::spawn(async move {
+    let creating = nervix_primitives::task::spawn(async move {
         client
             .subscribe(&SubscriptionRequest::new("live", "orders"))
             .await
@@ -379,7 +380,7 @@ async fn a_deletion_waiting_on_a_creation_completes_when_its_session_ends() {
     let unanswered = loopback.next_request().await;
     assert!(matches!(unanswered.request, ClientRequest::Subscribe(_)));
     let client = loopback.client.clone();
-    let deleting = tokio::spawn(async move { client.unsubscribe("live").await });
+    let deleting = nervix_primitives::task::spawn(async move { client.unsubscribe("live").await });
     loopback
         .wait_for_lifecycle("live", Some(SubscriptionLifecycle::Closing))
         .await;

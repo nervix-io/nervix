@@ -13,9 +13,10 @@ use std::{fmt, future::Future, time::Duration};
 use error_stack::Report;
 use nervix_client_wire::{CommandDisposition, Diagnostic};
 use nervix_models::ClusterNodeName;
+use nervix_primitives::task::JoinHandle;
 use nervix_server::application::AppError;
 use thiserror::Error;
-use tokio::{task::JoinHandle, time::timeout};
+use tokio::time::timeout;
 use triomphe::Arc;
 
 use super::{
@@ -114,12 +115,14 @@ impl fmt::Display for ReadinessProbeOutcome {
 pub(crate) enum NodeTaskTerminalOutcome {
     CleanApplicationExit,
     ApplicationError(Report<AppError>),
-    Panic(tokio::task::JoinError),
-    Cancellation(tokio::task::JoinError),
+    Panic(nervix_primitives::task::JoinError),
+    Cancellation(nervix_primitives::task::JoinError),
 }
 
 impl NodeTaskTerminalOutcome {
-    fn from_join(result: Result<Result<(), Report<AppError>>, tokio::task::JoinError>) -> Self {
+    fn from_join(
+        result: Result<Result<(), Report<AppError>>, nervix_primitives::task::JoinError>,
+    ) -> Self {
         match result {
             Ok(Ok(())) => Self::CleanApplicationExit,
             Ok(Err(error)) => Self::ApplicationError(error),
@@ -184,7 +187,7 @@ impl OwnedNodeTask {
     where
         F: Future<Output = Result<(), Report<AppError>>> + Send + 'static,
     {
-        Self::Running(tokio::spawn(future))
+        Self::Running(nervix_primitives::task::spawn(future))
     }
 
     pub(crate) fn is_running(&self) -> bool {
@@ -359,7 +362,7 @@ impl OwnedNodeTask {
     {
         let mut last_readiness = LastReadinessOutcome::NoCompletedProbe;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let task_state = self.inspect().await;
             if !matches!(task_state, NodeTaskState::Running) {
                 return Err(NodeStartupError::report(

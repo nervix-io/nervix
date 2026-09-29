@@ -789,8 +789,8 @@ impl Runtime {
                 shutdown: shutdown_tx.subscribe(),
             },
         };
-        let worker = tokio::spawn(worker.run());
-        let watcher = tokio::spawn(watch_client_intake(
+        let worker = nervix_primitives::task::spawn(worker.run());
+        let watcher = nervix_primitives::task::spawn(watch_client_intake(
             quiesce,
             commands.clone(),
             shutdown_tx.subscribe(),
@@ -841,7 +841,7 @@ impl Runtime {
             gauges: gauges.clone(),
             published: ClientIngestorGauges::default(),
         };
-        tokio::spawn(endpoint.run());
+        nervix_primitives::task::spawn(endpoint.run());
         self.inner.client_ingestors.insert(
             key,
             ClientIngestorEndpoint {
@@ -894,7 +894,7 @@ impl Runtime {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in keys {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self.inner.ingestors.contains_key(&key) {
                 continue;
             }
@@ -917,7 +917,7 @@ impl Runtime {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in keys {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.end_client_ingestor_endpoint(&key, reason).await;
         }
     }
@@ -988,9 +988,9 @@ impl Endpoint {
         }
 
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             // A resolution frees a slot of the window, so it is taken before further commands.
-            let next = tokio::select! {
+            let next = nervix_primitives::select! {
                 biased;
                 Some(resolved) = self.acknowledgements.next() => Next::Resolved(resolved),
                 command = self.commands.recv() => Next::Command(command),
@@ -1674,7 +1674,7 @@ async fn await_client_acknowledgement(
     ack_timeout: Duration,
 ) -> ClientAcknowledgement {
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let progress = tokio::time::timeout(ack_timeout, completion.wait_for_progress()).await;
         match progress {
             Ok(AckProgress::Alive) => {}
@@ -1731,13 +1731,13 @@ async fn watch_client_intake(
 ) {
     let mut observation = quiesce.observation();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let state = quiesce.client_intake_state();
         if reports.send(EndpointCommand::Intake(state)).is_err() {
             // The endpoint ended, and nothing it served is left to tell.
             return;
         }
-        tokio::select! {
+        nervix_primitives::select! {
             biased;
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
@@ -1760,7 +1760,7 @@ impl AdmissionWorker {
     /// refused.
     async fn run(mut self) {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(job) = self.mailbox.next_job().await else {
                 return;
             };
@@ -1792,8 +1792,8 @@ impl WorkerMailbox {
     /// refuses the batch it was handed and never took.
     async fn next_job(&mut self) -> Option<AdmissionJob> {
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 biased;
                 changed = self.shutdown.changed() => {
                     if changed.is_err() || *self.shutdown.borrow() {

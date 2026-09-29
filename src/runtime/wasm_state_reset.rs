@@ -167,7 +167,7 @@ impl BranchInstanceTemplate {
             .change_context_lazy(fresh)?;
         let mut output_schemas = Vec::with_capacity(output_routes.routes.len());
         for output in &output_routes.routes {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let schema = branch
                 .relay_schema(&output.output_relay)
                 .change_context_lazy(fresh)?;

@@ -7,7 +7,8 @@
 
 use std::time::Duration;
 
-use tokio::{sync::oneshot, time::Instant};
+use nervix_primitives::sync::oneshot;
+use tokio::time::Instant;
 
 use super::*;
 use crate::{runtime_ack::AckOutcome, shuttle_test::check_random};
@@ -28,7 +29,7 @@ fn shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves() {
                 batch.acks = vec![root];
                 let (owner_done, owner_is_done) = oneshot::channel();
                 let owner_services = services.clone();
-                let owner = tokio::spawn(async move {
+                let owner = nervix_primitives::task::spawn(async move {
                     let result = owner_services
                         .fanout_owner_batch(
                             &owner_domain,
@@ -44,7 +45,7 @@ fn shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves() {
                 });
 
                 let moving_services = services.clone();
-                let move_consumer = tokio::spawn(async move {
+                let move_consumer = nervix_primitives::task::spawn(async move {
                     let mut lease = RelayDispatchGateLease::engage(
                         gate,
                         Instant::now() + Duration::from_secs(86_400),

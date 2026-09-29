@@ -11,9 +11,6 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 use std::{num::NonZeroU64, ops::Range, time::Duration};
 
 use ahash::HashMap;
@@ -530,7 +527,7 @@ impl RowSink for PostgresSink {
             );
         }
         for request in requests.requests {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let written = match request {
                 RowRequest::Write {
                     members: written, ..
@@ -556,7 +553,7 @@ impl RowSink for PostgresSink {
                 // policy.
                 Err(error) if error.is_record_error() && written.len() > 1 => {
                     for index in written {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         let member = members[index];
                         let alone = index
                             .checked_add(1)

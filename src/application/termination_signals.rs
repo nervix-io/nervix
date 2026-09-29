@@ -20,21 +20,20 @@
 //! signal registry keeps its own handler installed, so a later signal would simply be ignored.
 //! Supervision therefore lasts until the process exits, and the first signal does not end it.
 
-#[cfg(not(feature = "shuttle"))]
-use std::thread;
 use std::{ffi::c_int, time::Duration};
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
-use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "shuttle")]
-use shuttle::thread;
+use nervix_primitives::{
+    runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime},
+    sync::atomic::{AtomicBool, Ordering},
+    thread,
+};
 use signal_hook::{
     consts::{SIGINT, SIGTERM},
     iterator::Signals,
     low_level,
 };
-use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
 use tracing::{info, warn};
 use triomphe::Arc;
 
@@ -117,11 +116,11 @@ impl TerminationSignals {
         let signals = SignalSupervision::new(shutdown, forced_exit);
         // The signal supervisor must outlive every other part of the process, because a stopped
         // supervisor would leave both signals ignored.
-        spawn_until_process_exit(SIGNAL_SUPERVISOR_THREAD, move || self.deliver_to(signals))
+        thread::spawn_detached(SIGNAL_SUPERVISOR_THREAD, move || self.deliver_to(signals))
             .change_context(AppError::SuperviseTerminationSignals)?;
         // The deadline supervisor parks until the deadline, and a process that finishes shutting
         // down before then exits without waiting for it.
-        spawn_until_process_exit(DEADLINE_SUPERVISOR_THREAD, move || deadline.enforce())
+        thread::spawn_detached(DEADLINE_SUPERVISOR_THREAD, move || deadline.enforce())
             .change_context(AppError::SuperviseShutdownDeadline)?;
         Ok(())
     }
@@ -137,29 +136,6 @@ impl TerminationSignals {
              handle",
         );
     }
-}
-
-/// Starts `body` on a thread that nothing joins, so it runs until it returns or the process exits.
-#[cfg(not(feature = "shuttle"))]
-fn spawn_until_process_exit<F>(name: &str, body: F) -> std::io::Result<()>
-where
-    F: FnOnce() + Send + 'static,
-{
-    let handle = thread::Builder::new().name(name.to_string()).spawn(body)?;
-    drop(handle);
-    Ok(())
-}
-
-/// Starts `body` as a detached Shuttle task. A model ends when its main thread returns and abandons
-/// a detached task wherever it is parked, as a process that exits abandons a thread nothing joins.
-#[cfg(feature = "shuttle")]
-fn spawn_until_process_exit<F>(_name: &str, body: F) -> std::io::Result<()>
-where
-    F: FnOnce() + Send + 'static,
-{
-    let detached = shuttle::future::spawn(async move { body() });
-    drop(detached);
-    Ok(())
 }
 
 /// How a forced exit ends the process it runs in.
@@ -402,7 +378,7 @@ impl ForcedExit {
         }
         let status = self.status();
         let watchdog_claim = claim.clone();
-        let watchdog = spawn_until_process_exit(FORCED_EXIT_WATCHDOG_THREAD, move || {
+        let watchdog = thread::spawn_detached(FORCED_EXIT_WATCHDOG_THREAD, move || {
             Self::exit_after_report_budget(status, &watchdog_claim);
         });
         let Ok(()) = watchdog else {
@@ -442,8 +418,9 @@ impl ForcedExit {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, time::Instant};
+    use std::time::Instant;
 
+    use nervix_primitives::sync::blocking::mpsc;
     use nervix_recovery::NoReceiver as _;
     use signal_hook::consts::SIGHUP;
 
@@ -496,7 +473,7 @@ mod tests {
     /// Runs `forced_exit` on a thread of its own, which the forced exit stops, and returns how that
     /// thread stopped.
     fn ending_of(forced_exit: impl FnOnce() + Send + 'static) -> ThreadEnding {
-        let joined = std::thread::spawn(forced_exit).join();
+        let joined = nervix_primitives::thread::spawn(forced_exit).join();
         let Err(unwound) = joined else {
             panic!("a forced exit must not return to its thread");
         };
@@ -712,8 +689,8 @@ mod tests {
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
     use meticulous::ResultExt as _;
+    use nervix_primitives::sync::watch;
     use shuttle::future::block_on;
-    use tokio::sync::watch;
 
     use super::*;
     use crate::{
@@ -823,9 +800,9 @@ mod shuttle_tests {
             let composing = shutdown.clone();
             let composition_root =
                 thread::spawn(move || block_on(shut_down_in_phase_order(composing)));
-            spawn_until_process_exit(DEADLINE_SUPERVISOR_THREAD, move || deadline.enforce())
+            thread::spawn_detached(DEADLINE_SUPERVISOR_THREAD, move || deadline.enforce())
                 .assured(DETACHED_TASK_SPAWNS);
-            spawn_until_process_exit(SIGNAL_SUPERVISOR_THREAD, move || {
+            thread::spawn_detached(SIGNAL_SUPERVISOR_THREAD, move || {
                 signals.deliver(TerminationSignal::Interrupt);
                 // A repeated signal forces an exit, which parks this task instead of returning.
                 signals.deliver(TerminationSignal::Terminate);

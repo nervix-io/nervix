@@ -33,9 +33,8 @@ use nervix_client_wire::{
         UPLOAD_RESOURCE_PATH,
     },
 };
+use nervix_primitives::sync::{CancellationToken, oneshot};
 use nervix_recovery::Discarded as _;
-use tokio::sync::oneshot;
-use tokio_util::sync::CancellationToken;
 use tonic::{
     Request, Response, Status, Streaming,
     body::Body,

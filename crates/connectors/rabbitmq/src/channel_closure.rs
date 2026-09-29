@@ -129,7 +129,7 @@ impl ChannelClosures {
     /// connection is gone.
     async fn next_error(&mut self) -> Option<lapin::Error> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let event = self.events.next().await?;
             if let Event::Error(error) = event {
                 return Some(error);

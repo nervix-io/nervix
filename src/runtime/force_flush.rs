@@ -9,8 +9,7 @@
 //! makes the same generation deliverable again.
 
 use ahash::{HashMap, HashMapExt};
-use parking_lot::Mutex;
-use tokio::sync::watch;
+use nervix_primitives::sync::{blocking::Mutex, watch};
 use triomphe::Arc;
 
 use super::*;
@@ -540,7 +539,7 @@ mod tests {
         assert!(!completion.complete());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn changed_returns_an_already_pending_generation_immediately() {
         let coordinator = DomainForceFlush::new();
         let mut participant = DomainForceFlush::subscribe(&coordinator, None);
@@ -554,7 +553,7 @@ mod tests {
         assert!(completion.complete());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn closed_coordinator_rejects_requests_and_new_participants() {
         let coordinator = DomainForceFlush::new();
         coordinator.close();
@@ -564,7 +563,7 @@ mod tests {
         assert!(participant.changed().await.is_err());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn close_clears_obligations_and_wakes_participants() {
         let coordinator = DomainForceFlush::new();
         let counters = counters();
@@ -597,7 +596,7 @@ mod shuttle_tests {
 
     async fn announce_after_first_pending<F>(
         future: F,
-        pending: tokio::sync::oneshot::Sender<()>,
+        pending: nervix_primitives::sync::oneshot::Sender<()>,
     ) -> F::Output
     where
         F: Future,
@@ -620,10 +619,10 @@ mod shuttle_tests {
             let counters = counters();
             let mut first = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
             let mut second = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
-            let (second_claimed, second_is_claimed) = tokio::sync::oneshot::channel();
-            let (release_second, second_is_released) = tokio::sync::oneshot::channel();
+            let (second_claimed, second_is_claimed) = nervix_primitives::sync::oneshot::channel();
+            let (release_second, second_is_released) = nervix_primitives::sync::oneshot::channel();
 
-            let first_task = tokio::spawn(async move {
+            let first_task = nervix_primitives::task::spawn(async move {
                 let completion = first
                     .changed()
                     .await
@@ -632,7 +631,7 @@ mod shuttle_tests {
                 assert!(completion.complete());
                 generation
             });
-            let second_task = tokio::spawn(async move {
+            let second_task = nervix_primitives::task::spawn(async move {
                 let completion = second
                     .changed()
                     .await
@@ -692,12 +691,13 @@ mod shuttle_tests {
             let counters = counters();
             let mut first = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
             let mut second = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
-            let (first_claimed, first_is_claimed) = tokio::sync::oneshot::channel();
-            let (second_claimed, second_is_claimed) = tokio::sync::oneshot::channel();
-            let (publish_to_first, first_publication) = tokio::sync::oneshot::channel();
-            let (publish_to_second, second_publication) = tokio::sync::oneshot::channel();
+            let (first_claimed, first_is_claimed) = nervix_primitives::sync::oneshot::channel();
+            let (second_claimed, second_is_claimed) = nervix_primitives::sync::oneshot::channel();
+            let (publish_to_first, first_publication) = nervix_primitives::sync::oneshot::channel();
+            let (publish_to_second, second_publication) =
+                nervix_primitives::sync::oneshot::channel();
 
-            let first_task = tokio::spawn(async move {
+            let first_task = nervix_primitives::task::spawn(async move {
                 let stale = first
                     .changed()
                     .await
@@ -718,7 +718,7 @@ mod shuttle_tests {
                 assert_eq!(current.generation(), current_generation);
                 assert!(current.complete());
             });
-            let second_task = tokio::spawn(async move {
+            let second_task = nervix_primitives::task::spawn(async move {
                 let stale = second
                     .changed()
                     .await
@@ -785,8 +785,8 @@ mod shuttle_tests {
             let coordinator = DomainForceFlush::new();
             let counters = counters();
             let mut participant = DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
-            let (waiting_started, is_waiting) = tokio::sync::oneshot::channel();
-            let waiting = tokio::spawn(async move {
+            let (waiting_started, is_waiting) = nervix_primitives::sync::oneshot::channel();
+            let waiting = nervix_primitives::task::spawn(async move {
                 let completion =
                     announce_after_first_pending(participant.changed(), waiting_started)
                         .await
@@ -800,7 +800,7 @@ mod shuttle_tests {
                 .assured("changed reports after its first pending poll");
             let publisher = {
                 let coordinator = coordinator.clone();
-                tokio::spawn(async move { coordinator.request() })
+                nervix_primitives::task::spawn(async move { coordinator.request() })
             };
 
             let generation = publisher
@@ -830,18 +830,19 @@ mod shuttle_tests {
                 .pending_completion()
                 .assured("the anchor remains open while participants subscribe")
                 .assured("the active generation gives the anchor an obligation");
-            let (subscribed, mut subscriptions) = tokio::sync::mpsc::channel(PCT_PARTICIPANTS);
+            let (subscribed, mut subscriptions) =
+                nervix_primitives::sync::mpsc::channel(PCT_PARTICIPANTS);
             let mut releases = Vec::with_capacity(PCT_PARTICIPANTS);
             let mut participants = Vec::with_capacity(PCT_PARTICIPANTS);
 
             for index in 0..PCT_PARTICIPANTS {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let coordinator = coordinator.clone();
                 let counters = counters.clone();
                 let subscribed = subscribed.clone();
-                let (release, released) = tokio::sync::oneshot::channel();
+                let (release, released) = nervix_primitives::sync::oneshot::channel();
                 releases.push(release);
-                participants.push(tokio::spawn(async move {
+                participants.push(nervix_primitives::task::spawn(async move {
                     let mut participant = DomainForceFlush::subscribe(&coordinator, Some(counters));
                     subscribed
                         .send(())
@@ -886,7 +887,7 @@ mod shuttle_tests {
             drop(subscribed);
 
             for _ in 0..PCT_PARTICIPANTS {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 subscriptions
                     .recv()
                     .await
@@ -897,26 +898,26 @@ mod shuttle_tests {
 
             let request = {
                 let coordinator = coordinator.clone();
-                tokio::spawn(async move { coordinator.request() })
+                nervix_primitives::task::spawn(async move { coordinator.request() })
             };
             let idle_request = {
                 let coordinator = coordinator.clone();
-                tokio::spawn(async move { coordinator.request_if_idle() })
+                nervix_primitives::task::spawn(async move { coordinator.request_if_idle() })
             };
-            let anchor_task = tokio::spawn(async move {
+            let anchor_task = nervix_primitives::task::spawn(async move {
                 let completed = anchor_completion.complete();
                 drop(anchor);
                 completed
             });
 
             for release in releases {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 release
                     .send(())
                     .assured("the participant remains blocked until lifecycle operations start");
             }
             for participant in participants {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 participant
                     .await
                     .assured("the participant lifecycle task does not panic");
@@ -938,27 +939,27 @@ mod shuttle_tests {
                 DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
             let mut second_closing =
                 DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
-            let first_waiter = tokio::spawn(async move {
+            let first_waiter = nervix_primitives::task::spawn(async move {
                 if let Ok(completion) = first_closing.changed().await {
                     completion.complete();
                 }
             });
-            let second_waiter = tokio::spawn(async move {
+            let second_waiter = nervix_primitives::task::spawn(async move {
                 if let Ok(completion) = second_closing.changed().await {
                     drop(completion);
                 }
             });
             let closing_request = {
                 let coordinator = coordinator.clone();
-                tokio::spawn(async move { coordinator.request() })
+                nervix_primitives::task::spawn(async move { coordinator.request() })
             };
             let closing_idle_request = {
                 let coordinator = coordinator.clone();
-                tokio::spawn(async move { coordinator.request_if_idle() })
+                nervix_primitives::task::spawn(async move { coordinator.request_if_idle() })
             };
             let close = {
                 let coordinator = coordinator.clone();
-                tokio::spawn(async move { coordinator.close() })
+                nervix_primitives::task::spawn(async move { coordinator.close() })
             };
 
             first_waiter

@@ -677,7 +677,7 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_confirmed_payload_delivers_every_member_and_an_unanswered_one_is_written_unchanged()
     {
         let (first, first_completions) = batch(&[1, 2, 3], 10);
@@ -758,7 +758,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_rejected_payload_rejects_every_member_with_one_reference_and_its_own_time() {
         let (first, first_completions) = batch(&[1], 10);
         let (second, second_completions) = batch(&[2], 20);
