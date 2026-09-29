@@ -617,7 +617,7 @@ impl SessionServiceImpl {
 
     /// What the node that executes an ingestor reports about it, and its metrics. An ingestor no
     /// node executes reports as stopped.
-    async fn ingestor_summary(
+    pub(in crate::application) async fn ingestor_summary(
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,

@@ -15,9 +15,11 @@ from scripts.loom_models import (
     Outcome,
     RunnerError,
     completion,
+    copy_working_tree,
     exploration_bounds,
     listed_tests,
     parse_inventory,
+    qualify,
     qualification_failure,
     run_models,
     select,
@@ -244,6 +246,50 @@ class ScriptedCommands(Commands):
 
 def listing(*tests: str) -> Outcome:
     return Outcome(0, "".join(f"{test}: test\n" for test in tests))
+
+
+class QualificationCopyTests(unittest.TestCase):
+    def test_generated_server_assets_join_the_source_copy(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "src").mkdir()
+            (root / "src/lib.rs").write_text("mod server;\n", encoding="utf-8")
+            dist = root / "crates/web-console/dist"
+            dist.mkdir(parents=True)
+            (dist / "index.html").write_text("<html></html>", encoding="utf-8")
+            commands = ScriptedCommands(root, lambda _: Outcome(0, "src/lib.rs\0"))
+
+            copy_working_tree(commands, root / "candidate")
+
+            self.assertEqual(
+                (root / "candidate/crates/web-console/dist/index.html").read_text(
+                    encoding="utf-8"
+                ),
+                "<html></html>",
+            )
+
+    def test_a_failed_qualification_still_clears_its_package_build(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+            source = root / "crates/execution/src/cancellation.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("store(true, Ordering::Release)", encoding="utf-8")
+
+            def respond(arguments: Sequence[str]) -> Outcome:
+                if arguments[:2] == ["git", "ls-files"]:
+                    return Outcome(0, "Cargo.toml\0crates/execution/src/cancellation.rs\0")
+                return Outcome(0, "     Running unittests src/lib.rs\n")
+
+            commands = ScriptedCommands(root, respond)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                status = qualify(commands, inventory(), root / "target")
+
+            self.assertEqual(status, 1)
+            self.assertEqual(
+                [command[1] for command in commands.commands if command[0] == "cargo"],
+                ["clean", "test", "clean"],
+            )
 
 
 class RunTests(unittest.TestCase):

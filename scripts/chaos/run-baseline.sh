@@ -88,6 +88,9 @@ while [[ "$#" -gt 0 ]]; do
             if [[ "${scenario}" == degraded-links ]]; then
                 record_count=1000
                 overall_timeout=2400
+            elif [[ "${scenario}" == backup ]]; then
+                record_count=1000
+                overall_timeout=1800
             fi
             shift 2
             ;;
@@ -167,12 +170,12 @@ done
 
 [[ -n "${image_ref}" ]] || setup_error '--image is required and must name an already-built Nervix image'
 case "${scenario}" in
-    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links) ;;
+    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup) ;;
     *) setup_error "unknown scenario: ${scenario}" ;;
 esac
 [[ "${node_count}" == "1" || "${node_count}" == "3" ]] \
     || setup_error '--nodes must be 1 or 3'
-if [[ "${scenario}" != baseline && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${node_count}" != 3 ]]; then
+if [[ "${scenario}" != baseline && "${scenario}" != backup && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${node_count}" != 3 ]]; then
     setup_error "${scenario} requires --nodes 3"
 fi
 if [[ "${scenario}" == pause-resume && "${outage_option_set}" == true ]]; then
@@ -983,7 +986,7 @@ run_bounded 30 docker run --rm --entrypoint /bin/sh "${image_id}" -eu -c \
 ensure_tool_image "${CHAOS_KAFKA_IMAGE}"
 ensure_tool_image "${CHAOS_KCAT_IMAGE}"
 ensure_tool_image "${CHAOS_PROBE_IMAGE}"
-if [[ "${scenario}" != "baseline" ]]; then
+if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
     [[ -S /var/run/docker.sock ]] \
         || setup_error "${scenario} requires a local /var/run/docker.sock for Pumba"
     ensure_tool_image "${CHAOS_PUMBA_IMAGE}"
@@ -1020,7 +1023,7 @@ fi
 update_manifest \
     ".status = \"running\" | .resolved_image_id = \$image_id | .resolved_repo_digests = \$digests" \
     --arg image_id "${image_id}" --arg digests "${image_digest}"
-if [[ "${scenario}" != "baseline" ]]; then
+if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
     # The dollars in this jq filter are jq variables, not shell expansion.
     # shellcheck disable=SC2016
     update_manifest '.pumba_image_id = $image_id | .pumba_image = $image' \
@@ -1113,6 +1116,13 @@ done
 
 phase "NSPL graph installation"
 nspl_fixture="$(<"${fixture_file}")"
+if [[ "${scenario}" == backup ]]; then
+    # The backup scenario needs source positions owned by the domain archive. Other chaos
+    # scenarios retain their consumer-group boundary.
+    [[ "${nspl_fixture}" == *'OFFSET BY CONSUMER GROUP chaos_baseline'* ]] \
+        || setup_error 'the backup fixture no longer contains its expected Kafka offset clause'
+    nspl_fixture="${nspl_fixture/OFFSET BY CONSUMER GROUP chaos_baseline/OFFSET BY DOMAIN}"
+fi
 cli_command 'CREATE UNPACED DOMAIN chaos_baseline;' \
     >"${artifact_dir}/public/create-domain.txt" 2>&1
 domain_cli_command "${nspl_fixture}" \
@@ -1185,6 +1195,10 @@ if [[ "${scenario}" != "baseline" ]]; then
         # shellcheck source=degraded-links-scenario.sh
         source "${script_dir}/degraded-links-scenario.sh"
         run_degraded_links
+    elif [[ "${scenario}" == backup ]]; then
+        # shellcheck source=backup-scenario.sh
+        source "${script_dir}/backup-scenario.sh"
+        run_backup_scenario
     else
         # shellcheck source=crash-scenario.sh
         source "${script_dir}/crash-scenario.sh"
@@ -1226,12 +1240,14 @@ accepted_count="$(wc -l <"${artifact_dir}/traffic/accepted-input.ndjson")"
 fi
 
 phase "offset and output boundaries"
-wait_for "Nervix consumer offsets at source boundary ${input_end}" 120 \
-    consumer_offsets_at_end "${input_end}"
-cp "${artifact_dir}/traffic/consumer-group.attempt.txt" \
-    "${artifact_dir}/traffic/consumer-group-final.txt"
+if [[ "${scenario}" != backup ]]; then
+    wait_for "Nervix consumer offsets at source boundary ${input_end}" 120 \
+        consumer_offsets_at_end "${input_end}"
+    cp "${artifact_dir}/traffic/consumer-group.attempt.txt" \
+        "${artifact_dir}/traffic/consumer-group-final.txt"
+fi
 output_wait_timed_out=false
-if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links ]]; then
+if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == backup ]]; then
     output_wait_seconds=120
     if [[ "${scenario}" == degraded-links ]]; then
         output_wait_seconds="${drain_seconds}"
@@ -1263,7 +1279,7 @@ observed_count="$(wc -l <"${artifact_dir}/traffic/observed-output.ndjson")"
 
 phase "external ledger verification"
 ledger_args=()
-if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links ]]; then
+if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == backup ]]; then
     ledger_args+=(--allow-replay-duplicates)
 fi
 "${script_dir}/verify-ledger.sh" \
@@ -1315,9 +1331,11 @@ if [[ "${scenario}" == "baseline" ]]; then
         "${artifact_dir}/results/remote-path.json" >"${remote_path_tmp}"
     mv "${remote_path_tmp}" "${artifact_dir}/results/remote-path.json"
 fi
-broker_admin /opt/kafka/bin/kafka-consumer-groups.sh \
-    --bootstrap-server broker:9092 --group chaos_baseline --describe \
-    >"${artifact_dir}/public/consumer-group-final.txt"
+if [[ "${scenario}" != backup ]]; then
+    broker_admin /opt/kafka/bin/kafka-consumer-groups.sh \
+        --bootstrap-server broker:9092 --group chaos_baseline --describe \
+        >"${artifact_dir}/public/consumer-group-final.txt"
+fi
 
 if [[ "${scenario}" == "baseline" ]]; then
     jq -n \
@@ -1346,6 +1364,19 @@ if [[ "${scenario}" == "baseline" ]]; then
           ledger: "results/ledger.json",
           placement: "results/remote-path.json"
         }' >"${artifact_dir}/results/baseline.json"
+elif [[ "${scenario}" == backup ]]; then
+    jq -n \
+        --arg run_id "${run_id}" --arg image_id "${image_id}" \
+        --argjson nodes "${node_count}" \
+        --argjson accepted_records "${input_end}" --argjson observed_records "${output_end}" \
+        --slurpfile progress "${artifact_dir}/results/backup-progress.json" \
+        --slurpfile ledger "${artifact_dir}/results/ledger.json" \
+        '{verdict:"pass",run_id:$run_id,image_id:$image_id,topology_nodes:$nodes,
+          accepted_source_records:$accepted_records,observed_output_records:$observed_records,
+          replay_duplicates:$ledger[0].duplicate_records,source_offsets_committed:true,
+          ledger:"results/ledger.json",remote_path:"results/remote-path.json",
+          backup:"backup/domain.nvxb",progress:$progress[0]}' \
+        >"${artifact_dir}/results/backup.json"
 elif [[ "${scenario}" == "rolling-restart" ]]; then
     jq -n \
         --arg run_id "${run_id}" \

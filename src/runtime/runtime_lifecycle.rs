@@ -137,6 +137,7 @@ impl Runtime {
                 state_replication_tasks: TaskTracker::new(),
                 passive_runtime_state_snapshots: DashMap::default(),
                 replicated_branch_lru_snapshots: DashMap::default(),
+                backup_capture_fences: ArcSwap::from_pointee(HashMap::default()),
                 prepared_runtime_state_handoffs,
                 activated_runtime_state_handoffs: DashMap::default(),
                 prepared_forced_runtime_state_recoveries: DashMap::default(),
@@ -294,6 +295,14 @@ impl Runtime {
         self.inner
             .fault_injection
             .pause_restore_step_if_armed(node_id, step)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_backup_cut_if_armed(&self, domain: &DomainName) {
+        self.inner
+            .fault_injection
+            .pause_backup_cut_if_armed(domain)
             .await;
     }
 

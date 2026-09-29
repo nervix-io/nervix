@@ -7,8 +7,8 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     BackupResources, ClusterNodeName, DomainClockPeriod, DomainClockSkew, DomainClockState,
-    DomainName, DomainPace, DomainStartPoint, DomainStatus, DomainTimeRate, PlacementPolicy,
-    ResourceName, Timestamp, UserName,
+    DomainName, DomainPace, DomainStartPoint, DomainStatus, DomainTimeRate, ModelName,
+    PlacementPolicy, ResourceName, SchemaFingerprint, Timestamp, UserName, WasmStateGeneration,
 };
 
 use crate::{
@@ -16,9 +16,10 @@ use crate::{
     ArchiveScope, ArchiveWriteError, BackupManifest, DeclaredResource, DomainCapture, DomainRecord,
     PublishedResourceVersion, RaftLogPosition, RecordKind, ResourceVersionRecord,
     ResourceVersionState, SectionContent, SectionDigester, SectionEntry, SectionPath,
-    SectionReader, SectionVisitor, UserRecord, UsersRecord, describe_archive, read_archive,
-    read_archive_contents,
+    SectionReader, SectionVisitor, SkippedStateReason, UserRecord, UsersRecord, describe_archive,
+    read_archive, read_archive_contents,
     section::{RECORD_HEADER_BYTES, RECORD_MAGIC, decode_record, encode_record},
+    state::{KafkaOffsetsRecord, WasmStateDescriptor},
     wire::{
         DeclaredResourceWire, DomainWire, ManifestWire, PaceWire, PlacementWire, StartPointWire,
         StatusWire,
@@ -294,8 +295,10 @@ fn a_manifest_of_another_major_version_is_refused() {
     let manifest = manifest_of(ArchiveScope::Cluster, Vec::new());
     let mut wire = ManifestWire::from(&manifest);
     wire.format_major = ARCHIVE_FORMAT_MAJOR + 1;
-    let section = encode_record(RecordKind::Manifest, 1, &wire).assured("the wire encodes");
-    let error = BackupManifest::decode("manifest.rkyv", &section).expect_err("major 2 is unknown");
+    let section = encode_record(RecordKind::Manifest, BackupManifest::VERSION, &wire)
+        .assured("the wire encodes");
+    let error = BackupManifest::decode("manifest.rkyv", &section)
+        .expect_err("the unsupported major is refused");
     assert_eq!(
         error.current_context(),
         &ArchiveReadError::UnsupportedArchiveFormat {
@@ -303,8 +306,13 @@ fn a_manifest_of_another_major_version_is_refused() {
             supported: ARCHIVE_FORMAT_MAJOR,
         }
     );
-    let decoded: ManifestWire = decode_record("manifest.rkyv", RecordKind::Manifest, 1, &section)
-        .assured("the wire shape itself is valid");
+    let decoded: ManifestWire = decode_record(
+        "manifest.rkyv",
+        RecordKind::Manifest,
+        BackupManifest::VERSION,
+        &section,
+    )
+    .assured("the wire shape itself is valid");
     assert_eq!(decoded.format_major, ARCHIVE_FORMAT_MAJOR + 1);
 }
 
@@ -340,17 +348,20 @@ fn manifest_of(scope: ArchiveScope, sections: Vec<SectionEntry>) -> BackupManife
                 domain: domain("prod"),
                 revision: 42,
                 raft_log: RaftLogPosition { term: 3, index: 42 },
+                cut: nervix_models::BackupCut::ConfigurationOnly,
             },
             DomainCapture {
                 domain: domain("staging"),
                 revision: 42,
                 raft_log: RaftLogPosition { term: 3, index: 42 },
+                cut: nervix_models::BackupCut::ConfigurationOnly,
             },
         ],
         ArchiveScope::Domain(name) => vec![DomainCapture {
             domain: name.clone(),
             revision: 7,
             raft_log: RaftLogPosition { term: 1, index: 7 },
+            cut: nervix_models::BackupCut::ConfigurationOnly,
         }],
     };
     BackupManifest {
@@ -543,6 +554,131 @@ fn a_domain_archive_holds_no_users() {
     assert_eq!(description.users, None);
     assert_eq!(description.domains.len(), 1);
     assert_eq!(description.manifest.scope, ArchiveScope::Domain(prod));
+}
+
+#[test]
+fn unsupported_state_record_headers_are_verified_and_reported_as_skipped() {
+    let prod = domain("prod");
+    let entity = ModelName::parse("source").assured("the test entity is valid");
+    let path = SectionPath::kafka_offsets(&prod, &entity);
+    let record = KafkaOffsetsRecord {
+        domain: prod.clone(),
+        entity,
+        schema: SchemaFingerprint::from_digest([3; 32]),
+        revision: 3,
+        offsets: Vec::new(),
+    };
+    for (kind, version, expected) in [
+        (
+            999_u16,
+            KafkaOffsetsRecord::VERSION,
+            SkippedStateReason::UnknownKind { found: 999 },
+        ),
+        (
+            RecordKind::KafkaOffsets.tag(),
+            999_u16,
+            SkippedStateReason::UnsupportedVersion {
+                found: 999,
+                supported: KafkaOffsetsRecord::VERSION,
+            },
+        ),
+    ] {
+        let mut bytes = record.encode().assured("the state record encodes");
+        bytes[8..10].copy_from_slice(&kind.to_le_bytes());
+        bytes[10..12].copy_from_slice(&version.to_le_bytes());
+        assert!(
+            KafkaOffsetsRecord::decode(path.as_str(), &bytes).is_err(),
+            "the typed record decoder stays strict"
+        );
+        let sections = vec![
+            record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
+            bytes_section(
+                SectionPath::domain_models(&prod),
+                SectionContent::Nspl,
+                Vec::new(),
+            ),
+            bytes_section(
+                path.clone(),
+                SectionContent::Record(RecordKind::KafkaOffsets),
+                bytes,
+            ),
+        ];
+        let mut manifest = manifest_of(
+            ArchiveScope::Domain(prod.clone()),
+            sections
+                .iter()
+                .map(|section| section.entry.clone())
+                .collect(),
+        );
+        manifest.domains[0].cut = nervix_models::BackupCut::Stopped;
+        let (_, archive) = write_archive(manifest, &sections);
+        let description = describe_archive(archive.as_slice())
+            .assured("unsupported state leaves the verified archive readable");
+        assert!(description.domains[0].state.is_empty());
+        assert_eq!(description.domains[0].skipped_state.len(), 1);
+        assert_eq!(description.domains[0].skipped_state[0].path, path);
+        assert_eq!(description.domains[0].skipped_state[0].reason, expected);
+    }
+}
+
+#[test]
+fn an_unsupported_wasm_descriptor_skips_its_guest_blob_together() {
+    let prod = domain("prod");
+    let entity = ModelName::parse("filter").assured("the test entity is valid");
+    let descriptor = WasmStateDescriptor {
+        domain: prod.clone(),
+        entity: entity.clone(),
+        schema: SchemaFingerprint::from_digest([3; 32]),
+        branch_fingerprint: None,
+        branch: None,
+        generation: WasmStateGeneration::FIRST,
+        revision: 4,
+    };
+    let mut descriptor_bytes = descriptor.encode().assured("the descriptor encodes");
+    descriptor_bytes[10..12].copy_from_slice(&999_u16.to_le_bytes());
+    let descriptor_path = SectionPath::wasm_state_descriptor(&prod, &entity, None);
+    let sections = vec![
+        record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
+        bytes_section(
+            SectionPath::domain_models(&prod),
+            SectionContent::Nspl,
+            Vec::new(),
+        ),
+        bytes_section(
+            descriptor_path.clone(),
+            SectionContent::Record(RecordKind::WasmStateDescriptor),
+            descriptor_bytes,
+        ),
+        bytes_section(
+            SectionPath::wasm_guest_blob(&prod, &entity, None),
+            SectionContent::WasmGuestBlob,
+            vec![7; 32],
+        ),
+    ];
+    let mut manifest = manifest_of(
+        ArchiveScope::Domain(prod),
+        sections
+            .iter()
+            .map(|section| section.entry.clone())
+            .collect(),
+    );
+    manifest.domains[0].cut = nervix_models::BackupCut::Stopped;
+    let (_, archive) = write_archive(manifest, &sections);
+    let description = describe_archive(archive.as_slice())
+        .assured("an unsupported WASM descriptor and its guest blob are skipped");
+    assert!(description.domains[0].state.is_empty());
+    assert_eq!(description.domains[0].skipped_state.len(), 1);
+    assert_eq!(
+        description.domains[0].skipped_state[0].path,
+        descriptor_path
+    );
+    assert_eq!(
+        description.domains[0].skipped_state[0].reason,
+        SkippedStateReason::UnsupportedVersion {
+            found: 999,
+            supported: WasmStateDescriptor::VERSION,
+        }
+    );
 }
 
 #[test]

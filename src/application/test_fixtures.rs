@@ -6,7 +6,10 @@
 //! The runtime's unit tests bind their loopback interconnect through this module as well, so the
 //! TLS material a transport authenticates with is generated in one place.
 
-use std::{path::PathBuf, sync::Arc as StdArc};
+use std::{
+    path::PathBuf,
+    sync::{Arc as StdArc, OnceLock},
+};
 
 use ahash::RandomState;
 use clap::Parser;
@@ -54,7 +57,7 @@ use crate::{
     runtime::Runtime, runtime_schema,
 };
 
-static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_TEST_ID: OnceLock<AtomicU64> = OnceLock::new();
 
 /// A fresh execution reference, as a client generates one for each command it sends.
 pub(in crate::application) fn test_execution_reference() -> CommandExecutionReference {
@@ -161,7 +164,9 @@ pub(in crate::application) fn test_tls_files(
 }
 
 fn test_db_path() -> PathBuf {
-    let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+    let id = NEXT_TEST_ID
+        .get_or_init(|| AtomicU64::new(1))
+        .fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("nervix-session-test-{}-{id}", std::process::id()))
 }
 
@@ -298,6 +303,8 @@ fn test_session_service(
             resource_upload_executions: DashMap::with_hasher(RandomState::new()),
             resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             retained_backups: Default::default(),
+            captured_backup_sections: Default::default(),
+            restored_state_uploads: Default::default(),
             restore_archives: Default::default(),
         }),
     }
@@ -531,8 +538,12 @@ pub(in crate::application) async fn build_test_service(
     let registry = Arc::new(
         Registry::from_database(db.clone(), Some(path.as_path())).expect("registry should open"),
     );
-    let id = u16::try_from(NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed))
-        .verified("this suite reserves far fewer than u16::MAX test identifiers");
+    let id = u16::try_from(
+        NEXT_TEST_ID
+            .get_or_init(|| AtomicU64::new(1))
+            .fetch_add(1, Ordering::Relaxed),
+    )
+    .verified("this suite reserves far fewer than u16::MAX test identifiers");
     let grpc_addr = test_addr(
         64000u16
             .checked_add(id)

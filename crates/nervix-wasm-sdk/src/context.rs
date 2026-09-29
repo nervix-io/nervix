@@ -39,9 +39,10 @@ impl BranchContext {
 
     /// Restores the processor of this branch configuration from a saved snapshot.
     ///
-    /// The snapshot must decode and must have been taken under this exact branch configuration;
-    /// only then does [`Processor::restore`] receive the application state it carries, including
-    /// empty application state.
+    /// The snapshot must decode and match this branch's type, key, and schemas. A backup may
+    /// restore the same computation under a different domain name; that name identifies the new
+    /// runtime but does not change the branch's state contract. Only after that check does
+    /// [`Processor::restore`] receive the application state, including empty state.
     pub(crate) fn restore_snapshot<P: Processor>(
         &self,
         saved: &[u8],
@@ -50,7 +51,11 @@ impl BranchContext {
             GuestSnapshot::decode(saved).change_context(RejectedSnapshot::UndecodableEnvelope)?;
         let saved_init = BranchInit::decode(&snapshot.init_metadata)
             .change_context(RejectedSnapshot::UndecodableInitMetadata)?;
-        if saved_init != self.init {
+        if saved_init.domain_type != self.init.domain_type
+            || saved_init.branch_key != self.init.branch_key
+            || saved_init.input_schema != self.init.input_schema
+            || saved_init.output_schemas != self.init.output_schemas
+        {
             return Err(Report::new(RejectedSnapshot::OtherBranchConfiguration));
         }
         P::restore(self, &snapshot.application_state)
@@ -316,6 +321,23 @@ mod tests {
                 application_state: 7_u64.to_le_bytes().to_vec(),
             }
         );
+    }
+
+    #[test]
+    fn a_snapshot_restores_under_a_new_domain_name_with_the_same_branch_contract() {
+        let source = branch(b"tenant=alpha");
+        let saved = source.encode_snapshot(saved_state(&Counter { count: 7 }));
+        let mut target_init = init(b"tenant=alpha");
+        target_init.domain_name = "restored_events".to_string();
+        let target = BranchContext::from(target_init);
+
+        assert_eq!(
+            target
+                .restore_snapshot::<Counter>(&saved)
+                .expect("the branch contract is unchanged"),
+            Counter { count: 7 }
+        );
+        assert_eq!(target.domain_name(), "restored_events");
     }
 
     #[test]

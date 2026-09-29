@@ -90,9 +90,46 @@ struct RemoteRelayAdmissionContext<'a> {
 /// the runtime resolves when acknowledgements come back over the interconnect.
 pub(super) struct RemoteDispatchRegistry {
     pub(super) next_ack_id: AtomicU64,
-    pub(super) pending_acks: DashMap<u64, AckSet, RandomState>,
+    pub(super) pending_acks: DashMap<u64, PendingRemoteAck, RandomState>,
     pub(super) pending_relay_admissions:
         DashMap<u64, watch::Sender<RelayAdmissionUpdate>, RandomState>,
+}
+
+/// One forwarded ACK share, including the latest nonterminal status from its remote owner.
+/// A parked share stays unresolved, but it no longer holds an ownership handoff or backup cut.
+pub(super) struct PendingRemoteAck {
+    acks: AckSet,
+    required_wait: Option<AckRequiredWaitGuard>,
+    progress_sequence: Option<u64>,
+}
+
+impl PendingRemoteAck {
+    fn new(acks: AckSet) -> Self {
+        Self {
+            acks,
+            required_wait: None,
+            progress_sequence: None,
+        }
+    }
+
+    fn progress(&mut self, sequence: u64, parked: bool) {
+        if self.progress_sequence.is_some_and(|seen| sequence <= seen) {
+            return;
+        }
+        self.progress_sequence = Some(sequence);
+        if parked {
+            if self.required_wait.is_none() {
+                self.required_wait = Some(AckRequiredWaitGuard::new([&self.acks]));
+            }
+        } else {
+            self.required_wait = None;
+        }
+    }
+}
+
+fn remote_ack_progress(completion: &AckCompletion) -> RemoteAckOutcome {
+    let (sequence, parked) = completion.remote_progress();
+    RemoteAckOutcome::Progress { sequence, parked }
 }
 
 /// How this node reaches the rest of its cluster. The node attaches it once, after joining the
@@ -144,7 +181,9 @@ impl RemoteDispatcher {
     }
 
     pub(super) fn register_pending_ack(&self, ack_id: u64, acks: AckSet) {
-        self.registry.pending_acks.insert(ack_id, acks);
+        self.registry
+            .pending_acks
+            .insert(ack_id, PendingRemoteAck::new(acks));
     }
 
     pub(super) fn forwarded_ack(acks: &AckSet) -> AckSet {
@@ -1061,7 +1100,7 @@ impl Runtime {
     }
 
     pub(crate) fn handle_remote_ack_resolution(&self, ack: RemoteAckResolution) {
-        if let RemoteAckOutcome::Alive = &ack.outcome {
+        if ack.outcome.is_progress() {
             if let Some(admission) = self
                 .inner
                 .remote_dispatch
@@ -1087,15 +1126,19 @@ impl Runtime {
                 }
                 return;
             }
-            let Some(pending) = self.inner.remote_dispatch.pending_acks.get(&ack.ack_id) else {
+            let Some(mut pending) = self.inner.remote_dispatch.pending_acks.get_mut(&ack.ack_id)
+            else {
                 warn!(
                     ack_id = ack.ack_id,
-                    "received remote ack alive for unknown ack id"
+                    "received remote ack progress for unknown ack id"
                 );
                 return;
             };
-            trace!(ack_id = ack.ack_id, "received remote ack alive");
-            pending.ack_alive();
+            trace!(ack_id = ack.ack_id, outcome = ?ack.outcome, "received remote ack progress");
+            if let RemoteAckOutcome::Progress { sequence, parked } = ack.outcome {
+                pending.progress(sequence, parked);
+            }
+            pending.acks.ack_alive();
             return;
         }
 
@@ -1108,7 +1151,7 @@ impl Runtime {
             let terminal_update = match ack.outcome {
                 RemoteAckOutcome::Ack => RelayAdmissionUpdate::Admitted,
                 RemoteAckOutcome::NoAck(error) => RelayAdmissionUpdate::Rejected(error),
-                RemoteAckOutcome::Alive => return,
+                RemoteAckOutcome::Alive | RemoteAckOutcome::Progress { .. } => return,
             };
             admission.send_if_modified(|update| {
                 if let RelayAdmissionUpdate::Admitted | RelayAdmissionUpdate::Rejected(_) = update {
@@ -1129,9 +1172,11 @@ impl Runtime {
         };
         trace!(ack_id = ack.ack_id, outcome = ?ack.outcome, "resolving remote ack");
         match ack.outcome {
-            RemoteAckOutcome::Ack => pending.ack_success(),
-            RemoteAckOutcome::NoAck(error) => pending.no_ack(error),
-            RemoteAckOutcome::Alive => unreachable!("alive ack outcome is handled before removal"),
+            RemoteAckOutcome::Ack => pending.acks.ack_success(),
+            RemoteAckOutcome::NoAck(error) => pending.acks.no_ack(error),
+            RemoteAckOutcome::Alive | RemoteAckOutcome::Progress { .. } => {
+                unreachable!("progress is handled before terminal removal")
+            }
         }
     }
 
@@ -1163,7 +1208,7 @@ impl Runtime {
                                 &ack.reply_node_id,
                                 Envelope::Ack(RemoteAckResolution {
                                     ack_id: ack.ack_id,
-                                    outcome: RemoteAckOutcome::Alive,
+                                    outcome: remote_ack_progress(&completion),
                                 }),
                             )
                             .await
@@ -1191,7 +1236,7 @@ impl Runtime {
                                         &ack.reply_node_id,
                                         Envelope::Ack(RemoteAckResolution {
                                             ack_id: ack.ack_id,
-                                            outcome: RemoteAckOutcome::Alive,
+                                            outcome: remote_ack_progress(&completion),
                                         }),
                                     )
                                     .await
@@ -1483,7 +1528,11 @@ mod tests {
         let runtime = Runtime::default();
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (acks, completion) = AckSet::root();
-        runtime.inner.remote_dispatch.pending_acks.insert(7, acks);
+        runtime
+            .inner
+            .remote_dispatch
+            .pending_acks
+            .insert(7, PendingRemoteAck::new(acks));
         let runtime_task = runtime.clone();
 
         tokio::spawn(async move {
@@ -1513,6 +1562,55 @@ mod tests {
             "terminal ack must clear the pending remote ack"
         );
         drop(shutdown_tx);
+    }
+
+    #[tokio::test]
+    async fn remote_parked_progress_releases_and_restores_upstream_handoff_ownership() {
+        let runtime = Runtime::default();
+        let tracker = Arc::new(AckRootTracker::default());
+        let (acks, completion) = AckSet::tracked_root(tracker.clone());
+        runtime
+            .inner
+            .remote_dispatch
+            .pending_acks
+            .insert(17, PendingRemoteAck::new(acks));
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
+
+        runtime.handle_remote_ack_resolution(RemoteAckResolution {
+            ack_id: 17,
+            outcome: RemoteAckOutcome::Progress {
+                sequence: 1,
+                parked: true,
+            },
+        });
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+        assert!(completion.remote_progress().1);
+
+        // A delayed status cannot undo the newer park. An actual resume can.
+        runtime.handle_remote_ack_resolution(RemoteAckResolution {
+            ack_id: 17,
+            outcome: RemoteAckOutcome::Progress {
+                sequence: 0,
+                parked: false,
+            },
+        });
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+        runtime.handle_remote_ack_resolution(RemoteAckResolution {
+            ack_id: 17,
+            outcome: RemoteAckOutcome::Progress {
+                sequence: 2,
+                parked: false,
+            },
+        });
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
+        assert!(!completion.remote_progress().1);
+
+        runtime.handle_remote_ack_resolution(RemoteAckResolution {
+            ack_id: 17,
+            outcome: RemoteAckOutcome::Ack,
+        });
+        assert_eq!(completion.wait().await, AckOutcome::Ack);
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
     }
 
     #[tokio::test]

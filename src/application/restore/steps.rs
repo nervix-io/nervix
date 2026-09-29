@@ -5,10 +5,11 @@
 //! - **Owns.** Applying each step of a planned restore and recording it: importing the users,
 //!   creating a domain stopped with its declared resources and making it usable on every node,
 //!   importing each completed resource version under its archived number, and applying the domain's
-//!   models as one batch under the lease the restore holds on the domain.
-//! - **Depends on.** Consensus restore steps, resource version imports, the direct model batch, and
-//!   the planned restore.
-//! - **Must not know.** The archive format, the transport, or how the restore was planned.
+//!   models as one batch under the lease the restore holds on the domain, then installing compatible
+//!   archived runtime checkpoints under the restored schedule.
+//! - **Depends on.** Consensus restore steps, resource version imports, the direct model batch,
+//!   the verified archive description, and the planned restore.
+//! - **Must not know.** Archive record encoding, client transport, or how the restore was planned.
 //!
 //! A step whose consensus record exists is never applied again; a step's own effects are either
 //! recorded with it in one consensus command, or idempotent under the identity the restore gives
@@ -16,9 +17,12 @@
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_backup::DescribedRuntimeState;
 use nervix_consensus::{CommandExecution, ConsensusError, RestoreStepEffect};
+use nervix_interconnect::{RuntimeState, StatePlacementEnvelope};
 use nervix_models::{
-    DomainName, ResourceId, ResourceUploadIdentity, ResourceUploadKey, RestoreStep, UserName,
+    ClusterNodeName, CoordinationIdentity, DomainName, ModelKind, NodeRef, ResourceId,
+    ResourceUploadIdentity, ResourceUploadKey, RestoreState, RestoreStep, UserName,
 };
 
 use super::{
@@ -26,8 +30,16 @@ use super::{
     runner::{RestoreSteps, StepFailure},
 };
 use crate::{
-    application::{resource::ImportedResourceVersion, session_service::SessionServiceImpl},
+    application::{
+        backup::interconnect::{InstallRestoredStateAction, InstallRestoredStateRequest},
+        resource::ImportedResourceVersion,
+        session_service::SessionServiceImpl,
+    },
     registry::{PlannedDomain, RestorePlan},
+    runtime::{
+        BackupBranchLifecycleEntry, CapturedRuntimeState, encode_restored_branch_lifecycle,
+        encode_restored_kafka_offsets,
+    },
 };
 
 /// The steps of one admitted restore, taking effect in consensus and the stores this leader
@@ -37,6 +49,7 @@ pub(super) struct ServerRestoreSteps<'a> {
     pub(super) execution: &'a CommandExecution,
     pub(super) plan: &'a RestorePlan,
     pub(super) archive: &'a VerifiedArchive,
+    pub(super) state: RestoreState,
 }
 
 impl RestoreSteps for ServerRestoreSteps<'_> {
@@ -48,7 +61,7 @@ impl RestoreSteps for ServerRestoreSteps<'_> {
             .pause_restore_step_if_armed(self.service.inner.consensus.local_node_id(), step)
             .await;
         self.service
-            .apply_restore_step(self.execution, self.plan, step, self.archive)
+            .apply_restore_step(self.execution, self.plan, step, self.archive, self.state)
             .await
     }
 }
@@ -90,6 +103,7 @@ impl SessionServiceImpl {
         plan: &RestorePlan,
         step: &RestoreStep,
         archive: &VerifiedArchive,
+        state: RestoreState,
     ) -> Result<(), StepFailure> {
         match step {
             RestoreStep::Users => {
@@ -124,10 +138,343 @@ impl SessionServiceImpl {
                 let domain = planned_domain(plan, target)?;
                 self.apply_restored_models(execution, domain, archive)
                     .await?;
+                self.install_restored_state(domain, archive, state).await?;
                 self.record_restore_step(execution, step, RestoreStepEffect::Completion)
                     .await
             }
         }
+    }
+
+    /// Installs state only after models have published their new stopped-domain schedule. A
+    /// retry of the unrecorded model step repeats this idempotently after purging the target.
+    async fn install_restored_state(
+        &self,
+        domain: &PlannedDomain,
+        archive: &VerifiedArchive,
+        state: RestoreState,
+    ) -> Result<(), StepFailure> {
+        let coordination = self
+            .inner
+            .interconnect
+            .next_coordination_identity()
+            .map_err(|error| {
+                StepFailure::Failed(format!(
+                    "failed to identify restore state installation: {error}"
+                ))
+            })?;
+        self.purge_restored_state_everywhere(&domain.target, &coordination)
+            .await?;
+        if state == RestoreState::ConfigurationOnly {
+            return Ok(());
+        }
+        let schedule = self.inner.consensus.current_schedule().await;
+        let Some(scheduled) = schedule.domain(&domain.target) else {
+            return Err(StepFailure::Failed(format!(
+                "restored domain '{}' has no published schedule",
+                domain.target
+            )));
+        };
+        // Lifecycle is installed first: a WASM branch save cannot be admitted into a branch
+        // incarnation the owner has not learned exists.
+        for first_lifecycle in [true, false] {
+            for archived in archive.states_for(&domain.source) {
+                let is_lifecycle =
+                    matches!(archived, DescribedRuntimeState::BranchLifecycle { .. });
+                if is_lifecycle != first_lifecycle {
+                    continue;
+                }
+                let (
+                    kind,
+                    entity,
+                    schema,
+                    branch_fingerprint,
+                    branch_key,
+                    runtime_state,
+                    revision,
+                    payload,
+                ) = match archived {
+                    DescribedRuntimeState::BranchLifecycle { lifecycle, .. } => {
+                        let payload = encode_restored_branch_lifecycle(
+                            lifecycle
+                                .branches
+                                .iter()
+                                .map(|entry| BackupBranchLifecycleEntry {
+                                    key: entry.key.clone().map(|fields| {
+                                        fields
+                                            .into_iter()
+                                            .map(|field| field.into_remote())
+                                            .collect()
+                                    }),
+                                    last_ingestion: entry.last_ingestion,
+                                    incarnation: entry.incarnation,
+                                })
+                                .collect(),
+                            &lifecycle.entity,
+                        )
+                        .map_err(|error| StepFailure::Failed(error.to_string()))?;
+                        (
+                            lifecycle.owner_kind,
+                            lifecycle.entity.clone(),
+                            Some(lifecycle.schema),
+                            None,
+                            None,
+                            RuntimeState::BranchLru {
+                                schema: lifecycle.schema,
+                            },
+                            lifecycle.revision,
+                            payload,
+                        )
+                    }
+                    DescribedRuntimeState::KafkaOffsets { offsets, .. } => {
+                        if state == RestoreState::WithoutSourceOffsets {
+                            continue;
+                        }
+                        let payload = encode_restored_kafka_offsets(
+                            offsets
+                                .offsets
+                                .iter()
+                                .map(|entry| {
+                                    (entry.topic.clone(), entry.partition, entry.next_offset)
+                                })
+                                .collect(),
+                        )
+                        .map_err(|error| StepFailure::Failed(error.to_string()))?;
+                        (
+                            ModelKind::Ingestor,
+                            offsets.entity.clone(),
+                            Some(offsets.schema),
+                            None,
+                            None,
+                            RuntimeState::KafkaOffset,
+                            offsets.revision,
+                            payload,
+                        )
+                    }
+                    DescribedRuntimeState::Wasm {
+                        descriptor, guest, ..
+                    } => {
+                        let payload = archive
+                            .read_guest_blob(&self.inner.runtime, guest)
+                            .await
+                            .map_err(|error| StepFailure::Failed(error.to_string()))?;
+                        (
+                            ModelKind::WasmProcessor,
+                            descriptor.entity.clone(),
+                            Some(descriptor.schema),
+                            descriptor.branch_fingerprint,
+                            descriptor.branch.clone().map(|fields| {
+                                fields
+                                    .into_iter()
+                                    .map(|field| field.into_remote())
+                                    .collect()
+                            }),
+                            RuntimeState::WasmProcessor {
+                                schema: descriptor.schema,
+                                generation: descriptor.generation,
+                            },
+                            descriptor.revision,
+                            payload,
+                        )
+                    }
+                };
+                let Some(node) = scheduled.nodes.get(&NodeRef::new(kind, entity.clone())) else {
+                    tracing::warn!(domain = %domain.target, entity = %entity, "skipped state for an entity absent from the restored schedule");
+                    continue;
+                };
+                if schema.is_some_and(|schema| schema != node.schema_fingerprint) {
+                    tracing::warn!(domain = %domain.target, entity = %entity, "skipped state with a mismatched schema fingerprint");
+                    continue;
+                }
+                let runtime_state = match runtime_state {
+                    RuntimeState::WasmProcessor { schema, .. } => {
+                        let Some(generations) = node.wasm_state_generations() else {
+                            return Err(StepFailure::Failed(format!(
+                                "restored WASM processor '{entity}' has no published state \
+                                 generation"
+                            )));
+                        };
+                        RuntimeState::WasmProcessor {
+                            schema,
+                            generation: generations.of_branch(branch_fingerprint.as_ref()),
+                        }
+                    }
+                    state => state,
+                };
+                let checkpoint = CapturedRuntimeState {
+                    placement: StatePlacementEnvelope {
+                        domain: domain.target.clone(),
+                        state: runtime_state,
+                        kind,
+                        identifier: entity.clone(),
+                        branch_key,
+                    },
+                    branch_fingerprint,
+                    revision,
+                    payload,
+                };
+                for owner_or_replica in &node.assigned_nodes {
+                    self.install_restored_checkpoint_on(owner_or_replica, checkpoint.clone())
+                        .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn purge_restored_state_everywhere(
+        &self,
+        domain: &DomainName,
+        coordination: &CoordinationIdentity,
+    ) -> Result<(), StepFailure> {
+        let mut nodes = self.inner.cluster.live_node_ids().await;
+        if !nodes.contains(self.inner.consensus.local_node_id()) {
+            nodes.push(self.inner.consensus.local_node_id().clone());
+        }
+        nodes.sort();
+        nodes.dedup();
+        for node in nodes {
+            if &node == self.inner.consensus.local_node_id() {
+                self.inner
+                    .runtime
+                    .purge_restored_domain_state(domain)
+                    .map_err(|error| {
+                        StepFailure::Failed(format!(
+                            "failed to purge state of '{domain}' on '{node}': {error}"
+                        ))
+                    })?;
+            } else {
+                let result = self
+                    .inner
+                    .interconnect
+                    .request(
+                        &node,
+                        InstallRestoredStateRequest {
+                            coordination: coordination.clone(),
+                            domain: domain.clone(),
+                            action: InstallRestoredStateAction::PurgeDomain,
+                        },
+                    )
+                    .await
+                    .map_err(|error| {
+                        StepFailure::Failed(format!(
+                            "failed to purge state of '{domain}' on '{node}': {error}"
+                        ))
+                    })?;
+                result.map_err(|failure| {
+                    StepFailure::Failed(format!(
+                        "failed to purge state of '{domain}' on '{node}': {failure}"
+                    ))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn install_restored_checkpoint_on(
+        &self,
+        node: &ClusterNodeName,
+        checkpoint: CapturedRuntimeState,
+    ) -> Result<(), StepFailure> {
+        if node == self.inner.consensus.local_node_id() {
+            return self
+                .inner
+                .runtime
+                .install_restored_domain_state(checkpoint)
+                .map_err(|error| {
+                    StepFailure::Failed(format!(
+                        "failed to install restored state on '{node}': {error}"
+                    ))
+                });
+        }
+        let coordination = self
+            .inner
+            .interconnect
+            .next_coordination_identity()
+            .map_err(|error| {
+                StepFailure::Failed(format!(
+                    "failed to identify restored state transfer: {error}"
+                ))
+            })?;
+        let domain = checkpoint.placement.domain.clone();
+        let length = u64::try_from(checkpoint.payload.len()).map_err(|_| {
+            StepFailure::Failed("restored state length exceeds address space".to_string())
+        })?;
+        let digest = *blake3::hash(&checkpoint.payload).as_bytes();
+        self.send_restored_state_action(
+            node,
+            &coordination,
+            &domain,
+            InstallRestoredStateAction::Begin {
+                placement: checkpoint.placement,
+                branch_fingerprint: checkpoint
+                    .branch_fingerprint
+                    .map(|fingerprint| *fingerprint.fingerprint()),
+                revision: checkpoint.revision,
+                length,
+                digest,
+            },
+        )
+        .await?;
+        for (index, chunk) in checkpoint.payload.chunks(64 * 1024).enumerate() {
+            let offset = u64::try_from(index)
+                .map_err(|_| {
+                    StepFailure::Failed(
+                        "restored state chunk index exceeds address space".to_string(),
+                    )
+                })?
+                .checked_mul(64 * 1024)
+                .ok_or_else(|| {
+                    StepFailure::Failed("restored state offset exceeds address space".to_string())
+                })?;
+            self.send_restored_state_action(
+                node,
+                &coordination,
+                &domain,
+                InstallRestoredStateAction::Chunk {
+                    offset,
+                    payload: chunk.to_vec(),
+                },
+            )
+            .await?;
+        }
+        self.send_restored_state_action(
+            node,
+            &coordination,
+            &domain,
+            InstallRestoredStateAction::Finish,
+        )
+        .await
+    }
+
+    async fn send_restored_state_action(
+        &self,
+        node: &ClusterNodeName,
+        coordination: &CoordinationIdentity,
+        domain: &DomainName,
+        action: InstallRestoredStateAction,
+    ) -> Result<(), StepFailure> {
+        let result = self
+            .inner
+            .interconnect
+            .request(
+                node,
+                InstallRestoredStateRequest {
+                    coordination: coordination.clone(),
+                    domain: domain.clone(),
+                    action,
+                },
+            )
+            .await
+            .map_err(|error| {
+                StepFailure::Failed(format!(
+                    "failed to send restored state to '{node}': {error}"
+                ))
+            })?;
+        result.map_err(|failure| {
+            StepFailure::Failed(format!(
+                "failed to install restored state on '{node}': {failure}"
+            ))
+        })
     }
 
     /// Records `step` with `effect` in consensus, which applies the effect unless the step is

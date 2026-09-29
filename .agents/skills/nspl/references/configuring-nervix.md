@@ -332,13 +332,18 @@ Choose checks relevant to the configured graph:
   `nervix_branch_evictions_total` split by `reason="lru"` or `reason="ttl"`.
 - `DESCRIBE RESOURCE` confirms uploads and reports `latest`, the completed version `VERSION LATEST`
   would bind now; `SHOW CREATE` shows the version each existing binding stores.
-- `BACKUP CLUSTER TO '<file>';` or `BACKUP DOMAIN [<name>] TO '<file>' [WITHOUT RESOURCES];` writes
-  a configuration archive on the client's machine, sent alone from `nervix-cli` or a native
-  client; `DESCRIBE BACKUP '<file>';` verifies one offline and lists its domains, users, and
-  resource versions with the checksums `DESCRIBE RESOURCE` reports. Treat an archive as a secret.
-- `RESTORE CLUSTER FROM '<file>' [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN];` or
-  `RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [DRY RUN];` recreates users, domains,
-  resource versions under their archived numbers, and models from an archive, sent alone from
+- `BACKUP CLUSTER TO '<file>';` or `BACKUP DOMAIN [<name>] TO '<file>' [WITHOUT RESOURCES]
+  [WITHOUT STATE | WITHOUT PAUSE | TIMEOUT <duration>];` writes an archive on the client's machine,
+  sent alone from `nervix-cli` or a native client. A normal backup quiesces each running domain
+  before capturing WASM guest state, Kafka domain source offsets, and branch lifecycle. `WITHOUT
+  PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures only
+  configuration. `DESCRIBE BACKUP '<file>';` verifies one offline and inventories its state,
+  domains, users, and resource versions. Treat an archive as a secret.
+- `RESTORE CLUSTER FROM '<file>' [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN]
+  [WITHOUT STATE | WITHOUT SOURCE OFFSETS];` or
+  `RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [DRY RUN]
+  [WITHOUT STATE | WITHOUT SOURCE OFFSETS];` recreates users, domains,
+  resource versions under their archived numbers, models, and compatible runtime state from an archive, sent alone from
   `nervix-cli` or a native client. Restored domains are stopped; a domain name that exists is
   refused, so copy a domain with `AS`. A fresh cluster already has its bootstrap user, so a cluster
   restore there needs `ON EXISTING USER SKIP` or `REPLACE`. Run `DRY RUN` first to see the plan and

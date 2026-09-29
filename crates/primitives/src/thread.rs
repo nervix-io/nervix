@@ -5,10 +5,10 @@
 //! are the operating system's threads.
 
 #[cfg(not(any(feature = "loom", feature = "shuttle")))]
-pub use std::thread::{JoinHandle, spawn};
+pub use std::thread::{JoinHandle, spawn, yield_now};
 
 #[cfg(feature = "loom")]
-pub use loom::thread::{JoinHandle, spawn};
+pub use loom::thread::{JoinHandle, spawn, yield_now};
 // See the atomic module: one backend stays selected when both modes are enabled by mistake.
 #[cfg(all(feature = "shuttle", not(feature = "loom")))]
-pub use shuttle::thread::{JoinHandle, spawn};
+pub use shuttle::thread::{JoinHandle, spawn, yield_now};

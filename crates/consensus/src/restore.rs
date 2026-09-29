@@ -423,6 +423,7 @@ mod tests {
                 scope,
                 source: "archive.nvxb".to_string(),
                 mode: RestoreMode::Apply,
+                state: nervix_models::RestoreState::All,
             },
             RestoreArchive {
                 total_bytes: NonZeroU64::MIN,

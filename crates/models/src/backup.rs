@@ -2,13 +2,13 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The `BACKUP` and `DESCRIBE BACKUP` Models, the choice of whether resource bytes
-//!   travel in an archive, and the summary a completed backup reports and its outcome records.
+//! - **Owns.** The `BACKUP` and `DESCRIBE BACKUP` Models, resource and runtime-state capture
+//!   choices, and the cut and archive summary a completed backup reports and its outcome records.
 //! - **Depends on.** Vocabulary names and timestamps.
 //! - **Must not know.** The archive's encoding, how a backup reads cluster state, where an archive
 //!   is staged, or how a client stores it.
 
-use std::{fmt, num::NonZeroU64};
+use std::{fmt, num::NonZeroU64, time::Duration};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,36 @@ pub struct Backup {
     /// The local file the client writes the archive to.
     pub destination: String,
     pub resources: BackupResources,
+    /// How runtime state is captured. A quiesced capture may override the domain drain timeout.
+    pub capture: BackupCapture,
+}
+
+/// The consistency and runtime-state contract requested by a backup.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum BackupCapture {
+    /// Pause and drain a running domain before capturing its state.
+    Quiesced { timeout: Option<Duration> },
+    /// Capture the latest published checkpoints while the domain keeps running.
+    Live,
+    /// Capture configuration only, without taking a domain mutation lease.
+    ConfigurationOnly,
+}
+
+impl Default for BackupCapture {
+    fn default() -> Self {
+        Self::Quiesced { timeout: None }
+    }
 }
 
 /// What a backup covers.
@@ -148,10 +178,99 @@ pub struct BackupDomainSummary {
     pub domain: DomainName,
     /// The applied consensus revision the domain's configuration was read at.
     pub revision: u64,
+    /// The consistency boundary at which its runtime state was captured.
+    pub cut: BackupCut,
     /// The sections the archive holds for the domain.
     pub sections: u64,
     /// The bytes those sections hold.
     pub section_bytes: u64,
+}
+
+/// The consistency boundary of one backed-up domain.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum BackupCut {
+    Quiesced {
+        engaged_at: Timestamp,
+        released_at: Timestamp,
+        quiesce: BackupQuiesceCounters,
+    },
+    Live,
+    Stopped,
+    ConfigurationOnly,
+}
+
+impl BackupCut {
+    pub const fn kind(self) -> BackupCutKind {
+        match self {
+            Self::Quiesced { .. } => BackupCutKind::Quiesced,
+            Self::Live => BackupCutKind::Live,
+            Self::Stopped => BackupCutKind::Stopped,
+            Self::ConfigurationOnly => BackupCutKind::ConfigurationOnly,
+        }
+    }
+}
+
+/// How one domain reached the state recorded in the archive.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum BackupCutKind {
+    Quiesced,
+    Live,
+    Stopped,
+    ConfigurationOnly,
+}
+
+impl BackupCutKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Quiesced => "quiesced",
+            Self::Live => "live",
+            Self::Stopped => "stopped",
+            Self::ConfigurationOnly => "without state",
+        }
+    }
+}
+
+/// What ingestion did during one freeze, summed across its owners.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct BackupQuiesceCounters {
+    pub buffered_records: u64,
+    pub buffered_bytes: u64,
+    pub dropped_records: u64,
+    pub rejected_records: u64,
 }
 
 #[cfg(test)]

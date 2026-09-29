@@ -12,7 +12,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{self, BufReader, Read},
+    io::{self, BufReader, Read, Seek, SeekFrom},
     path::Path,
 };
 
@@ -21,7 +21,10 @@ use bytes::Bytes;
 use error_stack::{Report, ResultExt as _};
 use futures_util::Stream;
 use meticulous::OptionExt as _;
-use nervix_backup::{ArchiveContents, ArchiveReadError, read_archive_contents};
+use nervix_backup::{
+    ArchiveContents, ArchiveReadError, DescribedRuntimeState, DescribedSection, SectionDigester,
+    read_archive_contents,
+};
 use nervix_execution::{Cancellation, ChargedBytes, Executor, MemoryClass, StorageClass};
 use nervix_models::{
     CreateStatement, DomainName, Model, RequestedResourceVersion, ResourceUpload,
@@ -78,6 +81,84 @@ pub(in crate::application) struct VerifiedArchive {
 }
 
 impl VerifiedArchive {
+    pub(in crate::application) fn states_for(
+        &self,
+        domain: &DomainName,
+    ) -> &[DescribedRuntimeState] {
+        match self
+            .contents
+            .description
+            .domains
+            .iter()
+            .find(|described| &described.capture.domain == domain)
+        {
+            Some(described) => described.state.as_slice(),
+            None => &[],
+        }
+    }
+
+    pub(in crate::application) fn skipped_state_for(
+        &self,
+        domain: &DomainName,
+    ) -> &[nervix_backup::SkippedStateSection] {
+        match self
+            .contents
+            .description
+            .domains
+            .iter()
+            .find(|described| &described.capture.domain == domain)
+        {
+            Some(described) => described.skipped_state.as_slice(),
+            None => &[],
+        }
+    }
+
+    /// Re-reads a verified raw guest blob from the staged archive through the bulk storage
+    /// executor. The digest is checked again before the bytes become an installed checkpoint.
+    pub(in crate::application) async fn read_guest_blob(
+        &self,
+        runtime: &Runtime,
+        section: &DescribedSection,
+    ) -> Result<Vec<u8>, Report<RestoreRefusal>> {
+        let executor = runtime.executor().clone();
+        let path = self.artifact.path().to_path_buf();
+        let offset = section.offset;
+        let length =
+            usize::try_from(section.length).map_err(|_| Report::new(RestoreRefusal::Unreadable))?;
+        let digest = section.digest;
+        let reservation = executor
+            .reserve(MemoryClass::Bulk, section.length)
+            .await
+            .change_context(RestoreRefusal::Unreadable)?;
+        let read = executor
+            .run_storage(
+                StorageClass::Filesystem,
+                reservation,
+                move |_charge, cancellation| -> io::Result<Vec<u8>> {
+                    let mut file = std::fs::File::open(path)?;
+                    file.seek(SeekFrom::Start(offset))?;
+                    let mut bytes = vec![0; length];
+                    if cancellation.is_cancelled() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "restore was cancelled",
+                        ));
+                    }
+                    file.read_exact(&mut bytes)?;
+                    if SectionDigester::digest_of(&bytes) != digest {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "guest blob digest changed",
+                        ));
+                    }
+                    Ok(bytes)
+                },
+            )
+            .await
+            .change_context(RestoreRefusal::Unreadable)?;
+        read.change_context(RestoreRefusal::Unreadable)
+    }
+
     /// When the backup that wrote the archive read its contents.
     pub(in crate::application) fn captured_at(&self) -> Timestamp {
         self.contents.description.manifest.captured_at

@@ -98,6 +98,10 @@ fingerprint is accepted for its identity even if its bytes happen to be zero. Sc
 publish the required fingerprint before schema-bound state can be loaded or replicated. Missing
 required identity is an error, not a default digest.
 
+The runtime Kafka offset key remains schema-independent. A backup archive also records the
+ingestor's scheduled fingerprint with those offsets, so restore applies them only to the same
+ingestor contract after publishing its target schedule.
+
 The runtime checks a stored state's schema identity against the current scheduled identity before
 accepting it. WASM guest state additionally uses its generation for the concrete branch. A state
 from another schema or generation cannot become current merely because it has a later revision.

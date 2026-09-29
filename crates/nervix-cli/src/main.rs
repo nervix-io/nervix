@@ -176,6 +176,15 @@ enum Command {
         /// Record every resource version and its digests without the version's bytes
         #[arg(long)]
         without_resources: bool,
+        /// Capture configuration only, without pausing domains
+        #[arg(long, conflicts_with = "without_pause")]
+        without_state: bool,
+        /// Capture the latest published state without pausing domains
+        #[arg(long)]
+        without_pause: bool,
+        /// Maximum time to drain a running domain before its state cut
+        #[arg(long, value_parser = humantime::parse_duration, conflicts_with_all = ["without_state", "without_pause"])]
+        timeout: Option<std::time::Duration>,
         /// How the backup's report is printed
         #[arg(long, value_enum, default_value_t = CliReportFormat::Text)]
         format: CliReportFormat,
@@ -201,6 +210,12 @@ enum Command {
         /// Verify the archive and plan the restore, changing nothing
         #[arg(long)]
         dry_run: bool,
+        /// Restore configuration without runtime state
+        #[arg(long, conflicts_with = "without_source_offsets")]
+        without_state: bool,
+        /// Restore runtime state but leave source offsets empty
+        #[arg(long)]
+        without_source_offsets: bool,
         /// How the restore's report is printed
         #[arg(long, value_enum, default_value_t = CliReportFormat::Text)]
         format: CliReportFormat,
@@ -473,6 +488,9 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             name,
             output,
             without_resources,
+            without_state,
+            without_pause,
+            timeout,
             format,
         }) => {
             let connect_options = connect_options_from_args(&args)?;
@@ -484,6 +502,9 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 domain: name,
                 output,
                 without_resources,
+                without_state,
+                without_pause,
+                timeout,
                 format,
             })
             .await;
@@ -495,6 +516,8 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             target,
             on_existing_user,
             dry_run,
+            without_state,
+            without_source_offsets,
             format,
         }) => {
             let connect_options = connect_options_from_args(&args)?;
@@ -508,6 +531,8 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 input,
                 existing_users: on_existing_user,
                 dry_run,
+                without_state,
+                without_source_offsets,
                 format,
             })
             .await;

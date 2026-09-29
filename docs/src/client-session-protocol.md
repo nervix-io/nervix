@@ -1319,11 +1319,12 @@ under its execution reference like every other persistent command, while its arc
 call of its own, `DownloadBackup`, keyed by that reference. [Backup And
 Restore](./backup-and-restore.md) owns what an archive holds and how it is laid out.
 
-The leader runs the backup. It reads every section from one applied revision, assembles the archive
-in its staging area, and only then completes the command. The `CommandCompleted` outcome carries the
+The leader runs the backup. Each domain is captured at its own applied revision and records whether
+its cut was quiesced, live, stopped, or configuration-only. The leader assembles the archive in its
+staging area, and only then completes the command. The `CommandCompleted` outcome carries the
 archive's summary: its size and BLAKE3 digest, the capture time, the instant the node stops
 retaining the archive, whether resource bytes are included, the number of users, and each domain's
-revision, section count, and bytes. The summary is part of the recorded outcome, so repeating the
+revision, cut kind and quiesce counters, section count, and bytes. The summary is part of the recorded outcome, so repeating the
 command under its reference returns the same summary and never assembles a second archive.
 
 A download call carries exactly one `BackupDownloadRequest`, which names the backup's execution

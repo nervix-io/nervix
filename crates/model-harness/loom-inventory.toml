@@ -45,3 +45,31 @@ invariant = "execution.cancellation.publication"
 original = "self.cancelled.load(Ordering::Acquire)"
 path = "crates/execution/src/cancellation.rs"
 weakened = "self.cancelled.load(Ordering::Relaxed)"
+
+[[invariant]]
+claim = "A quiesced backup cut waits for every branch state publication that registered before the cut closed, then reads all writes those publications completed."
+id = "server.backup.cut-includes-publication"
+package = "nervix-server"
+test = "runtime::backup_capture_fence::loom_models::loom_a_cut_includes_every_registered_publication"
+
+[[invariant]]
+claim = "A branch state publisher entering after a backup cut acquires the cut generation and sees the coordinator's preceding writes."
+id = "server.backup.cut-generation"
+package = "nervix-server"
+test = "runtime::backup_capture_fence::loom_models::loom_a_publisher_acquires_the_cut_generation"
+
+[[qualification]]
+failure = "the cut omitted a publication registered before it closed"
+id = "server.backup.relaxed-publication-completion"
+invariant = "server.backup.cut-includes-publication"
+original = "self.fence.state.fetch_sub(1, Ordering::Release);"
+path = "src/runtime/backup_capture_fence.rs"
+weakened = "self.fence.state.fetch_sub(1, Ordering::Relaxed);"
+
+[[qualification]]
+failure = "a publisher observed the cut generation without its prior writes"
+id = "server.backup.missing-publisher-acquire"
+invariant = "server.backup.cut-generation"
+original = ".compare_exchange_weak(state, state + 1, Ordering::AcqRel, Ordering::Relaxed)"
+path = "src/runtime/backup_capture_fence.rs"
+weakened = ".compare_exchange_weak(state, state + 1, Ordering::Release, Ordering::Relaxed)"

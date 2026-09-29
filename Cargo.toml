@@ -14,6 +14,12 @@ path = "src/main.rs"
 
 [features]
 default = []
+# Models the backup cut's production atomic owner under the shared execution boundary.
+loom = [
+  "nervix-execution/loom",
+  "nervix-model-harness/loom",
+  "nervix-primitives/loom",
+]
 # Exposes opaque benchmark drivers without making runtime internals part of the normal API.
 benchmarks = []
 # Replaces synchronization primitives with scheduler-visible Shuttle implementations. The edge
@@ -139,7 +145,7 @@ nervix-interconnect = { workspace = true }
 nervix-jaq = { workspace = true }
 nervix-models = { workspace = true, features = ["arrow"] }
 nervix-nspl = { workspace = true }
-nervix-primitives = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
 nervix-roto = { workspace = true }
 nervix-simd-kernels = { workspace = true }
@@ -228,6 +234,8 @@ iceberg-catalog-rest = { workspace = true }
 iceberg-storage-opendal = { workspace = true }
 lapin = { workspace = true }
 mongodb = { workspace = true }
+nervix-model-harness = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 # This is mysql_async's AWS-LC-backed Rustls feature; do not use default-rustls-ring.
 mysql_async = { workspace = true, features = ["default-rustls"] }
 nervix-client-core = { workspace = true, features = ["arrow"] }

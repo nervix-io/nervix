@@ -492,6 +492,11 @@ def copy_working_tree(commands: Commands, destination: Path) -> None:
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
+    # Server models embed the generated web console at compile time. It is ignored by Git, so
+    # tracked-source copies need this build input alongside the source under qualification.
+    console_dist = Path("crates/web-console/dist")
+    if (commands.root / console_dist).is_dir():
+        shutil.copytree(commands.root / console_dist, destination / console_dist)
 
 
 def qualification_failure(outcome: Outcome, qualification: Qualification) -> str | None:
@@ -522,6 +527,16 @@ def qualify(commands: Commands, inventory: Inventory, target: Path) -> int:
         )
         manifest = tree / "Cargo.toml"
         environment = {"CARGO_TARGET_DIR": str(target)}
+        clean_command = [
+            "cargo", "clean", "--manifest-path", str(manifest), "--package", model.package,
+        ]
+        cleaned = commands.run(clean_command, environment=environment, cwd=tree, echo=False)
+        if cleaned.status != 0:
+            problems.append(
+                f"qualification {qualification.id}: could not clear a previous package build; "
+                f"{cleaned.output}"
+            )
+            continue
         checkpoint = directory / "checkpoint.json"
         checkpoint.unlink(missing_ok=True)
         print(f"loom: qualifying {invariant.id} against {qualification.id}", flush=True)
@@ -546,6 +561,9 @@ def qualify(commands: Commands, inventory: Inventory, target: Path) -> int:
             replay_problem = qualification_failure(replayed, qualification)
             if replay_problem is not None:
                 problem = f"its checkpoint does not replay the failure: {replay_problem}"
+        cleaned = commands.run(clean_command, environment=environment, cwd=tree, echo=False)
+        if cleaned.status != 0:
+            problem = f"could not clear its weakened package build: {cleaned.output}"
         if problem is not None:
             problems.append(f"qualification {qualification.id}: {problem}; see {directory}")
             continue

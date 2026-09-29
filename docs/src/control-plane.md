@@ -509,6 +509,22 @@ records as an ordered effect rather than a model mutation, a guest's request for
 its own branch, and `ON REJECTED STATE RESET`. See
 [Coordinated Reset](./wasm-state.md#coordinated-reset).
 
+## Backing Up A Domain
+
+A normal domain backup acquires a replicated mutation lease under its persistent command
+execution. The leader also takes its node-local alteration guard, pauses and drains the domain,
+reads the configuration at the cut, and asks state owners to stage their checkpoints. It resumes
+the domain and explicitly releases that domain's lease before transferring its sections into the
+archive. A cluster backup repeats this process per domain, so one domain's archive transfer does
+not hold another domain paused or mutation locked. A stopped domain is confirmed under its lease
+and has no intake to pause;
+`WITHOUT STATE` takes no mutation lease, and `WITHOUT PAUSE` reads a live checkpoint without
+quiescing. A retry still uses the command execution's stable identity and outcome.
+The backup drain reads admitted work on every live node and uses a separate confirming force-flush
+round after the cluster first appears quiet. A parked materialized-state wait is reported but does
+not keep the cut open. If work reappears, the leader drains and confirms again. Each drain request
+is bound to the authenticated coordinator process; a successor cannot reuse its cut identity.
+
 ## Restoring A Backup
 
 A restore is a persistent administrative command whose progress is replicated state; the operator

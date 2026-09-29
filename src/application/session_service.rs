@@ -48,7 +48,7 @@ use triomphe::Arc;
 
 use super::{
     authentication::{AuthRateLimiter, BasicAuthCredentials},
-    backup::ServerRetainedBackups,
+    backup::{CaptureSectionKey, CapturedSectionStage, ServerRetainedBackups},
     client_producers::ClientProducerRouter,
     command_execution::{
         CommandAdmission, CommandExecutionOwners, CommandExecutionPolicy, PersistentCommandRequest,
@@ -205,6 +205,15 @@ pub(in crate::application) struct SessionServiceInner {
     /// The archives this node's backups assembled, until a download collects each or its retry
     /// validity ends.
     pub(in crate::application) retained_backups: ServerRetainedBackups,
+    /// Node-local staged state sections awaiting the coordinator's bulk fetch.
+    pub(in crate::application) captured_backup_sections:
+        DashMap<CaptureSectionKey, CapturedSectionStage, RandomState>,
+    /// Quota-charged, partially received guest saves awaiting a verified restore install.
+    pub(in crate::application) restored_state_uploads: DashMap<
+        nervix_models::CoordinationIdentity,
+        crate::application::backup::interconnect::RestoreUploadEntry,
+        RandomState,
+    >,
     /// The verified archives this node's restores read, until each restore finishes or its retry
     /// validity ends.
     pub(in crate::application) restore_archives: ServerRestoreArchives,

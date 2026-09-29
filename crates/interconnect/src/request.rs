@@ -377,6 +377,11 @@ pub trait InterconnectStreamRequest: RkyvMessage {
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
     const TIMEOUT: Duration;
     const REQUIRES_LIVE_TARGET: bool = true;
+
+    /// Bind a coordinated stream to the authenticated peer process before its handler runs.
+    fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
+        None
+    }
 }
 
 #[derive(Debug, Error)]
@@ -956,6 +961,11 @@ where
             let (request, _request_reservation) = M::decode_rkyv(executor, M::CLASS, payload)
                 .await
                 .map_err(|error| RemoteRequestFailure::InvalidPayload(error.to_string()))?;
+            if let Some(identity) = request.coordination_identity()
+                && !context.authenticates(identity)
+            {
+                return Err(RemoteRequestFailure::CoordinationIdentityMismatch);
+            }
             (handler)(context, request)
                 .await
                 .map_err(|error| RemoteRequestFailure::ResponseEncode(error.to_string()))

@@ -1250,11 +1250,31 @@ enum BackupResources : ubyte {
   Omitted
 }
 
+/// Consistency boundary of the domain state carried by a backup.
+enum BackupCutKind : ubyte {
+  Quiesced,
+  Live,
+  Stopped,
+  ConfigurationOnly
+}
+
+table BackupCut {
+  kind: BackupCutKind = null;
+  /// Present only for a quiesced cut, in nanoseconds since the Unix epoch.
+  engaged_at: long = null;
+  released_at: long = null;
+  buffered_records: ulong;
+  buffered_bytes: ulong;
+  dropped_records: ulong;
+  rejected_records: ulong;
+}
+
 /// One domain of a completed backup.
 table BackupDomainSummary {
   domain: string (required);
   /// The applied consensus revision the domain's configuration was read at.
   revision: ulong;
+  cut: BackupCut (required);
   /// The sections the archive holds for the domain.
   sections: ulong;
   /// The bytes those sections hold.

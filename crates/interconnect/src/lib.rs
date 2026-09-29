@@ -35,6 +35,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 
 mod authentication;
+pub mod backup;
 mod connection;
 mod entropy;
 mod identity;

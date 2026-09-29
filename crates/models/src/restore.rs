@@ -30,6 +30,31 @@ pub struct Restore {
     /// The local archive file the client reads.
     pub source: String,
     pub mode: RestoreMode,
+    /// Which archived runtime state the restore installs.
+    pub state: RestoreState,
+}
+
+/// The runtime state a restore installs into each stopped domain.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum RestoreState {
+    #[default]
+    All,
+    /// Install state other than source positions.
+    WithoutSourceOffsets,
+    /// Install configuration only.
+    ConfigurationOnly,
 }
 
 /// What a restore recreates.

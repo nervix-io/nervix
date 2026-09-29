@@ -200,10 +200,22 @@ pub(super) enum CorrelatorSide {
 }
 
 #[cfg(test)]
-pub(super) static CORRELATOR_WHERE_VM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
+static CORRELATOR_WHERE_VM_EXECUTIONS: std::sync::OnceLock<AtomicUsize> =
+    std::sync::OnceLock::new();
 
 #[cfg(test)]
-pub(super) static CORRELATOR_OUTPUT_VM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
+static CORRELATOR_OUTPUT_VM_EXECUTIONS: std::sync::OnceLock<AtomicUsize> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn where_vm_executions() -> &'static AtomicUsize {
+    CORRELATOR_WHERE_VM_EXECUTIONS.get_or_init(|| AtomicUsize::new(0))
+}
+
+#[cfg(test)]
+fn output_vm_executions() -> &'static AtomicUsize {
+    CORRELATOR_OUTPUT_VM_EXECUTIONS.get_or_init(|| AtomicUsize::new(0))
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct CorrelatorMaterializedState {
@@ -559,7 +571,7 @@ pub(super) async fn evaluate_correlator_where_matches(
         )
     })?;
     #[cfg(test)]
-    CORRELATOR_WHERE_VM_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
+    where_vm_executions().fetch_add(1, Ordering::Relaxed);
     let result = execute_program_with_selection_in_context(
         &program.program,
         &input,
@@ -793,7 +805,7 @@ pub(super) async fn evaluate_correlator_output_batch(
         }
     };
     #[cfg(test)]
-    CORRELATOR_OUTPUT_VM_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
+    output_vm_executions().fetch_add(1, Ordering::Relaxed);
     let result = match execute_program_with_selection_in_context(
         &program.program.compiled,
         &input,
@@ -1373,7 +1385,7 @@ mod tests {
             },
             materialized_state: Arc::new(HashMap::default()),
         };
-        CORRELATOR_WHERE_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+        where_vm_executions().store(0, Ordering::Relaxed);
 
         let (matched_left, _matched_right) = correlate_incoming_message(
             &processor,
@@ -1389,7 +1401,7 @@ mod tests {
         .expect("matching candidates should produce a correlation");
 
         assert_eq!(
-            CORRELATOR_WHERE_VM_EXECUTIONS.load(Ordering::Relaxed),
+            where_vm_executions().load(Ordering::Relaxed),
             1,
             "all candidate pairs must share one WHERE VM execution"
         );
@@ -1414,7 +1426,7 @@ mod tests {
             materialized_state: Arc::new(HashMap::default()),
         };
         let right_candidates = vec![right_candidate(7), right_candidate(8), right_candidate(7)];
-        CORRELATOR_WHERE_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+        where_vm_executions().store(0, Ordering::Relaxed);
 
         let matching = evaluate_correlator_where_matches(
             &processor,
@@ -1429,7 +1441,7 @@ mod tests {
 
         assert_eq!(matching, vec![true, false, true]);
         assert_eq!(
-            CORRELATOR_WHERE_VM_EXECUTIONS.load(Ordering::Relaxed),
+            where_vm_executions().load(Ordering::Relaxed),
             1,
             "a left-side arrival must also batch all candidate pairs"
         );
@@ -1533,7 +1545,7 @@ mod tests {
         let correlations = vec![correlation(0, "active"), correlation(1, "paused")];
         let matched = CorrelatorMatchedBatch::from_correlations(&correlations, &[&program])
             .expect("matched pairs should form one Arrow batch");
-        CORRELATOR_OUTPUT_VM_EXECUTIONS.store(0, Ordering::Relaxed);
+        output_vm_executions().store(0, Ordering::Relaxed);
 
         let outcomes = evaluate_correlator_output_batch(
             &named("join_profiles"),
@@ -1554,7 +1566,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(
-            CORRELATOR_OUTPUT_VM_EXECUTIONS.load(Ordering::Relaxed),
+            output_vm_executions().load(Ordering::Relaxed),
             1,
             "all matched pairs for one route must share one output VM execution"
         );

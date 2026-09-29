@@ -1614,7 +1614,7 @@ impl TransportState {
         // A terminal acknowledgement resolves the reserved admission it names. The resolved record
         // is retired once the acknowledgement is delivered, without looking the admission up again.
         let completed_admission = if let Envelope::Ack(ack) = &envelope {
-            if let RemoteAckOutcome::Alive = &ack.outcome {
+            if ack.outcome.is_progress() {
                 None
             } else {
                 let key = RelayAdmissionKey {
@@ -1641,7 +1641,7 @@ impl TransportState {
             let class = envelope.pool_class();
             let subquota = match &envelope {
                 Envelope::Ack(ack) => {
-                    if ack.outcome == RemoteAckOutcome::Alive {
+                    if ack.outcome.is_progress() {
                         RequestSubquota::Progress
                     } else {
                         RequestSubquota::Terminal
@@ -2228,7 +2228,7 @@ impl TransportState {
             )
             .await?;
             let (ack, reservation) = decoded.into_parts();
-            let terminal_admission = if ack.outcome == RemoteAckOutcome::Alive {
+            let terminal_admission = if ack.outcome.is_progress() {
                 None
             } else {
                 Some(RelayAdmissionKey {
@@ -2236,7 +2236,7 @@ impl TransportState {
                     ack_id: ack.ack_id,
                 })
             };
-            if ack.outcome == RemoteAckOutcome::Alive {
+            if ack.outcome.is_progress() {
                 self.deliver_incoming(
                     peer.addr,
                     peer.node_id,

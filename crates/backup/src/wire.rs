@@ -42,6 +42,22 @@ pub(crate) struct DomainCaptureWire {
     pub(crate) revision: u64,
     pub(crate) raft_term: u64,
     pub(crate) raft_index: u64,
+    pub(crate) cut: CutWire,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Archive, Serialize, Deserialize)]
+pub(crate) enum CutWire {
+    Quiesced {
+        engaged_at_unix_nanos: i64,
+        released_at_unix_nanos: i64,
+        buffered_records: u64,
+        buffered_bytes: u64,
+        dropped_records: u64,
+        rejected_records: u64,
+    },
+    Live,
+    Stopped,
+    ConfigurationOnly,
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
@@ -57,6 +73,7 @@ pub(crate) enum SectionContentWire {
     Record { kind: u16 },
     Nspl,
     ResourceArchive,
+    WasmGuestBlob,
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
@@ -160,3 +177,78 @@ pub(crate) struct PublishedVersionWire {
 /// grammar before it becomes a node identity.
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub(crate) struct NodeNameWire(pub(crate) String);
+
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+pub(crate) struct WasmStateDescriptorWire {
+    pub(crate) domain: String,
+    pub(crate) entity: String,
+    pub(crate) schema: [u8; 32],
+    pub(crate) branch_fingerprint: Option<[u8; 32]>,
+    pub(crate) branch: Option<Vec<StateField>>,
+    pub(crate) generation: u64,
+    pub(crate) revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+pub(crate) struct KafkaOffsetsWire {
+    pub(crate) domain: String,
+    pub(crate) entity: String,
+    pub(crate) schema: [u8; 32],
+    pub(crate) revision: u64,
+    pub(crate) offsets: Vec<KafkaPartitionWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+pub(crate) struct KafkaPartitionWire {
+    pub(crate) topic: String,
+    pub(crate) partition: i32,
+    pub(crate) next_offset: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+pub(crate) struct BranchLifecycleWire {
+    pub(crate) domain: String,
+    pub(crate) owner_kind: String,
+    pub(crate) entity: String,
+    pub(crate) schema: [u8; 32],
+    pub(crate) revision: u64,
+    pub(crate) branches: Vec<BranchLifecycleEntryWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+pub(crate) struct BranchLifecycleEntryWire {
+    pub(crate) key: Option<Vec<StateField>>,
+    pub(crate) last_ingestion_unix_nanos: i64,
+    pub(crate) incarnation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub struct StateField {
+    pub name: String,
+    pub value: StateValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[rkyv(serialize_bounds(
+    __S: rkyv::ser::Writer + rkyv::ser::Allocator,
+    __S::Error: rkyv::rancor::Source,
+))]
+#[rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))]
+#[rkyv(bytecheck(bounds(__C: rkyv::validation::ArchiveContext)))]
+pub enum StateValue {
+    U8(u8),
+    I8(i8),
+    U16(u16),
+    I16(i16),
+    U32(u32),
+    I32(i32),
+    U64(u64),
+    I64(i64),
+    Bool(bool),
+    String(String),
+    Datetime(String),
+    F32Bits(u32),
+    F64Bits(u64),
+    Array(#[rkyv(omit_bounds)] Vec<StateValue>),
+    Vec(#[rkyv(omit_bounds)] Vec<StateValue>),
+}

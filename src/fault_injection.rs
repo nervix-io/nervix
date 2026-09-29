@@ -241,6 +241,7 @@ enum CommandPausePoint {
         node_id: ClusterNodeName,
         step: RestoreStep,
     },
+    BackupCut(DomainName),
     TransactionCommit {
         node_id: ClusterNodeName,
         domain: String,
@@ -983,6 +984,20 @@ impl FaultInjection {
         });
     }
 
+    /// Holds a backup after its domain drain and before any owner captures state.
+    pub fn pause_backup_cut_on(&self, domain: DomainName) {
+        self.arm_command_pause(CommandPausePoint::BackupCut(domain));
+    }
+
+    pub async fn wait_for_backup_cut_pause(&self, domain: &DomainName) {
+        self.wait_for_command_pause(&CommandPausePoint::BackupCut(domain.clone()))
+            .await;
+    }
+
+    pub fn release_backup_cut_pause(&self, domain: &DomainName) {
+        self.release_command_pause(&CommandPausePoint::BackupCut(domain.clone()));
+    }
+
     pub fn pause_transaction_commit_after(
         &self,
         node_id: ClusterNodeName,
@@ -1594,6 +1609,11 @@ impl FaultInjection {
             step: step.clone(),
         })
         .await;
+    }
+
+    pub(crate) async fn pause_backup_cut_if_armed(&self, domain: &DomainName) {
+        self.pause_command_if_armed(CommandPausePoint::BackupCut(domain.clone()))
+            .await;
     }
 
     pub(crate) async fn pause_health_response_if_armed(

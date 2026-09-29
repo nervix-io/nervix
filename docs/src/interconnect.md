@@ -265,7 +265,8 @@ Coordination operations use a typed identity composed of the authenticated coord
 current process epoch, and a process-local sequence. The sequence begins independently in every
 process; the node and process epoch make equal sequence values distinct across concurrent leaders
 and restarts. For every coordination request, the receiver verifies the node and process epoch
-against the bound connection before the application handler can observe the request. A process
+against the bound connection before the application handler can observe the request or open a
+coordinated response stream. A process
 therefore cannot issue or replay an identity that belongs to another node or to an earlier run of
 the same node.
 
@@ -592,6 +593,11 @@ While admission or an attached acknowledgement is unresolved, the receiver sends
 events through the reserved management quota. The sender treats five seconds without progress as a
 stalled exchange and bounds the total admission wait at five minutes. Progress keeps a live attempt
 from being mistaken for a disconnected one; it does not change the delivery outcome.
+For an attached acknowledgement, progress also carries a monotonic sequence and whether all of its
+remaining handoff shares are parked on `REQUIRED WAIT`. Each upstream node parks or reactivates its
+own attached share in sequence order, so a domain drain excludes a parked chain across relay hops.
+The eventual terminal acknowledgement still resolves every share; parking does not acknowledge the
+source or persist an acknowledgement. Admission progress carries no parked state.
 
 ### Ordering, Retry, And Reconciliation
 
@@ -778,12 +784,33 @@ the active decoded section are resident at once.
 [Resource Versions And Bindings](./resource-versions.md#publication-and-transfer) defines when a
 node fetches a resource archive and how it verifies and records the fetched version.
 
+Backup state capture uses typed drain, capture, inventory, and fetch operations. The leader reads
+each node's admitted work through a management-class drain request and requests a separate
+confirming force-flush round after all nodes appear quiet. The leader sends a management-class capture
+request with its coordination identity and applied cut revision to each live node, then reads each
+node's management-class inventory of staged sections. A captured section is fetched over a
+snapshot-subquota bulk response: the inventory declares its path, length, content kind and digest,
+and the leader stages and verifies the stream before adding it to the archive. The owner keeps a
+staged section only for the coordinator process that requested it and releases expired stages.
+The fetch stream authenticates that process identity before its handler can consume the stage; a
+partitioned or cancelled fetch leaves any unconsumed stage available until expiry.
+
+Restore state installation uses the snapshot bulk subquota after the stopped-domain schedule is
+published. The leader purges the target domain on every live node, then sends each newly assigned
+owner and replica a begin request with placement, length and digest, ordered chunks of at most
+64 KiB, and a finish request. The receiver charges a staging file to its node quota, checks each
+chunk offset and the complete digest, then installs the checkpoint. Each transfer carries a fresh
+coordination identity and is refused if its sender is not the current leader. An incomplete staged
+transfer expires without becoming runtime state.
+
 A runtime-state placement names exactly the state it addresses: the domain, entity, state kind, and
 concrete branch; for every kind of state except branch-aggregated metrics and Kafka domain offsets,
 the fingerprint of the schemas the state is laid out by; and for WASM processor guest state the
 generation the committed schedule names for that branch. Branch-aggregated metrics and Kafka domain
 offsets depend on no schema, so their placements carry no fingerprint and stay current across every
-schema change of their entity. A checkpoint carries no identity of its own: a synchronization reply,
+schema change of their entity. A backup archive separately records the Kafka ingestor's schema
+fingerprint and checks it against the restore target before installing offsets. A checkpoint carries
+no identity of its own: a synchronization reply,
 a handoff checkpoint, and a forced-recovery preparation each carry it beside the placement that
 names it. A node answers a synchronization request, and acts on a checkpoint announcement or a
 handoff checkpoint, only while the placement is current on that node, so an owner never serves, and

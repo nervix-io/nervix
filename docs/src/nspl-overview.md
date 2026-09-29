@@ -762,18 +762,19 @@ list all bound usages, while a version-qualified description lists only usages p
 Backup and restore commands, which read and write archive files on the client's machine:
 
 ```nspl,ignore
-BACKUP CLUSTER TO '<file>' [WITHOUT RESOURCES];
-BACKUP DOMAIN [<name>] TO '<file>' [WITHOUT RESOURCES];
+BACKUP CLUSTER TO '<file>' [WITHOUT RESOURCES] [WITHOUT STATE | WITHOUT PAUSE | TIMEOUT <duration>];
+BACKUP DOMAIN [<name>] TO '<file>' [WITHOUT RESOURCES] [WITHOUT STATE | WITHOUT PAUSE | TIMEOUT <duration>];
 DESCRIBE BACKUP '<file>' [FORMAT TEXT | JSON];
-RESTORE CLUSTER FROM '<file>' [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN];
-RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [DRY RUN];
+RESTORE CLUSTER FROM '<file>' [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN] [WITHOUT STATE | WITHOUT SOURCE OFFSETS];
+RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [DRY RUN] [WITHOUT STATE | WITHOUT SOURCE OFFSETS];
 ```
 
 `BACKUP` is admitted and run by the leader like other persistent commands, and the client
 downloads the archive it assembles. `DESCRIBE BACKUP` runs in `nervix-cli` without a server.
 `RESTORE` streams the archive to the leader, which verifies and plans the whole restore before it
 changes anything, and then recreates the users, the domains stopped, their resource versions under
-their archived numbers, and their models. See [Backup And Restore](backup-and-restore.md).
+their archived numbers, their models, and their compatible runtime checkpoints. A normal backup
+quiesces each running domain for the state cut. See [Backup And Restore](backup-and-restore.md).
 
 Session-only commands:
 

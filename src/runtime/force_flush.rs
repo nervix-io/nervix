@@ -396,7 +396,7 @@ impl Runtime {
         DomainForceFlush::subscribe(&coordinator, Some(counters))
     }
 
-    pub(in crate::runtime) fn force_flush_domain(&self, domain: &DomainName) -> u64 {
+    pub(crate) fn force_flush_domain(&self, domain: &DomainName) -> u64 {
         self.inner
             .force_flush_by_domain
             .entry(domain.clone())

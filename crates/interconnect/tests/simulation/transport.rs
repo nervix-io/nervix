@@ -42,6 +42,7 @@ use super::{
     scenario::{Scenario, ScenarioRun},
 };
 
+mod backup;
 mod isolation;
 mod relay;
 

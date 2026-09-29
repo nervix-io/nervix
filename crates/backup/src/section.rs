@@ -47,6 +47,12 @@ pub enum RecordKind {
     Domain = 3,
     #[strum(serialize = "resource version")]
     ResourceVersion = 4,
+    #[strum(serialize = "WASM guest state descriptor")]
+    WasmStateDescriptor = 5,
+    #[strum(serialize = "Kafka domain offsets")]
+    KafkaOffsets = 6,
+    #[strum(serialize = "branch lifecycle")]
+    BranchLifecycle = 7,
 }
 
 impl RecordKind {
@@ -57,6 +63,9 @@ impl RecordKind {
             Self::Users => 2,
             Self::Domain => 3,
             Self::ResourceVersion => 4,
+            Self::WasmStateDescriptor => 5,
+            Self::KafkaOffsets => 6,
+            Self::BranchLifecycle => 7,
         }
     }
 }

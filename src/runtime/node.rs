@@ -149,6 +149,9 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<RuntimeStatePlacement, PersistedRuntimeStateEntry, RandomState>,
     pub(in crate::runtime) replicated_branch_lru_snapshots:
         DashMap<RuntimeStatePlacement, PersistedRuntimeStateEntry, RandomState>,
+    /// Immutable registry of per-domain publication handles shared by branch tasks and backup.
+    pub(in crate::runtime) backup_capture_fences:
+        ArcSwap<HashMap<DomainName, Arc<backup_capture_fence::BackupCaptureFence>>>,
     pub(in crate::runtime) prepared_runtime_state_handoffs:
         DashMap<DomainNodeRef, PreparedRuntimeStateHandoff, RandomState>,
     pub(in crate::runtime) activated_runtime_state_handoffs:

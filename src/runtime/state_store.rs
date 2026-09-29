@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, fmt, str::FromStr, sync::Arc as StdArc};
 
 use ahash::HashMap;
 use error_stack::{Report, ResultExt as _};
-use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode, Readable};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{
     Executor, MemoryClass, StorageClass,
@@ -21,6 +21,7 @@ use triomphe::Arc;
 
 use super::{BranchKey, WasmGuestState};
 
+mod backup;
 mod durability;
 
 use durability::DurabilityBarrier;
@@ -679,6 +680,26 @@ impl LatestSnapshotWriter {
         lsm: u64,
         payload: &[u8],
     ) -> error_stack::Result<(), RuntimePersistenceError> {
+        self.write_latest_snapshot_checked(placement, lsm, payload, false)
+            .map(|_| ())
+    }
+
+    fn write_latest_snapshot_checked(
+        &self,
+        placement: &RuntimeStatePlacement,
+        lsm: u64,
+        payload: &[u8],
+        require_newer: bool,
+    ) -> error_stack::Result<bool, RuntimePersistenceError> {
+        let _installation = self.replica_installs.lock();
+        // A periodic encode can finish after the backup's forced publication. Preserve the
+        // greater revision even when storage workers complete in the opposite order.
+        if self
+            .latest_lsm(placement)?
+            .is_some_and(|current| current > lsm || require_newer && current == lsm)
+        {
+            return Ok(false);
+        }
         let entry = PersistedRuntimeStateEntry {
             lsm,
             payload: payload.to_vec(),
@@ -692,7 +713,7 @@ impl LatestSnapshotWriter {
         self.lsm_index
             .insert(placement.as_lsm_index_key(lsm), placement_key)
             .map_err(|_| RuntimePersistenceError::WriteValue)?;
-        Ok(())
+        Ok(true)
     }
 
     fn persist(&self, mode: PersistMode) -> error_stack::Result<(), RuntimePersistenceError> {
@@ -722,14 +743,9 @@ impl LatestSnapshotWriter {
         placement: &RuntimeStatePlacement,
         snapshot: PersistedRuntimeStateEntry,
     ) -> error_stack::Result<Option<PersistedRuntimeStateEntry>, RuntimePersistenceError> {
-        let _install = self.replica_installs.lock();
-        if let Some(stored_lsm) = self.latest_lsm(placement)?
-            && stored_lsm >= snapshot.lsm
-        {
-            return Ok(None);
-        }
-        self.write_latest_snapshot(placement, snapshot.lsm, &snapshot.payload)?;
-        Ok(Some(snapshot))
+        let installed =
+            self.write_latest_snapshot_checked(placement, snapshot.lsm, &snapshot.payload, true)?;
+        Ok(installed.then_some(snapshot))
     }
 }
 
@@ -1681,47 +1697,6 @@ impl RuntimeStateStore {
         Ok(Some(decoded))
     }
 
-    #[cfg(test)]
-    pub(in crate::runtime) fn purge_domain(
-        &self,
-        domain: &DomainName,
-    ) -> Result<(), RuntimePersistenceError> {
-        let mut domain_prefix = domain.as_str().as_bytes().to_vec();
-        domain_prefix.push(0);
-        let latest_keys = self
-            .latest
-            .prefix(domain_prefix.clone())
-            .map(|item| {
-                item.key()
-                    .map(|key| key.as_ref().to_vec())
-                    .map_err(|_| RuntimePersistenceError::ReadValue)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let lsm_keys = self
-            .lsm_index
-            .prefix(domain_prefix)
-            .map(|item| {
-                item.key()
-                    .map(|key| key.as_ref().to_vec())
-                    .map_err(|_| RuntimePersistenceError::ReadValue)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if latest_keys.is_empty() && lsm_keys.is_empty() {
-            return Ok(());
-        }
-
-        let mut batch = self.db.batch();
-        for key in latest_keys {
-            batch.remove(&self.latest, key);
-        }
-        for key in lsm_keys {
-            batch.remove(&self.lsm_index, key);
-        }
-        batch
-            .commit()
-            .map_err(|_| RuntimePersistenceError::WriteValue)
-    }
-
     pub(in crate::runtime) fn purge_entity(
         &self,
         domain: &DomainName,
@@ -1842,11 +1817,11 @@ impl RuntimeStateStore {
 
 /// The placement a stored runtime-state key encodes: which state and lifetime it is, including the
 /// schema fingerprint of schema-bound state, which model owns it, and the branch it belongs to.
-struct StoredPlacement {
-    state: RuntimeState,
-    kind: ModelKind,
-    identifier: ModelName,
-    branch: Option<BranchKeyFingerprint>,
+pub(in crate::runtime) struct StoredPlacement {
+    pub(in crate::runtime) state: RuntimeState,
+    pub(in crate::runtime) kind: ModelKind,
+    pub(in crate::runtime) identifier: ModelName,
+    pub(in crate::runtime) branch: Option<BranchKeyFingerprint>,
 }
 
 fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersistenceError>> {

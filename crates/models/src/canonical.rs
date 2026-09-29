@@ -17,7 +17,7 @@ use crate::{
     AlterPlacement, AlterPlacementOperation, AlterProcessorOperation, AlterReingestor, AlterRelay,
     AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
     AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTargetScope,
-    AvroType, Backup, BackupResources, BackupScope, BinaryOperator, BranchEviction,
+    AvroType, Backup, BackupCapture, BackupResources, BackupScope, BinaryOperator, BranchEviction,
     BranchSelection, ClickHouseValueMapping, ClientConfigEntry, ClientIngestMode,
     ClientIngestSource, ClientResourceMount, CodecEncoding, CodecEncodingRule,
     CodecJaqTransformations, CodecName, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
@@ -42,10 +42,11 @@ use crate::{
     OtelSignal, OutputBranch, ParseAsType, PlacementPolicy, PostgresConflictAction,
     ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, PulsarIngestMode, QueueName,
     RabbitMqIngestMode, RangeOperator, RedisPubSubIngestMode, RelayBranching, RelayName, Restore,
-    RestoreMode, RestoreScope, RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName,
-    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement,
-    SubscriptionLiteral, TopicName, TransactionInspectionTarget, UnaryOperator,
-    WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
+    RestoreMode, RestoreScope, RestoreState, RetryPolicy, RouteConstruction, SchemaField,
+    SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup,
+    SqsIngestMode, Statement, SubscriptionLiteral, TopicName, TransactionInspectionTarget,
+    UnaryOperator, WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField,
+    ZeroMqIngestMode,
 };
 
 /// The NSPL release canonical rendering writes.
@@ -935,8 +936,16 @@ impl Backup {
             BackupResources::Included => "",
             BackupResources::Omitted => " WITHOUT RESOURCES",
         };
+        let capture = match self.capture {
+            BackupCapture::Quiesced { timeout: None } => String::new(),
+            BackupCapture::Quiesced {
+                timeout: Some(timeout),
+            } => format!(" TIMEOUT {}", humantime::format_duration(timeout)),
+            BackupCapture::Live => " WITHOUT PAUSE".to_string(),
+            BackupCapture::ConfigurationOnly => " WITHOUT STATE".to_string(),
+        };
         format!(
-            "BACKUP {scope} TO {}{resources};",
+            "BACKUP {scope} TO {}{resources}{capture};",
             string_literal(&self.destination)
         )
     }
@@ -967,6 +976,11 @@ impl Restore {
         match self.mode {
             RestoreMode::Apply => {}
             RestoreMode::DryRun => statement.push_str(" DRY RUN"),
+        }
+        match self.state {
+            RestoreState::All => {}
+            RestoreState::WithoutSourceOffsets => statement.push_str(" WITHOUT SOURCE OFFSETS"),
+            RestoreState::ConfigurationOnly => statement.push_str(" WITHOUT STATE"),
         }
         statement.push(';');
         statement

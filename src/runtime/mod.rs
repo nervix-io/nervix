@@ -184,6 +184,8 @@ use crate::{
     task_shutdown::JoinShutdown as _,
 };
 
+mod backup_capture_fence;
+mod backup_state;
 mod branch_aggregated_state;
 mod branch_buffering;
 mod branch_instance_registry;
@@ -278,6 +280,10 @@ mod subscription_predicate;
 #[cfg(test)]
 mod test_fixtures;
 
+pub(crate) use backup_state::{
+    BackupBranchLifecycleEntry, CapturedRuntimeState, decode_backup_branch_lifecycle,
+    decode_backup_kafka_offsets, encode_restored_branch_lifecycle, encode_restored_kafka_offsets,
+};
 use branch_aggregated_state::{
     BranchAggregatedRuntimeStateSnapshot, ReplicatedBranchAggregatedState,
     decode_branch_aggregated_snapshot, encode_branch_aggregated_snapshot,

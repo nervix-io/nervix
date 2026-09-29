@@ -36,9 +36,31 @@ Nodes](./processors.md#wasm-processor) owns the NSPL statements.
 | Control plane | The recovery coordinator on the leader | Deciding whether a refused lifetime still has its one recovery attempt, recording the decision, and driving the reset it admits. |
 | Edges | The session service and clients | Admitting an NSPL reset as a transaction step, and returning the typed state inspection beside the text of `DESCRIBE WASM PROCESSOR`. |
 
-Guest bytes never leave the data plane and the state store. The control plane decides lifetimes and
-never reads a checkpoint; the data plane executes the lifetime the committed schedule names and
-never decides one.
+During normal execution, guest bytes stay in the data plane and state store. A backup is an
+explicit control-plane export of durable checkpoints to an archive; restore installs those bytes
+under the generations of the newly published schedule. The data plane executes the lifetime the
+committed schedule names and never decides one.
+
+## Backup And Restore
+
+A normal backup holds a quiesced cut for each running domain. Once intake and acknowledged work
+drain, each owner requests a fresh branch lifecycle checkpoint from its active supervisors before
+reading durable WASM saves together with its other state from one database snapshot.
+The archive stores a typed descriptor for each saved branch: processor, schema fingerprint, typed
+branch key and its fingerprint, generation, and checkpoint revision. Raw guest bytes occupy a
+separate section with a measured length and digest. `WITHOUT PAUSE` exports the latest published
+checkpoints with crash-consistent semantics; `WITHOUT STATE` omits them.
+
+A restore creates the target domain stopped and publishes its models and schedule before installing
+state. It purges state previously stored for that target on all live nodes. It accepts a guest save
+only when its entity and schema fingerprint match the restored schedule, maps the saved branch to
+the generation that schedule names, and installs the checkpoint on the assigned owner and replicas.
+Branch lifecycle is installed before the guest save, so branch identity is available first. A
+checkpoint from a different schema or an entity absent from the schedule is skipped with a
+diagnostic. The source domain name and owner node are not carried into the restored placement.
+The guest still validates its saved bytes when the restored domain later starts. The Rust SDK
+allows the domain name to change when the branch key, domain type, and input and output schemas
+match; a guest with its own snapshot format may apply stricter identity rules and reject the save.
 
 ## Branch Ownership
 
@@ -131,6 +153,9 @@ A zero-length save means the guest has no state: the next instance is initialize
 `nervix_load_state` call. The Rust SDK wraps every save in a `GuestSnapshot` envelope that also
 carries the branch configuration, so empty application state is still restored as state, and a
 snapshot taken under another branch configuration is rejected.
+For a restore into a differently named domain, the SDK accepts that name change while still
+checking the domain type, concrete branch key, and input and output schemas. The saved application
+bytes are passed through unchanged.
 
 A restore either succeeds, or the guest rejects the saved state with one of the two reserved verdict
 codes, or it fails without a verdict: a trap, an exhausted limit, or another negative code. Only a

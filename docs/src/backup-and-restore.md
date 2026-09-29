@@ -1,15 +1,18 @@
 # Backup And Restore
 
-A backup writes the configuration of a whole cluster, or of one domain, into one archive file on the
+A backup writes a whole cluster, or one domain, into one archive file on the
 machine of the client that ran it. The archive holds each domain's committed models as NSPL, each
 domain's lifecycle and clock, its resource catalog with the original bytes of every resource
 version, and, for a cluster backup, every user. The archive is a public format: a tar stream whose
 sections standard tools can list and extract, and whose records every reader validates before it
 trusts them.
 
-A backup copies configuration only. It records no relay contents, no materialized state, no WASM
-guest state and no connector positions, and it takes no domain lease: every domain keeps running
-while it is read.
+A normal backup pauses each running domain in turn, waits for its intake and acknowledged work to
+drain, then captures its committed configuration, WASM guest checkpoints, Kafka source offsets,
+and branch lifecycle. It resumes that domain before transferring the captured sections into the
+archive. Stopped domains need no pause. `WITHOUT PAUSE` captures the latest published state while
+the domain runs and has crash-consistent rather than quiesced semantics; `WITHOUT STATE` captures
+configuration only. Relay contents and materialized state are not included.
 
 A restore recreates what an archive holds: every domain and user of a cluster archive in a fresh
 cluster, whatever its nodes are named, or one domain beside the domains a cluster already has,
@@ -21,6 +24,8 @@ under its archived name or a new one.
 BACKUP CLUSTER TO '/var/backups/nervix/cluster.nvxb';
 BACKUP DOMAIN payments TO './payments.nvxb';
 BACKUP DOMAIN TO './current-domain.nvxb' WITHOUT RESOURCES;
+BACKUP DOMAIN payments TO './payments-live.nvxb' WITHOUT PAUSE;
+BACKUP CLUSTER TO './cluster-config.nvxb' WITHOUT STATE;
 ```
 
 - `BACKUP CLUSTER` covers every domain and every user.
@@ -28,6 +33,11 @@ BACKUP DOMAIN TO './current-domain.nvxb' WITHOUT RESOURCES;
   A domain backup holds no users.
 - `WITHOUT RESOURCES` records every resource version with its checksums and sizes, and leaves out
   the version's bytes.
+- `WITHOUT STATE` omits runtime state and takes no domain mutation lease.
+- `WITHOUT PAUSE` includes published runtime checkpoints without pausing a running domain. Its
+  state and configuration need not be from one quiesced cut.
+- `TIMEOUT <duration>` bounds each running domain's quiesce wait. It is valid with the normal
+  quiesced capture.
 - The path names a file on the client's machine. A leading `~/` refers to the client user's home
   directory.
 
@@ -35,10 +45,25 @@ BACKUP DOMAIN TO './current-domain.nvxb' WITHOUT RESOURCES;
 with other statements and not while a transaction is open. The web console refuses it, because a
 browser session has no file to write.
 
-The server reads everything a backup holds from one applied revision of the replicated
-configuration. A model change committed while the backup runs is either in every part of the
-archive or in none of it, and the archive records that revision and the Raft log entry it was
-applied from for each domain.
+Each domain records the applied configuration revision and Raft log entry of its own capture.
+For a quiesced running domain, the leader holds a replicated domain mutation lease, pauses and
+drains the domain across live nodes, asks state owners to publish and stage their checkpoints,
+and reads the configuration while the cut is held. The leader resumes the domain and releases its
+lease before copying staged state into the final archive. Other domains continue independently.
+Each owner asks its active ingestor, reingestor, and processor supervisors to checkpoint their
+current branch lifecycle, including branches created since the periodic snapshot. It seals those
+checkpoints and the current Kafka offsets durably before opening one database snapshot that also
+contains the already durable WASM guest saves. A stopped domain reads its stored checkpoints
+without active task requests.
+The drain uses the shutdown admitted-work view: active intake and generators, active source ACK
+roots, relay and node buffers, and emitter buffers or publishes. Parked `REQUIRED WAIT` messages
+are exempt. Once every node reports no admitted work, the leader requests a confirming force-flush
+generation on every node and waits for its obligations to finish before asking owners to capture.
+An unavailable sink keeps its publish and ACK counts outstanding until `TIMEOUT` expires; the
+failed backup reports those counts and resumes the domain.
+A leader-tenure change during a cut refuses the archive. The paused-domain recovery path releases
+the old coordinator's lease and resumes the domain under the new leader. A client that retries the
+same execution reference may complete a new cut under that leader.
 
 The server renders each domain's models as NSPL, parses the rendered text back, and refuses the
 backup unless it yields exactly the committed models. A resource version's bytes are read from the
@@ -62,6 +87,9 @@ foreign archive.
 ```sh
 nervix-cli backup cluster --output cluster.nvxb
 nervix-cli backup domain payments --output payments.nvxb --without-resources
+nervix-cli backup domain payments --output payments.nvxb --timeout 30s
+nervix-cli backup domain payments --output live.nvxb --without-pause
+nervix-cli backup cluster --output config.nvxb --without-state
 nervix-cli backup domain --output - > current-domain.nvxb
 nervix-cli backup cluster --output cluster.nvxb --format json
 ```
@@ -71,6 +99,9 @@ nervix-cli backup cluster --output cluster.nvxb --format json
 | `cluster` or `domain [NAME]` | What the archive covers. `domain` without a name covers `--domain`. |
 | `--output PATH` | Where the archive is written. `-` writes it to standard output. |
 | `--without-resources` | Leaves resource version bytes out of the archive. |
+| `--without-state` | Captures configuration only. |
+| `--without-pause` | Captures published runtime state without quiescing a running domain. |
+| `--timeout DURATION` | Bounds the normal quiesced capture of each running domain. |
 | `--format text` or `--format json` | How the report is printed. Text is the default. |
 
 When the archive goes to standard output, the report goes to standard error, so standard output
@@ -87,7 +118,7 @@ delivered. With `--format json` the report is one JSON document:
   "resources": "included",
   "users": 3,
   "domains": [
-    { "domain": "payments", "revision": 812, "sections": 7, "section_bytes": 48190112 }
+    { "domain": "payments", "revision": 812, "cut": { "kind": "quiesced", "engaged_at": "2026-09-29 10:00:00 UTC", "released_at": "2026-09-29 10:00:01 UTC", "buffered_records": 0, "buffered_bytes": 0, "dropped_records": 0, "rejected_records": 0 }, "sections": 7, "section_bytes": 48190112 }
   ]
 }
 ```
@@ -132,12 +163,15 @@ reads the whole archive and verifies every section's length and digest before it
 The description names the archive format, the Nervix and NSPL releases that wrote it, the cluster,
 the capture time, the scope, whether resource bytes are included, and the users of a cluster
 archive. For each domain it names the revision and Raft log entry the domain was read at, its
-status, pace and start count, the size and digest of its models, and each resource version with the
+status, cut kind, pace and start count, the size and digest of its models, and each resource version with the
 `root_checksum` and `manifest_checksum` that `DESCRIBE RESOURCE` prints for the same version.
+It also inventories WASM guest saves by processor and branch fingerprint, Kafka positions by
+topic and partition, and branch lifecycle records by processor and branch count. The inspection
+does not print branch-key field values.
 
 ```text
 backup: ./cluster.nvxb
-format: 1
+format: 2
 producer_version: 0.1.0
 language_version: 0.1.0
 cluster: nervix-3f1c
@@ -147,6 +181,7 @@ resources: included
 users: default,operator
 domains:
 - domain=payments revision=812 raft_term=4 raft_index=812 status=RUNNING pace=unpaced start_version=2
+  cut: quiesced
   models: bytes=4213 blake3=5d41402abc4b2a76b9719d911017c592…
   resource_versions:
   - resource=proto version=1 state=completed root_checksum=… manifest_checksum=… file_count=3 total_bytes=18204 archive_bytes=24576 created_by_node=node-1 created_at=2026-09-20 08:15:00 UTC archive=included blake3=…
@@ -161,6 +196,7 @@ RESTORE CLUSTER FROM '/var/backups/nervix/cluster.nvxb' ON EXISTING USER SKIP;
 RESTORE DOMAIN payments FROM './payments.nvxb';
 RESTORE DOMAIN payments AS payments_copy FROM '/var/backups/nervix/cluster.nvxb';
 RESTORE DOMAIN payments AS payments_copy FROM './payments.nvxb' DRY RUN;
+RESTORE DOMAIN payments FROM './payments.nvxb' WITHOUT SOURCE OFFSETS;
 ```
 
 - `RESTORE CLUSTER` recreates every domain and imports every user of a cluster archive. It refuses
@@ -174,6 +210,15 @@ RESTORE DOMAIN payments AS payments_copy FROM './payments.nvxb' DRY RUN;
   Every other archived user is created with its archived password hash, so its original password
   authenticates.
 - `DRY RUN` receives and verifies the archive and plans the whole restore, and changes nothing.
+- `WITHOUT STATE` restores the configuration and purges state for the target domain.
+- `WITHOUT SOURCE OFFSETS` restores WASM and branch lifecycle but starts sources without the
+  archived Kafka positions.
+- A state section whose entity is absent or whose schema fingerprint differs from the published
+  schedule is skipped. The restore succeeds and reports a warning naming the skipped state in its
+  command diagnostics and CLI output; that entity starts without the skipped checkpoint.
+- A verified state record with an unknown kind tag or unsupported record version is also skipped
+  with a warning. The archive reader still rejects malformed records of a supported kind, and
+  always validates section lengths and digests.
 - The path names a file on the client's machine. A leading `~/` refers to the client user's home
   directory.
 
@@ -202,8 +247,12 @@ browser session has no file to read.
 - **Models.** Every model of the domain, bound to exactly the resource versions it was bound to in
   the source cluster. `SHOW CREATE` prints each restored model as it printed it in the source.
 
-A restore recreates configuration only, exactly as a backup records it: relays start empty, and no
-materialized state, WASM guest state or connector position is restored.
+A restore installs the archive's compatible branch lifecycle, WASM guest checkpoints, and Kafka
+source positions into every newly assigned owner and replica after its models are scheduled. A
+source uses its restored next offset when it starts, clamped to the partitions its current source
+assignment contains. Each target node clears any in-memory state handle created before the install,
+so the next `START` loads the checkpoint from storage. The domain remains stopped. Relays and
+materialized state start empty.
 
 ### Order Of Steps
 
@@ -234,7 +283,10 @@ completes:
    3. **Apply its models** as one batch, with full graph validation and the leader's content
       checks: TLS material loads, lookup data loads, WASM modules compile, inference models load,
       and UDFs prepare. The batch is not bounded by the statement and source-byte limits of a
-      transaction.
+      transaction. Before recording this step, purge state for the target on every live node,
+      then install compatible archived branch lifecycle, source offsets, and WASM guest saves on
+      the newly scheduled owners and replicas. `WITHOUT STATE` stops after the purge, and
+      `WITHOUT SOURCE OFFSETS` skips source positions.
 
 A completed restore reports what it recreated, and each step:
 
@@ -301,6 +353,8 @@ execution reference ends.
 nervix-cli restore cluster --input cluster.nvxb --on-existing-user skip
 nervix-cli restore domain payments --input payments.nvxb
 nervix-cli restore domain payments --as payments_copy --input cluster.nvxb --dry-run
+nervix-cli restore domain payments --input payments.nvxb --without-source-offsets
+nervix-cli restore domain payments --input payments.nvxb --without-state
 nervix-cli restore cluster --input cluster.nvxb --on-existing-user replace --format json
 ```
 
@@ -311,6 +365,8 @@ nervix-cli restore cluster --input cluster.nvxb --on-existing-user replace --for
 | `--as NEW_NAME` | Restores the domain under `NEW_NAME`. Only for `domain`. |
 | `--on-existing-user fail`, `skip` or `replace` | The user policy of a cluster restore. `fail` when omitted. |
 | `--dry-run` | Verifies the archive and plans the restore, changing nothing. |
+| `--without-state` | Installs configuration without runtime checkpoints. |
+| `--without-source-offsets` | Installs WASM and branch state, and leaves Kafka source positions unset. |
 | `--format text` or `--format json` | How the report is printed. Text is the default. |
 
 While the archive streams, the command shows how much of it was sent on standard error, when
@@ -341,13 +397,17 @@ With `--format json` the report is one JSON document:
     { "step": "create domain 'payments'", "outcome": "applied" },
     { "step": "import resource versions of domain 'payments'", "outcome": "applied" },
     { "step": "apply models of domain 'payments'", "outcome": "applied" }
-  ]
+  ],
+  "warnings": []
 }
 ```
 
 `mode` is `dry_run` for a dry run, whose steps are `planned` and whose domains carry their model
 run's transaction impact report in `planned_models`. A step's outcome is `applied`, `planned`,
 `failed` or `not_attempted`. `users` is `null` for a domain restore.
+`warnings` lists state sections skipped because their record kind or version is unsupported, or
+their entity or schema no longer matches the restored schedule. Text output prints the same
+warnings after the steps.
 
 A failure prints `{"error": {"code": "...", "message": "..."}}` instead. The codes are
 `INVALID_ARGUMENTS`, `CONNECTION_FAILED`, `RESTORE_FAILED` for a failure between client and server,
@@ -370,6 +430,10 @@ arrives.
 | `domains/<domain>/models.nspl` | The domain's models as NSPL | Every domain |
 | `domains/<domain>/resources/<resource>/<version>/version.rkyv` | One resource version record | Every resource version |
 | `domains/<domain>/resources/<resource>/<version>/archive.tar` | The version's original upload | Published versions, unless `WITHOUT RESOURCES` |
+| `domains/<domain>/state/wasm_processor/<processor>/<branch>/descriptor.rkyv` | Typed WASM checkpoint identity, schema fingerprint, generation and revision | Saved WASM branches unless `WITHOUT STATE` |
+| `domains/<domain>/state/wasm_processor/<processor>/<branch>/guest.bin` | Raw guest save bytes | With each WASM descriptor |
+| `domains/<domain>/state/kafka_offset/<ingestor>/offsets.rkyv` | Ingestor schema fingerprint and next offsets by topic and partition | Published Kafka domain offsets unless `WITHOUT STATE` |
+| `domains/<domain>/state/branch_lifecycle/<kind>/<processor>/branches.rkyv` | Typed branch keys, incarnations and LRU order | Published branch lifecycle unless `WITHOUT STATE` |
 
 A resource named `.` or `..` appears in a section path as `%2E` or `%2E%2E`.
 
@@ -379,14 +443,18 @@ its format version, each a little-endian 16-bit integer. The rest is an
 
 | Kind | Tag | Format version | Holds |
 | --- | --- | --- | --- |
-| Manifest | 1 | 1 | Archive format major version, producer and NSPL releases, cluster id, capture time, scope, whether resource bytes are included, each domain's revision and Raft log entry, and each section's path, content kind, length and BLAKE3 digest |
+| Manifest | 1 | 2 | Archive format major version, producer and NSPL releases, cluster id, capture time, scope, whether resource bytes are included, each domain's revision, Raft log entry and cut kind, and each section's path, content kind, length and BLAKE3 digest |
 | Users | 2 | 1 | Every user's name and password hash as a PHC string |
 | Domain | 3 | 1 | Pace, default placement policy, lifecycle status, start count, the point the latest start began from, the committed clock mapping, the logical instant the clock had reached, and each declared resource with its next version number |
 | Resource version | 4 | 1 | The version's domain, resource and number, its upload state, and for a published version its checksums, file count, sizes, creation time and creating node |
+| WASM guest state descriptor | 5 | 1 | The saved branch key, schema fingerprint, guest state generation and checkpoint revision |
+| Kafka domain offsets | 6 | 1 | The ingestor schema fingerprint and ordered topic and partition positions, expressed as the next offset to consume |
+| Branch lifecycle | 7 | 1 | The owner kind, schema fingerprint, branch keys, last ingestion times and incarnations in LRU order |
 
-The archive format major version is `1`. A reader refuses a record whose magic, kind or format
-version it does not know, a manifest of another major version, a first entry other than the
-manifest, and any section whose place, length or digest differs from what the manifest declares.
+The archive format major version is `2`. A reader refuses invalid record magic, an unsupported
+manifest or required configuration record, a first entry other than the manifest, and any section
+whose place, length or digest differs from what the manifest declares. Unknown optional state
+record kinds and unsupported state record versions produce restore warnings and are skipped.
 
 `models.nspl` holds one `CREATE` statement per model, separated by blank lines, in an order that
 creates every model after each model its configuration names. Resource bindings name explicit
@@ -408,8 +476,9 @@ secrets. Store it as a secret.
 | Restore chunk | 256 KiB |
 | Restore frames the Rust client queues ahead of the transport | 8 |
 | Restore archive retention | Until the restore finishes, or the retry validity of the execution reference ends |
+| State section staging on an owner | Charged to the same node staging quota until fetched or expired |
 
-A backup larger than one archive may be fails. A backup that fits waits while the leader's staging
+A backup larger than the staging quota fails. A backup that fits waits while the leader's staging
 area is full, until retained archives are downloaded or expire and snapshot transfers finish.
 
 A restore stages its archive under the same limits, and is refused rather than kept waiting when
@@ -428,6 +497,7 @@ contents. The reasons are:
 - a domain's clock mapping cannot be read at the capture time
 - a resource version's bytes are not installed on the leader, or do not match their catalog entry
 - the archive is larger than one archive may be, or a record does not encode
+- a quiesced domain cannot pause, drain, capture its owners or resume within its timeout
 
 A refused restore reports `restore refused:` and the reason, and changed nothing. The reasons are:
 
@@ -454,4 +524,3 @@ node, and a model batch the leader refused, such as lookup data that does not lo
 TLS material that does not load. A restore whose archive no client sent to a new leader before the
 retry validity of its execution reference ended reports `restore stopped after the steps it
 recorded`. No message includes password hashes or resource bytes.
-

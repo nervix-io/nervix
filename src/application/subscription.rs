@@ -38,6 +38,7 @@ mod interest;
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU64, NonZeroUsize},
+    sync::OnceLock,
 };
 
 use ahash::{HashMap, HashMapExt};
@@ -90,7 +91,7 @@ use crate::{
     task_shutdown::JoinShutdown,
 };
 
-static SESSION_SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
+static SESSION_SAMPLE_COUNTER: OnceLock<AtomicU64> = OnceLock::new();
 
 #[derive(Debug, thiserror::Error)]
 pub(in crate::application) enum SessionCommandPlanError {
@@ -823,7 +824,9 @@ fn subscription_sample_passes(batch_sample_rate: Option<f64>, key: Option<&Branc
         return false;
     }
 
-    let counter = SESSION_SAMPLE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let counter = SESSION_SAMPLE_COUNTER
+        .get_or_init(|| AtomicU64::new(0))
+        .fetch_add(1, Ordering::Relaxed);
     let mut hasher = Hasher::new();
     hasher.update(&counter.to_le_bytes());
     if let Some(key) = key {

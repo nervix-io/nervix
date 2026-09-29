@@ -225,7 +225,7 @@ test-shuttle-replay schedule: build-web-console wasm-processor-guests download-o
 # unregistered. A non-empty `filter` runs the models whose test name or invariant contains it and
 # fails when it selects none. A failed model leaves its Loom checkpoint, output and metadata under
 # target/loom-failures for `test-loom-replay`.
-test-loom filter="":
+test-loom filter="": build-web-console
     python3 -m unittest --quiet scripts.tests.test_loom_models
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} run {{ quote(filter) }}
 
@@ -237,7 +237,7 @@ test-loom-replay failure:
 # Show that each Loom model detects the ordering fault it exists for. Every registered weakening is
 # applied to a copy of the working tree, the model must fail with its registered message, and the
 # checkpoint of that failure must replay it.
-test-loom-qualification:
+test-loom-qualification: build-web-console
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} qualify
 
 # Run the Turmoil suite: the execution and library simulation checks, then every interconnect
@@ -578,6 +578,13 @@ test-coverage-client-packages:
     cargo llvm-cov --no-report --all-targets \
         --package nervix-client-core --package nervix-client-wire \
         --package nervix-models --package nervix-cli --package nervix-web-console
+
+# Add focused backup, wire, state, and primitive tests to a backup feature's coverage profile.
+test-coverage-backup-packages:
+    cargo llvm-cov --no-report --lib \
+        --package nervix-backup --package nervix-nspl --package nervix-models \
+        --package nervix-client-wire --package nervix-consensus --package nervix-interconnect \
+        --package nervix-wasm-protocol --package nervix-wasm-sdk --package nervix-primitives
 
 # Measure browser and CLI binary tests together with their public session scenarios.
 test-coverage-clients: tests-deps
@@ -1424,6 +1431,26 @@ build-web-console:
 
 build-server:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/server cargo build {{ release_flag }} --package nervix-server --bin nervix-server
+
+# Reuse an already available packaged image's runtime libraries for a local Chaos candidate.
+# The two binaries are built from this checkout in the ordinary target directory, then stripped
+# into a small, temporary Docker context so the source tree is never sent to the builder.
+build-chaos-local-image tag="nervix:backup-local" base="nervix:chaos-current":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --package nervix-server --bin nervix-server --package nervix-cli --bin nervix-cli
+    stage="$(mktemp -d {{ quote(cargo_target_dir + "/backup-chaos-image.XXXXXX") }})"
+    trap 'rm -rf "${stage}"' EXIT
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-server") }} "${stage}/nervix-server"
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-cli") }} "${stage}/nervix-cli"
+    llvm-strip-23 "${stage}/nervix-server" "${stage}/nervix-cli"
+    cat >"${stage}/Dockerfile" <<'EOF'
+    ARG BASE
+    FROM ${BASE}
+    COPY nervix-server /usr/local/bin/nervix-server
+    COPY nervix-cli /usr/local/bin/nervix-cli
+    EOF
+    docker build --build-arg BASE={{ quote(base) }} --tag {{ quote(tag) }} "${stage}"
 
 build-cli:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/cli cargo build {{ release_flag }} --package nervix-cli --bin nervix-cli

@@ -22,7 +22,7 @@ use std::{
     future::Future,
     io,
     path::{Path, PathBuf},
-    sync::Arc as StdArc,
+    sync::{Arc as StdArc, OnceLock},
     time::Duration,
 };
 
@@ -355,6 +355,12 @@ pub enum ConsensusCommand {
         request_digest: [u8; 32],
         domain: DomainName,
     },
+    ReleaseCommandDomainMutation {
+        reference: nervix_models::CommandExecutionReference,
+        owner: UserName,
+        request_digest: [u8; 32],
+        domain: DomainName,
+    },
     FinishCommandExecution {
         reference: nervix_models::CommandExecutionReference,
         owner: UserName,
@@ -615,6 +621,13 @@ impl std::fmt::Display for ConsensusCommand {
                 "acquire-command-domain-mutation:{reference}:{}",
                 domain.as_str()
             ),
+            Self::ReleaseCommandDomainMutation {
+                reference, domain, ..
+            } => write!(
+                f,
+                "release-command-domain-mutation:{reference}:{}",
+                domain.as_str()
+            ),
             Self::FinishCommandExecution { reference, .. } => {
                 write!(f, "finish-command-execution:{reference}")
             }
@@ -812,7 +825,7 @@ const RETENTION_ADMISSION_POLL: Duration = Duration::from_millis(50);
 /// How long one complete snapshot transfer may take.
 const SNAPSHOT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(30);
 
-static NEXT_SNAPSHOT_TRANSFER_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_SNAPSHOT_TRANSFER_ID: OnceLock<AtomicU64> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct ConsensusSettings {
@@ -2856,6 +2869,36 @@ impl Proposer {
         }
     }
 
+    pub async fn release_command_domain_mutation(
+        &self,
+        reference: nervix_models::CommandExecutionReference,
+        owner: UserName,
+        request_digest: [u8; 32],
+        domain: DomainName,
+    ) -> Result<CommandExecution, Report<ConsensusError>> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::ReleaseCommandDomainMutation {
+                reference: reference.clone(),
+                owner,
+                request_digest,
+                domain,
+            })
+            .await?;
+        match response.data {
+            ConsensusResponse::Applied => self
+                .current_command_execution(&reference)
+                .await
+                .ok_or_else(|| Report::new(ConsensusError::UnexpectedResponse)),
+            ConsensusResponse::Conflict(reason) => {
+                Err(Report::new(ConsensusError::Conflict(reason)))
+            }
+            ConsensusResponse::Transaction(_) => {
+                Err(Report::new(ConsensusError::UnexpectedResponse))
+            }
+        }
+    }
+
     pub async fn finish_command_execution(
         &self,
         reference: nervix_models::CommandExecutionReference,
@@ -4088,6 +4131,7 @@ fn io_error(err: impl std::fmt::Display) -> io::Error {
 
 fn next_snapshot_transfer_id() -> io::Result<u64> {
     NEXT_SNAPSHOT_TRANSFER_ID
+        .get_or_init(|| AtomicU64::new(1))
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(1)
         })
@@ -4684,6 +4728,38 @@ fn apply_consensus_command_at(
                     Err(reason) => return AppliedConsensusCommand::conflict(reason.to_string()),
                 };
                 execution.bind_domain_mutation(domain.clone(), lease);
+                state.command_executions.replace(execution);
+            }
+        }
+        ConsensusCommand::ReleaseCommandDomainMutation {
+            reference,
+            owner,
+            request_digest,
+            domain,
+        } => {
+            let Some(mut execution) = state.command_executions.get(reference).cloned() else {
+                return AppliedConsensusCommand::conflict(format!(
+                    "command execution reference '{reference}' is unknown"
+                ));
+            };
+            if execution.owner() != Some(owner)
+                || execution.request_digest() != Some(*request_digest)
+            {
+                return AppliedConsensusCommand::conflict(format!(
+                    "command execution reference '{reference}' is bound to a different owner or \
+                     request"
+                ));
+            }
+            if !execution.is_applying() {
+                return AppliedConsensusCommand::conflict(format!(
+                    "command execution reference '{reference}' is no longer applying"
+                ));
+            }
+            if let Some(lease) = execution.domain_mutation(domain) {
+                if let Err(reason) = release_domain_mutation(state, domain, lease) {
+                    return AppliedConsensusCommand::conflict(reason.to_string());
+                }
+                execution.release_domain_mutation(domain);
                 state.command_executions.replace(execution);
             }
         }
@@ -7625,6 +7701,72 @@ mod tests {
             },
         );
         assert!(matches!(stale.response, ConsensusResponse::Conflict(_)));
+    }
+
+    #[test]
+    fn command_releases_one_domain_mutation_while_it_keeps_applying() {
+        let owner = UserName::parse("app_user").assured("the owner is an accepted literal");
+        let first_domain = domain("first_domain");
+        let second_domain = domain("second_domain");
+        let execution = CommandExecution::applying(
+            command_reference(99),
+            owner.clone(),
+            Some(first_domain.clone()),
+            [9; 32],
+            Timestamp::from_unix_nanos(1),
+            CommandExecutionEffect::CreateUser {
+                if_not_exists: false,
+                name: UserName::parse("created_user")
+                    .assured("the created user is an accepted literal"),
+                password_hash: "argon2-hash".to_string(),
+            },
+        );
+        let mut state = StateMachineData {
+            last_applied_log_id: Some(LogIdOf::new(committed_leader(1), 11)),
+            ..Default::default()
+        };
+        let admitted = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::AdmitCommandExecution {
+                execution: Box::new(execution.clone()),
+                mutation_domains: BTreeSet::from([first_domain.clone(), second_domain.clone()]),
+                policy: command_policy(10),
+            },
+        );
+        assert_eq!(admitted.response, ConsensusResponse::Applied);
+        let release = ConsensusCommand::ReleaseCommandDomainMutation {
+            reference: execution.reference.clone(),
+            owner: owner.clone(),
+            request_digest: [9; 32],
+            domain: first_domain.clone(),
+        };
+        for _ in 0..2 {
+            let response = apply_consensus_command(&mut state, &release);
+            assert_eq!(response.response, ConsensusResponse::Applied);
+        }
+        assert!(!state.domain_mutations.contains_key(&first_domain));
+        assert!(state.domain_mutations.contains_key(&second_domain));
+        let applying = state
+            .command_executions
+            .get(&execution.reference)
+            .assured("the admitted command remains present");
+        assert!(applying.is_applying());
+        assert!(applying.domain_mutation(&first_domain).is_none());
+        assert!(applying.domain_mutation(&second_domain).is_some());
+        let unauthorized = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::ReleaseCommandDomainMutation {
+                reference: execution.reference,
+                owner,
+                request_digest: [8; 32],
+                domain: second_domain.clone(),
+            },
+        );
+        assert!(matches!(
+            unauthorized.response,
+            ConsensusResponse::Conflict(_)
+        ));
+        assert!(state.domain_mutations.contains_key(&second_domain));
     }
 
     #[test]

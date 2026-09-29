@@ -336,6 +336,12 @@ source batch through the emitter's message error policy. Stop requests retain th
 deadline-bounded final flush and transport finish, and a stopped interaction performs its final
 drain before the loop exits.
 
+A quiesced backup keeps these source and sink tasks installed. The host stops domain source
+admission according to each source's declared quiesce policy, reports admitted ACK roots and
+publishing sinks to the domain drain, and runs a confirming force flush after admitted work clears.
+Listeners for other domains continue serving. A sink that does not confirm before the backup's
+quiesce timeout leaves the backup incomplete; it is not treated as a successful publish.
+
 When that policy sends a failed emitter record to a DLQ, the host executes the message-error SET
 program bound during domain installation or replacement. The prepared route retains the input and
 optional attempted codec-record schemas, the source branch, relay target and flush cadence. The

@@ -413,6 +413,16 @@ impl CommandExecution {
         domain_mutations.insert(domain, lease);
     }
 
+    pub(crate) fn release_domain_mutation(&mut self, domain: &DomainName) {
+        let CommandExecutionState::Applying {
+            domain_mutations, ..
+        } = &mut self.state
+        else {
+            return;
+        };
+        domain_mutations.remove(domain);
+    }
+
     pub fn transaction_request(&self) -> Option<&CommandExecutionTransactionRequest> {
         match self.effect() {
             Some(CommandExecutionEffect::TransactionRequest(request)) => Some(request),

@@ -616,12 +616,14 @@ fn backup_archive() -> BackupArchiveSummary {
             BackupDomainSummary {
                 domain: name("analytics"),
                 revision: u64::MAX,
+                cut: nervix_models::BackupCut::ConfigurationOnly,
                 sections: 0,
                 section_bytes: u64::MAX,
             },
             BackupDomainSummary {
                 domain: name("tenant"),
                 revision: 1,
+                cut: nervix_models::BackupCut::Live,
                 sections: 7,
                 section_bytes: 4096,
             },

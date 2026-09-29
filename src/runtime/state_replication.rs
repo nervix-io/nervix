@@ -1439,7 +1439,7 @@ impl Runtime {
             .is_some_and(|owners| owners.contains(coordination))
     }
 
-    async fn checkpoint_entrypoint_branch_lifecycle(
+    pub(super) async fn checkpoint_entrypoint_branch_lifecycle(
         &self,
         domain: &DomainName,
         entity: &NodeRef,
@@ -1585,7 +1585,7 @@ impl Runtime {
         Ok(())
     }
 
-    fn node_has_branch_lifecycle(kind: ModelKind) -> bool {
+    pub(super) fn node_has_branch_lifecycle(kind: ModelKind) -> bool {
         kind.is_processor() || matches!(kind, ModelKind::Ingestor | ModelKind::Reingestor)
     }
 
@@ -2648,6 +2648,7 @@ impl Runtime {
         state: &KafkaOffsetStateOriginator,
         position: KafkaOffsetPosition,
     ) -> error_stack::Result<(), StateReplicationError> {
+        let publication = self.backup_publication(&state.placement().domain);
         let lsm = state
             .apply_committed_offset(&position)
             .change_context_lazy(|| StateReplicationError::CommitKafkaOffset {
@@ -2656,6 +2657,7 @@ impl Runtime {
                 partition: position.partition,
                 next_offset: position.offset,
             })?;
+        drop(publication);
         let offsets = state.read();
         if offsets.required_replica_acks() == 0 {
             return Ok(());
@@ -2670,6 +2672,7 @@ impl Runtime {
         state: &KafkaOffsetStateOriginator,
         offsets: Vec<KafkaOffsetPosition>,
     ) -> error_stack::Result<(), StateReplicationError> {
+        let _publication = self.backup_publication(&state.placement().domain);
         let (lsm, payload) = state
             .replace_offsets(offsets)
             .map_err(Report::new)
