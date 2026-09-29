@@ -497,14 +497,6 @@ impl RelayInteractionInputs {
             .collect()
     }
 
-    fn take_due(&mut self) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
-        self.take_collection(RelayInputCollection::take_due)
-    }
-
-    fn take_any(&mut self) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
-        self.take_collection(RelayInputCollection::take_any)
-    }
-
     fn take_collection(
         &mut self,
         mut take: impl FnMut(
@@ -709,7 +701,10 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                 }
             }
             let work = self.begin_work();
-            if let Some((relay, batch)) = self.inputs.take_due()? {
+            if let Some((relay, batch)) = self
+                .inputs
+                .take_collection(RelayInputCollection::take_due)?
+            {
                 return Ok(self.work_with(RelayInteractionEvent::Batch { relay, batch }, work));
             }
             drop(work);
@@ -874,7 +869,10 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                 continue;
             }
             let work = self.begin_work();
-            if let Some((relay, batch)) = self.inputs.take_any()? {
+            if let Some((relay, batch)) = self
+                .inputs
+                .take_collection(RelayInputCollection::take_any)?
+            {
                 return Ok(self.work_with(RelayInteractionEvent::Batch { relay, batch }, work));
             }
             drop(work);

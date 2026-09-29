@@ -125,8 +125,8 @@ use nervix_vm::{
     },
 };
 use nervix_wasm::{
-    WasmAckSidecar, WasmAckToken, WasmAckTokenSet, WasmBranchInit, WasmEnvelope,
-    WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput, WasmRuntime, WasmRuntimeConfig,
+    WasmAckSidecar, WasmAckToken, WasmBranchInit, WasmEnvelope, WasmOutputColumnRef, WasmOutputRow,
+    WasmRoutedOutput, WasmRuntime, WasmRuntimeConfig,
 };
 use ordered_float::OrderedFloat;
 use sorted_vec::SortedSet;

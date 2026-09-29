@@ -236,7 +236,7 @@ impl WasmOutputValidator<'_> {
                     }
                 }
                 for token_set in &output.acks.acked {
-                    self.validate_terminal_set(token_set, &mut terminal_tokens, "ACK")?;
+                    self.validate_terminal_tokens(&token_set.tokens, &mut terminal_tokens, "ACK")?;
                 }
                 for token_set in &output.acks.nacked {
                     self.validate_terminal_tokens(&token_set.tokens, &mut terminal_tokens, "NACK")?;
@@ -258,15 +258,6 @@ impl WasmOutputValidator<'_> {
             });
         }
         Ok(())
-    }
-
-    pub(super) fn validate_terminal_set(
-        &self,
-        token_set: &WasmAckTokenSet,
-        terminal_tokens: &mut HashSet<u64>,
-        decision: &str,
-    ) -> Result<(), WasmOutputError> {
-        self.validate_terminal_tokens(&token_set.tokens, terminal_tokens, decision)
     }
 
     pub(super) fn validate_terminal_tokens(
