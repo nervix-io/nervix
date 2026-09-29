@@ -3,7 +3,7 @@
 The client session protocol is the public boundary between a client and a Nervix node. It carries
 NSPL commands and their outcomes, transaction attachment and inspection, completion and choice
 lookups, domain selection and the observations that follow it, Row subscriptions, domain clock
-attachments, producers that submit batches to client ingestors, and resource uploads. The CLI, the web console, the Rust client, every host of the
+attachments, producers that submit batches to client ingestors, resource uploads, and backup downloads. The CLI, the web console, the Rust client, every host of the
 shared Rust binding, and independent implementations in other languages all speak it.
 
 The protocol owns framing, verification, the session limits, request correlation, cancellation,
@@ -29,7 +29,8 @@ Each links to the other instead of repeating it. [Command Completion](./command-
 the completion boundary and the retention of execution identities, [Control
 Plane](./control-plane.md#replicated-nspl-transactions) owns the transaction lifecycle, [Transaction
 Quiescence And Impact Inspection](./transaction-quiescence.md) owns the impact report, [Resource
-Versions And Bindings](./resource-versions.md) owns the version lifecycle behind an upload, [Domain
+Versions And Bindings](./resource-versions.md) owns the version lifecycle behind an upload, [Backup
+And Restore](./backup-and-restore.md) owns what a backup archive holds, [Domain
 Clock](./domain-clock.md) owns the clock a session can follow, [Errors And
 Diagnostics](./errors-and-diagnostics.md) owns how typed failures become diagnostics, and [Shutdown
 And Recovery](./shutdown.md) owns the phases of a node stop.
@@ -62,13 +63,14 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | --- | --- | --- |
 | Vocabulary | `nervix-models` | Execution references, domain, relay, subscription and user names, timestamps, the transaction status, preview identity and impact report, the resource description, and the observed domain clock. |
 | Edges | The wire crate, `nervix-client-wire` | The FlatBuffers schema, frame verification and ownership, the session limits, the typed requests, replies, events, transfers and rows the schema describes, the display text of a row, and how frames travel in gRPC and WebSocket messages. It knows no registry, runtime, consensus, parser, Arrow, or client dispatch. |
-| Edges | The session service in `nervix-server` | Authenticating a call, one session per transport connection, correlation, the ordered and concurrent lanes, cancellation against admission, typed rejections, reply encoding and transfer, the control and subscription lanes a session's frames wait in, unsolicited events, domain clock attachments, and the upload stream. |
+| Edges | The session service in `nervix-server` | Authenticating a call, one session per transport connection, correlation, the ordered and concurrent lanes, cancellation against admission, typed rejections, reply encoding and transfer, the control and subscription lanes a session's frames wait in, unsolicited events, domain clock attachments, the upload stream, and the backup download stream. |
 | Edges | The Row encoder in `nervix-server` | Binding one subscription generation to the row schema it announces and writing selected Arrow rows into bounded frames. |
 | Control plane | The command pipeline and transaction use cases | Durable execution identity, admission, exact recovery, domain mutation ownership, plan fencing, the transaction lifecycle, and the completion barrier. |
+| Control plane | Backup execution and retained archives | Assembling a backup's archive from one applied revision, retaining it under the backup's execution reference until a download collects it or its retry validity ends, and the bounded stream that sends it. |
 | Control plane | Session subscriptions | Creation and deletion, the generation each subscription opens with, its lifecycle, its filter and sampling, the delivery of one generation to its session, and the interest lease it holds on its relay. |
 | Data plane | Relay subscription fan-out | The subscribers of one relay, the definition they were attached under, and ending every subscriber before a batch of another definition can reach it. |
-| Edges | The Rust client, `nervix-client-core` | Connecting, TLS selection, the dispatcher that pairs replies with requests, execution identity across retries, redirect and reconnect, transaction binding and previews, desired subscriptions and their restoration, followed domain clocks, and uploads. |
-| Edges | The shared binding, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the Rust client's state machine, with borrowed frame access and bulk column copies. |
+| Edges | The Rust client, `nervix-client-core` | Connecting, TLS selection, the dispatcher that pairs replies with requests, execution identity across retries, redirect and reconnect, transaction binding and previews, desired subscriptions and their restoration, followed domain clocks, uploads, and backup downloads verified against their summary. |
+| Edges | The shared binding, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the Rust client's state machine, with borrowed frame access, bulk column copies, and retained domain clock events. |
 | Edges | The web console and the CLI | Consumers of the same protocol with bounded buffers of their own. The console speaks it over the WebSocket; the CLI uses the Rust client. |
 
 The server is the composition root: it is the only crate that names the wire crate, the command
@@ -79,9 +81,9 @@ serves itself, such as `USE`; everything it knows about the cluster arrives over
 
 ## Wire Format
 
-### One Schema, Four Frame Roots
+### One Schema, Six Frame Roots
 
-`crates/client-wire/schema/session.fbs` declares every shape of the public boundary, once. Four root
+`crates/client-wire/schema/session.fbs` declares every shape of the public boundary, once. Six root
 files name the table a frame is rooted at and the four-byte file identifier it carries:
 
 | Root | Identifier | Direction | Carried by |
@@ -90,6 +92,8 @@ files name the table a frame is rooted at and the four-byte file identifier it c
 | `ServerMessage` | `NXSM` | Server to client | The gRPC `Exchange` stream and the console WebSocket |
 | `UploadMessage` | `NXUM` | Client to server | The gRPC `UploadResource` stream |
 | `UploadReply` | `NXUR` | Server to client | The gRPC `UploadResource` stream, exactly once |
+| `BackupDownloadRequest` | `NXBQ` | Client to server | The gRPC `DownloadBackup` call, exactly once |
+| `BackupDownloadMessage` | `NXBD` | Server to client | The gRPC `DownloadBackup` stream |
 
 A frame is one finished FlatBuffer that carries its root's identifier and no size prefix. The
 transport delimits frames, so a frame never has to describe its own length and a receiver never
@@ -195,13 +199,14 @@ close only when the node begins to stop.
 
 ### Native gRPC
 
-Native clients reach the gRPC service `nervix.session.Session`, which serves two methods and answers
-every other path with `UNIMPLEMENTED`:
+Native clients reach the gRPC service `nervix.session.Session`, which serves three methods and
+answers every other path with `UNIMPLEMENTED`:
 
 | Method | Shape | Frames |
 | --- | --- | --- |
 | `/nervix.session.Session/Exchange` | Bidirectional stream | `ClientMessage` frames answered by `ServerMessage` frames. One call is one session. |
 | `/nervix.session.Session/UploadResource` | Client stream | `UploadMessage` frames answered by exactly one `UploadReply` frame. One call is one upload. |
+| `/nervix.session.Session/DownloadBackup` | Server stream | One `BackupDownloadRequest` frame answered by `BackupDownloadMessage` frames. One call is one download. |
 
 Each gRPC message holds exactly one frame, delimited by gRPC's own length prefix. The messages are
 not protocol buffers, and no generated gRPC service code is involved: the codec hands the frame
@@ -231,7 +236,8 @@ once with a `SessionEnding` whose reason is a `LeaderRedirect` naming the leader
 reconnects to the leader's advertised console endpoint. A console session also ends this way when
 its node stops leading, which the node checks every 250 milliseconds.
 
-The console WebSocket carries the `Exchange` session only. It has no upload stream: the console
+The console WebSocket carries the `Exchange` session only. It has no backup download, so the console
+refuses `BACKUP`, and no upload stream: the console
 uploads a resource through its own HTTP path, `/console/resources/upload`, where the leader builds
 the archive from the files it receives, as [Resource Versions And
 Bindings](./resource-versions.md#assignment) describes.
@@ -316,11 +322,12 @@ is refused with `DuplicateRequestId`, and that refusal necessarily names the sam
 request still in flight.
 
 Choice lookups on the concurrent lane return typed values for structured client controls. A domain
-dependency selects internal schemas, branches, relays, VHOSTs, signaling protocols,
+dependency selects internal schemas, branches, relays, codecs, VHOSTs, signaling protocols,
 JSON/CBOR/AVRO wire schemas, or resource catalogs; a domain and relay reference select relay
-fields; a domain and resource reference select completed resource versions. Wire-schema targets
-have separate discriminants, so a codec cannot
-mistake a JSON wire schema for a CBOR or AVRO schema with the same name. A completed-version value
+fields; a domain and codec reference select that codec's output schema fields; a domain and resource
+reference select completed resource versions. Wire-schema targets have separate discriminants, so
+a codec cannot mistake a JSON wire schema for a CBOR or AVRO schema with the same name. A
+completed-version value
 is either an explicit number or `LATEST`, not a label to parse. Resource catalogs include resources
 staged earlier in the attached transaction, while version choices include completed uploads only.
 The cursor binds the selected candidate set and its definitions; a changed context returns
@@ -494,7 +501,7 @@ retention, and the retry fence; this section describes what a client can rely on
 Every persistent command is recorded under its reference before its first effect: model creation,
 alteration, and removal, `REBIND RESOURCE`, `CREATE DOMAIN`, `ALTER DOMAIN`, `CREATE USER`,
 `CREATE RESOURCE`, `START`, `STOP`, `DROP NODE`, `CORDON NODE`, `UNCORDON NODE`, `DRAIN NODE`,
-`RELOCATE`, and `RESET WASM PROCESSOR ... STATE`. So is every transaction request: a request that
+`RELOCATE`, `RESET WASM PROCESSOR ... STATE`, and `BACKUP`. So is every transaction request: a request that
 begins, commits, or reverts a transaction, one sent while the session is bound to a transaction, and
 one that carries an expected transaction position. An ordinary request carries at most one
 persistent statement; several statements in one request always form a transaction request.
@@ -525,7 +532,8 @@ The leader serializes the requests that carry one reference, then consults its r
 
 The first reply is itself rebuilt from the durable record, so the reply to the original attempt and
 the reply to a repetition are identical except for their origin. The record keeps the disposition,
-message, diagnostics, per-statement outcomes, transaction status, and operation admission. It does
+message, diagnostics, per-statement outcomes, transaction status, operation admission, and the
+archive summary of a completed backup. It does
 not keep the typed inspection, WASM state, or resource description that a describing statement
 returns, because those statements are reads and record nothing.
 
@@ -1000,13 +1008,20 @@ stateDiagram-v2
 ```
 
 A consumer must stay bounded however fast rows arrive, and must never let an unread event hold back
-a reply. The Rust client holds at most 128 subscription events and 8 MiB across all subscriptions,
-and at most 32 events and 2 MiB for one subscription. An event that does not fit drops that
-subscription's queued events, reports a consumer overflow, and marks the subscription
-`DeliveryFailed`; the reader that routes replies never waits. Because one subscription may hold only
-2 MiB, a single Row frame above 2 MiB, which the server may send, overflows it at once. The CLI
-bounds its terminal output to 128 lines and 1 MiB, cuts a line above 8 KiB, and reports how many
-lines it omitted. The web console keeps at most 256 lines and 256 KiB per REPL and per subscription
+a reply. The Rust client charges each subscription event for the whole frame its rows keep alive and
+for the event itself. One subscription holds at most 32 events and one frame of the frame limit,
+4 MiB, with the event that carries it; all subscriptions together hold four times as much, 128
+events and 16 MiB of frames with their events. An event that does not fit drops that subscription's
+queued events, reports a consumer overflow, and marks the subscription `DeliveryFailed`; the reader
+that routes replies never waits. An event stops counting once the application reads it, so a
+subscription whose events are read before the next one arrives stays within its own allowance
+however wide the server's frames are, and overflows only when other subscriptions have filled the
+total. The gRPC receiver shares its receive buffer with a frame of 64 KiB or more rather than
+copying it, so a retained frame costs about its own size: four subscriptions each holding one
+4.17 MB frame kept 16.78 MB live for 16.69 MB of frames, and the receiver keeps the allocation of the
+last large frame it read as its receive buffer after that frame is released. The CLI bounds its
+terminal output to 128 lines and 1 MiB, cuts a line above 8 KiB, and reports how many lines it
+omitted. The web console keeps at most 256 lines and 256 KiB per REPL and per subscription
 tab, and marks where it omitted earlier lines. It keeps the latest 256 commands and 256 KiB of its
 command history and the snapshot of the one domain it observes. It holds at most 64 requests of its
 controls waiting for a connection, carrying at most 4 MiB of text, and at most 256 held or awaiting
@@ -1062,9 +1077,10 @@ Every node serves attachments from its own installation, which it derives from t
 revision as every other node, and from progress it already accepted, so an attachment adds no
 interconnect traffic and survives nothing: it ends silently with its session. The Rust client
 attaches every clock it followed again on its next session, clears its previous tick, and reports
-the gap as an interruption. The web console does not follow domain clocks, and the shared binding
-does not expose them. Both requests are refused while the session holds a transaction, like every
-other session-local request.
+the gap as an interruption. The shared binding exposes this event stream through
+`nx_session_next_clock_event` and a dedicated retained `nx_clock_event` handle. The web console
+does not follow domain clocks. Both requests are refused while the session holds a transaction,
+like every other session-local request.
 
 The CLI's `domain-clock` subcommand uses the Rust client's typed attach reply and clock event
 stream. It prints the reply and then the same state, tick, interruption, and end lines as its REPL,
@@ -1214,6 +1230,58 @@ Authentication gives an upload its owner and nothing more: any authenticated use
 version of any resource declared in a domain, and the user scopes only the identity, so two users
 who choose the same identity string upload two versions.
 
+## Backup Downloads
+
+A backup is a persistent command that leaves an artifact behind: its archive, which can be far
+larger than any reply. `BACKUP` therefore travels as an ordinary `CommandRequest` and is recorded
+under its execution reference like every other persistent command, while its archive travels on a
+call of its own, `DownloadBackup`, keyed by that reference. [Backup And
+Restore](./backup-and-restore.md) owns what an archive holds and how it is laid out.
+
+The leader runs the backup. It reads every section from one applied revision, assembles the archive
+in its staging area, and only then completes the command. The `CommandCompleted` outcome carries the
+archive's summary: its size and BLAKE3 digest, the capture time, the instant the node stops
+retaining the archive, whether resource bytes are included, the number of users, and each domain's
+revision, section count, and bytes. The summary is part of the recorded outcome, so repeating the
+command under its reference returns the same summary and never assembles a second archive.
+
+A download call carries exactly one `BackupDownloadRequest`, which names the backup's execution
+reference, and the node authenticates the call from its metadata before it reads the request. A
+node that retains the archive answers with a `BackupArchiveStart` naming the archive's size and
+digest, then the archive in order as non-empty `BackupArchiveChunk` frames of at most 256 KiB, then
+a `BackupArchiveComplete`. Every other answer is one frame:
+
+| Answer | Meaning |
+| --- | --- |
+| `BackupDownloadFailed` with `InvalidRequest` | The request did not decode. |
+| `BackupDownloadFailed` with `Expired` | The retry validity of the reference has ended. |
+| `BackupDownloadFailed` with `NotOwner` | Another user ran the backup. |
+| `LeaderRedirect` | The node does not retain the archive and does not lead. |
+| `BackupDownloadFailed` with `NotRetained` | The leader does not retain the archive: a download already collected it, the node that assembled it restarted, or the reference names no backup. |
+| `BackupDownloadFailed` with `ReadFailed` | The node could not read the archive it retains; the archive stays retained. |
+
+An archive is retained on the node that assembled it until the first download whose completion
+frame was queued collects it, or until the retry validity of the backup's reference ends. Any node
+reads that end from the reference's UUIDv7 time, so an expired reference is refused the same way
+before and after its execution record is reclaimed. A node that does not retain the archive sends
+the client to the leader, and the leader, which then does not retain it either, answers from the
+recorded outcome. If leadership moves while a backup runs, the new leader resumes the applying
+command and assembles an archive of its own, and the archive the former leader assembled is never
+offered again.
+
+The node reads the archive only as fast as the client takes frames, at most four frames ahead of
+it, so a slow client holds back reads instead of growing what the node buffers for it. The call is
+not bounded by the request deadline, because a transfer can take far longer than a command; the
+Rust client bounds the wait for each frame instead. A download that ends early releases only its own
+hold on the archive, which stays retained for the client to download again. The protocol has no
+resume offset: a client starts a failed download again from the first byte, and accepts the archive
+only when the completion frame has arrived and every byte matches the summary's size and digest.
+
+The console WebSocket carries no download, so the console refuses `BACKUP` instead of assembling an
+archive nobody could collect. `DESCRIBE BACKUP` never reaches a node at all: a client reads the
+archive file on its own machine, and a node answers the statement sent as a command with
+`RequestFailed`.
+
 ## Node Stop And Restart As A Client Observes Them
 
 [Shutdown And Recovery](./shutdown.md) owns the phases of a node stop. This section describes what a
@@ -1306,6 +1374,11 @@ The binding's lifecycle follows from that choice:
   `nx_event_cell_varlen` borrows one string or bytes value. Events are reference counted:
   `nx_event_retain` adds a reference, and the event and its frame are freed with the last
   `nx_event_release`, from any thread.
+- **Clock events.** `nx_session_next_clock_event` uses the same cancellation and deadline rules as
+  the subscription wait, but returns a separate `nx_clock_event` reference. Its kind, domain,
+  generation, state, paced mapping, tick and end-reason accessors expose the fields each event
+  carries. An accessor for a field its event lacks returns `NX_ERROR_TYPE`. Retain and release
+  preserve the event and its borrowed domain name across threads until the last reference ends.
 - **Typed failures.** A failing call returns an `nx_error` whose kind separates an invalid argument,
   a failed connection, a failed session, an uncertain outcome that carries the execution reference,
   a server refusal, a deadline, a cancellation, a protocol violation, a type mismatch, and a session
@@ -1313,12 +1386,13 @@ The binding's lifecycle follows from that choice:
 
 The binding connects with the Rust client's default options. It exposes no seeds, timeouts, or
 certificate authority, so it reaches a node over plaintext and connects to it directly. It exposes
-commands, completion, subscriptions and their events, and bulk row access, but not the typed
-transaction status, inspection, choice lookups, notices, leadership, or the followed domain clock: a
-host can execute `ATTACH DOMAIN CLOCK;`, and the library attaches again after a reconnect, but the
-host cannot read the clock or its changes. Its column accessors cover scalar, string, and bytes
-fields; a list field reports whether it is fixed-length or variable, and its values are read from
-the borrowed frame with generated code.
+commands, completion, subscriptions and their events, domain clock events, and bulk row access,
+but not the typed transaction status, inspection, choice lookups, notices, or leadership. A host
+can execute `ATTACH DOMAIN CLOCK;`; the Rust client restores the attachment after reconnect and
+the host reads later observations and ticks through the clock-event wait. The binding does not
+expose the initial clock carried by the attach reply as a typed outcome. Its column accessors
+cover scalar, string, and bytes fields; a list field reports whether it is fixed-length or
+variable, and its values are read from the borrowed frame with generated code.
 
 Independent implementations exist as qualification clients rather than supported SDKs. The Go client
 speaks native gRPC with `flatc --go` output and `google.golang.org/grpc`, and the TypeScript client
@@ -1415,6 +1489,8 @@ The protocol guarantees:
 - **One outcome per batch.** Every submitted batch receives exactly one terminal outcome, never
   completed before its acknowledgement root resolved, and a producer's end follows every outcome it
   owed.
+- **Verifiable archives.** A backup's archive arrives with the size and digest its recorded outcome
+  names, and a download that ends early leaves it retained for another attempt.
 
 It does not provide:
 
@@ -1436,6 +1512,9 @@ It does not provide:
   records, transactions, and upload records outlive it.
 - **Liveness detection.** Neither transport sends keepalives, and the server has no idle timeout. A
   client that needs to detect a half-open connection bounds its own waits.
+- **A durable archive.** A backup's archive lives in the staging area of the node that assembled it
+  and is lost when that node stops, or once its reference's retry validity ends; the recorded
+  outcome outlives it. Only the first complete download receives it.
 - **Authorization.** Every authenticated user may run every command in every domain.
 
 ## Observability
@@ -1469,6 +1548,9 @@ The protocol makes a client's view of its own work explicit rather than inferred
   forwarded producers, its outstanding batches and bytes, and the batches holding its window, and
   the node that executes it exports them as metrics with the answered batches by outcome and cause;
   see [Metrics And Observability](./metrics-and-observability.md#client-ingestors).
+- **Backups.** A completed backup's outcome carries its archive's summary. The node that assembled
+  the archive logs its assembly and its collection by a complete download at `info`, naming the
+  execution reference, and every other end of a download at `debug`.
 
 The server keeps its own records at the levels the logging contract assigns. Listener startup is
 logged at `info`. A reply replaced by a rejection, a reply the session ended before it could queue,

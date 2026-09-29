@@ -670,6 +670,7 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         Statement::CreateDomain(_) => "CREATE DOMAIN",
         Statement::CreateUser(_) => "CREATE USER",
         Statement::UploadResource(_) => "UPLOAD RESOURCE",
+        Statement::Backup(_) => "BACKUP",
         Statement::ResetWasmState(_) => "RESET WASM PROCESSOR STATE",
         Statement::DropNode(_) => "DROP NODE",
         Statement::CordonNode(_) => "CORDON",

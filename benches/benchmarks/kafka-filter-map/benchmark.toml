@@ -11,7 +11,7 @@ wait_timeout_seconds = 120
 warmup_seconds = 10
 
 [load.shape]
-kind = "uniform-passthrough"
+kind = "uniform-filter-map"
 
 [parameters]
 emitter_flush_each = "10ms"
@@ -31,4 +31,14 @@ image = "timberio/vector:0.57.0-debian"
 kind = "container"
 readiness_path = "/health"
 readiness_port = 8686
+require_consumer_group_membership = true
 template = "vector.yaml"
+
+[implementations.flink]
+command = ["/opt/flink/benchmark-start.sh", "/opt/flink/benchmark.sql"]
+config_path = "/opt/flink/benchmark.sql"
+image = "nervix-benchmark-flink:2.0.1"
+kind = "container"
+readiness_log = "BENCHMARK_FLINK_READY"
+require_consumer_group_membership = false
+template = "flink.sql.upon"

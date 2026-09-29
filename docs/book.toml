@@ -45,6 +45,7 @@ include = [
   "roto-language-reference.md",
   "lookups.md",
   "sessions.md",
+  "backup-and-restore.md",
   "metrics-and-observability.md",
   "client-library.md",
   "examples.md",

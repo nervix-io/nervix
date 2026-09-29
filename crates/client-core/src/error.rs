@@ -198,6 +198,15 @@ pub enum ClientError {
         refusal: ClientProducerRefusal,
         message: String,
     },
+    /// The backup completed, and its archive could not be downloaded. Running the same execution
+    /// handle again recovers the backup's outcome and downloads the archive again while the server
+    /// retains it.
+    #[error("failed to download the archive of backup '{reference}'")]
+    BackupDownload {
+        reference: CommandExecutionReference,
+        #[source]
+        source: crate::backup::BackupDownloadError,
+    },
 }
 
 impl ClientError {

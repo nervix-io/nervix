@@ -3,7 +3,9 @@ Feature: Cross-language client conformance
   protocol and prints the same report, so one expected report is the oracle for every language.
   The shared Rust binding is driven from C, C++, Python, Java and Ruby, and in process through
   its C ABI; Go over native gRPC and TypeScript on Node.js and Bun over the binary WebSocket are
-  independent implementations generated from the schema.
+  independent implementations generated from the schema. Every binding host also follows a paced
+  domain clock through the binding and reads the state and the first tick of the generation the
+  scenario starts.
 
   The rows cover the extremes of every integer width, 64-bit values on both sides of the
   JavaScript safe-integer boundary, an absent and a present-zero optional value, strings with
@@ -192,6 +194,62 @@ Feature: Cross-language client conformance
       | runtime | cluster_size |
       | bun     | 1            |
       | bun     | 3            |
+
+  Scenario Outline: A <runtime> client follows a paced domain clock through the shared binding
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
+      """
+    When the "<runtime>" client probe attaches to the domain clock on node "node-1"
+    And these NSPL commands are executed on the leader node
+      """
+      START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
+      """
+    Then within "180s" the client probe reports
+      """
+      ATTACHED completed
+      STATE domain={{domain}} generation=1 state=paced period=100000000 skew=10000000 origin=1893456000000000000 rate=f64:4000000000000000
+      TICK domain={{domain}} generation=1 boundary=origin+(id-1)*period
+      DETACHED completed
+      CHECKS ok
+      PASS
+      """
+
+    Examples: the C ABI in process
+      | runtime          | cluster_size |
+      | c-abi-in-process | 1            |
+      | c-abi-in-process | 3            |
+
+    @client_conformance_toolchain @client_probe_c
+    Examples: C over the shared Rust binding
+      | runtime | cluster_size |
+      | c       | 1            |
+      | c       | 3            |
+
+    @client_conformance_toolchain @client_probe_cpp
+    Examples: C++ over the shared Rust binding
+      | runtime | cluster_size |
+      | c++     | 1            |
+      | c++     | 3            |
+
+    @client_conformance_toolchain @client_probe_python
+    Examples: CPython over the shared Rust binding
+      | runtime | cluster_size |
+      | python  | 1            |
+      | python  | 3            |
+
+    @client_conformance_toolchain @client_probe_java
+    Examples: Java over the shared Rust binding
+      | runtime | cluster_size |
+      | java    | 1            |
+      | java    | 3            |
+
+    @client_conformance_toolchain @client_probe_ruby
+    Examples: Ruby over the shared Rust binding
+      | runtime | cluster_size |
+      | ruby    | 1            |
+      | ruby    | 3            |
 
   Scenario Outline: A <runtime> client reads every frame of the conformance corpus the Rust encoder wrote
     When the "<runtime>" client probe decodes the conformance corpus

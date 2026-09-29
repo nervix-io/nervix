@@ -17,6 +17,7 @@
 
 #[cfg(feature = "arrow")]
 mod arrow_types;
+mod backup;
 mod canonical;
 mod client_producer;
 mod cluster_node;
@@ -47,10 +48,14 @@ mod udf;
 mod wasm_state_generation;
 mod wasm_state_inspection;
 
+pub use backup::{
+    ArchiveDigest, Backup, BackupArchiveSummary, BackupDomainSummary, BackupResources, BackupScope,
+    DescribeBackup,
+};
 pub use canonical::{
-    CanonicalNsplError, alter_avro_wire_schema_to_canonical_nspl,
+    CanonicalNsplError, NSPL_LANGUAGE_VERSION, alter_avro_wire_schema_to_canonical_nspl,
     alter_cbor_wire_schema_to_canonical_nspl, alter_json_wire_schema_to_canonical_nspl,
-    expression_to_nspl, ingest_quiesce_to_nspl,
+    canonical_nspl_document, expression_to_nspl, ingest_quiesce_to_nspl,
 };
 pub use client_producer::{
     CLIENT_PRODUCER_NODE_BYTES, CLIENT_PRODUCER_SESSION_BYTES, ClientAttachmentId,

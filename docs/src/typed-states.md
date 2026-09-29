@@ -51,9 +51,9 @@ An emitter's buffered Arrow carrier keeps its typed source relay and optional co
 The relay's declared branch name is fixed, so the pair identifies the exact source branch even if
 another relay uses the same key fields and values. Payload assembly compares the pair before
 combining carriers, and unbranched absence remains `None` throughout buffering and packing. Each
-buffered row is one of three states: pending, carried by a batch payload the emitter retains, or
-resolved. A retained payload's members are therefore neither packed again nor mistaken for resolved
-rows, which a delivered flag could not express.
+buffered row is one of three states: pending, carried by a batch payload or prepared request the
+emitter retains, or resolved. A retained payload's members are therefore neither packed or prepared
+again nor mistaken for resolved rows, which a delivered flag could not express.
 
 **Expression scopes and errors.** The VM frontend receives a scope policy that says whether a
 bare field may be read, written, both, or neither. A generated or set-only route reports an
@@ -169,6 +169,14 @@ the typed outcome for domain-selection dispatch instead of matching reply messag
 FlatBuffers encoding preserves these optional fields and typed variants across the session edge;
 [Client Session Protocol](./client-session-protocol.md#verification-before-reading) defines how a
 receiver keeps an absent optional value distinct from a present zero.
+
+The shared C binding gives clock observations their own `nx_clock_event_kind` and installations
+their own `nx_clock_state`. Only `NX_CLOCK_PACED` has a mapping for
+`nx_clock_event_paced`; tick and end-reason accessors likewise require their corresponding event
+kinds. An interruption carries a domain but no invented generation or end reason. A mismatched
+accessor returns `NX_ERROR_TYPE` without changing its outputs, so absence cannot look like a
+zero generation or timestamp. The paced and tick accessors allow omitted output pointers for
+fields a host does not need.
 
 Completion replies likewise carry a `SuggestionStatus` variant for ready, missing, stale, or failed
 context and an optional continuation. The server resolves typed semantic references from one

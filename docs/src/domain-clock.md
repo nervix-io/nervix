@@ -119,9 +119,11 @@ already-armed deadlines continue through the quiesce cycle.
 ## Authority Selection And Reconciliation
 
 The current consensus leader reconciles authority ownership whenever domain state, Raft topology,
-or effective node availability changes. Candidate identities are the intersection of live gossip
-incarnations and current Raft voters. Duplicate observations for one node name collapse to the
-newest incarnation.
+or effective node availability changes. Candidate identities are the intersection of effectively
+available gossip incarnations and current Raft voters. A gossip-dead peer can remain available
+while its latest application-health observation is fresh, but an expired observation cannot keep it
+eligible as clock authority. Duplicate observations for one node name collapse to the newest
+incarnation.
 
 Selection is deterministic. Candidates are ordered by node name, the domain name is hashed, and
 the hash selects one position in that ordered set. Every leader presented with the same domain and
@@ -300,6 +302,13 @@ and a detach reports it not attached. The end of the session stops every deliver
 frame. See [Domain Clock Attachment](./sessions.md#domain-clock-attachment) for the public contract
 and [Client Session Protocol](./client-session-protocol.md#domain-clock-attachment) for how the
 attachment travels in the protocol.
+
+The Rust client keeps the attach reply's state as its latest followed clock. The shared C binding
+gives hosts a separate retained `nx_clock_event` handle for later state changes, ticks,
+interruptions, and ends through `nx_session_next_clock_event`. Its typed accessors expose the
+domain, generation, state and paced mapping, tick, or end reason. The binding does not expose the
+initial state in the attach reply as a typed value, so a host attaching to an already paced clock
+can use tick readings as they arrive but needs a later state change to read that generation's mapping.
 
 ## Execution-Time Snapshots
 

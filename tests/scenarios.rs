@@ -7,13 +7,14 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     fs::{OpenOptions, create_dir_all},
-    io::Write,
+    io::{Read as _, Write},
     net::{Ipv4Addr, SocketAddr},
     num::NonZeroU64,
     os::unix::process::ExitStatusExt as _,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
+    str::FromStr,
     sync::{Arc as StdArc, Mutex as StdMutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -95,7 +96,10 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uuid::Uuid;
 
 use crate::common::{
-    client_conformance::{ClientProbe, ProbeRuntime, ProbeTarget, SUBSCRIBED_LINE, corpus_report},
+    client_conformance::{
+        ATTACHED_LINE, ClientProbe, ProbeExercise, ProbeRuntime, ProbeTarget, SUBSCRIBED_LINE,
+        corpus_report,
+    },
     cluster::{
         BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
         HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
@@ -110,6 +114,7 @@ use crate::common::{
         POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, RUSTFS_ADDR,
         SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
+    grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
         CapturedRequest, ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET,
         ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
@@ -134,6 +139,7 @@ use crate::common::{
     tcp_forwarder::TcpForwarders,
 };
 
+mod backup;
 mod client_producers;
 mod common;
 mod domain_clock_attachment;
@@ -274,6 +280,14 @@ struct ScenarioWorld {
     last_clock_reply: Option<nervix_client_wire::ReplyBody>,
     /// When the last `START AT NOW` a scenario sent ran.
     clock_start_window: Option<domain_clock_attachment::ClockStartWindow>,
+    /// The directory a scenario's backup archives are written to.
+    backup_directory: Option<TempDir>,
+    /// The backup a scenario ran through its own session, whose archive it downloads itself.
+    last_backup: Option<backup::TestBackup>,
+    /// How the last backup download a scenario shaped itself ended.
+    last_backup_download: Option<crate::common::raw_session::TestDownloadEnd>,
+    /// The outcome of the last command a scenario sent through its own session.
+    last_session_command: Option<nervix_client_wire::CommandOutcome>,
     /// Candidates collected by a public session completion paging scenario.
     last_completion_values: Vec<String>,
     last_completion_page_count: usize,
@@ -342,6 +356,7 @@ struct ScenarioWorld {
     fault_injection: FaultInjection,
     consensus_commit_delays: BTreeMap<String, Duration>,
     burst_raft_retention_peak: Option<nervix_consensus::RaftLogRetention>,
+    saved_raft_log_heads: BTreeMap<String, Option<u64>>,
     durable_catch_up: Option<DurableCatchUpObservation>,
     durable_catch_up_writer: Option<DurableCatchUpWriter>,
     follower_commands_memory: Option<FollowerCommandsMemoryObservation>,
@@ -370,6 +385,11 @@ struct ScenarioWorld {
     tcp_forwarders: Option<TcpForwarders>,
     /// The HTTP receivers a scenario started, by the name its steps give them.
     http_receivers: BTreeMap<String, HttpReceiver>,
+    /// The gRPC receivers a scenario started, by the name its steps give them.
+    grpc_receivers: BTreeMap<String, GrpcReceiver>,
+    /// The transport each OTLP receiver a scenario started serves, by the name its steps give it.
+    /// The receiver itself is kept with the HTTP or gRPC receivers under the same name.
+    otlp_receivers: BTreeMap<String, OtlpTransport>,
     silent_interconnect_peers: Vec<tokio::net::TcpStream>,
     last_interconnect_attempt_error: Option<String>,
     server_process: Option<ServerProcess>,
@@ -450,6 +470,7 @@ impl fmt::Debug for ScenarioWorld {
                 &self.avro_http_optional_fields.len(),
             )
             .field("burst_raft_retention_peak", &self.burst_raft_retention_peak)
+            .field("saved_raft_log_heads", &self.saved_raft_log_heads)
             .field("transaction_qualification", &self.transaction_qualification)
             .field("temp_root_initialized", &self.temp_root.is_some())
             .field("browser_initialized", &self.browser.is_some())
@@ -474,6 +495,8 @@ impl fmt::Debug for ScenarioWorld {
             )
             .field("tcp_forwarders", &self.tcp_forwarders)
             .field("http_receivers", &self.http_receivers)
+            .field("grpc_receivers", &self.grpc_receivers)
+            .field("otlp_receivers", &self.otlp_receivers)
             .field(
                 "silent_interconnect_peer_count",
                 &self.silent_interconnect_peers.len(),
@@ -1381,6 +1404,433 @@ async fn then_http_receiver_records_failed_tls_handshake(world: &mut ScenarioWor
     if let Err(error) = waited {
         panic!("HTTP receiver '{name}': {error}");
     }
+}
+
+/// The OTLP transport an OTLP receiver serves, as a client names it in its `protocol` key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OtlpTransport {
+    Grpc,
+    HttpProtobuf,
+}
+
+impl FromStr for OtlpTransport {
+    type Err = String;
+
+    fn from_str(protocol: &str) -> Result<Self, Self::Err> {
+        match protocol {
+            "grpc" => Ok(Self::Grpc),
+            "http/protobuf" => Ok(Self::HttpProtobuf),
+            _ => Err(format!(
+                "unsupported OTLP protocol '{protocol}'; expected 'grpc' or 'http/protobuf'"
+            )),
+        }
+    }
+}
+
+/// One scripted answer of an OTLP receiver, the same over either transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OtlpAnswer {
+    /// A complete success answer with an empty Export response.
+    Accept,
+    /// HTTP `400`, or gRPC `INVALID_ARGUMENT`: the receiver refuses the request.
+    Reject,
+    /// HTTP `503`, or gRPC `UNAVAILABLE`: the receiver asks the client to try again.
+    Unavailable,
+    /// The receiver reads the whole request, then closes the connection without answering.
+    LoseResponse,
+    /// The receiver reads the whole request, then answers nothing until the client gives up.
+    HoldResponse,
+}
+
+impl FromStr for OtlpAnswer {
+    type Err = String;
+
+    fn from_str(line: &str) -> Result<Self, Self::Err> {
+        match line.trim() {
+            "accept" => Ok(Self::Accept),
+            "reject" => Ok(Self::Reject),
+            "unavailable" => Ok(Self::Unavailable),
+            "lose response" => Ok(Self::LoseResponse),
+            "hold response" => Ok(Self::HoldResponse),
+            other => Err(format!(
+                "unknown OTLP receiver answer '{other}'; expected accept, reject, unavailable, \
+                 lose response, or hold response"
+            )),
+        }
+    }
+}
+
+impl OtlpAnswer {
+    /// This answer as the HTTP receiver's script spells it.
+    fn http_response(self) -> ReceiverResponse {
+        let script = match self {
+            Self::Accept => "respond 200",
+            Self::Reject => "respond 400",
+            Self::Unavailable => "respond 503",
+            Self::LoseResponse => "lose response",
+            Self::HoldResponse => "hold response",
+        };
+        script
+            .parse()
+            .assured("every OTLP answer maps to a documented HTTP receiver script form")
+    }
+
+    /// This answer as the gRPC receiver takes it.
+    fn grpc_answer(self) -> GrpcAnswer {
+        match self {
+            Self::Accept => GrpcAnswer::Accept,
+            Self::Reject => GrpcAnswer::Status(tonic::Code::InvalidArgument),
+            Self::Unavailable => GrpcAnswer::Status(tonic::Code::Unavailable),
+            Self::LoseResponse => GrpcAnswer::LoseResponse,
+            Self::HoldResponse => GrpcAnswer::HoldResponse,
+        }
+    }
+}
+
+/// One Export request an OTLP receiver captured, over whichever transport it serves.
+enum CapturedExport {
+    Http(CapturedRequest),
+    Grpc(CapturedCall),
+}
+
+impl CapturedExport {
+    /// The path the request was sent to: an OTLP/HTTP path such as `/v1/logs`, or an OTLP/gRPC
+    /// method.
+    fn path(&self) -> &str {
+        match self {
+            Self::Http(request) => &request.target,
+            Self::Grpc(call) => &call.path,
+        }
+    }
+
+    /// The Export request's protobuf bytes, decompressed when the client compressed them.
+    fn protobuf(&self) -> Vec<u8> {
+        let (bytes, compression) = match self {
+            Self::Http(request) => {
+                let encoding = request.header_values("content-encoding");
+                (&request.body, encoding.first().copied())
+            }
+            Self::Grpc(call) => {
+                let encoding = call.header_values("grpc-encoding");
+                let compression = match call.compressed {
+                    true => encoding.first().copied(),
+                    false => None,
+                };
+                (&call.message, compression)
+            }
+        };
+        match compression {
+            None => bytes.clone(),
+            Some(b"gzip") => {
+                let mut decoded = Vec::new();
+                flate2::read::GzDecoder::new(bytes.as_slice())
+                    .read_to_end(&mut decoded)
+                    .unwrap_or_else(|error| panic!("a gzip Export request must decode: {error}"));
+                decoded
+            }
+            Some(other) => panic!(
+                "the OTLP receiver captured an Export request compressed as {:?}",
+                String::from_utf8_lossy(other)
+            ),
+        }
+    }
+}
+
+impl fmt::Display for CapturedExport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Http(request) => write!(formatter, "{request}"),
+            Self::Grpc(call) => write!(formatter, "{call}"),
+        }
+    }
+}
+
+fn otlp_transport(world: &ScenarioWorld, name: &str) -> OtlpTransport {
+    let name = expand_placeholders(world, name);
+    match world.otlp_receivers.get(&name) {
+        Some(transport) => *transport,
+        None => panic!("OTLP receiver '{name}' is not running"),
+    }
+}
+
+fn grpc_receiver<'world>(world: &'world ScenarioWorld, name: &str) -> &'world GrpcReceiver {
+    let name = expand_placeholders(world, name);
+    match world.grpc_receivers.get(&name) {
+        Some(receiver) => receiver,
+        None => panic!("gRPC receiver '{name}' is not running"),
+    }
+}
+
+/// Every Export request an OTLP receiver captured, in the order they arrived.
+fn captured_exports(world: &ScenarioWorld, name: &str) -> Vec<CapturedExport> {
+    match otlp_transport(world, name) {
+        OtlpTransport::HttpProtobuf => http_receiver(world, name)
+            .captured()
+            .into_iter()
+            .map(CapturedExport::Http)
+            .collect(),
+        OtlpTransport::Grpc => grpc_receiver(world, name)
+            .captured()
+            .into_iter()
+            .map(CapturedExport::Grpc)
+            .collect(),
+    }
+}
+
+/// Starts an in-process receiver for the OTLP transport a client's `protocol` key names, reachable
+/// as `{{otlp_receiver.<name>}}`.
+#[given(expr = "OTLP receiver {string} is running for {string}")]
+async fn given_otlp_receiver_is_running(world: &mut ScenarioWorld, name: String, protocol: String) {
+    initialize_scenario_identity(world);
+    let name = expand_placeholders(world, &name);
+    let transport = match protocol.parse::<OtlpTransport>() {
+        Ok(transport) => transport,
+        Err(error) => panic!("{error}"),
+    };
+    assert!(
+        !world.otlp_receivers.contains_key(&name),
+        "OTLP receiver '{name}' is already running"
+    );
+    /// Where a client reaches the receiver that was started.
+    struct Reachable {
+        origin: String,
+        port: u16,
+    }
+
+    let reachable = match transport {
+        OtlpTransport::HttpProtobuf => {
+            start_http_receiver(world, name.clone(), ReceiverTransport::Plain).await;
+            let receiver = http_receiver(world, &name);
+            Reachable {
+                origin: receiver.origin(),
+                port: receiver.port(),
+            }
+        }
+        OtlpTransport::Grpc => {
+            assert!(
+                !world.grpc_receivers.contains_key(&name),
+                "gRPC receiver '{name}' is already running"
+            );
+            let port = draw_scenario_port(world, "gRPC receiver");
+            let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+            let receiver = match GrpcReceiver::start(address).await {
+                Ok(receiver) => receiver,
+                Err(error) => panic!("gRPC receiver '{name}' failed to start: {error:?}"),
+            };
+            let reachable = Reachable {
+                origin: receiver.origin(),
+                port: receiver.port(),
+            };
+            world.grpc_receivers.insert(name.clone(), receiver);
+            reachable
+        }
+    };
+    world
+        .placeholders
+        .insert(format!("otlp_receiver.{name}"), reachable.origin);
+    world.placeholders.insert(
+        format!("otlp_receiver_port.{name}"),
+        reachable.port.to_string(),
+    );
+    world.otlp_receivers.insert(name, transport);
+}
+
+/// Each line is one answer, taken by the next Export request in order: `accept`, `reject`,
+/// `unavailable`, `lose response`, or `hold response`. Requests beyond the script are accepted.
+#[given(expr = "OTLP receiver {string} answers with")]
+async fn given_otlp_receiver_answers_with(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let mut answers = Vec::new();
+    for line in docstring(step)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        match line.parse::<OtlpAnswer>() {
+            Ok(answer) => answers.push(answer),
+            Err(error) => panic!("invalid OTLP receiver script line: {error}"),
+        }
+    }
+    match otlp_transport(world, &name) {
+        OtlpTransport::HttpProtobuf => {
+            http_receiver(world, &name).script(answers.into_iter().map(OtlpAnswer::http_response))
+        }
+        OtlpTransport::Grpc => {
+            grpc_receiver(world, &name).script(answers.into_iter().map(OtlpAnswer::grpc_answer))
+        }
+    }
+}
+
+#[then(expr = "OTLP receiver {string} eventually receives at least {int} export request(s)")]
+async fn then_otlp_receiver_eventually_receives_requests(
+    world: &mut ScenarioWorld,
+    name: String,
+    expected: usize,
+) {
+    match otlp_transport(world, &name) {
+        OtlpTransport::HttpProtobuf => {
+            let waited = http_receiver(world, &name)
+                .wait_for_requests(expected, HTTP_RECEIVER_WAIT)
+                .await;
+            if let Err(error) = waited {
+                panic!("OTLP receiver '{name}': {error}");
+            }
+        }
+        OtlpTransport::Grpc => {
+            let waited = grpc_receiver(world, &name)
+                .wait_for_calls(expected, HTTP_RECEIVER_WAIT)
+                .await;
+            if let Err(error) = waited {
+                panic!("OTLP receiver '{name}': {error}");
+            }
+        }
+    }
+}
+
+/// Compares two captured Export requests, counted from 1, exactly: over HTTP the request line,
+/// every header field in the order it arrived, and the body as sent; over gRPC the method, every
+/// header field, the compressed flag, and the message as sent. A retry sends the request it
+/// prepared, so a resent request repeats the attempt before it byte for byte.
+#[then(expr = "OTLP receiver {string} request {int} repeats request {int}")]
+async fn then_otlp_receiver_request_repeats_request(
+    world: &mut ScenarioWorld,
+    name: String,
+    repeated: usize,
+    original: usize,
+) {
+    match otlp_transport(world, &name) {
+        OtlpTransport::HttpProtobuf => {
+            let repeated_request = captured_http_request(world, &name, repeated);
+            let original_request = captured_http_request(world, &name, original);
+            assert_eq!(
+                repeated_request, original_request,
+                "OTLP receiver '{name}' request {repeated} does not repeat request \
+                 {original}:\n{repeated_request}\n---\n{original_request}"
+            );
+        }
+        OtlpTransport::Grpc => {
+            let captured = grpc_receiver(world, &name).captured();
+            let call = |position: usize| -> CapturedCall {
+                let Some(index) = position.checked_sub(1) else {
+                    panic!("OTLP receiver requests are counted from 1");
+                };
+                match captured.get(index) {
+                    Some(call) => call.clone(),
+                    None => panic!(
+                        "OTLP receiver '{name}' captured {} request(s), not request {position}",
+                        captured.len()
+                    ),
+                }
+            };
+            let repeated_call = call(repeated);
+            let original_call = call(original);
+            assert_eq!(
+                repeated_call, original_call,
+                "OTLP receiver '{name}' request {repeated} does not repeat request \
+                 {original}:\n{repeated_call}\n---\n{original_call}"
+            );
+        }
+    }
+}
+
+/// Decodes every captured request as an OTLP logs Export request and compares the log record
+/// bodies each carries, in order, with one docstring line per request, bodies separated by `|`.
+/// Every request must carry exactly one resource and one scope.
+#[then(expr = "OTLP receiver {string} captured these log export requests")]
+async fn then_otlp_receiver_captured_these_log_export_requests(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    use opentelemetry_proto::tonic::{
+        collector::logs::v1::ExportLogsServiceRequest, common::v1::any_value,
+    };
+    use otel_prost::Message as _;
+
+    let expected = expand_placeholders(world, docstring(step))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.split('|')
+                .map(str::trim)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let captured = captured_exports(world, &name);
+    let mut listing = String::new();
+    for export in &captured {
+        listing.push_str(&format!("{export}\n---\n"));
+    }
+    let mut received = Vec::with_capacity(captured.len());
+    for (index, export) in captured.iter().enumerate() {
+        let position = index + 1;
+        assert!(
+            export.path() == "/v1/logs"
+                || export.path() == "/opentelemetry.proto.collector.logs.v1.LogsService/Export",
+            "OTLP receiver '{name}' request {position} was not a logs export:\n{export}"
+        );
+        let request = ExportLogsServiceRequest::decode(export.protobuf().as_slice())
+            .unwrap_or_else(|error| {
+                panic!(
+                    "OTLP receiver '{name}' request {position} is not a logs Export request: \
+                     {error}\n{export}"
+                )
+            });
+        let [resource_logs] = request.resource_logs.as_slice() else {
+            panic!(
+                "OTLP receiver '{name}' request {position} carries {} resources, not one",
+                request.resource_logs.len()
+            );
+        };
+        let [scope_logs] = resource_logs.scope_logs.as_slice() else {
+            panic!(
+                "OTLP receiver '{name}' request {position} carries {} scopes, not one",
+                resource_logs.scope_logs.len()
+            );
+        };
+        let mut bodies = Vec::with_capacity(scope_logs.log_records.len());
+        for record in &scope_logs.log_records {
+            let body = match record.body.as_ref().and_then(|body| body.value.as_ref()) {
+                Some(any_value::Value::StringValue(body)) => body.clone(),
+                other => panic!(
+                    "OTLP receiver '{name}' request {position} carries a record whose body is not \
+                     a string: {other:?}"
+                ),
+            };
+            bodies.push(body);
+        }
+        received.push(bodies);
+    }
+    assert_eq!(
+        received, expected,
+        "OTLP receiver '{name}' captured other log export requests:\n{listing}"
+    );
+}
+
+/// Asserts how many Export requests the receiver holds when the step runs, once every request it
+/// expects has arrived, so a count above the expected one names a request that was sent although
+/// it must not be.
+#[then(expr = "OTLP receiver {string} has captured exactly {int} export request(s)")]
+async fn then_otlp_receiver_has_captured_exactly(
+    world: &mut ScenarioWorld,
+    name: String,
+    expected: usize,
+) {
+    let captured = captured_exports(world, &name);
+    let mut listing = String::new();
+    for export in &captured {
+        listing.push_str(&format!("{export}\n---\n"));
+    }
+    assert_eq!(
+        captured.len(),
+        expected,
+        "OTLP receiver '{name}' captured another number of export requests:\n{listing}"
+    );
 }
 
 #[given(expr = "clock source recorder {string} is reset")]
@@ -2728,9 +3178,59 @@ fn then_client_wire_command_transport_artifact_exists(world: &mut ScenarioWorld)
     );
 }
 
-/// How long a probe may take to open its session and subscription. Starting a JVM or compiling
-/// nothing still costs seconds on a loaded machine, so this bounds a wait, not a race.
+/// How long a probe may take to open its session and subscription or attachment. Starting a JVM
+/// or compiling nothing still costs seconds on a loaded machine, so this bounds a wait, not a race.
 const CLIENT_PROBE_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Where a probe of the scenario's domain connects when it starts on `node_id`.
+fn client_probe_target(
+    world: &ScenarioWorld,
+    node_id: &str,
+    exercise: ProbeExercise,
+) -> ProbeTarget {
+    let cluster = world.cluster();
+    let grpc_uri = cluster
+        .grpc_uri(node_id)
+        .expect("the probe's node belongs to the cluster");
+    let console = cluster
+        .web_console_url(node_id)
+        .expect("the probe's node belongs to the cluster");
+    let mut websocket_uri =
+        url::Url::parse(&console).expect("the harness builds a valid console URL");
+    websocket_uri
+        .set_scheme("ws")
+        .expect("an http URL can take the ws scheme");
+    websocket_uri.set_path("/console/ws");
+    ProbeTarget {
+        grpc_uri,
+        websocket_uri: websocket_uri.to_string(),
+        username: TEST_AUTH_USERNAME.to_string(),
+        password: TEST_AUTH_PASSWORD.to_string(),
+        domain: world.domain.clone(),
+        exercise,
+    }
+}
+
+/// Starts a probe and waits until it prints `ready_line`, the point a scenario continues from.
+async fn start_client_probe(
+    world: &mut ScenarioWorld,
+    runtime: ProbeRuntime,
+    node_id: &str,
+    target: ProbeTarget,
+    ready_line: &str,
+) {
+    append_cucumber_log_line(&format!(
+        "client probe {runtime:?}: node={node_id} target={target:?}"
+    ));
+    let mut probe = ClientProbe::start(runtime, target)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    probe
+        .wait_for_line(ready_line, CLIENT_PROBE_SUBSCRIBE_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    world.client_probe = Some(probe);
+}
 
 #[when(
     expr = "the {string} client probe subscribes as {string} to relay {string} on node {string} \
@@ -2748,40 +3248,27 @@ async fn when_client_probe_subscribes(
         .parse()
         .expect("the step names a known probe runtime");
     let node_id = expand_placeholders(world, &node_id);
-    let cluster = world.cluster();
-    let grpc_uri = cluster
-        .grpc_uri(&node_id)
-        .expect("the probe's node belongs to the cluster");
-    let console = cluster
-        .web_console_url(&node_id)
-        .expect("the probe's node belongs to the cluster");
-    let mut websocket_uri =
-        url::Url::parse(&console).expect("the harness builds a valid console URL");
-    websocket_uri
-        .set_scheme("ws")
-        .expect("an http URL can take the ws scheme");
-    websocket_uri.set_path("/console/ws");
-    let target = ProbeTarget {
-        grpc_uri,
-        websocket_uri: websocket_uri.to_string(),
-        username: TEST_AUTH_USERNAME.to_string(),
-        password: TEST_AUTH_PASSWORD.to_string(),
-        domain: world.domain.clone(),
+    let exercise = ProbeExercise::Subscription {
         relay: expand_placeholders(world, &relay),
         subscription: expand_placeholders(world, &subscription),
         rows,
     };
-    append_cucumber_log_line(&format!(
-        "client probe {runtime:?}: node={node_id} target={target:?}"
-    ));
-    let mut probe = ClientProbe::start(runtime, target)
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-    probe
-        .wait_for_line(SUBSCRIBED_LINE, CLIENT_PROBE_SUBSCRIBE_TIMEOUT)
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-    world.client_probe = Some(probe);
+    let target = client_probe_target(world, &node_id, exercise);
+    start_client_probe(world, runtime, &node_id, target, SUBSCRIBED_LINE).await;
+}
+
+#[when(expr = "the {string} client probe attaches to the domain clock on node {string}")]
+async fn when_client_probe_attaches_to_the_domain_clock(
+    world: &mut ScenarioWorld,
+    runtime: String,
+    node_id: String,
+) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .expect("the step names a known probe runtime");
+    let node_id = expand_placeholders(world, &node_id);
+    let target = client_probe_target(world, &node_id, ProbeExercise::DomainClock);
+    start_client_probe(world, runtime, &node_id, target, ATTACHED_LINE).await;
 }
 
 #[when(expr = "the {string} client probe decodes the conformance corpus")]
@@ -5252,7 +5739,42 @@ async fn then_leader_purged_covered_log(world: &mut ScenarioWorld, duration: Str
     let observer = world
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&leader));
-    await_covered_log_purge(&observer, &duration).await;
+    await_covered_log_purge(&observer, &duration, None).await;
+}
+
+#[given(expr = "node {string} raft log head is saved before stop")]
+async fn given_node_raft_log_head_is_saved_before_stop(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&node_id));
+    let retention = observer.raft_log_retention();
+    world.saved_raft_log_heads.insert(
+        node_id,
+        retention.last_log_index.max(retention.snapshot_index),
+    );
+}
+
+#[then(
+    expr = "within {string} the leader node has purged its covered raft log beyond stopped node \
+            {string}"
+)]
+async fn then_leader_purged_covered_log_beyond_stopped_node(
+    world: &mut ScenarioWorld,
+    duration: String,
+    stopped_node_id: String,
+) {
+    let stopped_node_id = expand_placeholders(world, &stopped_node_id);
+    let stopped_head = world
+        .saved_raft_log_heads
+        .get(&stopped_node_id)
+        .copied()
+        .verified("the scenario saved this follower's log head before stopping it");
+    let leader = running_leader_node(world).await;
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&leader));
+    await_covered_log_purge(&observer, &duration, stopped_head).await;
 }
 
 #[then(
@@ -5347,13 +5869,14 @@ async fn await_purge_beyond_retention_peak(
 async fn await_covered_log_purge(
     observer: &nervix_consensus::Observer,
     duration: &str,
+    beyond: Option<u64>,
 ) -> nervix_consensus::RaftLogRetention {
     let deadline = Instant::now()
         + humantime::parse_duration(duration).expect("step duration must be a valid duration");
     loop {
         tokio::task::consume_budget().await;
         let retention = observer.raft_log_retention();
-        if retention.purged_index.is_some() {
+        if retention.purged_index > beyond {
             assert!(
                 retention.snapshot_index >= retention.purged_index,
                 "the leader purged entries its snapshot does not cover: {retention:?}"
@@ -5362,7 +5885,8 @@ async fn await_covered_log_purge(
         }
         assert!(
             Instant::now() < deadline,
-            "the leader did not purge its covered raft log within {duration}: {retention:?}"
+            "the leader did not purge its covered raft log beyond {beyond:?} within {duration}: \
+             {retention:?}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -6805,6 +7329,31 @@ async fn then_dns_fixture_queried_name(world: &mut ScenarioWorld, name: String) 
     })
     .await
     .unwrap_or_else(|_| panic!("no client asked the DNS fixture for '{name}' within 10 seconds"));
+}
+
+#[then(expr = "the DNS fixture eventually receives another question for {string}")]
+async fn then_dns_fixture_queried_name_again(world: &mut ScenarioWorld, name: String) {
+    let baseline = world
+        .cluster()
+        .dns_questions_for_name(&name)
+        .assured("the scenario configured fixture DNS before observing questions");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            tokio::task::consume_budget().await;
+            let count = world
+                .cluster()
+                .dns_questions_for_name(&name)
+                .assured("the scenario configured fixture DNS before observing questions");
+            if count > baseline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("no client asked the DNS fixture for '{name}' again within 30 seconds")
+    });
 }
 
 #[then("the DNS fixture received no questions for node names")]
@@ -13257,6 +13806,24 @@ async fn when_selector_is_filled_with(world: &mut ScenarioWorld, selector: Strin
         .expect("selector must be fillable");
 }
 
+#[when(expr = "selector {string} is filled with text")]
+async fn when_selector_is_filled_with_text(
+    world: &mut ScenarioWorld,
+    selector: String,
+    #[step] step: &Step,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector actions");
+    let selector = expand_placeholders(world, &selector);
+    let value = expand_placeholders(world, docstring(step));
+    page.locator(&selector)
+        .fill(&value, None)
+        .await
+        .expect("selector must be fillable with multiline text");
+}
+
 #[when(expr = "selector {string} is pressed with {string}")]
 async fn when_selector_is_pressed_with(world: &mut ScenarioWorld, selector: String, key: String) {
     let page = world
@@ -14164,6 +14731,38 @@ async fn then_selector_has_value(world: &mut ScenarioWorld, selector: String, ex
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+#[then(expr = "selector {string} has value containing {string}")]
+async fn then_selector_has_value_containing(
+    world: &mut ScenarioWorld,
+    selector: String,
+    expected: String,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector assertions");
+    let selector = expand_placeholders(world, &selector);
+    let expected = expand_placeholders(world, &expected);
+    let locator = page.locator(&selector);
+    locator
+        .wait_for(Some(
+            WaitForOptions::builder()
+                .state(WaitForState::Visible)
+                .timeout(10_000.0)
+                .build(),
+        ))
+        .await
+        .expect("selector must become visible");
+    let value = locator
+        .input_value(None)
+        .await
+        .expect("selector value must be readable");
+    assert!(
+        value.contains(&expected),
+        "expected selector '{selector}' value to contain '{expected}', got '{value}'"
+    );
 }
 
 #[then(expr = "selector {string} is scrolled to bottom")]
@@ -20760,6 +21359,13 @@ async fn then_named_client_receives_subscription_payload(
             .unwrap_or_else(|error| {
                 panic!("client '{client_name}' subscription stream closed: {error}")
             });
+        if let nervix_client_core::SubscriptionEvent::ConsumerOverflow(overflowed) = &event {
+            panic!(
+                "client '{client_name}' could not retain the events of subscription '{}', so no \
+                 further rows of it follow",
+                overflowed.name.as_str()
+            );
+        }
         let nervix_client_core::SubscriptionEvent::Rows(rows) = event else {
             continue;
         };
@@ -21718,7 +22324,7 @@ async fn then_generator_occurrences_preserve_branches(
         .checked_add(duration)
         .assured("scenario durations fit Tokio's monotonic instant range");
     let mut branches_by_timestamp = BTreeMap::<_, BTreeSet<String>>::new();
-    let mut latest_timestamp = None;
+    let mut latest_timestamp_by_branch = BTreeMap::<String, i64>::new();
     let mut observed = Vec::new();
 
     loop {
@@ -21798,19 +22404,21 @@ async fn then_generator_occurrences_preserve_branches(
         let timestamp = timestamp
             .timestamp_nanos_opt()
             .assured("generator scenario timestamps fit signed Unix nanoseconds");
-        if !branches_by_timestamp.contains_key(&timestamp) {
-            if let Some(latest_timestamp) = latest_timestamp.as_ref() {
-                assert!(
-                    &timestamp > latest_timestamp,
-                    "generator occurrence timestamps arrived out of order: {observed:?}, {payload}"
-                );
-            }
-            latest_timestamp = Some(timestamp);
+        if let Some(previous) = latest_timestamp_by_branch.insert(branch.to_string(), timestamp) {
+            assert!(
+                timestamp > previous,
+                "generator timestamps for branch '{branch}' did not increase: {observed:?}, \
+                 {payload}"
+            );
         }
-        branches_by_timestamp
+        let inserted = branches_by_timestamp
             .entry(timestamp)
             .or_default()
             .insert(branch.to_string());
+        assert!(
+            inserted,
+            "generator repeated an occurrence for branch '{branch}': {payload}"
+        );
         world.last_subscription_payload = Some(payload.clone());
         observed.push(payload);
     }
@@ -24987,17 +25595,31 @@ async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
     std::future::pending::<SuiteOutcome>().await
 }
 
-/// Stops every HTTP receiver the scenario started, together under one budget, and records how
-/// each stop went. A receiver's port goes back with the scenario's other fixture ports at the end
-/// of cleanup.
-async fn stop_http_receivers(world: &mut ScenarioWorld) {
-    let receivers = std::mem::take(&mut world.http_receivers);
-    let stops = join_all(receivers.into_iter().map(|(name, receiver)| async move {
-        let stop = receiver.stop().await;
-        (name, stop)
-    }))
-    .await;
-    for (name, stop) in stops {
+/// Stops every HTTP and gRPC receiver the scenario started, together under one budget, and records
+/// how each stop went. A receiver's port goes back with the scenario's other fixture ports at the
+/// end of cleanup.
+async fn stop_receivers(world: &mut ScenarioWorld) {
+    let http_receivers = std::mem::take(&mut world.http_receivers);
+    let grpc_receivers = std::mem::take(&mut world.grpc_receivers);
+    world.otlp_receivers.clear();
+    let http_stops = join_all(
+        http_receivers
+            .into_iter()
+            .map(|(name, receiver)| async move {
+                let stop = receiver.stop().await;
+                (name, stop)
+            }),
+    );
+    let grpc_stops = join_all(
+        grpc_receivers
+            .into_iter()
+            .map(|(name, receiver)| async move {
+                let stop = receiver.stop().await;
+                (name, stop)
+            }),
+    );
+    let (http_stops, grpc_stops) = tokio::join!(http_stops, grpc_stops);
+    for (name, stop) in http_stops {
         append_cucumber_log_line(&format!("HTTP receiver cleanup: {name}: {stop}"));
         if stop.was_forced() {
             append_cucumber_log_line(&format!(
@@ -25005,11 +25627,19 @@ async fn stop_http_receivers(world: &mut ScenarioWorld) {
             ));
         }
     }
+    for (name, stop) in grpc_stops {
+        append_cucumber_log_line(&format!("gRPC receiver cleanup: {name}: {stop}"));
+        if stop.was_forced() {
+            append_cucumber_log_line(&format!(
+                "scenario cleanup forced: gRPC receiver {name}: {stop}"
+            ));
+        }
+    }
 }
 
 const _: () = assert!(
     RECEIVER_STOP_BUDGET.as_nanos() < CLUSTER_TEARDOWN_BUDGET.as_nanos(),
-    "stopping the HTTP receivers must cost less than stopping the cluster"
+    "stopping the HTTP and gRPC receivers must cost less than stopping the cluster"
 );
 
 /// Everything a scenario run may be configured with beyond cucumber's own options.
@@ -25171,7 +25801,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.broker_observer = None;
                 world.syslog_udp_observer = None;
                 world.producers = client_producers::ScenarioProducers::default();
-                stop_http_receivers(world).await;
+                stop_receivers(world).await;
                 close_browser(world).await;
                 world.active_session = None;
                 world.active_session_node = None;

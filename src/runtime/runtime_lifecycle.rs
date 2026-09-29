@@ -182,6 +182,15 @@ impl Runtime {
         &self.inner.executor
     }
 
+    /// Reserve staging space for an artifact of exactly `length` bytes this node assembles, under
+    /// the same quota incoming snapshot transfers share.
+    pub(crate) async fn stage_artifact(
+        &self,
+        length: u64,
+    ) -> Result<StagedSnapshotWriter, Report<SnapshotStagingError>> {
+        self.inner.snapshot_staging.stage(length).await
+    }
+
     pub(crate) fn dns(&self) -> Option<&DnsResolver> {
         self.inner.dns.as_ref()
     }

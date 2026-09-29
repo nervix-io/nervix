@@ -500,19 +500,26 @@ test-scenarios-coverage: tests-deps
 coverage-report-workspace:
     cargo llvm-cov report --package 'nervix-*' --lcov --output-path lcov.info
 
-# Measure changed server lines against its unit tests and selected Cucumber features while iterating.
-# The full `test-coverage` recipe remains the CI gate for workspace coverage and CRAP.
+# Measure changed server and CLI lines against the server's unit tests and selected Cucumber
+# features while iterating. The scenarios run the public CLI, so it is built instrumented and handed
+# to them exactly as `test-coverage` does. That recipe remains the CI gate for workspace coverage
+# and CRAP.
 test-coverage-feature +features: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov clean --workspace
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
     for feature in {{ features }}; do
         cargo llvm-cov --no-report --features testing --package nervix-server \
             --test scenarios -- --input "${feature}" --concurrency 1
     done
-    cargo llvm-cov report --lcov --output-path lcov.info
+    cargo llvm-cov report --package nervix-cli --package nervix-server --lcov \
+        --output-path lcov.info
 
 # Add client and vocabulary tests to an existing coverage profile without clearing server and
 # public-scenario coverage collected by `test-coverage-feature`.
@@ -573,7 +580,7 @@ coverage-visual-create output="target/visual-create.lcov": tests-deps
         --package nervix-models --package nervix-client-wire --package nervix-nspl
     cargo llvm-cov --no-report --bin nervix-web-console --package nervix-web-console
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
-    for feature in visual_create_schema visual_create_relay visual_create_codec visual_create_client_endpoint; do
+    for feature in visual_create_schema visual_create_relay visual_create_codec visual_create_client_endpoint visual_create_lookup_udf; do
         cargo llvm-cov --no-report --features testing --package nervix-server \
             --test scenarios -- --input "tests/features/web-console/${feature}.feature" \
             --concurrency 1 --retry 0
@@ -794,13 +801,18 @@ bench-vm-alloc *args:
 # Build the reusable harness and forward its CLI arguments. This is enough for container subjects
 # such as Vector; local Nervix has a dedicated recipe below because it also builds the server.
 benchmark *args:
-    just build_mode=release build-server
     cargo build --release --package nervix-benchmark --bins
-    "{{ cargo_target_dir }}/release/nervix-benchmark" {{ args }} --server-binary={{ cargo_target_dir }}/server/release/nervix-server
+    "{{ cargo_target_dir }}/release/nervix-benchmark" {{ args }}
 
 # Focused validation for the benchmark framework without building product binaries.
 test-benchmark-framework *args:
     cargo test --package nervix-benchmark {{ args }}
+
+# Build the pinned Flink image with its matching Kafka SQL connector.
+benchmark-flink-image:
+    docker build --file "{{ justfile_directory() }}/benches/flink/Dockerfile" \
+        --tag nervix-benchmark-flink:2.0.1 \
+        "{{ justfile_directory() }}/benches/flink"
 
 # Build and benchmark the current local Nervix checkout.
 benchmark-nervix-local benchmark_name="kafka-filter-map" *args: build-web-console
@@ -818,7 +830,7 @@ benchmark-nervix-image image benchmark_name="kafka-filter-map" *args:
         --implementation nervix --nervix-mode image --nervix-image {{ quote(image) }} {{ args }}
 
 # Build once, then run every declared workload implementation sequentially with local Nervix.
-benchmark-all-local *args: build-web-console
+benchmark-all-local *args: build-web-console benchmark-flink-image
     cargo build --release \
         --package nervix-server --bin nervix-server \
         --package nervix-benchmark --bins
@@ -866,7 +878,7 @@ benchmark-ab baseline_ref runs="3" benchmark_name="kafka-filter-map" *args: buil
 
 # Build only the benchmark harness, then run it against an already-built Nervix image. The harness
 # configures the server directly through client-core and never rebuilds a product binary.
-benchmark-ci nervix_image artifacts_root *args:
+benchmark-ci nervix_image artifacts_root *args: benchmark-flink-image
     #!/usr/bin/env bash
     set -euo pipefail
     test -S /var/run/docker.sock

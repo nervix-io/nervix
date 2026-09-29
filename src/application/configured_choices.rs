@@ -3,7 +3,7 @@
 //! Layer: edges.
 //!
 //! - **Owns.** Resolving a structured control's question about one domain's configuration — its
-//!   internal schemas, branches, relays, and the fields a relay's records carry — into ordered
+//!   internal schemas, branches, relays, codecs, and the fields their records carry — into ordered
 //!   typed choices, their presentation, and the digest of the definitions a page cursor binds.
 //! - **Depends on.** Vocabulary Models, names, and node references, and the session choice
 //!   contract.
@@ -31,6 +31,7 @@ pub(in crate::application) enum ConfiguredQuestion {
     Schemas,
     Branches,
     Relays,
+    Codecs,
     Vhosts,
     SignalingProtocols,
     WireJsonSchemas,
@@ -40,6 +41,8 @@ pub(in crate::application) enum ConfiguredQuestion {
     CompletedResourceVersions(ResourceName),
     /// The fields of the records the named relay carries.
     RelayFields(NodeRef),
+    /// Fields of the selected codec's output schema.
+    CodecFields(NodeRef),
 }
 
 /// The domain a lookup reads, and what it asks of that domain's configuration.
@@ -51,12 +54,14 @@ pub(in crate::application) struct ConfiguredQuery<'a> {
 
 impl<'a> ConfiguredQuery<'a> {
     /// The query `request` makes, when its target names configuration and its dependencies are
-    /// exactly the ones that target needs: a domain, followed for relay fields by that relay.
+    /// exactly the ones that target needs: a domain, followed for field choices by their relay or
+    /// codec.
     pub(in crate::application) fn of(request: &'a ChoiceLookupRequest) -> Option<Self> {
         let question = match request.target() {
             ChoiceTarget::Schema => ConfiguredQuestion::Schemas,
             ChoiceTarget::Branch => ConfiguredQuestion::Branches,
             ChoiceTarget::Relay => ConfiguredQuestion::Relays,
+            ChoiceTarget::Codec => ConfiguredQuestion::Codecs,
             ChoiceTarget::Vhost => ConfiguredQuestion::Vhosts,
             ChoiceTarget::SignalingProtocol => ConfiguredQuestion::SignalingProtocols,
             ChoiceTarget::WireJsonSchema => ConfiguredQuestion::WireJsonSchemas,
@@ -67,6 +72,7 @@ impl<'a> ConfiguredQuery<'a> {
                 return Self::resource_versions(request.dependencies());
             }
             ChoiceTarget::RelayField => return Self::relay_fields(request.dependencies()),
+            ChoiceTarget::CodecField => return Self::codec_fields(request.dependencies()),
             ChoiceTarget::DomainPace | ChoiceTarget::PlacementPolicy => return None,
         };
         let [
@@ -118,6 +124,27 @@ impl<'a> ConfiguredQuery<'a> {
             question: ConfiguredQuestion::RelayFields(relay.clone()),
         })
     }
+
+    fn codec_fields(dependencies: &'a [ChoiceSelection]) -> Option<Self> {
+        let [
+            ChoiceSelection {
+                value: ChoiceValue::Domain(domain),
+            },
+            ChoiceSelection {
+                value: ChoiceValue::Model(codec),
+            },
+        ] = dependencies
+        else {
+            return None;
+        };
+        if codec.kind != ModelKind::Codec {
+            return None;
+        }
+        Some(Self {
+            domain,
+            question: ConfiguredQuestion::CodecFields(codec.clone()),
+        })
+    }
 }
 
 /// The choices a question resolved to, and a digest of every definition that decided them.
@@ -162,7 +189,7 @@ impl ConfiguredChoices {
 
     /// Resolves `question`, keeping the candidates whose label contains `search` in any case.
     ///
-    /// Models are ordered by name. A relay's fields keep the order its schema declares them in,
+    /// Models are ordered by name. Record fields keep the order their schema declares them in,
     /// because that order is part of the schema.
     pub(in crate::application) fn resolve(
         &self,
@@ -174,12 +201,14 @@ impl ConfiguredChoices {
             ConfiguredQuestion::Schemas
             | ConfiguredQuestion::Branches
             | ConfiguredQuestion::Relays
+            | ConfiguredQuestion::Codecs
             | ConfiguredQuestion::Vhosts
             | ConfiguredQuestion::SignalingProtocols
             | ConfiguredQuestion::WireJsonSchemas
             | ConfiguredQuestion::WireCborSchemas
             | ConfiguredQuestion::WireAvroSchemas => self.models(question, &search),
             ConfiguredQuestion::RelayFields(relay) => self.relay_fields(relay, &search),
+            ConfiguredQuestion::CodecFields(codec) => self.codec_fields(codec, &search),
             ConfiguredQuestion::Resources => self.resources(&search),
             ConfiguredQuestion::CompletedResourceVersions(resource) => {
                 self.completed_versions(resource, &search)
@@ -203,6 +232,12 @@ impl ConfiguredChoices {
                     ModelCandidate::branch(branch)?
                 }
                 (ConfiguredQuestion::Relays, Model::Relay(relay)) => ModelCandidate::relay(relay)?,
+                (ConfiguredQuestion::Codecs, Model::Codec(codec)) => ModelCandidate::new(
+                    NodeRef::new(ModelKind::Codec, &codec.name),
+                    format!("output schema {}", codec.schema),
+                    "Codec",
+                    Model::<RequestedResourceVersion>::Codec(codec.clone()).to_canonical_nspl(),
+                )?,
                 (ConfiguredQuestion::Vhosts, Model::Vhost(vhost)) => ModelCandidate::new(
                     NodeRef::new(ModelKind::Vhost, &vhost.name),
                     format!("{} hostnames", vhost.hostnames.len()),
@@ -392,7 +427,7 @@ impl ConfiguredChoices {
         hash_choice_text(&mut digest, &schema_definition);
         let mut choices = Vec::new();
         for field in &schema.fields {
-            let choice = Self::field_choice(field);
+            let choice = Self::field_choice(field, "Relay field");
             if choice.presentation.label.to_lowercase().contains(search) {
                 choices.push(choice);
             }
@@ -403,9 +438,38 @@ impl ConfiguredChoices {
         })
     }
 
+    fn codec_fields(&self, codec: &NodeRef, search: &str) -> Result<ResolvedChoices, ChoiceStatus> {
+        let Some(Model::Codec(codec)) = self.models.get(codec) else {
+            return Err(ChoiceStatus::MissingContext);
+        };
+        let schema_ref = NodeRef::new(ModelKind::Schema, &codec.schema);
+        let Some(Model::Schema(schema)) = self.models.get(&schema_ref) else {
+            return Err(ChoiceStatus::LookupFailed);
+        };
+        let codec_definition = codec
+            .to_canonical_nspl()
+            .map_err(|_| ChoiceStatus::LookupFailed)?;
+        let schema_definition = schema
+            .to_canonical_nspl()
+            .map_err(|_| ChoiceStatus::LookupFailed)?;
+        let mut digest = blake3::Hasher::new();
+        hash_choice_text(&mut digest, &codec_definition);
+        hash_choice_text(&mut digest, &schema_definition);
+        let choices = schema
+            .fields
+            .iter()
+            .map(|field| Self::field_choice(field, "Codec field"))
+            .filter(|choice| choice.presentation.label.to_lowercase().contains(search))
+            .collect();
+        Ok(ResolvedChoices {
+            choices,
+            content_digest: digest.finalize().to_hex().to_string(),
+        })
+    }
+
     /// A field offered by name, presented with its exact type and modifiers as its schema declares
     /// them.
-    fn field_choice(field: &SchemaField) -> Choice {
+    fn field_choice(field: &SchemaField, group: &str) -> Choice {
         let mut detail = field.ty.to_string();
         if field.optional {
             detail.push_str(" OPTIONAL");
@@ -418,7 +482,7 @@ impl ConfiguredChoices {
             presentation: ChoicePresentation {
                 label: field.name.to_string(),
                 detail: Some(detail),
-                group: Some("Relay field".to_string()),
+                group: Some(group.to_string()),
             },
         }
     }
@@ -502,10 +566,11 @@ mod tests {
         ChoiceLookupRequest, ChoiceSelection, ChoiceStatus, ChoiceTarget, ChoiceValue,
     };
     use nervix_models::{
-        AvroType, BranchEviction, BranchName, CreateBranch, CreateRelay, CreateSchema,
-        CreateSignalingProtocol, CreateVhost, CreateWireSchema, DomainName, FieldName, JsonType,
-        MaterializedRelayState, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayBranching,
-        RelayName, RequestedResourceVersion, ResourceName, ResourceUpload, ResourceUploadIdentity,
+        AvroType, BranchEviction, BranchName, CodecName, CodecWireFormat, CreateBranch,
+        CreateCodec, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost,
+        CreateWireSchema, DomainName, FieldName, JsonType, MaterializedRelayState, Model,
+        ModelKind, ModelName, NodeRef, ParseAsType, RelayBranching, RelayName,
+        RequestedResourceVersion, ResourceName, ResourceUpload, ResourceUploadIdentity,
         ResourceUploadKey, ResourceUploadState, ResourceUploads, ResourceVersionCounter,
         ResourceVersionStatus, SchemaField, SchemaName, SignalingProtocolName,
         SignalingProtocolOnConnect, SignalingStep, SignalingWireFormat, UserName, VhostName,
@@ -714,6 +779,109 @@ mod tests {
             schemas.choices[0].presentation.detail.as_deref(),
             Some("3 fields")
         );
+    }
+
+    #[test]
+    fn codec_and_its_output_fields_use_the_same_domain_snapshot() {
+        let domain = domain();
+        let schema = CreateSchema {
+            name: SchemaName::parse("lookup_entry").assured("valid schema"),
+            fields: vec![
+                SchemaField {
+                    name: FieldName::parse("id").assured("valid field"),
+                    ty: ParseAsType::String,
+                    optional: false,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: FieldName::parse("value").assured("valid field"),
+                    ty: ParseAsType::I64,
+                    optional: true,
+                    sensitive: true,
+                },
+            ],
+        };
+        let codec = CreateCodec::<RequestedResourceVersion> {
+            name: CodecName::parse("lookup_codec").assured("valid codec"),
+            wire_format: CodecWireFormat::Json {
+                wire_schema: WireSchemaName::parse("lookup_wire").assured("valid wire schema"),
+            },
+            schema: schema.name.clone(),
+            encoding_rules: Vec::new(),
+        };
+        let codec_ref = NodeRef::new(ModelKind::Codec, &codec.name);
+        let configured = ConfiguredChoices::new(
+            domain.clone(),
+            vec![Model::Schema(schema), Model::Codec(codec)],
+            ResourceVersionStatus::default(),
+            Vec::new(),
+        );
+        let codec_request = ChoiceLookupRequest::new(
+            ChoiceTarget::Codec,
+            vec![ChoiceSelection {
+                value: ChoiceValue::Domain(domain.clone()),
+            }],
+            String::new(),
+        );
+        let codec_query = ConfiguredQuery::of(&codec_request).assured("codec asks in one domain");
+        let codecs = configured
+            .resolve(&codec_query.question, "LOOKUP")
+            .assured("codec resolves");
+        assert_eq!(codecs.choices.len(), 1);
+        assert_eq!(
+            codecs.choices[0].value,
+            ChoiceValue::Model(codec_ref.clone())
+        );
+        let fields_request = ChoiceLookupRequest::new(
+            ChoiceTarget::CodecField,
+            vec![
+                ChoiceSelection {
+                    value: ChoiceValue::Domain(domain.clone()),
+                },
+                ChoiceSelection {
+                    value: ChoiceValue::Model(codec_ref.clone()),
+                },
+            ],
+            String::new(),
+        );
+        let fields_query = ConfiguredQuery::of(&fields_request)
+            .assured("codec fields require domain and typed codec");
+        let fields = configured
+            .resolve(&fields_query.question, "")
+            .assured("codec output schema resolves");
+        assert_eq!(fields.choices[0].presentation.label, "id");
+        assert_eq!(
+            fields.choices[1].presentation.detail.as_deref(),
+            Some("I64 OPTIONAL SENSITIVE")
+        );
+        assert_eq!(
+            configured
+                .resolve(
+                    &ConfiguredQuestion::CodecFields(NodeRef::new(
+                        ModelKind::Codec,
+                        ModelName::parse("missing").assured("valid name"),
+                    )),
+                    ""
+                )
+                .err(),
+            Some(ChoiceStatus::MissingContext)
+        );
+        let wrong_kind = ChoiceLookupRequest::new(
+            ChoiceTarget::CodecField,
+            vec![
+                ChoiceSelection {
+                    value: ChoiceValue::Domain(domain),
+                },
+                ChoiceSelection {
+                    value: ChoiceValue::Model(NodeRef::new(
+                        ModelKind::Relay,
+                        ModelName::parse("lookup_codec").assured("valid name"),
+                    )),
+                },
+            ],
+            String::new(),
+        );
+        assert_eq!(ConfiguredQuery::of(&wrong_kind), None);
     }
 
     #[test]

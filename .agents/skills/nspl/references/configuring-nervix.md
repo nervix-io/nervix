@@ -37,6 +37,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
 | Session subscriptions and domain clock attachment | `Sessions`; `Command Line Client` for the CLI `subscribe` and `domain-clock` streams |
+| Configuration backups, their archives, and `DESCRIBE BACKUP` | `Backup And Restore` |
 | Metrics and runtime inspection | `Metrics And Observability` |
 | Full graph examples | `Examples` |
 | WASM guest ABI and output timing | `WASM Processor Guests` |
@@ -87,8 +88,8 @@ Use separate execution phases so transaction and active-domain rules stay clear.
    queued prefix without applying its effect; a rejection can be corrected before commit. Queued
    model mutations report their own preflighted quiesce levels, and `COMMIT` reports only the
    maximum level actually executed. `CREATE DOMAIN`, `CREATE USER`, other read-only statements,
-   subscriptions, domain clock attachment, uploads, and node administration remain outside the
-   transaction.
+   subscriptions, domain clock attachment, uploads, backups, and node administration remain
+   outside the transaction.
    `DESCRIBE TRANSACTION;` and `SHOW TRANSACTIONS;` run on their own beside an open transaction;
    they read impact or status without becoming content or shifting operation numbers.
 5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended. A
@@ -198,7 +199,9 @@ relay. Do not use them to scan across branches.
   A batching OTEL emitter bounds each export request by the number of successfully mapped source
   records and the exact uncompressed protobuf size, including resource and scope. An oversized
   candidate is divided and an oversized singleton follows `ON MESSAGE ERROR`; without the clause,
-  OTEL keeps one export request per pending Arrow batch. A batching Sentry emitter places its
+  OTEL keeps one export request per pending Arrow batch. With or without it, a request whose outcome
+  is unknown, such as one that timed out or lost its response, is retried with the same bytes and
+  records rather than prepared again. A batching Sentry emitter places its
   members inside one event in one envelope, and a `SYSLOG` codec places complete member messages
   in one frame's JSON-array `MSG`.
   SQS `.fifo` queue names and `FIFO GROUP` appear together, and `FIFO GROUP FROM BRANCH` is used
@@ -322,6 +325,10 @@ Choose checks relevant to the configured graph:
   `nervix_branch_evictions_total` split by `reason="lru"` or `reason="ttl"`.
 - `DESCRIBE RESOURCE` confirms uploads and reports `latest`, the completed version `VERSION LATEST`
   would bind now; `SHOW CREATE` shows the version each existing binding stores.
+- `BACKUP CLUSTER TO '<file>';` or `BACKUP DOMAIN [<name>] TO '<file>' [WITHOUT RESOURCES];` writes
+  a configuration archive on the client's machine, sent alone from `nervix-cli` or a native
+  client; `DESCRIBE BACKUP '<file>';` verifies one offline and lists its domains, users, and
+  resource versions with the checksums `DESCRIBE RESOURCE` reports. Treat an archive as a secret.
 - `SHOW UDFS`, `DESCRIBE UDF <name>`, and `SHOW CREATE UDF <name>` inspect trusted Roto functions.
   Creation itself is the test gate: a rejecting Roto `test` block prevents persistence.
 - `SHOW PLACEMENTS`, `DESCRIBE PLACEMENT <name>`, `SHOW CREATE PLACEMENT <name>`, and
@@ -341,6 +348,9 @@ Choose checks relevant to the configured graph:
   values: the mapping and tick frontier show which logical centers the admission window has reached.
 - `nervix-cli --domain <domain> domain-clock` follows that clock from a shell until Ctrl-C,
   printing the attach reply, state changes, and tick lines.
+- A host using the shared C binding executes attach and detach through `nx_session_execute` and
+  reads later states and ticks with `nx_session_next_clock_event`; the binding does not expose the
+  initial state from the attach reply as a typed outcome.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.
 - `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
   expiry outcomes.

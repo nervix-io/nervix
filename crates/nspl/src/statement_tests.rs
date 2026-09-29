@@ -341,7 +341,7 @@ fn gen_json_path(g: &mut ByteGen) -> nervix_models::JsonPath {
     JsonPath::new(steps).expect("the generator takes fewer steps than a path allows")
 }
 
-fn gen_model(bytes: &[u8]) -> Model<RequestedResourceVersion> {
+pub(crate) fn gen_model(bytes: &[u8]) -> Model<RequestedResourceVersion> {
     let mut g = ByteGen::new(bytes);
     match g.next_u8() % 30 {
         0 => {

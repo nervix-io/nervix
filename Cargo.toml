@@ -104,6 +104,7 @@ indexmap = { workspace = true }
 meticulous = { workspace = true }
 multer = { workspace = true }
 nervix-approx-into = { workspace = true }
+nervix-backup = { workspace = true }
 nervix-bounded-write = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-client-wire = { workspace = true }
@@ -216,6 +217,7 @@ aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 criterion = { workspace = true }
 cucumber = { workspace = true, features = ["libtest"] }
 flatbuffers = { workspace = true }
+flate2 = { workspace = true }
 h2 = { workspace = true }
 http = { workspace = true }
 httparse = { workspace = true }
@@ -230,6 +232,15 @@ nervix-client-core = { workspace = true, features = ["arrow"] }
 nervix-client-ffi = { workspace = true }
 nervix-test-environment = { workspace = true }
 nix = { workspace = true, features = ["signal"] }
+# The features the OTEL connector builds the crate with, so the scenarios decode the Export
+# requests it sends without compiling the crate a second time.
+opentelemetry-proto = { workspace = true, features = [
+  "gen-tonic",
+  "logs",
+  "metrics",
+  "trace",
+] }
+otel-prost = { workspace = true }
 playwright-rs = { workspace = true }
 pulsar = { workspace = true }
 rcgen = { workspace = true }
@@ -278,6 +289,7 @@ required-features = ["benchmarks"]
 members = [
   ".",
   "crates/approx-into",
+  "crates/backup",
   "crates/benchmark",
   "crates/bounded-write",
   "crates/client-core",
@@ -484,6 +496,7 @@ mongodb = { version = "3.6.0", default-features = false, features = [
 multer = "3"
 mysql_async = "0.36.2"
 nervix-approx-into = { package = "nervix-approx-into", path = "crates/approx-into" }
+nervix-backup = { package = "nervix-backup", path = "crates/backup" }
 nervix-bounded-write = { package = "nervix-bounded-write", path = "crates/bounded-write" }
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-client-ffi = { package = "nervix-client-ffi", path = "crates/client-ffi" }
@@ -745,6 +758,8 @@ opt-level = 3
 [profile.dev.package."arrow-string"]
 opt-level = 3
 [profile.dev.package."roto"]
+opt-level = 3
+[profile.dev.package."blake3"]
 opt-level = 3
 [profile.dev.package."cranelift-codegen"]
 opt-level = 3

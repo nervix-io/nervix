@@ -496,7 +496,8 @@ acknowledged source redelivers the record after the restart.
 An emitter reaches the sink completion point its `MODE` declares, and the drain waits for it. An
 emitter that cannot finish reports `emitter '<name>' did not drain before its configured deadline`
 and holds the drain until the timeout. A batching emitter's drain also writes every batch payload an
-earlier attempt left unanswered, with the bytes and members it was first written with, and the
+earlier attempt left unanswered, with the bytes and members it was first written with, as an OTEL
+emitter's drain sends every Export request it prepared and did not learn the outcome of, and the
 emitter buffer counts those members as work the node still holds until they resolve.
 
 Kafka is the only sink whose client-side queue shutdown drains explicitly: after its buffered
@@ -696,6 +697,11 @@ and starts no further lifetime.
 A new leader reconciles durable handoff preparations after a coordinator or participant is lost, as
 described above. Resource uploads that were staged but never promoted are removed at startup, so an
 upload interrupted by a forced ending leaves no partial version behind.
+
+A backup archive a node retains for download is a temporary file in its staging area and is never
+durable. Stopping the node, gracefully or not, loses it: a later download is refused, while the
+backup's recorded outcome stays retained under its execution reference. See
+[Backup And Restore](./backup-and-restore.md#downloading-the-archive).
 
 ### Domain Time
 

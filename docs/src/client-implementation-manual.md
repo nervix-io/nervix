@@ -3,7 +3,7 @@
 This manual is the normative contract for a program that speaks the Nervix client session protocol.
 It states what an implementation must do to frame and verify messages, correlate requests, recover
 commands exactly, follow the leader, hold a transaction, read subscriptions without misreading a
-value, publish batches through producers, and upload resources. [Client Session Protocol](./client-session-protocol.md) explains why
+value, publish batches through producers, upload resources, and download backups. [Client Session Protocol](./client-session-protocol.md) explains why
 the system behaves this way. This manual does not repeat those reasons, and the chapter does not
 repeat these rules.
 
@@ -67,7 +67,8 @@ Unsolicited `ServerMessage` bodies carry no request identity:
 | `ProducerAdmissionChanged`, `ProducerEnded` | The admission state and the end of one producer |
 | `SessionEnding` | The last frame of a session the server ends |
 
-An upload is a separate call with its own frames; see [Resource Uploads](#resource-uploads).
+An upload is a separate call with its own frames; see [Resource Uploads](#resource-uploads). So is
+the download of a backup's archive; see [Backup Downloads](#backup-downloads).
 
 ## Frames
 
@@ -178,9 +179,10 @@ An upload is a separate call with its own frames; see [Resource Uploads](#resour
 ## Structured Choice Lookups
 
 - **Q-1.** A client that sends `ChoiceLookupRequest` MUST use the target's typed dependencies:
-  domain for internal schema, branch, relay, VHOST, signaling protocol, JSON/CBOR/AVRO wire
+  domain for internal schema, branch, relay, codec, VHOST, signaling protocol, JSON/CBOR/AVRO wire
   schema, or resource choices;
-  domain followed by a relay `Model` reference for relay fields; and domain followed by a
+  domain followed by a relay `Model` reference for relay fields; domain followed by a codec
+  `Model` reference for the fields of its output schema; and domain followed by a
   `Resource` reference for completed resource versions. It MUST use the distinct wire-schema
   targets when a form requires an exact format.
 - **Q-2.** A client MUST use the returned `ChoiceValue`, rather than its presentation label, for
@@ -204,6 +206,8 @@ use.
 | `ATTACH DOMAIN CLOCK` | `AttachDomainClockRequest` for the selected domain |
 | `DETACH DOMAIN CLOCK` | `DetachDomainClockRequest` for the selected domain |
 | `UPLOAD RESOURCE ...` | An `UploadResource` call |
+| `BACKUP ...` | `CommandRequest`, then a `DownloadBackup` call for the archive its outcome summarizes |
+| `DESCRIBE BACKUP ...` | Nothing: the client reads the archive file itself. Sent as a command, it is refused. |
 | Every other statement | `CommandRequest` |
 
 - **L-1.** A client MUST put the selected domain in every `CommandRequest`, or leave `domain` absent
@@ -491,6 +495,37 @@ payload, infinity, and nullable and sensitive branch key fields.
   upload's outcome is uncertain. A client MUST send the whole archive again under the same identity
   to learn it, and MUST NOT create a new identity for it.
 
+## Backup Downloads
+
+- **A-1.** A client MUST send `BACKUP` as a `CommandRequest` on its own, under an execution reference
+  that follows E-1 to E-4, and MUST download the archive only after a `CommandCompleted` outcome
+  that carries a `backup` summary. It MUST keep the reference and the summary until the archive is
+  downloaded or its retention ends.
+- **A-2.** A client MUST download one archive per `DownloadBackup` call, sending exactly one
+  `BackupDownloadRequest` that names the backup's execution reference. The answer is one
+  `BackupDownloadFailed` or `LeaderRedirect` frame, or a `BackupArchiveStart`, the archive as
+  `BackupArchiveChunk` frames in order, and a `BackupArchiveComplete`. Any other order is a protocol
+  violation.
+- **A-3.** A client MUST check that the start's size and digest equal the summary's, MUST refuse an
+  archive that grows past that size, and MUST accept the archive only after `BackupArchiveComplete`
+  arrived and the bytes it received have exactly the summary's size and BLAKE3 digest.
+- **A-4.** A client MUST NOT expose a partial or unverified archive under the name the user asked
+  for, and SHOULD write the archive so that only its owner can read it: an archive holds password
+  hashes and secrets.
+- **A-5.** A client MUST act on the answer:
+  - `LeaderRedirect` means the client downloads again from the leader, or backs off when no leader
+    endpoint is named.
+  - `BackupDownloadFailed` with `Expired`, `NotOwner`, `NotRetained`, or `InvalidRequest` is final
+    for this archive, and the client MUST NOT present it as a failure of the backup itself, which
+    completed.
+  - `BackupDownloadFailed` with `ReadFailed` leaves the archive retained, and the client MAY download
+    it again.
+- **A-6.** When a call fails in transport, stalls, or ends before `BackupArchiveComplete`, a client
+  MAY download the archive again, always from its first byte. It MUST NOT bound a download by the
+  command's request deadline, and SHOULD bound the wait for each frame instead. A client that lost
+  the outcome of `BACKUP` itself repeats the command under the same reference, as E-3 requires, to
+  recover the summary.
+
 ## Using The Shared Binding
 
 A host of `nervix-client-ffi` follows the contract in `crates/client-ffi/include/nervix_client.h`
@@ -512,6 +547,16 @@ and these rules:
   or bytes column it first passes a null data buffer to learn the size it needs.
 - **B-7.** A host MUST treat `NX_EVENT_INTERRUPTED` as a gap in every subscription it names, and
   `NX_EVENT_CONSUMER_OVERFLOW` as the end of that subscription's delivery on this session.
+- **B-8.** A host that runs `BACKUP` through `nx_session_execute` receives the archive in the file
+  the statement names, and reads its size and digest with `nx_outcome_backup`. After an error that
+  names the backup's execution reference, the host MAY execute the same `nx_execution` again, which
+  recovers the backup's outcome and downloads its archive while the server retains it.
+- **B-9.** A host MUST release every `nx_clock_event` that `nx_session_next_clock_event` or
+  `nx_clock_event_retain` returns exactly once, and MAY release it on any thread. It MUST treat
+  `NX_CLOCK_EVENT_INTERRUPTED` as a gap in that domain's clock: the state event that follows
+  reports the clock the restored attachment found, and the changes and ticks in between are not
+  reported. [Rust Client Library](./client-library.md#through-the-shared-c-binding) lists the
+  accessors of each event kind.
 
 ## Required State Machines
 
@@ -620,12 +665,15 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | X-6 | `A session whose leader lost its binding re-attaches instead of failing` and `Attaching from a second session takes over an open transaction` in `nspl_transactions.feature`; `a_detached_transaction_is_attached_again_before_the_command_is_retried` |
 | X-7, X-8 | `A clean session close reverts its open transaction` and `An orphaned transaction expires and retains its outcome` in `nspl_transactions.feature`; `A stalled commit cannot block expiry, another domain, or tombstone cleanup` in `client_wire_failures.feature`; `Physical inactivity while every node is stopped expires an open transaction` in `client_wire_process_restart.feature` |
 | S-1 to S-6 | Every scenario of `session_subscription_lifecycle.feature` and `session_subscription_options.feature`; `Published interest starts, reopens, and stops remote subscription fan-out` in `subscription_interest.feature`; `Web console ends a relay tab the server ended and resubscribes it on request` in `nspl_repl.feature`; `a_subscription_type_must_be_selected_and_supported` and, in the console, `a_generation_the_server_ended_ends_its_tab_which_keeps_its_rows_and_is_not_restored` |
-| S-7, S-8 | `A reconnected native client restores acknowledged subscriptions` in `client_wire_failures.feature`; `Subscription restoration and typed transaction inspection survive the same leader loss` in `client_wire_qualification.feature`; `Web console restores a relay tab after its transaction finished while it reconnected`, `Web console restores a relay tab before it attaches its open transaction again`, and `Web console bounds a busy relay tab and keeps its REPL responsive` in `nspl_repl.feature`; `deleting_while_creation_is_in_flight_drains_its_late_success_before_name_reuse`, `cancelling_an_in_flight_restore_cleans_up_its_late_success`, and `one_subscription_overflow_preserves_other_subscription_events` |
+| S-7, S-8 | `A reconnected native client restores acknowledged subscriptions` and `A native client keeps a subscription active while it receives a row that fills most of a frame` in `client_wire_failures.feature`; `Subscription restoration and typed transaction inspection survive the same leader loss` in `client_wire_qualification.feature`; `Web console restores a relay tab after its transaction finished while it reconnected`, `Web console restores a relay tab before it attaches its open transaction again`, and `Web console bounds a busy relay tab and keeps its REPL responsive` in `nspl_repl.feature`; `deleting_while_creation_is_in_flight_drains_its_late_success_before_name_reuse`, `cancelling_an_in_flight_restore_cleans_up_its_late_success`, `one_subscription_overflow_preserves_other_subscription_events`, `each_subscription_retains_a_frame_of_the_frame_limit_and_overflows_alone_past_it`, `a_subscription_past_the_exchange_allowance_overflows_without_evicting_full_subscriptions`, and `a_row_frame_filled_to_the_frame_limit_reaches_an_active_subscription` |
 | R-1 to R-5 | `A <runtime> client round-trips an operation, typed rows, an error and a closure` in `client_conformance.feature` for every runtime; `a_batch_round_trips_every_cell_kind_at_its_bounds`, `cells_must_follow_their_fields`, `branch_identity_must_match_the_schema`, and `lists_must_follow_their_element_type_and_length`; `a_batch_that_does_not_conform_to_its_schema_is_a_protocol_failure` in the binding |
-| K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; the state, tick, and client pacing outlines in `domain_clock_attachment.feature`; the owner-loss case in `domain_clock_contract.feature`; `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock`, `ticks_coalesce_per_domain_and_follow_their_generations_state`, and the `server_domain_clock_ticked.nxsm` conformance frame |
+| K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; the state, tick, and client pacing outlines in `domain_clock_attachment.feature`; the owner-loss case in `domain_clock_contract.feature`; `A <runtime> client follows a paced domain clock through the shared binding` in `client_conformance.feature` for every binding host; `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock`, `ticks_coalesce_per_domain_and_follow_their_generations_state`, and the `server_domain_clock_ticked.nxsm` conformance frame |
 | P-1 to P-8 | Every scenario of `client_ingestors.feature`; `events_reach_the_producer_of_their_own_exchange_only` and `the_backoff_doubles_up_to_its_maximum` in `nervix-client-core`; `every_open_refusal_round_trips`, `every_submission_outcome_round_trips`, `producer_events_round_trip_and_name_no_request`, and `the_largest_submitted_batch_fits_a_frame_and_one_byte_more_does_not` in `nervix-client-wire`; the `client_open_ingestor.nxcm`, `client_submit_batch.nxcm`, `server_ingestor_opened.nxsm`, `server_submission_*.nxsm`, and `server_producer_*.nxsm` conformance frames |
 | U-1 to U-5 | `An upload stream the protocol does not allow is refused with a typed failure and admits nothing` in `session_protocol.feature`; in `resource_describe.feature`, `An incomplete upload does not admit content or consume its identity`, `Upload retry reports one assigned version`, `Upload retry after leader change reports the assigned version`, and `An uncertain upload completes once across installation and leader change`; `a_lost_upload_reply_retries_with_the_same_identity_and_archive` and `malformed_upload_replies_are_rejected_by_their_correlations` |
+| A-1 to A-6 | Every scenario of `backup.feature`, including `A client that loses its download fetches the archive again until a download collects it`, `An archive is refused once its execution reference's retry validity ends`, and `Downloads of another user's backup, or under a reference without an archive, are refused`; `every_download_frame_round_trips` and `a_download_request_with_an_invalid_reference_is_refused` in `nervix-client-wire`; the `backup_download_*` conformance frames |
 | B-1 to B-7 | The binding tests of `nervix-client-ffi`, such as `retained_references_keep_the_frame_until_the_last_one_is_released`, `string_and_bytes_columns_are_copied_with_offsets_and_borrowed_per_cell`, and `a_token_bounds_a_call_by_cancellation_and_by_deadline`; the C, C++, Python, Java, and Ruby cases of `client_conformance.feature` |
+| B-8 | `a_backup_outcome_reports_its_archive` and `client_errors_are_classified_and_keep_their_causes` in `nervix-client-ffi` |
+| B-9 | `a_retained_clock_event_outlives_a_reference_released_on_another_thread` and `a_session_reads_every_clock_event_kind_and_bounds_its_wait` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for C, C++, Python, Java, and Ruby |
 
 ### Executable Examples
 
@@ -643,6 +691,9 @@ are not UUIDv7, which E-1 allows only for reads.
 | `tests/client_conformance/python/probe.py` | The binding through `ctypes`, with a `memoryview` over a retained frame |
 | `tests/client_conformance/java/Probe.java` | The binding through the Foreign Function and Memory API, with arena-owned events |
 | `tests/client_conformance/ruby/probe.rb` | The binding through Fiddle, with collector-driven release |
+
+Run with the `clock` argument, each binding probe follows a paced domain clock instead: it attaches,
+reads the state and the first tick of the generation the scenario starts, and detaches.
 
 `just test-client-conformance` builds every probe and runs it against one- and three-node clusters;
 [`tests/client-conformance-ledger.md`](https://github.com/nervix-io/nervix/blob/main/tests/client-conformance-ledger.md)
@@ -695,4 +746,6 @@ A client built on this protocol MUST NOT tell its users that:
 - a session, its subscriptions, its clock attachments, or its producers survive the loss of its
   connection;
 - a submitted batch was delivered exactly once, or that a batch whose outcome is unknown or failed
-  had no effect.
+  had no effect;
+- a backup's archive can be downloaded more than once, or survives a restart of the node that
+  assembled it.

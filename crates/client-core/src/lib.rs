@@ -5,7 +5,7 @@
 //! - **Owns.** Connecting to the session service, TLS selection, the dispatcher that pairs every
 //!   reply of a session exchange with the request it answers, submitting statements, transaction
 //!   state, completion suggestions, subscription streams, the domain clocks the session follows,
-//!   the producers it opens against client ingestors, and resource upload.
+//!   the producers it opens against client ingestors, resource upload and backup download.
 //! - **Depends on.** The session wire contract, the language layer — an edge may name the parser,
 //!   and this one does so for client-side parsing and completion — and the vocabulary.
 //! - **Must not know.** The registry, the runtime, or anything else inside the server. Everything
@@ -16,6 +16,7 @@ extern crate shuttle_tokio as tokio;
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio_stream as tokio_stream;
 
+mod backup;
 mod client;
 mod connection;
 mod domain_clock;
@@ -29,6 +30,7 @@ mod shuttle_test;
 mod subscriptions;
 mod upload;
 
+pub use backup::BackupDownloadError;
 pub use client::{Client, ExecutionHandle};
 pub use connection::{ConnectOptions, TlsRequirement};
 pub use domain_clock::{
@@ -53,16 +55,16 @@ pub use nervix_client_wire::{
     SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause, UploadFailure,
 };
 pub use nervix_models::{
-    AckWindow, ClientAttachmentId, ClientBatchDefect, ClientEndpointContract,
-    ClientProcessingFailure, ClientProducerAdmission, ClientProducerDescription,
-    ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy,
-    ClientProducerRefusal, ClientSubmissionRefusal, CommandExecutionReference,
-    DomainAdmissionWindow, DomainClockObservation, DomainClockObservedState,
-    DomainClockTickObservation, DomainName, ImpactPlanningBasis, IngestorName, PacedDomainClock,
-    ResourceUploadIdentity, SchemaField, SubscriptionDeliveryBehavior, Timestamp,
-    TransactionImpactReport, TransactionInspection, TransactionLifecycle,
-    TransactionOperationAdmission, TransactionOperationNumber, TransactionPosition,
-    TransactionPreviewIdentity, TransactionStatus,
+    AckWindow, ArchiveDigest, BackupArchiveSummary, BackupDomainSummary, BackupResources,
+    ClientAttachmentId, ClientBatchDefect, ClientEndpointContract, ClientProcessingFailure,
+    ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
+    ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy, ClientProducerRefusal,
+    ClientSubmissionRefusal, CommandExecutionReference, DomainAdmissionWindow,
+    DomainClockObservation, DomainClockObservedState, DomainClockTickObservation, DomainName,
+    ImpactPlanningBasis, IngestorName, PacedDomainClock, ResourceUploadIdentity, SchemaField,
+    SubscriptionDeliveryBehavior, Timestamp, TransactionImpactReport, TransactionInspection,
+    TransactionLifecycle, TransactionOperationAdmission, TransactionOperationNumber,
+    TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
 };
 pub use outcome::{CommandOutcome, ResourceUploadOutcome};
 pub use producer::{

@@ -2,16 +2,15 @@
 //!
 //! - **Owns.** The kinds of failure the header names, how every client error is classified into
 //!   one, and the message and execution reference a host reads from it.
-//! - **Depends on.** The Rust client's errors.
+//! - **Depends on.** The Rust client's errors and the reports that carry them.
 //! - **Must not know.** How a host reacts to a failure.
 //!
 //! A failure is the reporting boundary of the binding: the client's typed error, with every cause
 //! behind it, becomes the message a host displays, and its classification becomes the kind a host
 //! branches on.
 
-use std::error::Error as _;
-
-use nervix_client_core::{ClientError, CommandExecutionReference};
+use error_stack::Report;
+use nervix_client_core::{BackupDownloadError, ClientError, CommandExecutionReference};
 
 use crate::abi;
 
@@ -126,27 +125,49 @@ impl Failure {
             | ClientError::ExecutionReferenceMismatch { .. }
             | ClientError::UploadIdentityMismatch { .. } => FailureKind::Protocol,
             ClientError::SessionClosed => FailureKind::Closed,
+            ClientError::BackupDownload { source, .. } => Self::classify_download(source),
+        }
+    }
+
+    /// The kind a failed backup download reports, by why it failed.
+    fn classify_download(error: &BackupDownloadError) -> FailureKind {
+        match error {
+            BackupDownloadError::Refused { .. } => FailureKind::Rejected,
+            BackupDownloadError::Transport { .. }
+            | BackupDownloadError::Stalled
+            | BackupDownloadError::Interrupted
+            | BackupDownloadError::NoLeader
+            | BackupDownloadError::RedirectLoop
+            | BackupDownloadError::SessionLost => FailureKind::Transport,
+            BackupDownloadError::OutOfOrder
+            | BackupDownloadError::InvalidFrame(_)
+            | BackupDownloadError::Mismatch => FailureKind::Protocol,
+            BackupDownloadError::EncodeRequest(_) | BackupDownloadError::Write { .. } => {
+                FailureKind::InvalidArgument
+            }
         }
     }
 }
 
 impl From<ClientError> for Failure {
     fn from(error: ClientError) -> Self {
-        let kind = Self::classify(&error);
-        let mut message = error.to_string();
-        let mut cause = error.source();
-        while let Some(current) = cause {
-            message.push_str(": ");
-            message.push_str(&current.to_string());
-            cause = current.source();
-        }
+        Self::from(Report::new(error))
+    }
+}
+
+impl From<Report<ClientError>> for Failure {
+    fn from(report: Report<ClientError>) -> Self {
+        let error = report.current_context();
         let execution_reference = match error {
-            ClientError::UncertainCommand { reference, .. } => Some(reference),
+            ClientError::UncertainCommand { reference, .. }
+            | ClientError::BackupDownload { reference, .. } => Some(reference.clone()),
             _ => None,
         };
         Self {
-            kind,
-            message,
+            kind: Self::classify(error),
+            // The alternate form joins every context of the report, and a report holds the causes
+            // of the error it was created from as contexts of their own.
+            message: format!("{report:#}"),
             execution_reference,
         }
     }

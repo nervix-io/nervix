@@ -11,12 +11,9 @@
 //! - **Must not know.** NSPL text, transactions, the gRPC surface or consensus. It is told what to
 //!   run and runs it.
 //!
-//! Generator, lookup, WASM, emitter, UDF compilation, relay transition, relay state replication
-//! and message-error paths still read Models directly instead of consuming plans, and `just
-//! ratchet` counts those remaining violations. Processor tasks consume published typed plans, and
-//! ingestors and reingestors start from the entrypoint plans each domain installs with its
-//! schedule. This module also holds the connectors themselves rather than hosting them; moving each
-//! integration into its connector crate closes that violation.
+//! Schedule coordination and one state-replication path still read Models directly; `just ratchet`
+//! counts the remaining direct matches. Processor tasks, entrypoints, emitters and message-error
+//! delivery consume prepared typed plans. This module also holds connector host composition.
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -65,9 +62,9 @@ use nervix_interconnect::{
     Transport, WasmStateResetTarget,
 };
 use nervix_models::{
-    AckMode, Assignment, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClientConfigEntry,
-    ClientName, ClientProducerEndReason, ClientResourceMount, ClusterNodeIncarnation,
-    ClusterNodeName, ClusterSchedule, CodecName, CommandExecutionReference, CoordinationIdentity,
+    AckMode, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClientConfigEntry, ClientName,
+    ClientProducerEndReason, ClientResourceMount, ClusterNodeIncarnation, ClusterNodeName,
+    ClusterSchedule, CodecName, CommandExecutionReference, CoordinationIdentity,
     CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateRelay, DomainClockAuthority,
     DomainConfig, DomainName, DomainNodeRef, DomainSchedule, DomainState, EmitterName,
     EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath, FlushPolicy,
@@ -76,12 +73,12 @@ use nervix_models::{
     KafkaPartitionSchedule, Literal as ModelLiteral, LookupName, MaterializedStatePolicy,
     MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind,
     ModelName, NodeRef, OwnershipStateComponent, OwnershipStateRecoveryOutcome,
-    OwnershipStateReset, OwnershipStateResetCause, ParseAsType, ProcessorOutput, RelayName,
-    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
-    ResolvedBranching, ResourceId, ResourceName, RetryPolicy, RouteConstruction, ScheduledModel,
-    ScheduledNode, ScheduledNodes, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
-    StructuredMessageError, SubscriptionName, Timestamp, WasmCheckpointInspection,
-    WasmRejectedStatePolicy, WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
+    OwnershipStateReset, OwnershipStateResetCause, ParseAsType, RelayName, RemoteAckOutcome,
+    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResolvedBranching, ResourceId,
+    ResourceName, RetryPolicy, RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes,
+    SchemaFingerprint, SignalingProtocolName, SignalingWireFormat, StructuredMessageError,
+    SubscriptionName, Timestamp, WasmCheckpointInspection, WasmRejectedStatePolicy,
+    WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
 };
 #[cfg(test)]
 use nervix_models::{
@@ -141,6 +138,8 @@ use triomphe::Arc;
 use upon::Engine as TemplateEngine;
 
 #[cfg(test)]
+use crate::registry::MessageErrorRouteSpec;
+#[cfg(test)]
 use crate::runtime_schema::test_runtime_row;
 use crate::{
     ConfiguredFaultInjection, cluster,
@@ -161,13 +160,14 @@ use crate::{
         DomainActivationPlanError, EndpointIngestorStartPlan, EntrypointPlanError, EntrypointPlans,
         GeneratorExecutionPlan, GeneratorRoutePlan, HttpIngestorStartPlan, IngestorInputPlan,
         IngestorSpec, IngestorStartPlan, KafkaDomainOffsetPlacement, KafkaIngestorStartPlan,
-        KafkaOffsetPlan, LookupResourcePlan, LoweredConstruction, MqttIngestorStartPlan,
-        NatsIngestorStartPlan, PlannedCodec, PlannedCodecWireFormat, PlannedEntryRoute,
-        PlannedRouteBranch, PlannedSignalingProtocol, PrometheusIngestorStartPlan,
-        PulsarIngestorStartPlan, RabbitMqIngestorStartPlan, RedisPubSubIngestorStartPlan,
-        ReingestorInputPlan, ReingestorPlan, ResourceExecutionPlans, RuntimeChanges, ScheduleDelta,
-        SourceStartPlan, SqsIngestorStartPlan, SyslogIngestorStartPlan, TransportInputPlan,
-        WasmModulePlan, WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan,
+        KafkaOffsetPlan, LookupResourcePlan, LoweredConstruction, MessageErrorCompileSchemas,
+        MessageErrorRouteKey, MessageErrorRouteSpecs, MqttIngestorStartPlan, NatsIngestorStartPlan,
+        PlannedCodec, PlannedCodecWireFormat, PlannedEntryRoute, PlannedRouteBranch,
+        PlannedSignalingProtocol, PrometheusIngestorStartPlan, PulsarIngestorStartPlan,
+        RabbitMqIngestorStartPlan, RedisPubSubIngestorStartPlan, ReingestorInputPlan,
+        ReingestorPlan, ResourceExecutionPlans, RuntimeChanges, ScheduleDelta, SourceStartPlan,
+        SqsIngestorStartPlan, SyslogIngestorStartPlan, TransportInputPlan, WasmModulePlan,
+        WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan,
         branched_node_specs_from_scheduled_nodes,
     },
     resource::ResourceStore,
@@ -237,6 +237,7 @@ mod materialized_snapshot;
 mod materialized_state;
 mod message_error;
 mod message_error_delivery;
+mod message_error_plan;
 mod node;
 mod node_settings;
 mod observability;
@@ -342,8 +343,8 @@ use emitter_publishing::{
     sink_publish_failure,
 };
 use emitter_record_writes::{
-    EncodedPayload, PreparedHttpRequest, PreparedPayload, PreparedPayloads, PreparedWrite,
-    RowAnswers, RowRecords,
+    CheckedPreparation, EncodedPayload, PreparedHttpRequest, PreparedPayload, PreparedPayloads,
+    PreparedWrite, RowAnswers, RowPreparationViolation, RowRecords, RowRequestBody,
 };
 use emitter_retry::{
     EmitterAcknowledgements, EmitterRetryDeferral, EmitterRetrySchedule, RETRY_ACK_ALIVE_EACH,
@@ -358,7 +359,9 @@ use emitter_task::{
     EmitterRuntimeError, EmitterRuntimeResult, EmitterSinkContext, emitter_error_message,
     emitter_init_error, emitter_publish_error_is_retryable, emitter_report,
 };
-use emitter_values::{MappedRowSink, MappedValuesProjection, MappedValuesProjectionInit};
+use emitter_values::{
+    MappedRequestSink, MappedRowSink, MappedValuesProjection, MappedValuesProjectionInit,
+};
 use endpoint::{
     EndpointIngestBinding, EndpointRoute, HttpRouteKey, RoutedEndpoint, RoutedEndpointsByDomain,
 };
@@ -429,14 +432,16 @@ use materialized_state::{
     ReplicatedMaterializedRelayState,
 };
 use message_error::{
-    MessageErrorCompileSchemas, MessageErrorFailure, MessageErrorHandling,
-    MessageErrorSourceContext, SingleRecordFilterMapOutcome, captured_partial_output,
-    finalized_partial_output, invalid_output_fields, planned_structured_message_error,
-    structured_message_error, vm_partial_output_row_to_runtime_batch,
+    MessageErrorFailure, MessageErrorHandling, MessageErrorSourceContext,
+    SingleRecordFilterMapOutcome, captured_partial_output, finalized_partial_output,
+    invalid_output_fields, planned_structured_message_error, structured_message_error,
+    vm_partial_output_row_to_runtime_batch,
 };
 use message_error_delivery::{
-    MessageErrorDelivery, MessageErrorRouteKey, MessageErrorRouteRuntime, MessageErrorRouteTarget,
-    matching_message_error_output,
+    MessageErrorDelivery, MessageErrorRouteRuntime, MessageErrorRouteTarget,
+};
+use message_error_plan::{
+    BoundMessageErrorRoute, BoundMessageErrorRoutes, MessageErrorRouteBindingContext,
 };
 use nervix_connector_kafka::KafkaOffsetPosition;
 use nervix_models::{DeduplicatorName, ReingestorName};
@@ -504,6 +509,9 @@ use scheduled_node::{
 };
 pub(in crate::runtime) use shared_clients::{SharedClientError, SharedClientLease};
 use snapshot_staging::{SnapshotStaging, SnapshotStagingLimits};
+pub(crate) use snapshot_staging::{
+    SnapshotStagingError, StagedArtifact, StagedArtifactReader, StagedSnapshotWriter,
+};
 use state_replication::{
     ActivatedRuntimeStateHandoff, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
     DEFAULT_STATE_SNAPSHOT_INTERVAL, PendingStateCheckpointAnnouncement, PendingStateReplicaSync,

@@ -220,6 +220,13 @@ func commandLines(id uint64, outcome *session.CommandOutcome) ([]string, error) 
 		}
 		lines = append(lines, "UNKNOWN cause="+session.EnumNamesUnknownOutcomeCause[*cause])
 	}
+	if archive := outcome.Backup(nil); archive != nil {
+		backup, err := backupLines(archive)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, backup...)
+	}
 	return lines, nil
 }
 
@@ -269,6 +276,33 @@ func producerLines(id uint64, opened *session.ProducerOpened, message []byte) ([
 	return lines, nil
 }
 
+// backupLines renders the archive a completed backup reports.
+func backupLines(archive *session.BackupArchiveSummary) ([]string, error) {
+	digest := archive.Digest(nil)
+	resources := archive.Resources()
+	if archive.TotalBytes() == 0 || digest == nil || digest.BytesLength() != 32 || resources == nil {
+		return nil, errors.New("a backup archive lacks its size, digest or resources")
+	}
+	users := "none"
+	if count := archive.Users(); count != nil {
+		users = fmt.Sprintf("%d", *count)
+	}
+	lines := []string{fmt.Sprintf(
+		"BACKUP total_bytes=%d digest=%s captured_at=%d retained_until=%d resources=%s users=%s",
+		archive.TotalBytes(), hex.EncodeToString(digest.BytesBytes()), archive.CapturedAt(),
+		archive.RetainedUntil(), session.EnumNamesBackupResources[*resources], users)}
+	for index := 0; index < archive.DomainsLength(); index++ {
+		domain := new(session.BackupDomainSummary)
+		if !archive.Domains(domain, index) {
+			return nil, errors.New("a backup domain is missing")
+		}
+		lines = append(lines, fmt.Sprintf(
+			"BACKUP_DOMAIN domain=%s revision=%d sections=%d section_bytes=%d",
+			domain.Domain(), domain.Revision(), domain.Sections(), domain.SectionBytes()))
+	}
+	return lines, nil
+}
+
 // submissionLine renders the terminal outcome of one submitted batch.
 func submissionLine(id uint64, outcome *session.SubmissionOutcome) (string, error) {
 	message := text(outcome.Message())
@@ -310,6 +344,69 @@ func submissionLine(id uint64, outcome *session.SubmissionOutcome) (string, erro
 			session.EnumNamesOutcomeUncertainty[*cause], message), nil
 	}
 	return "", fmt.Errorf("undeclared submission disposition %d", outcome.DispositionType())
+}
+
+// downloadRequestLines renders the request of a backup download.
+func downloadRequestLines(frame []byte) ([]string, error) {
+	if err := frameRoot(frame, "NXBQ"); err != nil {
+		return nil, err
+	}
+	request := session.GetRootAsBackupDownloadRequest(frame, 0)
+	return []string{"REQUEST DOWNLOAD_BACKUP reference=" + string(request.ExecutionReference())}, nil
+}
+
+// downloadLines renders one frame of a backup download stream.
+func downloadLines(frame []byte) ([]string, error) {
+	if err := frameRoot(frame, "NXBD"); err != nil {
+		return nil, err
+	}
+	message := session.GetRootAsBackupDownloadMessage(frame, 0)
+	switch message.PartType() {
+	case session.BackupDownloadPartBackupArchiveStart:
+		start := new(session.BackupArchiveStart)
+		if err := union(message.Part, start); err != nil {
+			return nil, err
+		}
+		digest := start.Digest(nil)
+		if start.TotalBytes() == 0 || digest == nil || digest.BytesLength() != 32 {
+			return nil, errors.New("a download start lacks its size or digest")
+		}
+		return []string{fmt.Sprintf("DOWNLOAD START total_bytes=%d digest=%s", start.TotalBytes(),
+			hex.EncodeToString(digest.BytesBytes()))}, nil
+	case session.BackupDownloadPartBackupArchiveChunk:
+		chunk := new(session.BackupArchiveChunk)
+		if err := union(message.Part, chunk); err != nil {
+			return nil, err
+		}
+		if chunk.BytesLength() == 0 {
+			return nil, errors.New("a download chunk is empty")
+		}
+		return []string{"DOWNLOAD CHUNK bytes=" + hex.EncodeToString(chunk.BytesBytes())}, nil
+	case session.BackupDownloadPartBackupArchiveComplete:
+		return []string{"DOWNLOAD COMPLETE"}, nil
+	case session.BackupDownloadPartBackupDownloadFailed:
+		failed := new(session.BackupDownloadFailed)
+		if err := union(message.Part, failed); err != nil {
+			return nil, err
+		}
+		failure := failed.Failure()
+		if failure == nil {
+			return nil, errors.New("a download refusal has no reason")
+		}
+		return []string{fmt.Sprintf("DOWNLOAD FAILED failure=%s message=%s",
+			session.EnumNamesBackupDownloadFailure[*failure], text(failed.Message()))}, nil
+	case session.BackupDownloadPartLeaderRedirect:
+		redirect := new(session.LeaderRedirect)
+		if err := union(message.Part, redirect); err != nil {
+			return nil, err
+		}
+		if leader := redirect.Leader(nil); leader != nil {
+			return []string{fmt.Sprintf("DOWNLOAD LEADER node=%s grpc=%s console=%s", leader.Node(),
+				orNone(leader.GrpcUri()), orNone(leader.WebConsoleUri()))}, nil
+		}
+		return []string{"DOWNLOAD LEADER none"}, nil
+	}
+	return nil, fmt.Errorf("undeclared download part %d", message.PartType())
 }
 
 func serverLines(frame []byte, fields, keys []field) ([]string, error) {
@@ -755,7 +852,8 @@ func corpus(directory string) error {
 	}
 	var files []string
 	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name(), ".nxcm") || strings.HasSuffix(entry.Name(), ".nxsm") {
+		switch filepath.Ext(entry.Name()) {
+		case ".nxcm", ".nxsm", ".nxbq", ".nxbd":
 			files = append(files, entry.Name())
 		}
 	}
@@ -774,9 +872,14 @@ func corpus(directory string) error {
 			return err
 		}
 		var lines []string
-		if strings.HasSuffix(file, ".nxcm") {
+		switch filepath.Ext(file) {
+		case ".nxcm":
 			lines, err = clientLines(frame)
-		} else {
+		case ".nxbq":
+			lines, err = downloadRequestLines(frame)
+		case ".nxbd":
+			lines, err = downloadLines(frame)
+		default:
 			lines, err = serverLines(frame, fields, keys)
 		}
 		if err != nil {

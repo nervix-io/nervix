@@ -1,3 +1,15 @@
+FRAME backup_download_chunk.nxbd
+DOWNLOAD CHUNK bytes=007f80ff
+FRAME backup_download_complete.nxbd
+DOWNLOAD COMPLETE
+FRAME backup_download_failed.nxbd
+DOWNLOAD FAILED failure=NotRetained message=str:6e6f20617263686976652069732072657461696e656420756e6465722074686973207265666572656e6365
+FRAME backup_download_redirect.nxbd
+DOWNLOAD LEADER node=node-2 grpc=https://node-2.cluster.local:7443/ console=http://node-2.cluster.local:17420/console/
+FRAME backup_download_request.nxbq
+REQUEST DOWNLOAD_BACKUP reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44
+FRAME backup_download_start.nxbd
+DOWNLOAD START total_bytes=18446744073709551615 digest=a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5
 FRAME client_attach_domain_clock.nxcm
 REQUEST 16 ATTACH_DOMAIN_CLOCK domain=simulation
 FRAME client_cancel.nxcm
@@ -36,6 +48,14 @@ CHOICE value=resource-version:LATEST label=str:4c4154455354 detail=str:486967686
 CHOICE value=resource-version:3 label=str:33 detail=str:436f6d706c657465642076657273696f6e group=str:5265736f757263652076657273696f6e
 CHOICE value=model:relay/orders label=str:6f7264657273 detail=str:52454c4159 group=str:4d6f64656c73
 CHOICE value=field:amount label=str:616d6f756e74 detail=str:493634204f5054494f4e414c group=str:52656c6179206669656c64
+FRAME server_command_backup.nxsm
+REPLY 6 COMMAND completed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+BACKUP total_bytes=18446744073709551615 digest=5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a captured_at=-9223372036854775808 retained_until=9223372036854775807 resources=Omitted users=0
+BACKUP_DOMAIN domain=analytics revision=18446744073709551615 sections=0 section_bytes=18446744073709551615
+BACKUP_DOMAIN domain=tenant revision=1 sections=7 section_bytes=4096
 FRAME server_command_failed.nxsm
 REPLY 1 COMMAND failed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
 DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927

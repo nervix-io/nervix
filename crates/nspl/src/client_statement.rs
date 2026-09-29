@@ -3,18 +3,18 @@ use std::ops::Range;
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    BuiltinFunctionScope, CanonicalNsplError, CreateSubscription, DeleteSubscription, DomainName,
-    EmitSinkKind, IngestSourceKind, ModelKind, RelayName, SchemaName, SemanticReference, Statement,
-    UploadResource, WireSchemaName,
+    BuiltinFunctionScope, CanonicalNsplError, CreateSubscription, DeleteSubscription,
+    DescribeBackup, DomainName, EmitSinkKind, IngestSourceKind, ModelKind, RelayName, SchemaName,
+    SemanticReference, Statement, UploadResource, WireSchemaName,
 };
 
 use crate::{
     lexer::{Identifier as Keyword, Token, Word},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, completion_context,
-        completion_tokens, domain_ref, if_not_exists_clause, into_parse_error, junction_name, kw,
-        kw_phrase3, lex_input, relay_ref, schema_name, suggestions_from_errors, tok,
-        wire_schema_name,
+        completion_tokens, domain_ref, filter_by_prefix, if_not_exists_clause, into_parse_error,
+        junction_name, kw, kw_phrase3, lex_input, relay_ref, schema_name, suggestions_from_errors,
+        tok, wire_schema_name,
     },
 };
 
@@ -30,6 +30,8 @@ pub enum ClientStatement {
     CommitTransaction,
     RevertTransaction,
     UploadResource(UploadResource),
+    /// Describes a local archive file without asking a server.
+    DescribeBackup(DescribeBackup),
     CreateSubscription(CreateSubscription),
     DeleteSubscription(DeleteSubscription),
     Server(Statement),
@@ -52,6 +54,7 @@ impl ClientStatement {
             Self::UploadResource(upload) => {
                 Statement::UploadResource(upload.clone()).to_canonical_nspl()
             }
+            Self::DescribeBackup(describe) => Ok(describe.to_canonical_nspl()),
             Self::CreateSubscription(subscription) => {
                 Ok(crate::subscribe::create_subscription_query(
                     subscription.name.as_str(),
@@ -68,13 +71,20 @@ impl ClientStatement {
         }
     }
 
+    /// Whether the client serves this statement itself, alone, rather than as one statement of a
+    /// command batch.
+    ///
+    /// A `BACKUP` is also executed by the server, but its client writes the archive the server
+    /// assembles to a local file, so it too is sent on its own.
     pub fn requires_local_handling(&self) -> bool {
         match self {
             Self::UseDomain(_)
             | Self::ListDomains
             | Self::AttachDomainClock
             | Self::DetachDomainClock
-            | Self::UploadResource(_) => true,
+            | Self::UploadResource(_)
+            | Self::DescribeBackup(_)
+            | Self::Server(Statement::Backup(_)) => true,
             Self::BeginTransaction
             | Self::CommitTransaction
             | Self::RevertTransaction
@@ -181,6 +191,9 @@ pub fn client_command_parser<'src>()
         commit_transaction_parser().to(ClientStatement::CommitTransaction),
         revert_transaction_parser().to(ClientStatement::RevertTransaction),
         crate::upload_resource::upload_resource_parser().map(ClientStatement::UploadResource),
+        crate::backup::backup_parser()
+            .map(|backup| ClientStatement::Server(Statement::Backup(backup))),
+        crate::backup::describe_backup_parser().map(ClientStatement::DescribeBackup),
         crate::subscribe::create_subscription_parser().map(ClientStatement::CreateSubscription),
         crate::subscribe::delete_subscription_parser().map(ClientStatement::DeleteSubscription),
     ))
@@ -642,8 +655,14 @@ fn client_completion(input: &str, cursor: usize) -> (Vec<String>, Vec<Token>) {
         suggestions_from_errors(out.into_errors(), &prefix)
     } else {
         match out.into_output() {
+            Some(ClientStatement::Server(Statement::Backup(_))) => {
+                backup_tail(&tokens, &source, &prefix)
+            }
             Some(ClientStatement::Server(statement)) => {
                 crate::statement::statement_tail(&statement, &tokens, &source, &prefix)
+            }
+            Some(ClientStatement::DescribeBackup(describe)) => {
+                describe_backup_tail(&describe, &tokens, &source, &prefix)
             }
             _ => Vec::new(),
         }
@@ -651,48 +670,96 @@ fn client_completion(input: &str, cursor: usize) -> (Vec<String>, Vec<Token>) {
     (labels, tokens)
 }
 
-pub fn upload_resource_path_fragment(input: &str, cursor: usize) -> Option<&str> {
-    let safe_cursor = cursor.min(input.len());
-    let raw_prefix = &input[..safe_cursor];
-    let upper = raw_prefix.to_ascii_uppercase();
-    let version_index = upper.find(" VERSION ")?;
-    let before_version = &raw_prefix[..version_index];
-    if !before_version
-        .trim_end()
-        .to_ascii_uppercase()
-        .starts_with("UPLOAD RESOURCE ")
-    {
-        return None;
+/// The optional clause completion offers after a complete `BACKUP`.
+///
+/// Nothing may follow a terminated statement, and a clause is offered only once the word before
+/// it has ended, so a statement still being typed is left to its own expectations.
+fn backup_tail(tokens: &[Token], source: &str, prefix: &str) -> Vec<String> {
+    let trimmed = source.trim_end();
+    let open = source.len() > trimmed.len() && !trimmed.ends_with(';');
+    if !open {
+        return Vec::new();
     }
-    let after_version = &raw_prefix[version_index + " VERSION ".len()..];
-    if after_version.is_empty() {
-        return Some("");
-    }
-    let quote = after_version.chars().next()?;
-    if quote != '\'' && quote != '"' {
-        return Some("");
-    }
-    let fragment = &after_version[quote.len_utf8()..];
-    if fragment.contains(quote) || fragment.contains('\n') {
-        return None;
-    }
-    Some(fragment)
+    filter_by_prefix(crate::backup::backup_tail(tokens), prefix)
 }
 
-/// Source bytes replaced when accepting a local upload path candidate.
-pub fn upload_resource_path_range(input: &str, cursor: usize) -> Option<Range<usize>> {
-    let fragment = upload_resource_path_fragment(input, cursor)?;
-    let start = cursor.checked_sub(fragment.len())?;
-    let quote = input.get(..start)?.chars().last();
-    let end = match quote {
-        Some(quote @ ('\'' | '"')) => {
-            let suffix = input.get(cursor..)?;
-            let after_path = suffix.find(quote).unwrap_or(suffix.len());
-            cursor.checked_add(after_path)?
+/// The optional clauses completion offers after a complete `DESCRIBE BACKUP`.
+///
+/// Nothing may follow a terminated statement, and a clause is offered only once the word before
+/// it has ended, so a statement still being typed is left to its own expectations.
+fn describe_backup_tail(
+    describe: &DescribeBackup,
+    tokens: &[Token],
+    source: &str,
+    prefix: &str,
+) -> Vec<String> {
+    let trimmed = source.trim_end();
+    let open = source.len() > trimmed.len() && !trimmed.ends_with(';');
+    if !open {
+        return Vec::new();
+    }
+    filter_by_prefix(
+        crate::backup::describe_backup_tail(describe, tokens),
+        prefix,
+    )
+}
+
+/// A local path being written at the cursor, which a client completes from its own filesystem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalPathFragment<'input> {
+    /// The part of the path already written, from its opening quote to the cursor. Empty when the
+    /// cursor is where a quoted path may begin.
+    pub fragment: &'input str,
+    /// The source bytes a candidate path replaces: the path written so far, and the rest of it up
+    /// to its closing quote.
+    pub range: Range<usize>,
+}
+
+/// Finds the local path being written at `cursor`, if the grammar expects one there.
+///
+/// A client-local statement names a file it reads or writes as a quoted `local_path`. Inside an
+/// unterminated quote the source no longer lexes, so the grammar is asked what it expects where the
+/// quote opens; outside a quote it is asked at the cursor itself. Only a position that expects a
+/// `local_path` answers, which is what keeps a path lookup out of every other string literal.
+pub fn local_path_fragment(input: &str, cursor: usize) -> Option<LocalPathFragment<'_>> {
+    let cursor = input.floor_char_boundary(cursor.min(input.len()));
+    let head = &input[..cursor];
+    let opening = head
+        .char_indices()
+        .rev()
+        .find(|(_, character)| matches!(character, '\'' | '"'));
+    if let Some((quote_at, quote)) = opening {
+        let fragment_start = quote_at
+            .checked_add(quote.len_utf8())
+            .verified("a quote found in the head is followed by at least the cursor");
+        let fragment = &head[fragment_start..];
+        if !fragment.contains('\n') && expects_local_path(&head[..quote_at]) {
+            let rest = &input[cursor..];
+            let line_end = rest.find('\n').unwrap_or(rest.len());
+            let closing = rest[..line_end].find(quote).unwrap_or(line_end);
+            let end = cursor
+                .checked_add(closing)
+                .verified("the closing quote is found within the input after the cursor");
+            return Some(LocalPathFragment {
+                fragment,
+                range: fragment_start..end,
+            });
         }
-        _ => cursor,
-    };
-    Some(start..end)
+    }
+    if expects_local_path(head) {
+        return Some(LocalPathFragment {
+            fragment: "",
+            range: cursor..cursor,
+        });
+    }
+    None
+}
+
+/// Whether the client grammar expects a `local_path` right after `head`.
+fn expects_local_path(head: &str) -> bool {
+    suggest_client_statement(head, head.len())
+        .iter()
+        .any(|label| label == "local_path")
 }
 
 #[cfg(test)]
@@ -1111,6 +1178,11 @@ mod tests {
             "CREATE USER alice WITH PASSWORD 'secret';",
             "CREATE RESOURCE refdata;",
             "UPLOAD RESOURCE refdata VERSION './reference-data';",
+            "BACKUP CLUSTER TO './cluster.nvxb';",
+            "BACKUP DOMAIN demo TO './demo.nvxb' WITHOUT RESOURCES;",
+            "BACKUP DOMAIN TO './current.nvxb';",
+            "DESCRIBE BACKUP './cluster.nvxb';",
+            "DESCRIBE BACKUP './cluster.nvxb' FORMAT JSON;",
             "START;",
             "START AT NOW TIME RATE 1.0;",
             "START AT '2026-01-01T00:00:00Z' TIME RATE 2.0;",
@@ -1289,39 +1361,75 @@ mod tests {
             .any(|candidate| matches!(candidate, CompletionExpectation::Literal(value) if value == "schema_name")));
     }
 
-    #[test]
-    fn detects_upload_resource_path_fragment() {
-        let input = "UPLOAD RESOURCE proto VERSION '/tmp/pro|to';";
+    fn fragment_at_marker(input: &str) -> (String, Option<(String, Range<usize>)>) {
         let cursor = input
             .find('|')
             .assured("the test input contains a cursor marker");
-        let input = input.replace('|', "");
-        assert_eq!(
-            upload_resource_path_range(&input, cursor),
-            Some("UPLOAD RESOURCE proto VERSION '".len()..input.len() - 2)
-        );
-        let closed = "UPLOAD RESOURCE proto VERSION '/tmp/pro';";
-        assert_eq!(upload_resource_path_fragment(closed, closed.len()), None);
-        assert_eq!(
-            upload_resource_path_fragment(
-                "UPLOAD RESOURCE proto VERSION '/tmp/pro",
-                "UPLOAD RESOURCE proto VERSION '/tmp/pro".len(),
+        let source = input.replace('|', "");
+        let found = local_path_fragment(&source, cursor)
+            .map(|found| (found.fragment.to_string(), found.range));
+        (source, found)
+    }
+
+    #[test]
+    fn finds_the_local_path_of_every_client_local_statement() {
+        for (input, expected_fragment) in [
+            ("UPLOAD RESOURCE proto VERSION '/tmp/pro|to';", "/tmp/pro"),
+            ("BACKUP CLUSTER TO '/tmp/cl|';", "/tmp/cl"),
+            (
+                "BACKUP DOMAIN prod TO \"~/ba|ck.nvxb\" WITHOUT RESOURCES;",
+                "~/ba",
             ),
-            Some("/tmp/pro")
-        );
-        assert_eq!(
-            upload_resource_path_fragment(
-                "UPLOAD RESOURCE proto VERSION ",
-                "UPLOAD RESOURCE proto VERSION ".len(),
-            ),
-            Some("")
-        );
-        assert_eq!(
-            upload_resource_path_fragment(
-                "DESCRIBE RESOURCE proto VERSION ",
-                "DESCRIBE RESOURCE proto VERSION ".len(),
-            ),
-            None
-        );
+            ("BACKUP DOMAIN TO './|", "./"),
+            ("DESCRIBE BACKUP 'arch|ives/c.nvxb' FORMAT JSON;", "arch"),
+        ] {
+            let (source, found) = fragment_at_marker(input);
+            let (fragment, range) = found.unwrap_or_else(|| panic!("{input:?} names a local path"));
+            assert_eq!(fragment, expected_fragment, "{input:?}");
+            let quote_at = input
+                .find(['\'', '"'])
+                .assured("each input quotes its path");
+            assert_eq!(range.start, quote_at + 1, "{input:?}");
+            let replaced = &source[range];
+            assert!(
+                replaced.starts_with(expected_fragment) && !replaced.contains(['\'', '"']),
+                "{input:?} replaces {replaced:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn offers_a_path_lookup_where_a_quoted_path_may_begin() {
+        for input in [
+            "UPLOAD RESOURCE proto VERSION |",
+            "BACKUP CLUSTER TO |",
+            "DESCRIBE BACKUP |",
+        ] {
+            let (_, found) = fragment_at_marker(input);
+            let cursor = input
+                .find('|')
+                .assured("the test input contains a cursor marker");
+            assert_eq!(
+                found,
+                Some((String::new(), cursor..cursor)),
+                "{input:?} expects a local path"
+            );
+        }
+    }
+
+    #[test]
+    fn other_strings_are_not_local_paths() {
+        for input in [
+            "UPLOAD RESOURCE proto VERSION '/tmp/pro';|",
+            "BACKUP CLUSTER TO '/tmp/c.nvxb' |",
+            "DESCRIBE RESOURCE proto VERSION |",
+            "CREATE USER alice WITH PASSWORD 'sec|",
+            "CREATE CLIENT http_main TYPE HTTP CONFIG { 'url' = 'http://lo|",
+            "DESCRIBE TRANSACTION 'tx|",
+            "BACKUP CLUSTER |",
+        ] {
+            let (_, found) = fragment_at_marker(input);
+            assert_eq!(found, None, "{input:?} is not a local path");
+        }
     }
 }

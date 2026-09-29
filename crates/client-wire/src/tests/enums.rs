@@ -5,6 +5,7 @@ use std::{collections::BTreeSet, fmt::Debug};
 use error_stack::Report;
 
 use crate::{
+    backup::{ALL_BACKUP_DOWNLOAD_FAILURES, ALL_BACKUP_RESOURCES},
     choice::{
         ALL_CHOICE_PLACEMENT_POLICIES, ALL_CHOICE_STATUSES, ALL_CHOICE_TARGETS,
         ALL_DOMAIN_PACE_CHOICES,
@@ -144,6 +145,11 @@ fn every_enum_maps_exactly_to_its_schema_enum() {
         wire::SubscriptionEndReason::ENUM_VALUES,
     );
     assert_exact_mapping(ALL_UPLOAD_FAILURES, wire::UploadFailure::ENUM_VALUES);
+    assert_exact_mapping(ALL_BACKUP_RESOURCES, wire::BackupResources::ENUM_VALUES);
+    assert_exact_mapping(
+        ALL_BACKUP_DOWNLOAD_FAILURES,
+        wire::BackupDownloadFailure::ENUM_VALUES,
+    );
     assert_exact_mapping(
         ALL_DOMAIN_CLOCK_ATTACHMENT_END_REASONS,
         wire::DomainClockAttachmentEndReason::ENUM_VALUES,
@@ -240,6 +246,14 @@ fn every_undeclared_enum_byte_is_refused() {
     assert_undeclared_refused::<nervix_models::ModelChangeAspect, _>(
         wire::ModelChangeAspect::ENUM_MAX,
         wire::ModelChangeAspect,
+    );
+    assert_undeclared_refused::<nervix_models::BackupResources, _>(
+        wire::BackupResources::ENUM_MAX,
+        wire::BackupResources,
+    );
+    assert_undeclared_refused::<crate::BackupDownloadFailure, _>(
+        wire::BackupDownloadFailure::ENUM_MAX,
+        wire::BackupDownloadFailure,
     );
     assert_undeclared_refused::<crate::SuggestionKind, _>(
         wire::SuggestionKind::ENUM_MAX,

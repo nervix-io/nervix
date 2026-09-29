@@ -1,3 +1,10 @@
+//! Rebuilding running and passive domain executions from typed activation decisions.
+//!
+//! Layer: data plane.
+//! - **Owns.** Binding a domain's relay surfaces, programs and tasks during rebuild and recovery.
+//! - **Depends on.** Typed registry plans, runtime capabilities and installed resources.
+//! - **Must not know.** NSPL parsing, transaction decisions or connector internals.
+
 use nervix_connector_websockets::CompiledSignalingProtocol;
 
 use super::*;
@@ -792,6 +799,28 @@ impl Runtime {
             domain: domain.as_str().to_string(),
             reason: format!("{reason:#}"),
         })?;
+        let error_specs =
+            MessageErrorRouteSpecs::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
+                .map_err(|reason| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to plan message-error routes: {reason:#}"),
+                })?;
+        let message_error_plans = Arc::new(
+            BoundMessageErrorRoutes::bind(
+                error_specs,
+                MessageErrorRouteBindingContext {
+                    relay_registries: &relay_registries,
+                    relay_services: &relay_services,
+                    materialized_stream_specs: &materialized_stream_specs,
+                    lookups: &lookup_runtimes,
+                    udfs: &udf_executor,
+                },
+            )
+            .map_err(|reason| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!("failed to bind message-error routes: {reason:#}"),
+            })?,
+        );
 
         for (node_spec, inputs) in processor_input_specs {
             let entity = NodeRef {
@@ -914,6 +943,7 @@ impl Runtime {
                     },
                 ),
                 entrypoints,
+                message_error_plans,
                 branched_entrypoints,
                 endpoint_routes,
                 node_tasks,
@@ -1081,6 +1111,28 @@ impl Runtime {
                 )
             })
             .collect::<HashMap<_, _>>();
+        let error_specs =
+            MessageErrorRouteSpecs::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
+                .map_err(|reason| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("failed to plan message-error routes: {reason:#}"),
+                })?;
+        let message_error_plans = Arc::new(
+            BoundMessageErrorRoutes::bind(
+                error_specs,
+                MessageErrorRouteBindingContext {
+                    relay_registries: &relay_registries,
+                    relay_services: &relay_services,
+                    materialized_stream_specs: &materialized_stream_specs,
+                    lookups: &lookups,
+                    udfs: &udf_executor,
+                },
+            )
+            .map_err(|reason| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!("failed to bind message-error routes: {reason:#}"),
+            })?,
+        );
         let start_version = match self.inner.domains.get(domain) {
             Some(state) => state.start_version,
             None => 0,
@@ -1108,6 +1160,7 @@ impl Runtime {
                 },
             ),
             entrypoints,
+            message_error_plans,
             branched_entrypoints: HashMap::default(),
             endpoint_routes,
             node_tasks: HashMap::default(),

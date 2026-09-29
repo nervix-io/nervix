@@ -218,6 +218,29 @@ pub unsafe extern "C" fn nx_outcome_subscription(
 
 /// # Safety
 ///
+/// `outcome` is a live outcome this library returned; non-null out-parameters are writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_outcome_backup(
+    outcome: *const Outcome,
+    total_bytes: *mut u64,
+    digest: *mut *const u8,
+    digest_len: *mut usize,
+) -> bool {
+    // SAFETY: the header requires a live outcome.
+    let outcome = unsafe { abi::accessor(outcome) };
+    let Some(summary) = &outcome.outcome.backup else {
+        return false;
+    };
+    // SAFETY: the header requires writable out-parameters.
+    unsafe {
+        abi::write(total_bytes, summary.total_bytes.get());
+        abi::write_bytes(digest, digest_len, summary.digest.as_bytes());
+    }
+    true
+}
+
+/// # Safety
+///
 /// `outcome` is a live outcome this library returned; a non-null `out` is writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nx_outcome_schema(

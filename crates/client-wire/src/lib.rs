@@ -8,14 +8,14 @@
 //! Layer: edges.
 //!
 //! - **Owns.** The session schema, frame verification and ownership, the typed requests, replies,
-//!   transfers, events and rows the schema describes, the producer operations and the batch bytes
-//!   they carry, the text every client displays a row as, the session limits, and how frames
-//!   travel over gRPC and WebSocket messages.
+//!   transfers, backup downloads, events and rows the schema describes, the producer operations
+//!   and the batch bytes they carry, the text every client displays a row as, the session limits,
+//!   and how frames travel over gRPC and WebSocket messages.
 //! - **Depends on.** `flatbuffers`, the vocabulary for names, timestamps, schema fields, the
-//!   transaction impact report, the resource description, the observed domain clock, the client
-//!   producer contract and the status, inspection envelope and preview identity a session
-//!   exchanges, `serde_json` to write a row's display text, and tonic's codec traits for the gRPC
-//!   transport.
+//!   transaction impact report, the resource description, the backup summary, the observed domain
+//!   clock, the client producer contract and the status, inspection envelope and preview identity
+//!   a session exchanges, `serde_json` to write a row's display text, and tonic's codec traits for
+//!   the gRPC transport.
 //! - **Must not know.** The server's registry, runtime or consensus, the parser, Arrow — a batch is
 //!   bytes here, never columns — or any client's dispatch, reconnection or subscription state.
 
@@ -23,6 +23,7 @@ include!(concat!(env!("OUT_DIR"), "/flatbuffers/session_module.rs"));
 
 use generated::nervix::session as wire;
 
+mod backup;
 mod choice;
 mod codec;
 mod command;
@@ -48,6 +49,10 @@ mod transfer;
 mod upload;
 pub mod websocket;
 
+pub use backup::{
+    BackupArchiveChunk, BackupArchiveStart, BackupDownloadFailed, BackupDownloadFailure,
+    BackupDownloadMessage, BackupDownloadRequest,
+};
 pub use choice::{
     Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection, ChoiceStatus,
     ChoiceTarget, ChoiceValue, DomainPaceChoice,
@@ -74,8 +79,8 @@ pub use event::{
     Leadership, LeadershipObserved, NoticeLevel, ServerNotice, SessionEndReason, SessionEnding,
 };
 pub use frame::{
-    ClientFrame, EncodedFrame, FrameError, FrameRoot, FrameViolation, ServerFrame, UploadFrame,
-    UploadReplyFrame, VerifiedFrame,
+    BackupDownloadFrame, BackupDownloadRequestFrame, ClientFrame, EncodedFrame, FrameError,
+    FrameRoot, FrameViolation, ServerFrame, UploadFrame, UploadReplyFrame, VerifiedFrame,
 };
 pub use limits::{LimitsError, MAX_IN_FLIGHT_REQUESTS, SessionLimitSettings, SessionLimits};
 pub use producer::{

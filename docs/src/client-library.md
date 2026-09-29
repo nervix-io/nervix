@@ -19,6 +19,7 @@ Capabilities:
   `Producer::rejoin(...)`, `Producer::pending_submissions()`, `Producer::release(...)` and
   `Producer::close()`
 - `Client::upload_resource_from_directory(...)`
+- `Client::download_backup(...)`
 - `Client::next_server_event()`, `Client::next_domain_list()` and `Client::leadership()`
 - `Client::suggest(...)` behind the `autocomplete` feature
 - `Client::lookup_choices(...)`
@@ -100,6 +101,30 @@ redefined, so the announced schema no longer describes its rows, or `RelayRemove
 or its domain no longer exists. The end is the last event of that subscription; subscribe again to
 keep reading a redefined relay. See [Sessions](sessions.md#subscription-lifecycle).
 
+## Backing Up
+
+`execute` runs `BACKUP CLUSTER TO '<file>';` and `BACKUP DOMAIN [<name>] TO '<file>';` as one
+command and then downloads the archive the backup assembled into the named file. The download is
+not bounded by the client's retry deadline; each frame must arrive within the request timeout. The
+client writes a private file beside the destination and moves it over the destination only once
+the archive's size and BLAKE3 digest match the backup's summary, so the file never holds a partial
+archive, and on Unix only its owner may read it. A download that fails in transport starts again
+from the first byte while the server retains the archive.
+
+The outcome's `backup` field carries the summary: the archive's size and digest, the capture time,
+the instant the server stops retaining it, whether resource bytes are included, the number of
+users, and each domain's revision, section count and bytes. A download that still fails returns
+`ClientError::BackupDownload` with the backup's execution reference and a typed
+`BackupDownloadError`. Running the same `ExecutionHandle` again returns the recorded outcome and
+downloads the archive again, and `Client::download_backup(reference, summary, destination)`
+downloads a summary's archive directly. A download that receives the whole archive releases it on
+the server, and a later download of it is refused.
+
+`execute` refuses `DESCRIBE BACKUP`, which `nervix-cli` serves from a local file without a server;
+the `nervix-backup` crate's `describe_archive` reads and verifies an archive for other Rust
+programs. The C binding runs `BACKUP` through `nx_session_execute` the same way and reports the
+archive's size and digest through `nx_outcome_backup`. See [Backup And Restore](backup-and-restore.md).
+
 ## Following A Domain Clock
 
 `execute` routes `ATTACH DOMAIN CLOCK;` and `DETACH DOMAIN CLOCK;` the way it routes `USE`: it sends
@@ -162,6 +187,35 @@ clock again on the new session before any other request, and the clock that atta
 follows the interruption as an `Observed` event; changes in between are not reported. Waiting for
 the next event reopens a closed session when a followed clock waits for it. A detach, or an end,
 stops following the domain, and `domain_clock` returns `None` for it afterwards.
+
+### Through The Shared C Binding
+
+The shared C binding reads the same events for C, C++, Python, JVM and Ruby hosts; its header is
+`crates/client-ffi/include/nervix_client.h`. `ATTACH DOMAIN CLOCK;` and `DETACH DOMAIN CLOCK;` run
+through `nx_session_prepare` and `nx_session_execute` like any statement, for the session's selected
+domain. `nx_session_next_clock_event` waits for the next event, bounded by the same `nx_cancel`
+tokens and deadlines as every blocking call, and hands out an `nx_clock_event` reference. The events
+are the Rust client's, coalesced the same way:
+
+- `nx_clock_event_kind_of` tells an `NX_CLOCK_EVENT_STATE`, `NX_CLOCK_EVENT_TICK`,
+  `NX_CLOCK_EVENT_ENDED` or `NX_CLOCK_EVENT_INTERRUPTED` event apart, and `nx_clock_event_domain`
+  borrows the name of the domain it concerns.
+- `nx_clock_event_generation` reads the `START` generation of a state or tick event,
+  `nx_clock_event_state` the installation state of a state event, `nx_clock_event_paced` the period,
+  skew, logical origin, UTC anchor and time rate of a paced one, `nx_clock_event_tick` the id,
+  logical boundary, authority UTC observation and serving node's logical reading of a tick, and
+  `nx_clock_event_end_reason` why the server ended an attachment. Each fails with `NX_ERROR_TYPE`
+  for an event whose kind does not carry what it reads.
+- Instants are signed nanoseconds since the Unix epoch, the period and skew unsigned nanoseconds,
+  and the time rate a `double`. Every field is written to an out-parameter the host provides, so
+  reading an event allocates nothing on the host's side.
+- `nx_clock_event_retain` and `nx_clock_event_release` count references the way `nx_event_retain`
+  and `nx_event_release` do, and a reference may be released on any thread.
+
+The binding exposes the events, not `AttachedDomainClock`: a host projects logical time, physical
+waits and admission windows from the paced fields itself. The outcome of an attach carries its
+disposition and message, not the clock, so a host that attaches to a running clock paces on the
+ticks' logical readings until the next state event reports the committed mapping.
 
 ## Producers
 

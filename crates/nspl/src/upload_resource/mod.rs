@@ -5,8 +5,8 @@ use nervix_models::UploadResource;
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, into_parse_error, kw, lex_input,
-        resource_ref, string_lit, suggest_from,
+        LexedInput, ParseError, ParseFromSourceError, into_parse_error, kw, lex_input, local_path,
+        resource_ref, suggest_from,
     },
 };
 
@@ -16,7 +16,7 @@ pub fn upload_resource_parser<'src>()
         .ignore_then(kw(Identifier::Resource))
         .ignore_then(resource_ref())
         .then_ignore(kw(Identifier::Version))
-        .then(string_lit())
+        .then(local_path())
         .map(|(identifier, source_path)| UploadResource {
             identifier,
             source_path,

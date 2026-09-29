@@ -249,4 +249,4 @@ mod json_completion_tests;
 
 #[cfg(test)]
 #[path = "statement_tests.rs"]
-mod tests;
+pub(crate) mod tests;

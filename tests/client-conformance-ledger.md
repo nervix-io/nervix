@@ -1,11 +1,12 @@
 # Client wire cross-language conformance ledger
 
-This is the executable ledger of [Client Wire 14](https://app.clickup.com/t/86bc1ahyr). It records
-which runtimes speak the finalized session protocol, whether each does so as an independent native
-client or through the shared Rust binding, the commands that build and run each one, and what the
-qualification found. It does not promise a separately maintained production SDK for any language:
-the probes are qualification clients, and the binding is the supported way for Python, JVM, Ruby, C
-and C++ hosts to reuse the Rust session.
+This is the executable ledger of [Client Wire 14](https://app.clickup.com/t/86bc1ahyr), which
+[Clock Attach 05](https://app.clickup.com/t/86bc8azn1) extended with the domain clock events the
+binding exposes. It records which runtimes speak the finalized session protocol, whether each does
+so as an independent native client or through the shared Rust binding, the commands that build and
+run each one, and what the qualification found. It does not promise a separately maintained
+production SDK for any language: the probes are qualification clients, and the binding is the
+supported way for Python, JVM, Ruby, C and C++ hosts to reuse the Rust session.
 
 ## Paths
 
@@ -52,8 +53,9 @@ runs in the ordinary scenario suite. The CI job `client-conformance` runs the wh
 
 A binding probe reads `NERVIX_CLIENT_LIBRARY`, and every probe reads its target from
 `NERVIX_PROBE_GRPC_URI`, `NERVIX_PROBE_WEBSOCKET_URI`, `NERVIX_PROBE_USERNAME`,
-`NERVIX_PROBE_PASSWORD`, `NERVIX_PROBE_DOMAIN`, `NERVIX_PROBE_RELAY`, `NERVIX_PROBE_SUBSCRIPTION`
-and `NERVIX_PROBE_ROWS`.
+`NERVIX_PROBE_PASSWORD` and `NERVIX_PROBE_DOMAIN`, and its subscription from `NERVIX_PROBE_RELAY`,
+`NERVIX_PROBE_SUBSCRIPTION` and `NERVIX_PROBE_ROWS`. Run with the `clock` argument, a binding probe
+follows the domain's clock instead and reads no subscription.
 
 ## What every probe proves
 
@@ -76,11 +78,28 @@ expected report:
   the final transport as well as the transport's scalar encoding.
 - A closure: deleting the subscription completes.
 
+`A <runtime> client follows a paced domain clock through the shared binding` runs every binding
+host, the C ABI in process, C, C++, Python, Java and Ruby, against a one- and a three-node cluster,
+starting on `node-1`. The probe attaches to the clock of a paced domain that has not started, the
+scenario starts it at a logical origin with a time rate, and every probe prints the same report:
+
+- The attachment: `ATTACH DOMAIN CLOCK;` completes through `nx_session_execute`.
+- The state of the started generation, read from its `NX_CLOCK_EVENT_STATE` event: the domain, the
+  generation, the paced state, and the period, skew, logical origin and time rate the scenario
+  started the clock with, the rate by its bits. A state event reporting the generation uninstalled
+  before the serving node holds its mapping and authority is skipped, not reported.
+- The first tick of that generation, read from its `NX_CLOCK_EVENT_TICK` event: the domain and the
+  generation, with its boundary held to the logical origin plus one period for every id before it
+  and the serving node's logical reading held to never precede the origin. Tick ids, the
+  authority's UTC observation and the UTC anchor depend on when the scenario ran, so they are
+  checked rather than printed.
+- The detachment: `DETACH DOMAIN CLOCK;` completes.
+
 Beyond the shared report, each kind of probe checks what only it can reach:
 
 | Probe | Checks |
 | --- | --- |
-| Binding hosts | Rows survive on a retained reference after the first is released, and read identically after collections, allocation churn, and release on another thread. Every column is copied in one call, and every string and bytes value borrowed from the frame equals its copy. A wait cancelled from another thread reports `NX_ERROR_CANCELLED`, an expired deadline `NX_ERROR_DEADLINE`, and a cancelled command keeps its execution reference. |
+| Binding hosts | Rows survive on a retained reference after the first is released, and read identically after collections, allocation churn, and release on another thread. Every column is copied in one call, and every string and bytes value borrowed from the frame equals its copy. A wait cancelled from another thread reports `NX_ERROR_CANCELLED`, an expired deadline `NX_ERROR_DEADLINE`, and a cancelled command keeps its execution reference. A clock wait of a session that follows no clock ends the same two ways, and the state and tick events read identically on a retained reference after the first is released on another thread. |
 | Python | The frame is a `memoryview` whose buffer keeps the event alive; it stays readable after every other reference is dropped and collected. |
 | Java | References retained into automatic arenas are released by the collector while other references to the same event are read. A view of a released event throws instead of reading freed memory. |
 | Ruby | References nothing reaches are released by the collector's free function while retained references are read. |
@@ -130,5 +149,10 @@ the independent interoperation with Rust in both encoding directions.
 - Only the Rust client restores subscriptions and domain clock attachments after reconnection. The
   Go and TypeScript clients show that the protocol is implementable, not that they recover; a
   binding host inherits the Rust client's recovery.
-- The binding does not expose domain clock attachment. Its hosts read the attach reply and clock
-  frames only as the corpus readers do.
+- The binding exposes the domain clock events, not the attach reply's clock and not the Rust
+  client's arithmetic. An attach reports its disposition and message; a host that attaches to a
+  running clock reads its committed mapping from the next state event and paces on the ticks'
+  logical readings until then, and it projects logical time, physical waits and admission windows
+  from the paced fields itself.
+- The Go and TypeScript clients read the attach reply and the clock frames only from the corpus;
+  no live probe of theirs follows a domain clock.
