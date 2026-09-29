@@ -842,6 +842,7 @@ mod tests {
             wasm_state: None,
             resource: None,
             backup: None,
+            restore: None,
         }
     }
 

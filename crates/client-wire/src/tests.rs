@@ -12,6 +12,7 @@ mod producers;
 mod replies;
 mod requests;
 mod resources;
+mod restores;
 mod rows;
 mod samples;
 mod schema;

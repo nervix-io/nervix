@@ -4,8 +4,8 @@ use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
     BuiltinFunctionScope, CanonicalNsplError, CreateSubscription, DeleteSubscription,
-    DescribeBackup, DomainName, EmitSinkKind, IngestSourceKind, ModelKind, RelayName, SchemaName,
-    SemanticReference, Statement, UploadResource, WireSchemaName,
+    DescribeBackup, DomainName, EmitSinkKind, IngestSourceKind, ModelKind, RelayName, Restore,
+    SchemaName, SemanticReference, Statement, UploadResource, WireSchemaName,
 };
 
 use crate::{
@@ -75,7 +75,8 @@ impl ClientStatement {
     /// command batch.
     ///
     /// A `BACKUP` is also executed by the server, but its client writes the archive the server
-    /// assembles to a local file, so it too is sent on its own.
+    /// assembles to a local file, so it too is sent on its own. A `RESTORE` is executed by the
+    /// server from an archive its client reads and streams, so it is sent on its own as well.
     pub fn requires_local_handling(&self) -> bool {
         match self {
             Self::UseDomain(_)
@@ -84,7 +85,7 @@ impl ClientStatement {
             | Self::DetachDomainClock
             | Self::UploadResource(_)
             | Self::DescribeBackup(_)
-            | Self::Server(Statement::Backup(_)) => true,
+            | Self::Server(Statement::Backup(_) | Statement::Restore(_)) => true,
             Self::BeginTransaction
             | Self::CommitTransaction
             | Self::RevertTransaction
@@ -193,6 +194,8 @@ pub fn client_command_parser<'src>()
         crate::upload_resource::upload_resource_parser().map(ClientStatement::UploadResource),
         crate::backup::backup_parser()
             .map(|backup| ClientStatement::Server(Statement::Backup(backup))),
+        crate::backup::restore_parser()
+            .map(|restore| ClientStatement::Server(Statement::Restore(restore))),
         crate::backup::describe_backup_parser().map(ClientStatement::DescribeBackup),
         crate::subscribe::create_subscription_parser().map(ClientStatement::CreateSubscription),
         crate::subscribe::delete_subscription_parser().map(ClientStatement::DeleteSubscription),
@@ -658,6 +661,9 @@ fn client_completion(input: &str, cursor: usize) -> (Vec<String>, Vec<Token>) {
             Some(ClientStatement::Server(Statement::Backup(_))) => {
                 backup_tail(&tokens, &source, &prefix)
             }
+            Some(ClientStatement::Server(Statement::Restore(restore))) => {
+                restore_tail(&restore, &tokens, &source, &prefix)
+            }
             Some(ClientStatement::Server(statement)) => {
                 crate::statement::statement_tail(&statement, &tokens, &source, &prefix)
             }
@@ -681,6 +687,19 @@ fn backup_tail(tokens: &[Token], source: &str, prefix: &str) -> Vec<String> {
         return Vec::new();
     }
     filter_by_prefix(crate::backup::backup_tail(tokens), prefix)
+}
+
+/// The optional clauses completion offers after a complete `RESTORE`.
+///
+/// Nothing may follow a terminated statement, and a clause is offered only once the word before
+/// it has ended, so a statement still being typed is left to its own expectations.
+fn restore_tail(restore: &Restore, tokens: &[Token], source: &str, prefix: &str) -> Vec<String> {
+    let trimmed = source.trim_end();
+    let open = source.len() > trimmed.len() && !trimmed.ends_with(';');
+    if !open {
+        return Vec::new();
+    }
+    filter_by_prefix(crate::backup::restore_tail(restore, tokens), prefix)
 }
 
 /// The optional clauses completion offers after a complete `DESCRIBE BACKUP`.
@@ -1382,6 +1401,11 @@ mod tests {
             ),
             ("BACKUP DOMAIN TO './|", "./"),
             ("DESCRIBE BACKUP 'arch|ives/c.nvxb' FORMAT JSON;", "arch"),
+            ("RESTORE CLUSTER FROM '/tmp/re|';", "/tmp/re"),
+            (
+                "RESTORE DOMAIN prod AS prod_copy FROM './ar|ch.nvxb' DRY RUN;",
+                "./ar",
+            ),
         ] {
             let (source, found) = fragment_at_marker(input);
             let (fragment, range) = found.unwrap_or_else(|| panic!("{input:?} names a local path"));
@@ -1404,6 +1428,8 @@ mod tests {
             "UPLOAD RESOURCE proto VERSION |",
             "BACKUP CLUSTER TO |",
             "DESCRIBE BACKUP |",
+            "RESTORE CLUSTER FROM |",
+            "RESTORE DOMAIN prod AS prod_copy FROM |",
         ] {
             let (_, found) = fragment_at_marker(input);
             let cursor = input
@@ -1427,6 +1453,8 @@ mod tests {
             "CREATE CLIENT http_main TYPE HTTP CONFIG { 'url' = 'http://lo|",
             "DESCRIBE TRANSACTION 'tx|",
             "BACKUP CLUSTER |",
+            "RESTORE CLUSTER FROM '/tmp/c.nvxb' |",
+            "RESTORE DOMAIN |",
         ] {
             let (_, found) = fragment_at_marker(input);
             assert_eq!(found, None, "{input:?} is not a local path");

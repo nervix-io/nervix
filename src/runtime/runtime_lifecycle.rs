@@ -192,6 +192,15 @@ impl Runtime {
         self.inner.snapshot_staging.stage(length).await
     }
 
+    /// Stages an artifact of `length` bytes, refusing rather than waiting when the node's staging
+    /// quota cannot hold it now.
+    pub(crate) async fn try_stage_artifact(
+        &self,
+        length: u64,
+    ) -> Result<StagedSnapshotWriter, Report<SnapshotStagingError>> {
+        self.inner.snapshot_staging.try_stage(length).await
+    }
+
     pub(crate) fn dns(&self) -> Option<&DnsResolver> {
         self.inner.dns.as_ref()
     }
@@ -273,6 +282,18 @@ impl Runtime {
         self.inner
             .fault_injection
             .pause_command_admission_if_armed(node_id)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_restore_step_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+        step: &nervix_models::RestoreStep,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_restore_step_if_armed(node_id, step)
             .await;
     }
 

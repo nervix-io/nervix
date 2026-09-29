@@ -22,12 +22,12 @@ use nervix_consensus::{
     CommandExecutionStatementDisposition, CommandExecutionStatementResult,
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, ConsensusConflict,
-    ConsensusError,
+    ConsensusError, RestoreExecution,
 };
 use nervix_execution::sync::DashMap;
 use nervix_models::{
-    CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus, Statement,
-    Timestamp, TransactionPosition, TransactionStatus, UserName,
+    CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus, Restore,
+    RestoreArchive, Statement, Timestamp, TransactionPosition, TransactionStatus, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use thiserror::Error;
@@ -197,6 +197,12 @@ enum PersistentCommandRequestBody {
         statement: Statement,
     },
     Transaction(CommandExecutionTransactionRequest),
+    /// A restore of `archive`, which takes the mutation lease of every domain in `targets`.
+    Restore {
+        restore: Restore,
+        archive: RestoreArchive,
+        targets: BTreeSet<DomainName>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -338,6 +344,41 @@ impl PersistentCommandRequest {
         })
     }
 
+    /// The request of a restore of `archive`, which owns the domains in `targets` while it
+    /// applies. The request's identity covers the statement and the archive's size and digest, so
+    /// the same reference sent with another archive is another request.
+    pub(in crate::application) fn restore(
+        restore: Restore,
+        archive: RestoreArchive,
+        targets: BTreeSet<DomainName>,
+    ) -> Result<Self, Report<PersistentCommandRequestError>> {
+        let statement = Statement::Restore(restore.clone());
+        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&statement).map_err(|error| {
+            Report::new(PersistentCommandRequestError::Encoding {
+                message: error.to_string(),
+            })
+        })?;
+        let encoded_bytes = encoded.as_slice();
+        let encoded_length = u64::try_from(encoded_bytes.len())
+            .map_err(|_| Report::new(PersistentCommandRequestError::SemanticsTooLarge))?;
+        let mut hasher = Hasher::new();
+        hasher.update(&[]);
+        hasher.update(&encoded_length.to_le_bytes());
+        hasher.update(encoded_bytes);
+        hasher.update(&archive.total_bytes.get().to_le_bytes());
+        hasher.update(archive.digest.as_bytes());
+        Ok(Self {
+            domain: None,
+            expected_transaction_position: None,
+            digest: *hasher.finalize().as_bytes(),
+            body: PersistentCommandRequestBody::Restore {
+                restore,
+                archive,
+                targets,
+            },
+        })
+    }
+
     pub(in crate::application) fn transaction_digest(
         query: &str,
     ) -> Result<[u8; 32], Report<PersistentCommandRequestError>> {
@@ -350,8 +391,10 @@ impl PersistentCommandRequest {
     }
 
     fn mutation_domains(&self) -> BTreeSet<DomainName> {
-        let PersistentCommandRequestBody::Statement { statement, .. } = &self.body else {
-            return BTreeSet::new();
+        let statement = match &self.body {
+            PersistentCommandRequestBody::Statement { statement, .. } => statement,
+            PersistentCommandRequestBody::Restore { targets, .. } => return targets.clone(),
+            PersistentCommandRequestBody::Transaction(_) => return BTreeSet::new(),
         };
         match statement {
             Statement::CreateDomain(create) => BTreeSet::from([create.id.clone()]),
@@ -370,7 +413,8 @@ fn transaction_targets_match(
 ) -> bool {
     let requested = match &requested.body {
         PersistentCommandRequestBody::Transaction(request) => Some(request),
-        PersistentCommandRequestBody::Statement { .. } => None,
+        PersistentCommandRequestBody::Statement { .. }
+        | PersistentCommandRequestBody::Restore { .. } => None,
     };
     match (existing.transaction_target(), requested) {
         (Some(existing), Some(requested)) => existing.identifies_same_request(&requested.target),
@@ -406,6 +450,17 @@ impl SessionServiceImpl {
                 continue;
             };
             if !execution.is_applying() {
+                continue;
+            }
+            if execution.restore_execution().is_some()
+                && !self.inner.restore_archives.retains(&reference)
+            {
+                // Only the node its client streamed the archive to can apply a restore. Its
+                // client sends the archive again to this leader to resume it; until then it waits,
+                // and once no retry can send it any more, it ends where it stopped.
+                if self.restore_archive_retry_ended(&reference) {
+                    self.finish_restore_without_archive(execution, execution_guard);
+                }
                 continue;
             }
             let owner = execution
@@ -582,6 +637,12 @@ impl SessionServiceImpl {
                     statement: Box::new(statement.clone()),
                 }
             }
+            PersistentCommandRequestBody::Restore {
+                restore, archive, ..
+            } => CommandExecutionEffect::Restore(Box::new(RestoreExecution::new(
+                restore.clone(),
+                *archive,
+            ))),
         };
         let admitted_at = current_timestamp();
         let policy = self
@@ -758,6 +819,9 @@ impl SessionServiceImpl {
                 identity,
                 member_at_admission,
             } => Box::pin(self.drop_admitted_node(identity, member_at_admission)).await,
+            CommandExecutionEffect::Restore(restore) => {
+                Box::pin(self.execute_restore(execution, *restore)).await
+            }
         }
     }
 
@@ -802,6 +866,9 @@ impl SessionServiceImpl {
                 return Err(Box::new(result));
             }
         };
+        // A restore's archive is read only while its restore applies, so it is released once the
+        // restore's outcome is durable. Every other command retains no archive under its reference.
+        self.inner.restore_archives.release(&reference);
         self.result_from_finished_execution(&reference, execution)
             .await
     }
@@ -1005,6 +1072,7 @@ fn durable_command_result(result: &CommandResult) -> CommandExecutionResult {
         transaction: result.transaction.as_ref().map(durable_transaction_status),
         transaction_admission: result.transaction_admission.clone(),
         backup: result.backup.as_deref().cloned(),
+        restore: result.restore.as_deref().cloned(),
     }
 }
 
@@ -1062,6 +1130,7 @@ fn command_result(result: CommandExecutionResult) -> CommandResult {
         transaction,
         transaction_admission: result.transaction_admission,
         backup: result.backup.map(Box::new),
+        restore: result.restore.map(Box::new),
         ..CommandResult::new(disposition, result.message)
     }
 }

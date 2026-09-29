@@ -15,7 +15,8 @@ use tonic::{
 use crate::{
     frame::{
         BackupDownloadFrame, BackupDownloadRequestFrame, ClientFrame, EncodedFrame, FrameError,
-        FrameRoot, ServerFrame, UploadFrame, UploadReplyFrame, VerifiedFrame,
+        FrameRoot, RestoreFrame, RestoreReplyFrame, ServerFrame, UploadFrame, UploadReplyFrame,
+        VerifiedFrame,
     },
     limits::SessionLimits,
 };
@@ -31,6 +32,9 @@ pub const UPLOAD_RESOURCE_PATH: &str = "/nervix.session.Session/UploadResource";
 
 /// One backup download request answered by a server stream of download frames.
 pub const DOWNLOAD_BACKUP_PATH: &str = "/nervix.session.Session/DownloadBackup";
+
+/// The client stream of restore frames answered by one restore reply frame.
+pub const RESTORE_BACKUP_PATH: &str = "/nervix.session.Session/RestoreBackup";
 
 /// Frames below this size are copied out of tonic's read buffer.
 ///
@@ -63,6 +67,12 @@ pub type ClientBackupDownloadCodec = FrameCodec<BackupDownloadRequestFrame, Back
 
 /// The server side of a backup download.
 pub type ServerBackupDownloadCodec = FrameCodec<BackupDownloadFrame, BackupDownloadRequestFrame>;
+
+/// The client side of a restore.
+pub type ClientRestoreCodec = FrameCodec<RestoreFrame, RestoreReplyFrame>;
+
+/// The server side of a restore.
+pub type ServerRestoreCodec = FrameCodec<RestoreReplyFrame, RestoreFrame>;
 
 impl<Outbound: FrameRoot, Inbound: FrameRoot> FrameCodec<Outbound, Inbound> {
     /// A codec holding frames to `limits`. Configure tonic's message size limits with

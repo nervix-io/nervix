@@ -18,8 +18,9 @@ use nervix_models::{
     ClientProducerDescription, ClientProducerEndReason, ClientProducerRefusal,
     ClientSubmissionOutcome, ClientSubmissionRefusal, CommandExecutionReference,
     DomainClockObservation, DomainClockObservedState, DomainClockTickObservation, ModelKind,
-    ModelName, NodeRef, ParseAsType, PlacementPolicy, RequestedResourceVersion, SchemaField,
-    Timestamp,
+    ModelName, NodeRef, ParseAsType, PlacementPolicy, RequestedResourceVersion, RestoreArchive,
+    RestoreMode, RestoreReport, RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain,
+    RestoredUsers, SchemaField, Timestamp,
 };
 
 use super::{
@@ -39,10 +40,12 @@ use crate::{
     DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked, DomainPaceChoice,
     LeaderRedirect, OpenIngestorDisposition, OpenIngestorOutcome, ProducerAdmissionChanged,
     ProducerEnded, ProducerOpened, Reply, ReplyBody, ReplyDelivery, RequestRejected,
-    RequestRejection, ServerEvent, ServerFrame, ServerMessage, SubmissionOutcome,
-    SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason, SubscriptionEnded,
-    SubscriptionOpened, SubscriptionType, SuggestOutcome, Suggestion, SuggestionKind,
-    SuggestionStatus, TextEdit, UnknownOutcomeCause, VerifiedFrame, producer::wire_refusal, wire,
+    RequestRejection, RestoreDisposition, RestoreFrame, RestoreMessage, RestoreReply,
+    RestoreReplyFrame, RestoreStart, RestoreUploadFailure, ServerEvent, ServerFrame, ServerMessage,
+    SubmissionOutcome, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
+    SubscriptionEnded, SubscriptionOpened, SubscriptionType, SuggestOutcome, Suggestion,
+    SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause, VerifiedFrame,
+    producer::wire_refusal, restore::RestoreChunk, wire,
 };
 
 const UPDATE_ENV: &str = "NERVIX_UPDATE_CLIENT_WIRE_CORPUS";
@@ -164,6 +167,10 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             already_existed: false,
         })
     };
+    let restore = CommandOutcome {
+        restore: Some(Box::new(restore_report())),
+        ..command_outcome(CommandDisposition::Failed)
+    };
     let clock_ticked = DomainClockTicked {
         domain: name("tenant"),
         tick: DomainClockTickObservation {
@@ -254,6 +261,53 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
         ("client_submit_batch.nxcm", client(19)),
         ("client_subscribe.nxcm", client(11)),
         ("client_suggest.nxcm", client(3)),
+        (
+            "restore_chunk.nxrm",
+            RestoreChunk::encode(&[0x00, 0x7f, 0x80, 0xff], &limits())
+                .assured("a corpus restore chunk fits the default limits")
+                .into_bytes(),
+        ),
+        (
+            "restore_failed.nxrr",
+            RestoreReply {
+                request_id: None,
+                disposition: RestoreDisposition::UploadFailed {
+                    failure: RestoreUploadFailure::DigestMismatch,
+                    message: "the archive does not have its declared digest".to_string(),
+                },
+            }
+            .encode(&limits())
+            .assured("a corpus restore refusal fits the default limits")
+            .into_bytes(),
+        ),
+        (
+            "restore_outcome.nxrr",
+            RestoreReply {
+                request_id: Some(request(1)),
+                disposition: RestoreDisposition::Outcome(Box::new(restore.clone())),
+            }
+            .encode(&limits())
+            .assured("a corpus restore outcome fits the default limits")
+            .into_bytes(),
+        ),
+        (
+            "restore_start.nxrm",
+            RestoreStart {
+                request_id: request(1),
+                execution_reference: CommandExecutionReference::parse(
+                    "0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44",
+                )
+                .assured("the corpus reference is a UUID"),
+                statement: "RESTORE CLUSTER FROM 'cluster.nvxb' ON EXISTING USER SKIP;".to_string(),
+                archive: RestoreArchive {
+                    total_bytes: NonZeroU64::MAX,
+                    digest: ArchiveDigest::from_bytes([0x3c; 32]),
+                },
+            }
+            .encode(&limits())
+            .assured("a corpus restore start fits the default limits")
+            .into_bytes(),
+        ),
         (
             "server_choice.nxsm",
             reply(
@@ -358,6 +412,10 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                     leader: Some(leader()),
                 }),
             ),
+        ),
+        (
+            "server_command_restore.nxsm",
+            reply(19, ReplyBody::Command(Box::new(restore))),
         ),
         (
             "server_command_unknown.nxsm",
@@ -571,6 +629,58 @@ fn backup_archive() -> BackupArchiveSummary {
     }
 }
 
+/// A restore report of every step kind and outcome, user counts at the edges of their range, and
+/// a domain restored under another name.
+fn restore_report() -> RestoreReport {
+    RestoreReport {
+        mode: RestoreMode::Apply,
+        archive: RestoreArchive {
+            total_bytes: NonZeroU64::MAX,
+            digest: ArchiveDigest::from_bytes([0x3c; 32]),
+        },
+        captured_at: Timestamp::from_unix_nanos(i64::MIN),
+        users: Some(RestoredUsers {
+            created: u64::MAX,
+            skipped: 0,
+            replaced: 7,
+        }),
+        domains: vec![
+            RestoredDomain {
+                source: name("tenant"),
+                domain: name("tenant_copy"),
+                resource_versions: 3,
+                models: u64::MAX,
+                planned_models: None,
+            },
+            RestoredDomain {
+                source: name("analytics"),
+                domain: name("analytics"),
+                resource_versions: 0,
+                models: 0,
+                planned_models: None,
+            },
+        ],
+        steps: vec![
+            RestoreStepReport {
+                step: RestoreStep::Users,
+                outcome: RestoreStepOutcome::Applied,
+            },
+            RestoreStepReport {
+                step: RestoreStep::CreateDomain(name("tenant_copy")),
+                outcome: RestoreStepOutcome::Planned,
+            },
+            RestoreStepReport {
+                step: RestoreStep::ImportResources(name("tenant_copy")),
+                outcome: RestoreStepOutcome::Failed,
+            },
+            RestoreStepReport {
+                step: RestoreStep::ApplyModels(name("tenant_copy")),
+                outcome: RestoreStepOutcome::NotAttempted,
+            },
+        ],
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -773,70 +883,7 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
             let id = reply.request_id.get();
             match &reply.body {
                 ReplyBody::Command(outcome) => {
-                    lines.push(format!(
-                        "REPLY {id} COMMAND {} reference={} origin={:?} message={}",
-                        disposition(&outcome.disposition),
-                        outcome.execution_reference.as_str(),
-                        outcome.origin,
-                        text(&outcome.message)
-                    ));
-                    for diagnostic in &outcome.diagnostics {
-                        let span = match diagnostic.span {
-                            Some(span) => format!("{}..{}", span.start(), span.end()),
-                            None => "none".to_string(),
-                        };
-                        lines.push(format!(
-                            "DIAGNOSTIC span={span} message={}",
-                            text(&diagnostic.message)
-                        ));
-                    }
-                    match &outcome.disposition {
-                        CommandDisposition::NotLeader(LeaderRedirect {
-                            leader: Some(leader),
-                        }) => {
-                            let uri = |uri: &Option<url::Url>| match uri {
-                                Some(uri) => uri.as_str().to_string(),
-                                None => "none".to_string(),
-                            };
-                            lines.push(format!(
-                                "LEADER node={} grpc={} console={}",
-                                leader.node.as_str(),
-                                uri(&leader.grpc_uri),
-                                uri(&leader.web_console_uri)
-                            ));
-                        }
-                        CommandDisposition::NotLeader(LeaderRedirect { leader: None }) => {
-                            lines.push("LEADER none".to_string());
-                        }
-                        CommandDisposition::OutcomeUnknown(cause) => {
-                            lines.push(format!("UNKNOWN cause={cause:?}"));
-                        }
-                        _ => {}
-                    }
-                    if let Some(archive) = &outcome.backup {
-                        let users = match archive.users {
-                            Some(users) => users.to_string(),
-                            None => "none".to_string(),
-                        };
-                        lines.push(format!(
-                            "BACKUP total_bytes={} digest={} captured_at={} retained_until={} \
-                             resources={:?} users={users}",
-                            archive.total_bytes,
-                            hex(archive.digest.as_bytes()),
-                            archive.captured_at.unix_nanos(),
-                            archive.retained_until.unix_nanos(),
-                            archive.resources
-                        ));
-                        for domain in &archive.domains {
-                            lines.push(format!(
-                                "BACKUP_DOMAIN domain={} revision={} sections={} section_bytes={}",
-                                domain.domain.as_str(),
-                                domain.revision,
-                                domain.sections,
-                                domain.section_bytes
-                            ));
-                        }
-                    }
+                    render_command(&format!("REPLY {id} COMMAND"), outcome, lines);
                 }
                 ReplyBody::Rejected(rejected) => {
                     let field = rejected.field.as_deref().unwrap_or("none");
@@ -1155,6 +1202,152 @@ fn render_client(message: &ClientMessage, lines: &mut Vec<String>) {
     }
 }
 
+/// The lines of one command outcome, the first of them after `head`.
+fn render_command(head: &str, outcome: &CommandOutcome, lines: &mut Vec<String>) {
+    lines.push(format!(
+        "{head} {} reference={} origin={:?} message={}",
+        disposition(&outcome.disposition),
+        outcome.execution_reference.as_str(),
+        outcome.origin,
+        text(&outcome.message)
+    ));
+    for diagnostic in &outcome.diagnostics {
+        let span = match diagnostic.span {
+            Some(span) => format!("{}..{}", span.start(), span.end()),
+            None => "none".to_string(),
+        };
+        lines.push(format!(
+            "DIAGNOSTIC span={span} message={}",
+            text(&diagnostic.message)
+        ));
+    }
+    match &outcome.disposition {
+        CommandDisposition::NotLeader(LeaderRedirect {
+            leader: Some(leader),
+        }) => {
+            let uri = |uri: &Option<url::Url>| match uri {
+                Some(uri) => uri.as_str().to_string(),
+                None => "none".to_string(),
+            };
+            lines.push(format!(
+                "LEADER node={} grpc={} console={}",
+                leader.node.as_str(),
+                uri(&leader.grpc_uri),
+                uri(&leader.web_console_uri)
+            ));
+        }
+        CommandDisposition::NotLeader(LeaderRedirect { leader: None }) => {
+            lines.push("LEADER none".to_string());
+        }
+        CommandDisposition::OutcomeUnknown(cause) => {
+            lines.push(format!("UNKNOWN cause={cause:?}"));
+        }
+        _ => {}
+    }
+    if let Some(archive) = &outcome.backup {
+        let users = match archive.users {
+            Some(users) => users.to_string(),
+            None => "none".to_string(),
+        };
+        lines.push(format!(
+            "BACKUP total_bytes={} digest={} captured_at={} retained_until={} resources={:?} \
+             users={users}",
+            archive.total_bytes,
+            hex(archive.digest.as_bytes()),
+            archive.captured_at.unix_nanos(),
+            archive.retained_until.unix_nanos(),
+            archive.resources
+        ));
+        for domain in &archive.domains {
+            lines.push(format!(
+                "BACKUP_DOMAIN domain={} revision={} sections={} section_bytes={}",
+                domain.domain.as_str(),
+                domain.revision,
+                domain.sections,
+                domain.section_bytes
+            ));
+        }
+    }
+    if let Some(report) = &outcome.restore {
+        render_restore_report(report, lines);
+    }
+}
+
+fn render_restore_report(report: &RestoreReport, lines: &mut Vec<String>) {
+    let users = match &report.users {
+        Some(users) => format!(
+            "created:{},skipped:{},replaced:{}",
+            users.created, users.skipped, users.replaced
+        ),
+        None => "none".to_string(),
+    };
+    lines.push(format!(
+        "RESTORE mode={:?} total_bytes={} digest={} captured_at={} users={users}",
+        report.mode,
+        report.archive.total_bytes,
+        hex(report.archive.digest.as_bytes()),
+        report.captured_at.unix_nanos()
+    ));
+    for domain in &report.domains {
+        let planned = match &domain.planned_models {
+            Some(_) => "present",
+            None => "none",
+        };
+        lines.push(format!(
+            "RESTORE_DOMAIN source={} domain={} resource_versions={} models={} \
+             planned_models={planned}",
+            domain.source.as_str(),
+            domain.domain.as_str(),
+            domain.resource_versions,
+            domain.models
+        ));
+    }
+    for step in &report.steps {
+        let (kind, domain) = match &step.step {
+            RestoreStep::Users => ("Users", "none"),
+            RestoreStep::CreateDomain(domain) => ("CreateDomain", domain.as_str()),
+            RestoreStep::ImportResources(domain) => ("ImportResources", domain.as_str()),
+            RestoreStep::ApplyModels(domain) => ("ApplyModels", domain.as_str()),
+        };
+        lines.push(format!(
+            "RESTORE_STEP kind={kind} domain={domain} outcome={:?}",
+            step.outcome
+        ));
+    }
+}
+
+fn render_restore(message: &RestoreMessage, lines: &mut Vec<String>) {
+    match message {
+        RestoreMessage::Start(start) => lines.push(format!(
+            "RESTORE_START request={} reference={} statement={} total_bytes={} digest={}",
+            start.request_id.get(),
+            start.execution_reference.as_str(),
+            text(&start.statement),
+            start.archive.total_bytes,
+            hex(start.archive.digest.as_bytes())
+        )),
+        RestoreMessage::Chunk(chunk) => {
+            lines.push(format!("RESTORE_CHUNK bytes={}", hex(chunk.bytes())));
+        }
+    }
+}
+
+fn render_restore_reply(reply: &RestoreReply, lines: &mut Vec<String>) {
+    let request = match reply.request_id {
+        Some(request) => request.get().to_string(),
+        None => "none".to_string(),
+    };
+    match &reply.disposition {
+        RestoreDisposition::Outcome(outcome) => {
+            render_command(&format!("RESTORE_REPLY {request} COMMAND"), outcome, lines);
+        }
+        RestoreDisposition::UploadFailed { failure, message } => lines.push(format!(
+            "RESTORE_REPLY {request} FAILED failure={failure:?} message={}",
+            text(message)
+        )),
+    }
+}
+
 fn render_download_request(request: &BackupDownloadRequest, lines: &mut Vec<String>) {
     lines.push(format!(
         "REQUEST DOWNLOAD_BACKUP reference={}",
@@ -1216,6 +1409,16 @@ fn report_of(frames: &[(&'static str, Bytes)]) -> String {
             let message =
                 BackupDownloadMessage::decode(&frame).assured("a corpus download frame decodes");
             render_download(&message, &mut lines);
+        } else if file.ends_with(".nxrm") {
+            let frame = VerifiedFrame::<RestoreFrame>::verify(bytes.clone(), &limits())
+                .assured("a corpus restore frame verifies");
+            let message = RestoreMessage::decode(&frame).assured("a corpus restore frame decodes");
+            render_restore(&message, &mut lines);
+        } else if file.ends_with(".nxrr") {
+            let frame = VerifiedFrame::<RestoreReplyFrame>::verify(bytes.clone(), &limits())
+                .assured("a corpus restore reply verifies");
+            let reply = RestoreReply::decode(&frame).assured("a corpus restore reply decodes");
+            render_restore_reply(&reply, &mut lines);
         } else if file.ends_with(".nxcm") {
             let frame = VerifiedFrame::<ClientFrame>::verify(bytes.clone(), &limits())
                 .assured("a corpus client frame verifies");

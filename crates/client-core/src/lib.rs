@@ -5,7 +5,8 @@
 //! - **Owns.** Connecting to the session service, TLS selection, the dispatcher that pairs every
 //!   reply of a session exchange with the request it answers, submitting statements, transaction
 //!   state, completion suggestions, subscription streams, the domain clocks the session follows,
-//!   the producers it opens against client ingestors, resource upload and backup download.
+//!   the producers it opens against client ingestors, resource upload, backup download and
+//!   restore.
 //! - **Depends on.** The session wire contract, the language layer — an edge may name the parser,
 //!   and this one does so for client-side parsing and completion — and the vocabulary.
 //! - **Must not know.** The registry, the runtime, or anything else inside the server. Everything
@@ -26,6 +27,7 @@ mod exchange;
 mod outcome;
 mod producer;
 mod restoration;
+mod restore;
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_test;
 mod subscriptions;
@@ -51,10 +53,11 @@ pub use nervix_client_wire::{
     DomainClockAttachOutcome, DomainClockAttachmentEndReason, DomainClockAttachmentEnded,
     DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked,
     DomainInfo, DomainPaceChoice, ExecutionReferenceConflict, LeaderEndpoints, LeaderRedirect,
-    Leadership, NoticeLevel, OutcomeOrigin, ProducerId, RowConformanceError, RowSchema, SourceSpan,
-    StatementDisposition, StatementOutcome, SubscriptionDeliveryLost, SubscriptionEnded,
-    SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionRowsSkipped,
-    SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause, UploadFailure,
+    Leadership, NoticeLevel, OutcomeOrigin, ProducerId, RestoreUploadFailure, RowConformanceError,
+    RowSchema, SourceSpan, StatementDisposition, StatementOutcome, SubscriptionDeliveryLost,
+    SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRows,
+    SubscriptionRowsSkipped, SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause,
+    UploadFailure,
 };
 pub use nervix_models::{
     AckWindow, ArchiveDigest, BackupArchiveSummary, BackupDomainSummary, BackupResources,
@@ -63,7 +66,9 @@ pub use nervix_models::{
     ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy, ClientProducerRefusal,
     ClientSubmissionRefusal, CommandExecutionReference, DomainAdmissionWindow,
     DomainClockObservation, DomainClockObservedState, DomainClockTickObservation, DomainName,
-    ImpactPlanningBasis, IngestorName, PacedDomainClock, ResourceUploadIdentity, SchemaField,
+    ExistingUserPolicy, ImpactPlanningBasis, IngestorName, PacedDomainClock,
+    ResourceUploadIdentity, Restore, RestoreArchive, RestoreMode, RestoreReport, RestoreScope,
+    RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers, SchemaField,
     SubscriptionDeliveryBehavior, Timestamp, TransactionImpactReport, TransactionInspection,
     TransactionLifecycle, TransactionOperationAdmission, TransactionOperationNumber,
     TransactionPosition, TransactionPreviewIdentity, TransactionStatus,

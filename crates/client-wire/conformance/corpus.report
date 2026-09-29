@@ -38,6 +38,24 @@ FRAME client_subscribe.nxcm
 REQUEST 12 SUBSCRIBE domain=tenant statement=str:43524541544520535542534352495054494f4e206c6976652046524f4d206f72646572733b type=Row
 FRAME client_suggest.nxcm
 REQUEST 4 SUGGEST input=str:53484f572052454c415920c2abc3bc6ec3af636f6465c2bb20 cursor=13 domain=tenant page_size=2 continuation=page-two
+FRAME restore_chunk.nxrm
+RESTORE_CHUNK bytes=007f80ff
+FRAME restore_failed.nxrr
+RESTORE_REPLY none FAILED failure=DigestMismatch message=str:746865206172636869766520646f6573206e6f74206861766520697473206465636c6172656420646967657374
+FRAME restore_outcome.nxrr
+RESTORE_REPLY 1 COMMAND failed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+RESTORE mode=Apply total_bytes=18446744073709551615 digest=3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c captured_at=-9223372036854775808 users=created:18446744073709551615,skipped:0,replaced:7
+RESTORE_DOMAIN source=tenant domain=tenant_copy resource_versions=3 models=18446744073709551615 planned_models=none
+RESTORE_DOMAIN source=analytics domain=analytics resource_versions=0 models=0 planned_models=none
+RESTORE_STEP kind=Users domain=none outcome=Applied
+RESTORE_STEP kind=CreateDomain domain=tenant_copy outcome=Planned
+RESTORE_STEP kind=ImportResources domain=tenant_copy outcome=Failed
+RESTORE_STEP kind=ApplyModels domain=tenant_copy outcome=NotAttempted
+FRAME restore_start.nxrm
+RESTORE_START request=1 reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 statement=str:524553544f524520434c55535445522046524f4d2027636c75737465722e6e76786227204f4e204558495354494e47205553455220534b49503b total_bytes=18446744073709551615 digest=3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c
 FRAME server_choice.nxsm
 REPLY 9 CHOICE status=Ready cursor=choice-page-two
 CHOICE value=pace:Paced label=str:5041434544 detail=str:57616c6c20636c6f636b group=str:446f6d61696e20636c6f636b
@@ -73,6 +91,18 @@ DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c4159
 DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
 DIAGNOSTIC span=none message=str:
 LEADER node=node-2 grpc=https://node-2.cluster.local:7443/ console=http://node-2.cluster.local:17420/console/
+FRAME server_command_restore.nxsm
+REPLY 19 COMMAND failed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+RESTORE mode=Apply total_bytes=18446744073709551615 digest=3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c captured_at=-9223372036854775808 users=created:18446744073709551615,skipped:0,replaced:7
+RESTORE_DOMAIN source=tenant domain=tenant_copy resource_versions=3 models=18446744073709551615 planned_models=none
+RESTORE_DOMAIN source=analytics domain=analytics resource_versions=0 models=0 planned_models=none
+RESTORE_STEP kind=Users domain=none outcome=Applied
+RESTORE_STEP kind=CreateDomain domain=tenant_copy outcome=Planned
+RESTORE_STEP kind=ImportResources domain=tenant_copy outcome=Failed
+RESTORE_STEP kind=ApplyModels domain=tenant_copy outcome=NotAttempted
 FRAME server_command_unknown.nxsm
 REPLY 4 COMMAND outcome_unknown reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
 DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927

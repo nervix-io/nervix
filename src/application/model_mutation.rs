@@ -94,6 +94,7 @@ fn requires_request_domain(statement: &Statement) -> bool {
         Statement::CreateDomain(_)
             | Statement::CreateUser(_)
             | Statement::Backup(_)
+            | Statement::Restore(_)
             | Statement::StopDomain(_)
             | Statement::ShowClusterStatus(_)
             | Statement::ShowTransactions(_)
@@ -111,6 +112,7 @@ pub(in crate::application) fn requires_existing_domain(statement: &Statement) ->
         Statement::CreateDomain(_)
             | Statement::CreateUser(_)
             | Statement::Backup(_)
+            | Statement::Restore(_)
             | Statement::StopDomain(_)
             | Statement::ShowClusterStatus(_)
             | Statement::ShowTransactions(_)
@@ -829,24 +831,49 @@ impl SessionServiceImpl {
             query,
             request_domain,
             None,
+            None,
         ))
         .await
     }
 
+    /// Applies a restore's models to `domain` as one batch, publishing under `lease`, the mutation
+    /// lease the restore holds on the domain.
+    pub(in crate::application) async fn process_restored_model_batch(
+        &self,
+        statements: Vec<Statement>,
+        query: &str,
+        domain: &DomainName,
+        lease: &DomainMutationLease,
+    ) -> CommandResult {
+        Box::pin(self.process_model_mutation_batch_with_transaction(
+            statements,
+            query,
+            Some(domain),
+            None,
+            Some(lease),
+        ))
+        .await
+    }
+
+    /// Applies one batch of model mutations. A transaction step publishes under its transaction's
+    /// lease, and a batch a command owns under `command_lease`, the lease that command holds on the
+    /// domain; a batch with neither presents none.
     pub(in crate::application) async fn process_model_mutation_batch_with_transaction(
         &self,
         statements: Vec<Statement>,
         query: &str,
         request_domain: Option<&DomainName>,
         transaction_step: Option<TransactionModelStepContext<'_>>,
+        command_lease: Option<&DomainMutationLease>,
     ) -> CommandResult {
         let Some(domain) = request_domain.cloned() else {
             return command_error("no active domain selected".to_string());
         };
-        let domain_mutation = transaction_step
-            .as_ref()
-            .and_then(|step| step.transaction.domain_mutation())
-            .cloned();
+        let domain_mutation = match (&transaction_step, command_lease) {
+            (Some(step), _) => step.transaction.domain_mutation().cloned(),
+            (None, Some(lease)) => Some(lease.clone()),
+            (None, None) => None,
+        };
 
         let leader = Box::pin(self.inner.consensus.current_leader()).await;
         if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
@@ -2152,6 +2179,11 @@ impl SessionServiceImpl {
             Statement::UploadResource(upload) => self.upload_resource_command(upload).await,
             Statement::Backup(_) => command_error(
                 "BACKUP runs only as an admitted command under its execution reference".to_string(),
+            ),
+            Statement::Restore(_) => command_error(
+                "RESTORE reads an archive on the client's machine; a client sends it on the \
+                 restore stream beside the session"
+                    .to_string(),
             ),
             Statement::StartDomain(start) => {
                 let domain = domain

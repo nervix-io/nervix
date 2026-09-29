@@ -289,6 +289,18 @@ struct ScenarioWorld {
     last_backup: Option<backup::TestBackup>,
     /// How the last backup download a scenario shaped itself ended.
     last_backup_download: Option<crate::common::raw_session::TestDownloadEnd>,
+    /// The `SHOW CREATE` output of models a scenario saved, by the name it saved them as and then
+    /// by statement.
+    saved_model_definitions: BTreeMap<String, BTreeMap<String, String>>,
+    /// The version lines `DESCRIBE RESOURCE` printed that a scenario saved, by the name it saved
+    /// them as and then by version.
+    saved_resource_details: BTreeMap<String, BTreeMap<u64, String>>,
+    /// How the last restore stream a scenario shaped itself ended.
+    last_restore_end: Option<crate::common::raw_session::TestRestoreEnd>,
+    /// A restore stream a scenario sent in the background.
+    background_restore: Option<AbortOnDropHandle<crate::common::raw_session::TestRestoreEnd>>,
+    /// The restore step pause a scenario armed and has not released.
+    restore_step_pause: Option<backup::restore::ArmedRestorePause>,
     /// The outcome of the last command a scenario sent through its own session.
     last_session_command: Option<nervix_client_wire::CommandOutcome>,
     /// Candidates collected by a public session completion paging scenario.

@@ -69,6 +69,7 @@ mod impact;
 mod inspection;
 mod rendering;
 mod request;
+pub(in crate::application) mod restored;
 pub(in crate::application) use impact::{QuiescenceAttempt, TransactionStepImpactRecorder};
 use inspection::transaction_inspection_status;
 pub use inspection::{InspectedReportError, InspectingSession, TransactionInspectionOutcome};
@@ -671,6 +672,7 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         Statement::CreateUser(_) => "CREATE USER",
         Statement::UploadResource(_) => "UPLOAD RESOURCE",
         Statement::Backup(_) => "BACKUP",
+        Statement::Restore(_) => "RESTORE",
         Statement::ResetWasmState(_) => "RESET WASM PROCESSOR STATE",
         Statement::DropNode(_) => "DROP NODE",
         Statement::CordonNode(_) => "CORDON",
@@ -2174,6 +2176,7 @@ impl SessionServiceImpl {
                         actual: &actual,
                         outcome: &outcome,
                     }),
+                    None,
                 ))
                 .await;
                 let recorded = outcome.lock().take();

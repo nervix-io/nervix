@@ -6,8 +6,8 @@
 //!   transfer reassembly, the subscriptions the session opened and the display text of their rows,
 //!   every frame about a subscription outside the lifetime its replies and events announced, the
 //!   notices it received, the domain clock replies and frames it read in their arrival order, raw
-//!   frames a scenario sends to probe the server's refusals, and backup downloads a scenario shapes
-//!   itself.
+//!   frames a scenario sends to probe the server's refusals, and backup downloads and restore
+//!   streams a scenario shapes itself.
 //! - **Depends on.** The client wire contract and its gRPC codec, the NSPL client statement parser
 //!   to route subscription statements, and the shared TLS and credential fixtures.
 //! - **Must not know.** Server internals; everything it observes arrives through the public
@@ -33,19 +33,20 @@ use nervix_client_wire::{
     CancelRequest, ClientMessage, ClientRequest, CommandDisposition, CommandOutcome,
     CommandRequest, DetachDomainClockRequest, Diagnostic, DomainClockAttachmentEnded,
     DomainClockDetachDisposition, DomainClockObserved, DomainClockTicked, LeaderRedirect,
-    NoticeLevel, OutcomeOrigin, Reply, ReplyBody, RequestId, RowSchema, ServerEvent, ServerFrame,
-    ServerMessage, SessionEndReason, SessionLimits, SubscribeDisposition, SubscribeRequest,
-    SubscriptionEnded, SubscriptionHandle, SubscriptionType, TransferAssembly,
-    UnsubscribeDisposition, UnsubscribeRequest, UploadChunk, UploadReply, UploadStart,
-    VerifiedFrame,
+    NoticeLevel, OutcomeOrigin, Reply, ReplyBody, RequestId, RestoreChunk, RestoreReply,
+    RestoreStart, RowSchema, ServerEvent, ServerFrame, ServerMessage, SessionEndReason,
+    SessionLimits, SubscribeDisposition, SubscribeRequest, SubscriptionEnded, SubscriptionHandle,
+    SubscriptionType, TransferAssembly, UnsubscribeDisposition, UnsubscribeRequest, UploadChunk,
+    UploadReply, UploadStart, VerifiedFrame,
     grpc::{
-        ClientBackupDownloadCodec, ClientExchangeCodec, ClientUploadCodec, DOWNLOAD_BACKUP_PATH,
-        EXCHANGE_PATH, FrameDecoder, UPLOAD_RESOURCE_PATH,
+        ClientBackupDownloadCodec, ClientExchangeCodec, ClientRestoreCodec, ClientUploadCodec,
+        DOWNLOAD_BACKUP_PATH, EXCHANGE_PATH, FrameDecoder, RESTORE_BACKUP_PATH,
+        UPLOAD_RESOURCE_PATH,
     },
 };
 use nervix_models::{
-    CommandExecutionReference, DomainName, ResourceName, ResourceUploadIdentity, SubscriptionName,
-    TransactionPosition, TransactionStatus,
+    ArchiveDigest, CommandExecutionReference, DomainName, ResourceName, ResourceUploadIdentity,
+    RestoreArchive, SubscriptionName, TransactionPosition, TransactionStatus,
 };
 use nervix_nspl::client_statement::{ClientStatement, parse_client_statement_sources};
 use tokio::{sync::mpsc, time::Instant};
@@ -452,6 +453,114 @@ pub(crate) async fn download_backup(
     }
 }
 
+/// A restore stream a scenario shapes itself.
+pub(crate) struct TestRestore<'a> {
+    pub(crate) reference: &'a CommandExecutionReference,
+    /// The `RESTORE` statement the start names, as canonical NSPL.
+    pub(crate) statement: &'a str,
+    pub(crate) archive: &'a [u8],
+    /// The digest the start declares, when it is not the archive's own.
+    pub(crate) declared_digest: Option<[u8; 32]>,
+    /// Goes away without ending the stream once this many chunks were sent, as a client that loses
+    /// its connection does.
+    pub(crate) abandon_after_chunks: Option<usize>,
+}
+
+/// How a restore stream a scenario shaped itself ended.
+#[derive(Debug)]
+pub(crate) enum TestRestoreEnd {
+    /// The node answered the stream.
+    Replied(RestoreReply),
+    /// The scenario went away before the stream ended, and the node had not answered it.
+    Abandoned,
+    /// The call itself failed with this status.
+    Status(Box<Status>),
+}
+
+/// Archive bytes one restore chunk carries, as the Rust client sends them.
+const RESTORE_CHUNK_BYTES: usize = 256 * 1024;
+
+/// How long a restore waits for its reply once every frame was sent: the restore applies before it
+/// answers.
+const RESTORE_REPLY_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// How long an abandoned restore keeps its connection after its last chunk before it goes away.
+/// The scenario does not depend on it: a node that has not read the chunks by then has less to
+/// release.
+const RESTORE_ABANDON_HOLD: Duration = Duration::from_secs(1);
+
+/// Streams the restore `restore` shapes to `server`, and returns how it ended.
+pub(crate) async fn send_restore(
+    server: &str,
+    restore: TestRestore<'_>,
+) -> io::Result<TestRestoreEnd> {
+    let limits = SessionLimits::DEFAULT;
+    let channel = session_channel(server).await?;
+    let mut client = tonic::client::Grpc::new(channel)
+        .max_decoding_message_size(limits.frame_bytes())
+        .max_encoding_message_size(limits.frame_bytes());
+    client.ready().await.map_err(io::Error::other)?;
+    let length = u64::try_from(restore.archive.len()).map_err(io::Error::other)?;
+    let Some(total_bytes) = NonZeroU64::new(length) else {
+        return Err(io::Error::other("a restore streams a non-empty archive"));
+    };
+    let digest = match restore.declared_digest {
+        Some(declared) => declared,
+        None => *blake3::hash(restore.archive).as_bytes(),
+    };
+    let start = RestoreStart {
+        request_id: RequestId::new(NonZeroU64::MIN),
+        execution_reference: restore.reference.clone(),
+        statement: restore.statement.to_string(),
+        archive: RestoreArchive {
+            total_bytes,
+            digest: ArchiveDigest::from_bytes(digest),
+        },
+    }
+    .encode(&limits)
+    .map_err(io::Error::other)?;
+    let mut frames = vec![start];
+    for chunk in restore.archive.chunks(RESTORE_CHUNK_BYTES) {
+        frames.push(RestoreChunk::encode(chunk, &limits).map_err(io::Error::other)?);
+    }
+    let path = http::uri::PathAndQuery::from_static(RESTORE_BACKUP_PATH);
+    let codec = ClientRestoreCodec::new(limits);
+    let Some(chunks) = restore.abandon_after_chunks else {
+        let request = authorized(tokio_stream::iter(frames))?;
+        let call = client.client_streaming(request, path, codec);
+        let response = match tokio::time::timeout(RESTORE_REPLY_TIMEOUT, call).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(status)) => return Ok(TestRestoreEnd::Status(Box::new(status))),
+            Err(_) => {
+                return Err(io::Error::other(
+                    "the restore was not answered within five minutes",
+                ));
+            }
+        };
+        let reply = RestoreReply::decode(response.get_ref()).map_err(io::Error::other)?;
+        return Ok(TestRestoreEnd::Replied(reply));
+    };
+    let Some(sent) = chunks.checked_add(1) else {
+        return Err(io::Error::other(
+            "a scenario abandons a restore after a handful of chunks",
+        ));
+    };
+    frames.truncate(sent);
+    // The stream never ends, so only a node that refuses it outright answers before the client
+    // goes away; dropping the call resets the stream, as a lost connection does.
+    let parts = tokio_stream::StreamExt::chain(tokio_stream::iter(frames), tokio_stream::pending());
+    let request = authorized(parts)?;
+    let call = client.client_streaming(request, path, codec);
+    match tokio::time::timeout(RESTORE_ABANDON_HOLD, call).await {
+        Ok(Ok(response)) => {
+            let reply = RestoreReply::decode(response.get_ref()).map_err(io::Error::other)?;
+            Ok(TestRestoreEnd::Replied(reply))
+        }
+        Ok(Err(status)) => Ok(TestRestoreEnd::Status(Box::new(status))),
+        Err(_) => Ok(TestRestoreEnd::Abandoned),
+    }
+}
+
 /// A command outcome for a subscription statement the session sent as its own request.
 fn subscription_outcome(
     execution_reference: CommandExecutionReference,
@@ -479,6 +588,7 @@ fn subscription_outcome(
         wasm_state: None,
         resource: None,
         backup: None,
+        restore: None,
     }
 }
 

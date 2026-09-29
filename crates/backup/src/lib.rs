@@ -28,8 +28,8 @@ mod section;
 mod wire;
 
 pub use describe::{
-    ArchiveDescription, DescribedDomain, DescribedResourceVersion, DescribedSection,
-    describe_archive,
+    ArchiveContents, ArchiveDescription, DescribedDomain, DescribedResourceVersion,
+    DescribedSection, describe_archive, read_archive_contents,
 };
 pub use error::{ArchiveReadError, ArchiveWriteError};
 pub use layout::{ArchiveLayout, ArchivePiece, SectionSink};

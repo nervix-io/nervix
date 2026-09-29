@@ -30,7 +30,7 @@ use crate::{
     FieldName, GeneratorName, InferencerName, IngestorName, JsonType, JunctionName, LookupName,
     ModelName, NodeRef, ParseAsType, PlacementName, PulsarSubscriptionName, QueueGroupName,
     QueueName, RebindResource, ReingestorName, RelayName, ReordererName, RequestedResourceVersion,
-    ResetWasmState, ResourceName, SchemaFingerprint, SchemaName, SignalingProtocolName,
+    ResetWasmState, ResourceName, Restore, SchemaFingerprint, SchemaName, SignalingProtocolName,
     SubjectName, SubscriptionName, TableName, Timestamp, TopicName, TransactionInspectionRequest,
     UdfName, UserName, VhostName, WasmProcessorName, WasmSavedStateRejection, WasmStateGeneration,
     WasmStateGenerations, WasmStateRecoveries, WasmStateRecoveryAdmission,
@@ -50,6 +50,7 @@ pub enum Statement {
     ResetWasmState(ResetWasmState),
     UploadResource(UploadResource),
     Backup(Backup),
+    Restore(Restore),
     StartDomain(StartDomain),
     StopDomain(StopDomain),
     Create(CreateStatement<Box<Model<RequestedResourceVersion>>>),
@@ -139,6 +140,7 @@ impl Statement {
             | Self::CreateResource(_)
             | Self::UploadResource(_)
             | Self::Backup(_)
+            | Self::Restore(_)
             | Self::StartDomain(_)
             | Self::StopDomain(_)
             | Self::DropNode(_)

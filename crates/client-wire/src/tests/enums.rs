@@ -29,6 +29,10 @@ use crate::{
         ALL_CANCEL_STATES, ALL_CANCELLATION_STAGES, ALL_INSPECTION_REJECTIONS,
         ALL_REQUEST_REJECTIONS, ALL_SUGGESTION_KINDS,
     },
+    restore::{
+        ALL_RESTORE_MODES, ALL_RESTORE_STEP_KINDS, ALL_RESTORE_STEP_OUTCOMES,
+        ALL_RESTORE_UPLOAD_FAILURES,
+    },
     row::ALL_SCALAR_TYPES,
     subscription::{ALL_ROWS_SKIPPED_CAUSES, ALL_SUBSCRIPTION_END_REASONS, ALL_SUBSCRIPTION_TYPES},
     upload::ALL_UPLOAD_FAILURES,
@@ -171,6 +175,16 @@ fn every_enum_maps_exactly_to_its_schema_enum() {
         ALL_PRODUCER_END_REASONS,
         wire::ProducerEndReason::ENUM_VALUES,
     );
+    assert_exact_mapping(ALL_RESTORE_MODES, wire::RestoreMode::ENUM_VALUES);
+    assert_exact_mapping(ALL_RESTORE_STEP_KINDS, wire::RestoreStepKind::ENUM_VALUES);
+    assert_exact_mapping(
+        ALL_RESTORE_STEP_OUTCOMES,
+        wire::RestoreStepOutcome::ENUM_VALUES,
+    );
+    assert_exact_mapping(
+        ALL_RESTORE_UPLOAD_FAILURES,
+        wire::RestoreUploadFailure::ENUM_VALUES,
+    );
 }
 
 #[test]
@@ -254,6 +268,22 @@ fn every_undeclared_enum_byte_is_refused() {
     assert_undeclared_refused::<crate::BackupDownloadFailure, _>(
         wire::BackupDownloadFailure::ENUM_MAX,
         wire::BackupDownloadFailure,
+    );
+    assert_undeclared_refused::<nervix_models::RestoreMode, _>(
+        wire::RestoreMode::ENUM_MAX,
+        wire::RestoreMode,
+    );
+    assert_undeclared_refused::<crate::restore::RestoreStepKind, _>(
+        wire::RestoreStepKind::ENUM_MAX,
+        wire::RestoreStepKind,
+    );
+    assert_undeclared_refused::<nervix_models::RestoreStepOutcome, _>(
+        wire::RestoreStepOutcome::ENUM_MAX,
+        wire::RestoreStepOutcome,
+    );
+    assert_undeclared_refused::<crate::RestoreUploadFailure, _>(
+        wire::RestoreUploadFailure::ENUM_MAX,
+        wire::RestoreUploadFailure,
     );
     assert_undeclared_refused::<crate::SuggestionKind, _>(
         wire::SuggestionKind::ENUM_MAX,

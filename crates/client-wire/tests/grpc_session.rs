@@ -197,6 +197,7 @@ fn answer(frame: &VerifiedFrame<ClientFrame>) -> Option<Reply> {
             wasm_state: None,
             resource: None,
             backup: None,
+            restore: None,
         })),
         ClientRequest::InspectTransaction(_) => ReplyBody::Inspection(inspection()),
         _ => ReplyBody::Rejected(RequestRejected {

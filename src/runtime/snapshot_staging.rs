@@ -52,6 +52,8 @@ pub(crate) enum SnapshotStagingError {
     LengthMismatch { actual: u64, declared: u64 },
     #[error("the staged snapshot does not match the digest its source declared")]
     DigestMismatch,
+    #[error("the node staging quota cannot hold another {requested} bytes now")]
+    Full { requested: u64 },
 }
 
 /// The disk a node will hold incomplete snapshot transfers on at one time.
@@ -126,19 +128,7 @@ impl SnapshotStaging {
         &self,
         length: u64,
     ) -> Result<StagedSnapshotWriter, Report<SnapshotStagingError>> {
-        if length > self.limits.snapshot_bytes {
-            return Err(Report::new(SnapshotStagingError::QuotaExceeded {
-                actual: length,
-                limit: self.limits.snapshot_bytes,
-            }));
-        }
-        let blocks = length.div_ceil(STAGING_PERMIT_BYTES).max(1);
-        let blocks = u32::try_from(blocks).map_err(|_| {
-            Report::new(SnapshotStagingError::QuotaExceeded {
-                actual: length,
-                limit: self.limits.staging_bytes,
-            })
-        })?;
+        let blocks = self.quota_blocks(length)?;
         let reservation = std::sync::Arc::clone(&self.quota.permits)
             .acquire_many_owned(blocks)
             .await
@@ -148,6 +138,47 @@ impl SnapshotStaging {
                     limit: self.limits.staging_bytes,
                 })
             })?;
+        self.open(length, reservation).await
+    }
+
+    /// The same as [`Self::stage`], refusing rather than waiting when the quota cannot hold
+    /// `length` more bytes now.
+    pub(crate) async fn try_stage(
+        &self,
+        length: u64,
+    ) -> Result<StagedSnapshotWriter, Report<SnapshotStagingError>> {
+        let blocks = self.quota_blocks(length)?;
+        let reservation = std::sync::Arc::clone(&self.quota.permits)
+            .try_acquire_many_owned(blocks)
+            .map_err(|_| Report::new(SnapshotStagingError::Full { requested: length }))?;
+        self.open(length, reservation).await
+    }
+
+    /// The quota permits `length` staged bytes take, or a refusal when one snapshot may not be that
+    /// large.
+    fn quota_blocks(&self, length: u64) -> Result<u32, Report<SnapshotStagingError>> {
+        if length > self.limits.snapshot_bytes {
+            return Err(Report::new(SnapshotStagingError::QuotaExceeded {
+                actual: length,
+                limit: self.limits.snapshot_bytes,
+            }));
+        }
+        let blocks = length.div_ceil(STAGING_PERMIT_BYTES).max(1);
+        u32::try_from(blocks).map_err(|_| {
+            Report::new(SnapshotStagingError::QuotaExceeded {
+                actual: length,
+                limit: self.limits.staging_bytes,
+            })
+        })
+    }
+
+    /// Opens the staging file `length` bytes land in, holding `reservation` for as long as they
+    /// exist.
+    async fn open(
+        &self,
+        length: u64,
+        reservation: OwnedSemaphorePermit,
+    ) -> Result<StagedSnapshotWriter, Report<SnapshotStagingError>> {
         let root = self.root.clone();
         let executor = self.executor.clone();
         let file = executor
@@ -420,6 +451,11 @@ impl StagedArtifact {
     /// The BLAKE3 digest of the artifact's bytes.
     pub(crate) fn digest(&self) -> [u8; 32] {
         self.digest
+    }
+
+    /// The file the artifact is staged in, which readers open for as long as the artifact lives.
+    pub(crate) fn path(&self) -> &std::path::Path {
+        self.file.path()
     }
 
     /// Open a reader of its own over the artifact, from its first byte.

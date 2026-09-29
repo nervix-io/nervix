@@ -247,8 +247,8 @@ offsets and replacement text. Clients apply that edit to the original input; the
 range from the display value. A local path suggestion asks the native CLI to search its own
 filesystem and carries the path fragment's source range. The grammar offers one wherever a
 statement names a file or directory on the client's machine: the directory of `UPLOAD RESOURCE`,
-the destination of `BACKUP`, and the archive `DESCRIBE BACKUP` reads. The server sorts and deduplicates the
-candidate set before returning a bounded page. A continuation binds the input, cursor, domain,
+the destination of `BACKUP`, and the archive `DESCRIBE BACKUP` or `RESTORE` reads. The server sorts
+and deduplicates the candidate set before returning a bounded page. A continuation binds the input, cursor, domain,
 configuration revision, and candidate set; if any of these changes, the server returns
 `StaleContext` instead of silently paging through a different set.
 
@@ -288,6 +288,43 @@ it is refused. A download whose client goes away releases only its own hold, so 
 retained for the client to download again. The call is not bounded by the request timeout; the
 Rust client bounds the wait for each frame by it instead, and starts a failed download again from
 the first byte. [Backup And Restore](backup-and-restore.md) describes backups and their archives.
+
+## Restore Streams
+
+The session service's `RestoreBackup` method is a client-streaming gRPC call that carries one
+restore and its archive, and a single reply answers it. The call authenticates from its metadata
+before it reads a frame, like every session method, and a call without valid credentials ends with
+`UNAUTHENTICATED`.
+
+The first frame is the restore's start. It names the request identity of the reply, the restore's
+execution reference, the `RESTORE` statement as canonical NSPL, and the archive's exact size and
+BLAKE3 digest. Every later frame carries the next bytes of the archive, at most 256 KiB each. The
+execution reference, the statement, and the archive's size and digest together are the restore's
+request identity, so sending them again joins the same restore.
+
+The reply is either the restore's outcome as a command outcome, or a typed refusal of the stream
+itself, which leaves nothing changed:
+
+| Answer | When |
+| --- | --- |
+| Refused `InvalidStream` | The first frame is not a start, a later frame is not a chunk, or a frame does not decode. |
+| Refused `InvalidStatement` | The start does not name exactly one `RESTORE` statement. |
+| Refused `SizeMismatch` | The chunks add up to more, or fewer, bytes than the start declares. |
+| Refused `DigestMismatch` | The archive's bytes do not have the digest the start declares. |
+| Refused `QuotaExceeded` | The archive is larger than the leader stages, or its staging area cannot hold the archive now. |
+| Refused `StagingFailed` | The leader could not write the archive to its staging area. |
+| A redirect outcome | The node is not the leader. |
+| An outcome at once | A restore under the reference already finished, which answers with its recorded outcome, or still applies on this node, which answers `OutcomeUnknown` with the `StillApplying` cause. |
+| The restore's outcome | The archive arrived, and the restore was refused, failed at a step, or completed. |
+
+A refusal is not recorded: sending the stream again stages the archive again. The leader stages
+the archive only as fast as the client sends it and refuses, rather than queues, an archive its
+staging area cannot hold now. The call is not bounded by the request timeout, because an archive
+may take far longer to send than a command takes to run; the Rust client bounds each frame by it
+instead, and then the wait for the reply once the last frame was sent. A call that ends before the
+last frame arrived changes nothing and releases what the leader staged for it. Once the whole
+archive arrived, the restore goes on without the call.
+[Backup And Restore](backup-and-restore.md#restoring) describes restores.
 
 ## Structured Choices
 

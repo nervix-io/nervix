@@ -37,7 +37,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
 | Session subscriptions and domain clock attachment | `Sessions`; `Command Line Client` for the CLI `subscribe` and `domain-clock` streams |
-| Configuration backups, their archives, and `DESCRIBE BACKUP` | `Backup And Restore` |
+| Configuration backups, their archives, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore` |
 | Metrics and runtime inspection | `Metrics And Observability` |
 | Full graph examples | `Examples` |
 | WASM guest ABI and output timing | `WASM Processor Guests` |
@@ -88,8 +88,8 @@ Use separate execution phases so transaction and active-domain rules stay clear.
    queued prefix without applying its effect; a rejection can be corrected before commit. Queued
    model mutations report their own preflighted quiesce levels, and `COMMIT` reports only the
    maximum level actually executed. `CREATE DOMAIN`, `CREATE USER`, other read-only statements,
-   subscriptions, domain clock attachment, uploads, backups, and node administration remain
-   outside the transaction.
+   subscriptions, domain clock attachment, uploads, backups, restores, and node administration
+   remain outside the transaction.
    `DESCRIBE TRANSACTION;` and `SHOW TRANSACTIONS;` run on their own beside an open transaction;
    they read impact or status without becoming content or shifting operation numbers.
 5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended. A
@@ -336,6 +336,13 @@ Choose checks relevant to the configured graph:
   a configuration archive on the client's machine, sent alone from `nervix-cli` or a native
   client; `DESCRIBE BACKUP '<file>';` verifies one offline and lists its domains, users, and
   resource versions with the checksums `DESCRIBE RESOURCE` reports. Treat an archive as a secret.
+- `RESTORE CLUSTER FROM '<file>' [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN];` or
+  `RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [DRY RUN];` recreates users, domains,
+  resource versions under their archived numbers, and models from an archive, sent alone from
+  `nervix-cli` or a native client. Restored domains are stopped; a domain name that exists is
+  refused, so copy a domain with `AS`. A fresh cluster already has its bootstrap user, so a cluster
+  restore there needs `ON EXISTING USER SKIP` or `REPLACE`. Run `DRY RUN` first to see the plan and
+  each domain's impact report without changing anything.
 - `SHOW UDFS`, `DESCRIBE UDF <name>`, and `SHOW CREATE UDF <name>` inspect trusted Roto functions.
   Creation itself is the test gate: a rejecting Roto `test` block prevents persistence.
 - `SHOW PLACEMENTS`, `DESCRIBE PLACEMENT <name>`, `SHOW CREATE PLACEMENT <name>`, and
