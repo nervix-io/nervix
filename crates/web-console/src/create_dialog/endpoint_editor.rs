@@ -6,17 +6,16 @@
 //! - **Depends on.** Endpoint browser drafts and shared typed choices.
 //! - **Must not know.** Listener routing or WebSocket handshake execution.
 
-use futures_channel::mpsc::UnboundedSender;
 use leptos::prelude::*;
 use nervix_models::EndpointType;
 
-use super::{ChoiceControl, ChoiceGroup, ConsoleRequest, CreateSignals, event_target_value};
+use super::{ChoiceControl, ChoiceGroup, CreateSignals, RequestSender, event_target_value};
 
 #[component]
 pub(super) fn EndpointEditor(
     signals: CreateSignals,
     name_input: NodeRef<leptos::html::Input>,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     session_generation: RwSignal<u64>,
 ) -> impl IntoView {
     let pending = move || signals.progress.get().is_pending();

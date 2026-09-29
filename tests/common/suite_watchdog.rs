@@ -58,16 +58,13 @@ use super::{
 };
 
 /// The `timeout-minutes` of the workflow job that runs the scenario suite. A policy input: keep it
-/// in step with the `tests` job in `.github/workflows/check.yaml`, which is the emergency guard
+/// in step with the `scenarios` job in `.github/workflows/check.yaml`, which is the emergency guard
 /// outside this budget rather than the mechanism that ends a wedged run.
 const WORKFLOW_JOB_LIMIT: Duration = Duration::from_secs(60 * 60);
-/// What the job spends before the scenario binary starts: its setup steps, the toolchains it
-/// installs, and the builds and earlier test binaries the coverage step runs first. Measured at
-/// 6m28s, 7m50s, 9m25s, 12m21s and 15m26s over five `tests` jobs, and rising with the workspace:
-/// it gained thirteen crates in the week those were measured. A policy input, and the one most
-/// likely to exhaust the job limit first: measure it again when the job's steps or its build
-/// inputs change.
-const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(18 * 60);
+/// The `scenarios` job's setup and instrumented server and CLI build before the suite starts.
+/// The first cold kache 0.28.0 PR run took 11m37s from job start to the scenario binary. Round
+/// that measurement up to 14 minutes so another cold runner has room for setup variation.
+const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(14 * 60);
 /// What the job keeps for itself once the suite budget has expired: the bounded cleanup the
 /// watchdog drives, the dependency containers the suite then stops, and the artifact upload that
 /// follows. The cleanup is bounded by [`WATCHDOG_CLEANUP_WINDOW`], the containers stop in seconds
@@ -86,19 +83,17 @@ pub(crate) const SUITE_BUDGET: Duration =
         },
         None => panic!("the workflow job limit must cover the work that precedes the suite"),
     };
-/// The slowest a healthy suite ran: 21m08s, against 15m20s, 15m26s, 16m47s and 18m53s over five
-/// `tests` jobs, all at the CI concurrency factor of two scenarios per CPU, and the slowest of
-/// them spent three scenario retries. A policy input, and a rising one: the suite gained 204
-/// scenarios in the week these were measured, so measure it again whenever the suite, its
-/// concurrency or the runner changes.
+/// The first split-job PR run completed all attempts in 21m49s, including four retries, with
+/// 88.3% run-slot utilization. The next, passing run took 20m26s with seven retries and 94.3%
+/// utilization. Round the slower complete run up to 22 minutes as the observed suite ceiling.
 const SLOWEST_HEALTHY_SUITE: Duration = Duration::from_secs(22 * 60);
 /// What the budget must leave beyond the slowest healthy suite, so a runner slower than the
 /// measuring one still finishes its own scenarios.
 ///
 /// An absolute slack rather than a multiple of the suite, because what stretches a whole-suite run
 /// adds rather than scales: a retry re-runs one scenario, and a loaded runner delays the steps it
-/// is running. The five measured runs spread over six minutes, so this is some two and a half
-/// times the spread that has been observed. A policy input.
+/// is running. Earlier measurements spread over six minutes; retain two and a half times that
+/// variation even as the measured healthy duration grows. A policy input.
 const SUITE_SLACK: Duration = Duration::from_secs(15 * 60);
 const _: () = assert!(
     match SLOWEST_HEALTHY_SUITE.checked_add(SUITE_SLACK) {
@@ -560,7 +555,24 @@ impl SuiteWatchdog {
     /// The budget is passed into the wait rather than wrapped around it: a timeout wrapped around
     /// the run would drop it at expiry, and the registries a diagnostic reads live in the worlds
     /// that run owns. So the run is held, read, and asked to stop, and only then dropped.
+    #[allow(
+        dead_code,
+        reason = "harness regressions use this entry point; scenarios report at expiry"
+    )]
     pub(crate) async fn bound<F>(self, run: F) -> SuiteRun<F::Output>
+    where
+        F: Future,
+    {
+        self.bound_with_timeout_report(run, || {}).await
+    }
+
+    /// As [`Self::bound`], but captures a report at the expiry instant, before cleanup changes
+    /// the active scenario registry or spends its own window.
+    pub(crate) async fn bound_with_timeout_report<F>(
+        self,
+        run: F,
+        report_timeout: impl FnOnce(),
+    ) -> SuiteRun<F::Output>
     where
         F: Future,
     {
@@ -580,6 +592,7 @@ impl SuiteWatchdog {
         // what it was doing.
         let stall = SuiteStall::capture(self.budget);
         eprint!("{stall}");
+        report_timeout();
         flush_process_output();
 
         let cleanup = WatchdogCleanup::stop_every_live_node(self.cleanup_window).await;

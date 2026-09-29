@@ -2519,15 +2519,22 @@ button {
   height: 6px;
 }
 
-.repl-toolbar .tab-close {
+.repl-toolbar .tab-close,
+.repl-toolbar .tab-resubscribe {
   width: 28px;
   height: 100%;
   padding: 0;
   color: var(--text-d);
 }
 
-.repl-toolbar .tab-close:hover {
+.repl-toolbar .tab-close:hover,
+.repl-toolbar .tab-resubscribe:hover {
   color: var(--text-a);
+}
+
+.repl-toolbar .subscription-tab[data-subscription-state="ended"] .tab-main {
+  color: var(--text-d);
+  text-decoration: line-through;
 }
 
 .repl-toolbar .tab.active {
