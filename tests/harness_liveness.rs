@@ -3448,6 +3448,180 @@ mod http_receiver_tests {
     }
 
     #[nervix_primitives::test]
+    async fn requests_awaiting_a_response_are_counted_until_their_final_head_begins() {
+        let concurrent = start(ReceiverTransport::Plain).await;
+        concurrent.answer_unscripted_requests_with(
+            "respond 204; after 300ms"
+                .parse()
+                .assured("the standing response is valid"),
+        );
+        let client = reqwest::Client::new();
+        let (first, second) = tokio::join!(
+            client.get(format!("{}/first", concurrent.origin())).send(),
+            client.get(format!("{}/second", concurrent.origin())).send(),
+        );
+        assert_eq!(first.assured("the first request is answered").status(), 204);
+        assert_eq!(
+            second.assured("the second request is answered").status(),
+            204
+        );
+        assert_eq!(
+            concurrent.most_awaiting_responses(),
+            2,
+            "both delayed requests awaited their responses at once"
+        );
+        assert!(!concurrent.stop().await.was_forced());
+
+        let sequential = start(ReceiverTransport::Plain).await;
+        sequential.answer_unscripted_requests_with(
+            "respond 204; after 100ms"
+                .parse()
+                .assured("the standing response is valid"),
+        );
+        for target in ["/first", "/second", "/third"] {
+            let answered = client
+                .get(format!("{}{target}", sequential.origin()))
+                .send()
+                .await
+                .assured("each request is answered before the next is sent");
+            assert_eq!(answered.status(), 204);
+        }
+        assert_eq!(
+            sequential.most_awaiting_responses(),
+            1,
+            "a client that waits for each final head never has two requests awaiting"
+        );
+        assert!(!sequential.stop().await.was_forced());
+    }
+
+    /// Writes a request on a fresh connection, reads until the end of the response head, and
+    /// closes the connection without reading anything more.
+    async fn read_head_and_leave(receiver: &HttpReceiver, request: &[u8]) -> Vec<u8> {
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, receiver.port()))
+            .await
+            .assured("the receiver is listening");
+        stream
+            .write_all(request)
+            .await
+            .assured("the receiver reads what a client writes");
+        let mut head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            let read = tokio::time::timeout(WITHIN, stream.read(&mut byte))
+                .await
+                .assured("the receiver writes a response head")
+                .assured("reading from a loopback connection succeeds");
+            assert_eq!(read, 1, "the connection stays open until the head ends");
+            head.push(byte[0]);
+        }
+        head
+    }
+
+    #[nervix_primitives::test]
+    async fn a_client_that_leaves_an_unfinished_response_abandons_it() {
+        let receiver = start(ReceiverTransport::Plain).await;
+        receiver.script(script(
+            "hold response\nrespond 200; body partial; stall body\nrespond 200; body bytes \
+             33554432\nrespond 204",
+        ));
+
+        let mut held = TcpStream::connect((Ipv4Addr::LOCALHOST, receiver.port()))
+            .await
+            .assured("the receiver is listening");
+        held.write_all(b"GET /held HTTP/1.1\r\nHost: receiver\r\n\r\n")
+            .await
+            .assured("the receiver reads what a client writes");
+        receiver
+            .wait_for_requests(1, WITHIN)
+            .await
+            .assured("the held request is captured before it is held");
+        drop(held);
+        receiver
+            .wait_for_abandoned_responses(1, WITHIN)
+            .await
+            .assured("a client that leaves a held response abandons it");
+
+        let stalled = read_head_and_leave(
+            &receiver,
+            b"GET /stalled HTTP/1.1\r\nHost: receiver\r\n\r\n",
+        )
+        .await;
+        assert!(stalled.starts_with(b"HTTP/1.1 200 "));
+        receiver
+            .wait_for_abandoned_responses(2, WITHIN)
+            .await
+            .assured("a client that leaves at the head of a stalled body abandons it");
+
+        // The body is many times what a loopback connection buffers, so the receiver can finish
+        // writing it only if the client reads it.
+        let oversized =
+            read_head_and_leave(&receiver, b"GET /large HTTP/1.1\r\nHost: receiver\r\n\r\n").await;
+        let oversized = String::from_utf8(oversized).assured("the response head is ASCII");
+        assert!(
+            oversized.contains("content-length: 33554432\r\n"),
+            "{oversized}"
+        );
+        receiver
+            .wait_for_abandoned_responses(3, WITHIN)
+            .await
+            .assured("a client that leaves at the head of a large body abandons it");
+
+        let complete = exchange(
+            &receiver,
+            b"GET /complete HTTP/1.1\r\nHost: receiver\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(complete.starts_with(b"HTTP/1.1 204 "));
+        let unmet = receiver
+            .wait_for_abandoned_responses(4, Duration::ZERO)
+            .await
+            .expect_err("a response the client read to its end is not abandoned");
+        assert!(
+            unmet.to_string().contains("abandoned 3 of the 4"),
+            "{unmet}"
+        );
+        assert_eq!(
+            receiver.most_awaiting_responses(),
+            1,
+            "each request was captured after the previous one ended"
+        );
+        let stop = receiver.stop().await;
+        assert!(!stop.was_forced(), "{stop}");
+        assert_eq!(
+            stop.faults, 0,
+            "abandoning a response is not a fault: {stop}"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_wait_for_a_request_line_ends_once_that_request_is_captured() {
+        let receiver = start(ReceiverTransport::Plain).await;
+        let client = reqwest::Client::new();
+        for target in ["/first", "/second"] {
+            client
+                .get(format!("{}{target}", receiver.origin()))
+                .send()
+                .await
+                .assured("the receiver answers every request");
+        }
+
+        let captured = receiver
+            .wait_for_request_line("GET /second", WITHIN)
+            .await
+            .assured("the second request was captured");
+        assert_eq!(captured.len(), 2);
+        let missing = receiver
+            .wait_for_request_line("GET /never", Duration::from_millis(100))
+            .await
+            .expect_err("no request for /never was sent");
+        assert!(
+            missing.to_string().contains("request line 'GET /never'"),
+            "{missing}"
+        );
+        assert!(!receiver.stop().await.was_forced());
+    }
+
+    #[nervix_primitives::test]
     async fn requests_beyond_the_receiver_bounds_are_faults_not_captures() {
         let receiver = start(ReceiverTransport::Plain).await;
 
@@ -3594,6 +3768,7 @@ mod http_receiver_tests {
             "respond 200",
             "respond 204; header X-A: b; body text; interim 100; after 250ms; extra headers 129",
             "respond 200; stall body",
+            "respond 200; body bytes 67108864",
             "respond 429; retry after date in 3s",
             "lose response",
             "hold response",
@@ -3612,6 +3787,7 @@ mod http_receiver_tests {
             ("respond 503; retry after date in soon", "Duration"),
             ("respond 503; retry after date in 2days", "RetryAfterDelay"),
             ("respond 200; extra headers many", "Count"),
+            ("respond 200; body bytes 67108865", "BodySize"),
             ("respond 200; teapot", "UnknownClause"),
             ("raw trailing\\", "Escape"),
         ];

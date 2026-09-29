@@ -6617,6 +6617,7 @@ name = "nervix-client-wire"
 version = "0.1.0-dev"
 dependencies = [
  "base64-simd",
+ "bolero",
  "bytes",
  "error-stack",
  "flatbuffers",
@@ -6632,6 +6633,7 @@ dependencies = [
  "tokio-tungstenite 0.24.0",
  "tonic 0.13.1",
  "url",
+ "uuid",
 ]
 
 [[package]]

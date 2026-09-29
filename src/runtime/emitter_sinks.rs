@@ -56,7 +56,8 @@ impl EmitterSinkStarter {
                 SyslogSink::check_client_config(&sink.client.config.entries)
                     .change_context(EmitterRuntimeError::InvalidSinkConfig)
             }
-            EmitterSinkPlan::Http(_)
+            EmitterSinkPlan::Client(_)
+            | EmitterSinkPlan::Http(_)
             | EmitterSinkPlan::Kafka(_)
             | EmitterSinkPlan::Pulsar(_)
             | EmitterSinkPlan::RabbitMq(_)
@@ -80,11 +81,18 @@ impl EmitterSinkStarter {
         plan: &EmitterStartPlan,
         context: &EmitterSinkContext,
         input_schema: &CompiledSchema,
+        output_schema: &Arc<CompiledSchema>,
         codec: Option<&Arc<CompiledCodec>>,
     ) -> EmitterRuntimeResult<Box<dyn EmitterSink>> {
         let label = plan.sink.label();
         let batch = plan.sink.batch();
-        let sink = match &plan.sink {
+        let sink: Box<dyn EmitterSink> = match &plan.sink {
+            EmitterSinkPlan::Client(sink) => Box::new(ClientEmitterSink::new(
+                context,
+                sink,
+                output_schema.clone(),
+                plan.retry_policy,
+            )),
             EmitterSinkPlan::Http(sink) => Self::http_request(
                 codec,
                 HttpSink::new(

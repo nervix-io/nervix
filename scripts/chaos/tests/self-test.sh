@@ -3,6 +3,8 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 chaos_dir="$(cd "${script_dir}/.." && pwd)"
+# shellcheck source=../tool-images.sh
+source "${chaos_dir}/tool-images.sh"
 
 "${script_dir}/role-wait-self-test.sh"
 
@@ -439,9 +441,21 @@ status=0
 grep -Fq -- '--image is required' "${tmp_dir}/missing-image.out" \
     || fail "missing --image did not produce an explicit setup error"
 
+# The runner's preflight checks run against copies of this bundle whose Kafka and kcat pins name
+# the pinned probe image, so they need neither the broker nor the producer image. Tool images
+# resolve before the Nervix image, so these runs need no Nervix image either.
+preflight_bundle() {
+    local bundle="$1"
+    local kcat_image="$2"
+    cp -R "${chaos_dir}" "${bundle}"
+    printf 'chaos_kafka_image=%q\nchaos_kcat_image=%q\n' "${chaos_probe_image}" "${kcat_image}" \
+        >>"${bundle}/tool-images.sh"
+}
+
+preflight_bundle "${tmp_dir}/probe-tools" "${chaos_probe_image}"
 status=0
 invalid_image_run_id="invalid-image-$$-${RANDOM}"
-"${chaos_dir}/chaos.sh" run baseline \
+"${tmp_dir}/probe-tools/chaos.sh" run baseline \
     --image 'not a valid image reference' \
     --nodes 1 \
     --artifacts "${tmp_dir}/artifacts" \
@@ -451,14 +465,77 @@ invalid_image_run_id="invalid-image-$$-${RANDOM}"
 [[ "${status}" -eq 2 ]] || fail "invalid image returned ${status}, expected setup error 2"
 grep -Fq "could not be resolved" "${tmp_dir}/invalid-image.out" \
     || fail "invalid image did not produce an explicit setup error"
-jq -e '.status == "failed" and .exit_code == 2 and .final_phase == "preflight"' \
-    "${tmp_dir}/artifacts/${invalid_image_run_id}/manifest.json" >/dev/null \
-    || fail "invalid image did not preserve a failed preflight manifest"
+probe_image_id="$(docker image inspect --format '{{.Id}}' "${chaos_probe_image}")"
+jq -e --arg probe "${chaos_probe_image}" --arg probe_id "${probe_image_id}" '
+    .status == "failed" and .exit_code == 2 and .final_phase == "preflight"
+    and (.setup_error | test("could not be resolved"))
+    and .tool_images == {kafka: {reference: $probe, image_id: $probe_id},
+                         kcat: {reference: $probe, image_id: $probe_id},
+                         probe: {reference: $probe, image_id: $probe_id}}
+' "${tmp_dir}/artifacts/${invalid_image_run_id}/manifest.json" >/dev/null \
+    || fail "invalid image did not preserve a failed preflight manifest recording its tool images"
+
+# A pinned tool image that cannot be pulled fails the run in preflight as a setup error naming it.
+unpullable_image="localhost:1/nervix-chaos/unpullable@sha256:$(printf '0%.0s' {1..64})"
+preflight_bundle "${tmp_dir}/unpullable-kcat" "${unpullable_image}"
+status=0
+unpullable_run_id="unpullable-tool-$$-${RANDOM}"
+"${tmp_dir}/unpullable-kcat/chaos.sh" run baseline \
+    --image 'not a valid image reference' \
+    --nodes 1 \
+    --artifacts "${tmp_dir}/artifacts" \
+    --run-id "${unpullable_run_id}" \
+    --timeout 120 \
+    >"${tmp_dir}/unpullable-tool.out" 2>&1 || status=$?
+[[ "${status}" -eq 2 ]] || fail "an unpullable tool image returned ${status}, expected setup error 2"
+grep -Fq "chaos setup error: pinned kcat image '${unpullable_image}' could not be pulled" \
+    "${tmp_dir}/unpullable-tool.out" \
+    || fail "an unpullable tool image did not produce a setup error naming it"
+jq -e --arg image "${unpullable_image}" --arg probe "${chaos_probe_image}" '
+    .status == "failed" and .exit_code == 2 and .final_phase == "preflight"
+    and (.setup_error | contains($image))
+    and (.tool_images | keys) == ["kafka"] and .tool_images.kafka.reference == $probe
+' "${tmp_dir}/artifacts/${unpullable_run_id}/manifest.json" >/dev/null \
+    || fail "an unpullable tool image did not preserve a failed preflight manifest naming it"
+[[ -s "${tmp_dir}/artifacts/${unpullable_run_id}/diagnostics/tool-image-pull-kcat.txt" ]] \
+    || fail "an unpullable tool image did not keep its pull output"
+
+# A fault scenario also resolves and records its Pumba image, and its finding carries every tool.
+status=0
+crash_setup_run_id="crash-setup-$$-${RANDOM}"
+"${tmp_dir}/probe-tools/chaos.sh" run leader-crash \
+    --image 'not a valid image reference' \
+    --artifacts "${tmp_dir}/artifacts" \
+    --run-id "${crash_setup_run_id}" \
+    --timeout 120 \
+    >"${tmp_dir}/crash-setup.out" 2>&1 || status=$?
+[[ "${status}" -eq 2 ]] || fail "a fault scenario with an invalid image returned ${status}, expected setup error 2"
+crash_setup_dir="${tmp_dir}/artifacts/${crash_setup_run_id}"
+pinned_pumba_image_id="$(docker image inspect --format '{{.Id}}' "${chaos_pumba_image}")"
+jq -e --arg pumba "${chaos_pumba_image}" --arg pumba_id "${pinned_pumba_image_id}" '
+    (.tool_images | keys) == ["kafka", "kcat", "probe", "pumba"]
+    and .tool_images.pumba == {reference: $pumba, image_id: $pumba_id}
+' "${crash_setup_dir}/manifest.json" >/dev/null \
+    || fail "a fault scenario did not record its Pumba image with the other tool images"
+jq -e --slurpfile manifest "${crash_setup_dir}/manifest.json" '
+    .category == "setup" and .phase == "preflight" and .tool_images == $manifest[0].tool_images
+' "${crash_setup_dir}/results/finding.json" >/dev/null \
+    || fail "a fault scenario's setup finding did not carry the recorded tool images"
 
 for script in "${chaos_dir}"/*.sh "${chaos_dir}"/tests/*.sh; do
     bash -n "${script}"
 done
 sh -n "${chaos_dir}/continuous-load.sh" "${chaos_dir}/observe-nodes.sh"
+
+# Every tool image a run starts is pinned in tool-images.sh by a registry-qualified digest.
+qualified_digest_reference='^[a-z0-9-]+(\.[a-z0-9-]+)+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[a-f0-9]{64}$'
+mapfile -t pinned_image_variables < <(compgen -v chaos_ | grep -E '^chaos_[a-z]+_image$' | LC_ALL=C sort)
+[[ "${pinned_image_variables[*]}" == 'chaos_kafka_image chaos_kcat_image chaos_nettools_image chaos_probe_image chaos_pumba_image' ]] \
+    || fail "tool-images.sh does not pin exactly the Kafka, kcat, nettools, probe and Pumba images: ${pinned_image_variables[*]}"
+for pinned_image_variable in "${pinned_image_variables[@]}"; do
+    [[ "${!pinned_image_variable}" =~ ${qualified_digest_reference} ]] \
+        || fail "${pinned_image_variable} is not a registry-qualified digest reference: ${!pinned_image_variable}"
+done
 
 placeholder_image="sha256:0000000000000000000000000000000000000000000000000000000000000000"
 compose_json="${tmp_dir}/compose.json"
@@ -467,9 +544,9 @@ CHAOS_RUN_ID="self-test" \
 CHAOS_CLUSTER_ID="chaos-self-test" \
 CHAOS_TLS_DIR="${tmp_dir}" \
 CHAOS_PASSWORD="self-test-password" \
-CHAOS_KAFKA_IMAGE="apache/kafka:3.9.1" \
-CHAOS_KCAT_IMAGE="edenhill/kcat:1.7.1" \
-CHAOS_PROBE_IMAGE="alpine:3.22" \
+CHAOS_KAFKA_IMAGE="${chaos_kafka_image}" \
+CHAOS_KCAT_IMAGE="${chaos_kcat_image}" \
+CHAOS_PROBE_IMAGE="${chaos_probe_image}" \
 CHAOS_SCRIPT_DIR="${chaos_dir}" \
 CHAOS_LOAD_FILE="${expected}" \
 CHAOS_TRAFFIC_DIR="${tmp_dir}" \
@@ -499,6 +576,16 @@ jq -e --arg image "${placeholder_image}" \
     and .services["nervix-1"].environment.NERVIX_NODE_UNAVAILABILITY_TIMEOUT == $node_timeout
 ' "${compose_json}" >/dev/null || fail "Compose does not pin every Nervix service or contains a build"
 
+jq -e --arg nervix "${placeholder_image}" \
+    --arg kafka "${chaos_kafka_image}" \
+    --arg kcat "${chaos_kcat_image}" \
+    --arg probe "${chaos_probe_image}" '
+    [.services.broker.image, .services["broker-admin"].image] == [$kafka, $kafka]
+    and [.services.kcat.image, .services.load.image] == [$kcat, $kcat]
+    and [.services.probe.image, .services.observer.image] == [$probe, $probe]
+    and ([.services[].image] | all(. == $nervix or . == $kafka or . == $kcat or . == $probe))
+' "${compose_json}" >/dev/null || fail "Compose does not start every tool service from its pinned image"
+
 # Peer-side partition rules follow a node across its restart only if its address stays fixed, and
 # no other container may be handed a node address while that node is stopped.
 jq -e '
@@ -515,7 +602,7 @@ jq -e '
 cleanup_run_id="pause-cleanup-$$-${RANDOM}"
 cleanup_container="$(docker run --detach --rm \
     --label "io.nervix.chaos.run=${cleanup_run_id}" \
-    --label io.nervix.chaos.role=node alpine:3.22 sleep 60)"
+    --label io.nervix.chaos.role=node "${chaos_probe_image}" sleep 60)"
 docker pause "${cleanup_container}" >/dev/null
 [[ "$(docker inspect --format '{{.State.Paused}}' "${cleanup_container}")" == true ]] \
     || fail 'cleanup exercise did not pause its run-owned target'
@@ -527,12 +614,12 @@ fi
 cleanup_run_id="pause-injector-failure-$$-${RANDOM}"
 cleanup_container="$(docker run --detach --rm \
     --label "io.nervix.chaos.run=${cleanup_run_id}" \
-    --label io.nervix.chaos.role=node alpine:3.22 sleep 60)"
+    --label io.nervix.chaos.role=node "${chaos_probe_image}" sleep 60)"
 docker pause "${cleanup_container}" >/dev/null
 injector_status=0
 docker run --rm \
     --label "io.nervix.chaos.run=${cleanup_run_id}" \
-    --label io.nervix.chaos.role=fault alpine:3.22 false \
+    --label io.nervix.chaos.role=fault "${chaos_probe_image}" false \
     >"${tmp_dir}/injector-failure.txt" 2>&1 || injector_status=$?
 [[ "${injector_status}" -ne 0 ]] || fail 'injector-failure exercise did not fail'
 "${chaos_dir}/cleanup.sh" --run-id "${cleanup_run_id}" --quiet
@@ -542,13 +629,17 @@ fi
 
 # An injector killed with SIGKILL cannot remove its own rules. Healing must remove exactly the
 # rules Pumba owns, together with any sidecar left joined to a run-owned namespace.
-# shellcheck source=../tool-images.sh
-source "${chaos_dir}/tool-images.sh"
 network_faults="${chaos_dir}/network-faults.sh"
+# The network preflight canary is created from the pinned probe image the runner passes in.
+status=0
+"${network_faults}" preflight --run-id "network-usage-$$" --pumba "${chaos_pumba_image}" \
+    --nettools "${chaos_nettools_image}" --output "${tmp_dir}/network-usage" \
+    >"${tmp_dir}/network-usage.txt" 2>&1 || status=$?
+[[ "${status}" -eq 2 ]] || fail "network preflight without a probe image returned ${status}, expected usage error 2"
 cleanup_run_id="network-heal-$$-${RANDOM}"
 heal_target="$(docker run --detach --rm \
     --label "io.nervix.chaos.run=${cleanup_run_id}" \
-    --label io.nervix.chaos.role=node alpine:3.22 sleep 120)"
+    --label io.nervix.chaos.role=node "${chaos_probe_image}" sleep 120)"
 heal_target_name="$(docker inspect --format '{{.Name}}' "${heal_target}")"
 heal_injectors=()
 for fault in "netem --duration 120s --tc-image ${chaos_nettools_image} --target 192.0.2.1 loss --percent 100" \
@@ -575,7 +666,7 @@ done
 [[ "${installed}" == true ]] || fail 'the healing exercise could not install Pumba faults'
 docker kill "${heal_injectors[@]}" >/dev/null
 heal_sidecar="$(docker run --detach --label com.gaiaadm.pumba.skip=true \
-    --network "container:${heal_target}" alpine:3.22 sleep 120)"
+    --network "container:${heal_target}" "${chaos_probe_image}" sleep 120)"
 "${network_faults}" heal --run-id "${cleanup_run_id}" --nettools "${chaos_nettools_image}" \
     --output "${tmp_dir}/heal-report.txt" || fail 'healing did not clear faults left by a killed injector'
 grep -Fq 'removed Pumba root qdisc 504d:' "${tmp_dir}/heal-report.txt" \
@@ -595,7 +686,7 @@ docker rm --force "${heal_injectors[@]}" >/dev/null
 cleanup_run_id="network-foreign-$$-${RANDOM}"
 foreign_target="$(docker run --detach --rm \
     --label "io.nervix.chaos.run=${cleanup_run_id}" \
-    --label io.nervix.chaos.role=node alpine:3.22 sleep 120)"
+    --label io.nervix.chaos.role=node "${chaos_probe_image}" sleep 120)"
 docker run --rm --cap-add NET_ADMIN --network "container:${foreign_target}" --entrypoint sh \
     "${chaos_nettools_image}" -ec 'tc qdisc add dev eth0 root handle 1: netem delay 1ms' >/dev/null
 status=0
@@ -609,7 +700,7 @@ grep -q '^qdisc netem 1: root' "${tmp_dir}/foreign-final.txt" \
 
 # External cleanup also removes a Pumba sidecar joined to a run-owned container.
 foreign_sidecar="$(docker run --detach --label com.gaiaadm.pumba.skip=true \
-    --network "container:${foreign_target}" alpine:3.22 sleep 120)"
+    --network "container:${foreign_target}" "${chaos_probe_image}" sleep 120)"
 "${chaos_dir}/cleanup.sh" --run-id "${cleanup_run_id}" --quiet
 if docker inspect "${foreign_sidecar}" >/dev/null 2>&1 || docker inspect "${foreign_target}" >/dev/null 2>&1; then
     fail 'external cleanup left a run-owned container or its Pumba sidecar'

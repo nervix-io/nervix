@@ -46,6 +46,15 @@ mod ingestor_editor;
 mod ingestor_route_draft;
 mod ingestor_route_editor;
 mod ingestor_source_draft;
+mod processor_assignment_editor;
+mod processor_choices;
+mod processor_draft;
+mod processor_editor;
+mod processor_inheritance_editor;
+mod processor_input_editor;
+mod processor_invocation_editor;
+mod processor_route_editor;
+mod processor_state_editor;
 mod relay_draft;
 mod relay_editor;
 mod resource_binding_draft;
@@ -78,6 +87,8 @@ use hash_map_editor::HashMapEditor;
 use ingestor_draft::{IngestorDraft, IngestorDraftError, TimestampDraft};
 use ingestor_editor::IngestorEditor;
 use ingestor_route_draft::{InheritDraft, MessageErrorDraft, RouteBranchDraft};
+use processor_draft::{ProcessorDraft, ProcessorDraftError, ProcessorFamily};
+use processor_editor::ProcessorEditor;
 use relay_draft::{RelayDraft, RelayDraftError};
 use relay_editor::RelayEditor;
 use schema_draft::{SchemaDraftError, StructuredDrafts, WireFormat};
@@ -111,6 +122,8 @@ pub(crate) enum CreateKind {
     HashMap,
     Udf,
     Ingestor,
+    Junction,
+    Reingestor,
 }
 
 impl CreateKind {
@@ -134,6 +147,8 @@ impl CreateKind {
             Self::HashMap => "hash map",
             Self::Udf => "Roto UDF",
             Self::Ingestor => "ingestor",
+            Self::Junction => "junction",
+            Self::Reingestor => "reingestor",
         }
     }
 
@@ -164,7 +179,7 @@ impl CreateKind {
             | Self::Client
             | Self::Vhost
             | Self::Endpoint => None,
-            Self::HashMap | Self::Udf | Self::Ingestor => None,
+            Self::HashMap | Self::Udf | Self::Ingestor | Self::Junction | Self::Reingestor => None,
         }
     }
 }
@@ -206,6 +221,17 @@ pub(crate) enum ChoiceControl {
     IngestBranchField,
     IngestErrorRelay,
     IngestErrorField,
+    ProcessorInputRelay,
+    ProcessorBranch,
+    ProcessorStateRelay,
+    ProcessorStateField,
+    ProcessorRouteBranch,
+    ProcessorRouteRelay,
+    ProcessorInputField,
+    ProcessorOutputField,
+    ProcessorBranchField,
+    ProcessorErrorRelay,
+    ProcessorErrorField,
 }
 
 impl ChoiceControl {
@@ -239,7 +265,25 @@ impl ChoiceControl {
             | Self::IngestBranchField
             | Self::IngestErrorRelay
             | Self::IngestErrorField => CreateKind::Ingestor,
+            Self::ProcessorInputRelay
+            | Self::ProcessorBranch
+            | Self::ProcessorStateRelay
+            | Self::ProcessorStateField
+            | Self::ProcessorRouteBranch
+            | Self::ProcessorRouteRelay
+            | Self::ProcessorInputField
+            | Self::ProcessorOutputField
+            | Self::ProcessorBranchField
+            | Self::ProcessorErrorRelay
+            | Self::ProcessorErrorField => CreateKind::Junction,
         }
+    }
+
+    fn applies_to(self, kind: CreateKind) -> bool {
+        if self.form() == kind {
+            return true;
+        }
+        kind == CreateKind::Reingestor && self.form() == CreateKind::Junction
     }
 }
 
@@ -318,6 +362,17 @@ struct ChoiceControls {
     ingest_branch_field: ChoiceControlSignals,
     ingest_error_relay: ChoiceControlSignals,
     ingest_error_field: ChoiceControlSignals,
+    processor_input_relay: ChoiceControlSignals,
+    processor_branch: ChoiceControlSignals,
+    processor_state_relay: ChoiceControlSignals,
+    processor_state_field: ChoiceControlSignals,
+    processor_route_branch: ChoiceControlSignals,
+    processor_route_relay: ChoiceControlSignals,
+    processor_input_field: ChoiceControlSignals,
+    processor_output_field: ChoiceControlSignals,
+    processor_branch_field: ChoiceControlSignals,
+    processor_error_relay: ChoiceControlSignals,
+    processor_error_field: ChoiceControlSignals,
 }
 
 impl ChoiceControls {
@@ -357,6 +412,17 @@ impl ChoiceControls {
             ingest_branch_field: ChoiceControlSignals::new(),
             ingest_error_relay: ChoiceControlSignals::new(),
             ingest_error_field: ChoiceControlSignals::new(),
+            processor_input_relay: ChoiceControlSignals::new(),
+            processor_branch: ChoiceControlSignals::new(),
+            processor_state_relay: ChoiceControlSignals::new(),
+            processor_state_field: ChoiceControlSignals::new(),
+            processor_route_branch: ChoiceControlSignals::new(),
+            processor_route_relay: ChoiceControlSignals::new(),
+            processor_input_field: ChoiceControlSignals::new(),
+            processor_output_field: ChoiceControlSignals::new(),
+            processor_branch_field: ChoiceControlSignals::new(),
+            processor_error_relay: ChoiceControlSignals::new(),
+            processor_error_field: ChoiceControlSignals::new(),
         }
     }
 
@@ -396,6 +462,17 @@ impl ChoiceControls {
             ChoiceControl::IngestBranchField => self.ingest_branch_field,
             ChoiceControl::IngestErrorRelay => self.ingest_error_relay,
             ChoiceControl::IngestErrorField => self.ingest_error_field,
+            ChoiceControl::ProcessorInputRelay => self.processor_input_relay,
+            ChoiceControl::ProcessorBranch => self.processor_branch,
+            ChoiceControl::ProcessorStateRelay => self.processor_state_relay,
+            ChoiceControl::ProcessorStateField => self.processor_state_field,
+            ChoiceControl::ProcessorRouteBranch => self.processor_route_branch,
+            ChoiceControl::ProcessorRouteRelay => self.processor_route_relay,
+            ChoiceControl::ProcessorInputField => self.processor_input_field,
+            ChoiceControl::ProcessorOutputField => self.processor_output_field,
+            ChoiceControl::ProcessorBranchField => self.processor_branch_field,
+            ChoiceControl::ProcessorErrorRelay => self.processor_error_relay,
+            ChoiceControl::ProcessorErrorField => self.processor_error_field,
         }
     }
 }
@@ -687,6 +764,8 @@ enum CreateDraftError {
     Udf(#[from] UdfDraftError),
     #[error("{0}")]
     Ingestor(#[from] IngestorDraftError),
+    #[error("{0}")]
+    Processor(#[from] ProcessorDraftError),
     #[error("Canonical NSPL could not be rendered")]
     CanonicalNspl,
 }
@@ -842,6 +921,8 @@ pub(crate) struct CreateSignals {
     hash_map: RwSignal<HashMapDraft>,
     udf: RwSignal<UdfDraft>,
     ingestor: RwSignal<IngestorDraft>,
+    junction: RwSignal<ProcessorDraft>,
+    reingestor: RwSignal<ProcessorDraft>,
     /// The number the next generated subscription name carries. Numbers only increase, so no two
     /// generated names of one console coincide.
     next_subscription_name: RwSignal<u64>,
@@ -849,6 +930,21 @@ pub(crate) struct CreateSignals {
 }
 
 impl CreateSignals {
+    fn processor(self, family: ProcessorFamily) -> RwSignal<ProcessorDraft> {
+        match family {
+            ProcessorFamily::Junction => self.junction,
+            ProcessorFamily::Reingestor => self.reingestor,
+        }
+    }
+
+    fn active_processor(self) -> Option<RwSignal<ProcessorDraft>> {
+        match self.open.get_untracked() {
+            Some(CreateKind::Junction) => Some(self.junction),
+            Some(CreateKind::Reingestor) => Some(self.reingestor),
+            _ => None,
+        }
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             open: RwSignal::new(None),
@@ -877,6 +973,8 @@ impl CreateSignals {
             hash_map: RwSignal::new(HashMapDraft::default()),
             udf: RwSignal::new(UdfDraft::default()),
             ingestor: RwSignal::new(IngestorDraft::default()),
+            junction: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Junction)),
+            reingestor: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Reingestor)),
             next_subscription_name: RwSignal::new(2),
             choices: ChoiceControls::new(),
         }
@@ -988,6 +1086,10 @@ impl CreateSignals {
                 CreateKind::Endpoint => self.endpoint.update(EndpointDraft::invalidate_references),
                 CreateKind::HashMap => self.hash_map.update(HashMapDraft::invalidate_references),
                 CreateKind::Ingestor => self.ingestor.update(IngestorDraft::invalidate_references),
+                CreateKind::Junction => self.junction.update(ProcessorDraft::invalidate_references),
+                CreateKind::Reingestor => self
+                    .reingestor
+                    .update(ProcessorDraft::invalidate_references),
                 CreateKind::Udf => {}
                 CreateKind::Domain
                 | CreateKind::User
@@ -1069,7 +1171,10 @@ impl CreateSignals {
         current_generation: u64,
         outcome: ChoiceOutcome,
     ) {
-        if self.open.get_untracked() != Some(context.control.form())
+        if !self
+            .open
+            .get_untracked()
+            .is_some_and(|kind| context.control.applies_to(kind))
             || self.revision.get_untracked() != context.draft_revision
             || current_generation != context.session_generation
         {
@@ -1353,7 +1458,7 @@ impl CreateSignals {
                     value: ChoiceValue::Domain(domain),
                 }];
                 let target = match &route.branch {
-                    RouteBranchDraft::Unselected => {
+                    RouteBranchDraft::Unselected | RouteBranchDraft::Preserve => {
                         return Err("Choose the route branch before its relay");
                     }
                     RouteBranchDraft::Unbranched => ChoiceTarget::IngestUnbranchedRelay,
@@ -1435,6 +1540,17 @@ impl CreateSignals {
                     page_size: 100,
                 })
             }
+            ChoiceControl::ProcessorInputRelay
+            | ChoiceControl::ProcessorBranch
+            | ChoiceControl::ProcessorStateRelay
+            | ChoiceControl::ProcessorStateField
+            | ChoiceControl::ProcessorRouteBranch
+            | ChoiceControl::ProcessorRouteRelay
+            | ChoiceControl::ProcessorInputField
+            | ChoiceControl::ProcessorOutputField
+            | ChoiceControl::ProcessorBranchField
+            | ChoiceControl::ProcessorErrorRelay
+            | ChoiceControl::ProcessorErrorField => self.processor_choice_query(control),
         }
     }
 
@@ -1600,6 +1716,30 @@ impl CreateSignals {
                     scope,
                 )
             }
+            CreateKind::Junction => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.junction.get_untracked();
+                let junction = draft.build_junction().map_err(draft_error)?;
+                CreateSubmission::domain_model(
+                    kind,
+                    Model::Junction(junction),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
+            CreateKind::Reingestor => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                let draft = self.reingestor.get_untracked();
+                let reingestor = draft.build_reingestor().map_err(draft_error)?;
+                CreateSubmission::domain_model(
+                    kind,
+                    Model::Reingestor(reingestor),
+                    draft.if_not_exists,
+                    scope,
+                )
+            }
             CreateKind::Subscription => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
@@ -1704,6 +1844,12 @@ pub(crate) fn CreateMenu(
                 </button>
                 <button type="button" role="menuitem" data-create-kind="ingestor" on:click=move |_| choose(CreateKind::Ingestor)>
                     <span>"Ingestor"</span><em>"External source and ordered routes"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="junction" on:click=move |_| choose(CreateKind::Junction)>
+                    <span>"Junction"</span><em>"Transform and fan out relay records"</em>
+                </button>
+                <button type="button" role="menuitem" data-create-kind="reingestor" on:click=move |_| choose(CreateKind::Reingestor)>
+                    <span>"Reingestor"</span><em>"Transform records across branch boundaries"</em>
                 </button>
             </div>
         </div>
@@ -1878,6 +2024,48 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
                 if matches!(route.message_error, MessageErrorDraft::SendTo { .. }) {
                     controls.push(ChoiceControl::IngestErrorRelay);
                     controls.push(ChoiceControl::IngestErrorField);
+                }
+            }
+            controls
+        }
+        CreateKind::Junction | CreateKind::Reingestor => {
+            let Some(processor) = signals.active_processor() else {
+                return Vec::new();
+            };
+            let draft = processor.get_untracked();
+            let mut controls = vec![
+                ChoiceControl::ProcessorInputRelay,
+                ChoiceControl::ProcessorRouteRelay,
+            ];
+            if kind == CreateKind::Junction
+                && matches!(
+                    draft.branching,
+                    processor_draft::JunctionBranchDraft::Branched(_)
+                )
+            {
+                controls.push(ChoiceControl::ProcessorBranch);
+            }
+            if let Some(state) = draft.active_state() {
+                controls.push(ChoiceControl::ProcessorStateRelay);
+                if matches!(state.policy, processor_draft::StatePolicyDraft::Default(_)) {
+                    controls.push(ChoiceControl::ProcessorStateField);
+                }
+            }
+            if let Some(route) = draft.active_route() {
+                if matches!(
+                    route.inherit,
+                    InheritDraft::AllExcept(_) | InheritDraft::Fields(_)
+                ) {
+                    controls.push(ChoiceControl::ProcessorInputField);
+                }
+                if matches!(route.branch, RouteBranchDraft::Branched { .. }) {
+                    controls.push(ChoiceControl::ProcessorRouteBranch);
+                    controls.push(ChoiceControl::ProcessorBranchField);
+                }
+                controls.push(ChoiceControl::ProcessorOutputField);
+                if matches!(route.message_error, MessageErrorDraft::SendTo { .. }) {
+                    controls.push(ChoiceControl::ProcessorErrorRelay);
+                    controls.push(ChoiceControl::ProcessorErrorField);
                 }
             }
             controls
@@ -2133,6 +2321,12 @@ pub(crate) fn CreateDialog(
                         <Show when=move || signals.open.get() == Some(CreateKind::Ingestor) fallback=|| ()>
                             <IngestorEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
                         </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Junction) fallback=|| ()>
+                            <ProcessorEditor family=ProcessorFamily::Junction signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
+                        <Show when=move || signals.open.get() == Some(CreateKind::Reingestor) fallback=|| ()>
+                            <ProcessorEditor family=ProcessorFamily::Reingestor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        </Show>
 
                         <Show when=move || signals.open.get().is_some_and(CreateKind::takes_if_not_exists) fallback=|| ()>
                             <label class="create-check">
@@ -2157,6 +2351,8 @@ pub(crate) fn CreateDialog(
                                         Some(CreateKind::HashMap) => signals.hash_map.get().if_not_exists,
                                         Some(CreateKind::Udf) => signals.udf.get().if_not_exists,
                                         Some(CreateKind::Ingestor) => signals.ingestor.get().if_not_exists,
+                                        Some(CreateKind::Junction) => signals.junction.get().if_not_exists,
+                                        Some(CreateKind::Reingestor) => signals.reingestor.get().if_not_exists,
                                         Some(CreateKind::Subscription) | None => false,
                                     }
                                     disabled=move || signals.progress.get().is_pending()
@@ -2180,6 +2376,8 @@ pub(crate) fn CreateDialog(
                                             Some(CreateKind::HashMap) => signals.hash_map.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Udf) => signals.udf.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Ingestor) => signals.ingestor.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Junction) => signals.junction.update(|draft| draft.if_not_exists = checked),
+                                            Some(CreateKind::Reingestor) => signals.reingestor.update(|draft| draft.if_not_exists = checked),
                                             Some(CreateKind::Subscription) | None => {}
                                         }
                                         signals.edit();

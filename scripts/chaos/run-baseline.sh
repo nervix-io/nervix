@@ -48,6 +48,7 @@ EOF
 
 setup_error() {
     failure_category=setup
+    setup_error_message="$*"
     printf 'chaos setup error: %s\n' "$*" >&2
     exit 2
 }
@@ -263,6 +264,8 @@ image_id=""
 image_digest=""
 signal_name=""
 failure_category="controller"
+setup_error_message=""
+declare -A tool_image_ids=()
 # The live recording is the run's complete Docker event evidence and is never trimmed; a recording
 # that outgrows this bound fails the run instead.
 docker_event_bytes_limit=67108864
@@ -272,9 +275,9 @@ export CHAOS_RUN_ID="${run_id}"
 export CHAOS_CLUSTER_ID="${cluster_id}"
 export CHAOS_TLS_DIR="${artifact_dir}/tls"
 export CHAOS_PASSWORD="${password}"
-export CHAOS_KAFKA_IMAGE="apache/kafka:3.9.1"
-export CHAOS_KCAT_IMAGE="edenhill/kcat:1.7.1"
-export CHAOS_PROBE_IMAGE="alpine:3.22"
+export CHAOS_KAFKA_IMAGE="${chaos_kafka_image}"
+export CHAOS_KCAT_IMAGE="${chaos_kcat_image}"
+export CHAOS_PROBE_IMAGE="${chaos_probe_image}"
 export CHAOS_PUMBA_IMAGE="${chaos_pumba_image}"
 export CHAOS_NETTOOLS_IMAGE="${chaos_nettools_image}"
 export CHAOS_LOAD_FILE="${artifact_dir}/fixtures/input.ndjson"
@@ -314,6 +317,7 @@ jq -n \
       status: "preflight",
       started_at: $started_at,
       requested_image: $image,
+      tool_images: {},
       scenario: $scenario,
       topology_nodes: $nodes,
       fixture_record_limit: $records,
@@ -574,6 +578,21 @@ finish() {
             printf '%s\n' 'controller failure: the run has no live Docker event recording' >&2
         fi
     fi
+    # The covered recording holds the creation of every run-owned container, so it shows whether
+    # each came from the Nervix image or a pinned tool image that the manifest records.
+    if [[ "${run_event_recording_covered}" == true ]]; then
+        local images_status=0
+        "${script_dir}/verify-docker-events.sh" images \
+            --recording "${artifact_dir}/diagnostics/docker-events.ndjson" \
+            --manifest "${artifact_dir}/manifest.json" \
+            --output "${artifact_dir}/results/container-images.json" || images_status=$?
+        if [[ "${status}" -eq 0 && "${images_status}" -ne 0 ]]; then
+            status=1
+            failure_category=controller
+            current_phase='container image identity'
+            printf '%s\n' 'controller failure: every run-owned container must come from a recorded image; see results/container-images.json' >&2
+        fi
+    fi
 
     if [[ "${status}" -ne 0 && ( "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links ) ]]; then
         local reproducer_image="${image_id:-${image_ref}}"
@@ -611,7 +630,7 @@ finish() {
             diagnostics/target-before-unpause.json diagnostics/target-unpause.txt \
             results/pause-progress.json \
             traffic/observed-output.ndjson results/crash-progress.json \
-            results/ledger.json results/ledger.txt; do
+            results/ledger.json results/ledger.txt results/container-images.json; do
             if [[ -s "${artifact_dir}/${evidence_path}" ]]; then
                 evidence_paths+=("${evidence_path}")
             fi
@@ -673,9 +692,10 @@ finish() {
             --arg reproducer "${reproducer}" \
             --arg image_id "${image_id}" \
             --arg image_reference "${reproducer_image}" \
+            --argjson tool_images "$(jq -c '.tool_images' "${artifact_dir}/manifest.json")" \
             --argjson exit_code "${status}" \
             --argjson evidence "${evidence_json}" \
-            '{category:$category,phase:$phase,exit_code:$exit_code,image_id:$image_id,image_reference:$image_reference,reproducer:$reproducer,evidence:$evidence}' \
+            '{category:$category,phase:$phase,exit_code:$exit_code,image_id:$image_id,image_reference:$image_reference,tool_images:$tool_images,reproducer:$reproducer,evidence:$evidence}' \
             >"${artifact_dir}/results/finding.json"
     fi
 
@@ -708,6 +728,7 @@ finish() {
         --arg phase "${current_phase}" \
         --arg finished_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg signal "${signal_name}" \
+        --arg setup_error "${setup_error_message}" \
         --argjson exit_code "${status}" \
         --argjson resources_retained "${retained}" \
         '.status = $status
@@ -715,7 +736,8 @@ finish() {
          | .finished_at = $finished_at
          | .exit_code = $exit_code
          | .resources_retained = $resources_retained
-         | if $signal == "" then . else .signal = $signal end' \
+         | if $signal == "" then . else .signal = $signal end
+         | if $setup_error == "" then . else .setup_error = $setup_error end' \
         "${artifact_dir}/manifest.json" >"${manifest_tmp}" \
         && mv "${manifest_tmp}" "${artifact_dir}/manifest.json"
 
@@ -741,13 +763,28 @@ trap 'on_signal 129 HUP' HUP
 
 cli_host=nervix-1
 
-ensure_tool_image() {
-    local tool_image="$1"
-    if run_bounded 20 docker image inspect "${tool_image}" >/dev/null 2>&1; then
-        return 0
+# Makes one pinned tool image local and records its reference and image ID under TOOL in the
+# manifest. A missing image is pulled once within a bound; its digest-pinned reference cannot pull
+# different content, and a pull that fails is a setup failure that names the image.
+resolve_tool_image() {
+    local tool="$1"
+    local reference="$2"
+    local pull_log="diagnostics/tool-image-pull-${tool}.txt"
+    if ! run_bounded 20 docker image inspect "${reference}" >/dev/null 2>&1; then
+        printf 'pulling pinned %s image %s\n' "${tool}" "${reference}"
+        run_bounded 180 docker pull "${reference}" >"${artifact_dir}/${pull_log}" 2>&1 \
+            || setup_error "pinned ${tool} image '${reference}' could not be pulled; see ${pull_log}"
     fi
-    printf 'pulling required tool image %s\n' "${tool_image}"
-    run_bounded 180 docker pull "${tool_image}"
+    local tool_image_id
+    tool_image_id="$(run_bounded 30 docker image inspect --format '{{.Id}}' "${reference}")" \
+        || setup_error "pinned ${tool} image '${reference}' is local but cannot be inspected"
+    [[ "${tool_image_id}" =~ ^sha256:[a-f0-9]{64}$ ]] \
+        || setup_error "pinned ${tool} image '${reference}' did not resolve to an immutable local image ID"
+    tool_image_ids["${tool}"]="${tool_image_id}"
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.tool_images[$tool] = {reference: $reference, image_id: $image_id}' \
+        --arg tool "${tool}" --arg reference "${reference}" --arg image_id "${tool_image_id}"
 }
 
 # Starts the run's live Docker event recording before the run creates its first container, so the
@@ -1005,6 +1042,18 @@ run_bounded 30 docker info >/dev/null \
 run_bounded 30 docker compose version >"${artifact_dir}/docker-compose-version.txt"
 select_run_network
 
+# Every tool image the scenario starts is local and recorded before the run creates a container.
+resolve_tool_image kafka "${CHAOS_KAFKA_IMAGE}"
+resolve_tool_image kcat "${CHAOS_KCAT_IMAGE}"
+resolve_tool_image probe "${CHAOS_PROBE_IMAGE}"
+if [[ "${scenario}" != "baseline" ]]; then
+    resolve_tool_image pumba "${CHAOS_PUMBA_IMAGE}"
+    pumba_image_id="${tool_image_ids[pumba]}"
+fi
+if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links ]]; then
+    resolve_tool_image nettools "${CHAOS_NETTOOLS_IMAGE}"
+fi
+
 if ! image_id="$(run_bounded 30 docker image inspect --format '{{.Id}}' "${image_ref}" 2>/dev/null)"; then
     printf 'image is not local; attempting bounded pull: %s\n' "${image_ref}"
     run_bounded 180 docker pull "${image_ref}" \
@@ -1018,20 +1067,19 @@ fi
 
 image_digest="$(run_bounded 30 docker image inspect \
     --format '{{join .RepoDigests ","}}' "${image_ref}" 2>/dev/null || true)"
+# The dollars in this jq filter are jq variables, not shell expansion.
+# shellcheck disable=SC2016
+update_manifest '.resolved_image_id = $image_id | .resolved_repo_digests = $digests' \
+    --arg image_id "${image_id}" --arg digests "${image_digest}"
 export NERVIX_IMAGE="${image_id}"
 run_bounded 30 docker run --rm --entrypoint /bin/sh "${image_id}" -eu -c \
     'test -x /usr/local/bin/nervix-server; test -x /usr/local/bin/nervix-cli' \
     || setup_error "image '${image_ref}' does not package executable nervix-server and nervix-cli binaries"
 
-ensure_tool_image "${CHAOS_KAFKA_IMAGE}"
-ensure_tool_image "${CHAOS_KCAT_IMAGE}"
-ensure_tool_image "${CHAOS_PROBE_IMAGE}"
 start_run_event_recording
 if [[ "${scenario}" != "baseline" ]]; then
     [[ -S /var/run/docker.sock ]] \
         || setup_error "${scenario} requires a local /var/run/docker.sock for Pumba"
-    ensure_tool_image "${CHAOS_PUMBA_IMAGE}"
-    pumba_image_id="$(run_bounded 30 docker image inspect --format '{{.Id}}' "${CHAOS_PUMBA_IMAGE}")"
     run_bounded 30 docker run --rm \
         --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
         "${pumba_image_id}" --version >"${artifact_dir}/pumba-version.txt"
@@ -1051,36 +1099,25 @@ if [[ "${scenario}" != "baseline" ]]; then
         || setup_error 'Pumba cannot access the selected Docker daemon'
 fi
 if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links ]]; then
-    ensure_tool_image "${CHAOS_NETTOOLS_IMAGE}"
-    nettools_image_id="$(run_bounded 30 docker image inspect --format '{{.Id}}' "${CHAOS_NETTOOLS_IMAGE}")"
     # Pumba's netem and iptables faults must take effect on this worker's kernel and heal on SIGTERM.
     run_bounded 120 "${script_dir}/network-faults.sh" preflight --run-id "${run_id}" \
         --pumba "${pumba_image_id}" --nettools "${CHAOS_NETTOOLS_IMAGE}" \
+        --probe "${CHAOS_PROBE_IMAGE}" \
         --output "${artifact_dir}/diagnostics/network-preflight" \
         >"${artifact_dir}/diagnostics/network-preflight.txt" 2>&1 \
         || setup_error "this Docker worker cannot install and heal netem/iptables faults; see ${artifact_dir}/diagnostics/network-preflight.txt"
 fi
 
-update_manifest \
-    ".status = \"running\" | .resolved_image_id = \$image_id | .resolved_repo_digests = \$digests" \
-    --arg image_id "${image_id}" --arg digests "${image_digest}"
-if [[ "${scenario}" != "baseline" ]]; then
-    # The dollars in this jq filter are jq variables, not shell expansion.
-    # shellcheck disable=SC2016
-    update_manifest '.pumba_image_id = $image_id | .pumba_image = $image' \
-        --arg image_id "${pumba_image_id}" --arg image "${CHAOS_PUMBA_IMAGE}"
-fi
+update_manifest '.status = "running"'
 if [[ "${scenario}" == partition-recovery ]]; then
     # shellcheck disable=SC2016
-    update_manifest '.nettools_image_id = $image_id | .nettools_image = $image | .partition = {case: $case, minimum_window_seconds: ($seconds | tonumber)}' \
-        --arg image_id "${nettools_image_id}" --arg image "${CHAOS_NETTOOLS_IMAGE}" \
+    update_manifest '.partition = {case: $case, minimum_window_seconds: ($seconds | tonumber)}' \
         --arg case "${partition_case}" --arg seconds "${partition_seconds}"
 fi
 if [[ "${scenario}" == degraded-links ]]; then
     # The dollars in this jq filter are jq variables, not shell expansion.
     # shellcheck disable=SC2016
-    update_manifest '.nettools_image_id = $image_id | .nettools_image = $image | .degradation = $settings' \
-        --arg image_id "${nettools_image_id}" --arg image "${CHAOS_NETTOOLS_IMAGE}" \
+    update_manifest '.degradation = $settings' \
         --argjson settings "$(jq -n \
             --arg profile "${degradation_profile}" \
             --argjson load_interval_ms "${load_interval_ms}" \
@@ -1363,11 +1400,13 @@ broker_admin /opt/kafka/bin/kafka-consumer-groups.sh \
     --bootstrap-server broker:9092 --group chaos_baseline --describe \
     >"${artifact_dir}/public/consumer-group-final.txt"
 
+tool_images_json="$(jq -c '.tool_images' "${artifact_dir}/manifest.json")"
 if [[ "${scenario}" == "baseline" ]]; then
     jq -n \
         --arg run_id "${run_id}" \
         --arg image_id "${image_id}" \
         --arg image_digest "${image_digest}" \
+        --argjson tool_images "${tool_images_json}" \
         --argjson nodes "${node_count}" \
         --argjson generated_records "${record_count}" \
         --argjson accepted_records "${input_end}" \
@@ -1379,6 +1418,7 @@ if [[ "${scenario}" == "baseline" ]]; then
           run_id: $run_id,
           image_id: $image_id,
           image_digest: $image_digest,
+          tool_images: $tool_images,
           topology_nodes: $nodes,
           generated_records: $generated_records,
           accepted_source_records: $accepted_records,
@@ -1394,37 +1434,36 @@ elif [[ "${scenario}" == "rolling-restart" ]]; then
     jq -n \
         --arg run_id "${run_id}" \
         --arg image_id "${image_id}" \
-        --arg pumba_image_id "${pumba_image_id}" \
+        --argjson tool_images "${tool_images_json}" \
         --argjson nodes "${node_count}" \
         --argjson accepted_records "${input_end}" \
         --argjson observed_records "${output_end}" \
         --slurpfile progress "${artifact_dir}/results/rolling-progress.json" \
-        '{verdict:"pass",run_id:$run_id,image_id:$image_id,pumba_image_id:$pumba_image_id,topology_nodes:$nodes,accepted_source_records:$accepted_records,observed_output_records:$observed_records,source_offsets_committed:true,ledger:"results/ledger.json",remote_path:"results/remote-path.json",progress:$progress[0]}' \
+        '{verdict:"pass",run_id:$run_id,image_id:$image_id,tool_images:$tool_images,topology_nodes:$nodes,accepted_source_records:$accepted_records,observed_output_records:$observed_records,source_offsets_committed:true,ledger:"results/ledger.json",remote_path:"results/remote-path.json",progress:$progress[0]}' \
         >"${artifact_dir}/results/rolling-restart.json"
 elif [[ "${scenario}" == "pause-resume" ]]; then
     jq -n \
         --arg run_id "${run_id}" \
         --arg image_id "${image_id}" \
-        --arg pumba_image_id "${pumba_image_id}" \
+        --argjson tool_images "${tool_images_json}" \
         --argjson accepted_records "${input_end}" \
         --argjson observed_records "${output_end}" \
         --slurpfile progress "${artifact_dir}/results/pause-progress.json" \
         --slurpfile ledger "${artifact_dir}/results/ledger.json" \
-        '{verdict:"pass",run_id:$run_id,image_id:$image_id,pumba_image_id:$pumba_image_id,topology_nodes:3,accepted_source_records:$accepted_records,observed_output_records:$observed_records,replay_duplicates:$ledger[0].duplicate_records,source_offsets_committed:true,ledger:"results/ledger.json",remote_path:"results/remote-path.json",progress:$progress[0]}' \
+        '{verdict:"pass",run_id:$run_id,image_id:$image_id,tool_images:$tool_images,topology_nodes:3,accepted_source_records:$accepted_records,observed_output_records:$observed_records,replay_duplicates:$ledger[0].duplicate_records,source_offsets_committed:true,ledger:"results/ledger.json",remote_path:"results/remote-path.json",progress:$progress[0]}' \
         >"${artifact_dir}/results/pause-resume.json"
 elif [[ "${scenario}" == "partition-recovery" ]]; then
     jq -n \
         --arg run_id "${run_id}" \
         --arg image_id "${image_id}" \
-        --arg pumba_image_id "${pumba_image_id}" \
-        --arg nettools_image_id "${nettools_image_id}" \
+        --argjson tool_images "${tool_images_json}" \
         --arg case "${partition_case}" \
         --argjson accepted_records "${input_end}" \
         --argjson observed_records "${output_end}" \
         --slurpfile progress "${artifact_dir}/results/partition-progress.json" \
         --slurpfile ledger "${artifact_dir}/results/ledger.json" \
         --slurpfile findings <(cat "${artifact_dir}/results/partition-findings.ndjson" 2>/dev/null || true) \
-        '{verdict:(if ($findings | length) == 0 then "pass" else "fail" end),run_id:$run_id,image_id:$image_id,pumba_image_id:$pumba_image_id,nettools_image_id:$nettools_image_id,case:$case,topology_nodes:3,accepted_source_records:$accepted_records,observed_output_records:$observed_records,replay_duplicates:$ledger[0].duplicate_records,source_offsets_committed:true,ledger:"results/ledger.json",remote_path:"results/remote-path.json",findings:$findings,progress:$progress[0]}' \
+        '{verdict:(if ($findings | length) == 0 then "pass" else "fail" end),run_id:$run_id,image_id:$image_id,tool_images:$tool_images,case:$case,topology_nodes:3,accepted_source_records:$accepted_records,observed_output_records:$observed_records,replay_duplicates:$ledger[0].duplicate_records,source_offsets_committed:true,ledger:"results/ledger.json",remote_path:"results/remote-path.json",findings:$findings,progress:$progress[0]}' \
         >"${artifact_dir}/results/partition-recovery.json"
     if [[ "$(jq -r '.verdict' "${artifact_dir}/results/partition-recovery.json")" != pass ]]; then
         failure_category=product
@@ -1437,14 +1476,14 @@ elif [[ "${scenario}" == "partition-recovery" ]]; then
 elif [[ "${scenario}" == "degraded-links" ]]; then
     jq -n \
         --arg run_id "${run_id}" --arg image_id "${image_id}" \
-        --arg pumba_image_id "${pumba_image_id}" --arg nettools_image_id "${nettools_image_id}" \
+        --argjson tool_images "${tool_images_json}" \
         --arg profile "${degradation_profile}" \
         --argjson accepted_records "${input_end}" --argjson observed_records "${output_end}" \
         --slurpfile progress "${artifact_dir}/results/degraded-progress.json" \
         --slurpfile ledger "${artifact_dir}/results/ledger.json" \
         --slurpfile findings <(cat "${artifact_dir}/degraded/findings.ndjson" 2>/dev/null || true) \
         '{verdict:(if ($findings|length)==0 then "pass" else "fail" end),run_id:$run_id,
-          image_id:$image_id,pumba_image_id:$pumba_image_id,nettools_image_id:$nettools_image_id,
+          image_id:$image_id,tool_images:$tool_images,
           profile:$profile,topology_nodes:3,accepted_source_records:$accepted_records,
           observed_output_records:$observed_records,replay_duplicates:$ledger[0].duplicate_records,
           source_offsets_committed:true,ledger:"results/ledger.json",progress:$progress[0],findings:$findings}' \
@@ -1461,13 +1500,13 @@ else
         --arg run_id "${run_id}" \
         --arg scenario "${scenario}" \
         --arg image_id "${image_id}" \
-        --arg pumba_image_id "${pumba_image_id}" \
+        --argjson tool_images "${tool_images_json}" \
         --argjson nodes "${node_count}" \
         --argjson accepted_records "${input_end}" \
         --argjson observed_records "${output_end}" \
         --slurpfile progress "${artifact_dir}/results/crash-progress.json" \
         --slurpfile ledger "${artifact_dir}/results/ledger.json" \
-        '{verdict:"pass",run_id:$run_id,scenario:$scenario,image_id:$image_id,pumba_image_id:$pumba_image_id,topology_nodes:$nodes,accepted_source_records:$accepted_records,observed_output_records:$observed_records,replay_duplicates:$ledger[0].duplicate_records,source_offsets_committed:true,ledger:"results/ledger.json",remote_path:"results/remote-path.json",progress:$progress[0]}' \
+        '{verdict:"pass",run_id:$run_id,scenario:$scenario,image_id:$image_id,tool_images:$tool_images,topology_nodes:$nodes,accepted_source_records:$accepted_records,observed_output_records:$observed_records,replay_duplicates:$ledger[0].duplicate_records,source_offsets_committed:true,ledger:"results/ledger.json",remote_path:"results/remote-path.json",progress:$progress[0]}' \
         >"${artifact_dir}/results/crash.json"
 fi
 

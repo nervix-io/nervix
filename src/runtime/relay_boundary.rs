@@ -10,6 +10,10 @@
 
 use super::*;
 
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "relay_boundary_shuttle_tests.rs"]
+mod shuttle_tests;
+
 pub(super) const RELAY_BUFFER_DIRECTION_CONCRETE: &str = "concrete";
 const RELAY_CHANNEL_IDLE_ROTATION: Duration = Duration::from_secs(300);
 
@@ -1505,12 +1509,31 @@ impl RelayBoundaryServices {
         domain: &DomainName,
         relay: &RelayName,
         batch: &RelayRecordBatch,
+        fault_injection: &ConfiguredFaultInjection,
     ) -> RelayDispatchResult {
+        fault_injection
+            .pause_owner_relay_fanout_if_armed(domain)
+            .await;
+        let gate = self.fanout.dispatch_gate();
+        let Some(_dispatch_permit) = gate.try_acquire_dispatch() else {
+            for ack in batch.acks.iter() {
+                ack.no_ack("relay routing changed before owner fan-out");
+            }
+            batch.ack_success();
+            return Err(Box::new(batch.clone()));
+        };
         self.fanout_local_subscriptions(batch).await;
         self.fanout_remote_subscriptions(domain, relay, batch).await;
-        self.dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Owner, batch)
-            .await?;
-        self.dispatch_remote_runtime_consumers(domain, batch).await
+        if let Err(failed) = self
+            .dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Owner, batch)
+            .await
+        {
+            batch.ack_success();
+            return Err(failed);
+        }
+        let result = self.dispatch_remote_runtime_consumers(domain, batch).await;
+        batch.ack_success();
+        result
     }
 
     /// Hands a batch another node's relay owner routed here to the runtime consumers this node runs
@@ -1670,8 +1693,12 @@ impl Runtime {
             batch.domain_timestamp(),
         );
         services.observe_owner_buffer_length(&metrics);
-        let result = services.fanout_owner_batch(domain, relay, batch).await;
-        batch.ack_success();
+        let result = services
+            .fanout_owner_batch(domain, relay, batch, &self.inner.fault_injection)
+            .await;
+        self.inner
+            .fault_injection
+            .mark_owner_relay_fanout_complete(domain);
         result
     }
 

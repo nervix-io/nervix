@@ -298,6 +298,19 @@ that overlaps no existing Docker network or host route. Nodes take the fixed add
 `.13` and every other container an address from the upper half. The manifest records the network
 and the node addresses.
 
+Every tool image a run starts is pinned by a registry-qualified digest in `tool-images.sh`: Apache
+Kafka 3.9.1 for the broker and topic administration, kcat 1.7.1 for traffic, Alpine 3.22.6 for
+probes, observers and event markers, and Pumba 1.2.1 with its nettools helper for faults. Kafka,
+Alpine, Pumba and nettools are pinned by multi-architecture index digest; kcat 1.7.1 is published
+for linux/amd64 only. The Compose file has no fallback tags. In preflight, before it resolves the
+Nervix image and before the run creates any container, the controller makes each tool image the
+scenario uses local, pulling a missing one once within a bound, and records its reference and image
+ID under `tool_images` in `manifest.json`. Result files and `results/finding.json` carry the same
+map. A pinned image that cannot be pulled fails the run in preflight with exit status 2: the setup
+error names the image on the console and in the manifest's `setup_error`, and Docker's pull output
+is kept in `diagnostics/tool-image-pull-<tool>.txt`. Moving a tool to another release means
+replacing its digest in `tool-images.sh` and requalifying the scenarios that start it.
+
 The host needs Bash, Docker with Compose, GNU `timeout`, OpenSSL, and jq. Kafka administration,
 traffic, listener probes, metrics probes, and Nervix administration run in prebuilt containers.
 The baseline provisions its Kafka topics explicitly, installs the checked-in NSPL graph with the
@@ -305,11 +318,11 @@ image's packaged `nervix-cli`, and reconstructs the accepted-input ledger from K
 checks the ingestor consumer-group boundary and compares the output ledger by event ID and exact
 content. Duplicate, missing, unexpected, and corrupt records are reported independently.
 
-Each run writes bounded evidence under `target/chaos/<run-id>/`: the immutable image identity,
-rendered Compose configuration, phase ledger, public cluster and placement output, listener and
-metrics probes, broker offsets, accepted and observed traffic, verifier reports, logs, Docker events,
-and container inspection. The default baseline fixture has 24 records and accepts at most 1,000
-with `--records`.
+Each run writes bounded evidence under `target/chaos/<run-id>/`: the immutable Nervix and tool
+image identities, rendered Compose configuration, phase ledger, public cluster and placement
+output, listener and metrics probes, broker offsets, accepted and observed traffic, verifier
+reports, logs, Docker events, and container inspection. The default baseline fixture has 24
+records and accepts at most 1,000 with `--records`.
 Rolling runs additionally retain a Pumba command and version, each target's before/stop/start
 inspection, stop and observer logs, measured stop and recovery times, per-restart public status and
 metrics, and per-restart offset results. A failed identity, stop, exit, deadline, listener, or
@@ -329,7 +342,10 @@ accepted only when recorded markers bracket it, and its bounds are kept beside i
 closes, including one whose subscriber exited, fails the run as a controller failure with those
 bounds as evidence. When diagnostics are captured, after every heal, a final marker closes the
 recording. It must then cover the whole run within 64 MiB, and its bounds are kept in
-`diagnostics/docker-events.recording.json`.
+`diagnostics/docker-events.recording.json`. Because the closed recording holds the creation of
+every run-owned container, `results/container-images.json` then attributes each one, markers
+included, to the resolved Nervix image or to a tool image the manifest records. A container
+created from any other image fails a run that otherwise passed as a controller failure.
 
 All owned containers, networks, and volumes carry `io.nervix.chaos.run=<run-id>`. This label also
 gives Pumba scenarios an exact target selector; Nervix nodes additionally carry
@@ -346,7 +362,7 @@ just chaos cleanup --run-id <run-id>
 
 `--keep` retains resources for interactive diagnosis and prints the same cleanup command.
 
-Run the external verifier and Compose contract checks directly with:
+Run the external verifier, pinned tool image and Compose contract checks directly with:
 
 ```bash
 just chaos self-test
