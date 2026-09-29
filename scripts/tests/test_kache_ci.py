@@ -17,7 +17,7 @@ class KacheCiTests(unittest.TestCase):
         self.assertNotIn("actions/cache@", docker_workflow)
         self.assertNotIn("enable-cache: true", docker_workflow)
         for workflow in (check_workflow, docker_workflow):
-            self.assertIn('KACHE_VERSION: "0.28.0"', workflow)
+            self.assertIn('KACHE_VERSION: "0.28.1"', workflow)
             self.assertIn('KACHE_REMOTE_KEY_LISTING: "false"', workflow)
 
         import re
@@ -140,7 +140,7 @@ class KacheCiTests(unittest.TestCase):
         self.assertNotIn('if [[ -n "${KACHE_S3_ACCESS_KEY:-}"', justfile)
         self.assertNotIn("${KACHE_S3_REGION:-us-east-1}", justfile)
         self.assertIn("ENV RUSTC_WRAPPER=kache", dockerfile)
-        self.assertIn("ARG KACHE_VERSION=0.28.0", dockerfile)
+        self.assertIn("ARG KACHE_VERSION=0.28.1", dockerfile)
         self.assertIn("ENV KACHE_CACHE_EXECUTABLES=true", dockerfile)
         self.assertIn("ENV KACHE_MAX_SIZE=1TiB", dockerfile)
         self.assertIn("ENV KACHE_REMOTE_KEY_LISTING=false", dockerfile)
