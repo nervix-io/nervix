@@ -11,9 +11,10 @@ use error_stack::Report;
 use imbl::OrdSet;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    ClusterNodeIdentity, CommandExecutionReference, CommandExecutionReferenceTimestampError,
-    DomainName, DomainState, Statement, Timestamp, TransactionLifecycle,
-    TransactionOperationAdmission, TransactionPosition, TransactionPreviewIdentity, UserName,
+    BackupArchiveSummary, ClusterNodeIdentity, CommandExecutionReference,
+    CommandExecutionReferenceTimestampError, DomainName, DomainState, Statement, Timestamp,
+    TransactionLifecycle, TransactionOperationAdmission, TransactionPosition,
+    TransactionPreviewIdentity, UserName,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -122,6 +123,8 @@ pub struct CommandExecutionResult {
     pub statements: Vec<CommandExecutionStatementResult>,
     pub transaction: Option<CommandExecutionTransactionStatus>,
     pub transaction_admission: Option<TransactionOperationAdmission>,
+    /// The archive a completed backup assembled. Absent for every other command.
+    pub backup: Option<BackupArchiveSummary>,
 }
 
 /// The preview a refused commit expected, beside the one that now describes the transaction.
@@ -983,6 +986,7 @@ mod tests {
             statements: Vec::new(),
             transaction: None,
             transaction_admission: None,
+            backup: None,
         })
     }
 

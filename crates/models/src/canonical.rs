@@ -17,28 +17,28 @@ use crate::{
     AlterPlacement, AlterPlacementOperation, AlterProcessorOperation, AlterReingestor, AlterRelay,
     AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
     AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTargetScope,
-    AvroType, BinaryOperator, BranchEviction, BranchSelection, ClickHouseValueMapping,
-    ClientConfigEntry, ClientResourceMount, CodecEncoding, CodecEncodingRule,
-    CodecJaqTransformations, CodecName, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
-    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
-    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    AvroType, Backup, BackupResources, BackupScope, BinaryOperator, BranchEviction,
+    BranchSelection, ClickHouseValueMapping, ClientConfigEntry, ClientResourceMount, CodecEncoding,
+    CodecEncodingRule, CodecJaqTransformations, CodecName, CodecWireFormat,
+    CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse,
+    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
+    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
+    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
+    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
     CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
     CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
-    CreateWindowProcessor, CreateWireSchema, DescribeTransaction, DomainPace, DomainStartPoint,
-    EmitSink, EmitterAckWindow, EmitterBatchPolicy, EmitterBody, EmitterPublishingMode,
-    EndpointIngestMode, Expression, FieldName, FieldScope, Float64Literal, FlushPolicy,
-    GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorMapping, IngestSource, IngestTimestampSource, Inheritance, InputCollectPolicy,
-    InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode, Literal,
-    MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy,
-    Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch, ParseAsType,
-    PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
+    CreateWindowProcessor, CreateWireSchema, DescribeBackup, DescribeTransaction, DomainPace,
+    DomainStartPoint, EmitSink, EmitterAckWindow, EmitterBatchPolicy, EmitterBody,
+    EmitterPublishingMode, EndpointIngestMode, Expression, FieldName, FieldScope, Float64Literal,
+    FlushPolicy, GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration,
+    InferencerTensorDimension, InferencerTensorMapping, IngestSource, IngestTimestampSource,
+    Inheritance, InputCollectPolicy, InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode,
+    Literal, MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator,
+    MessageErrorPolicy, Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos,
+    MqttSession, MySqlConflictAction, NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch,
+    ParseAsType, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
     ProcessorOutputs, PulsarIngestMode, QueueName, RabbitMqIngestMode, RangeOperator,
     RedisPubSubIngestMode, RelayBranching, RelayName, RetryPolicy, RouteConstruction, SchemaField,
     SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup,
@@ -46,6 +46,12 @@ use crate::{
     UnaryOperator, WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField,
     ZeroMqIngestMode,
 };
+
+/// The NSPL release canonical rendering writes.
+///
+/// NSPL is versioned with the product, so a text this crate renders is read back by the parser of
+/// the same release. An archive records it beside the NSPL it holds.
+pub const NSPL_LANGUAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Width of one canonical indentation level.
 const INDENT: usize = 2;
@@ -771,6 +777,7 @@ impl Statement {
                 upload.identifier.as_str(),
                 string_literal(&upload.source_path)
             )),
+            Self::Backup(backup) => Ok(backup.to_canonical_nspl()),
             Self::StartDomain(start) => Ok(match &start.start {
                 DomainStartPoint::Resume => "START;".to_string(),
                 DomainStartPoint::Now { time_rate } => {
@@ -912,6 +919,38 @@ impl Statement {
     }
 }
 
+impl Backup {
+    /// Renders the statement with the clauses it needs, omitting the default of including resource
+    /// bytes.
+    pub fn to_canonical_nspl(&self) -> String {
+        let scope = match &self.scope {
+            BackupScope::Cluster => "CLUSTER".to_string(),
+            BackupScope::Domain(Some(domain)) => format!("DOMAIN {}", domain.as_str()),
+            BackupScope::Domain(None) => "DOMAIN".to_string(),
+        };
+        let resources = match self.resources {
+            BackupResources::Included => "",
+            BackupResources::Omitted => " WITHOUT RESOURCES",
+        };
+        format!(
+            "BACKUP {scope} TO {}{resources};",
+            string_literal(&self.destination)
+        )
+    }
+}
+
+impl DescribeBackup {
+    /// Renders the statement, omitting the default `FORMAT TEXT`.
+    pub fn to_canonical_nspl(&self) -> String {
+        let mut statement = format!("DESCRIBE BACKUP {}", string_literal(&self.source));
+        if self.format != InspectionFormat::default() {
+            statement.push_str(&format!(" FORMAT {}", self.format.as_ref()));
+        }
+        statement.push(';');
+        statement
+    }
+}
+
 impl DescribeTransaction {
     /// Renders the statement with each clause it needs, omitting the default `FORMAT TEXT`.
     pub fn to_canonical_nspl(&self) -> String {
@@ -946,6 +985,25 @@ fn subscription_literal_to_nspl(literal: &SubscriptionLiteral) -> String {
         SubscriptionLiteral::Number(value) => value.clone(),
         SubscriptionLiteral::Bool(value) => value.to_string().to_ascii_uppercase(),
     }
+}
+
+/// Renders `models` as one canonical NSPL document: each model's `CREATE` statement in the order
+/// given, separated by a blank line and ending with a newline.
+///
+/// A parser reads the document back statement by statement, so the order is the order the models
+/// have to be created in; the caller decides it.
+pub fn canonical_nspl_document<'model, Version: Display + 'model>(
+    models: impl IntoIterator<Item = &'model Model<Version>>,
+) -> error_stack::Result<String, CanonicalNsplError> {
+    let mut document = String::new();
+    for model in models {
+        if !document.is_empty() {
+            document.push('\n');
+        }
+        document.push_str(&model.to_canonical_nspl()?);
+        document.push('\n');
+    }
+    Ok(document)
 }
 
 impl<Version: Display> Model<Version> {

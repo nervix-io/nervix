@@ -1,13 +1,15 @@
-//! The bounded on-disk staging area a sealed snapshot is received into before it is opened.
+//! The bounded on-disk staging area a sealed snapshot is received into before it is opened, and
+//! an artifact the node assembles, such as a backup archive, is written into before it is served.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The staging quota, the temporary file one transfer writes into, the length and
-//!   digest check that accepts it, and the bounded sequential reads that open it afterwards.
+//! - **Owns.** The staging quota, the temporary file one transfer or artifact writes into, the
+//!   length and digest check that accepts it, and the bounded sequential reads that open it
+//!   afterwards.
 //! - **Depends on.** The executor that admits and charges filesystem work and bulk memory, and the
 //!   directory the node stages into.
-//! - **Must not know.** What a snapshot contains, which state it belongs to, or how its bytes
-//!   arrived.
+//! - **Must not know.** What a snapshot or an artifact contains, which state it belongs to, or how
+//!   its bytes arrived.
 //!
 //! A transfer larger than the node's transfer-memory budget is normal: the bytes land on disk as
 //! they arrive and are read back one bounded section at a time, so no step of a transfer holds a
@@ -26,9 +28,9 @@ use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, MemoryClass, Stor
 use thiserror::Error;
 use tokio::sync::OwnedSemaphorePermit;
 
-/// Why a snapshot could not be staged or read back.
+/// Why a snapshot or an artifact could not be staged or read back.
 #[derive(Debug, Error)]
-pub(in crate::runtime) enum SnapshotStagingError {
+pub(crate) enum SnapshotStagingError {
     #[error("the node has no bulk capacity to stage this snapshot")]
     Admission,
     #[error("staging this snapshot could not be admitted for execution")]
@@ -115,11 +117,12 @@ impl SnapshotStaging {
         }
     }
 
-    /// Reserve staging disk for a snapshot of `length` bytes and open the file it lands in.
+    /// Reserve staging disk for a snapshot or artifact of `length` bytes and open the file it
+    /// lands in.
     ///
     /// The quota is taken before the first chunk is written, so a node that cannot hold the
     /// declared snapshot refuses the transfer instead of discovering it when the disk fills.
-    pub(in crate::runtime) async fn stage(
+    pub(crate) async fn stage(
         &self,
         length: u64,
     ) -> Result<StagedSnapshotWriter, Report<SnapshotStagingError>> {
@@ -183,8 +186,8 @@ impl SnapshotStaging {
     }
 }
 
-/// One incomplete transfer, writing into its own staging file under the node's quota.
-pub(in crate::runtime) struct StagedSnapshotWriter {
+/// One incomplete transfer or artifact, writing into its own staging file under the node's quota.
+pub(crate) struct StagedSnapshotWriter {
     file: Option<tempfile::NamedTempFile>,
     hasher: Option<Hasher>,
     written: u64,
@@ -204,7 +207,7 @@ struct StagedWrite {
 
 impl StagedSnapshotWriter {
     /// Write one already-admitted chunk, refusing bytes past the length the source declared.
-    pub(in crate::runtime) async fn write_chunk(
+    pub(crate) async fn write_chunk(
         &mut self,
         chunk: ChargedBytes,
     ) -> Result<(), Report<SnapshotStagingError>> {
@@ -339,6 +342,195 @@ impl StagedSnapshotWriter {
             _reservation: self._reservation,
         })
     }
+}
+
+impl StagedSnapshotWriter {
+    /// Synchronize a staged artifact this node assembled itself and seal it with the digest of
+    /// what was written. There is no source digest to verify against: the artifact is exactly the
+    /// bytes this node wrote, and its digest is what later readers check it by.
+    pub(crate) async fn finish_artifact(
+        mut self,
+    ) -> Result<StagedArtifact, Report<SnapshotStagingError>> {
+        if self.written != self.declared {
+            return Err(Report::new(SnapshotStagingError::LengthMismatch {
+                actual: self.written,
+                declared: self.declared,
+            }));
+        }
+        let reservation = self
+            .executor
+            .reserve(MemoryClass::Bulk, 1)
+            .await
+            .change_context(SnapshotStagingError::Admission)?;
+        let file = self
+            .file
+            .take()
+            .assured("an unfinished staging writer owns its file");
+        let hasher = self
+            .hasher
+            .take()
+            .assured("an unfinished staging writer owns its hasher");
+        let executor = self.executor.clone();
+        let file = executor
+            .run_storage(
+                StorageClass::Filesystem,
+                reservation,
+                move |_charge, cancellation| {
+                    if cancellation.is_cancelled() {
+                        return Err(Report::new(SnapshotStagingError::Cancelled));
+                    }
+                    let mut file = file;
+                    file.as_file_mut().sync_all().map_err(|error| {
+                        Report::new(SnapshotStagingError::Write {
+                            reason: error.to_string(),
+                        })
+                    })?;
+                    Ok(file)
+                },
+            )
+            .await
+            .change_context(SnapshotStagingError::Execution)??;
+        Ok(StagedArtifact {
+            file,
+            length: self.declared,
+            digest: *hasher.finalize().as_bytes(),
+            executor,
+            _reservation: self._reservation,
+        })
+    }
+}
+
+/// One complete artifact this node assembled, held on disk under the staging quota until it is
+/// dropped, and read back by any number of independent readers.
+pub(crate) struct StagedArtifact {
+    file: tempfile::NamedTempFile,
+    length: u64,
+    digest: [u8; 32],
+    executor: Executor,
+    /// Held for as long as the artifact exists, so the quota is released when it is dropped.
+    _reservation: OwnedSemaphorePermit,
+}
+
+impl StagedArtifact {
+    /// The artifact's exact size.
+    pub(crate) fn length(&self) -> u64 {
+        self.length
+    }
+
+    /// The BLAKE3 digest of the artifact's bytes.
+    pub(crate) fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    /// Open a reader of its own over the artifact, from its first byte.
+    pub(crate) async fn open_reader(
+        &self,
+    ) -> Result<StagedArtifactReader, Report<SnapshotStagingError>> {
+        let reservation = self
+            .executor
+            .reserve(MemoryClass::Bulk, 1)
+            .await
+            .change_context(SnapshotStagingError::Admission)?;
+        let path = self.file.path().to_path_buf();
+        let file = self
+            .executor
+            .run_storage(
+                StorageClass::Filesystem,
+                reservation,
+                move |_charge, cancellation| {
+                    if cancellation.is_cancelled() {
+                        return Err(Report::new(SnapshotStagingError::Cancelled));
+                    }
+                    std::fs::File::open(path).map_err(|error| {
+                        Report::new(SnapshotStagingError::Read {
+                            reason: error.to_string(),
+                        })
+                    })
+                },
+            )
+            .await
+            .change_context(SnapshotStagingError::Execution)??;
+        Ok(StagedArtifactReader {
+            file: Some(file),
+            remaining: self.length,
+            executor: self.executor.clone(),
+        })
+    }
+}
+
+/// One sequential reader over a staged artifact.
+pub(crate) struct StagedArtifactReader {
+    file: Option<std::fs::File>,
+    remaining: u64,
+    executor: Executor,
+}
+
+/// One file that finished an artifact read, returned with what it produced.
+struct ArtifactRead {
+    file: std::fs::File,
+    result: Result<ChargedBytes, Report<SnapshotStagingError>>,
+}
+
+impl StagedArtifactReader {
+    /// Read the next chunk of at most `limit` bytes, charged to the bulk budget for as long as the
+    /// caller holds it. Absent once every byte of the artifact was read.
+    pub(crate) async fn next_chunk(
+        &mut self,
+        limit: u64,
+    ) -> Result<Option<ChargedBytes>, Report<SnapshotStagingError>> {
+        if self.remaining == 0 {
+            return Ok(None);
+        }
+        let length = self.remaining.min(limit.max(1));
+        let reservation = self
+            .executor
+            .reserve(MemoryClass::Bulk, length)
+            .await
+            .change_context(SnapshotStagingError::Admission)?;
+        let file = self
+            .file
+            .take()
+            .assured("an artifact reader holds its file between completed storage jobs");
+        let read = self
+            .executor
+            .run_storage(
+                StorageClass::Filesystem,
+                reservation,
+                move |charge, cancellation| {
+                    let mut file = file;
+                    let result = if cancellation.is_cancelled() {
+                        Err(Report::new(SnapshotStagingError::Cancelled))
+                    } else {
+                        read_artifact_chunk(&mut file, charge, length)
+                    };
+                    ArtifactRead { file, result }
+                },
+            )
+            .await
+            .change_context(SnapshotStagingError::Execution)?;
+        self.file = Some(read.file);
+        let bytes = read.result?;
+        self.remaining = self
+            .remaining
+            .checked_sub(length)
+            .verified("the chunk length was capped at the bytes that remain");
+        Ok(Some(bytes))
+    }
+}
+
+fn read_artifact_chunk(
+    file: &mut std::fs::File,
+    charge: nervix_execution::Reservation,
+    length: u64,
+) -> Result<ChargedBytes, Report<SnapshotStagingError>> {
+    let size: usize = length.arch_into();
+    let mut bytes = vec![0_u8; size];
+    file.read_exact(&mut bytes).map_err(|error| {
+        Report::new(SnapshotStagingError::Read {
+            reason: error.to_string(),
+        })
+    })?;
+    Ok(ChargedBytes::from_owned(bytes, charge))
 }
 
 /// One complete, verified snapshot on disk, read back one bounded section at a time.

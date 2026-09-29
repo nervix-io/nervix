@@ -10,7 +10,7 @@
 //! branches on.
 
 use error_stack::Report;
-use nervix_client_core::{ClientError, CommandExecutionReference};
+use nervix_client_core::{BackupDownloadError, ClientError, CommandExecutionReference};
 
 use crate::abi;
 
@@ -125,6 +125,26 @@ impl Failure {
             | ClientError::ExecutionReferenceMismatch { .. }
             | ClientError::UploadIdentityMismatch { .. } => FailureKind::Protocol,
             ClientError::SessionClosed => FailureKind::Closed,
+            ClientError::BackupDownload { source, .. } => Self::classify_download(source),
+        }
+    }
+
+    /// The kind a failed backup download reports, by why it failed.
+    fn classify_download(error: &BackupDownloadError) -> FailureKind {
+        match error {
+            BackupDownloadError::Refused { .. } => FailureKind::Rejected,
+            BackupDownloadError::Transport { .. }
+            | BackupDownloadError::Stalled
+            | BackupDownloadError::Interrupted
+            | BackupDownloadError::NoLeader
+            | BackupDownloadError::RedirectLoop
+            | BackupDownloadError::SessionLost => FailureKind::Transport,
+            BackupDownloadError::OutOfOrder
+            | BackupDownloadError::InvalidFrame(_)
+            | BackupDownloadError::Mismatch => FailureKind::Protocol,
+            BackupDownloadError::EncodeRequest(_) | BackupDownloadError::Write { .. } => {
+                FailureKind::InvalidArgument
+            }
         }
     }
 }
@@ -139,7 +159,8 @@ impl From<Report<ClientError>> for Failure {
     fn from(report: Report<ClientError>) -> Self {
         let error = report.current_context();
         let execution_reference = match error {
-            ClientError::UncertainCommand { reference, .. } => Some(reference.clone()),
+            ClientError::UncertainCommand { reference, .. }
+            | ClientError::BackupDownload { reference, .. } => Some(reference.clone()),
             _ => None,
         };
         Self {

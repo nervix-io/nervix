@@ -51,9 +51,9 @@ An emitter's buffered Arrow carrier keeps its typed source relay and optional co
 The relay's declared branch name is fixed, so the pair identifies the exact source branch even if
 another relay uses the same key fields and values. Payload assembly compares the pair before
 combining carriers, and unbranched absence remains `None` throughout buffering and packing. Each
-buffered row is one of three states: pending, carried by a batch payload the emitter retains, or
-resolved. A retained payload's members are therefore neither packed again nor mistaken for resolved
-rows, which a delivered flag could not express.
+buffered row is one of three states: pending, carried by a batch payload or prepared request the
+emitter retains, or resolved. A retained payload's members are therefore neither packed or prepared
+again nor mistaken for resolved rows, which a delivered flag could not express.
 
 **Expression scopes and errors.** The VM frontend receives a scope policy that says whether a
 bare field may be read, written, both, or neither. A generated or set-only route reports an

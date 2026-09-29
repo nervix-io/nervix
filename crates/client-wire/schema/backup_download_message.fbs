@@ -1,0 +1,12 @@
+// A backup download stream frame: the archive's start, one chunk of its bytes, its completion, or
+// why it cannot be downloaded.
+//
+// This file declares a frame root for code generators; every shape it names lives in session.fbs.
+
+include "session.fbs";
+
+namespace nervix.session;
+
+root_type BackupDownloadMessage;
+file_identifier "NXBD";
+file_extension "nxbd";

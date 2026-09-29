@@ -10,7 +10,8 @@ use leptos::prelude::*;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{ChoiceTarget, ChoiceValue};
 use nervix_models::{
-    DomainName, ModelKind, ModelName, NodeRef, RequestedResourceVersion, ResourceName,
+    DomainName, FieldName, ModelKind, ModelName, NodeRef, ParseAsType, RequestedResourceVersion,
+    ResourceName,
 };
 
 use super::{
@@ -19,9 +20,183 @@ use super::{
     codec_draft::{CodecFormatDraft, CodecFormatKind},
     open_form_controls,
     resource_binding_draft::ConfigEntryDraft,
+    schema_draft::CollectionLayer,
     select_choice, selected_choice,
     signaling_draft::{SignalingFormatDraft, SignalingFormatKind, SignalingStepDraft},
+    udf_draft::UdfArgumentDraft,
 };
+
+#[test]
+fn hash_map_and_roto_udf_forms_render_current_model_controls() {
+    super::super::initialize_test_executor();
+    Owner::new().with(|| {
+        let domain = DomainName::parse("orders").assured("valid domain");
+        let signals = CreateSignals::new();
+        let active_domain = RwSignal::new(Some(domain.clone()));
+        let connection_state = RwSignal::new(super::super::ConsoleConnectionState::Waiting);
+        let generation = RwSignal::new(1);
+        let request_tx = RwSignal::new(None);
+        let render = || {
+            let dialog = CreateDialog(
+                CreateDialogProps::builder()
+                    .signals(signals)
+                    .active_domain(active_domain)
+                    .connection_state(connection_state)
+                    .session_generation(generation)
+                    .request_tx(request_tx)
+                    .submit(|_, _, _| {})
+                    .build(),
+            );
+            any_spawner::Executor::poll_local();
+            dialog.to_html()
+        };
+
+        signals.open(
+            CreateKind::HashMap,
+            Some(domain.clone()),
+            "global-create-button",
+        );
+        signals.hash_map.update(|draft| {
+            draft.name = "by_id".to_string();
+            draft.path = "lookup.jsonl".to_string();
+            draft
+                .pin
+                .select_resource(ResourceName::parse("bundle").assured("valid resource"));
+            draft.pin.select_version(RequestedResourceVersion::Latest);
+            draft.select_codec(&node(ModelKind::Codec, "entry_codec"));
+            draft.select_key(FieldName::parse("id").assured("valid field"));
+        });
+        let lookup = render();
+        for control in [
+            "create-hash-resource",
+            "create-hash-version",
+            "create-hash-codec",
+            "create-hash-key",
+            "create-hash-path",
+        ] {
+            assert!(lookup.contains(control), "{control} must render");
+        }
+        assert!(lookup.contains("KEY id"));
+        assert!(lookup.contains("VERSION LATEST"));
+        assert!(lookup.contains("Selected key: id"));
+        assert_eq!(open_form_controls(signals, CreateKind::HashMap).len(), 4);
+
+        signals.open(CreateKind::Udf, Some(domain), "global-create-button");
+        signals.udf.update(|draft| {
+            draft.name = "reflect".to_string();
+            let mut argument = UdfArgumentDraft {
+                name: "value".to_string(),
+                ..UdfArgumentDraft::default()
+            };
+            argument.ty.scalar = Some(ParseAsType::I64);
+            draft.arguments.push(argument);
+            draft.returns.scalar = Some(ParseAsType::I64);
+            draft.code = "fn reflect(value: I64Column) -> I64Column { value }".to_string();
+        });
+        let udf = render();
+        for control in [
+            "create-udf-language",
+            "create-udf-add-argument",
+            "create-udf-argument-name",
+            "create-udf-argument-type",
+            "create-udf-return-type",
+            "create-udf-volatile",
+            "create-udf-code",
+        ] {
+            assert!(udf.contains(control), "{control} must render");
+        }
+        assert!(udf.contains("ARGS (value I64)"));
+        assert!(udf.contains("RETURNS I64"));
+        assert!(udf.contains("fn reflect(value: I64Column)"));
+        assert!(open_form_controls(signals, CreateKind::Udf).is_empty());
+
+        signals.udf.update(|draft| {
+            draft.arguments[0].ty.layers.push(CollectionLayer::Vector);
+            draft.returns.layers.push(CollectionLayer::Array {
+                length: "4".to_string(),
+            });
+        });
+        let collections = render();
+        assert!(collections.contains("Vector"));
+        assert!(collections.contains("Fixed array"));
+        assert!(collections.contains("create-udf-array-length"));
+        assert!(collections.contains("RETURNS ARRAY&lt;I64, 4&gt;"));
+    });
+}
+
+#[test]
+fn hash_map_choices_bind_the_key_to_the_selected_codec_and_domain() {
+    Owner::new().with(|| {
+        let scope = DomainName::parse("orders").assured("valid domain");
+        let elsewhere = DomainName::parse("elsewhere").assured("valid domain");
+        let resource =
+            ChoiceValue::Resource(ResourceName::parse("bundle").assured("valid resource"));
+        let version = ChoiceValue::ResourceVersion(RequestedResourceVersion::Latest);
+        let codec = ChoiceValue::Model(node(ModelKind::Codec, "entry_codec"));
+        let key = ChoiceValue::Field(FieldName::parse("id").assured("valid field"));
+        let signals = CreateSignals::new();
+        for control in open_form_controls(signals, CreateKind::HashMap) {
+            assert_eq!(control.form(), CreateKind::HashMap);
+        }
+        assert_eq!(CreateKind::HashMap.wire_format(), None);
+        assert_eq!(CreateKind::Udf.wire_format(), None);
+
+        signals.open(
+            CreateKind::HashMap,
+            Some(scope.clone()),
+            "global-create-button",
+        );
+        assert_eq!(
+            signals.choice_query(ChoiceControl::HashVersion).err(),
+            Some("Select a resource to list its completed versions")
+        );
+        assert_eq!(
+            signals.choice_query(ChoiceControl::HashKey).err(),
+            Some("Select a codec to list the fields of its output schema")
+        );
+        select_choice(signals, ChoiceControl::HashResource, resource.clone());
+        select_choice(signals, ChoiceControl::HashVersion, version.clone());
+        select_choice(signals, ChoiceControl::HashCodec, codec.clone());
+        select_choice(signals, ChoiceControl::HashKey, key.clone());
+        for (control, value) in [
+            (ChoiceControl::HashResource, &resource),
+            (ChoiceControl::HashVersion, &version),
+            (ChoiceControl::HashCodec, &codec),
+            (ChoiceControl::HashKey, &key),
+        ] {
+            assert!(selected_choice(signals, control, value));
+        }
+        let versions = signals
+            .choice_query(ChoiceControl::HashVersion)
+            .assured("version choices depend on the selected resource");
+        assert_eq!(versions.target, ChoiceTarget::CompletedResourceVersion);
+        assert_eq!(versions.dependencies[1].value, resource);
+        let codecs = signals
+            .choice_query(ChoiceControl::HashCodec)
+            .assured("codec choices are scoped to the domain");
+        assert_eq!(codecs.target, ChoiceTarget::Codec);
+        assert_eq!(
+            codecs.dependencies[0].value,
+            ChoiceValue::Domain(scope.clone())
+        );
+        let keys = signals
+            .choice_query(ChoiceControl::HashKey)
+            .assured("key choices depend on the selected codec");
+        assert_eq!(keys.target, ChoiceTarget::CodecField);
+        assert_eq!(keys.dependencies[0].value, ChoiceValue::Domain(scope));
+        assert_eq!(keys.dependencies[1].value, codec);
+
+        signals.change_scope(Some(elsewhere));
+        for (control, value) in [
+            (ChoiceControl::HashResource, &resource),
+            (ChoiceControl::HashVersion, &version),
+            (ChoiceControl::HashCodec, &keys.dependencies[1].value),
+            (ChoiceControl::HashKey, &key),
+        ] {
+            assert!(!selected_choice(signals, control, value));
+        }
+    });
+}
 
 #[test]
 fn client_vhost_and_endpoint_forms_render_every_transport_and_typed_reference_control() {

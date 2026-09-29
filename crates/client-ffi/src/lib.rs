@@ -47,7 +47,7 @@ pub use failure::{
     nx_error_message,
 };
 pub use outcome::{
-    Disposition, Outcome, nx_outcome_diagnostic, nx_outcome_diagnostic_count,
+    Disposition, Outcome, nx_outcome_backup, nx_outcome_diagnostic, nx_outcome_diagnostic_count,
     nx_outcome_disposition, nx_outcome_execution_reference, nx_outcome_free, nx_outcome_message,
     nx_outcome_schema, nx_outcome_subscription,
 };

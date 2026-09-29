@@ -207,7 +207,8 @@ nx_error_kind nx_error_kind_of(const nx_error *error);
 /* The error and every cause behind it, as one message. */
 void nx_error_message(const nx_error *error, const uint8_t **message, size_t *message_len);
 /* Whether the error names the execution reference of the command it concerns, and that
-   reference when it does. */
+   reference when it does: an uncertain command, or a backup whose archive failed to download,
+   which running the same execution again downloads while the server retains it. */
 bool nx_error_execution_reference(const nx_error *error, const uint8_t **reference,
                                   size_t *reference_len);
 void nx_error_free(nx_error *error);
@@ -281,6 +282,10 @@ nx_error *nx_outcome_diagnostic(const nx_outcome *outcome, size_t index, const u
 /* Whether the command opened a subscription, and its name and generation when it did. */
 bool nx_outcome_subscription(const nx_outcome *outcome, const uint8_t **name, size_t *name_len,
                              uint64_t *generation);
+/* Whether the command was a completed BACKUP, and the size and BLAKE3 digest of the archive the
+   client verified and wrote to the file the statement names. `digest` points at 32 bytes. */
+bool nx_outcome_backup(const nx_outcome *outcome, uint64_t *total_bytes, const uint8_t **digest,
+                       size_t *digest_len);
 /* The schema of the subscription the command opened. An outcome that opened none fails with
    NX_ERROR_INVALID_ARGUMENT. */
 nx_error *nx_outcome_schema(const nx_outcome *outcome, nx_schema **out);
