@@ -16,6 +16,12 @@ path = "src/main.rs"
 default = []
 # Exposes opaque benchmark drivers without making runtime internals part of the normal API.
 benchmarks = []
+# Selects Loom's primitives for the whole graph, so a Loom model of a server owner runs on them.
+loom = [
+  "nervix-consensus/loom",
+  "nervix-execution/loom",
+  "nervix-primitives/loom",
+]
 # Replaces synchronization primitives with scheduler-visible Shuttle implementations. The edge
 # I/O modules remain Tokio's real implementations through the wrapper crates.
 shuttle = [

@@ -209,6 +209,7 @@ impl ActiveDelivery {
             batch,
             self.predicate.as_ref(),
             self.batch_sample_rate,
+            &self.service.inner.subscription_sampler,
             &self.service.inner.runtime,
             &self.domain,
         )

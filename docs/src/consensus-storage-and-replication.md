@@ -271,6 +271,13 @@ sends it in 64 KiB chunks through the Bulk pool. The receiver holds at most one 
 validates its declared size and offsets, and synchronizes each completed section into a newly claimed
 generation. A restarted transfer abandons the earlier staged generation.
 
+The receiver stages at most one transfer from each sending node, and a new transfer from that node
+supersedes it. Every transfer carries an identity its sender allocates, and the receiver refuses a
+chunk or a finish whose identity is not that of the transfer it is staging, so a late chunk of a
+superseded transfer never lands in its successor. Because the receiver only compares identities
+from one sender, an identity is unique among the transfers one node sends: every Raft connection of
+the node draws from the node's own sequence, which starts again when the node starts.
+
 After every declared section arrives, Raft revalidates the vote and whether the snapshot still
 applies. Installation then synchronizes the new manifest together with an installation marker. That
 write is the recovery boundary: before it, the old snapshot and state machine remain authoritative;

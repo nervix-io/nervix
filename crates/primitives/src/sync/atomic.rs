@@ -14,6 +14,11 @@
 //! The surface is the part every backend provides: the atomic types, [`Ordering`] and [`fence`].
 //! An operation one backend lacks, such as the standard library's `as_ptr`, fails to compile in
 //! that mode instead of silently using a real primitive.
+//!
+//! A selected atomic belongs to the model execution that constructs it, so none lives in a `static`
+//! or is constructed in a const context. Loom's constructors are not `const`, and a static would
+//! carry one execution's state into the next. State that must outlive every execution is a real
+//! atomic from [`crate::unmodeled`].
 
 #[cfg(not(any(feature = "loom", feature = "shuttle")))]
 pub use std::sync::atomic::{

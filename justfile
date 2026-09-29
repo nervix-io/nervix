@@ -1025,8 +1025,8 @@ cargo-clippy-all:
     export RUSTFLAGS="-Dwarnings {{ rustflags }}"
     # Execution-mode builds require their runner, Shuttle's deliberately omits Tokio's process and
     # runtime-builder APIs, and the modes cannot be enabled together. Lint the packages that own a
-    # mode in ordinary mode, then lint each modeled build separately: the Shuttle library boundary,
-    # the Loom models and the Turmoil targets.
+    # mode in ordinary mode, then lint each modeled build separately: the Shuttle library boundary
+    # and the Turmoil targets here, and the Loom builds in `cargo-clippy-loom`.
     mode_packages=(
         nervix-client-core
         'nervix-connector*'
@@ -1062,14 +1062,29 @@ cargo-clippy-all:
         --package nervix-server \
         --package nervix-wasm
     cargo clippy --all-targets --features 'shuttle native' --package nervix-primitives
-    cargo clippy --all-targets --features loom \
-        --package nervix-execution \
-        --package nervix-model-harness
-    cargo clippy --all-targets --features 'loom native' --package nervix-primitives
     cargo clippy --all-targets --features turmoil \
         --package nervix-execution \
         --package nervix-interconnect
     cargo clippy --all-targets --features 'turmoil native' --package nervix-primitives
+
+# Lint every Loom build, each in its own invocation: the models and their harness, the primitive
+# boundary, and the server and consensus libraries as they ship and in test mode, where the Loom
+# models of their owners are built. Their integration tests and binaries never run a model, and
+# consensus unit tests build with `testing`, whose fault controls only the server's tests use.
+cargo-clippy-loom:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all"
+    export RUSTFLAGS="-Dwarnings {{ rustflags }}"
+    cargo clippy --all-targets --features loom \
+        --package nervix-execution \
+        --package nervix-model-harness
+    cargo clippy --all-targets --features 'loom native' --package nervix-primitives
+    cargo clippy --lib --features loom \
+        --package nervix-consensus \
+        --package nervix-server
+    cargo clippy --lib --profile test --features loom --package nervix-server
+    cargo clippy --lib --profile test --features 'loom testing' --package nervix-consensus
 
 # Lint one workspace package and all of its targets with warnings denied, sharing the workspace
 # lint build directory. Extra arguments are forwarded to Cargo.
@@ -1093,7 +1108,7 @@ cargo-clippy-client-wire-wasm:
     CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-client-wire-wasm" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-client-wire --target wasm32-unknown-unknown -q
 
 [parallel]
-cargo-clippy: cargo-clippy-all cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console cargo-clippy-client-wire-wasm
+cargo-clippy: cargo-clippy-all cargo-clippy-loom cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console cargo-clippy-client-wire-wasm
 
 [parallel]
 lint-inner: cargo-clippy
@@ -1193,10 +1208,11 @@ validate-dns-dependencies:
 validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies
 
 # Hold every atomic to nervix-primitives and every mode feature to its owner. The check rejects a
-# direct, renamed, grouped, qualified, glob, alias or macro path to another backend's atomics, an
-# unmodeled atomic without its permission, a stale permission, a `loom` dependency outside its owner
-# and harness, and a mode feature that is not forwarded. The check's own tests run first, so a rule
-# that stopped rejecting its bypass fails here too.
+# direct, renamed, grouped, qualified, glob, alias or macro path to another backend's atomics, a
+# selected atomic held by a static or constructed in a const context, an unmodeled atomic without
+# its permission, a stale permission, a `loom` dependency outside its owner and harness, and a mode
+# feature that is not forwarded. The check's own tests run first, so a rule that stopped rejecting
+# its bypass fails here too.
 validate-primitive-boundary:
     python3 -m unittest --quiet scripts.tests.test_check_primitive_boundary
     python3 -m scripts.check_primitive_boundary
