@@ -39,6 +39,8 @@ pub enum RequestKind {
     Cancel,
     #[strum(serialize = "upload resource")]
     UploadResource,
+    #[strum(serialize = "restore")]
+    Restore,
     #[strum(serialize = "attach domain clock")]
     AttachDomainClock,
     #[strum(serialize = "detach domain clock")]
@@ -184,6 +186,19 @@ pub enum ClientError {
     },
     #[error("failed to load TLS CA certificate")]
     LoadTlsCaCertificate(#[source] std::io::Error),
+    /// The archive a restore names could not be read on this machine.
+    #[error("failed to read the restore archive '{}' ({kind})", .path.display())]
+    ReadRestoreArchive {
+        path: std::path::PathBuf,
+        kind: std::io::ErrorKind,
+    },
+    /// The archive a restore names is empty, so it holds no backup.
+    #[error("the restore archive '{}' is empty", .path.display())]
+    EmptyRestoreArchive { path: std::path::PathBuf },
+    #[error("restore request failed: {0}")]
+    Restore(#[source] Box<tonic::Status>),
+    #[error("the restore reply does not decode")]
+    InvalidRestoreReply(#[source] WireDecodeError),
     /// The backup completed, and its archive could not be downloaded. Running the same execution
     /// handle again recovers the backup's outcome and downloads the archive again while the server
     /// retains it.
@@ -217,7 +232,7 @@ impl ClientError {
             | Self::SessionOpenDeadline
             | Self::RetryDeadline => true,
             Self::Transport(_) => self.retryable_session_failure(),
-            Self::StartSession(status) => matches!(
+            Self::StartSession(status) | Self::Restore(status) => matches!(
                 status.code(),
                 tonic::Code::Cancelled
                     | tonic::Code::Unknown

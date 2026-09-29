@@ -1,0 +1,11 @@
+// A restore stream frame: the restore start or one chunk of archive bytes.
+//
+// This file declares a frame root for code generators; every shape it names lives in session.fbs.
+
+include "session.fbs";
+
+namespace nervix.session;
+
+root_type RestoreMessage;
+file_identifier "NXRM";
+file_extension "nxrm";

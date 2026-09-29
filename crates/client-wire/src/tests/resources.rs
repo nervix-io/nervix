@@ -208,6 +208,7 @@ fn raw_description(raw: RawDescription<'_>) -> Bytes {
             wasm_state: None,
             resource: Some(description),
             backup: None,
+            restore: None,
         },
     );
     finish_reply(

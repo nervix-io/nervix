@@ -21,6 +21,7 @@ use nervix_execution::{CpuClass, Executor, MemoryClass, sync::DashMap};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
     DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RemoteRuntimeField,
+    RestoreStep,
 };
 use nervix_primitives::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use nervix_recovery::{Discarded as _, NoReceiver as _};
@@ -236,6 +237,10 @@ enum CommandPausePoint {
     RelocationPublication(DomainName),
     ResponseDelivery(ClusterNodeName),
     ResourceInstallation(ClusterNodeName),
+    RestoreStep {
+        node_id: ClusterNodeName,
+        step: RestoreStep,
+    },
     TransactionCommit {
         node_id: ClusterNodeName,
         domain: String,
@@ -958,6 +963,26 @@ impl FaultInjection {
         self.release_command_pause(&CommandPausePoint::ResourceInstallation(node_id.clone()));
     }
 
+    /// Holds the next restore on `node_id` just before it applies `step`, once.
+    pub fn pause_restore_step_on(&self, node_id: ClusterNodeName, step: RestoreStep) {
+        self.arm_command_pause(CommandPausePoint::RestoreStep { node_id, step });
+    }
+
+    pub async fn wait_for_restore_step_pause(&self, node_id: &ClusterNodeName, step: &RestoreStep) {
+        self.wait_for_command_pause(&CommandPausePoint::RestoreStep {
+            node_id: node_id.clone(),
+            step: step.clone(),
+        })
+        .await;
+    }
+
+    pub fn release_restore_step_pause(&self, node_id: &ClusterNodeName, step: &RestoreStep) {
+        self.release_command_pause(&CommandPausePoint::RestoreStep {
+            node_id: node_id.clone(),
+            step: step.clone(),
+        });
+    }
+
     pub fn pause_transaction_commit_after(
         &self,
         node_id: ClusterNodeName,
@@ -1557,6 +1582,18 @@ impl FaultInjection {
     pub(crate) async fn pause_resource_installation_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::ResourceInstallation(node_id.clone()))
             .await;
+    }
+
+    pub(crate) async fn pause_restore_step_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+        step: &RestoreStep,
+    ) {
+        self.pause_command_if_armed(CommandPausePoint::RestoreStep {
+            node_id: node_id.clone(),
+            step: step.clone(),
+        })
+        .await;
     }
 
     pub(crate) async fn pause_health_response_if_armed(

@@ -8,10 +8,11 @@
 //! Layer: edges.
 //!
 //! - **Owns.** The session schema, frame verification and ownership, the typed requests, replies,
-//!   transfers, backup downloads, events and rows the schema describes, the text every client displays a row as,
+//!   transfers, backup downloads, restore streams, events and rows the schema describes, the text every client displays a row as,
 //!   the session limits, and how frames travel over gRPC and WebSocket messages.
 //! - **Depends on.** `flatbuffers`, the vocabulary for names, timestamps, schema fields, the
-//!   transaction impact report, the resource description, the backup summary, the observed domain
+//!   transaction impact report, the resource description, the backup summary and restore report,
+//!   the observed domain
 //!   clock and the status, inspection envelope and preview identity a session exchanges, `serde_json` to write a
 //!   row's display text, and tonic's codec traits for the gRPC transport.
 //! - **Must not know.** The server's registry, runtime or consensus, the parser, Arrow, or any
@@ -37,6 +38,7 @@ mod limits;
 mod reply;
 mod request;
 mod resource;
+mod restore;
 mod row;
 mod row_text;
 mod server;
@@ -77,7 +79,8 @@ pub use event::{
 };
 pub use frame::{
     BackupDownloadFrame, BackupDownloadRequestFrame, ClientFrame, EncodedFrame, FrameError,
-    FrameRoot, FrameViolation, ServerFrame, UploadFrame, UploadReplyFrame, VerifiedFrame,
+    FrameRoot, FrameViolation, RestoreFrame, RestoreReplyFrame, ServerFrame, UploadFrame,
+    UploadReplyFrame, VerifiedFrame,
 };
 pub use limits::{LimitsError, MAX_IN_FLIGHT_REQUESTS, SessionLimitSettings, SessionLimits};
 pub use reply::{
@@ -90,6 +93,10 @@ pub use request::{
     AttachDomainClockRequest, AttachTransactionRequest, CancelRequest, ClientMessage,
     ClientRequest, CommandRequest, DetachDomainClockRequest, InspectTransactionRequest,
     SelectDomainRequest, SubscribeRequest, SuggestRequest, UnsubscribeRequest,
+};
+pub use restore::{
+    RestoreChunk, RestoreDisposition, RestoreMessage, RestoreReply, RestoreStart,
+    RestoreUploadFailure,
 };
 pub use row::{
     CellView, CellWriter, CellsView, EmptyBranchKey, RowBatchView, RowBranch, RowConformanceError,

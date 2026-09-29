@@ -12,8 +12,8 @@ use imbl::OrdSet;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     BackupArchiveSummary, ClusterNodeIdentity, CommandExecutionReference,
-    CommandExecutionReferenceTimestampError, DomainName, DomainState, Statement, Timestamp,
-    TransactionLifecycle, TransactionOperationAdmission, TransactionPosition,
+    CommandExecutionReferenceTimestampError, DomainName, DomainState, RestoreReport, Statement,
+    Timestamp, TransactionLifecycle, TransactionOperationAdmission, TransactionPosition,
     TransactionPreviewIdentity, UserName,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     DomainMutationLease, TransactionActivity, TransactionStatementRequest,
-    durable_batch::DurableBatch, records::Records,
+    durable_batch::DurableBatch, records::Records, restore::RestoreExecution,
 };
 
 /// Client clocks may lead the serving node by this much when the reference is first admitted.
@@ -125,6 +125,9 @@ pub struct CommandExecutionResult {
     pub transaction_admission: Option<TransactionOperationAdmission>,
     /// The archive a completed backup assembled. Absent for every other command.
     pub backup: Option<BackupArchiveSummary>,
+    /// What a restore applied, and the step it failed at if one failed. Absent for every other
+    /// command, and for a restore refused before it applied anything.
+    pub restore: Option<RestoreReport>,
 }
 
 /// The preview a refused commit expected, beside the one that now describes the transaction.
@@ -227,6 +230,8 @@ pub enum CommandExecutionEffect {
         identity: ClusterNodeIdentity,
         member_at_admission: bool,
     },
+    /// A restore, with the steps it has applied so far.
+    Restore(Box<RestoreExecution>),
 }
 
 #[derive(
@@ -416,10 +421,43 @@ impl CommandExecution {
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::CreateUser { .. }
+                | CommandExecutionEffect::DropNode { .. }
+                | CommandExecutionEffect::Restore(_),
+            )
+            | None => None,
+        }
+    }
+
+    /// The restore this execution applies, while it applies.
+    pub fn restore_execution(&self) -> Option<&RestoreExecution> {
+        match self.effect() {
+            Some(CommandExecutionEffect::Restore(restore)) => Some(restore),
+            Some(
+                CommandExecutionEffect::CreateDomain { .. }
+                | CommandExecutionEffect::Transaction { .. }
+                | CommandExecutionEffect::TransactionRequest(_)
+                | CommandExecutionEffect::Statement { .. }
+                | CommandExecutionEffect::CreateUser { .. }
                 | CommandExecutionEffect::DropNode { .. },
             )
             | None => None,
         }
+    }
+
+    /// Records `step` of the restore this execution applies. An execution that applies no restore
+    /// is left as it is.
+    pub(crate) fn record_restore_step(
+        &mut self,
+        step: nervix_models::RestoreStep,
+        users: Option<nervix_models::RestoredUsers>,
+    ) {
+        let CommandExecutionState::Applying { effect, .. } = &mut self.state else {
+            return;
+        };
+        let CommandExecutionEffect::Restore(restore) = effect.as_mut() else {
+            return;
+        };
+        restore.record(step, users);
     }
 
     pub fn transaction_target(&self) -> Option<&CommandExecutionTransactionTarget> {
@@ -430,7 +468,8 @@ impl CommandExecution {
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::CreateUser { .. }
-                | CommandExecutionEffect::DropNode { .. } => None,
+                | CommandExecutionEffect::DropNode { .. }
+                | CommandExecutionEffect::Restore(_) => None,
             },
             CommandExecutionState::Finished { request, .. } => match &request.evidence {
                 CommandExecutionRequestEvidence::Transaction { target } => Some(target),
@@ -449,7 +488,8 @@ impl CommandExecution {
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::TransactionRequest(_)
                 | CommandExecutionEffect::Statement { .. }
-                | CommandExecutionEffect::DropNode { .. } => None,
+                | CommandExecutionEffect::DropNode { .. }
+                | CommandExecutionEffect::Restore(_) => None,
             },
             CommandExecutionState::Finished { request, .. } => match &request.evidence {
                 CommandExecutionRequestEvidence::UserCredentials { password_hash } => {
@@ -543,7 +583,8 @@ impl CommandExecution {
             CommandExecutionEffect::CreateDomain { .. }
             | CommandExecutionEffect::Transaction { .. }
             | CommandExecutionEffect::Statement { .. }
-            | CommandExecutionEffect::DropNode { .. } => CommandExecutionRequestEvidence::Statement,
+            | CommandExecutionEffect::DropNode { .. }
+            | CommandExecutionEffect::Restore(_) => CommandExecutionRequestEvidence::Statement,
         };
         Some(Self {
             reference,
@@ -987,6 +1028,7 @@ mod tests {
             transaction: None,
             transaction_admission: None,
             backup: None,
+            restore: None,
         })
     }
 

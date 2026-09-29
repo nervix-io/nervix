@@ -13,9 +13,10 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
     ArchiveDigest, BackupArchiveSummary, BackupDownloadError, BackupResources, ClientError,
     CommandDisposition, CommandExecutionReference, CommandOutcome, Diagnostic, LeaderRedirect,
-    OutcomeOrigin, RowSchema, SourceSpan, SubscriptionEvent, SubscriptionHandle,
-    SubscriptionInterruption, SubscriptionOpened, SubscriptionRestorationFailure,
-    SubscriptionRowsEvent, UnknownOutcomeCause,
+    OutcomeOrigin, RestoreArchive, RestoreMode, RestoreReport, RestoreStep, RestoreStepOutcome,
+    RestoreStepReport, RestoredDomain, RowSchema, SourceSpan, SubscriptionEvent,
+    SubscriptionHandle, SubscriptionInterruption, SubscriptionOpened,
+    SubscriptionRestorationFailure, SubscriptionRowsEvent, UnknownOutcomeCause,
     wire::{
         CellWriter, RequestRejection, RowBranch, RowsSkippedCause, ServerEvent, ServerMessage,
         SessionLimits, SubscriptionDeliveryLost, SubscriptionEndReason, SubscriptionEnded,
@@ -33,9 +34,9 @@ use crate::{
     nx_event_frame, nx_event_kind_of, nx_event_release, nx_event_retain, nx_event_row_count,
     nx_event_schema, nx_event_subscription, nx_execution_free, nx_outcome_backup,
     nx_outcome_diagnostic, nx_outcome_diagnostic_count, nx_outcome_disposition,
-    nx_outcome_execution_reference, nx_outcome_free, nx_outcome_message, nx_outcome_schema,
-    nx_outcome_subscription, nx_schema_branch, nx_schema_field, nx_schema_field_count,
-    nx_schema_free, nx_session_connect, nx_session_free,
+    nx_outcome_execution_reference, nx_outcome_free, nx_outcome_message, nx_outcome_restore,
+    nx_outcome_schema, nx_outcome_subscription, nx_schema_branch, nx_schema_field,
+    nx_schema_field_count, nx_schema_free, nx_session_connect, nx_session_free,
 };
 
 mod clock_events;
@@ -793,6 +794,7 @@ fn command_outcome(disposition: CommandDisposition, subscription: bool) -> Comma
         subscription: subscription.then(|| Box::new(opened)),
         resource_upload: None,
         backup: None,
+        restore: None,
     }
 }
 
@@ -980,6 +982,98 @@ fn a_backup_outcome_reports_its_archive() {
             &mut digest_len
         ));
         nx_outcome_free(backup);
+        nx_outcome_free(without);
+    }
+}
+
+#[test]
+fn a_restore_outcome_reports_its_steps() {
+    let domain = |name: &str| {
+        nervix_models::DomainName::parse(name).assured("the test domain is a valid literal name")
+    };
+    let restored = |source: &str, versions: u64, models: u64| RestoredDomain {
+        source: domain(source),
+        domain: domain(source),
+        resource_versions: versions,
+        models,
+        planned_models: None,
+    };
+    let report = |mode: RestoreMode, outcome: RestoreStepOutcome| RestoreReport {
+        mode,
+        archive: RestoreArchive {
+            total_bytes: NonZeroU64::new(4096).assured("a non-zero size"),
+            digest: ArchiveDigest::from_bytes([9; 32]),
+        },
+        captured_at: Timestamp::from_unix_nanos(1),
+        users: None,
+        domains: vec![restored("payments", 3, 5), restored("ledger", 1, 2)],
+        steps: vec![
+            RestoreStepReport {
+                step: RestoreStep::CreateDomain(domain("payments")),
+                outcome: RestoreStepOutcome::Applied,
+            },
+            RestoreStepReport {
+                step: RestoreStep::ApplyModels(domain("payments")),
+                outcome,
+            },
+        ],
+    };
+    let mut failed = command_outcome(CommandDisposition::Failed, false);
+    failed.restore = Some(Box::new(report(
+        RestoreMode::Apply,
+        RestoreStepOutcome::Failed,
+    )));
+    let mut planned = command_outcome(
+        CommandDisposition::Completed {
+            already_existed: false,
+        },
+        false,
+    );
+    planned.restore = Some(Box::new(report(
+        RestoreMode::DryRun,
+        RestoreStepOutcome::Planned,
+    )));
+    let failed = Box::into_raw(Box::new(Outcome::new(failed)));
+    let planned = Box::into_raw(Box::new(Outcome::new(planned)));
+    let without = Box::into_raw(Box::new(outcome(CommandDisposition::Failed, false)));
+    let mut dry_run = true;
+    let mut domains = 0;
+    let mut resource_versions = 0;
+    let mut models = 0;
+    let mut step_failed = false;
+    // SAFETY: every outcome is live until it is freed, and every out-parameter is writable.
+    unsafe {
+        assert!(nx_outcome_restore(
+            failed,
+            &mut dry_run,
+            &mut domains,
+            &mut resource_versions,
+            &mut models,
+            &mut step_failed
+        ));
+        assert!(!dry_run);
+        assert_eq!((domains, resource_versions, models), (2, 4, 7));
+        assert!(step_failed);
+        assert!(nx_outcome_restore(
+            planned,
+            &mut dry_run,
+            &mut domains,
+            &mut resource_versions,
+            &mut models,
+            &mut step_failed
+        ));
+        assert!(dry_run);
+        assert!(!step_failed);
+        assert!(!nx_outcome_restore(
+            without,
+            &mut dry_run,
+            &mut domains,
+            &mut resource_versions,
+            &mut models,
+            &mut step_failed
+        ));
+        nx_outcome_free(failed);
+        nx_outcome_free(planned);
         nx_outcome_free(without);
     }
 }

@@ -11,7 +11,7 @@
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
-    io::{self, Read as _, Write as _},
+    io::{self, Read as _, Seek as _, Write as _},
     path::{Component, Path, PathBuf},
 };
 
@@ -192,8 +192,59 @@ struct PendingInstall {
     created_at: Timestamp,
 }
 
+/// Where an archive to install is read from.
+enum ArchiveSource {
+    /// A whole file.
+    File(PathBuf),
+    /// `length` bytes of a larger file, starting `offset` bytes into it, such as one section of a
+    /// backup archive.
+    Section {
+        path: PathBuf,
+        offset: u64,
+        length: u64,
+    },
+}
+
+impl ArchiveSource {
+    /// The exact size of the archive.
+    fn length(&self) -> Result<u64, Report<ResourceStoreError>> {
+        match self {
+            Self::File(path) => Ok(fs::metadata(path)
+                .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?
+                .len()),
+            Self::Section { length, .. } => Ok(*length),
+        }
+    }
+
+    /// A reader of exactly the archive's bytes.
+    fn open(&self) -> Result<io::Take<fs::File>, Report<ResourceStoreError>> {
+        match self {
+            Self::File(path) => {
+                let file = fs::File::open(path)
+                    .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+                let length = file
+                    .metadata()
+                    .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?
+                    .len();
+                Ok(file.take(length))
+            }
+            Self::Section {
+                path,
+                offset,
+                length,
+            } => {
+                let mut file = fs::File::open(path)
+                    .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+                file.seek(io::SeekFrom::Start(*offset))
+                    .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+                Ok(file.take(*length))
+            }
+        }
+    }
+}
+
 struct ArchiveInstallPlan<'a> {
-    source_archive_path: &'a Path,
+    source: &'a ArchiveSource,
     declared_archive_bytes: u64,
     declared_root_checksum: &'a str,
     limits: ResourceStoreLimits,
@@ -1025,7 +1076,7 @@ impl ResourceStore {
     ) -> Result<ResourceManifest, Report<ResourceStoreError>> {
         self.install_archive_path(
             id,
-            archive_path.as_ref().to_path_buf(),
+            ArchiveSource::File(archive_path.as_ref().to_path_buf()),
             root_checksum,
             created_by_node,
             created_at,
@@ -1042,7 +1093,31 @@ impl ResourceStore {
     ) -> Result<ResourceManifest, Report<ResourceStoreError>> {
         self.install_archive_path(
             resource.id.clone(),
-            archive_path.as_ref().to_path_buf(),
+            ArchiveSource::File(archive_path.as_ref().to_path_buf()),
+            resource.root_checksum.clone(),
+            resource.created_by_node.clone(),
+            resource.created_at,
+            Some(resource),
+        )
+        .await
+    }
+
+    /// Verify every published field of `resource` before atomically installing the archive that
+    /// `length` bytes of `archive_path` hold from `offset`, such as a section of a backup archive.
+    pub async fn install_replica_from_archive_section(
+        &self,
+        resource: ResourceVersion,
+        archive_path: impl AsRef<Path>,
+        offset: u64,
+        length: u64,
+    ) -> Result<ResourceManifest, Report<ResourceStoreError>> {
+        self.install_archive_path(
+            resource.id.clone(),
+            ArchiveSource::Section {
+                path: archive_path.as_ref().to_path_buf(),
+                offset,
+                length,
+            },
             resource.root_checksum.clone(),
             resource.created_by_node.clone(),
             resource.created_at,
@@ -1054,7 +1129,7 @@ impl ResourceStore {
     async fn install_archive_path(
         &self,
         id: ResourceId,
-        archive_path: PathBuf,
+        source: ArchiveSource,
         root_checksum: String,
         created_by_node: ClusterNodeName,
         created_at: Timestamp,
@@ -1088,7 +1163,7 @@ impl ResourceStore {
                 move |_charge, cancellation| {
                     install_archive(
                         install,
-                        &archive_path,
+                        &source,
                         &root_checksum,
                         limits,
                         chunk_bytes,
@@ -1297,7 +1372,7 @@ async fn write_archive_file(
 
 fn install_archive(
     install: PendingInstall,
-    source_archive_path: &Path,
+    source: &ArchiveSource,
     declared_root_checksum: &str,
     limits: ResourceStoreLimits,
     chunk_bytes: u64,
@@ -1305,9 +1380,7 @@ fn install_archive(
     cancellation: &Cancellation,
 ) -> Result<ResourceManifest, Report<ResourceStoreError>> {
     let result = (|| {
-        let declared_archive_bytes = fs::metadata(source_archive_path)
-            .map_err(|_| Report::new(ResourceStoreError::ReadArchive))?
-            .len();
+        let declared_archive_bytes = source.length()?;
         if install.staging_root.exists() {
             remove_tree(&install.staging_root, cancellation)?;
         }
@@ -1323,7 +1396,7 @@ fn install_archive(
         install_archive_into_staging(
             &install,
             ArchiveInstallPlan {
-                source_archive_path,
+                source,
                 declared_archive_bytes,
                 declared_root_checksum,
                 limits,
@@ -1356,7 +1429,7 @@ fn install_archive_into_staging(
     let mut buffer = vec![0_u8; buffer_bytes];
     let staged_archive_path = install.staging_root.join("archive.tar");
     let (root_checksum, archive_bytes) = copy_archive_to_staging(
-        plan.source_archive_path,
+        plan.source,
         &staged_archive_path,
         plan.limits.max_archive_bytes,
         &mut buffer,
@@ -1663,14 +1736,13 @@ fn collect_staged_bundle_entries_recursive(
 }
 
 fn copy_archive_to_staging(
-    source: &Path,
+    source: &ArchiveSource,
     destination: &Path,
     max_archive_bytes: u64,
     buffer: &mut [u8],
     cancellation: &Cancellation,
 ) -> Result<(String, u64), Report<ResourceStoreError>> {
-    let mut source =
-        fs::File::open(source).map_err(|_| Report::new(ResourceStoreError::ReadArchive))?;
+    let mut source = source.open()?;
     let mut destination =
         fs::File::create(destination).map_err(|_| Report::new(ResourceStoreError::WriteArchive))?;
     let mut hasher = Hasher::new();

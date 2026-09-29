@@ -2,8 +2,9 @@
 //
 // Every shape of the public client boundary is declared in this file, once. The root files
 // client_message.fbs, server_message.fbs, upload_message.fbs, upload_reply.fbs,
-// backup_download_request.fbs and backup_download_message.fbs name the table a frame is rooted at
-// and the file identifier it carries; they declare no shapes of their own.
+// backup_download_request.fbs, backup_download_message.fbs, restore_message.fbs and
+// restore_reply.fbs name the table a frame is rooted at and the file identifier it carries; they
+// declare no shapes of their own.
 //
 // Framing
 //
@@ -16,6 +17,8 @@
 //   ("NXUM") answered by exactly one UploadReply frame ("NXUR").
 //   `/nervix.session.Session/DownloadBackup` is one BackupDownloadRequest frame ("NXBQ") answered
 //   by a server stream of BackupDownloadMessage frames ("NXBD").
+//   `/nervix.session.Session/RestoreBackup` is a client stream of RestoreMessage frames ("NXRM")
+//   answered by exactly one RestoreReply frame ("NXRR").
 // * WebSocket. Each binary message holds exactly one ClientMessage frame from the client or one
 //   ServerMessage frame from the server. A text message is a protocol violation.
 //
@@ -1239,6 +1242,94 @@ table BackupArchiveSummary {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Restores
+// ---------------------------------------------------------------------------------------------
+
+/// Whether a restore applied what it planned.
+enum RestoreMode : ubyte {
+  Apply,
+  /// `DRY RUN`: verified and planned, and nothing changed.
+  DryRun
+}
+
+/// What a step of a restore changes.
+enum RestoreStepKind : ubyte {
+  /// Imports the archived users.
+  Users,
+  /// Creates a domain, stopped, with its declared resources.
+  CreateDomain,
+  /// Imports every completed resource version of a domain under its archived number.
+  ImportResources,
+  /// Applies a domain's models.
+  ApplyModels
+}
+
+enum RestoreStepOutcome : ubyte {
+  /// The step's effects are in place.
+  Applied,
+  /// A dry run planned the step and applied nothing.
+  Planned,
+  /// The step failed. The steps before it stay applied, and none after it was attempted.
+  Failed,
+  /// An earlier step failed before this one was reached.
+  NotAttempted
+}
+
+table RestoreStepReport {
+  /// Required.
+  kind: RestoreStepKind = null;
+  /// The domain the step changes, by the name it is restored under. Absent for Users, which
+  /// changes no domain, and present for every other kind.
+  domain: string;
+  /// Required.
+  outcome: RestoreStepOutcome = null;
+}
+
+/// The users a cluster restore imports, by what it did with each.
+table RestoredUsers {
+  /// Archived users the cluster did not have.
+  created: ulong;
+  /// Existing users kept under `ON EXISTING USER SKIP`.
+  skipped: ulong;
+  /// Existing users given the archived password hash under `ON EXISTING USER REPLACE`.
+  replaced: ulong;
+}
+
+/// One domain a restore recreates.
+table RestoredDomain {
+  /// The domain's name in the archive.
+  source: string (required);
+  /// The name the domain is restored under.
+  domain: string (required);
+  /// The completed resource versions imported, each under its archived number.
+  resource_versions: ulong;
+  /// The models applied.
+  models: ulong;
+  /// For a dry run, the transaction planner's report on the domain's model run. Absent when the
+  /// restore applies, and when the domain holds no models.
+  planned_models: TransactionImpactReport;
+}
+
+/// What a restore applied, or for a dry run what it would apply.
+table RestoreReport {
+  /// Required.
+  mode: RestoreMode = null;
+  /// The archive's exact size. Non-zero.
+  total_bytes: ulong;
+  /// The BLAKE3 digest of the whole archive.
+  digest: Fingerprint (required);
+  /// When the backup that wrote the archive read its contents, in nanoseconds since the Unix
+  /// epoch.
+  captured_at: long;
+  /// The users a cluster restore imports. Absent for a domain restore, which imports none.
+  users: RestoredUsers;
+  /// Every domain the restore recreates, in archive order.
+  domains: [RestoredDomain] (required);
+  /// Every step, in the order the restore applies them.
+  steps: [RestoreStepReport] (required);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Client requests
 // ---------------------------------------------------------------------------------------------
 
@@ -1460,6 +1551,9 @@ table CommandOutcome {
   /// Present when the command was a completed BACKUP. Download the archive with the command's
   /// execution_reference.
   backup: BackupArchiveSummary;
+  /// Present when the command was a RESTORE that verified its archive: what it applied, the step
+  /// it failed at if one failed, or for a dry run what it would apply.
+  restore: RestoreReport;
 }
 
 table TransactionAttached {
@@ -2097,6 +2191,68 @@ union BackupDownloadPart {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Restore upload
+// ---------------------------------------------------------------------------------------------
+//
+// A restore is one RestoreStart, then RestoreChunk frames whose bytes add up to total_bytes,
+// answered by exactly one RestoreReply. The reply is RestoreUploadFailed for everything the
+// stream itself gets wrong, and otherwise the CommandOutcome of the RESTORE the start names, which
+// is recorded under its execution_reference like every other persistent command. A node answers
+// from the start frame alone, reading no chunk, when it does not lead, when the reference already
+// recorded an outcome, and when it already holds the archive of the applying restore.
+
+/// The first frame of a restore stream.
+table RestoreStart {
+  /// Non-zero. The RestoreReply carries it back.
+  request_id: ulong;
+  /// The durable identity of the restore across retries, reconnects and leader changes.
+  execution_reference: string (required);
+  /// One RESTORE statement, as NSPL.
+  statement: string (required);
+  /// The archive's exact size. Non-zero.
+  total_bytes: ulong;
+  /// The BLAKE3 digest of the whole archive.
+  digest: Fingerprint (required);
+}
+
+/// Archive bytes following RestoreStart, in order.
+table RestoreChunk {
+  /// Never empty.
+  bytes: [ubyte] (required);
+}
+
+union RestorePart {
+  RestoreStart,
+  RestoreChunk
+}
+
+enum RestoreUploadFailure : ubyte {
+  /// The stream did not begin with a valid RestoreStart, or a later frame was not a chunk.
+  InvalidStream,
+  /// The start's statement is not one RESTORE statement.
+  InvalidStatement,
+  /// The chunks did not add up to total_bytes.
+  SizeMismatch,
+  /// The chunks do not have the declared digest.
+  DigestMismatch,
+  /// The declared size exceeds what the leader stages for one archive.
+  QuotaExceeded,
+  /// The leader could not stage the archive.
+  StagingFailed
+}
+
+table RestoreUploadFailed {
+  /// Required.
+  failure: RestoreUploadFailure = null;
+  message: string (required);
+}
+
+union RestoreDisposition {
+  CommandOutcome,
+  RestoreUploadFailed
+}
+
+// ---------------------------------------------------------------------------------------------
 // Frame roots
 // ---------------------------------------------------------------------------------------------
 
@@ -2129,4 +2285,16 @@ table UploadReply {
   disposition: UploadDisposition (required);
   message: string (required);
   diagnostics: [Diagnostic] (required);
+}
+
+/// Root of a restore stream frame ("NXRM").
+table RestoreMessage {
+  part: RestorePart (required);
+}
+
+/// Root of the frame that answers a restore stream ("NXRR").
+table RestoreReply {
+  /// The request_id of the stream's RestoreStart. Absent when the stream carried none.
+  request_id: ulong = null;
+  disposition: RestoreDisposition (required);
 }

@@ -36,9 +36,18 @@ pub trait SectionVisitor {
 pub struct SectionReader<'entry> {
     content: &'entry mut dyn Read,
     digester: SectionDigester,
+    /// Where the section's first byte sits in the archive stream.
+    offset: u64,
 }
 
 impl SectionReader<'_> {
+    /// Where the section's first byte sits in the archive, counted from the archive's first byte.
+    /// The section's bytes are the `length` bytes its manifest entry declares from there, so a
+    /// reader holding the whole archive can read them again later without walking the stream.
+    pub fn archive_offset(&self) -> u64 {
+        self.offset
+    }
+
     /// Reads the whole section into memory. `limit` bounds what the caller is prepared to hold;
     /// a longer section is refused rather than read.
     pub fn read_all(
@@ -160,9 +169,11 @@ pub fn read_archive<R: Read>(
                 limit,
             }));
         }
+        let offset = entry.raw_file_position();
         let mut content = SectionReader {
             content: &mut entry,
             digester: SectionDigester::new(),
+            offset,
         };
         visitor.section(section, &mut content)?;
         if let Err(error) = io::copy(&mut content, &mut io::sink()) {

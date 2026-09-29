@@ -1,8 +1,10 @@
 //! What an archive holds, read and verified from a stream.
 //!
-//! A description decodes every record, verifies every section, and keeps the size and digest of
-//! the NSPL and resource archive sections without their bytes, so describing an archive of any size
-//! holds only its records in memory.
+//! A description decodes every record, verifies every section, and keeps the place, size and digest
+//! of the NSPL and resource archive sections without their bytes, so describing an archive of any
+//! size holds only its records in memory. The contents a restore reads add each domain's NSPL,
+//! which configuration size keeps small, and leave resource archives where they are, to be read
+//! again by their place.
 
 use std::{
     collections::{BTreeMap, btree_map::Entry},
@@ -57,19 +59,34 @@ pub struct DescribedResourceVersion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribedSection {
     pub path: SectionPath,
+    /// Where the section's first byte sits in the archive, counted from the archive's first byte.
+    pub offset: u64,
     pub length: u64,
     pub digest: SectionDigest,
 }
 
-impl From<&SectionEntry> for DescribedSection {
-    fn from(entry: &SectionEntry) -> Self {
+impl DescribedSection {
+    fn read_at(entry: &SectionEntry, content: &SectionReader<'_>) -> Self {
         Self {
             path: entry.path.clone(),
+            offset: content.archive_offset(),
             length: entry.length,
             digest: entry.digest,
         }
     }
 }
+
+/// Everything a restore reads from an archive before it changes anything, verified: the
+/// description, and the text of every domain's `models.nspl`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveContents {
+    pub description: ArchiveDescription,
+    /// Each domain's models as NSPL, keyed by the domain's name in the archive.
+    pub models: BTreeMap<DomainName, String>,
+}
+
+/// The largest `models.nspl` a reader holds in memory.
+const MAX_MODELS_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Reads and verifies the archive `reader` streams, and describes what it holds.
 pub fn describe_archive<R: Read>(
@@ -78,6 +95,57 @@ pub fn describe_archive<R: Read>(
     let mut describer = Describer::default();
     let manifest = read_archive(reader, &mut describer)?;
     describer.finish(manifest)
+}
+
+/// Reads and verifies the archive `reader` streams, and returns its description with the text of
+/// every domain's models.
+pub fn read_archive_contents<R: Read>(
+    reader: R,
+) -> Result<ArchiveContents, Report<ArchiveReadError>> {
+    let mut reader_state = ContentsReader {
+        describer: Describer::default(),
+        models: BTreeMap::new(),
+    };
+    let manifest = read_archive(reader, &mut reader_state)?;
+    let description = reader_state.describer.finish(manifest)?;
+    Ok(ArchiveContents {
+        description,
+        models: reader_state.models,
+    })
+}
+
+/// A description being assembled, and the NSPL text of the domains read so far.
+struct ContentsReader {
+    describer: Describer,
+    models: BTreeMap<DomainName, String>,
+}
+
+impl SectionVisitor for ContentsReader {
+    fn manifest(&mut self, manifest: &BackupManifest) -> Result<(), Report<ArchiveReadError>> {
+        self.describer.manifest(manifest)
+    }
+
+    fn section(
+        &mut self,
+        entry: &SectionEntry,
+        content: &mut SectionReader<'_>,
+    ) -> Result<(), Report<ArchiveReadError>> {
+        let SectionContent::Nspl = entry.content else {
+            return self.describer.section(entry, content);
+        };
+        let bytes = content.read_all(entry, MAX_MODELS_BYTES)?;
+        let Ok(text) = String::from_utf8(bytes) else {
+            return Err(Report::new(ArchiveReadError::InvalidText {
+                path: entry.path.to_string(),
+            }));
+        };
+        self.describer.section(entry, content)?;
+        let Some(domain) = self.describer.models_paths.get(&entry.path) else {
+            return Err(misplaced(entry));
+        };
+        self.models.insert(domain.clone(), text);
+        Ok(())
+    }
 }
 
 /// The domains a description is assembling, keyed by name.
@@ -146,8 +214,8 @@ impl SectionVisitor for Describer {
                 self.resource_version(entry, content)
             }
             SectionContent::Record(RecordKind::Manifest) => Err(misplaced(entry)),
-            SectionContent::Nspl => self.models(entry),
-            SectionContent::ResourceArchive => self.resource_archive(entry),
+            SectionContent::Nspl => self.models(entry, content),
+            SectionContent::ResourceArchive => self.resource_archive(entry, content),
         }
     }
 }
@@ -186,7 +254,11 @@ impl Describer {
         Ok(())
     }
 
-    fn models(&mut self, entry: &SectionEntry) -> Result<(), Report<ArchiveReadError>> {
+    fn models(
+        &mut self,
+        entry: &SectionEntry,
+        content: &SectionReader<'_>,
+    ) -> Result<(), Report<ArchiveReadError>> {
         let Some(domain) = self.models_paths.get(&entry.path) else {
             return Err(misplaced(entry));
         };
@@ -196,7 +268,7 @@ impl Describer {
         if assembled.models.is_some() {
             return Err(misplaced(entry));
         }
-        assembled.models = Some(DescribedSection::from(entry));
+        assembled.models = Some(DescribedSection::read_at(entry, content));
         Ok(())
     }
 
@@ -228,7 +300,11 @@ impl Describer {
         Ok(())
     }
 
-    fn resource_archive(&mut self, entry: &SectionEntry) -> Result<(), Report<ArchiveReadError>> {
+    fn resource_archive(
+        &mut self,
+        entry: &SectionEntry,
+        content: &SectionReader<'_>,
+    ) -> Result<(), Report<ArchiveReadError>> {
         let Some(slot) = self.archive_paths.get(&entry.path) else {
             return Err(misplaced(entry));
         };
@@ -241,7 +317,7 @@ impl Describer {
         if version.archive.is_some() {
             return Err(misplaced(entry));
         }
-        version.archive = Some(DescribedSection::from(entry));
+        version.archive = Some(DescribedSection::read_at(entry, content));
         Ok(())
     }
 

@@ -27,6 +27,7 @@ are in [Message Errors](./processors.md#message-errors) and [Error Routes](./qui
 | Ingest grouping and relay batching | Route grouping, branch-key construction, Arrow batch assembly, relay admission, and delivery failures | Keep the affected concrete branch and fail or retry the correct in-memory attempt. |
 | Registry, placement, and planning | Invalid domain models, references, capabilities, branch relationships, flush contracts, schedules, and placements | Reject the command before activating an invalid graph or refuse a relocation plan. |
 | Backup archive format | Records that do not encode or exceed their size limit, and archives whose structure, record headers, record values, section lengths or digests do not match what the manifest declares | Refuse to write an archive, or refuse a whole archive naming the section and the check that failed. |
+| Restore planning | Archives a restore cannot apply to the cluster: the wrong scope, a domain the archive lacks or the cluster has, an archived user the cluster has under `ON EXISTING USER FAIL`, resource versions the archive does not hold consistently, and models that bind no restored version | Refuse the restore before it changes anything, naming the domain, user, resource, version, or model. |
 | Interconnect | Authentication, framing, limits, transport, and the class and subject of a remote operation failure | Distinguish a transport failure from a peer's rejection, absence, unreadiness, or executed failure. |
 | Control plane and public edges | Transaction and lifecycle results, command dispositions, session diagnostics, and HTTP response selection | Return a recoverable command outcome or an appropriate response to a client or operator. |
 
@@ -168,6 +169,34 @@ stream are retried, from the archive's first byte. The C binding classifies a re
 archive as `NX_ERROR_PROTOCOL`, and a write failure as `NX_ERROR_INVALID_ARGUMENT`, and names the
 execution reference so a host can run the backup again. No diagnostic of a backup includes archive
 contents, password hashes, or resource bytes.
+
+A restore's failures are owned where they are decided, in the order the restore meets them. The
+restore stream refuses what its frames get wrong with a typed `RestoreUploadFailure`:
+`InvalidStream`, `InvalidStatement`, `SizeMismatch`, `DigestMismatch`, `QuotaExceeded`, or
+`StagingFailed`, and a call without valid credentials ends with `UNAUTHENTICATED`. The control
+plane's `RestoreRefusal` then names an archive the leader could not read, one that does not verify,
+with the archive format's `ArchiveReadError` beneath it, a domain whose `models.nspl` does not
+parse, with the line and the parser's diagnostic, a statement that creates no model, with its
+number and line, a restore that cannot apply to this cluster, and a domain whose models do not form
+a valid configuration, with the transaction planner's report beneath it. Beneath a restore that
+cannot apply, the decision layer's `RestorePlanError` names the domain, user, resource, version,
+or model: a domain archive given to `RESTORE CLUSTER`, a domain the archive does not hold or the
+cluster already has, an archived user the cluster has under `ON EXISTING USER FAIL`, a resource the
+domain does not declare, a version outside its declared sequence, completed without checksums, or
+without its bytes, bytes that do not match the version's root checksum, and a model that binds a
+version other than a restored one by number. Each of these is reported as `restore refused:` and
+its reason, and changes nothing. Once admitted, a step that fails ends the restore as
+`restore failed at step '<step>':` and its reason, with the restore's report: the consensus command
+that records a step refuses it with a `RestoreStepConflict` naming the step and the domain, user,
+resource, or version, and a resource import or the domain's model batch keeps its own failure
+beneath the step. The steps before it stay applied, and the message says so. No restore
+diagnostic includes password hashes or resource bytes. The client reports an archive it cannot read
+as `ClientError::ReadRestoreArchive` with the path and the I/O error kind, an empty file as
+`ClientError::EmptyRestoreArchive`, a failed call as `ClientError::Restore` with its status, and a
+reply that does not decode as `ClientError::InvalidRestoreReply`; an error that may hide an
+admitted restore is `ClientError::UncertainCommand` with its execution reference. The C binding
+classifies an unreadable or empty archive as `NX_ERROR_INVALID_ARGUMENT`, a failed call as
+`NX_ERROR_TRANSPORT`, and an undecodable reply as `NX_ERROR_PROTOCOL`.
 
 The vocabulary is the innermost owner, and its Model operations report the same way. An alteration
 is applied to a copy of the stored Model, which replaces the original only when every operation

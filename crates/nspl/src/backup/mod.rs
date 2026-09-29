@@ -1,19 +1,26 @@
-//! `BACKUP` and `DESCRIBE BACKUP` grammar.
+//! `BACKUP`, `RESTORE` and `DESCRIBE BACKUP` grammar.
 //!
 //! Layer: language.
-//! - **Owns.** Parsing a backup of the cluster or of one domain into a local archive file, and a
-//!   description of a local archive file, each with its optional clauses in their fixed order.
-//! - **Depends on.** Shared NSPL tokens, the shared keyword, domain reference, local path and
-//!   inspection format primitives, and vocabulary Models.
-//! - **Must not know.** Sessions, how an archive is assembled, transferred or read, or where a
-//!   client writes it.
+//! - **Owns.** Parsing a backup of the cluster or of one domain into a local archive file, a
+//!   restore of the cluster or of one domain from a local archive file, and a description of a
+//!   local archive file, each with its optional clauses in their fixed order.
+//! - **Depends on.** Shared NSPL tokens, the shared keyword, domain name and reference, local path
+//!   and inspection format primitives, and vocabulary Models.
+//! - **Must not know.** Sessions, how an archive is assembled, transferred, read or restored, or
+//!   where a client writes or reads it.
 
 use chumsky::prelude::*;
-use nervix_models::{Backup, BackupResources, BackupScope, DescribeBackup, InspectionFormat};
+use nervix_models::{
+    Backup, BackupResources, BackupScope, DescribeBackup, ExistingUserPolicy, InspectionFormat,
+    Restore, RestoreMode, RestoreScope,
+};
 
 use crate::{
     lexer::{Identifier, Token, Word},
-    parser_support::{ParseError, domain_ref, inspection_format, kw, kw_phrase2, local_path, tok},
+    parser_support::{
+        ParseError, domain_name, domain_ref, inspection_format, kw, kw_phrase2, kw_phrase3,
+        local_path, tok,
+    },
 };
 
 /// `BACKUP CLUSTER TO '<file>' [WITHOUT RESOURCES]` or
@@ -46,6 +53,56 @@ pub fn backup_parser<'src>()
             destination,
             resources,
         })
+        .then_ignore(tok(Token::Semicolon).or_not())
+        .boxed()
+}
+
+/// `RESTORE CLUSTER FROM '<file>' [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN]` or
+/// `RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [DRY RUN]`.
+///
+/// Omitting the user policy refuses a restore that meets an existing user. The domain names a
+/// domain of the archive, which need not exist in the cluster, so it is a name rather than a
+/// reference to an existing domain.
+pub fn restore_parser<'src>()
+-> impl Parser<'src, &'src [Token], Restore, extra::Err<ParseError<'src>>> + Clone {
+    let dry_run =
+        kw_phrase2(Identifier::Dry, Identifier::Run)
+            .or_not()
+            .map(|dry_run| match dry_run {
+                Some(()) => RestoreMode::DryRun,
+                None => RestoreMode::Apply,
+            });
+    let existing_users = kw_phrase3(Identifier::On, Identifier::Existing, Identifier::User)
+        .ignore_then(choice((
+            kw(Identifier::Fail).to(ExistingUserPolicy::Fail),
+            kw(Identifier::Skip).to(ExistingUserPolicy::Skip),
+            kw(Identifier::Replace).to(ExistingUserPolicy::Replace),
+        )))
+        .or_not()
+        .map(Option::unwrap_or_default);
+    let cluster = kw(Identifier::Cluster)
+        .ignore_then(kw(Identifier::From))
+        .ignore_then(local_path())
+        .then(existing_users)
+        .then(dry_run.clone())
+        .map(|((source, existing_users), mode)| Restore {
+            scope: RestoreScope::Cluster { existing_users },
+            source,
+            mode,
+        });
+    let domain = kw(Identifier::Domain)
+        .ignore_then(domain_name())
+        .then(kw(Identifier::As).ignore_then(domain_name()).or_not())
+        .then_ignore(kw(Identifier::From))
+        .then(local_path())
+        .then(dry_run)
+        .map(|(((domain, target), source), mode)| Restore {
+            scope: RestoreScope::Domain { domain, target },
+            source,
+            mode,
+        });
+    kw(Identifier::Restore)
+        .ignore_then(choice((cluster, domain)))
         .then_ignore(tok(Token::Semicolon).or_not())
         .boxed()
 }
@@ -87,6 +144,23 @@ pub(crate) fn backup_tail(tokens: &[Token]) -> Vec<String> {
         return vec![";".to_string()];
     }
     vec![";".to_string(), "WITHOUT RESOURCES".to_string()]
+}
+
+/// The clauses that may still follow a complete `RESTORE`, as completion offers them.
+pub(crate) fn restore_tail(restore: &Restore, tokens: &[Token]) -> Vec<String> {
+    if writes_keyword(tokens, Identifier::Dry) {
+        return vec![";".to_string()];
+    }
+    match &restore.scope {
+        RestoreScope::Cluster { .. } if !writes_keyword(tokens, Identifier::Existing) => vec![
+            ";".to_string(),
+            "DRY RUN".to_string(),
+            "ON EXISTING USER".to_string(),
+        ],
+        RestoreScope::Cluster { .. } | RestoreScope::Domain { .. } => {
+            vec![";".to_string(), "DRY RUN".to_string()]
+        }
+    }
 }
 
 /// The clauses that may still follow a complete `DESCRIBE BACKUP`, as completion offers them.
@@ -345,6 +419,248 @@ mod tests {
         assert!(
             !suggestions.contains(&"BACKUP".to_string()),
             "the server grammar offers no client-local description: {suggestions:?}"
+        );
+    }
+
+    fn restore(scope: RestoreScope, source: &str, mode: RestoreMode) -> Statement {
+        Statement::Restore(Restore {
+            scope,
+            source: source.to_string(),
+            mode,
+        })
+    }
+
+    fn cluster_scope(existing_users: ExistingUserPolicy) -> RestoreScope {
+        RestoreScope::Cluster { existing_users }
+    }
+
+    fn domain_scope(name: &str, target: Option<&str>) -> RestoreScope {
+        RestoreScope::Domain {
+            domain: domain(name),
+            target: target.map(domain),
+        }
+    }
+
+    #[rstest]
+    #[case::cluster(
+        "RESTORE CLUSTER FROM '/tmp/cluster.nvxb';",
+        restore(
+            cluster_scope(ExistingUserPolicy::Fail),
+            "/tmp/cluster.nvxb",
+            RestoreMode::Apply
+        )
+    )]
+    #[case::cluster_without_terminator(
+        "RESTORE CLUSTER FROM 'c.nvxb'",
+        restore(cluster_scope(ExistingUserPolicy::Fail), "c.nvxb", RestoreMode::Apply)
+    )]
+    #[case::cluster_fail_written_out(
+        "RESTORE CLUSTER FROM 'c.nvxb' ON EXISTING USER FAIL;",
+        restore(cluster_scope(ExistingUserPolicy::Fail), "c.nvxb", RestoreMode::Apply)
+    )]
+    #[case::cluster_skip(
+        "RESTORE CLUSTER FROM 'c.nvxb' ON EXISTING USER SKIP;",
+        restore(cluster_scope(ExistingUserPolicy::Skip), "c.nvxb", RestoreMode::Apply)
+    )]
+    #[case::cluster_replace_dry_run(
+        "RESTORE CLUSTER FROM 'c.nvxb' ON EXISTING USER REPLACE DRY RUN;",
+        restore(
+            cluster_scope(ExistingUserPolicy::Replace),
+            "c.nvxb",
+            RestoreMode::DryRun
+        )
+    )]
+    #[case::cluster_dry_run(
+        "RESTORE CLUSTER FROM 'c.nvxb' DRY RUN;",
+        restore(cluster_scope(ExistingUserPolicy::Fail), "c.nvxb", RestoreMode::DryRun)
+    )]
+    #[case::domain(
+        "RESTORE DOMAIN prod FROM '/var/backups/prod.nvxb';",
+        restore(
+            domain_scope("prod", None),
+            "/var/backups/prod.nvxb",
+            RestoreMode::Apply
+        )
+    )]
+    #[case::domain_as(
+        "RESTORE DOMAIN prod AS prod_copy FROM \"it's.nvxb\";",
+        restore(
+            domain_scope("prod", Some("prod_copy")),
+            "it's.nvxb",
+            RestoreMode::Apply
+        )
+    )]
+    #[case::domain_as_dry_run(
+        "RESTORE DOMAIN prod AS prod_copy FROM 'p.nvxb' DRY RUN;",
+        restore(domain_scope("prod", Some("prod_copy")), "p.nvxb", RestoreMode::DryRun)
+    )]
+    #[case::domain_named_like_a_keyword(
+        "RESTORE DOMAIN from AS dry FROM 'f.nvxb';",
+        restore(domain_scope("from", Some("dry")), "f.nvxb", RestoreMode::Apply)
+    )]
+    #[case::lowercase_keywords(
+        "restore cluster from '~/c.nvxb' on existing user skip dry run",
+        restore(
+            cluster_scope(ExistingUserPolicy::Skip),
+            "~/c.nvxb",
+            RestoreMode::DryRun
+        )
+    )]
+    #[case::spread_over_lines(
+        "RESTORE\n  DOMAIN prod\n  AS copy\n  FROM 'p.nvxb'\n  DRY\n  RUN;",
+        restore(domain_scope("prod", Some("copy")), "p.nvxb", RestoreMode::DryRun)
+    )]
+    fn parses_every_restore_form(#[case] source: &str, #[case] expected: Statement) {
+        let client = parse_client_statement(source).expect("the client grammar reads RESTORE");
+        assert_eq!(client, ClientStatement::Server(expected));
+        assert!(client.requires_local_handling());
+    }
+
+    /// A restore reads a file on the client's machine, so only the client grammar reads it; the
+    /// server receives it on the stream that carries the archive.
+    #[test]
+    fn the_server_grammar_does_not_read_a_restore() {
+        assert!(parse_statement("RESTORE CLUSTER FROM '/tmp/c.nvxb';").is_err());
+        assert!(parse_statement("RESTORE DOMAIN prod FROM '/tmp/c.nvxb';").is_err());
+    }
+
+    #[rstest]
+    #[case::no_scope("RESTORE FROM 'c.nvxb';")]
+    #[case::no_source("RESTORE CLUSTER;")]
+    #[case::no_from("RESTORE CLUSTER 'c.nvxb';")]
+    #[case::to_instead_of_from("RESTORE CLUSTER TO 'c.nvxb';")]
+    #[case::unquoted_source("RESTORE CLUSTER FROM c.nvxb;")]
+    #[case::empty_source("RESTORE CLUSTER FROM '';")]
+    #[case::cluster_with_domain("RESTORE CLUSTER prod FROM 'c.nvxb';")]
+    #[case::cluster_with_as("RESTORE CLUSTER AS copy FROM 'c.nvxb';")]
+    #[case::domain_without_name("RESTORE DOMAIN FROM 'c.nvxb';")]
+    #[case::domain_with_user_policy("RESTORE DOMAIN prod FROM 'c.nvxb' ON EXISTING USER SKIP;")]
+    #[case::as_after_from("RESTORE DOMAIN prod FROM 'c.nvxb' AS copy;")]
+    #[case::as_without_name("RESTORE DOMAIN prod AS FROM 'c.nvxb';")]
+    #[case::policy_without_value("RESTORE CLUSTER FROM 'c.nvxb' ON EXISTING USER;")]
+    #[case::unknown_policy("RESTORE CLUSTER FROM 'c.nvxb' ON EXISTING USER MERGE;")]
+    #[case::partial_policy_phrase("RESTORE CLUSTER FROM 'c.nvxb' ON EXISTING SKIP;")]
+    #[case::dry_alone("RESTORE CLUSTER FROM 'c.nvxb' DRY;")]
+    #[case::dry_run_before_policy("RESTORE CLUSTER FROM 'c.nvxb' DRY RUN ON EXISTING USER SKIP;")]
+    #[case::repeated_dry_run("RESTORE CLUSTER FROM 'c.nvxb' DRY RUN DRY RUN;")]
+    #[case::trailing_word("RESTORE CLUSTER FROM 'c.nvxb' NOW;")]
+    #[case::two_domains("RESTORE DOMAIN a b FROM 'c.nvxb';")]
+    fn rejects_malformed_restores(#[case] source: &str) {
+        assert!(
+            parse_client_statement(source).is_err(),
+            "{source:?} must be rejected by the client grammar"
+        );
+    }
+
+    #[rstest]
+    #[case::cluster("RESTORE CLUSTER FROM '/tmp/c.nvxb';")]
+    #[case::cluster_skip("RESTORE CLUSTER FROM '/tmp/c.nvxb' ON EXISTING USER SKIP;")]
+    #[case::cluster_replace_dry_run(
+        "RESTORE CLUSTER FROM '/tmp/c.nvxb' ON EXISTING USER REPLACE DRY RUN;"
+    )]
+    #[case::domain("RESTORE DOMAIN prod FROM '/tmp/p.nvxb';")]
+    #[case::domain_as_dry_run("RESTORE DOMAIN prod AS prod_copy FROM '/tmp/p.nvxb' DRY RUN;")]
+    #[case::quote_in_path("RESTORE DOMAIN prod FROM \"it's.nvxb\";")]
+    fn renders_a_canonical_restore_that_parses_back(#[case] source: &str) {
+        let parsed = parse_client_statement(source).expect("RESTORE must parse");
+        let canonical = parsed.to_canonical_nspl().expect("RESTORE always renders");
+        assert_eq!(canonical, source);
+        let reparsed = parse_client_statement(&canonical).expect("the canonical form must parse");
+        assert_eq!(reparsed, parsed);
+    }
+
+    #[test]
+    fn the_default_user_policy_is_left_out_of_the_canonical_form() {
+        let parsed = parse_client_statement("RESTORE CLUSTER FROM 'c.nvxb' ON EXISTING USER FAIL;")
+            .expect("RESTORE must parse");
+        assert_eq!(
+            parsed.to_canonical_nspl().expect("RESTORE always renders"),
+            "RESTORE CLUSTER FROM 'c.nvxb';"
+        );
+    }
+
+    #[rstest]
+    #[case::statement_start("RES", "RESTORE")]
+    #[case::scope_cluster("RESTORE ", "CLUSTER")]
+    #[case::scope_domain("RESTORE ", "DOMAIN")]
+    #[case::cluster_source("RESTORE CLUSTER ", "FROM")]
+    #[case::domain_name("RESTORE DOMAIN ", "domain_name")]
+    #[case::domain_target("RESTORE DOMAIN prod ", "AS")]
+    #[case::domain_source("RESTORE DOMAIN prod ", "FROM")]
+    #[case::renamed_domain_source("RESTORE DOMAIN prod AS copy ", "FROM")]
+    #[case::source_path("RESTORE CLUSTER FROM ", "local_path")]
+    #[case::cluster_policy("RESTORE CLUSTER FROM 'c.nvxb' ", "ON EXISTING USER")]
+    #[case::cluster_dry_run("RESTORE CLUSTER FROM 'c.nvxb' ", "DRY RUN")]
+    #[case::cluster_terminator("RESTORE CLUSTER FROM 'c.nvxb' ", ";")]
+    #[case::policy_prefix("RESTORE CLUSTER FROM 'c.nvxb' ON", "ON EXISTING USER")]
+    #[case::policy_fail("RESTORE CLUSTER FROM 'c.nvxb' ON EXISTING USER ", "FAIL")]
+    #[case::policy_skip("RESTORE CLUSTER FROM 'c.nvxb' ON EXISTING USER ", "SKIP")]
+    #[case::policy_replace("RESTORE CLUSTER FROM 'c.nvxb' ON EXISTING USER ", "REPLACE")]
+    #[case::dry_run_after_policy("RESTORE CLUSTER FROM 'c.nvxb' ON EXISTING USER SKIP ", "DRY RUN")]
+    #[case::domain_dry_run("RESTORE DOMAIN prod FROM 'p.nvxb' ", "DRY RUN")]
+    #[case::dry_run_prefix("RESTORE DOMAIN prod FROM 'p.nvxb' DR", "DRY RUN")]
+    #[case::terminator_after_dry_run("RESTORE DOMAIN prod FROM 'p.nvxb' DRY RUN ", ";")]
+    fn completion_offers_each_restore_clause(#[case] source: &str, #[case] expected: &str) {
+        let suggestions = suggest_client_statement(source, source.len());
+        assert!(
+            suggestions.contains(&expected.to_string()),
+            "{source:?} must offer {expected:?}: {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn a_written_restore_clause_is_not_offered_again() {
+        let source = "RESTORE CLUSTER FROM 'c.nvxb' ON EXISTING USER SKIP ";
+        let suggestions = suggest_client_statement(source, source.len());
+        assert!(
+            !suggestions.contains(&"ON EXISTING USER".to_string()),
+            "{suggestions:?}"
+        );
+        let source = "RESTORE CLUSTER FROM 'c.nvxb' DRY RUN ";
+        let suggestions = suggest_client_statement(source, source.len());
+        assert_eq!(suggestions, [";"]);
+        let source = "RESTORE DOMAIN prod FROM 'p.nvxb' ";
+        let suggestions = suggest_client_statement(source, source.len());
+        assert!(
+            !suggestions.contains(&"ON EXISTING USER".to_string()),
+            "a domain restore imports no users: {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn a_restore_names_archived_domains_rather_than_existing_ones() {
+        let suggestions = suggest_client_statement("RESTORE DOMAIN ", "RESTORE DOMAIN ".len());
+        assert!(
+            !suggestions.contains(&"ref:domain".to_string()),
+            "{suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn restore_phrases_stay_out_of_other_statement_contexts() {
+        for source in [
+            "CREATE ", "SHOW ", "DROP ", "START ", "USE ", "LIST ", "BACKUP ",
+        ] {
+            let suggestions = suggest_client_statement(source, source.len());
+            for phrase in ["RESTORE", "ON EXISTING USER", "DRY RUN"] {
+                assert!(
+                    !suggestions.contains(&phrase.to_string()),
+                    "{source:?} leaks {phrase:?}: {suggestions:?}"
+                );
+            }
+        }
+        let source = "BACKUP CLUSTER TO 'c.nvxb' ";
+        let suggestions = suggest_client_statement(source, source.len());
+        for phrase in ["ON EXISTING USER", "DRY RUN"] {
+            assert!(
+                !suggestions.contains(&phrase.to_string()),
+                "a backup leaks {phrase:?}: {suggestions:?}"
+            );
+        }
+        let suggestions = suggest_statement("RES", "RES".len());
+        assert!(
+            !suggestions.contains(&"RESTORE".to_string()),
+            "the server grammar offers no restore: {suggestions:?}"
         );
     }
 

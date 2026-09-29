@@ -114,9 +114,9 @@ that bind the named resource.
 
 Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time. `CREATE DOMAIN`
 and `CREATE USER` are rejected too: neither belongs to a domain, so neither is transaction content.
-Session subscriptions, `UPLOAD RESOURCE`, `BACKUP`, and node scheduling or membership operations
-(`CORDON`, `UNCORDON`, `DRAIN`, `DROP NODE`, and `RELOCATE`) are also immediate, non-transaction
-content. Run those statements outside `BEGIN`/`COMMIT`.
+Session subscriptions, `UPLOAD RESOURCE`, `BACKUP`, `RESTORE`, and node scheduling or membership
+operations (`CORDON`, `UNCORDON`, `DRAIN`, `DROP NODE`, and `RELOCATE`) are also immediate,
+non-transaction content. Run those statements outside `BEGIN`/`COMMIT`.
 
 Queue admission is not a blind append. The leader replays the replicated transaction prefix into a
 side-effect-free ordered plan, then checks the new statement against that plan. The planner uses one
@@ -505,6 +505,48 @@ operation serves every trigger: the `RESET WASM PROCESSOR ... STATE` statement, 
 records as an ordered effect rather than a model mutation, a guest's request for a new lifetime of
 its own branch, and `ON REJECTED STATE RESET`. See
 [Coordinated Reset](./wasm-state.md#coordinated-reset).
+
+## Restoring A Backup
+
+A restore is a persistent administrative command whose progress is replicated state; the operator
+view is in [Backup And Restore](./backup-and-restore.md#restoring). The leader admits a restore
+under its execution reference only after the archive verified and the whole restore planned, and
+admission takes the mutation lease of every domain the restore creates. The admitted execution
+records the `RESTORE` statement, the size and digest of its archive, every step the restore has
+applied, and what its users step did. The terminal result stores the typed restore report beside
+the outcome, so a retry after the restore finished returns the same report.
+
+Two consensus commands change the cluster on a restore's behalf. Each is refused unless the
+execution it names is an applying restore:
+
+- **Apply restore step** applies one step's effect and records the step in the restore's execution,
+  in one command. The users step imports every archived user with its password hash under the
+  user policy, and checks every user before it writes any. A domain step creates the domain stopped,
+  with its declared resources and their version sequences, only under the restore's lease and only
+  where neither the domain nor a catalog of those resources exists. The resource and model steps of
+  a domain carry no effect of their own: they record that the commands which applied the domain's
+  versions or models are complete. A step already recorded changes nothing, and a step whose
+  prerequisite is not recorded is refused: a cluster restore imports its users before it creates a
+  domain, and each domain is created, then given its resource versions, then its models.
+- **Import resource version** publishes one completed version under its archived number, as
+  [Restored Versions](./resource-versions.md#restored-versions) describes. It is refused before
+  the domain is created, and, for a version not imported yet, once the domain's resource step is
+  recorded.
+
+A domain's models are applied as one direct model batch under the restore's lease, with full graph
+validation and the leader's content checks, and without the statement and source-byte limits of a
+transaction. The lease keeps every other command from changing the domain while the restore holds
+it, so a leader that finds exactly the archived models already committed knows that an earlier
+attempt applied them, and records the step without applying them again.
+
+A step's effect and its record commit together, and an import or a model batch that committed
+before its step was recorded is recognized rather than repeated, so a leader that resumes a restore
+never applies a step's effect twice, whether or not an earlier leader's last proposal committed.
+Only the node a client streamed the archive to holds it. Reconciliation therefore leaves an
+applying restore alone on a leader without its archive, and the restore resumes from its first
+step not recorded when a retry streams the archive to that leader. Once the retry validity of the
+execution reference ends without one, the leader finishes the restore as failed, and the steps it
+recorded stay applied.
 
 ## Planned Ownership Handoffs And Failover
 

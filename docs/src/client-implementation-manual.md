@@ -64,7 +64,8 @@ Unsolicited `ServerMessage` bodies carry no request identity:
 | `SessionEnding` | The last frame of a session the server ends |
 
 An upload is a separate call with its own frames; see [Resource Uploads](#resource-uploads). So is
-the download of a backup's archive; see [Backup Downloads](#backup-downloads).
+the download of a backup's archive; see [Backup Downloads](#backup-downloads), and a restore with its
+archive; see [Restore Streams](#restore-streams).
 
 ## Frames
 
@@ -214,6 +215,7 @@ use.
 | `DETACH DOMAIN CLOCK` | `DetachDomainClockRequest` for the selected domain |
 | `UPLOAD RESOURCE ...` | An `UploadResource` call |
 | `BACKUP ...` | `CommandRequest`, then a `DownloadBackup` call for the archive its outcome summarizes |
+| `RESTORE ...` | A `RestoreBackup` call that carries the statement and the archive it names. Sent as a command, it is refused. |
 | `DESCRIBE BACKUP ...` | Nothing: the client reads the archive file itself. Sent as a command, it is refused. |
 | Every other statement | `CommandRequest` |
 
@@ -511,6 +513,37 @@ payload, infinity, and nullable and sensitive branch key fields.
   the outcome of `BACKUP` itself repeats the command under the same reference, as E-3 requires, to
   recover the summary.
 
+## Restore Streams
+
+- **P-1.** A client MUST send `RESTORE` on its own, never in a `CommandRequest` and never while it
+  holds a transaction. Each attempt is one `RestoreBackup` call: a `RestoreStart` with a non-zero
+  `request_id`, the restore's execution reference, the statement as canonical NSPL, and the exact
+  size and BLAKE3 digest of the archive; then the archive as `RestoreChunk` frames in order, each
+  non-empty and within one frame, adding up to exactly the declared size; then the client
+  half-closes the stream. The Rust client sends 256 KiB chunks.
+- **P-2.** A client MUST create one execution reference per logical restore, following E-1 to E-4,
+  and MUST keep the reference, the statement, and the archive's bytes until the restore's outcome is
+  known. Every attempt MUST send all three unchanged, and the digest MUST be computed over exactly
+  the bytes the client streams.
+- **P-3.** A client MUST check that the reply's `request_id`, when present, equals the start's, and
+  that a `CommandOutcome` names the execution reference it sent.
+- **P-4.** A client MUST act on the reply:
+  - `RestoreUploadFailed` with `InvalidStream`, `InvalidStatement`, `SizeMismatch`, or
+    `DigestMismatch` changed nothing, and the client MUST NOT send the same stream again
+    unchanged.
+  - `RestoreUploadFailed` with `QuotaExceeded` or `StagingFailed` changed nothing, and the client
+    MAY send the same stream again later.
+  - A `CommandOutcome` is the restore's outcome, decided from its disposition as E-6 to E-8 decide
+    a command's: `LeaderRedirect` means the client streams the restore again, under the same
+    reference, to the leader; `OutcomeUnknown` means it streams it again after a backoff; and
+    `CommandCompleted` and `RequestFailed` are terminal. A `RequestFailed` whose restore report
+    names a failed step leaves the steps before it applied.
+- **P-5.** When a call fails in transport, or a frame or the reply does not arrive in time, the
+  restore's outcome is uncertain. A client MUST stream the whole archive again, from its first
+  byte, under the same reference to learn it, and MUST NOT create a new reference for it. It MUST
+  NOT bound a call by the command's request deadline, and SHOULD bound each frame, and the wait
+  for the reply once the last frame was sent, instead.
+
 ## Using The Shared Binding
 
 A host of `nervix-client-ffi` follows the contract in `crates/client-ffi/include/nervix_client.h`
@@ -545,6 +578,10 @@ and these rules:
   reported. It MUST treat `NX_CLOCK_EVENT_RESTORATION_FAILED` as a refused attempt to attach that
   domain's clock again, which the session repeats. [Rust Client Library](./client-library.md#through-the-shared-c-binding) lists the
   accessors of each event kind.
+- **B-10.** A host that runs `RESTORE` through `nx_session_execute` streams the archive the
+  statement names, and reads what the restore's report says with `nx_outcome_restore`. After an
+  error that names the restore's execution reference, the host MUST execute the same `nx_execution`
+  again, which streams the archive again and joins the restore or recovers its outcome.
 
 ## Required State Machines
 
@@ -626,6 +663,7 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | B-1 to B-7 | The binding tests of `nervix-client-ffi`, such as `retained_references_keep_the_frame_until_the_last_one_is_released`, `string_and_bytes_columns_are_copied_with_offsets_and_borrowed_per_cell`, `every_event_kind_reports_its_subscription_and_count`, and `a_token_bounds_a_call_by_cancellation_and_by_deadline`; the C, C++, Python, Java, and Ruby cases of `client_conformance.feature` |
 | B-8 | `a_backup_outcome_reports_its_archive` and `client_errors_are_classified_and_keep_their_causes` in `nervix-client-ffi` |
 | B-9 | `a_retained_clock_event_outlives_a_reference_released_on_another_thread`, `a_session_reads_every_clock_event_kind_and_bounds_its_wait`, and `a_restoration_failure_names_its_domain_and_carries_no_clock` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for C, C++, Python, Java, and Ruby |
+| P-1 to P-5, B-10 | Every scenario of `restore.feature`, including `An interrupted restore upload is sent again under its execution reference`, `A restore repeated under its execution reference joins it or returns its recorded outcome`, and `A leader change while a restore applies resumes it on the new leader`; `a_restore_start_round_trips`, `every_restore_chunk_round_trips_and_an_empty_one_is_refused`, and `every_restore_reply_round_trips` in `nervix-client-wire`; the `restore_*` conformance frames; `a_restore_outcome_reports_its_steps` in `nervix-client-ffi` |
 
 ### Executable Examples
 
@@ -697,4 +735,6 @@ A client built on this protocol MUST NOT tell its users that:
   exists;
 - a session, its subscriptions, or its clock attachments survive the loss of its connection;
 - a backup's archive can be downloaded more than once, or survives a restart of the node that
-  assembled it.
+  assembled it;
+- a restore whose outcome is unknown changed nothing, or that a restore which failed at a step
+  undid the steps before it.

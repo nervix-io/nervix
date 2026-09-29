@@ -17,6 +17,7 @@ Capabilities:
   `Client::domain_clock(...)` and `Client::next_domain_clock_event()`
 - `Client::upload_resource_from_directory(...)`
 - `Client::download_backup(...)`
+- `Client::restore(...)` and `Client::restore_with_reference(...)`
 - `Client::next_server_event()`, `Client::next_domain_list()` and `Client::leadership()`
 - `Client::suggest(...)` behind the `autocomplete` feature
 - `Client::lookup_choices(...)`
@@ -142,6 +143,30 @@ the server, and a later download of it is refused.
 the `nervix-backup` crate's `describe_archive` reads and verifies an archive for other Rust
 programs. The C binding runs `BACKUP` through `nx_session_execute` the same way and reports the
 archive's size and digest through `nx_outcome_backup`. See [Backup And Restore](backup-and-restore.md).
+
+## Restoring
+
+`execute` runs `RESTORE CLUSTER FROM '<file>' ...;` and `RESTORE DOMAIN <name> ... FROM '<file>'
+...;` by streaming the named local archive to the leader on the session service's restore stream,
+beside the session; it refuses both inside a transaction. `Client::restore(restore, on_progress)`
+runs a parsed `Restore` the same way and reports each number of archive bytes it hands to the
+transport to `on_progress`, and `Client::restore_with_reference(restore, reference, on_progress)`
+runs it under an execution reference the caller chose. The client reads the file once to declare
+its size and BLAKE3 digest, and sends it in 256 KiB chunks.
+
+A restore is not bounded by the client's retry deadline: each frame must reach the transport within
+the request timeout, and so must the reply once the last frame was sent. After a redirect, a lost
+connection, or an answer that the restore still applies, the client streams the archive again under
+the same execution reference, which joins the restore or returns its recorded outcome, so a leader
+change resumes a restore instead of repeating it. An error that may hide an admitted restore is
+`ClientError::UncertainCommand` with the restore's execution reference, and running the restore
+again under that reference recovers its outcome.
+
+The outcome's `restore` field carries the typed `RestoreReport`: the mode, the archive's size and
+digest, the capture time, what the users step did, each restored domain, and each step's outcome.
+A stream the leader refused before the restore ran is a failed outcome whose message names the
+typed failure. The C binding runs `RESTORE` through `nx_session_execute` and reports the report's
+counts, whether it was a dry run, and whether a step failed through `nx_outcome_restore`.
 
 ## Following A Domain Clock
 

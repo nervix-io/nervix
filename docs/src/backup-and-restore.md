@@ -11,6 +11,10 @@ A backup copies configuration only. It records no relay contents, no materialize
 guest state and no connector positions, and it takes no domain lease: every domain keeps running
 while it is read.
 
+A restore recreates what an archive holds: every domain and user of a cluster archive in a fresh
+cluster, whatever its nodes are named, or one domain beside the domains a cluster already has,
+under its archived name or a new one.
+
 ## Backing Up
 
 ```nspl
@@ -150,6 +154,207 @@ domains:
 
 An archive that fails verification is refused whole, with the section and the check that failed.
 
+## Restoring
+
+```nspl
+RESTORE CLUSTER FROM '/var/backups/nervix/cluster.nvxb' ON EXISTING USER SKIP;
+RESTORE DOMAIN payments FROM './payments.nvxb';
+RESTORE DOMAIN payments AS payments_copy FROM '/var/backups/nervix/cluster.nvxb';
+RESTORE DOMAIN payments AS payments_copy FROM './payments.nvxb' DRY RUN;
+```
+
+- `RESTORE CLUSTER` recreates every domain and imports every user of a cluster archive. It refuses
+  a domain archive.
+- `RESTORE DOMAIN <name>` recreates the archived domain `<name>` of a cluster or domain archive,
+  and imports no users. `AS <new_name>` restores it under another name, which is how a domain is
+  copied beside its original in the same cluster.
+- `ON EXISTING USER` decides what a cluster restore does with an archived user the cluster already
+  has. `FAIL`, the default, refuses the restore before it changes anything. `SKIP` keeps the
+  existing user and its password. `REPLACE` gives the existing user the archived password hash.
+  Every other archived user is created with its archived password hash, so its original password
+  authenticates.
+- `DRY RUN` receives and verifies the archive and plans the whole restore, and changes nothing.
+- The path names a file on the client's machine. A leading `~/` refers to the client user's home
+  directory.
+
+A fresh cluster already has the user its configuration creates when the cluster starts, and a
+cluster archive holds that user too, so restoring a cluster archive into a fresh cluster takes
+`ON EXISTING USER SKIP` to keep the fresh cluster's password, or `ON EXISTING USER REPLACE` to take
+the archived one.
+
+`RESTORE` runs in `nervix-cli` and in the Rust and C clients. It must be sent alone: not in a batch
+with other statements and not while a transaction is open. The web console refuses it, because a
+browser session has no file to read.
+
+### What A Restore Recreates
+
+- **Users.** Each archived user, with its password hash exactly as the archive holds it.
+- **Domains.** Each restored domain is created stopped, with its archived pace and placement
+  default, its start count, and the point its latest start began from. `LIST DOMAINS` shows it
+  with its archived pace and the status `STOPPED`, and `START` in a session that selected it
+  starts it as any stopped domain starts. A restore never starts a domain.
+- **Resources.** Each resource the domain declared, and each completed version under its archived
+  number, with its checksums, file count, sizes, creation time and creating node as
+  `DESCRIBE RESOURCE` showed them in the source cluster. A number the source assigned to an upload
+  that failed or was still installing when the backup read it stays a gap, and the next upload of
+  the resource receives the number the source would have assigned next. See
+  [Resource Versions](resource-versions.md#restored-versions).
+- **Models.** Every model of the domain, bound to exactly the resource versions it was bound to in
+  the source cluster. `SHOW CREATE` prints each restored model as it printed it in the source.
+
+A restore recreates configuration only, exactly as a backup records it: relays start empty, and no
+materialized state, WASM guest state or connector position is restored.
+
+### Order Of Steps
+
+A restore first receives the archive and plans everything it will do. Nothing changes before both
+have finished:
+
+1. **Receive.** The client streams the archive to the leader, which stages it in its staging area
+   and checks that it is exactly the size and BLAKE3 digest the client declared.
+2. **Verify.** The leader reads the whole archive and verifies its manifest, every section's length
+   and digest, every record, and each resource version's bytes against the version's root
+   checksum. It parses the `models.nspl` of every domain the archive holds, which must hold one
+   `CREATE` of a model per statement.
+3. **Plan.** The leader resolves every archived user under the user policy, checks that no
+   restored domain name exists, pins every model to the resource versions the restore imports, and
+   plans each domain's models with the transaction planner against the domain as the restore will
+   create it. A dry run ends here and reports the plan.
+
+The restore then applies its steps in order, and records each step in the replicated state as it
+completes:
+
+1. **Import users**, for a cluster restore.
+2. For each restored domain, in archive order:
+   1. **Create the domain**, stopped, with its declared resources.
+   2. **Import its resource versions**: each version's bytes are installed from the archive on the
+      leader and checked against the version's checksums, the version is published under its
+      archived number, and the restore waits until every live node has installed it, exactly as an
+      upload completes.
+   3. **Apply its models** as one batch, with full graph validation and the leader's content
+      checks: TLS material loads, lookup data loads, WASM modules compile, inference models load,
+      and UDFs prepare. The batch is not bounded by the statement and source-byte limits of a
+      transaction.
+
+A completed restore reports what it recreated, and each step:
+
+```text
+restored the cluster from '/var/backups/nervix/cluster.nvxb': 2 domains, 5 resource versions, 14 models, users 1 created, 1 skipped, 0 replaced; restored domains are stopped
+- applied: import users
+- applied: create domain 'payments'
+- applied: import resource versions of domain 'payments'
+- applied: apply models of domain 'payments'
+- applied: create domain 'ledger'
+- applied: import resource versions of domain 'ledger'
+- applied: apply models of domain 'ledger'
+```
+
+A dry run reports every step as `planned`, and for each domain the report of its model run: the
+[transaction impact report](transaction-quiescence.md) the transaction planner produces for the
+batch of the domain's models.
+
+A step that fails ends the restore. The steps before it stay applied, and the outcome names the
+step and the reason, followed by the report of every step:
+
+```text
+restore failed at step 'apply models of domain 'payments'': ...; the steps before it stay applied
+```
+
+A domain the failed restore created stays, stopped, with the resource versions it imported. A
+restore never creates a domain whose name exists, so restore the archived domain again under
+another name with `AS`, or create the missing models in the created domain yourself. A cluster
+restore that failed before it reached some domains leaves them for `RESTORE DOMAIN`.
+
+### Retries, Disconnects And Leader Changes
+
+A restore is a persistent command under its execution reference, like any command that changes the
+cluster; see [Command Completion](command-completion.md). The leader admits it once the archive is
+verified and planned, and from then on it holds the mutation lease of every domain it restores, so
+no other command changes those domains while it applies.
+
+- A restore sent to a follower is redirected to the leader, and the client sends the archive
+  there.
+- Once the leader has received the whole archive, the restore goes on when the client disconnects.
+- Sending the restore again with the same execution reference joins it: while it still applies on
+  the leader, the answer says so at once, and once it finished, the answer is its recorded outcome
+  and report. The Rust client sends it again until it has the outcome.
+- A restore stream the client abandons before the archive arrived whole changes nothing, and
+  releases the staging space it reserved. Sending the restore again with the same execution
+  reference sends the archive again from its first byte.
+- Only the leader the archive was streamed to holds it. If leadership moves, or the leader
+  restarts, while a restore applies, the restore stays applying, and the next leader resumes it
+  from its first step not recorded once the client sends the archive again with the same execution
+  reference. The Rust client does so when it is redirected or its connection fails. A step is
+  recorded together with its effect, so no step is applied twice.
+- If no client sends the archive to the new leader before the retry validity of the execution
+  reference ends, 15 minutes by default, the new leader ends the restore as failed. The steps it
+  recorded stay applied, and the outcome says how many.
+
+The staged archive is released when its restore finishes, or when the retry validity of the
+execution reference ends.
+
+### Restoring From The Command Line
+
+`nervix-cli restore` runs one restore and exits:
+
+```sh
+nervix-cli restore cluster --input cluster.nvxb --on-existing-user skip
+nervix-cli restore domain payments --input payments.nvxb
+nervix-cli restore domain payments --as payments_copy --input cluster.nvxb --dry-run
+nervix-cli restore cluster --input cluster.nvxb --on-existing-user replace --format json
+```
+
+| Argument | Meaning |
+| --- | --- |
+| `cluster` or `domain NAME` | What the restore recreates: every domain and user of a cluster archive, or the archived domain `NAME`. |
+| `--input PATH` | The archive file to restore from. |
+| `--as NEW_NAME` | Restores the domain under `NEW_NAME`. Only for `domain`. |
+| `--on-existing-user fail`, `skip` or `replace` | The user policy of a cluster restore. `fail` when omitted. |
+| `--dry-run` | Verifies the archive and plans the restore, changing nothing. |
+| `--format text` or `--format json` | How the report is printed. Text is the default. |
+
+While the archive streams, the command shows how much of it was sent on standard error, when
+standard error is a terminal. It exits with a nonzero status whenever the restore did not complete.
+With `--format json` the report is one JSON document:
+
+```json
+{
+  "execution_reference": "0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44",
+  "input": "cluster.nvxb",
+  "mode": "apply",
+  "message": "restored the cluster from 'cluster.nvxb': ...",
+  "total_bytes": 48213504,
+  "blake3": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "captured_at": "2026-09-27 12:00:00 UTC",
+  "users": { "created": 1, "skipped": 1, "replaced": 0 },
+  "domains": [
+    {
+      "source": "payments",
+      "domain": "payments",
+      "resource_versions": 3,
+      "models": 9,
+      "planned_models": null
+    }
+  ],
+  "steps": [
+    { "step": "import users", "outcome": "applied" },
+    { "step": "create domain 'payments'", "outcome": "applied" },
+    { "step": "import resource versions of domain 'payments'", "outcome": "applied" },
+    { "step": "apply models of domain 'payments'", "outcome": "applied" }
+  ]
+}
+```
+
+`mode` is `dry_run` for a dry run, whose steps are `planned` and whose domains carry their model
+run's transaction impact report in `planned_models`. A step's outcome is `applied`, `planned`,
+`failed` or `not_attempted`. `users` is `null` for a domain restore.
+
+A failure prints `{"error": {"code": "...", "message": "..."}}` instead. The codes are
+`INVALID_ARGUMENTS`, `CONNECTION_FAILED`, `RESTORE_FAILED` for a failure between client and server,
+`RESTORE_REFUSED` for a restore refused before it changed anything, and `RESTORE_INCOMPLETE` for a
+restore that failed at a step. A `RESTORE_INCOMPLETE` error carries the restore's report as
+`report`, in the shape above.
+
 ## Archive Format
 
 An archive is a tar stream. Every entry is a regular file with owner-only permissions and a zero
@@ -200,9 +405,17 @@ secrets. Store it as a secret.
 | Download chunk | 256 KiB |
 | Frames a download queues ahead of its client | 4 |
 | Retention | Until downloaded, or the retry validity of the execution reference ends |
+| Restore chunk | 256 KiB |
+| Restore frames the Rust client queues ahead of the transport | 8 |
+| Restore archive retention | Until the restore finishes, or the retry validity of the execution reference ends |
 
 A backup larger than one archive may be fails. A backup that fits waits while the leader's staging
 area is full, until retained archives are downloaded or expire and snapshot transfers finish.
+
+A restore stages its archive under the same limits, and is refused rather than kept waiting when
+the archive is larger than one archive may be, or the leader's staging area cannot hold it now; send
+it again once retained archives are released and snapshot transfers finish. A restore's model batch
+is not bounded by the statement and source-byte limits of a transaction.
 
 ## Failures
 
@@ -215,3 +428,30 @@ contents. The reasons are:
 - a domain's clock mapping cannot be read at the capture time
 - a resource version's bytes are not installed on the leader, or do not match their catalog entry
 - the archive is larger than one archive may be, or a record does not encode
+
+A refused restore reports `restore refused:` and the reason, and changed nothing. The reasons are:
+
+- the stream did not carry the archive its start declared: its chunks add up to another size, or
+  its bytes have another digest
+- the leader's staging area cannot hold the archive now, or the archive is larger than one archive
+  may be
+- the archive does not verify: the section and the check that failed are named
+- a restored domain's `models.nspl` does not parse, naming the domain and the line, or holds a
+  statement that creates no model, naming the domain, the statement's number and its line
+- `RESTORE CLUSTER` was given a domain archive, or `RESTORE DOMAIN` names a domain the archive does
+  not hold
+- a restored domain name exists
+- an archived user exists and the user policy is `FAIL`
+- the archive was taken `WITHOUT RESOURCES` and holds completed resource versions, or holds a
+  version's bytes that do not match its root checksum
+- a model binds a resource version the restore does not import as completed
+- a domain's models do not form a valid configuration, as the transaction planner finds
+
+A restore that failed at a step reports `restore failed at step '<step>':`, the reason, and that the
+steps before it stay applied, together with the report of every step. The reasons are a consensus
+refusal of the step, a resource version that could not be installed or completed on every live
+node, and a model batch the leader refused, such as lookup data that does not load at its path or
+TLS material that does not load. A restore whose archive no client sent to a new leader before the
+retry validity of its execution reference ended reports `restore stopped after the steps it
+recorded`. No message includes password hashes or resource bytes.
+

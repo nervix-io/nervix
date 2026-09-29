@@ -2,12 +2,12 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** The `nervix.session.Session` gRPC service: routing its three methods,
+//! - **Owns.** The `nervix.session.Session` gRPC service: routing its four methods,
 //!   authenticating each call from its metadata before any frame is read, holding every message to
 //!   the session frame limit, and ending a call with the status of the transport failure that ended
 //!   it.
-//! - **Depends on.** The session engine, upload handling and backup downloads, the client wire
-//!   gRPC codecs, and tonic's server primitives.
+//! - **Depends on.** The session engine, upload handling, backup downloads and restores, the
+//!   client wire gRPC codecs, and tonic's server primitives.
 //! - **Must not know.** What any request does.
 //!
 //! A call that fails authentication ends with `UNAUTHENTICATED`. A message above the frame limit
@@ -25,11 +25,12 @@ use std::{
 
 use futures_util::{Stream, StreamExt as _, stream};
 use nervix_client_wire::{
-    BackupDownloadFrame, BackupDownloadRequestFrame, ClientFrame, EncodedFrame, ServerFrame,
-    SessionLimits, UploadFrame, UploadReplyFrame, VerifiedFrame,
+    BackupDownloadFrame, BackupDownloadRequestFrame, ClientFrame, EncodedFrame, RestoreFrame,
+    RestoreReplyFrame, ServerFrame, SessionLimits, UploadFrame, UploadReplyFrame, VerifiedFrame,
     grpc::{
-        DOWNLOAD_BACKUP_PATH, EXCHANGE_PATH, SERVICE_NAME, ServerBackupDownloadCodec,
-        ServerExchangeCodec, ServerUploadCodec, UPLOAD_RESOURCE_PATH,
+        DOWNLOAD_BACKUP_PATH, EXCHANGE_PATH, RESTORE_BACKUP_PATH, SERVICE_NAME,
+        ServerBackupDownloadCodec, ServerExchangeCodec, ServerRestoreCodec, ServerUploadCodec,
+        UPLOAD_RESOURCE_PATH,
     },
 };
 use nervix_recovery::Discarded as _;
@@ -101,8 +102,15 @@ impl Service<http::Request<Body>> for SessionGrpcService {
                 let download = Download { service, limits };
                 Ok(grpc.server_streaming(download, request).await)
             }),
+            RESTORE_BACKUP_PATH => Box::pin(async move {
+                let mut grpc = Grpc::new(ServerRestoreCodec::new(limits))
+                    .max_decoding_message_size(limits.frame_bytes())
+                    .max_encoding_message_size(limits.frame_bytes());
+                let restore = Restore { service, limits };
+                Ok(grpc.client_streaming(restore, request).await)
+            }),
             _ => Box::pin(async move {
-                let status = Status::unimplemented("the session service serves three methods");
+                let status = Status::unimplemented("the session service serves four methods");
                 Ok(status.into_http())
             }),
         }
@@ -211,6 +219,34 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for Upload {
                 Ok(frame) => Ok(Response::new(frame)),
                 Err(error) => Err(Status::internal(format!(
                     "the upload reply does not fit a frame: {error}"
+                ))),
+            }
+        })
+    }
+}
+
+/// One restore call.
+struct Restore {
+    service: SessionServiceImpl,
+    limits: SessionLimits,
+}
+
+impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for Restore {
+    type Response = EncodedFrame<RestoreReplyFrame>;
+    type Future = BoxFuture<Response<EncodedFrame<RestoreReplyFrame>>, Status>;
+
+    fn call(&mut self, request: Request<Streaming<VerifiedFrame<RestoreFrame>>>) -> Self::Future {
+        let service = self.service.clone();
+        let limits = self.limits;
+        Box::pin(async move {
+            let user = service
+                .authenticate_grpc_metadata(request.metadata())
+                .await?;
+            let reply = service.serve_restore(user, request.into_inner()).await?;
+            match reply.encode(&limits) {
+                Ok(frame) => Ok(Response::new(frame)),
+                Err(error) => Err(Status::internal(format!(
+                    "the restore reply does not fit a frame: {error}"
                 ))),
             }
         })
