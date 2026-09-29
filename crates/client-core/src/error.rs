@@ -226,21 +226,39 @@ impl ClientError {
     }
 
     pub(crate) fn retryable_session_failure(&self) -> bool {
+        self.session_failure().is_some()
+    }
+
+    /// The same failure again, when it is the loss of a session that a caller recovers from by
+    /// opening a new one.
+    ///
+    /// A subscription request fails on a task of its own, whose report its caller keeps; the
+    /// caller rebuilds the failure from that report so it can recover the session the way every
+    /// other request does.
+    pub(crate) fn session_failure(&self) -> Option<Self> {
         match self {
-            Self::SessionClosed
-            | Self::RequestDeadline { .. }
-            | Self::RequestInterrupted { .. } => true,
-            Self::Transport(status) => {
-                if let tonic::Code::Cancelled
+            Self::SessionClosed => Some(Self::SessionClosed),
+            Self::RequestDeadline { request } => Some(Self::RequestDeadline { request: *request }),
+            Self::RequestInterrupted { request } => {
+                Some(Self::RequestInterrupted { request: *request })
+            }
+            Self::Transport(status) => match status.code() {
+                tonic::Code::Cancelled
                 | tonic::Code::Unknown
                 | tonic::Code::DeadlineExceeded
-                | tonic::Code::Unavailable = status.code()
-                {
-                    return true;
-                }
-                false
-            }
-            _ => false,
+                | tonic::Code::Unavailable => Some(Self::Transport(status.clone())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The error the report of a subscription request stands for: the session failure it
+    /// reports, which its caller recovers from, or the operation's failure with its report.
+    pub(crate) fn subscription_operation(report: error_stack::Report<Self>) -> Self {
+        match report.current_context().session_failure() {
+            Some(failure) => failure,
+            None => Self::SubscriptionOperation(Box::new(report.into_error())),
         }
     }
 

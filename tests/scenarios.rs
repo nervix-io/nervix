@@ -7440,6 +7440,44 @@ async fn when_the_dns_fixture_answers_name_with(
         .expect("the cluster has a DNS fixture");
 }
 
+/// Stand a TCP forwarder at `address` in front of the gRPC endpoint of `node_id`, and record the
+/// forwarded endpoint in placeholder `forwarded_grpc`. A client connected through it loses its
+/// session when the forwarder stops, while the node keeps serving every other session.
+#[given(expr = "the gRPC endpoint of node {string} is forwarded from fixture address {string}")]
+async fn given_node_grpc_endpoint_is_forwarded(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    address: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node_id)
+        .expect("failed to resolve the node gRPC URI");
+    let mut url = url::Url::parse(&grpc_uri).expect("a node gRPC URI is a URL");
+    let host = url
+        .host_str()
+        .expect("a node gRPC URI has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("a node listens for gRPC on a literal address");
+    let port = url.port().expect("a node gRPC URI names its port");
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .expect("a forwarder is named by its address");
+    let forwarders = TcpForwarders::start(&[address], std::net::SocketAddr::new(host, port))
+        .await
+        .expect("the gRPC forwarder could not listen");
+    url.set_ip_host(address)
+        .expect("a gRPC URL can carry an address host");
+    url.set_port(Some(forwarders.port()))
+        .expect("a gRPC URL can carry the forwarder port");
+    world.placeholders.insert(
+        "forwarded_grpc".to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
+    world.tcp_forwarders = Some(forwarders);
+}
+
 #[when(expr = "the TCP forwarder at {string} stops")]
 async fn when_the_tcp_forwarder_stops(world: &mut ScenarioWorld, address: String) {
     let address = address
@@ -12256,12 +12294,22 @@ async fn connect_named_client_to_node(
     node_id: String,
     seed_nodes: Vec<String>,
 ) {
-    let name = expand_placeholders(world, &name);
     let node_id = expand_placeholders(world, &node_id);
     let grpc_uri = world
         .cluster()
         .grpc_uri(&node_id)
         .expect("failed to resolve client node gRPC URI");
+    connect_named_client(world, name, grpc_uri, seed_nodes).await;
+}
+
+/// Connects a named client to `grpc_uri`, with the gRPC endpoints of `seed_nodes` as its seeds.
+async fn connect_named_client(
+    world: &mut ScenarioWorld,
+    name: String,
+    grpc_uri: String,
+    seed_nodes: Vec<String>,
+) {
+    let name = expand_placeholders(world, &name);
     let mut options =
         client_connect_options(&grpc_uri).expect("failed to build client tls options");
     for seed_node in seed_nodes {
@@ -12276,7 +12324,7 @@ async fn connect_named_client_to_node(
     let client = Client::connect_with_options(&grpc_uri, client_domain(&world.domain), options)
         .await
         .unwrap_or_else(|error| {
-            panic!("failed to connect client '{name}' to '{node_id}': {error}")
+            panic!("failed to connect client '{name}' to '{grpc_uri}': {error}")
         });
     assert!(
         world
@@ -12304,6 +12352,17 @@ async fn given_named_client_is_connected_with_cluster_seeds(
 ) {
     let seeds = world.cluster().node_ids();
     connect_named_client_to_node(world, name, node_id, seeds).await;
+}
+
+#[given(expr = "client {string} is connected to {string} with cluster seeds")]
+async fn given_named_client_is_connected_to_endpoint_with_cluster_seeds(
+    world: &mut ScenarioWorld,
+    name: String,
+    grpc_uri: String,
+) {
+    let grpc_uri = expand_placeholders(world, &grpc_uri);
+    let seeds = world.cluster().node_ids();
+    connect_named_client(world, name, grpc_uri, seeds).await;
 }
 
 #[given(expr = "client {string} is connected to the leader node")]
@@ -21794,6 +21853,97 @@ async fn then_named_client_observes_subscription_interrupted(
         panic!("client '{client_name}' did not report an interruption: {event:?}");
     };
     assert_eq!(interrupted.subscription.name.as_str(), subscription_name);
+}
+
+#[then(
+    expr = "within {string} client {string} observes a failed restoration of subscription {string}"
+)]
+async fn then_named_client_observes_failed_restoration(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_name: String,
+    subscription_name: String,
+    #[step] step: &Step,
+) {
+    let duration = humantime::parse_duration(&duration)
+        .assured("the restoration deadline is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let expected = expand_placeholders(world, docstring(step));
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let event = tokio::time::timeout(duration, client.next_subscription())
+        .await
+        .unwrap_or_else(|_| {
+            panic!("client '{client_name}' did not report a failed restoration within {duration:?}")
+        })
+        .unwrap_or_else(|error| panic!("client '{client_name}' event failed: {error}"));
+    let nervix_client_core::SubscriptionEvent::RestorationFailed(failure) = event else {
+        panic!("client '{client_name}' did not report a failed restoration: {event:?}");
+    };
+    assert_eq!(failure.subscription.name.as_str(), subscription_name);
+    assert!(
+        failure.message.contains(expected.trim()),
+        "client '{client_name}' reported the restoration failure {:?}, expected it to contain \
+         {expected:?}",
+        failure.message
+    );
+}
+
+#[then(expr = "client {string} subscription {string} is interrupted")]
+async fn then_named_client_subscription_is_interrupted(
+    world: &mut ScenarioWorld,
+    client_name: String,
+    subscription_name: String,
+) {
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"));
+    let name = nervix_models::SubscriptionName::parse(&subscription_name)
+        .assured("the scenario subscription name is valid");
+    // A refused restoration is sent again after a wait, so the subscription is briefly restoring
+    // while an attempt is in flight; it is interrupted again once that attempt is refused.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        tokio::task::consume_budget().await;
+        let lifecycle = client.subscription_lifecycle(&name);
+        if let Some(nervix_client_core::SubscriptionLifecycle::Interrupted(_)) = lifecycle {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "client '{client_name}' subscription '{subscription_name}' is not interrupted: \
+             {lifecycle:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(expr = "client {string} no longer holds subscription {string}")]
+async fn then_named_client_no_longer_holds_subscription(
+    world: &mut ScenarioWorld,
+    client_name: String,
+    subscription_name: String,
+) {
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"));
+    let name = nervix_models::SubscriptionName::parse(&subscription_name)
+        .assured("the scenario subscription name is valid");
+    assert_eq!(
+        client.subscription_lifecycle(&name),
+        None,
+        "client '{client_name}' still holds subscription '{subscription_name}'"
+    );
 }
 
 #[then(expr = "client {string} subscription {string} is active")]

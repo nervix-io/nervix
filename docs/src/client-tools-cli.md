@@ -153,6 +153,17 @@ what is waiting and why, and the client keeps trying:
 [events] notice: subscription events could not resume yet: failed to connect to server; the client keeps trying
 ```
 
+After a reconnect the CLI opens every subscription and attaches every clock again. When the new
+session refuses one, a notice line reports the server's message and when the next attempt follows:
+
+```text
+[events] subscription [watch] notice: opening the subscription again failed: stream 'orders' does not exist in domain 'quickstart'; the next attempt follows in 2s
+[events] domain clock [simulation] notice: attaching the clock again failed: session-scoped and client-local statements cannot be queued in a transaction; the next attempt follows in 1s
+```
+
+`DELETE SUBSCRIPTION` of a subscription no open session holds, because its session ended or the new
+session refused to open it again, completes at once and frees the name.
+
 If server notices arrive faster than the CLI reads them, the client drops the ones it held and
 `[events] notice: server notices were dropped because they arrived faster than they were read`
 marks the gap; the notices after it keep printing.
@@ -323,14 +334,15 @@ observers can parse them. Every line has one of these forms:
 | `[events] domain clock [<domain>]: <clock>` | when the serving node installs another clock, and when a new session attaches the clock again |
 | `[events] domain clock [<domain>] tick: generation <n>, id <n>, boundary <time>, authority UTC <time>, node logical <time>` | when the serving node accepts a newer tick of a paced clock |
 | `[events] domain clock [<domain>] notice: the session was interrupted; the clock is attached again on the next session` | when the session holding the attachment ends |
+| `[events] domain clock [<domain>] notice: attaching the clock again failed: <message>; the next attempt follows in <wait>` | when a new session refuses to attach the clock again |
 | `[events] domain clock [<domain>] notice: the attachment ended because <reason>` | when the server ends the attachment, as the last line |
 
 `<clock>` is `generation <n>, ` followed by `stopped`, `uninstalled`, `unpaced`, or
 `paced: period <duration>, skew <duration>, logical origin <time>, UTC anchor <time>, time rate <rate>`.
 Within a line:
 
-- Fields are separated by `, ` and appear in the order shown. Each field is its name, one space,
-  and its value.
+- In the attach reply, state, and tick lines, fields are separated by `, ` and appear in the order
+  shown. Each field is its name, one space, and its value.
 - `<n>` is an unsigned decimal integer. The generation counts the domain's `START`s, and tick ids
   number the ticks of a generation from one: a tick's boundary is the logical origin plus the id
   minus one periods.
@@ -339,6 +351,8 @@ Within a line:
 - `<duration>` has unit suffixes, such as `500ms`, `1s`, or `1s 500ms`, and can contain spaces, so
   read a field by its name rather than by splitting at spaces.
 - `<rate>` is a decimal number, such as `2` or `0.25`.
+- In a notice line, `<message>` is display text that can itself contain `, ` and `; `, and `<wait>`
+  is a whole number of seconds such as `1s` or `30s`.
 
 Within one session, the tick ids of a generation increase and can skip, because the authority
 coalesces missed periods and a slow reader receives the newest tick rather than a backlog. When the
@@ -348,7 +362,8 @@ then shows the clock the new session reports, and its ticks continue from the ne
 session's node holds. Ticks accepted in between are not replayed, and the first tick after the
 interruption can repeat the last id printed before it, or precede it when another node serves the
 new session. A node that is still starting answers the attach once it has installed the cluster's
-committed domains, so a restart never ends the attachment.
+committed domains, so a restart never ends the attachment. When the new session refuses the attach
+for another reason, a notice line reports it and when the client tries again on that session.
 
 The server ends an attachment when the domain no longer exists on the serving node; the end line is
 the last clock line and the command exits with status `0`, as it does after Ctrl-C detaches the

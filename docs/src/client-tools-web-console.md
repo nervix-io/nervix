@@ -366,6 +366,9 @@ follows leadership. The transaction id and status are replicated. If the WebSock
 unexpectedly or leadership changes, the console reconnects and attaches that id before resuming a
 pending command. Each append is matched by its reference and expected position, and an outstanding
 commit remains pending through `COMMITTING` until its exact terminal result. A
+finished or failed attach does not settle pending commands: the console sends each under its
+original reference and position to recover its own outcome, or a failure if it was never admitted.
+The Create form then leaves **Queued until reconnect** with a completed or failed result. A
 second session can attach the same owner's transaction and take it over; the displaced console
 then gets an explicit takeover error. A clean console session close reverts an open transaction,
 while an accepted commit continues on the leader without the browser. See
