@@ -11,7 +11,6 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::{NonZeroU64, NonZeroUsize},
     path::Path,
-    sync::atomic::{AtomicU64, Ordering},
     task::{Context, Poll},
     time::Duration,
 };
@@ -23,6 +22,7 @@ use nervix_models::{
     PlacementPolicy, RelayName, SchemaField, SubscriptionName, TransactionInspection,
     TransactionInspectionRejection, TransactionInspectionTarget,
 };
+use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use nervix_recovery::Discarded as _;
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
 use tokio::{

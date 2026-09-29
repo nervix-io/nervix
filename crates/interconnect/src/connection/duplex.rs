@@ -13,13 +13,7 @@
 //! - **Depends on.** The authenticated connection lease and bounded execution admission.
 //! - **Must not know.** What the frames carry, or why a caller keeps a stream open.
 
-use std::{
-    future::poll_fn,
-    marker::PhantomData,
-    pin::Pin,
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
+use std::{future::poll_fn, marker::PhantomData, pin::Pin, time::Duration};
 
 use arch_into::ArchInto as _;
 use bytes::Bytes;
@@ -30,6 +24,7 @@ use http::{Method, Request, Response, StatusCode, Version};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{ChargedBytes, Executor, MemoryClass, Reservation};
 use nervix_models::ClusterNodeName;
+use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use tokio::time::{Instant, timeout};
 use triomphe::Arc;
 

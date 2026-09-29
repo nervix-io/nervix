@@ -1107,8 +1107,6 @@ impl IcebergObjectStoreProperties {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use ::iceberg::{
         arrow::arrow_schema_to_schema_auto_assign_ids,
         io::FileIO,
@@ -1120,6 +1118,7 @@ mod tests {
     use arrow_schema::Field;
     use meticulous::ResultExt as _;
     use nervix_dns::{DnsConfiguration, NameServers};
+    use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
     use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 

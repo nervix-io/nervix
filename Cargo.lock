@@ -4061,6 +4061,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "generator"
+version = "0.8.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54ade96dc9003043bce7c035c85a9df5a858bfb2039c5a2e6fdf00f324f6c551"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "log",
+ "rustversion",
+ "windows-link",
+ "windows-result",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5853,6 +5868,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "loom"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca"
+dependencies = [
+ "cfg-if",
+ "generator",
+ "scoped-tls",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lru"
 version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6470,6 +6500,7 @@ dependencies = [
  "nervix-approx-into",
  "nervix-client-core",
  "nervix-models",
+ "nervix-primitives",
  "nervix-recovery",
  "nervix-test-environment",
  "ordered-float 4.6.0",
@@ -6514,6 +6545,7 @@ dependencies = [
  "nervix-dns",
  "nervix-models",
  "nervix-nspl",
+ "nervix-primitives",
  "nervix-recovery",
  "reedline",
  "rpassword",
@@ -6543,6 +6575,7 @@ dependencies = [
  "nervix-dns",
  "nervix-models",
  "nervix-nspl",
+ "nervix-primitives",
  "nervix-recovery",
  "nervix-test-environment",
  "parking_lot",
@@ -6629,6 +6662,7 @@ dependencies = [
  "meticulous",
  "nervix-dns",
  "nervix-models",
+ "nervix-primitives",
  "nervix-recovery",
  "reqwest 0.13.5",
  "rustls",
@@ -6665,6 +6699,7 @@ dependencies = [
  "nervix-connector",
  "nervix-dns",
  "nervix-models",
+ "nervix-primitives",
  "nervix-test-environment",
  "shuttle-tokio",
  "tempfile",
@@ -6685,6 +6720,7 @@ dependencies = [
  "nervix-connector",
  "nervix-dns",
  "nervix-models",
+ "nervix-primitives",
  "reqwest 0.13.5",
  "rustls",
  "rustls-pki-types",
@@ -6717,6 +6753,7 @@ dependencies = [
  "nervix-connector",
  "nervix-dns",
  "nervix-models",
+ "nervix-primitives",
  "nervix-test-environment",
  "opendal",
  "parquet",
@@ -6747,6 +6784,7 @@ dependencies = [
  "meticulous",
  "nervix-connector",
  "nervix-models",
+ "nervix-primitives",
  "rdkafka",
  "shuttle-tokio",
  "thiserror 2.0.21",
@@ -6769,6 +6807,7 @@ dependencies = [
  "mongodb",
  "nervix-connector",
  "nervix-models",
+ "nervix-primitives",
  "shuttle-tokio",
  "thiserror 2.0.21",
  "tokio",
@@ -6787,6 +6826,7 @@ dependencies = [
  "meticulous",
  "nervix-connector",
  "nervix-models",
+ "nervix-primitives",
  "nonzero_ext",
  "rumqttc-next",
  "shuttle-tokio",
@@ -6812,6 +6852,7 @@ dependencies = [
  "mysql_async",
  "nervix-connector",
  "nervix-models",
+ "nervix-primitives",
  "serde_json",
  "shuttle-tokio",
  "thiserror 2.0.21",
@@ -6832,6 +6873,7 @@ dependencies = [
  "meticulous",
  "nervix-connector",
  "nervix-models",
+ "nervix-primitives",
  "shuttle-tokio",
  "thiserror 2.0.21",
  "tokio",
@@ -6854,6 +6896,7 @@ dependencies = [
  "nervix-connector",
  "nervix-dns",
  "nervix-models",
+ "nervix-primitives",
  "nervix-test-environment",
  "opentelemetry-proto",
  "parking_lot",
@@ -6885,6 +6928,7 @@ dependencies = [
  "meticulous",
  "nervix-connector",
  "nervix-models",
+ "nervix-primitives",
  "nonzero_ext",
  "serde_json",
  "shuttle-tokio",
@@ -6926,6 +6970,7 @@ dependencies = [
  "meticulous",
  "nervix-connector",
  "nervix-models",
+ "nervix-primitives",
  "pulsar",
  "shuttle-tokio",
  "tempfile",
@@ -6950,6 +6995,7 @@ dependencies = [
  "nervix-connector",
  "nervix-dns",
  "nervix-models",
+ "nervix-primitives",
  "nervix-test-environment",
  "shuttle-tokio",
  "tempfile",
@@ -6968,6 +7014,7 @@ dependencies = [
  "futures-util",
  "nervix-connector",
  "nervix-models",
+ "nervix-primitives",
  "redis",
  "shuttle-tokio",
  "thiserror 2.0.21",
@@ -6985,6 +7032,7 @@ dependencies = [
  "nervix-connector",
  "nervix-dns",
  "nervix-models",
+ "nervix-primitives",
  "reqwest 0.13.5",
  "sentry-types",
  "serde_json",
@@ -7009,6 +7057,7 @@ dependencies = [
  "nervix-connector",
  "nervix-dns",
  "nervix-models",
+ "nervix-primitives",
  "nervix-test-environment",
  "shuttle-tokio",
  "tempfile",
@@ -7027,6 +7076,7 @@ dependencies = [
  "nervix-connector",
  "nervix-dns",
  "nervix-models",
+ "nervix-primitives",
  "nervix-test-environment",
  "nonzero_ext",
  "rustls",
@@ -7074,6 +7124,7 @@ dependencies = [
  "error-stack",
  "nervix-connector",
  "nervix-models",
+ "nervix-primitives",
  "shuttle-tokio",
  "thiserror 2.0.21",
  "tokio",
@@ -7094,6 +7145,7 @@ dependencies = [
  "nervix-execution",
  "nervix-interconnect",
  "nervix-models",
+ "nervix-primitives",
  "nervix-recovery",
  "openraft",
  "parking_lot",
@@ -7164,6 +7216,8 @@ dependencies = [
  "dashmap 6.2.1",
  "error-stack",
  "meticulous",
+ "nervix-model-harness",
+ "nervix-primitives",
  "parking_lot",
  "shuttle",
  "shuttle-dashmap",
@@ -7185,6 +7239,7 @@ dependencies = [
  "ahash",
  "intrusive-collections",
  "meticulous",
+ "nervix-primitives",
  "triomphe",
 ]
 
@@ -7210,6 +7265,7 @@ dependencies = [
  "nervix-dns",
  "nervix-execution",
  "nervix-models",
+ "nervix-primitives",
  "nervix-recovery",
  "parking_lot",
  "percent-encoding",
@@ -7259,6 +7315,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-model-harness"
+version = "0.1.0-dev"
+dependencies = [
+ "loom",
+ "nervix-primitives",
+ "tracing",
+ "tracing-subscriber",
+ "triomphe",
+]
+
+[[package]]
 name = "nervix-models"
 version = "0.1.0-dev"
 dependencies = [
@@ -7270,6 +7337,7 @@ dependencies = [
  "indexmap 2.14.2",
  "meticulous",
  "nervix-approx-into",
+ "nervix-primitives",
  "nonzero_ext",
  "rkyv",
  "rstest",
@@ -7299,6 +7367,7 @@ dependencies = [
  "nervix-approx-into",
  "nervix-backup",
  "nervix-models",
+ "nervix-primitives",
  "nervix-vm",
  "nonzero_ext",
  "rstest",
@@ -7325,6 +7394,15 @@ dependencies = [
  "nervix-recovery",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "nervix-primitives"
+version = "0.1.0-dev"
+dependencies = [
+ "loom",
+ "meticulous",
+ "shuttle",
 ]
 
 [[package]]
@@ -7460,6 +7538,7 @@ dependencies = [
  "nervix-jaq",
  "nervix-models",
  "nervix-nspl",
+ "nervix-primitives",
  "nervix-recovery",
  "nervix-roto",
  "nervix-simd-kernels",
@@ -7595,6 +7674,7 @@ dependencies = [
  "nervix-approx-into",
  "nervix-models",
  "nervix-nspl",
+ "nervix-primitives",
  "nonzero_ext",
  "regex",
  "regex-automata 0.4.18",
@@ -7625,6 +7705,7 @@ dependencies = [
  "flatbuffers",
  "meticulous",
  "nervix-models",
+ "nervix-primitives",
  "nervix-recovery",
  "nervix-wasm-protocol",
  "nonzero_ext",

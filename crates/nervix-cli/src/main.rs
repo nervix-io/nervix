@@ -15,10 +15,7 @@ use std::{
     net::SocketAddr,
     ops::Range,
     path::{Path, PathBuf},
-    sync::{
-        Mutex as StdMutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
+    sync::Mutex as StdMutex,
 };
 
 use arch_into::ArchInto as _;
@@ -42,6 +39,7 @@ use nervix_models::{ClusterNodeName, InspectionFormat, Statement};
 use nervix_nspl::client_statement::{
     ClientStatement, local_path_fragment, parse_client_statements, parse_upload_resource_query,
 };
+use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use nervix_recovery::{Discarded as _, Reported as _};
 use reedline::{
     Completer, DefaultHinter, DefaultPrompt, DefaultPromptSegment, Emacs, FileBackedHistory,

@@ -10,18 +10,21 @@ workspace = true
 
 [features]
 default = []
+# Runs the cancellation protocol's Loom models, with Loom's primitives selected for the whole graph.
+loom = ["nervix-model-harness/loom", "nervix-primitives/loom"]
 shuttle = [
   "dep:shuttle",
   "dep:shuttle-dashmap",
   "dep:shuttle-parking-lot",
   "dep:shuttle-tokio",
   "dep:shuttle-tokio-util",
+  "nervix-primitives/shuttle",
   "shuttle-dashmap/shuttle",
   "shuttle-parking-lot/shuttle",
   "shuttle-tokio/shuttle",
   "shuttle-tokio-util/shuttle",
 ]
-turmoil = ["dep:turmoil"]
+turmoil = ["dep:turmoil", "nervix-primitives/turmoil"]
 
 [dependencies]
 arc-swap = { workspace = true }
@@ -29,6 +32,7 @@ arch-into = { workspace = true }
 dashmap = { workspace = true }
 error-stack = { workspace = true }
 meticulous = { workspace = true }
+nervix-primitives = { workspace = true }
 parking_lot = { workspace = true }
 shuttle = { workspace = true, optional = true }
 shuttle-dashmap = { workspace = true, optional = true }
@@ -46,4 +50,7 @@ turmoil = { workspace = true, optional = true }
 ubyte = { workspace = true }
 
 [dev-dependencies]
+nervix-model-harness = { workspace = true }
+# The cancellation models run their participants as threads of the selected model.
+nervix-primitives = { workspace = true, features = ["native"] }
 tokio = { workspace = true, features = ["full", "test-util"] }

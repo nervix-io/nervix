@@ -10,17 +10,12 @@
 //! - **Depends on.** The regex engine and the `regex` error vocabulary the VM reports.
 //! - **Must not know.** Registers, batches, row errors, or which rows a pattern applies to.
 
-use std::{
-    collections::hash_map::Entry,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
+use std::{collections::hash_map::Entry, sync::Arc};
 
 use ahash::{HashMap, HashMapExt};
 use arc_swap::ArcSwapOption;
 use indexmap::IndexMap;
+use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
 use regex_automata::{
     Input, MatchKind,
     meta::{self, BuildError, Cache},
