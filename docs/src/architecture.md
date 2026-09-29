@@ -76,6 +76,10 @@ boundary, its source and sink families, delivery and commit points, special inte
 failure semantics. The [Ingestors](./ingestors.md) and [Emitters](./emitters.md) manuals define the
 public NSPL forms.
 
+[HTTP Emitter Architecture](./http-emitter-architecture.md) traces one HTTP request from its
+validated configuration and Arrow source record through preparation, response classification,
+retry, acknowledgement, and recovery, with the one- and three-node qualification evidence.
+
 Every expression follows the same one-way conversion. Parsing produces expression Models;
 registry validation compiles them to check exact types and sensitivity. The decision layer lowers
 the committed schedule into typed programs, and node installation compiles them against its bound
