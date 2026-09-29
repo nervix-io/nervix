@@ -203,6 +203,12 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   missing value, state variant, required identity, conversion failure, or boundary representation
   is modeled or validated must keep that chapter current in the same change. Interconnect,
   domain-clock, and shutdown details remain in their own authoritative chapters.
+- [Execution Plans](docs/src/execution-plans.md) is the authoritative architecture reference for
+  converting a committed schedule into one typed execution revision and installing it as running
+  or passive runtime state. Any change to revision construction, typed node, resource, source,
+  sink, processor or message-error plans, schedule-delta application, graph publication, or
+  plan-based recovery must keep that chapter current in the same change. The linked engine,
+  connector, concurrency, error, resource and state chapters retain their detailed contracts.
 
 ## System Layers and Migration
 

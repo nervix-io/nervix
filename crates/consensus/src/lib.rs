@@ -45,8 +45,8 @@ pub use openraft::raft::{
     TransferLeaderResponse, VoteRequest, VoteResponse,
 };
 use openraft::{
-    BasicNode, Config, LogId, Raft, RaftNetworkFactory, Snapshot, SnapshotMeta, StoredMembership,
-    Vote,
+    BasicNode, ChangeMembers, Config, LogId, Raft, RaftNetworkFactory, Snapshot, SnapshotMeta,
+    StoredMembership, Vote,
     error::{ClientWriteError, RPCError, RaftError, StreamingError},
     metrics::RaftServerMetrics,
     network::{RPCOption, RaftNetworkV2},
@@ -1050,10 +1050,13 @@ struct MembershipSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MembershipMutation {
+    UpdateAddress {
+        node_id: ClusterNodeName,
+        endpoint: NodeEndpoint,
+    },
     AddLearner {
         node_id: ClusterNodeName,
         endpoint: NodeEndpoint,
-        refresh: bool,
     },
     ChangeVoters {
         voters: BTreeSet<ClusterNodeName>,
@@ -1084,12 +1087,16 @@ impl MembershipSnapshot {
             let known_address = self.nodes.get(&node.node_id);
             let is_voter = self.voters.contains(&node.node_id);
             let address_changed = known_address != Some(&advertised);
-            if !is_voter || address_changed {
-                let refresh = known_address.is_some() && address_changed;
+            if known_address.is_some() && address_changed {
+                mutations.push(MembershipMutation::UpdateAddress {
+                    node_id: node.node_id.clone(),
+                    endpoint: endpoint.clone(),
+                });
+            }
+            if !is_voter {
                 mutations.push(MembershipMutation::AddLearner {
                     node_id: node.node_id.clone(),
                     endpoint,
-                    refresh,
                 });
             }
             desired_voters.insert(node.node_id);
@@ -3652,14 +3659,31 @@ impl Administrator {
         for mutation in mutations {
             tokio::task::consume_budget().await;
             match mutation {
-                MembershipMutation::AddLearner {
-                    node_id,
-                    endpoint,
-                    refresh,
-                } => {
-                    let operation = if refresh {
-                        format!("refresh learner '{node_id}' at {endpoint}")
-                    } else if before.nodes.contains_key(&node_id) {
+                MembershipMutation::UpdateAddress { node_id, endpoint } => {
+                    let operation = format!("update address of '{node_id}' to {endpoint}");
+                    self.inner.events.report(format!("raft {operation}"));
+                    let update = timeout(
+                        MEMBERSHIP_MUTATION_TIMEOUT,
+                        self.inner.raft.change_membership(
+                            ChangeMembers::SetNodes(BTreeMap::from([(
+                                node_id,
+                                BasicNode::new(endpoint.to_string()),
+                            )])),
+                            true,
+                        ),
+                    )
+                    .await;
+                    let result = match update {
+                        Ok(result) => result,
+                        Err(_) => {
+                            let observed = self.effective_membership();
+                            return Err(self.membership_timeout(operation, &observed));
+                        }
+                    };
+                    result.map_err(ConsensusError::from)?;
+                }
+                MembershipMutation::AddLearner { node_id, endpoint } => {
+                    let operation = if before.nodes.contains_key(&node_id) {
                         format!("wait for learner '{node_id}' to catch up at {endpoint}")
                     } else {
                         format!("add learner '{node_id}' at {endpoint}")
@@ -6450,7 +6474,6 @@ mod tests {
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
                     endpoint: node_endpoint("node-2.test:7443"),
-                    refresh: false,
                 },
                 MembershipMutation::ChangeVoters {
                     voters: BTreeSet::from([first, joining]),
@@ -6504,7 +6527,6 @@ mod tests {
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
                     endpoint: node_endpoint("node-2.test:7443"),
-                    refresh: false,
                 },
                 MembershipMutation::ChangeVoters {
                     voters: BTreeSet::from([first, joining]),
@@ -6514,7 +6536,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_endpoint_is_refreshed_before_membership_promotion() {
+    fn changed_learner_address_is_updated_before_promotion() {
         let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
         let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
         let current_address = "node-2.test:7443".to_string();
@@ -6539,15 +6561,56 @@ mod tests {
         assert_eq!(
             membership.automatic_mutations(&gossip, &admission_fences),
             vec![
+                MembershipMutation::UpdateAddress {
+                    node_id: joining.clone(),
+                    endpoint: replacement_endpoint.clone(),
+                },
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
                     endpoint: replacement_endpoint,
-                    refresh: true,
                 },
                 MembershipMutation::ChangeVoters {
                     voters: BTreeSet::from([first, joining]),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_restarted_voter_updates_its_address_once() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let restarted = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let endpoint = node_endpoint("node-2.test:8443");
+        let gossip = GossipState {
+            live_nodes: vec![GossipNode {
+                interconnect_endpoint: Some(endpoint.clone()),
+                ..undiscovered_node("node-2", 3)
+            }],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let mut membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone(), restarted.clone()]),
+            nodes: BTreeMap::from([
+                (first, "node-1.test:7443".to_string()),
+                (restarted.clone(), "node-2.test:7443".to_string()),
+            ]),
+        };
+        let admission_fences = BTreeMap::new();
+
+        assert_eq!(
+            membership.automatic_mutations(&gossip, &admission_fences),
+            vec![MembershipMutation::UpdateAddress {
+                node_id: restarted.clone(),
+                endpoint: endpoint.clone(),
+            }]
+        );
+
+        membership.nodes.insert(restarted, endpoint.to_string());
+        assert!(
+            membership
+                .automatic_mutations(&gossip, &admission_fences)
+                .is_empty()
         );
     }
 
@@ -6587,7 +6650,6 @@ mod tests {
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
                     endpoint: node_endpoint("node-2.test:7443"),
-                    refresh: false,
                 },
                 MembershipMutation::ChangeVoters {
                     voters: BTreeSet::from([first, joining]),

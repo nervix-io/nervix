@@ -60,7 +60,7 @@ use super::{
 /// outside this budget rather than the mechanism that ends a wedged run.
 const WORKFLOW_JOB_LIMIT: Duration = Duration::from_secs(60 * 60);
 /// The `scenarios` job's setup and instrumented server and CLI build before the suite starts.
-/// The first cold kache 0.28.0 PR run took 11m37s from job start to the scenario binary. Round
+/// The first cold kache 0.28.1 PR run took 11m37s from job start to the scenario binary. Round
 /// that measurement up to 14 minutes so another cold runner has room for setup variation.
 const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(14 * 60);
 /// What the job keeps for itself once the suite budget has expired: the bounded cleanup the
