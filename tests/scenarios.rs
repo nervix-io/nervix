@@ -37,7 +37,7 @@ use cucumber::{
     writer::{self, Stats as _},
 };
 use futures_util::{
-    TryStreamExt,
+    StreamExt as _, TryStreamExt,
     future::{join_all, try_join_all},
 };
 use iceberg::{
@@ -108,7 +108,7 @@ use crate::common::{
         KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
         MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR,
         POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, RUSTFS_ADDR,
-        TestDependencies,
+        SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
     http_receiver::{
         CapturedRequest, ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET,
@@ -117,7 +117,11 @@ use crate::common::{
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     raw_session::{TestUpload, TestUploadPart, WireOutcome as _},
-    scenario_phase::{ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase},
+    scenario_phase::{
+        ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
+        begin_suite_measurement, suite_summary,
+    },
+    scenario_schedule::{FeatureLimit, ScenarioAdmission, ScenarioRunSlots, prioritize_features},
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
         ServerProcessLaunch, ServerProcessOption, describe_exit,
@@ -142,13 +146,6 @@ const CUCUMBER_LOG_FILE: &str = "tests/logs/cucumber.log";
 static ONNX_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<StdMutex<BTreeMap<String, String>>> = OnceLock::new();
-// Every scenario holds a read guard; `@exclusive` scenarios hold the write guard.
-static SCENARIO_EXECUTION_LOCK: OnceLock<StdArc<tokio::sync::RwLock<()>>> = OnceLock::new();
-static WEB_CONSOLE_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> = OnceLock::new();
-static WASM_STATE_RESET_SCENARIO_PERMITS: OnceLock<StdArc<tokio::sync::Semaphore>> =
-    OnceLock::new();
-const MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS: usize = 2;
-const MAX_CONCURRENT_WASM_STATE_RESET_SCENARIOS: usize = 1;
 const WEB_CONSOLE_ASSERTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ZEROMQ_OBSERVER_BIND_ATTEMPTS: usize = 8;
 const DURABLE_CATCH_UP_STORAGE_COMMITS_PER_ENTRY: u32 = 2;
@@ -158,24 +155,8 @@ const MAX_DURABLE_CATCH_UP_WRITES: usize = 128;
 /// The execution class a follower charges its decoded append batches to.
 const COMMANDS_MEMORY_LABEL: &str = "class=\"commands\"";
 const BULK_MEMORY_LABEL: &str = "class=\"bulk\"";
-const WEB_CONSOLE_FEATURE_NAMES: [&str; 3] = [
-    "Web console NSPL REPL",
-    "Web console execution graph",
-    "Web console transaction inspector",
-];
-const WASM_STATE_RESET_FEATURE_NAME: &str = "Coordinated WASM processor state reset";
 const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
 const DEPENDENCY_LIFECYCLE_STARTED: &str = "NERVIX_DEPENDENCY_LIFECYCLE_STARTED=";
-
-#[derive(Debug)]
-enum ScenarioExecutionPermit {
-    Concurrent {
-        _permit: tokio::sync::OwnedRwLockReadGuard<()>,
-    },
-    Exclusive {
-        _permit: tokio::sync::OwnedRwLockWriteGuard<()>,
-    },
-}
 
 /// What a scenario's own steps did, as its after hook sees it.
 ///
@@ -255,9 +236,23 @@ struct TransactionQualificationObservation {
     committed_inspection: Option<Box<nervix_models::TransactionInspection>>,
 }
 
+#[derive(Debug)]
+struct SavedHealthyPlacement {
+    kind: String,
+    name: String,
+    owner: String,
+}
+
+/// One long-running CLI clock follower and the bounded stdout lines its assertions inspect.
+struct CliClockProcess {
+    child: tokio::process::Child,
+    lines: StdArc<StdMutex<VecDeque<String>>>,
+    _reader: AbortOnDropHandle<()>,
+}
+
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
-    scenario_execution_permit: Option<ScenarioExecutionPermit>,
+    scenario_admission: Option<ScenarioAdmission>,
     /// Publishes which phase this scenario is in for as long as its world lives, so a reader of
     /// the registry sees the work in flight rather than the last work that finished.
     active_scenario: Option<ActiveScenarioRegistration>,
@@ -291,10 +286,12 @@ struct ScenarioWorld {
     last_publish_at: Option<Instant>,
     last_command_error: Option<String>,
     last_command_output: Option<String>,
+    last_command_disposition: Option<nervix_client_wire::CommandDisposition>,
     last_cli_output: Option<Output>,
     cli_subscription_process: Option<tokio::process::Child>,
     cli_subscription_lines: Option<StdArc<StdMutex<VecDeque<String>>>>,
     cli_subscription_reader: Option<AbortOnDropHandle<()>>,
+    cli_clock_process: Option<CliClockProcess>,
     /// The whole outcome of the last command a named client ran, for assertions that read more
     /// than its message.
     last_client_outcome: Option<ClientCommandOutcome>,
@@ -334,6 +331,8 @@ struct ScenarioWorld {
     scenario_ports: Vec<u16>,
     syslog_udp_observer: Option<tokio::net::UdpSocket>,
     placeholders: BTreeMap<String, String>,
+    saved_healthy_placements: Vec<SavedHealthyPlacement>,
+    health_fault_started_at: Option<Instant>,
     /// Human-readable references in scenarios map to UUIDv7 identities so retries retain one
     /// stable creation timestamp while feature text remains legible.
     command_execution_references: BTreeMap<String, String>,
@@ -360,8 +359,6 @@ struct ScenarioWorld {
     browser_context: Option<playwright_rs::BrowserContext>,
     browser: Option<playwright_rs::Browser>,
     playwright: Option<Playwright>,
-    web_console_scenario_permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    wasm_state_reset_scenario_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     dependencies: TestDependencies,
     background_nspl: Option<AbortOnDropHandle<Result<String, String>>>,
     background_command_result:
@@ -456,11 +453,17 @@ impl fmt::Debug for ScenarioWorld {
             .field("browser_initialized", &self.browser.is_some())
             .field(
                 "web_console_permit_acquired",
-                &self.web_console_scenario_permit.is_some(),
+                &self
+                    .scenario_admission
+                    .as_ref()
+                    .is_some_and(|admission| admission.limit() == FeatureLimit::WebConsole),
             )
             .field(
                 "wasm_state_reset_permit_acquired",
-                &self.wasm_state_reset_scenario_permit.is_some(),
+                &self
+                    .scenario_admission
+                    .as_ref()
+                    .is_some_and(|admission| admission.limit() == FeatureLimit::WasmStateReset),
             )
             .field("dependencies", &self.dependencies)
             .field(
@@ -516,11 +519,23 @@ impl ScenarioWorld {
         };
         let published = registration.enter(phase);
         let marker = format!(
-            "scenario {phase}: {} age={:?} {detail}",
+            "scenario {phase}: {} suite_age={:?} age={:?} {detail}",
             published.identity,
+            ActiveScenario::suite_age(),
             published.age()
         );
         append_cucumber_log_line(marker.trim_end());
+    }
+
+    fn wait_for_admission(&self, reason: common::scenario_schedule::AdmissionWait) {
+        let Some(registration) = &self.active_scenario else {
+            return;
+        };
+        let published = registration.wait_for(reason);
+        append_cucumber_log_line(&format!(
+            "scenario queued: {} attempt={} waiting_for={reason}",
+            published.identity, published.attempt
+        ));
     }
 
     fn stop_durable_catch_up_work(&mut self) {
@@ -1056,6 +1071,40 @@ async fn given_http_receiver_answers_unscripted_requests_with(
     http_receiver(world, &name).answer_unscripted_requests_with(response);
 }
 
+/// Gives every request for one exact target, its path and query, its own answer, which it takes
+/// instead of the script. Requests of independent branches or source relays have no order between
+/// them, so a scenario answers each of them by its target rather than by its position.
+#[given(expr = "HTTP receiver {string} answers requests for {string} with {string}")]
+async fn given_http_receiver_answers_requests_for_target(
+    world: &mut ScenarioWorld,
+    name: String,
+    target: String,
+    response: String,
+) {
+    let target = expand_placeholders(world, &target);
+    let response = match expand_placeholders(world, &response).parse::<ReceiverResponse>() {
+        Ok(response) => response,
+        Err(error) => panic!("invalid HTTP receiver response: {error}"),
+    };
+    http_receiver(world, &name).answer_requests_for(target, response);
+}
+
+/// Answers every request the receiver holds until released, and every one it holds later, with
+/// the named response. Until this step runs, such a request stays unresolved for as long as the
+/// scenario needs to observe it, bounded only by the client's own timeout.
+#[when(expr = "HTTP receiver {string} releases its held responses with {string}")]
+async fn when_http_receiver_releases_held_responses(
+    world: &mut ScenarioWorld,
+    name: String,
+    response: String,
+) {
+    let response = match expand_placeholders(world, &response).parse::<ReceiverResponse>() {
+        Ok(response) => response,
+        Err(error) => panic!("invalid HTTP receiver response: {error}"),
+    };
+    http_receiver(world, &name).release_held_responses(response);
+}
+
 #[then(expr = "HTTP receiver {string} eventually receives at least {int} request(s)")]
 async fn then_http_receiver_eventually_receives_requests(
     world: &mut ScenarioWorld,
@@ -1220,6 +1269,47 @@ async fn then_http_receiver_request_repeats_request(
         repeated_request, original_request,
         "HTTP receiver '{name}' request {repeated} does not repeat request \
          {original}:\n{repeated_request}\n---\n{original_request}"
+    );
+}
+
+/// Compares receipt times after both requests have arrived. The receiver records the first time
+/// before delaying its response, so this measures serialization without racing a silence window.
+#[then(expr = "HTTP receiver {string} request {int} arrived at least {string} after request {int}")]
+async fn then_http_receiver_requests_have_minimum_gap(
+    world: &mut ScenarioWorld,
+    name: String,
+    later: usize,
+    minimum_gap: String,
+    earlier: usize,
+) {
+    let minimum_gap = humantime::parse_duration(&minimum_gap)
+        .assured("the Cucumber expression supplies a valid minimum gap duration");
+    let later_request = captured_http_request(world, &name, later);
+    let earlier_request = captured_http_request(world, &name, earlier);
+    let Some(gap) = later_request
+        .received_at
+        .checked_duration_since(earlier_request.received_at)
+    else {
+        panic!("HTTP receiver '{name}' request {later} arrived before request {earlier}");
+    };
+    assert!(
+        gap >= minimum_gap,
+        "HTTP receiver '{name}' request {later} arrived {gap:?} after request {earlier}, below \
+         the {minimum_gap:?} minimum"
+    );
+}
+
+#[then(expr = "HTTP receiver {string} request {int} has no header {string}")]
+async fn then_http_receiver_request_has_no_header(
+    world: &mut ScenarioWorld,
+    name: String,
+    position: usize,
+    header: String,
+) {
+    let request = captured_http_request(world, &name, position);
+    assert!(
+        request.header_values(&header).is_empty(),
+        "HTTP receiver '{name}' request {position} unexpectedly carries '{header}':\n{request}"
     );
 }
 
@@ -3176,6 +3266,301 @@ async fn then_cli_subscription_output_contains(world: &mut ScenarioWorld, expect
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+#[when(expr = "the CLI follows the clock of domain {string} on node {string}")]
+fn when_cli_follows_domain_clock(world: &mut ScenarioWorld, domain: String, node: String) {
+    let domain = expand_placeholders(world, &domain);
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    start_cli_clock_process(world, &domain, &grpc_uri);
+}
+
+#[given(expr = "the CLI clock connection to node {string} is forwarded")]
+async fn given_cli_clock_connection_is_forwarded(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    let mut url = url::Url::parse(&grpc_uri).assured("a cluster gRPC endpoint is a URL");
+    let target_host = url
+        .host_str()
+        .assured("a cluster gRPC endpoint names a host")
+        .parse::<std::net::IpAddr>()
+        .assured("a cluster gRPC endpoint uses a literal IP address");
+    let target_port = url.port().assured("a cluster gRPC endpoint names a port");
+    let local_host = std::net::IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let forwarders = TcpForwarders::start(
+        &[local_host],
+        std::net::SocketAddr::new(target_host, target_port),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("the CLI clock forwarder could not start: {error}"));
+    url.set_host(Some("127.0.0.1"))
+        .assured("the loopback host is valid in a URL");
+    url.set_port(Some(forwarders.port()))
+        .assured("a reserved TCP port is valid in a URL");
+    world
+        .placeholders
+        .insert("cli_clock_forwarded_server".to_string(), url.to_string());
+    world.tcp_forwarders = Some(forwarders);
+}
+
+#[when(expr = "the CLI follows the clock of domain {string} through its TCP forwarder")]
+fn when_cli_follows_domain_clock_through_forwarder(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let grpc_uri = world
+        .placeholders
+        .get("cli_clock_forwarded_server")
+        .verified("the preceding step forwarded the CLI clock connection")
+        .clone();
+    start_cli_clock_process(world, &domain, &grpc_uri);
+}
+
+fn start_cli_clock_process(world: &mut ScenarioWorld, domain: &str, grpc_uri: &str) {
+    let mut child = tokio::process::Command::new(scenario_cli_binary())
+        .args([
+            "--server",
+            grpc_uri,
+            "--domain",
+            domain,
+            "--username",
+            TEST_AUTH_USERNAME,
+            "--password",
+            TEST_AUTH_PASSWORD,
+            "domain-clock",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap_or_else(|error| panic!("the CLI clock process failed to start: {error}"));
+    let stdout = child
+        .stdout
+        .take()
+        .verified("the CLI clock process was started with piped stdout");
+    let lines = StdArc::new(StdMutex::new(VecDeque::new()));
+    let reader_lines = lines.clone();
+    let reader = tokio::spawn(async move {
+        let mut stdout = tokio::io::BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = stdout.next_line().await {
+            tokio::task::consume_budget().await;
+            let mut retained = reader_lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if retained.len() == 2048 {
+                retained.pop_front();
+            }
+            retained.push_back(line);
+        }
+    });
+    world.cli_clock_process = Some(CliClockProcess {
+        child,
+        lines,
+        _reader: AbortOnDropHandle::new(reader),
+    });
+}
+
+async fn wait_for_cli_clock_output(
+    world: &ScenarioWorld,
+    duration: Duration,
+    described: &str,
+    matches: impl Fn(&VecDeque<String>) -> bool,
+) {
+    let lines = &world
+        .cli_clock_process
+        .as_ref()
+        .verified("the preceding step started the CLI clock process")
+        .lines;
+    let deadline = Instant::now() + duration;
+    loop {
+        tokio::task::consume_budget().await;
+        {
+            let retained = lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if matches(&retained) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("CLI clock output did not show {described}: {retained:?}");
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(expr = "within {string} the CLI clock output contains {string}")]
+async fn then_cli_clock_output_contains(
+    world: &mut ScenarioWorld,
+    duration: String,
+    expected: String,
+) {
+    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let expected = expand_placeholders(world, &expected);
+    wait_for_cli_clock_output(world, duration, &expected, |lines| {
+        lines.iter().any(|line| line.contains(&expected))
+    })
+    .await;
+}
+
+fn cli_clock_tick_id(line: &str, domain: &str, generation: u64) -> Option<u64> {
+    let prefix = format!("[events] domain clock [{domain}] tick: generation {generation}, id ");
+    let (id, fields) = line.strip_prefix(&prefix)?.split_once(", boundary ")?;
+    if !fields.contains(", authority UTC ") || !fields.contains(", node logical ") {
+        return None;
+    }
+    id.parse().ok()
+}
+
+#[then(
+    expr = "within {string} the CLI clock output has {int} increasing ticks for generation {int} \
+            of domain {string}"
+)]
+async fn then_cli_clock_ticks_increase(
+    world: &mut ScenarioWorld,
+    duration: String,
+    count: usize,
+    generation: u64,
+    domain: String,
+) {
+    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let domain = expand_placeholders(world, &domain);
+    wait_for_cli_clock_output(world, duration, "increasing clock ticks", |lines| {
+        let ids: Vec<_> = lines
+            .iter()
+            .filter_map(|line| cli_clock_tick_id(line, &domain, generation))
+            .collect();
+        ids.len() >= count && ids.windows(2).all(|pair| pair[0] < pair[1])
+    })
+    .await;
+}
+
+#[then(
+    expr = "within {string} the CLI clock output has a tick for generation {int} after its state \
+            of domain {string}"
+)]
+async fn then_cli_clock_tick_follows_state(
+    world: &mut ScenarioWorld,
+    duration: String,
+    generation: u64,
+    domain: String,
+) {
+    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let domain = expand_placeholders(world, &domain);
+    let state = format!("[events] domain clock [{domain}]: generation {generation}, paced:");
+    wait_for_cli_clock_output(world, duration, "a tick after its clock state", |lines| {
+        let Some(state_index) = lines.iter().rposition(|line| line.starts_with(&state)) else {
+            return false;
+        };
+        lines
+            .iter()
+            .skip(state_index + 1)
+            .any(|line| cli_clock_tick_id(line, &domain, generation).is_some())
+    })
+    .await;
+}
+
+#[then(
+    expr = "within {string} the CLI clock output has a fresh state for generation {int} after \
+            interruption of domain {string}"
+)]
+async fn then_cli_clock_state_follows_interruption(
+    world: &mut ScenarioWorld,
+    duration: String,
+    generation: u64,
+    domain: String,
+) {
+    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let domain = expand_placeholders(world, &domain);
+    let interrupted =
+        format!("[events] domain clock [{domain}] notice: the session was interrupted;");
+    let state = format!("[events] domain clock [{domain}]: generation {generation}, paced:");
+    wait_for_cli_clock_output(
+        world,
+        duration,
+        "a restored state after interruption",
+        |lines| {
+            let Some(interruption_index) =
+                lines.iter().position(|line| line.starts_with(&interrupted))
+            else {
+                return false;
+            };
+            lines
+                .iter()
+                .skip(interruption_index + 1)
+                .any(|line| line.starts_with(&state))
+        },
+    )
+    .await;
+}
+
+#[when(expr = "the CLI clock process receives Ctrl-C")]
+fn when_cli_clock_receives_ctrl_c(world: &mut ScenarioWorld) {
+    let process = world
+        .cli_clock_process
+        .as_ref()
+        .verified("the preceding step started the CLI clock process");
+    let raw_pid = process
+        .child
+        .id()
+        .verified("the CLI clock process is still running");
+    let pid = nix::unistd::Pid::from_raw(
+        i32::try_from(raw_pid).assured("a process id fits the operating system pid type"),
+    );
+    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGINT)
+        .unwrap_or_else(|error| panic!("failed to interrupt the CLI clock process: {error}"));
+}
+
+#[then(expr = "the CLI clock process exits successfully")]
+async fn then_cli_clock_exits_successfully(world: &mut ScenarioWorld) {
+    let process = world
+        .cli_clock_process
+        .as_mut()
+        .verified("the preceding step started the CLI clock process");
+    let status = tokio::time::timeout(Duration::from_secs(10), process.child.wait())
+        .await
+        .unwrap_or_else(|_| panic!("the CLI clock process did not stop after Ctrl-C"))
+        .unwrap_or_else(|error| panic!("the CLI clock process could not be reaped: {error}"));
+    assert!(
+        status.success(),
+        "the CLI clock process exited with {status}"
+    );
+    world.cli_clock_process = None;
+}
+
+#[when(expr = "the CLI attempts to follow the clock of missing domain {string} on node {string}")]
+async fn when_cli_follows_missing_domain(world: &mut ScenarioWorld, domain: String, node: String) {
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new(scenario_cli_binary())
+            .args([
+                "--server",
+                &grpc_uri,
+                "--domain",
+                &domain,
+                "--username",
+                TEST_AUTH_USERNAME,
+                "--password",
+                TEST_AUTH_PASSWORD,
+                "domain-clock",
+            ])
+            .output(),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("the CLI missing-domain request did not finish"))
+    .unwrap_or_else(|error| panic!("the CLI missing-domain process did not start: {error}"));
+    world.last_cli_output = Some(output);
 }
 
 /// The directory holding the NSPL files a formatter scenario writes.
@@ -6141,6 +6526,18 @@ async fn given_rabbitmq_endpoints_have_fixture_dns(world: &mut ScenarioWorld, na
     publish_fixture_name(world, RABBITMQ_TLS_ADDR, &name, "rabbitmq_tls_dns_addr");
 }
 
+#[given(expr = "the ClickHouse endpoints are published under fixture DNS name {string}")]
+async fn given_clickhouse_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
+    publish_fixture_name(world, CLICKHOUSE_ADDR, &name, "clickhouse_dns_addr");
+    publish_fixture_name(world, CLICKHOUSE_TLS_ADDR, &name, "clickhouse_tls_dns_addr");
+}
+
+#[given(expr = "the SQS endpoints are published under fixture DNS name {string}")]
+async fn given_sqs_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
+    publish_fixture_name(world, SQS_ENDPOINT, &name, "sqs_dns_endpoint");
+    publish_fixture_name(world, SQS_TLS_ENDPOINT, &name, "sqs_tls_dns_endpoint");
+}
+
 #[given("the WebSocket mock endpoints are published under fixture DNS")]
 async fn given_websocket_mock_has_fixture_dns(world: &mut ScenarioWorld) {
     publish_fixture_name(
@@ -6168,28 +6565,14 @@ async fn given_websocket_endpoint_is_forwarded(
     addresses: String,
 ) {
     let endpoint = expand_placeholders(world, &endpoint);
-    let mut url = url::Url::parse(&endpoint).expect("the WebSocket endpoint is a URL");
-    let host = url
-        .host_str()
-        .expect("the WebSocket endpoint has a host")
-        .parse::<std::net::IpAddr>()
-        .expect("the WebSocket mock listens on a literal address");
-    let port = url
-        .port()
-        .expect("the WebSocket mock endpoint names its port");
-    let addresses = fixture_addresses(&addresses);
-    let forwarders = TcpForwarders::start(&addresses, std::net::SocketAddr::new(host, port))
-        .await
-        .expect("the WebSocket forwarders could not listen");
-    url.set_host(Some(&name))
-        .expect("the fixture name is a valid WebSocket URL host");
-    url.set_port(Some(forwarders.port()))
-        .expect("the WebSocket URL can carry the forwarder port");
-    world.placeholders.insert(
-        "websocket_forwarded_addr".to_string(),
-        url.to_string().trim_end_matches('/').to_string(),
-    );
-    world.tcp_forwarders = Some(forwarders);
+    forward_under_fixture_name(
+        world,
+        &endpoint,
+        &name,
+        &addresses,
+        "websocket_forwarded_addr",
+    )
+    .await;
 }
 
 #[given(
@@ -6221,28 +6604,87 @@ async fn given_syslog_endpoint_is_forwarded(
 /// The scenario decides separately what the DNS fixture answers for `name`.
 #[given(expr = "RabbitMQ is forwarded as {string} from the fixture addresses {string}")]
 async fn given_rabbitmq_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
-    let endpoint = world
-        .placeholders
-        .get(RABBITMQ_ADDR)
-        .expect("RabbitMQ was started");
-    let mut url = url::Url::parse(endpoint).expect("the RabbitMQ endpoint is a URL");
-    let host = url
-        .host_str()
-        .expect("the RabbitMQ endpoint has a host")
-        .parse::<std::net::IpAddr>()
-        .expect("RabbitMQ listens on a literal address");
-    let port = url.port().expect("the RabbitMQ endpoint names its port");
-    let addresses = fixture_addresses(&addresses);
-    let forwarders = TcpForwarders::start(&addresses, std::net::SocketAddr::new(host, port))
-        .await
-        .expect("the RabbitMQ forwarders could not listen");
-    url.set_host(Some(&name))
-        .expect("the fixture name is a valid URL host");
-    url.set_port(Some(forwarders.port()))
-        .expect("an AMQP URL carries a port");
+    let endpoint = started_dependency(world, RABBITMQ_ADDR);
+    forward_under_fixture_name(
+        world,
+        &endpoint,
+        &name,
+        &addresses,
+        "rabbitmq_forwarded_addr",
+    )
+    .await;
+}
+
+/// Stand TCP forwarders to the plain ClickHouse HTTP listener at `addresses`, and record in
+/// placeholder `clickhouse_forwarded_addr` the ClickHouse URL that reaches them through the
+/// fixture name `name`. The scenario decides separately what the DNS fixture answers for `name`.
+#[given(expr = "ClickHouse is forwarded as {string} from the fixture addresses {string}")]
+async fn given_clickhouse_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
+    let endpoint = started_dependency(world, CLICKHOUSE_ADDR);
+    forward_under_fixture_name(
+        world,
+        &endpoint,
+        &name,
+        &addresses,
+        "clickhouse_forwarded_addr",
+    )
+    .await;
+}
+
+/// Stand TCP forwarders to the plain SQS listener at `addresses`, and record in placeholder
+/// `sqs_forwarded_endpoint` the SQS endpoint that reaches them through the fixture name `name`.
+/// The scenario decides separately what the DNS fixture answers for `name`.
+#[given(expr = "SQS is forwarded as {string} from the fixture addresses {string}")]
+async fn given_sqs_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
+    let endpoint = started_dependency(world, SQS_ENDPOINT);
+    forward_under_fixture_name(
+        world,
+        &endpoint,
+        &name,
+        &addresses,
+        "sqs_forwarded_endpoint",
+    )
+    .await;
+}
+
+/// The URL of the started dependency placeholder `source` names.
+fn started_dependency(world: &ScenarioWorld, source: &str) -> String {
     world
         .placeholders
-        .insert("rabbitmq_forwarded_addr".to_string(), url.to_string());
+        .get(source)
+        .unwrap_or_else(|| panic!("the dependency behind '{source}' was not started"))
+        .clone()
+}
+
+/// Stand TCP forwarders at `addresses` to the literal address and port of the URL `endpoint`, and
+/// record in placeholder `target` that URL with the fixture name `name` as its host and the
+/// forwarders' port as its port.
+async fn forward_under_fixture_name(
+    world: &mut ScenarioWorld,
+    endpoint: &str,
+    name: &str,
+    addresses: &str,
+    target: &str,
+) {
+    let mut url = url::Url::parse(endpoint).expect("the forwarded endpoint is a URL");
+    let host = url
+        .host_str()
+        .expect("the forwarded endpoint has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("the forwarded dependency listens on a literal address");
+    let port = url.port().expect("the forwarded endpoint names its port");
+    let addresses = fixture_addresses(addresses);
+    let forwarders = TcpForwarders::start(&addresses, std::net::SocketAddr::new(host, port))
+        .await
+        .unwrap_or_else(|error| panic!("the forwarders to {endpoint} could not listen: {error}"));
+    url.set_host(Some(name))
+        .expect("the fixture name is a valid URL host");
+    url.set_port(Some(forwarders.port()))
+        .expect("the forwarded URL can carry the forwarder port");
+    world.placeholders.insert(
+        target.to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
     world.tcp_forwarders = Some(forwarders);
 }
 
@@ -6300,6 +6742,20 @@ async fn when_the_tcp_forwarder_stops(world: &mut ScenarioWorld, address: String
         .stop(address)
         .await
         .unwrap_or_else(|error| panic!("the forwarder at {address} could not stop: {error}"));
+}
+
+#[when(expr = "the TCP forwarder at {string} restarts")]
+async fn when_the_tcp_forwarder_restarts(world: &mut ScenarioWorld, address: String) {
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .assured("the scenario names a TCP forwarder address");
+    world
+        .tcp_forwarders
+        .as_mut()
+        .verified("the scenario started TCP forwarders")
+        .restart(address)
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder at {address} could not restart: {error}"));
 }
 
 #[then(expr = "the TCP forwarder at {string} eventually accepts a connection")]
@@ -8231,9 +8687,35 @@ async fn given_health_responses_are_paused(
 #[when(expr = "application health responses from node {string} fail")]
 async fn given_health_responses_fail(world: &mut ScenarioWorld, responding_node_id: String) {
     let responding_node_id = expand_placeholders(world, &responding_node_id);
+    world.health_fault_started_at = Some(Instant::now());
     world
         .cluster()
         .fail_health_responses_from(&responding_node_id);
+}
+
+#[when(expr = "gossip exchanges involving node {string} are blocked with a {string} send delay")]
+async fn when_gossip_exchanges_are_blocked(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    duration: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let delay = humantime::parse_duration(&duration).assured("the scenario duration is valid");
+    world.cluster().block_gossip_for_node(&node_id, delay);
+}
+
+#[when(expr = "consensus connectivity for node {string} is blocked")]
+async fn when_consensus_connectivity_is_blocked(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .block_consensus_connectivity(crate::common::cluster::node_name(&node_id));
+}
+
+#[when(expr = "gossip exchanges involving node {string} are restored")]
+async fn when_gossip_exchanges_are_restored(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.cluster().restore_gossip_for_node(&node_id);
 }
 
 #[then(expr = "the health response pause from node {string} to node {string} is reached")]
@@ -8473,6 +8955,49 @@ async fn when_command_admission_pause_is_released(world: &mut ScenarioWorld, nod
     world
         .fault_injection
         .release_command_admission_pause(&crate::common::cluster::node_name(&node_id));
+}
+
+#[given(expr = "command reference lookup on node {string} pauses before proposal")]
+async fn given_command_reference_lookup_pause(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_command_reference_lookup_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "the command reference lookup pause on node {string} is reached")]
+async fn then_command_reference_lookup_pause_is_reached(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node_name = crate::common::cluster::node_name(&node_id);
+    let fault_injection = world.fault_injection.clone();
+    let request = world
+        .background_command_result
+        .as_mut()
+        .verified("the preceding step started a background command request");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::select! {
+            () = fault_injection.wait_for_command_reference_lookup_pause(&node_name) => {},
+            result = request => panic!(
+                "command on '{node_id}' returned before its reference lookup pause: {result:?}"
+            ),
+        }
+    })
+    .await
+    .unwrap_or_else(|error| panic!("command reference lookup pause was not reached: {error}"));
+}
+
+#[when(expr = "the command reference lookup pause on node {string} is released")]
+async fn when_command_reference_lookup_pause_is_released(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_command_reference_lookup_pause(&crate::common::cluster::node_name(&node_id));
 }
 
 #[given(expr = "command execution on node {string} pauses after durable admission")]
@@ -8812,6 +9337,37 @@ async fn when_remote_relay_branch_admission_pause_is_released(
     world
         .fault_injection
         .release_remote_relay_admission_pause_for_branch(&domain, Some(&branch));
+}
+
+#[given(expr = "admitted remote relay dispatch for domain {string} is paused")]
+async fn given_remote_relay_dispatch_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world.fault_injection.pause_remote_relay_dispatch(domain);
+}
+
+#[then(expr = "the admitted remote relay dispatch pause for domain {string} is reached")]
+async fn then_remote_relay_dispatch_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        world
+            .fault_injection
+            .wait_for_remote_relay_dispatch_pause(&domain),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "admitted remote relay dispatch pause for domain '{domain}' was not reached: {error}"
+        )
+    });
+}
+
+#[when(expr = "the admitted remote relay dispatch pause for domain {string} is released")]
+async fn when_remote_relay_dispatch_pause_is_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .fault_injection
+        .release_remote_relay_dispatch_pause(&domain);
 }
 
 #[given(expr = "ownership handoff for domain {string} pauses after preparation")]
@@ -10315,6 +10871,7 @@ async fn execute_command_request_with_reference_on_leader(
         .run_command_result_with_reference(&query, execution_reference)
         .await
         .unwrap_or_else(|error| panic!("resumed command request failed: {error}"));
+    world.last_command_disposition = Some(result.disposition.clone());
     if result.succeeded() {
         world.last_command_error = None;
         world.last_command_output = Some(result.message);
@@ -10322,6 +10879,51 @@ async fn execute_command_request_with_reference_on_leader(
         world.last_command_output = None;
         world.last_command_error = Some(result.message);
     }
+}
+
+#[then("the last command request reports an expired execution reference")]
+fn then_last_command_request_reports_expired_execution_reference(world: &mut ScenarioWorld) {
+    assert_eq!(
+        world.last_command_disposition,
+        Some(nervix_client_wire::CommandDisposition::ExecutionReferenceExpired)
+    );
+}
+
+#[then("the background command request reports a content conflict or unknown leadership outcome")]
+async fn then_background_command_request_reports_conflict_or_unknown_leadership(
+    world: &mut ScenarioWorld,
+) {
+    let request = world
+        .background_command_result
+        .take()
+        .verified("the preceding step started a background command request");
+    let result = tokio::time::timeout(Duration::from_secs(30), request)
+        .await
+        .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
+        .assured("the background command task is owned by this scenario")
+        .assured("the background command transport is live until its answer");
+    assert!(matches!(
+        result.disposition,
+        nervix_client_wire::CommandDisposition::ExecutionReferenceConflict(
+            nervix_client_wire::ExecutionReferenceConflict::Content,
+        ) | nervix_client_wire::CommandDisposition::OutcomeUnknown(
+            nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
+        )
+    ));
+}
+
+#[then("the last command request reports an execution reference content conflict")]
+fn then_last_command_request_reports_execution_reference_content_conflict(
+    world: &mut ScenarioWorld,
+) {
+    assert_eq!(
+        world.last_command_disposition,
+        Some(
+            nervix_client_wire::CommandDisposition::ExecutionReferenceConflict(
+                nervix_client_wire::ExecutionReferenceConflict::Content,
+            )
+        )
+    );
 }
 
 #[then(expr = "command execution reference {string} is eventually reclaimed")]
@@ -16762,6 +17364,221 @@ fn scheduled_node_placement_from_status<'a>(
     })
 }
 
+fn scheduled_placements_for_domain(status: &str, domain: &str) -> Vec<SavedHealthyPlacement> {
+    let mut placements = Vec::new();
+    for line in status.lines() {
+        let Some(line) = line.trim().strip_prefix("- domain=") else {
+            continue;
+        };
+        let mut fields = line.split_whitespace();
+        if fields.next() != Some(domain) {
+            continue;
+        }
+        let mut kind = None;
+        let mut name = None;
+        let mut owner = None;
+        for field in fields {
+            if let Some(value) = field.strip_prefix("kind=") {
+                kind = Some(value);
+            } else if let Some(value) = field.strip_prefix("name=") {
+                name = Some(value);
+            } else if let Some(value) = field.strip_prefix("owner=") {
+                owner = Some(value);
+            }
+        }
+        if let (Some(kind), Some(name), Some(owner)) = (kind, name, owner) {
+            placements.push(SavedHealthyPlacement {
+                kind: kind.to_string(),
+                name: name.to_string(),
+                owner: owner.to_string(),
+            });
+        }
+    }
+    placements
+}
+
+fn gossip_live_nodes_from_status(status: &str) -> BTreeSet<&str> {
+    let mut in_live_nodes = false;
+    let mut live_nodes = BTreeSet::new();
+    for line in status.lines() {
+        if line == "live_nodes:" {
+            in_live_nodes = true;
+            continue;
+        }
+        if in_live_nodes && line.starts_with('[') {
+            break;
+        }
+        if in_live_nodes && let Some(node) = line.strip_prefix("- node_id: ") {
+            live_nodes.insert(node);
+        }
+    }
+    live_nodes
+}
+
+#[then(expr = "the last cluster status work on healthy nodes {string} is saved")]
+async fn then_save_healthy_scheduled_work(world: &mut ScenarioWorld, node_ids: String) {
+    let node_ids = expand_placeholders(world, &node_ids);
+    let healthy = node_ids.split(',').collect::<BTreeSet<_>>();
+    let output = world
+        .last_command_output
+        .as_deref()
+        .expect("cluster status must be read before saving scheduled work");
+    let placements = scheduled_placements_for_domain(output, &world.domain);
+    for node_id in &healthy {
+        assert!(
+            placements
+                .iter()
+                .any(|placement| placement.owner == *node_id),
+            "expected scheduled work on healthy node '{node_id}', got {placements:?} in: {output}"
+        );
+    }
+    world.saved_healthy_placements = placements
+        .into_iter()
+        .filter(|placement| healthy.contains(placement.owner.as_str()))
+        .collect();
+}
+
+#[then(
+    expr = "for {string} healthy nodes {string} keep each other live and their scheduled work \
+            while node {string} waits at least {string} for failover"
+)]
+async fn then_healthy_nodes_keep_their_work(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_ids: String,
+    unavailable_node: String,
+    minimum_failover_delay: String,
+) {
+    let duration = humantime::parse_duration(&duration).assured("the scenario duration is valid");
+    let minimum_failover_delay = humantime::parse_duration(&minimum_failover_delay)
+        .assured("the scenario failover delay is valid");
+    let health_fault_started_at = world
+        .health_fault_started_at
+        .expect("the health fault must start before observing failover timing");
+    observe_healthy_peers(
+        world,
+        duration,
+        node_ids,
+        unavailable_node,
+        Some((health_fault_started_at, minimum_failover_delay)),
+    )
+    .await;
+}
+
+#[then(
+    expr = "for {string} healthy nodes {string} keep each other live and their scheduled work \
+            after node {string} stops"
+)]
+async fn then_stopped_peer_does_not_move_healthy_work(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_ids: String,
+    stopped_node: String,
+) {
+    let duration = humantime::parse_duration(&duration).assured("the scenario duration is valid");
+    observe_healthy_peers(world, duration, node_ids, stopped_node, None).await;
+}
+
+async fn observe_healthy_peers(
+    world: &mut ScenarioWorld,
+    duration: Duration,
+    node_ids: String,
+    unavailable_node: String,
+    minimum_failover_delay: Option<(Instant, Duration)>,
+) {
+    let node_ids = expand_placeholders(world, &node_ids);
+    let unavailable_node = expand_placeholders(world, &unavailable_node);
+    let nodes = node_ids.split(',').collect::<Vec<_>>();
+    assert_eq!(nodes.len(), 2, "the scenario names the two connected peers");
+    assert!(
+        !world.saved_healthy_placements.is_empty(),
+        "healthy work must be saved before observing the partition"
+    );
+    let observation = PhaseDeadline::after(duration);
+    while !observation.has_passed() {
+        tokio::task::consume_budget().await;
+        for (source, peer) in [(nodes[0], nodes[1]), (nodes[1], nodes[0])] {
+            let status = world
+                .cluster()
+                .status_text(source, PhaseDeadline::after(STATUS_REQUEST_TIMEOUT))
+                .await
+                .unwrap_or_else(|error| panic!("cluster status on '{source}' failed: {error:#}"));
+            assert!(
+                gossip_live_nodes_from_status(&status).contains(peer),
+                "'{source}' dropped connected peer '{peer}' from gossip: {status}"
+            );
+            for placement in &world.saved_healthy_placements {
+                let current = scheduled_node_placement_from_status(
+                    &status,
+                    &world.domain,
+                    &placement.kind,
+                    &placement.name,
+                );
+                assert_eq!(
+                    current.map(|(owner, _)| owner),
+                    Some(placement.owner.as_str()),
+                    "'{source}' moved healthy work while another peer was unavailable: {status}"
+                );
+            }
+            if source == nodes[0]
+                && let Some((health_fault_started_at, minimum_failover_delay)) =
+                    minimum_failover_delay
+            {
+                let placements = scheduled_placements_for_domain(&status, &world.domain);
+                let isolated_work_remains = placements
+                    .iter()
+                    .any(|placement| placement.owner == unavailable_node);
+                if !isolated_work_remains {
+                    let elapsed = health_fault_started_at.elapsed();
+                    assert!(
+                        elapsed >= minimum_failover_delay,
+                        "work on '{unavailable_node}' moved after {elapsed:?}, before the \
+                         {minimum_failover_delay:?} application-health interval: {status}"
+                    );
+                }
+            }
+            world.last_command_output = Some(status);
+        }
+        observation.pause(Duration::from_millis(250)).await;
+    }
+}
+
+#[then(expr = "within {string} node {string} reports no scheduled work on {string}")]
+async fn then_no_scheduled_work_on_node(
+    world: &mut ScenarioWorld,
+    duration: String,
+    observing_node: String,
+    unavailable_node: String,
+) {
+    let duration = humantime::parse_duration(&duration).assured("the scenario duration is valid");
+    let observing_node = expand_placeholders(world, &observing_node);
+    let unavailable_node = expand_placeholders(world, &unavailable_node);
+    let observation = PhaseDeadline::after(duration);
+    loop {
+        tokio::task::consume_budget().await;
+        assert!(
+            !observation.has_passed(),
+            "work on '{unavailable_node}' did not fail over"
+        );
+        let status = world
+            .cluster()
+            .status_text(&observing_node, observation)
+            .await
+            .unwrap_or_else(|error| panic!("cluster status failed: {error:#}"));
+        let placements = scheduled_placements_for_domain(&status, &world.domain);
+        if !placements.is_empty()
+            && placements
+                .iter()
+                .all(|placement| placement.owner != unavailable_node)
+        {
+            world.last_command_output = Some(status);
+            return;
+        }
+        world.last_command_output = Some(status);
+        observation.pause(Duration::from_millis(250)).await;
+    }
+}
+
 #[then(expr = "the last cluster status schedules nodes on at least {int} distinct owners")]
 async fn then_last_cluster_status_uses_at_least_distinct_owners(
     world: &mut ScenarioWorld,
@@ -21932,7 +22749,9 @@ async fn then_otel_collector_receives_split_exports(
                 .filter(|member| block.contains(**member))
                 .count();
             if carried > 0 {
-                observed.push(format!("export {index}: {count:?} {count_key}, {carried} named"));
+                observed.push(format!(
+                    "export {index}: {count:?} {count_key}, {carried} named"
+                ));
             }
             if count == Some(2)
                 && block.find(members[0]).is_some_and(|first| {
@@ -24210,6 +25029,44 @@ struct ScenarioRunArgs {
     watchdog: SuiteWatchdogArgs,
 }
 
+/// Parse the same Gherkin inputs and CLI options as Cucumber's basic parser, then take the
+/// limited feature chains up before the bulk. Cucumber may schedule all parsed scenarios at
+/// once; admission to a feature and to a run slot happens in the before hook.
+#[derive(Clone, Debug, Default)]
+struct PrioritizedScenarioParser;
+
+impl<I: AsRef<Path>> cucumber::parser::Parser<I> for PrioritizedScenarioParser {
+    type Cli = cucumber::parser::basic::Cli;
+    type Output = futures_util::stream::LocalBoxStream<
+        'static,
+        cucumber::parser::Result<cucumber::gherkin::Feature>,
+    >;
+
+    fn parse(self, input: I, cli: Self::Cli) -> Self::Output {
+        let parsed = cucumber::parser::Parser::parse(cucumber::parser::Basic::new(), input, cli);
+        futures_util::stream::once(async move {
+            let mut features = parsed.collect::<Vec<_>>().await;
+            prioritize_features(&mut features, |feature| {
+                feature.as_ref().ok().map(|feature| feature.name.as_str())
+            });
+            features
+        })
+        .flat_map(futures_util::stream::iter)
+        .boxed_local()
+    }
+}
+
+fn publish_suite_summary() {
+    let summary = suite_summary();
+    print!("{summary}");
+    for line in summary.lines() {
+        append_cucumber_log_line(line);
+    }
+    if let Err(error) = std::fs::write("tests/logs/suite-summary.md", &summary) {
+        eprintln!("failed to write suite summary: {error}");
+    }
+}
+
 async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     let mut cli =
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, ScenarioRunArgs>::parsed();
@@ -24228,9 +25085,14 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         .runner
         .concurrency
         .unwrap_or(default_max_concurrent_scenarios);
+    // Cucumber's cap controls task take-up, not work. All queued scenarios may enter their before
+    // hooks; the harness permits below are the only run capacity charged to a scenario.
+    cli.runner.concurrency = None;
+    let run_slots = StdArc::new(ScenarioRunSlots::new(effective_max_concurrent_scenarios));
     truncate_cucumber_log();
+    begin_suite_measurement(effective_max_concurrent_scenarios, watchdog.budget());
     append_cucumber_log_line(&format!(
-        "scenario parallelism: max_concurrent_scenarios={effective_max_concurrent_scenarios} \
+        "scenario parallelism: run_slots={effective_max_concurrent_scenarios} \
          concurrency_factor={concurrency_factor} tokio_worker_threads={} suite_budget={:?}",
         parallelism.tokio_worker_threads(),
         watchdog.budget()
@@ -24243,19 +25105,15 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     .summarized()
     .normalized()
     .repeat_failed();
-    let run = ScenarioWorld::cucumber()
-        .max_concurrent_scenarios(default_max_concurrent_scenarios)
+    let run = ScenarioWorld::cucumber::<&str>()
+        .with_parser(PrioritizedScenarioParser)
+        .max_concurrent_scenarios(usize::MAX)
         .retries(2)
-        .before(|feature, rule, scenario, world| {
+        .before(move |feature, _rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
             let scenario_line = scenario.position.line;
-            let exclusive = scenario
-                .tags
-                .iter()
-                .chain(rule.iter().flat_map(|rule| &rule.tags))
-                .chain(&feature.tags)
-                .any(|tag| tag == "exclusive");
+            let run_slots = run_slots.clone();
             Box::pin(async move {
                 // Published before the permits below, so a scenario the suite has taken up is
                 // visible while it waits for them rather than only once it runs.
@@ -24264,61 +25122,13 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                     &scenario_name,
                     scenario_line,
                 ));
-                let wasm_state_reset_scenario_permit =
-                    if feature_name == WASM_STATE_RESET_FEATURE_NAME {
-                        // Every reset scenario starts a cluster and compiles WASM. Running more
-                        // than one with the suite's coverage concurrency starves unrelated
-                        // scenario nodes, stretching subsecond assertions into tens of seconds.
-                        // Acquire this before the shared execution guard so queued reset scenarios
-                        // cannot keep an exclusive scenario from taking that guard.
-                        Some(
-                            WASM_STATE_RESET_SCENARIO_PERMITS
-                                .get_or_init(|| {
-                                    StdArc::new(tokio::sync::Semaphore::new(
-                                        MAX_CONCURRENT_WASM_STATE_RESET_SCENARIOS,
-                                    ))
-                                })
-                                .clone()
-                                .acquire_owned()
-                                .await
-                                .expect("WASM state reset scenario semaphore must remain open"),
-                        )
-                    } else {
-                        None
-                    };
-                let execution_lock = SCENARIO_EXECUTION_LOCK
-                    .get_or_init(|| StdArc::new(tokio::sync::RwLock::new(())))
-                    .clone();
-                let execution_permit = if exclusive {
-                    ScenarioExecutionPermit::Exclusive {
-                        _permit: execution_lock.write_owned().await,
-                    }
-                } else {
-                    ScenarioExecutionPermit::Concurrent {
-                        _permit: execution_lock.read_owned().await,
-                    }
-                };
-                world.wasm_state_reset_scenario_permit = wasm_state_reset_scenario_permit;
-                world.scenario_execution_permit = Some(execution_permit);
-                if WEB_CONSOLE_FEATURE_NAMES
-                    .iter()
-                    .any(|name| *name == feature_name)
-                {
-                    // Starting many three-node clusters and optimized WASM consoles together can
-                    // starve Chromium renderer event loops under the suite's global concurrency.
-                    world.web_console_scenario_permit = Some(
-                        WEB_CONSOLE_SCENARIO_PERMITS
-                            .get_or_init(|| {
-                                StdArc::new(tokio::sync::Semaphore::new(
-                                    MAX_CONCURRENT_WEB_CONSOLE_SCENARIOS,
-                                ))
-                            })
-                            .clone()
-                            .acquire_owned()
-                            .await
-                            .expect("web console scenario semaphore must remain open"),
-                    );
-                }
+                let limit = FeatureLimit::for_name(&feature_name);
+                let admission = run_slots
+                    .admit_with(limit, &feature_name, |reason| {
+                        world.wait_for_admission(reason)
+                    })
+                    .await;
+                world.scenario_admission = Some(admission);
                 world.enter_phase(ScenarioPhase::Body, "");
             })
         })
@@ -24361,6 +25171,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.cli_subscription_reader = None;
                 world.cli_subscription_process = None;
                 world.cli_subscription_lines = None;
+                world.cli_clock_process = None;
                 world.server_process_http_load = None;
                 world.held_resource_upload = None;
                 world.server_process = None;
@@ -24405,9 +25216,6 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.stallable_tcp_proxies.clear();
                 world.tcp_forwarders = None;
                 world.silent_interconnect_peers.clear();
-                world.web_console_scenario_permit = None;
-                world.wasm_state_reset_scenario_permit = None;
-                world.scenario_execution_permit = None;
                 // The ZeroMQ and syslog ports the scenario drew for itself were bound by its nodes
                 // and its observers, and both are gone by now, so the ports go back to the pool
                 // the next scenario draws from.
@@ -24418,6 +25226,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                     ScenarioPhase::Finished,
                     &format!("body={body} {cluster_cleanup}"),
                 );
+                world.scenario_admission = None;
             })
         })
         .with_writer(writer)
@@ -24433,7 +25242,10 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     // mid-scenario, leaving logs without the suite's own diagnostic. Cucumber's fail-fast is not
     // this guarantee — it stops scheduling and leaves the scenarios already running exactly where
     // they are — so the retry coverage below keeps running until the budget itself expires.
-    let writer = match watchdog.bound(run).await {
+    let writer = match watchdog
+        .bound_with_timeout_report(run, publish_suite_summary)
+        .await
+    {
         SuiteRun::Completed(writer) => writer,
         SuiteRun::TimedOut(timeout) => {
             for line in timeout.to_string().lines() {
@@ -24469,6 +25281,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         SuiteOutcome::Passed
     };
     drop(writer);
+
+    publish_suite_summary();
 
     execution_failure
 }

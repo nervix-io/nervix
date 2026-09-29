@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 arrow-array = "58"
 arrow-schema = "58"
+error-stack = "0.5"
 nervix-wasm-sdk = { path = "../../../crates/nervix-wasm-sdk" }
 
 [profile.release]

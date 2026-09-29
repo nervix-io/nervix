@@ -66,7 +66,7 @@ control_attempt() {
     local output_dir="$3"
     local status=0
     local outcome=acknowledged
-    local limit=60
+    local limit="${4:-60}"
     if [[ "${name}" == chaos_canary_during ]]; then
         limit=20
     fi

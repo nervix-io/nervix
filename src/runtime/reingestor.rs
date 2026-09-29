@@ -398,10 +398,10 @@ impl Runtime {
                     ),
                 });
             }
-            let metadata = success_input_rows
-                .iter()
-                .map(|input_row| batch.metadata[*input_row].clone())
-                .collect::<Vec<_>>();
+            let metadata = batch.metadata.take(&success_input_rows).verified(
+                "the program selects rows of this batch, whose metadata has one entry for every \
+                 row",
+            );
             let input_batch =
                 batch
                     .batch
@@ -1156,23 +1156,12 @@ impl Runtime {
                                 continue;
                             }
                         };
-                        let delivery_observation = batch.delivery_observation(accepted_at);
-                        input_metrics.observe_batch(
-                            batch.message_count(),
-                            batch.estimated_bytes(),
-                            delivery_observation.domain_timestamp,
-                        );
+                        input_metrics.observe_delivery(&batch.delivery_observation(accepted_at));
                         runtime.mark_branch_aggregated_metrics_updated(
                             &task_domain,
                             ModelKind::Reingestor,
                             &task_reingestor_node,
                         );
-                        for seconds in delivery_observation.latency_seconds {
-                            input_metrics.observe_delivery_latency(
-                                seconds,
-                                delivery_observation.domain_timestamp,
-                            );
-                        }
                         let dependency_error_acks = batch.acks.clone();
                         let wait_for_required_state = !interaction.is_terminal_drain();
                         let batch = match runtime
@@ -1590,7 +1579,7 @@ mod tests {
                 placement_tasks: HashMap::default(),
                 relay_state_tasks: HashMap::default(),
                 relay_owner_tasks: HashMap::default(),
-                clients: HashMap::default(),
+                emitter_plans: Arc::new(EmitterExecutionPlans::default()),
                 tasks: Vec::new(),
             },
         );
@@ -1841,7 +1830,7 @@ mod tests {
                 placement_tasks: HashMap::default(),
                 relay_state_tasks: HashMap::default(),
                 relay_owner_tasks: HashMap::default(),
-                clients: HashMap::default(),
+                emitter_plans: Arc::new(EmitterExecutionPlans::default()),
                 tasks: Vec::new(),
             },
         );

@@ -359,7 +359,7 @@ fn compile_with(
     input_schema: &StdArc<Schema>,
     outputs: Vec<Field>,
     options: CompileOptions,
-) -> Result<CompiledProgram, CompileError> {
+) -> error_stack::Result<CompiledProgram, CompileError> {
     let output_schema = schema(
         input_schema
             .fields()
@@ -600,7 +600,7 @@ impl FunctionInjector for CheckedInjector {
         span: Span,
         _now: Timestamp,
         _prior_error_rows: RowErrorMask<'_>,
-    ) -> Result<InjectedResult, RuntimeError> {
+    ) -> error_stack::Result<InjectedResult, RuntimeError> {
         assert_eq!(*function, FunctionName::Udf("checked".to_string()));
         let [TypedArray::Int64(values)] = arguments else {
             panic!("checked must receive one Int64 argument");
@@ -614,10 +614,12 @@ impl FunctionInjector for CheckedInjector {
                 continue;
             };
             if value > 1000 {
-                return Err(RuntimeError::InjectedFunctionFailed {
-                    function: function.as_str().to_string(),
-                    message: "value above 1000".to_string(),
-                });
+                return Err(error_stack::Report::new(
+                    RuntimeError::InjectedFunctionFailed {
+                        function: function.as_str().to_string(),
+                        message: "value above 1000".to_string(),
+                    },
+                ));
             }
             if value < 0 {
                 output.push(None);
@@ -699,7 +701,10 @@ fn a_tolerant_cast_reports_the_failures_of_an_injected_function_in_its_operand()
     let error = execute_program_sync(&compiled, &whole_batch)
         .expect_err("a failure of the whole batch is not a conversion failure");
     assert!(
-        matches!(error, RuntimeError::InjectedFunctionFailed { .. }),
+        matches!(
+            error.current_context(),
+            RuntimeError::InjectedFunctionFailed { .. }
+        ),
         "{error}"
     );
 }
@@ -723,7 +728,11 @@ fn a_tolerant_cast_is_optional_and_initializes_a_required_field_only_through_a_n
             CompileOptions::default(),
         )
         .expect_err("a tolerant conversion may be null");
-        assert_eq!(error.code, "null_for_required_field", "{source}");
+        assert_eq!(
+            error.current_context().code(),
+            "null_for_required_field",
+            "{source}"
+        );
     }
 
     let compiled = compile(
@@ -772,7 +781,7 @@ fn a_tolerant_cast_keeps_its_exact_target_type_and_the_sensitivity_of_its_operan
         DataType::Int64,
     )
     .expect_err("a converted sensitive value stays sensitive");
-    assert_eq!(leak.code, "sensitive_leak");
+    assert_eq!(leak.current_context().code(), "sensitive_leak");
 
     compile_sensitive(
         "SET amount = leak_sensitive(TRY_CAST(input.secret AS I64))",
@@ -785,7 +794,7 @@ fn a_tolerant_cast_keeps_its_exact_target_type_and_the_sensitivity_of_its_operan
         DataType::Utf8,
     )
     .expect_err("the result has exactly the target type");
-    assert_eq!(mismatch.code, "type_mismatch");
+    assert_eq!(mismatch.current_context().code(), "type_mismatch");
 }
 
 #[test]
@@ -822,5 +831,5 @@ fn a_tolerant_set_element_is_its_converted_value_or_a_null_the_set_rejects() {
         CompileOptions::default(),
     )
     .expect_err("an element that does not convert is a typed null");
-    assert_eq!(error.code, "null_set_element");
+    assert_eq!(error.current_context().code(), "null_set_element");
 }

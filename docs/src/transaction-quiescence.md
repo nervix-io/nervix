@@ -290,7 +290,8 @@ prevents delayed or out-of-order responses from updating the wrong waiter. Recon
 redirect recover the same admitted command by execution reference; a side-effect-free inspection
 can instead be read again. [Rust Client Library](./client-library.md#inspecting-a-transaction),
 [Command Line Client](./client-tools-cli.md), and [NSPL Overview](./nspl-overview.md) own usage;
-client reconnection and correlated response handling remain with the Rust client contract.
+[Client Session Protocol](./client-session-protocol.md) owns client reconnection, correlated
+response handling, and the exact recovery of transaction requests.
 
 The web console uses the typed envelope directly. Its outline selects the whole transaction, an
 effective execution step, or one operation's contribution. The graph combines each step's before
@@ -299,6 +300,9 @@ and after topology at stable positions, then offers **Before**, **Changes**, and
 parallel relations, shared gates, ownership moves, rebuilds, and state resets. A domain-wide pause
 gets an explicit domain outline; a force flush outside the pictured subgraph remains visible in
 the domain summary. An incomplete or stale preview is marked, and a refresh obtains a new basis.
+The console reads a report again only when the inspector opens or changes its target, when the
+attached transaction's position, state, or applied count changes, or when the operator refreshes;
+a delivered report never requests itself again.
 Historical retained topology is drawn from the report rather than a live graph snapshot. Selecting
 one operation still sends the whole-transaction preview identity on commit. See
 [Web Console](./client-tools-web-console.md#inspecting-a-transaction) for the controls.

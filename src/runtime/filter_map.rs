@@ -558,10 +558,9 @@ pub(super) async fn plan_filter_map_messages(
                         error
                     ),
                 })?;
-        let output_metadata = success_input_rows
-            .iter()
-            .map(|input_row| metadata[*input_row].clone())
-            .collect::<Vec<_>>();
+        let output_metadata = metadata.take(&success_input_rows).verified(
+            "the program selects rows of this batch, whose metadata has one entry for every row",
+        );
         let output_acks = success_input_rows
             .iter()
             .map(|input_row| std::mem::take(&mut acks[*input_row]))
@@ -774,10 +773,9 @@ pub(super) async fn plan_emitter_filter_map_batch(
                 emitter.as_str()
             ),
         })?;
-        let metadata = successful_input_rows
-            .iter()
-            .map(|input_row| input.metadata[*input_row].clone())
-            .collect::<Vec<_>>();
+        let metadata = input.metadata.take(&successful_input_rows).verified(
+            "the program selects rows of this batch, whose metadata has one entry for every row",
+        );
         let output_acks = successful_input_rows
             .iter()
             .map(|input_row| std::mem::take(&mut acks[*input_row]))
@@ -2292,10 +2290,16 @@ mod tests {
             ),
             materialized_state: Vec::new(),
         };
+        let route = EmitterExecutionPlan::route(
+            &emitter,
+            input_schema.arrow_schema().as_ref(),
+            output_schema.arrow_schema().as_ref(),
+        )
+        .expect("emitter route must lower");
         let program = compile_emitter_filter_map_program(
             &domain("default"),
-            &emitter,
-            EmitterRoute::Declared,
+            &emitter.name,
+            route.as_ref(),
             RuntimeVmSchemaPair {
                 input: input_schema.arrow_schema(),
                 input_sensitivity: VmSchemaSensitivity::default(),
@@ -2315,25 +2319,13 @@ mod tests {
         *unsupported_emitter.sink = EmitSink::ZeroMq {
             client: named("zeromq_main"),
         };
-        let error = compile_emitter_filter_map_program(
-            &domain("default"),
+        let error = EmitterExecutionPlan::route(
             &unsupported_emitter,
-            EmitterRoute::Declared,
-            RuntimeVmSchemaPair {
-                input: input_schema.arrow_schema(),
-                input_sensitivity: VmSchemaSensitivity::default(),
-                output: output_schema.arrow_schema(),
-                output_sensitivity: VmSchemaSensitivity::default(),
-            },
-            RuntimeVmCompileContext {
-                available_materialized_streams: &HashMap::default(),
-                available_lookups: &HashMap::default(),
-                current_branching: &ResolvedBranching::unbranched(),
-                udfs: None,
-            },
+            input_schema.arrow_schema().as_ref(),
+            output_schema.arrow_schema().as_ref(),
         )
         .expect_err("ZeroMQ emitters must reject write_header");
-        assert!(error.to_string().contains("ZEROMQ emitters do not support"));
+        assert!(error.to_string().contains("ZEROMQ emitter"));
         let messages = [true, false]
             .into_iter()
             .map(|active| {

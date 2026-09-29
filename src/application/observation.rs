@@ -1064,11 +1064,11 @@ impl SessionServiceImpl {
                 reason: reason.to_string(),
             })?;
         Ok(LookupDescribeEnvelope {
-            resource: description.model.resource,
-            resource_version: description.model.resource_version,
-            path: description.model.path,
-            decode_using_codec: description.model.decode_using_codec,
-            key_field: description.model.key_field,
+            resource: description.plan.resource.identifier,
+            resource_version: description.plan.resource.version,
+            path: description.plan.path,
+            decode_using_codec: description.plan.codec,
+            key_field: description.plan.key_field,
             entry_count: description.entry_count.arch_into(),
         })
     }
@@ -2341,7 +2341,7 @@ mod tests {
         *,
     };
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn remote_observation_errors_retain_request_and_decode_causes() {
         let TestService {
             service,

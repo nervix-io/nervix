@@ -78,7 +78,36 @@ if [[ -n "${volumes_output}" ]]; then
 fi
 
 status=0
+# Pumba runs tc and iptables in sidecars that join a target's network namespace and carry only
+# Pumba's own label. One left by an interrupted injector is owned through the container it joined.
+sidecars=()
 if ((${#containers[@]} > 0)); then
+    mapfile -t pumba_sidecars < <(timeout --foreground --kill-after=5s 30s \
+        docker container ls --all --quiet --filter label=com.gaiaadm.pumba.skip=true)
+    for sidecar_id in "${pumba_sidecars[@]}"; do
+        network_mode="$(timeout --foreground --kill-after=5s 20s \
+            docker inspect --format '{{.HostConfig.NetworkMode}}' "${sidecar_id}" 2>/dev/null || true)"
+        for container_id in "${containers[@]}"; do
+            if [[ "${network_mode}" == "container:${container_id}"* ]]; then
+                sidecars+=("${sidecar_id}")
+                break
+            fi
+        done
+    done
+fi
+if ((${#sidecars[@]} > 0)); then
+    timeout --foreground --kill-after=5s 60s docker container rm --force "${sidecars[@]}" \
+        >/dev/null || status=$?
+fi
+if ((${#containers[@]} > 0)); then
+    for container_id in "${containers[@]}"; do
+        paused="$(timeout --foreground --kill-after=5s 20s \
+            docker inspect --format '{{.State.Paused}}' "${container_id}")" || status=1
+        if [[ "${paused:-}" == true ]]; then
+            timeout --foreground --kill-after=5s 20s docker unpause "${container_id}" \
+                >/dev/null || status=1
+        fi
+    done
     timeout --foreground --kill-after=5s 60s docker container rm --force "${containers[@]}" \
         >/dev/null || status=$?
 fi
@@ -92,8 +121,8 @@ if ((${#volumes[@]} > 0)); then
 fi
 
 if [[ "${quiet}" != true ]]; then
-    printf 'chaos cleanup run=%s containers=%d networks=%d volumes=%d\n' \
-        "${run_id}" "${#containers[@]}" "${#networks[@]}" "${#volumes[@]}"
+    printf 'chaos cleanup run=%s containers=%d pumba_sidecars=%d networks=%d volumes=%d\n' \
+        "${run_id}" "${#containers[@]}" "${#sidecars[@]}" "${#networks[@]}" "${#volumes[@]}"
 fi
 
 exit "${status}"

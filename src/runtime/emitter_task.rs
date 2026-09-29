@@ -1,11 +1,11 @@
 //! One emitter's task: the loop that receives its input and decides when it publishes.
 //!
 //! Layer: data plane.
-//! - **Owns.** Spawning an emitter task from its start plan, the loop that handles its commands,
+//! - **Owns.** Spawning an emitter task from its execution plan, the loop that handles its commands,
 //!   force flushes, wakes and input batches, resolving each input batch's materialized state,
 //!   filters, ordering groups and HTTP request fields, the host context its connector reports
 //!   through, and the emitter's failure semantics.
-//! - **Depends on.** The emitter's start plan and compiled programs, the relay interaction that
+//! - **Depends on.** The emitter's execution and sink start plans and compiled programs, the relay interaction that
 //!   delivers its input, its buffer, retry schedule and publishing, and the node's metrics, events
 //!   and error policies.
 //! - **Must not know.** Which sink crate the emitter publishes through, how its records are
@@ -146,8 +146,6 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     StopDeadlineElapsed,
     #[error("emitter final flush failed")]
     FinalFlush,
-    #[error("OTEL RESOURCE attribute '{attribute}' must be a literal value or a literal array")]
-    InvalidOtelResource { attribute: String },
     #[error("failed to encode emitter batch")]
     EncodeBatch,
     #[error("failed to publish emitter batch")]
@@ -178,7 +176,6 @@ impl EmitterRuntimeError {
             | Self::UnknownSinkRecord { .. }
             | Self::SinkRecordAnsweredTwice { .. }
             | Self::InvalidSinkConfig
-            | Self::InvalidOtelResource { .. }
             | Self::InitializeSink
             | Self::FaultInjected
             | Self::ShutdownWhileStalled
@@ -563,7 +560,7 @@ impl EmitterTask {
     pub(in crate::runtime) fn spawn(
         runtime: &Runtime,
         build: EmitterTaskBuildDeps<'_>,
-        emitter: CreateEmitter,
+        emitter: EmitterExecutionPlan,
         plan: EmitterStartPlan,
         inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
     ) -> Result<ScheduledEmitterTask, RuntimeError> {
@@ -579,7 +576,7 @@ impl EmitterTask {
             materialized_relay_specs: materialized_stream_specs,
             lookups,
         } = deps;
-        let codec = if let Some(codec_name) = emitter.body.codec() {
+        let codec = if let Some(codec_name) = emitter.codec.as_ref() {
             Some(codecs.get(codec_name).cloned().ok_or_else(|| {
                 RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
@@ -615,14 +612,10 @@ impl EmitterTask {
             current_branching: &input_branching,
             udfs: udfs.as_ref(),
         };
-        let route = match &plan.sink {
-            EmitterSinkPlan::Http(_) => EmitterRoute::HttpRequest,
-            _ => EmitterRoute::Declared,
-        };
         let filter_map = compile_emitter_filter_map_program(
             domain,
-            &emitter,
-            route,
+            &emitter.name,
+            emitter.route.as_ref(),
             RuntimeVmSchemaPair {
                 input: input_schema.arrow_schema(),
                 input_sensitivity: input_schema.vm_sensitivity(),
@@ -640,6 +633,10 @@ impl EmitterTask {
                 let compiled = CompiledHttpRequestFields::compile(
                     &emitter.name,
                     sink,
+                    emitter
+                        .http_request
+                        .as_ref()
+                        .verified("the decision gives every HTTP emitter its request program"),
                     HttpRequestSchemas {
                         input: RuntimeVmSchema {
                             schema: input_schema.arrow_schema(),
@@ -657,7 +654,7 @@ impl EmitterTask {
             }
             _ => None,
         };
-        let ordering_group = match plan.sink.ordering_group() {
+        let ordering_group = match emitter.ordering_group.as_ref() {
             None => None,
             Some(declared) => Some(CompiledOrderingGroup::compile(
                 declared,
@@ -676,13 +673,16 @@ impl EmitterTask {
             )?),
         };
         let mut source_filters = HashMap::default();
-        for source_filter in emitter.from.where_clauses() {
-            let program = compile_scoped_filter_program(
+        for input in &emitter.inputs {
+            let Some(source_filter) = input.from_where.as_ref() else {
+                continue;
+            };
+            let program = bind_scoped_filter_program(
                 RuntimeCompileTarget {
                     domain,
                     identifier: &ModelName::from(&emitter.name),
                 },
-                Some(&source_filter.where_clause),
+                source_filter.program(),
                 RuntimeVmSchema {
                     schema: input_schema.arrow_schema(),
                     sensitivity: input_schema.vm_sensitivity(),
@@ -699,17 +699,13 @@ impl EmitterTask {
                     allow_header_reads: false,
                     allow_metadata: false,
                 },
-            )?
-            .verified(
-                "a FROM WHERE clause is present here, and a present clause always compiles to a \
-                 program",
-            );
-            source_filters.insert(source_filter.relay.clone(), program);
+            )?;
+            source_filters.insert(input.relay.clone(), program);
         }
         let task_domain = domain.clone();
         let task_emitter = emitter.name.clone();
-        let task_metric_relay = if emitter.from.relays().len() == 1 {
-            emitter.from.first().cloned()
+        let task_metric_relay = if emitter.inputs.len() == 1 {
+            emitter.inputs.first().map(|input| input.relay.clone())
         } else {
             None
         };
@@ -796,7 +792,7 @@ impl EmitterTask {
             domain,
             "emitter",
             &emitter.name,
-            emitter.from.collect_policy.as_ref(),
+            emitter.collect_policy.as_ref(),
         )?;
         let (commands, command_rx) = mpsc::channel(4);
         let (stop_signal, mut stop_rx) = watch::channel(None);
@@ -975,17 +971,13 @@ impl EmitterTaskLoop<'_> {
             let (input_event, mut work) = work.into_parts();
             match input_event {
                 RelayInteractionEvent::Command(EmitterTaskCommand::Reconfigure {
-                    config,
+                    flush_policy,
                     response,
                 }) => {
                     // The new cadence replaces the old one for the batches already buffered,
                     // so a reconfiguration that cannot read the domain clock leaves them
                     // without a deadline and is recorded as the emitter's transient error.
-                    if let Err(error) = self
-                        .state
-                        .buffer
-                        .reconfigure(self.context, &config.flush_policy)
-                    {
+                    if let Err(error) = self.state.buffer.reconfigure(self.context, &flush_policy) {
                         let reason = emitter_error_message(&error);
                         self.context.runtime.record_emitter_transient_error(
                             &self.context.domain,
@@ -1320,27 +1312,16 @@ impl EmitterTaskLoop<'_> {
                     relay: input_relay,
                     batch,
                 } => {
-                    let delivery_observation = batch.delivery_observation(actual_utc_now());
                     let input_metrics = self
                         .input_metrics
                         .get(&input_relay)
                         .verified("the task resolves metrics for every declared emitter input");
-                    input_metrics.observe_batch(
-                        batch.message_count(),
-                        batch.estimated_bytes(),
-                        delivery_observation.domain_timestamp,
-                    );
+                    input_metrics.observe_delivery(&batch.delivery_observation(actual_utc_now()));
                     self.context.runtime.mark_branch_aggregated_metrics_updated(
                         &self.context.domain,
                         ModelKind::Emitter,
                         &self.context.emitter,
                     );
-                    for seconds in delivery_observation.latency_seconds {
-                        input_metrics.observe_delivery_latency(
-                            seconds,
-                            delivery_observation.domain_timestamp,
-                        );
-                    }
                     let wait_for_required_state = !self.interaction.is_terminal_drain();
                     let publish_batch = match self
                         .batch_context

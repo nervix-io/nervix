@@ -128,6 +128,11 @@ raw on the wire, while callers see the state the format describes. Arrow batches
 data-plane payload throughout this conversion; codecs use typed builders and column values, and a
 single addressed message is a view into a batch.
 
+A relay batch carries its rows' ingestion watermarks the same way, in two Arrow buffers of
+Unix-nanosecond timestamps beside the payload. A kernel reads them as `i64` lanes; a row addressed
+on its own, the interconnect wire, and a materialized-state snapshot receive typed timestamps,
+converted once where the row leaves the batch.
+
 A conversion failure never becomes another valid payload value. The MongoDB sink returns a typed
 per-record failure if a value cannot be represented in BSON, including an unsigned value above
 BSON's signed range. It does not publish that record with a replacement BSON null or a changed
@@ -146,7 +151,9 @@ Session replies carry typed command purpose and outcomes. An upload failure can 
 assigned nonzero resource version; before assignment, the version is absent. Diagnostic spans can
 be absent, while a present span beginning at offset zero is still present. The web console uses
 the typed outcome for domain-selection dispatch instead of matching reply message text. The
-FlatBuffers encoding preserves these optional fields and typed variants across the session edge.
+FlatBuffers encoding preserves these optional fields and typed variants across the session edge;
+[Client Session Protocol](./client-session-protocol.md#verification-before-reading) defines how a
+receiver keeps an absent optional value distinct from a present zero.
 
 Completion replies likewise carry a `SuggestionStatus` variant for ready, missing, stale, or failed
 context and an optional continuation. The server resolves typed semantic references from one
@@ -166,7 +173,9 @@ the same typed union for enum variants and domain, resource, model, or field ref
 label, detail, and group held separately as presentation. The FlatBuffers discriminant selects
 behavior. A missing typed dependency is `MissingContext`, and a page cursor binds the dependencies,
 revision, candidate values, and presentation so changed form state is `StaleContext` rather than a
-silently retargeted page.
+silently retargeted page. The browser keeps missing prerequisites, stale context, empty results,
+loading, and failures as separate choice states. A missing prerequisite carries a hint; stale
+context offers a fresh lookup; only lookup and transport failures are alerts.
 
 Incomplete schema, branch, relay, and subscription form values stay in browser drafts. The
 completed conversion creates the current schema, branch, or relay Model, with field order,
@@ -211,6 +220,11 @@ message on every hot-path operation. Diagnostics contain the relevant identity, 
 field names, while sensitive payload values stay out of errors and logs. A truly optional value
 continues as `Option` until its consumer decides whether absence is valid. A label or rendered
 string is only a presentation of the state and never an input to execution.
+
+Replicated command admission distinguishes a reference that has expired from one bound to a
+different owner, domain, transaction position, or content in its typed conflict result. The
+session carries that distinction into the public command disposition; rendering its message does
+not choose the disposition.
 
 Error-route branch validation carries the node, source route, error relay, and both branch
 declarations as typed data. Direct emitter `VALUES` validation identifies a sensitive external

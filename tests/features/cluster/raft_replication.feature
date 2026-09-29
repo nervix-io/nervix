@@ -28,7 +28,7 @@ Feature: Pipelined raft replication and bounded log retention
     And a 3 node nervix cluster is started
     And node "node-3" is stopped
     When 40 domains named "interrupted" are created on the leader node
-    Then within "60s" the leader node has purged its covered raft log
+    Then within "60s" the leader node has purged its covered raft log and reports fewer retained bytes
     Given node "node-3" interrupts its next raft snapshot installation
     When node "node-3" is started without waiting for it to catch up
     Then within "60s" node "node-3" has interrupted a raft snapshot installation
@@ -37,7 +37,6 @@ Feature: Pipelined raft replication and bounded log retention
     Then within "60s" node "node-3" recovers by installing a raft snapshot
     And within "60s" node "node-3" has applied 40 domains named "interrupted"
 
-  @exclusive
   Scenario: Durable follower catch-up stays bounded and preserves its append stream
     Given raft election timeout is configured from "15s" to "20s"
     And a 3 node nervix cluster is started

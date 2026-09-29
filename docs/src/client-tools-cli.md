@@ -51,7 +51,7 @@ subcommand for this release.
 
 The client runs in exactly one of three modes, in this order of precedence:
 
-1. **A subcommand**, such as `subscribe` or `drain-node`.
+1. **A subcommand**, such as `subscribe`, `domain-clock`, or `drain-node`.
 2. **`--command`**, which submits NSPL, prints the result, and exits.
 3. **The interactive REPL**, when neither of the above is given.
 
@@ -122,7 +122,7 @@ offending span highlighted in place rather than described by offset.
 
 ### Asynchronous Output
 
-Subscription deliveries, server notifications, and changes of an attached domain clock arrive
+Subscription deliveries, server notifications, and state changes and ticks of an attached clock arrive
 independently of the prompt and are printed above it:
 
 ```text
@@ -130,9 +130,11 @@ independently of the prompt and are printed above it:
 [events] server ERROR: emitter 'redis_orders' publish failed
 [events] topology INFO: raft transition: node-2 became leader
 [events] domain clock [simulation]: generation 2, stopped
+[events] domain clock [simulation] tick: generation 3, id 12, boundary 2030-01-01T00:00:01.100000000Z, authority UTC 2026-09-27T00:00:00Z, node logical 2030-01-01T00:00:01.120000000Z
 ```
 
-A domain clock line follows every change after the attach reply. When the server ends an
+A domain clock line follows every state change or accepted tick after the attach reply. A slow
+client may skip tick ids because its pending tick is replaced by the newest one. When the server ends an
 attachment, or the session holding it is interrupted and the clock is attached again on the next
 session, the line reads `[events] domain clock [<domain>] notice: ...` with the reason.
 
@@ -234,11 +236,39 @@ nervix-cli --domain quickstart subscribe sampled orders \
 | --- | --- |
 | `--dropping` | drop deliveries when the session transport queue is full |
 | `--blocking` | block instead of dropping; this is the default, so the flag is only ever explicit |
-| `--batch-sample-rate <0.0-1.0>` | per-arrival sampling of delivered batches |
-| `--where <expression>` | NSPL predicate over delivered records, validated locally before connecting |
+| `--batch-sample-rate <0.0-1.0>` | sampling of each row the predicate selected |
+| `--where <expression>` | NSPL predicate over delivered records, validated locally before the subscription opens |
 
 `--dropping` and `--blocking` are mutually exclusive. Subscription semantics, sampling, and
 backpressure are covered in [Sessions](sessions.md).
+
+## Following A Domain Clock
+
+The `domain-clock` subcommand attaches to the selected domain's clock and prints its state and
+progress on stdout until interrupted:
+
+```bash
+nervix-cli --domain simulation domain-clock
+```
+
+The first line is the attach reply. Every later clock state, tick, interruption, or attachment end
+uses the same one-line format as the REPL's [Asynchronous Output](#asynchronous-output):
+
+```text
+attached to the clock of domain 'simulation': generation 1, paced: period 1s, skew 100ms, logical origin 2030-01-01T00:00:00Z, UTC anchor 2026-09-27T09:30:00.125Z, time rate 2
+[events] domain clock [simulation] tick: generation 1, id 1, boundary 2030-01-01T00:00:00Z, authority UTC 2026-09-27T09:30:00.125Z, node logical 2030-01-01T00:00:00Z
+[events] domain clock [simulation]: generation 1, stopped
+[events] domain clock [simulation]: generation 2, paced: period 1s, skew 100ms, logical origin 2026-09-27T09:31:00Z, UTC anchor 2026-09-27T09:31:00Z, time rate 1
+```
+
+The domain and generation identify each state. A paced state includes its period, skew, logical
+origin, UTC anchor, and rate. A tick includes its id, logical boundary, the authority's UTC
+observation, and the serving node's logical reading. Tick ids increase within a generation but may
+skip when the client or server coalesces progress. After a redirect or transport loss, an
+interruption line reports the gap and the client's restored attachment prints the fresh state.
+The server may end an attachment when the domain disappears; the end line is the last clock line
+and the command exits. Ctrl-C detaches the clock and exits successfully. A refused attach,
+including a missing domain, prints the typed reason on stderr and exits nonzero.
 
 ## Cluster Node Administration
 
@@ -287,17 +317,21 @@ the server, so it works before a cluster exists.
 ## Leader Redirects
 
 Persistent statements are applied by the leader. The CLI gives each one a stable execution
-reference and retains it until the terminal result. If the session lands on a follower the client
-reports the redirect and reconnects on its own, following up to four hops:
+reference and retains it until the terminal result. If the session lands on a follower, the client
+follows the redirect and reconnects on its own, repeating the statement under the same reference,
+and waits out an election the same way; all of it is bounded by the client's 120-second retry
+deadline. A statement the leader never answered in that time is reported with its execution
+reference as not known yet. A redirect that reaches the terminal as a statement's own result is
+printed as:
 
 ```text
-topology: not-a-leader, retry on leader 'node-2' at http://10.0.0.12:47391
+topology: not-a-leader, retry on leader 'node-2' at http://10.0.0.12:47391/
 ```
 
 Transaction controls follow the same redirect beginning with `BEGIN`. The CLI retains the returned
 transaction id and attaches it on the new connection before resuming any queued statement or
 commit. Each append keeps its execution reference and expected queue position. A pending commit
-waits through `COMMITTING` for the exact retained terminal result. An open
+waits for the exact retained terminal result recorded under its own reference. An open
 transaction therefore survives an unclean connection loss or leader failover; a clean CLI exit
-reverts it. See
-[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions).
+reverts it. See [Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions) and
+[Client Session Protocol](client-session-protocol.md).

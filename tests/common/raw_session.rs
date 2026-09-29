@@ -29,11 +29,11 @@ use nervix_client_wire::{
     AttachDisposition, AttachDomainClockRequest, AttachOutcome, AttachTransactionRequest,
     CancelRequest, ClientMessage, ClientRequest, CommandDisposition, CommandOutcome,
     CommandRequest, DetachDomainClockRequest, Diagnostic, DomainClockAttachmentEnded,
-    DomainClockObserved, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, RequestId, RowSchema,
-    ServerEvent, ServerFrame, ServerMessage, SessionEndReason, SessionLimits, SubscribeDisposition,
-    SubscribeRequest, SubscriptionEnded, SubscriptionHandle, SubscriptionType, TransferAssembly,
-    UnsubscribeDisposition, UnsubscribeRequest, UploadChunk, UploadReply, UploadStart,
-    VerifiedFrame,
+    DomainClockObserved, DomainClockTicked, NoticeLevel, OutcomeOrigin, Reply, ReplyBody,
+    RequestId, RowSchema, ServerEvent, ServerFrame, ServerMessage, SessionEndReason, SessionLimits,
+    SubscribeDisposition, SubscribeRequest, SubscriptionEnded, SubscriptionHandle,
+    SubscriptionType, TransferAssembly, UnsubscribeDisposition, UnsubscribeRequest, UploadChunk,
+    UploadReply, UploadStart, VerifiedFrame,
     grpc::{
         ClientExchangeCodec, ClientUploadCodec, EXCHANGE_PATH, FrameDecoder, UPLOAD_RESOURCE_PATH,
     },
@@ -89,6 +89,7 @@ struct OpenSubscription {
 #[derive(Debug, Clone)]
 pub(crate) enum TestClockFrame {
     Observed(DomainClockObserved),
+    Ticked(DomainClockTicked),
     Ended(DomainClockAttachmentEnded),
 }
 
@@ -96,6 +97,7 @@ impl TestClockFrame {
     pub(crate) fn domain(&self) -> &DomainName {
         match self {
             Self::Observed(observed) => &observed.domain,
+            Self::Ticked(ticked) => &ticked.domain,
             Self::Ended(ended) => &ended.domain,
         }
     }
@@ -586,6 +588,9 @@ impl TestSession {
             ServerEvent::DomainClockObserved(observed) => {
                 self.file_clock_frame(TestClockFrame::Observed(observed));
             }
+            ServerEvent::DomainClockTicked(ticked) => {
+                self.file_clock_frame(TestClockFrame::Ticked(ticked));
+            }
             ServerEvent::DomainClockAttachmentEnded(ended) => {
                 self.file_clock_frame(TestClockFrame::Ended(ended));
             }
@@ -605,6 +610,13 @@ impl TestSession {
     /// Every domain clock reply and frame, in the order the session read them.
     pub(crate) fn clock_log(&self) -> &[TestClockLogEntry] {
         &self.clock_log
+    }
+
+    /// Drops unread frames for `domain` that were filed while waiting for a reply already read.
+    /// The caller checks the clock log's wire order before discarding them.
+    pub(crate) fn discard_queued_clock_frames_for(&mut self, domain: &DomainName) {
+        self.pending_clock_frames
+            .retain(|frame| frame.domain() != domain);
     }
 
     /// Sends a request attaching the session to the clock of `domain`, without waiting for its

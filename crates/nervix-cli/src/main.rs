@@ -29,9 +29,10 @@ use error_stack::{Report as StackReport, ResultExt as _};
 use nervix_client_core::{
     AutocompleteOutcome, AutocompleteSuggestion, Client, ClientError as CoreClientError,
     CommandDisposition, CommandExecutionReference, CommandOutcome, ConnectOptions, Diagnostic,
-    DomainClockEvent, DomainName, LeaderRedirect, NoticeLevel, ServerEvent, SourceSpan,
-    StatementDisposition, StatementOutcome, SubscriptionDeliveryBehavior, SubscriptionEvent,
-    SubscriptionRequest, SuggestionKind as ClientSuggestionKind, TlsRequirement,
+    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockDetachDisposition,
+    DomainClockDetachOutcome, DomainClockEvent, DomainName, LeaderRedirect, NoticeLevel,
+    ServerEvent, SourceSpan, StatementDisposition, StatementOutcome, SubscriptionDeliveryBehavior,
+    SubscriptionEvent, SubscriptionRequest, SuggestionKind as ClientSuggestionKind, TlsRequirement,
     TransactionLifecycle, TransactionStatus,
 };
 use nervix_models::{ClusterNodeName, InspectionFormat, Statement};
@@ -119,6 +120,8 @@ enum Command {
         #[arg(long = "where")]
         where_clause: Option<String>,
     },
+    /// Follow the selected domain's clock until interrupted
+    DomainClock,
     /// Remove a node from the cluster membership
     RemoveNode {
         /// Node id to remove
@@ -171,6 +174,20 @@ enum ClientError {
     InspectionFailed { message: String },
     #[error("completion pagination repeated a continuation")]
     RepeatedSuggestionPage,
+    #[error("domain '{domain}' does not exist")]
+    ClockDomainNotFound { domain: DomainName },
+    #[error("the session already follows the clock of domain '{domain}'")]
+    ClockAlreadyAttached { domain: DomainName },
+    #[error("domain clock attachment was refused")]
+    ClockAttachRefused,
+    #[error("domain clock detachment was refused")]
+    ClockDetachRefused,
+    #[error("failed to attach to the domain clock")]
+    ClockAttachRequest,
+    #[error("failed to read the domain clock")]
+    ClockEventRead,
+    #[error("failed to detach from the domain clock")]
+    ClockDetachRequest,
 }
 
 async fn collect_suggestions(
@@ -327,6 +344,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             })
             .await;
         }
+        Some(Command::DomainClock) => return run_domain_clock_mode(&args).await,
         Some(Command::RemoveNode { node_id }) => {
             let connect_options = connect_options_from_args(&args)?;
             let client = Client::connect_with_options(
@@ -775,6 +793,76 @@ async fn run_subscribe_mode(options: SubscribeModeOptions) -> Result<(), StackRe
         .await
         .map_err(|_| StackReport::new(ClientError::from(CoreClientError::SessionClosed)))?;
     Ok(())
+}
+
+async fn run_domain_clock_mode(args: &Args) -> Result<(), StackReport<ClientError>> {
+    let connect_options = connect_options_from_args(args)?;
+    let client =
+        Client::connect_with_options(&args.server, Some(args.domain.clone()), connect_options)
+            .await
+            .map_err(|error| StackReport::new(ClientError::from(error)))?;
+    let outcome = client
+        .attach_domain_clock(args.domain.clone())
+        .await
+        .change_context(ClientError::ClockAttachRequest)?;
+    println!("{}", clock_attach_message(outcome)?);
+
+    let interrupt = signal::ctrl_c();
+    tokio::pin!(interrupt);
+    loop {
+        tokio::task::consume_budget().await;
+        tokio::select! {
+            event = client.next_domain_clock_event() => {
+                let event = event.change_context(ClientError::ClockEventRead)?;
+                println!("{}", format_domain_clock_event(&event));
+                if let DomainClockEvent::Ended(_) = event {
+                    return Ok(());
+                }
+            }
+            interrupted = &mut interrupt => {
+                interrupted.map_err(|_| StackReport::new(ClientError::from(CoreClientError::SessionClosed)))?;
+                let outcome = client
+                    .detach_domain_clock(args.domain.clone())
+                    .await
+                    .change_context(ClientError::ClockDetachRequest)?;
+                clock_detach_completed(outcome)?;
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn clock_attach_message(
+    outcome: DomainClockAttachOutcome,
+) -> Result<String, StackReport<ClientError>> {
+    match outcome.disposition {
+        DomainClockAttachDisposition::Attached { .. } => Ok(outcome.message),
+        DomainClockAttachDisposition::DomainNotFound(domain) => {
+            Err(StackReport::new(ClientError::ClockDomainNotFound {
+                domain,
+            }))
+        }
+        DomainClockAttachDisposition::AlreadyAttached(domain) => {
+            Err(StackReport::new(ClientError::ClockAlreadyAttached {
+                domain,
+            }))
+        }
+        DomainClockAttachDisposition::Failed => {
+            Err(StackReport::new(ClientError::ClockAttachRefused).attach_printable(outcome.message))
+        }
+    }
+}
+
+fn clock_detach_completed(
+    outcome: DomainClockDetachOutcome,
+) -> Result<(), StackReport<ClientError>> {
+    match outcome.disposition {
+        DomainClockDetachDisposition::Detached(_)
+        | DomainClockDetachDisposition::NotAttached(_) => Ok(()),
+        DomainClockDetachDisposition::Failed => {
+            Err(StackReport::new(ClientError::ClockDetachRefused).attach_printable(outcome.message))
+        }
+    }
 }
 
 fn command_buffer_is_complete(buffer: &str) -> bool {
@@ -1228,6 +1316,16 @@ fn format_domain_clock_event(event: &DomainClockEvent) -> String {
             "[events] domain clock [{}]: {}",
             observed.domain, observed.clock
         ),
+        DomainClockEvent::Ticked(ticked) => format!(
+            "[events] domain clock [{}] tick: generation {}, id {}, boundary {}, authority UTC \
+             {}, node logical {}",
+            ticked.domain,
+            ticked.tick.generation,
+            ticked.tick.tick_id,
+            ticked.tick.logical_boundary.to_rfc3339(),
+            ticked.tick.authority_utc.to_rfc3339(),
+            ticked.tick.serving_logical.to_rfc3339(),
+        ),
         DomainClockEvent::Ended(ended) => format!(
             "[events] domain clock [{}] notice: the attachment ended because {}",
             ended.domain, ended.reason
@@ -1479,6 +1577,65 @@ mod tests {
             }
             other => panic!("unexpected subcommand: {other:?}"),
         }
+    }
+
+    #[test]
+    fn domain_clock_command_is_parsed() {
+        let args = Args::parse_from(["nervix-cli", "--domain", "sim", "domain-clock"]);
+        assert_eq!(args.domain.as_str(), "sim");
+        assert!(matches!(args.subcommand, Some(Command::DomainClock)));
+    }
+
+    #[test]
+    fn domain_clock_attach_refusals_keep_typed_errors_and_server_detail() {
+        let domain = DomainName::parse("sim").assured("a valid domain name");
+        let already_attached = DomainClockAttachOutcome {
+            disposition: DomainClockAttachDisposition::AlreadyAttached(domain.clone()),
+            message: "already attached".to_string(),
+        };
+        let Err(error) = clock_attach_message(already_attached) else {
+            panic!("an already attached clock must be refused");
+        };
+        assert!(matches!(
+            error.current_context(),
+            ClientError::ClockAlreadyAttached { domain: attached } if attached == &domain
+        ));
+
+        let refused = DomainClockAttachOutcome {
+            disposition: DomainClockAttachDisposition::Failed,
+            message: "the server refused the attachment".to_string(),
+        };
+        let Err(error) = clock_attach_message(refused) else {
+            panic!("a refused clock attachment must fail");
+        };
+        assert!(matches!(
+            error.current_context(),
+            ClientError::ClockAttachRefused
+        ));
+        assert!(format!("{error:?}").contains("the server refused the attachment"));
+    }
+
+    #[test]
+    fn domain_clock_detach_accepts_absence_and_reports_refusal() {
+        let domain = DomainName::parse("sim").assured("a valid domain name");
+        let not_attached = DomainClockDetachOutcome {
+            disposition: DomainClockDetachDisposition::NotAttached(domain),
+            message: "not attached".to_string(),
+        };
+        assert!(clock_detach_completed(not_attached).is_ok());
+
+        let refused = DomainClockDetachOutcome {
+            disposition: DomainClockDetachDisposition::Failed,
+            message: "the server refused the detachment".to_string(),
+        };
+        let Err(error) = clock_detach_completed(refused) else {
+            panic!("a refused clock detachment must fail");
+        };
+        assert!(matches!(
+            error.current_context(),
+            ClientError::ClockDetachRefused
+        ));
+        assert!(format!("{error:?}").contains("the server refused the detachment"));
     }
 
     #[test]
@@ -2252,6 +2409,22 @@ mod tests {
         assert_eq!(
             format_domain_clock_event(&observed),
             "[events] domain clock [sim]: generation 4, unpaced"
+        );
+        let ticked = DomainClockEvent::Ticked(nervix_client_core::DomainClockTicked {
+            domain: domain.clone(),
+            tick: nervix_client_core::DomainClockTickObservation {
+                generation: 5,
+                tick_id: 12,
+                logical_boundary: nervix_client_core::Timestamp::from_unix_nanos(1_000),
+                authority_utc: nervix_client_core::Timestamp::from_unix_nanos(2_000),
+                serving_logical: nervix_client_core::Timestamp::from_unix_nanos(3_000),
+            },
+        });
+        assert_eq!(
+            format_domain_clock_event(&ticked),
+            "[events] domain clock [sim] tick: generation 5, id 12, boundary \
+             1970-01-01T00:00:00.000001Z, authority UTC 1970-01-01T00:00:00.000002Z, node logical \
+             1970-01-01T00:00:00.000003Z"
         );
         let ended = DomainClockEvent::Ended(nervix_client_core::DomainClockAttachmentEnded {
             domain: domain.clone(),

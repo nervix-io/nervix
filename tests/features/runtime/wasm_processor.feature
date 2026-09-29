@@ -590,7 +590,7 @@ Feature: WASM processor runtime behavior
     Then within "10s" the active session observes a server error
     And the last server error contains
       """
-      wasm processor 'restoring_guest' application state restoration failed (branch {"tenant":"alpha"}, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1)
+      wasm processor 'restoring_guest' application state restoration failed (branch {"tenant":"alpha"}, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1): wasm guest rejected the application state in its saved snapshot: guest refuses its saved counters
       """
     And within "10s" the relay subscription receives payloads containing all fragments
       """
@@ -1006,6 +1006,7 @@ Feature: WASM processor runtime behavior
       | 1            | 0             |
       | 3            | 0             |
 
+  @execution_resource_plan
   Scenario Outline: WASM processor restores guest state after cluster restart
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And the production sticky scheduler is configured
@@ -2003,6 +2004,7 @@ Feature: WASM processor runtime behavior
       | 1            | 0             |
       | 3            | 0             |
 
+  @execution_resource_plan
   Scenario Outline: Invalid WASM processor module prevents runtime startup
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

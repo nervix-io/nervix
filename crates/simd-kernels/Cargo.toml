@@ -1,0 +1,20 @@
+[package]
+description = "Portable SIMD kernels over plain buffers and offsets"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-simd-kernels"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+arch-into = { workspace = true }
+error-stack = { workspace = true }
+fearless_simd = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+fastrand = { workspace = true }
+hdrhistogram = { workspace = true }
+meticulous = { workspace = true }

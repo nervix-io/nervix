@@ -108,6 +108,21 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   discovery and topology, wire contracts and exchange forms, pool and quota isolation, limits and
   deadlines, relay delivery and acknowledgements, application health, consensus and bulk traffic,
   connection lifecycle, failure semantics, and observability.
+- [Client Session Protocol](docs/src/client-session-protocol.md) is the authoritative architecture
+  reference for client-to-node communication, and the
+  [Client Implementation Manual](docs/src/client-implementation-manual.md) is its normative
+  companion for client implementations. Any change to client protocol code or to a client-to-node
+  operation must keep that chapter current in the same change, and must keep the manual current
+  when it changes what a client implementation must do. Client protocol code is the session schema
+  and wire crate, the session service and its transports, the Row encoder, the Rust client, the
+  shared binding, and the session handling of the web console and the CLI. Its scope includes the
+  boundary with the interconnect and layer ownership, the FlatBuffers schema, its verification and
+  limits, gRPC and WebSocket framing, endpoints and authentication, request correlation, lanes and
+  cancellation, command dispositions, durable execution identity and exact recovery, domain
+  mutation ownership and plan fencing as clients observe them, transactions over the protocol,
+  discovery, leader redirect and reconnection, Row subscriptions and their gaps, domain clock
+  attachment, resource uploads, node stop and restart as clients observe them, the shared binding
+  and measured protocol costs, guarantees and non-guarantees, and observability.
 - [Errors And Diagnostics](docs/src/errors-and-diagnostics.md) is the authoritative architecture
   reference for typed error ownership, propagation, ordinary outcomes versus failures, validation
   and planning diagnostics, runtime message errors, cross-node failure classification, public
@@ -692,6 +707,10 @@ build and the existing tests, and nothing in it changes behavior.
   only holds on an idle machine is a defect in the test, not a flake to retry. Waiting for
   something to happen is therefore bounded generously: raising that bound costs nothing under
   parallelism, because the wait ends when the condition holds.
+- Every scenario runs beside the rest of the suite. Do not add a tag, lock, or harness mode that
+  runs a scenario alone or stops other scenarios from starting while it runs, such as an @exclusive
+  tag. A scenario that passes only on an idle machine is a defect in that scenario: fix its timing
+  assumption, and rely on the suite’s retries for what load remains.
 - An assertion that something has **not** happened yet is the opposite, and no choice of window
   makes it reliable. Its window opens when the step starts, while the cadence it races started at
   the event before it, so the margin between them is consumed by whatever delayed the step

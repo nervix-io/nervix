@@ -118,7 +118,33 @@ quiesce buffers do not migrate during termination or failover.
 
 The two session-subscription families use `domain` and `relay` labels and describe the node that
 exports them: the subscriptions its sessions hold and the rows those sessions lost. A client is told
-of its own losses directly, as described in [Sessions](sessions.md).
+of its own losses directly, as described in [Sessions](sessions.md). The server exports no other
+session metrics; [Client Session Protocol](./client-session-protocol.md#observability) describes
+what clients and operators observe instead.
+
+## Delivery Latency
+
+Every processor, reingestor, and emitter input records the delivery latency of each batch it
+accepts. A row's latency runs from its ingestion high watermark to the instant the input accepts the
+batch. Processors and reingestors read that instant from the domain clock, so in a paced domain
+their latency is measured in domain time; emitters read the wall clock. A row whose high watermark
+is later than that instant has no latency and adds nothing to the histograms, although it still
+counts as a received message.
+
+A batch is recorded as a whole. Each row's ingestion watermarks travel with the batch in Arrow
+buffers of Unix-nanosecond timestamps, and one pass over the high watermarks finds the batch's
+latest watermark and folds every row's latency into buckets. Each latency series then takes the whole batch
+in one update: the rolling histograms behind `DESCRIBE` merge the buckets under one lock with one
+wall-clock reading, and the Prometheus histogram takes the batch in one flush.
+
+- The batch's latest high watermark is its domain timestamp. It stamps the batch's traffic counters
+  and places its latencies in the domain-clock windows. A batch older than a window's current step
+  lands in its own step only while that step is still retained; an older step is never reopened.
+- The rolling histograms record each latency to the nearest millisecond, halves rounding up, and
+  record anything above 30 seconds as 30 seconds, so a slow tail is never dropped from the
+  percentiles.
+- The Prometheus histogram receives every latency in seconds and counts it in the boundaries
+  listed under [Raw Metrics](#raw-metrics); a latency above 30 seconds counts only in `+Inf`.
 
 ## Interconnection Metrics
 
@@ -301,7 +327,10 @@ Nervix reports two time bases because they answer different questions:
 
 For unpaced domains or records without usable timestamps, domain-clock values may be unavailable. For paced domains, domain-clock values follow the event timestamps and domain pace rather than the speed of test execution or wall-clock ingestion.
 
-The moving rates and percentile windows are online exponential summaries rather than stored real-time windows. This keeps memory bounded and allows metric state to be snapshotted and replicated without retaining all observations.
+The moving rates are online exponential summaries. The percentile windows keep one bounded HDR
+histogram per step, 10 seconds for the one-minute windows and one minute for the fifteen-minute
+windows, rather than every observation. Both keep memory bounded and let metric state be
+snapshotted and replicated without retaining the observations themselves.
 
 ## Replication And Drain Behavior
 

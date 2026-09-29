@@ -10,8 +10,10 @@ workspace = true
 
 [dependencies]
 arch-into = { workspace = true }
+aws-smithy-runtime-api = { workspace = true }
 error-stack = { workspace = true }
 hickory-resolver = { workspace = true }
+hyper-util = { workspace = true, features = ["client-legacy", "tokio"] }
 indexmap = { workspace = true }
 meticulous = { workspace = true }
 reqwest = { workspace = true }
@@ -20,10 +22,19 @@ resolv-conf = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tower-service = { workspace = true }
 tracing = { workspace = true }
 triomphe = { workspace = true }
 
 [dev-dependencies]
+bytes = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper-util = { workspace = true, features = [
+  "client-legacy",
+  "http1",
+  "tokio",
+] }
 nervix-test-environment = { workspace = true }
 rustls = { workspace = true }
 tempfile = { workspace = true }

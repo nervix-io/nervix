@@ -238,7 +238,10 @@ from the origin, `PERIOD`, and `SKEW`. A driver of a paced simulation can theref
 `TIMESTAMP AT` values the ingestor admits, such as the newest reached center, and compute how long
 to wait until a logical instant. The projection uses the client host's UTC, so the synchronization
 requirement above extends to such a client: its offset from the cluster's hosts, multiplied by
-`TIME RATE`, shifts every answer. Tick progress is not delivered to sessions.
+`TIME RATE`, shifts every projection. The session also receives each newest accepted tick as a
+replaceable frame with its id, logical boundary, authority UTC observation, and serving node's
+logical reading. A client can pace from those accepted boundaries even if its own UTC is offset;
+the serving node's reading gives it a cluster-side anchor.
 
 Both statements are session-local, are refused while a transaction is open, and follow each domain
 at most once. See [Domain Clock Attachment](sessions.md#domain-clock-attachment) for the delivery

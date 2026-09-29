@@ -99,7 +99,7 @@ not expose the branch scope.
 
 ## Internal Payload Model
 
-After schema application, Nervix does not keep an internal per-message document format on relays. The runtime payload on a relay is an Apache Arrow record batch plus the schema and per-row runtime metadata needed for ACKs and watermark-based logic.
+After schema application, Nervix does not keep an internal per-message document format on relays. The runtime payload on a relay is an Apache Arrow record batch plus the schema, the row-aligned ACK state, and each row's low and high ingestion watermarks. The watermarks travel beside the batch in two Arrow buffers of Unix-nanosecond timestamps, which watermark-based logic and [delivery latency](metrics-and-observability.md#delivery-latency) read without converting each row.
 
 Apache Arrow is used here for two practical reasons:
 
@@ -115,9 +115,13 @@ Operationally that means:
 - batches remain branch-local until a `REINGESTOR` or `EMITTER` boundary changes the routing behavior
 - a producer on a nonowner cluster node serializes a batch once and holds one fixed ingress slot
   until the owner admits it into the relay buffer
-- the owner serializes an admitted batch once for each remote consuming cluster node; every local
-  runtime consumer on that node shares the delivery, and a session subscription on the same node
-  piggybacks on it
+- the owner serializes an admitted batch at most once for its remote runtime consumers and once for
+  remote session subscriptions, and shares each serialized body across the destination nodes; every
+  local runtime consumer on a node shares that node's delivery, and a session subscription on a node
+  that also hosts a runtime consumer piggybacks on it
+- a delivery that reaches a node after its attached consumer moved away fails its attached
+  acknowledgements, so the source redelivers the record along the owner's current routes; see
+  [Consumers That Leave The Receiver](interconnect.md#consumers-that-leave-the-receiver)
 
 Lookup and state-replication control paths are separate from this relay payload model. The Arrow batch path applies to relay movement inside the data plane.
 

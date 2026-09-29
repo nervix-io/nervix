@@ -25,7 +25,9 @@ use crate::{ClusterNodeIdentity, Timestamp};
 mod admission;
 mod observation;
 pub use admission::DomainAdmissionWindow;
-pub use observation::{DomainClockObservation, DomainClockObservedState, PacedDomainClock};
+pub use observation::{
+    DomainClockObservation, DomainClockObservedState, DomainClockTickObservation, PacedDomainClock,
+};
 
 #[derive(Debug, Error)]
 pub enum DomainClockError {
@@ -432,6 +434,16 @@ impl DomainClockState {
         let Some(logical_delta) = target_logical.duration_since(current_logical) else {
             return Ok(Duration::ZERO);
         };
+        self.wall_duration_for_logical_delta(logical_delta)
+    }
+
+    /// Converts a logical duration to physical time, rounding up so a cadence never fires early.
+    /// This form also works when an origin is too close to the timestamp limit to represent the
+    /// next logical boundary.
+    pub fn wall_duration_for_logical_delta(
+        &self,
+        logical_delta: Duration,
+    ) -> Result<Duration, Report<DomainClockError>> {
         if logical_delta.is_zero() {
             return Ok(Duration::ZERO);
         }

@@ -383,7 +383,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       - domain={{domain}} kind=junction name=moving_route owner=node-2
       """
 
-  @ownership-state-handoff @shutdown_qualification @exclusive
+  @ownership-state-handoff @shutdown_qualification
   Scenario: A lost prepare response is reconciled before a later relocation
     Given runtime replication is configured with replica count 0 and snapshot interval "1h"
     And entity gate deadline is configured as "1s"
@@ -478,7 +478,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       - domain={{domain}} kind=junction name=moving_route owner=node-2
       """
 
-  @ownership-state-handoff @shutdown_qualification @exclusive
+  @ownership-state-handoff @shutdown_qualification
   Scenario: A new leader reconciles preparation left before schedule commit
     Given runtime replication is configured with replica count 0 and snapshot interval "1h"
     And entity gate deadline is configured as "1s"
@@ -1565,6 +1565,14 @@ Feature: Relocating runtime nodes onto a named cluster node
     And the last command output contains
       """
       - domain={{domain}} kind=junction name=abort_route owner=node-2
+      """
+    When http payload is posted to node "node-1" with host "abort-{{test_id}}.example.com" path "/abort"
+      """
+      {"seq":2}
+      """
+    Then the observed broker receives a payload
+      """
+      "seq":2
       """
 
   Scenario: Runtime nodes outside the unit keep their state through a relocation

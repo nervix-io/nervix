@@ -2519,15 +2519,22 @@ button {
   height: 6px;
 }
 
-.repl-toolbar .tab-close {
+.repl-toolbar .tab-close,
+.repl-toolbar .tab-resubscribe {
   width: 28px;
   height: 100%;
   padding: 0;
   color: var(--text-d);
 }
 
-.repl-toolbar .tab-close:hover {
+.repl-toolbar .tab-close:hover,
+.repl-toolbar .tab-resubscribe:hover {
   color: var(--text-a);
+}
+
+.repl-toolbar .subscription-tab[data-subscription-state="ended"] .tab-main {
+  color: var(--text-d);
+  text-decoration: line-through;
 }
 
 .repl-toolbar .tab.active {
@@ -2833,6 +2840,7 @@ button {
 }
 
 .create-field input,
+.create-field textarea,
 .create-choice-search {
   min-width: 0;
   height: 35px;
@@ -2846,10 +2854,74 @@ button {
   font-size: 12px;
 }
 
+.create-field textarea {
+  height: auto;
+  min-height: 78px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
 .create-field input:focus,
+.create-field textarea:focus,
 .create-choice-search:focus {
   border-color: var(--cyan);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--cyan) 18%, transparent);
+}
+
+.create-config-list,
+.create-codec-encoding,
+.create-signaling-steps,
+.create-signaling-step,
+.create-signaling-program-list {
+  display: grid;
+  gap: 10px;
+}
+
+.create-config-list,
+.create-codec-encoding,
+.create-signaling-step {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.create-config-list p,
+.create-codec-encoding p,
+.create-signaling-program-list p {
+  margin: 0;
+  color: var(--text-c);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.create-signaling-program-row,
+.create-signaling-step-head {
+  display: flex;
+  align-items: start;
+  gap: 8px;
+}
+
+.create-signaling-step-head {
+  flex-wrap: wrap;
+}
+
+.create-signaling-program-row .create-field {
+  flex: 1;
+}
+
+.create-config-list button,
+.create-codec-encoding button,
+.create-signaling-steps button,
+.create-signaling-program-list button {
+  min-height: 30px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-hi);
+  color: var(--text-c);
+  font: inherit;
+  font-size: 10px;
 }
 
 .create-choice-group {
@@ -3002,6 +3074,7 @@ button {
 
 .create-choice-buttons button,
 .create-choice-more,
+.create-choice-retry,
 .create-actions button {
   min-height: 31px;
   padding: 6px 10px;
@@ -3030,6 +3103,12 @@ button {
 
 .create-choice-state {
   color: var(--text-d);
+}
+
+.create-choice-recovery {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .choice-failed,

@@ -97,6 +97,16 @@ async fn given_clock_session_is_opened(world: &mut ScenarioWorld, role: String) 
     world.clock_session = Some(session);
 }
 
+#[given(expr = "a clock session is opened on node {string}")]
+async fn given_clock_session_is_opened_on_node(world: &mut ScenarioWorld, node: String) {
+    let session = world
+        .cluster()
+        .open_session(&node, &world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("a clock session could not open on '{node}': {error}"));
+    world.clock_session = Some(session);
+}
+
 #[when(expr = "the clock session attaches to the clock of domain {string}")]
 async fn when_clock_session_attaches(world: &mut ScenarioWorld, domain: String) {
     let domain = scenario_domain(world, &domain);
@@ -255,11 +265,105 @@ async fn next_clock_frame(
     frame
 }
 
-fn observed_clock(frame: TestClockFrame) -> DomainClockObservation {
-    let TestClockFrame::Observed(observed) = frame else {
-        panic!("the attachment ended instead of observing a clock: {frame:?}");
+/// Ignores ticks already queued before a lifecycle change and returns its state frame.
+async fn next_observed_clock(
+    world: &mut ScenarioWorld,
+    duration: &str,
+    domain: &DomainName,
+) -> DomainClockObservation {
+    loop {
+        tokio::task::consume_budget().await;
+        match next_clock_frame(world, duration, domain).await {
+            TestClockFrame::Observed(observed) => return observed.clock,
+            TestClockFrame::Ticked(_) => {}
+            frame @ TestClockFrame::Ended(_) => {
+                panic!("the attachment ended instead of observing a clock: {frame:?}")
+            }
+        }
+    }
+}
+
+#[then(
+    expr = "within {string} the clock session receives {int} increasing ticks for generation \
+            {int} with period {string} and time rate {string}"
+)]
+async fn then_clock_session_receives_increasing_ticks(
+    world: &mut ScenarioWorld,
+    duration: String,
+    count: usize,
+    generation: u64,
+    expected_period: String,
+    expected_rate: String,
+) {
+    let domain = scenario_domain(world, &world.domain);
+    let attached = attached_clock(world, last_clock_reply(world));
+    let DomainClockObservedState::Paced(paced) = attached.state else {
+        panic!("the attached clock must be paced");
     };
-    observed.clock
+    let period = period(&expected_period);
+    assert_eq!(paced.period, period);
+    let minimum_wall_spacing = period.as_duration().div_f64(rate(&expected_rate).get());
+    let mut previous: Option<nervix_models::DomainClockTickObservation> = None;
+    for _ in 0..count {
+        let ticked = match next_clock_frame(world, &duration, &domain).await {
+            TestClockFrame::Ticked(ticked) => ticked,
+            other => panic!("expected a paced tick, received {other:?}"),
+        };
+        let tick = ticked.tick;
+        assert_eq!(tick.generation, generation);
+        assert!(tick.tick_id > 0);
+        let elapsed_periods = u32::try_from(tick.tick_id - 1)
+            .expect("a scenario observes fewer than 2^32 paced ticks");
+        let offset = period
+            .as_duration()
+            .checked_mul(elapsed_periods)
+            .expect("the scenario tick offset fits in a duration");
+        let expected = paced
+            .mapping
+            .logical_start()
+            .checked_add(offset)
+            .expect("the scenario origin leaves room for its ticks");
+        assert_eq!(tick.logical_boundary, expected);
+        assert!(tick.serving_logical >= tick.logical_boundary);
+        if let Some(prior) = &previous {
+            assert!(tick.tick_id > prior.tick_id);
+            let spacing = tick
+                .authority_utc
+                .duration_since(prior.authority_utc)
+                .expect("accepted ticks have increasing authority observations");
+            assert!(
+                spacing >= minimum_wall_spacing,
+                "authority observations were {spacing:?} apart, below {minimum_wall_spacing:?}"
+            );
+        }
+        previous = Some(tick);
+    }
+}
+
+#[then(
+    expr = "within {string} the clock session receives a tick for generation {int} after its \
+            state frame"
+)]
+async fn then_tick_follows_state(world: &mut ScenarioWorld, duration: String, generation: u64) {
+    let domain = scenario_domain(world, &world.domain);
+    loop {
+        tokio::task::consume_budget().await;
+        let frame = next_clock_frame(world, &duration, &domain).await;
+        match frame {
+            TestClockFrame::Ticked(ticked) if ticked.tick.generation == generation => {
+                let log = clock_session(world).clock_log();
+                let tick_position = log.len() - 1;
+                let state_position = log.iter().position(|entry| {
+                    matches!(entry, TestClockLogEntry::Frame(TestClockFrame::Observed(observed))
+                        if observed.clock.generation == generation)
+                });
+                assert!(state_position.is_some_and(|position| position < tick_position));
+                return;
+            }
+            TestClockFrame::Ticked(_) => {}
+            other => panic!("expected a generation {generation} tick, received {other:?}"),
+        }
+    }
 }
 
 #[then(
@@ -272,13 +376,55 @@ async fn then_clock_session_observes_stopped(
     generation: u64,
 ) {
     let domain = scenario_domain(world, &domain);
-    let clock = observed_clock(next_clock_frame(world, &duration, &domain).await);
+    let clock = next_observed_clock(world, &duration, &domain).await;
     assert_eq!(
         clock,
         DomainClockObservation {
             generation,
             state: DomainClockObservedState::Stopped,
         }
+    );
+}
+
+#[then(
+    expr = "within {string} the clock session receives a tick with an id higher than before owner \
+            loss"
+)]
+async fn then_clock_tick_resumes_after_owner_loss(world: &mut ScenarioWorld, duration: String) {
+    let domain = scenario_domain(world, &world.domain);
+    let before_loss = clock_session(world)
+        .clock_log()
+        .iter()
+        .filter_map(|entry| match entry {
+            TestClockLogEntry::Frame(TestClockFrame::Ticked(ticked)) => Some(ticked.tick.tick_id),
+            _ => None,
+        })
+        .max()
+        .expect("the attachment read a tick before owner loss");
+    let ticked = match next_clock_frame(world, &duration, &domain).await {
+        TestClockFrame::Ticked(ticked) => ticked,
+        other => panic!("expected progress after owner loss, received {other:?}"),
+    };
+    assert!(ticked.tick.tick_id > before_loss);
+    let attached = attached_clock(world, last_clock_reply(world));
+    let DomainClockObservedState::Paced(paced) = attached.state else {
+        panic!("the attached clock must remain paced");
+    };
+    assert_eq!(ticked.tick.generation, attached.generation);
+    let elapsed_periods = u32::try_from(ticked.tick.tick_id - 1)
+        .expect("a scenario observes fewer than 2^32 paced ticks");
+    let offset = paced
+        .period
+        .as_duration()
+        .checked_mul(elapsed_periods)
+        .expect("the tick offset fits in a duration");
+    assert_eq!(
+        ticked.tick.logical_boundary,
+        paced
+            .mapping
+            .logical_start()
+            .checked_add(offset)
+            .expect("the original mapping leaves room for the resumed tick")
     );
 }
 
@@ -312,7 +458,7 @@ async fn then_clock_session_observes_started_clock(
     let window = world
         .clock_start_window
         .expect("the domain clock must have been started at now");
-    let clock = observed_clock(next_clock_frame(world, &duration, &domain).await);
+    let clock = next_observed_clock(world, &duration, &domain).await;
     assert_eq!(clock.generation, generation, "{clock:?}");
     let DomainClockObservedState::Paced(paced) = &clock.state else {
         panic!("the started clock is not paced: {clock:?}");
@@ -341,6 +487,21 @@ async fn then_clock_session_receives_no_frame(
     let domain = scenario_domain(world, &domain);
     let duration =
         humantime::parse_duration(&duration).expect("step durations are valid durations");
+    let session = clock_session(world);
+    let reply = session
+        .clock_log()
+        .iter()
+        .rposition(|entry| matches!(entry, TestClockLogEntry::Reply(_)))
+        .assured("the detach reply was read before checking its frames");
+    assert!(
+        session.clock_log()[reply + 1..].iter().all(|entry| {
+            !matches!(entry, TestClockLogEntry::Frame(frame) if frame.domain() == &domain)
+        }),
+        "a frame about the detached clock followed its reply on the wire"
+    );
+    // Waiting for the reply filed any earlier ticks in the unread queue. Only frames read after
+    // the reply are relevant to this assertion, so begin the timed wait with that queue drained.
+    session.discard_queued_clock_frames_for(&domain);
     let deadline = Instant::now() + duration;
     loop {
         tokio::task::consume_budget().await;
@@ -609,6 +770,39 @@ fn client_admission_window(world: &ScenarioWorld, name: &str) -> DomainAdmission
         .admission_window(Timestamp::now())
         .unwrap_or_else(|error| panic!("client '{name}' cannot read its attached clock: {error}"))
         .unwrap_or_else(|| panic!("client '{name}' follows a clock without an admission window"))
+}
+
+#[then(expr = "within {string} client {string} receives a tick for its attached domain clock")]
+async fn then_client_receives_tick(world: &mut ScenarioWorld, duration: String, name: String) {
+    let duration = humantime::parse_duration(&duration).expect("step durations are valid");
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let domain = scenario_domain(world, &world.domain);
+    let ticked = tokio::time::timeout(duration, async {
+        loop {
+            tokio::task::consume_budget().await;
+            let event = client
+                .next_domain_clock_event()
+                .await
+                .expect("the client reads its clock events");
+            match event {
+                nervix_client_core::DomainClockEvent::Ticked(ticked) if ticked.domain == domain => {
+                    break ticked;
+                }
+                nervix_client_core::DomainClockEvent::Observed(_) => {}
+                other => panic!("the client did not receive a tick: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("the attached clock delivers a tick within the scenario deadline");
+    let attached = client_attached_clock(world, &name);
+    let latest = attached.latest_tick().expect("the helper retains the tick");
+    assert!(latest.tick_id >= ticked.tick.tick_id);
+    assert_eq!(attached.frontier(), Some(latest.logical_boundary));
 }
 
 async fn post_timestamped_event(

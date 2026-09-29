@@ -309,6 +309,7 @@ Feature: Client wire failure regressions
       """
       has expired
       """
+    And the last command request reports an expired execution reference
     When this NSPL command request is executed on the leader node
       """
       SHOW CREATE SCHEMA reclaimed_identity_record;
@@ -370,6 +371,55 @@ Feature: Client wire failure regressions
       | 3            | created "1h" before now | has expired                                        |
       | 3            | created "10m" after now | beyond the accepted client clock-skew boundary     |
       | 3            | without a creation time | does not carry a UUID version 7 creation timestamp |
+
+  @client_wire_execution_reference_conflict
+  Scenario: A race across leaders recovers a typed execution reference conflict
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "first_leader"
+    And a node other than placeholder "first_leader" is saved as placeholder "second_leader"
+    Given command reference lookup on node "{{first_leader}}" pauses before proposal
+    When this NSPL command request with execution reference "raced-{{test_id}}" begins executing in the background on the leader node
+      """
+      CREATE SCHEMA raced_first_record (value STRING);
+      """
+    Then the command reference lookup pause on node "{{first_leader}}" is reached
+    When leadership is transferred from node "{{first_leader}}" to node "{{second_leader}}"
+    Then node "{{second_leader}}" eventually reports leader "{{second_leader}}"
+    When this NSPL command request with execution reference "raced-{{test_id}}" is executed on the leader node
+      """
+      CREATE SCHEMA raced_second_record (value STRING);
+      """
+    Then the last command request succeeded
+    When the command reference lookup pause on node "{{first_leader}}" is released
+    Then the background command request reports a content conflict or unknown leadership outcome
+    When this NSPL command request with execution reference "raced-{{test_id}}" is executed on the leader node
+      """
+      CREATE SCHEMA raced_first_record (value STRING);
+      """
+    Then the last command request reports an execution reference content conflict
+    When this NSPL command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA raced_second_record;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA raced_second_record (
+        value STRING
+      );
+      """
+    When this NSPL command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA raced_first_record;
+      """
+    Then the last command error contains
+      """
+      schema 'raced_first_record' does not exist in domain '{{domain}}'
+      """
 
   @client_wire_execution_history
   Scenario Outline: A full command history refuses new identities and keeps every retained result

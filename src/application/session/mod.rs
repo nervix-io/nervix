@@ -26,6 +26,8 @@
 
 pub(in crate::application) mod admission;
 mod clock_attachments;
+#[cfg(test)]
+pub(crate) use clock_attachments::{ClockDeliveryOrder, NextClockFrame};
 mod events;
 pub(in crate::application) mod grpc;
 pub(in crate::application) mod outbound;
@@ -45,12 +47,12 @@ use nervix_client_wire::{
     CancellationStage, ChoiceLookupRequest, ClientFrame, ClientMessage, ClientRequest,
     CommandRequest, DetachDomainClockRequest, DomainClockAttachDisposition,
     DomainClockAttachOutcome, DomainClockDetachDisposition, DomainClockDetachOutcome, DomainList,
-    DomainSelection, EncodedFrame, InspectTransactionRequest, InspectionOutcome, Reply, ReplyBody,
-    ReplyDelivery, RequestCancelled, RequestId, RequestRejected, RequestRejection,
-    SelectDomainRequest, ServerFrame, SessionEndReason, SessionEnding, SessionLimits,
-    SubscribeDisposition, SubscribeOutcome, SubscribeRequest, SubscriptionType, SuggestRequest,
-    UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame, WireDecodeError,
-    WireEncodeError,
+    DomainSelection, EncodedFrame, InspectTransactionRequest, InspectionOutcome,
+    MAX_IN_FLIGHT_REQUESTS, Reply, ReplyBody, ReplyDelivery, RequestCancelled, RequestId,
+    RequestRejected, RequestRejection, SelectDomainRequest, ServerFrame, SessionEndReason,
+    SessionEnding, SessionLimits, SubscribeDisposition, SubscribeOutcome, SubscribeRequest,
+    SubscriptionType, SuggestRequest, UnsubscribeDisposition, UnsubscribeOutcome,
+    UnsubscribeRequest, VerifiedFrame, WireDecodeError, WireEncodeError,
 };
 use nervix_execution::{AdmissionError, CpuClass, ExecutionError, MemoryClass};
 use nervix_models::{
@@ -80,11 +82,6 @@ use super::{
     subscription::{OpenedSubscription, SessionDelivery, SessionSubscriptions, SessionView},
     transaction::TransactionInspectionOutcome,
 };
-
-/// How many requests one session may have in flight. A request beyond it is refused rather than
-/// queued, so a client flooding one session cannot grow what the server holds for it. It is also
-/// what bounds the queue of ordered requests waiting for the lane.
-const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 
 /// The transport a session arrived on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

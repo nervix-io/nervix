@@ -7,7 +7,7 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use bytes::Bytes;
-use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use error_stack::Report;
 use futures_util::{
     FutureExt, SinkExt, StreamExt,
     future::{AbortHandle, Abortable},
@@ -23,13 +23,13 @@ use nervix_client_wire::{
     ChoiceLookupRequest, ClientMessage, ClientRequest, ClusterObserved, CommandDisposition,
     CommandOutcome, CommandRequest, Diagnostic, DomainEntity, DomainInfo, DomainSelection,
     DomainSnapshotObserved, InspectTransactionRequest, InspectionOutcome, LeaderRedirect,
-    Leadership, NoticeLevel, ReplyBody, RequestCancelled, RequestId, RowBatchView, RowSchema,
-    SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage, ServerNotice, SessionEndReason,
-    SessionLimits, StatementDisposition, StatementOutcome, SubscribeDisposition, SubscribeOutcome,
-    SubscribeRequest, SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionType,
-    SuggestRequest, Suggestion as WireSuggestion, SuggestionKind, SuggestionStatus, TextEdit,
-    TransferAssembly, TransferPart, UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest,
-    VerifiedFrame,
+    Leadership, MAX_IN_FLIGHT_REQUESTS, NoticeLevel, ReplyBody, RequestCancelled, RequestId,
+    RowBatchView, RowSchema, SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage,
+    ServerNotice, SessionEndReason, SessionLimits, StatementDisposition, StatementOutcome,
+    SubscribeDisposition, SubscribeOutcome, SubscribeRequest, SubscriptionEnded,
+    SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionType, SuggestRequest,
+    Suggestion as WireSuggestion, SuggestionKind, SuggestionStatus, TextEdit, TransferAssembly,
+    TransferPart, UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame,
     websocket::{ClientWebSocketCodec, WebSocketData},
 };
 use nervix_dataflow_graph::{
@@ -46,23 +46,26 @@ use nervix_models::{
 use nervix_nspl::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
 };
-use nervix_recovery::{Discarded as _, NoReceiver as _};
+use nervix_recovery::Discarded as _;
 use nervix_web_console::graph::{
     GraphEdgeId, GraphSearch, LiveGraphLayout, graph_layout_edge, graph_layout_item,
     layout::{EdgeTravel, GroupRegion, Rect},
     viewport::{Extent, GraphBounds, Viewport},
 };
+use thiserror::Error;
 use url::Url;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
 mod create_dialog;
+mod request_handoff;
 mod transaction_inspector;
 
 use create_dialog::{
     ChoiceControl, ChoiceRequestContext, CommandDispatch, CreateCommandContext, CreateDialog,
     CreateDispatch, CreateKind, CreateMenu, CreateSignals, CreateSubmission, SubscriptionDispatch,
 };
+use request_handoff::{RequestReceiver, RequestSender, request_handoff};
 use transaction_inspector::{InspectorSignals, TransactionInspector};
 
 const RUNTIME_VERSION_LABEL: &str = concat!("nervix runtime v", env!("CARGO_PKG_VERSION"));
@@ -78,6 +81,45 @@ const SESSION_LIMITS: SessionLimits = SessionLimits::DEFAULT;
 /// request.
 const UNEXPECTED_REPLY: &str = "the server answered with a reply of another kind";
 
+/// What a request shows when the console has no session to hand it to.
+const SESSION_UNAVAILABLE: &str = "websocket session is not available";
+
+/// The most requests of the console's controls its session keeps outstanding: held until the
+/// session can serve them, or sent and awaiting their reply.
+const MAX_OUTSTANDING_REQUESTS: usize = 256;
+/// The most text those requests carry together.
+const MAX_OUTSTANDING_REQUEST_BYTES: usize = 4 * request_handoff::MAX_WAITING_REQUEST_BYTES;
+// Everything the hand-off holds fits a session that has nothing else outstanding.
+const _: () = assert!(request_handoff::MAX_WAITING_REQUESTS <= MAX_OUTSTANDING_REQUESTS);
+const _: () = assert!(request_handoff::MAX_WAITING_REQUEST_BYTES <= MAX_OUTSTANDING_REQUEST_BYTES);
+
+/// Why the console did not send a request one of its controls issued. The control shows the
+/// reason where the request's outcome would have been shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+enum RequestRefusal {
+    #[error(
+        "{limit} requests are already waiting for the console's session; this one was not sent"
+    )]
+    TooManyWaiting { limit: usize },
+    #[error(
+        "the requests waiting for the console's session would carry more than {limit} bytes of \
+         text; this one was not sent"
+    )]
+    TooMuchWaitingText { limit: usize },
+    #[error(
+        "{limit} requests are already outstanding in the console's session; this one was not sent"
+    )]
+    TooManyOutstanding { limit: usize },
+    #[error(
+        "the requests outstanding in the console's session would carry more than {limit} bytes of \
+         text; this one was not sent"
+    )]
+    TooMuchOutstandingText { limit: usize },
+    /// The session loop stopped taking requests.
+    #[error("websocket command channel is closed")]
+    Closed,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ConsoleConnectionState {
     Connecting,
@@ -88,7 +130,7 @@ enum ConsoleConnectionState {
 #[derive(Clone)]
 struct WebConsoleSession {
     state: RwSignal<ConsoleConnectionState>,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     upload_base_url: RwSignal<Option<String>>,
     auth_token: RwSignal<Option<String>>,
 }
@@ -100,7 +142,10 @@ struct WebConsoleSignals {
     suggestion_status: RwSignal<Option<SuggestionStatus>>,
     suggestion_query: RwSignal<Option<SuggestionQuery>>,
     suggestion_continuation: RwSignal<Option<String>>,
-    domain_snapshots: RwSignal<BTreeMap<DomainName, DomainSnapshotView>>,
+    /// The latest snapshot of the domain the session observes. The session observes only its
+    /// active domain, so the console keeps one snapshot; another domain's snapshot is sent again at
+    /// once when that domain is selected.
+    domain_snapshot: RwSignal<Option<DomainSnapshotView>>,
     cluster_counters: RwSignal<ClusterCounters>,
     active_domain: RwSignal<Option<DomainName>>,
     transaction_status: RwSignal<Option<TransactionStatus>>,
@@ -126,7 +171,7 @@ impl WebConsoleSignals {
         self.transaction_status.set(None);
         self.inspector.clear();
         self.domains.set(Vec::new());
-        self.domain_snapshots.set(BTreeMap::new());
+        self.domain_snapshot.set(None);
         self.resource_details.set(BTreeMap::new());
         self.cluster_counters.set(ClusterCounters::default());
         self.domains_loaded.set(false);
@@ -144,6 +189,10 @@ impl WebConsoleSignals {
 
     /// Closing a pending start waits for its reply before deleting that subscription. An opened
     /// stream stays visible as closing until its unsubscribe reply names the same generation.
+    ///
+    /// An interrupted or ended tab holds no subscription that still delivers, so it closes at once.
+    /// The server keeps the name of a generation it ended until the name is reused or the session
+    /// ends, and nothing of that generation remains to release.
     fn begin_subscription_close(self, tab_id: u64) -> Option<UnsubscribeRequest> {
         let tab = self
             .subscription_tabs
@@ -151,7 +200,9 @@ impl WebConsoleSignals {
             .into_iter()
             .find(|tab| tab.id == tab_id)?;
         let stream = match tab.state {
-            SubscriptionTabState::Pending | SubscriptionTabState::Restoring => {
+            SubscriptionTabState::Pending
+            | SubscriptionTabState::Restoring
+            | SubscriptionTabState::Resubscribing => {
                 self.subscription_tabs.update(|tabs| {
                     if let Some(tab) = tabs.iter_mut().find(|tab| tab.id == tab_id) {
                         tab.state = SubscriptionTabState::Closing(None);
@@ -159,7 +210,7 @@ impl WebConsoleSignals {
                 });
                 return None;
             }
-            SubscriptionTabState::Interrupted => {
+            SubscriptionTabState::Interrupted | SubscriptionTabState::Ended => {
                 remove_subscription_tab(
                     self.subscription_tabs,
                     self.active_subscription_tab,
@@ -178,6 +229,89 @@ impl WebConsoleSignals {
         Some(UnsubscribeRequest {
             subscription: tab.name,
         })
+    }
+
+    /// Marks every interrupted tab as restoring and returns the requests that open their
+    /// subscriptions again, each under its name as a new generation of the current session.
+    fn begin_restorations(self) -> Vec<ConsoleRequest> {
+        let mut restorations = Vec::new();
+        self.subscription_tabs.update(|tabs| {
+            // Bounded by the subscription tabs the operator has open in this console.
+            for tab in tabs.iter_mut() {
+                if let SubscriptionTabState::Interrupted = &tab.state {
+                    tab.state = SubscriptionTabState::Restoring;
+                    restorations.push(ConsoleRequest::SubscriptionStart {
+                        tab_id: tab.id,
+                        request: SubscribeRequest {
+                            domain: tab.domain.clone(),
+                            statement: tab.subscribe_command.clone(),
+                            subscription_type: SubscriptionType::Row,
+                        },
+                        origin: SubscriptionOrigin::Restoration,
+                    });
+                }
+            }
+        });
+        restorations
+    }
+
+    /// Opens an ended tab's subscription again, under its name and with the statement that first
+    /// opened it. The server takes the reused name as a new generation, whose opening reply
+    /// announces the relay's current schema.
+    fn begin_resubscribe(self, tab_id: u64) -> Option<SubscribeRequest> {
+        let mut request = None;
+        self.subscription_tabs.update(|tabs| {
+            // Bounded by the subscription tabs the operator has open in this console.
+            let Some(tab) = tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                return;
+            };
+            if !tab.state.can_resubscribe() {
+                return;
+            }
+            tab.state = SubscriptionTabState::Resubscribing;
+            request = Some(SubscribeRequest {
+                domain: tab.domain.clone(),
+                statement: tab.subscribe_command.clone(),
+                subscription_type: SubscriptionType::Row,
+            });
+        });
+        request
+    }
+
+    /// Ends the tab that shows a generation the server ended. The tab keeps its rows and shows
+    /// why, and it is not restored on a later connection, which would not change why the server
+    /// ended it. A tab the operator is closing is removed at once, because nothing is left to
+    /// show.
+    fn end_subscription(self, ended: &SubscriptionEnded) {
+        let mut closed = None;
+        self.subscription_tabs.update(|tabs| {
+            // Bounded by the subscription tabs the operator has open in this console.
+            for tab in tabs.iter_mut() {
+                match &tab.state {
+                    SubscriptionTabState::Open(stream)
+                        if stream.subscription == ended.subscription =>
+                    {
+                        tab.state = SubscriptionTabState::Ended;
+                        tab.lines.push(TermLine::error(ended.message.clone()));
+                    }
+                    SubscriptionTabState::Closing(Some(stream))
+                        if stream.subscription == ended.subscription =>
+                    {
+                        closed = Some(tab.id);
+                    }
+                    SubscriptionTabState::Pending
+                    | SubscriptionTabState::Open(_)
+                    | SubscriptionTabState::Interrupted
+                    | SubscriptionTabState::Restoring
+                    | SubscriptionTabState::Ended
+                    | SubscriptionTabState::Resubscribing
+                    | SubscriptionTabState::Closing(_) => {}
+                }
+            }
+        });
+        if let Some(tab_id) = closed {
+            remove_subscription_tab(self.subscription_tabs, self.active_subscription_tab, tab_id);
+        }
     }
 }
 
@@ -227,9 +361,13 @@ enum ConsoleRequest {
 /// Who asked for a subscription, and so who reads its outcome besides its tab.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SubscriptionOrigin {
-    /// Typed in the REPL, or restored on a later connection: the tab and the terminal show the
+    /// Typed in the REPL, or resubscribed from an ended tab: the tab and the terminal show the
     /// outcome.
     Console,
+    /// The restoration of an interrupted tab on a new connection: the tab and the terminal show
+    /// the outcome. It belongs to that connection, which opens it before it attaches the
+    /// session's transaction again; a later connection restores the tab itself.
+    Restoration,
     /// Submitted by the Create form, whose attempt completes or fails with the outcome.
     Create { attempt: u64, draft_revision: u64 },
 }
@@ -280,6 +418,64 @@ impl ConsoleRequest {
             | Self::Suggest(_)
             | Self::Choice { .. }
             | Self::AttachTransaction(_) => false,
+        }
+    }
+
+    /// Whether the request belongs to the connection it was sent on: the deletion of a
+    /// subscription that ended with that connection's session, or the restoration of a tab into
+    /// that session. The next connection issues its own.
+    fn belongs_to_connection(&self) -> bool {
+        match self {
+            Self::SubscriptionStop { .. }
+            | Self::SubscriptionStart {
+                origin: SubscriptionOrigin::Restoration,
+                ..
+            } => true,
+            Self::SubscriptionStart {
+                origin: SubscriptionOrigin::Console | SubscriptionOrigin::Create { .. },
+                ..
+            }
+            | Self::Command { .. }
+            | Self::ListDomains
+            | Self::SelectDomain(_)
+            | Self::Suggest(_)
+            | Self::Choice { .. }
+            | Self::AttachTransaction(_)
+            | Self::InspectTransaction(_) => false,
+        }
+    }
+
+    /// Whether the request was issued in the session's transaction: a command that expects the
+    /// transaction's accepted position. It cannot be served once that transaction is gone.
+    fn belongs_to_transaction(&self) -> bool {
+        match self {
+            Self::Command { request, .. } => request.expected_transaction_position.is_some(),
+            Self::ListDomains
+            | Self::SubscriptionStart { .. }
+            | Self::SubscriptionStop { .. }
+            | Self::SelectDomain(_)
+            | Self::Suggest(_)
+            | Self::Choice { .. }
+            | Self::AttachTransaction(_)
+            | Self::InspectTransaction(_) => false,
+        }
+    }
+
+    /// The bytes of free text the request carries: a command's source, a subscription's
+    /// statement, the input a completion is asked for, or the search of a choice. Names and
+    /// identities are short by their own validation, so the bounds on outstanding requests count
+    /// only text an operator typed or pasted.
+    fn text_bytes(&self) -> usize {
+        match self {
+            Self::Command { request, .. } => request.query.len(),
+            Self::SubscriptionStart { request, .. } => request.statement.len(),
+            Self::Suggest(request) => request.input().len(),
+            Self::Choice { request, .. } => request.search().len(),
+            Self::ListDomains
+            | Self::SubscriptionStop { .. }
+            | Self::SelectDomain(_)
+            | Self::AttachTransaction(_)
+            | Self::InspectTransaction(_) => 0,
         }
     }
 
@@ -334,6 +530,59 @@ struct AnsweredRequest {
 struct UnreadableReply {
     request: IssuedRequest,
     reason: String,
+}
+
+/// What became of a request one of the console's controls issued.
+enum Admission {
+    /// It was sent at once, in this message.
+    Sent(ClientMessage),
+    /// It waits until the session can serve it.
+    Held,
+    /// It was never sent, because the session already keeps as many requests outstanding as it
+    /// holds.
+    Refused(Box<RefusedRequest>),
+}
+
+/// A request the session refused, and why.
+struct RefusedRequest {
+    request: ConsoleRequest,
+    refusal: RequestRefusal,
+}
+
+/// The requests the session keeps outstanding, and the text they carry.
+#[derive(Default)]
+struct OutstandingLoad {
+    requests: usize,
+    bytes: usize,
+}
+
+impl OutstandingLoad {
+    fn add(&mut self, request: &ConsoleRequest) {
+        self.requests = self.requests.checked_add(1).assured(
+            "the outstanding requests are held in memory, so they cannot number usize::MAX",
+        );
+        self.bytes = self.bytes.checked_add(request.text_bytes()).assured(
+            "every counted text is held in memory at once, so the texts cannot add up past \
+             usize::MAX",
+        );
+    }
+
+    /// Whether one more request carrying `bytes` of text stays within the bounds, or which bound
+    /// it would cross.
+    fn admits(&self, bytes: usize) -> Result<(), Report<RequestRefusal>> {
+        if self.requests >= MAX_OUTSTANDING_REQUESTS {
+            return Err(Report::new(RequestRefusal::TooManyOutstanding {
+                limit: MAX_OUTSTANDING_REQUESTS,
+            }));
+        }
+        match self.bytes.checked_add(bytes) {
+            Some(total) if total <= MAX_OUTSTANDING_REQUEST_BYTES => Ok(()),
+            // A sum that overflows is past the bound as well.
+            Some(_) | None => Err(Report::new(RequestRefusal::TooMuchOutstandingText {
+                limit: MAX_OUTSTANDING_REQUEST_BYTES,
+            })),
+        }
+    }
 }
 
 /// Where every request of the console's session stands: waiting until the session can serve it,
@@ -407,14 +656,52 @@ impl SessionRequests {
         self.leader_confirmed = true;
     }
 
-    /// Takes a newly issued request. An ordered request waits while the session is not ready;
-    /// anything else is sent at once, and the returned message carries it.
-    fn accept(&mut self, issued: IssuedRequest) -> Option<ClientMessage> {
-        if issued.request.is_ordered() && !self.is_ready() {
-            self.held.insert(issued.order, issued.request);
-            return None;
+    /// Takes a request one of the console's controls issued. It is refused when the session
+    /// already keeps as many requests outstanding, or as much of their text, as it holds. An
+    /// ordered request then waits until it can go out in its place; anything else is sent at once.
+    fn accept(&mut self, issued: IssuedRequest) -> Admission {
+        if let Err(report) = self.outstanding().admits(issued.request.text_bytes()) {
+            return Admission::Refused(Box::new(RefusedRequest {
+                request: issued.request,
+                refusal: *report.current_context(),
+            }));
         }
-        Some(self.dispatch(issued))
+        if issued.request.is_ordered() && !self.can_send_ordered() {
+            self.held.insert(issued.order, issued.request);
+            return Admission::Held;
+        }
+        Admission::Sent(self.dispatch(issued))
+    }
+
+    /// Whether an ordered request can go out at once: the session is ready, nothing issued before
+    /// it still waits, and the server admits another request in flight. Beyond
+    /// `MAX_IN_FLIGHT_REQUESTS` the server would refuse the request rather than queue it, so the
+    /// console holds it until an earlier reply frees a place.
+    fn can_send_ordered(&self) -> bool {
+        self.is_ready() && self.held.is_empty() && self.has_room_in_flight()
+    }
+
+    /// Whether the server admits another request in flight on this connection. The console
+    /// counts a request until its reply arrives, and the server stops counting it once the reply
+    /// is queued, so the console never counts fewer than the server does.
+    fn has_room_in_flight(&self) -> bool {
+        self.in_flight.len() < MAX_IN_FLIGHT_REQUESTS
+    }
+
+    /// The requests the session keeps outstanding: held, or sent and awaiting their reply.
+    fn outstanding(&self) -> OutstandingLoad {
+        let mut load = OutstandingLoad::default();
+        // Bounded by `MAX_OUTSTANDING_REQUESTS`, which `accept` enforces, together with the
+        // requests the session issues itself: the requests that open a connection, one
+        // restoration or deletion per subscription tab, and one description per completed
+        // resource creation.
+        for request in self.held.values() {
+            load.add(request);
+        }
+        for issued in self.in_flight.values() {
+            load.add(&issued.request);
+        }
+        load
     }
 
     /// Registers a request as sent on the current connection and returns the message that
@@ -429,6 +716,7 @@ impl SessionRequests {
             ConsoleRequest::Suggest(_) => {
                 if let Some(previous) = self.latest_suggestion.replace(request_id) {
                     self.in_flight.remove(&previous);
+                    self.transfers.remove(&previous);
                 }
             }
             ConsoleRequest::Choice { context, .. } => {
@@ -455,14 +743,17 @@ impl SessionRequests {
         message
     }
 
-    /// Dispatches the held requests in the order they were issued, once the session is ready.
+    /// Dispatches the held requests in the order they were issued, once the session is ready and
+    /// while the server admits them in flight. The rest keep waiting for earlier replies.
     fn release_held(&mut self) -> Vec<ClientMessage> {
+        let mut messages = Vec::new();
         if !self.is_ready() {
-            return Vec::new();
+            return messages;
         }
-        let held = std::mem::take(&mut self.held);
-        let mut messages = Vec::with_capacity(held.len());
-        for (order, request) in held {
+        while self.has_room_in_flight() {
+            let Some((order, request)) = self.held.pop_first() else {
+                break;
+            };
             messages.push(self.dispatch(IssuedRequest { order, request }));
         }
         messages
@@ -473,9 +764,18 @@ impl SessionRequests {
         self.held.insert(issued.order, issued.request);
     }
 
-    /// Drops the held requests, which can no longer be served as they were issued.
+    /// Drops every held request, because the session they were issued for is over.
     fn clear_held(&mut self) {
         self.held.clear();
+    }
+
+    /// Drops the held commands issued in the session's transaction, which cannot be served once
+    /// that transaction is gone. Everything else held, such as a subscription start or deletion, a
+    /// domain listing, an inspection, or a command issued outside the transaction, does not depend
+    /// on it and keeps its place until the session is ready.
+    fn drop_transaction_commands(&mut self) {
+        self.held
+            .retain(|_, request| !request.belongs_to_transaction());
     }
 
     /// Pairs a server message with the request it answers. An event answers no request.
@@ -555,18 +855,17 @@ impl SessionRequests {
 
     /// Forgets the connection that ended. Every ordered request it left unanswered waits for the
     /// next connection in its place in the issue order; a command keeps its execution reference,
-    /// so the server recovers its recorded outcome instead of executing it twice.
+    /// so the server recovers its recorded outcome instead of executing it twice. A request that
+    /// belongs to the ended connection ends with it.
     fn end_connection(&mut self) {
         let in_flight = std::mem::take(&mut self.in_flight);
         for issued in in_flight.into_values() {
-            if issued.request.is_ordered()
-                && !matches!(&issued.request, ConsoleRequest::SubscriptionStop { .. })
-            {
+            if issued.request.is_ordered() && !issued.request.belongs_to_connection() {
                 self.hold_again(issued);
             }
         }
         self.held
-            .retain(|_, request| !matches!(request, ConsoleRequest::SubscriptionStop { .. }));
+            .retain(|_, request| !request.belongs_to_connection());
         self.transfers.clear();
         self.next_request_id = NonZeroU64::MIN;
         self.latest_suggestion = None;
@@ -639,12 +938,27 @@ impl SubscriptionTabView {
     }
 }
 
+/// Where a subscription tab stands.
 #[derive(Clone)]
 enum SubscriptionTabState {
+    /// A new tab whose subscription has not opened yet. A refusal removes the tab.
     Pending,
+    /// The subscription streams its rows into the tab.
     Open(TabStream),
+    /// The connection that carried the subscription ended, or the tab's restoration was refused.
+    /// The next connection restores the tab, and so does a retry every second while the session
+    /// holds no transaction.
     Interrupted,
+    /// The subscription of an interrupted tab is being opened again. A refusal leaves the tab
+    /// interrupted, so it is tried again.
     Restoring,
+    /// The server ended the subscription's generation, because its relay was redefined or
+    /// removed. The tab keeps its rows and why it ended, and is never restored on its own.
+    Ended,
+    /// The operator resubscribed an ended tab. A refusal leaves the tab ended and shows why.
+    Resubscribing,
+    /// The operator closed the tab, which waits for its opening reply or for the deletion of its
+    /// subscription.
     Closing(Option<TabStream>),
 }
 
@@ -655,14 +969,34 @@ impl SubscriptionTabState {
             Self::Open(_) => "active",
             Self::Interrupted => "interrupted",
             Self::Restoring => "restoring",
+            Self::Ended => "ended",
+            Self::Resubscribing => "resubscribing",
             Self::Closing(_) => "closing",
         }
     }
 
     fn can_activate(&self) -> bool {
         match self {
-            Self::Open(_) | Self::Interrupted | Self::Restoring | Self::Closing(Some(_)) => true,
+            Self::Open(_)
+            | Self::Interrupted
+            | Self::Restoring
+            | Self::Ended
+            | Self::Resubscribing
+            | Self::Closing(Some(_)) => true,
             Self::Pending | Self::Closing(None) => false,
+        }
+    }
+
+    /// Whether the operator can open the tab's subscription again from the tab.
+    fn can_resubscribe(&self) -> bool {
+        match self {
+            Self::Ended => true,
+            Self::Pending
+            | Self::Open(_)
+            | Self::Interrupted
+            | Self::Restoring
+            | Self::Resubscribing
+            | Self::Closing(_) => false,
         }
     }
 }
@@ -759,7 +1093,7 @@ fn App() -> impl IntoView {
     let suggestion_status = RwSignal::new(None::<SuggestionStatus>);
     let suggestion_query = RwSignal::new(None::<SuggestionQuery>);
     let suggestion_continuation = RwSignal::new(None::<String>);
-    let domain_snapshots = RwSignal::new(BTreeMap::<DomainName, DomainSnapshotView>::new());
+    let domain_snapshot = RwSignal::new(None::<DomainSnapshotView>);
     let cluster_counters = RwSignal::new(ClusterCounters::default());
     let resource_details = RwSignal::new(BTreeMap::<String, ResourceDetailView>::new());
     let domains_loaded = RwSignal::new(false);
@@ -775,7 +1109,7 @@ fn App() -> impl IntoView {
         suggestion_status,
         suggestion_query,
         suggestion_continuation,
-        domain_snapshots,
+        domain_snapshot,
         cluster_counters,
         active_domain,
         transaction_status,
@@ -801,8 +1135,11 @@ fn App() -> impl IntoView {
     let active_graph = move || {
         let active = active_domain.get()?;
         let graph = {
-            let snapshots = domain_snapshots.read();
-            let snapshot = snapshots.get(&active)?;
+            let snapshot = domain_snapshot.read();
+            let snapshot = snapshot.as_ref()?;
+            if snapshot.domain != active {
+                return None;
+            }
             snapshot.dataflow_graph.clone()
         };
         if graph.nodes.is_empty() {
@@ -814,10 +1151,10 @@ fn App() -> impl IntoView {
         let Some(active) = active_domain.get() else {
             return Vec::new();
         };
-        let snapshots = domain_snapshots.read();
-        match snapshots.get(&active) {
-            Some(snapshot) => snapshot.entities.clone(),
-            None => Vec::new(),
+        let snapshot = domain_snapshot.read();
+        match snapshot.as_ref() {
+            Some(snapshot) if snapshot.domain == active => snapshot.entities.clone(),
+            Some(_) | None => Vec::new(),
         }
     };
     let active_domain_session = web_console_session.clone();
@@ -826,10 +1163,11 @@ fn App() -> impl IntoView {
             return;
         };
         let queued = ConsoleRequest::SelectDomain(SelectDomainRequest { domain });
-        if let Some(request_tx) = active_domain_session.request_tx.get_untracked() {
-            request_tx
-                .unbounded_send(queued)
-                .means_shutdown("web console session");
+        if let Some(request_tx) = active_domain_session.request_tx.get_untracked()
+            && let Err(refusal) = request_tx.send(queued)
+        {
+            let reason = refusal.current_context().to_string();
+            terminal_lines.update(|lines| lines.push(TermLine::error(reason)));
         }
     });
     let suggestion_request_sequence = RwSignal::new(0_u64);
@@ -874,9 +1212,10 @@ fn App() -> impl IntoView {
                 .assured("the console page size is within the protocol bound");
             let queued = ConsoleRequest::Suggest(request);
             if let Some(request_tx) = suggestion_session.request_tx.get_untracked()
-                && request_tx.unbounded_send(queued).is_err()
+                && request_tx.send(queued).is_err()
             {
                 suggestions.set(Vec::new());
+                suggestion_status.set(Some(SuggestionStatus::LookupFailed));
             }
         });
     };
@@ -923,39 +1262,12 @@ fn App() -> impl IntoView {
             statement,
             subscription_type: SubscriptionType::Row,
         };
-        let start = ConsoleRequest::SubscriptionStart {
-            tab_id,
-            request,
-            origin,
-        };
-        let reason = match subscription_request_tx.get_untracked() {
-            Some(request_tx) => match request_tx.unbounded_send(start) {
-                Ok(()) => return,
-                Err(_) => "websocket command channel is closed",
-            },
-            None => "websocket session is not available",
-        };
-        fail_subscription_start(signals, tab_id, vec![TermLine::error(reason)]);
-        fail_subscription_origin(signals, origin, reason.to_string());
+        send_subscription_start(signals, subscription_request_tx, tab_id, request, origin);
     };
-    let stop_subscription_session = web_console_session.clone();
-    let stop_subscription = move |tab_id: u64| {
-        let Some(request) = signals.begin_subscription_close(tab_id) else {
-            return;
-        };
-        if let Some(request_tx) = stop_subscription_session.request_tx.get_untracked()
-            && request_tx
-                .unbounded_send(ConsoleRequest::SubscriptionStop { tab_id, request })
-                .is_ok()
-        {
-            return;
-        }
-        restore_failed_unsubscribe(
-            subscription_tabs,
-            tab_id,
-            "websocket session is not available".to_string(),
-        );
-    };
+    let tab_request_tx = web_console_session.request_tx;
+    let stop_subscription =
+        move |tab_id: u64| close_subscription_tab(signals, tab_request_tx, tab_id);
+    let resubscribe = move |tab_id: u64| resubscribe_tab(signals, tab_request_tx, tab_id);
 
     let run_command = move |next_command: Option<String>| {
         suggestion_request_sequence.update(|sequence| {
@@ -995,13 +1307,10 @@ fn App() -> impl IntoView {
                 return;
             }
             if let Some(request_tx) = web_console_session.request_tx.get_untracked()
-                && request_tx
-                    .unbounded_send(ConsoleRequest::ListDomains)
-                    .is_err()
+                && let Err(refusal) = request_tx.send(ConsoleRequest::ListDomains)
             {
-                terminal_lines.update(|lines| {
-                    lines.push(TermLine::error("websocket command channel is closed"));
-                });
+                let reason = refusal.current_context().to_string();
+                terminal_lines.update(|lines| lines.push(TermLine::error(reason)));
             }
         } else if let Ok(domain) = parse_use_domain(&command) {
             if transaction_active {
@@ -1108,10 +1417,9 @@ fn App() -> impl IntoView {
                 purpose: CommandPurpose::Repl,
             };
             if let Some(request_tx) = web_console_session.request_tx.get_untracked() {
-                if request_tx.unbounded_send(queued).is_err() {
-                    terminal_lines.update(|lines| {
-                        lines.push(TermLine::error("websocket command channel is closed"));
-                    });
+                if let Err(refusal) = request_tx.send(queued) {
+                    let reason = refusal.current_context().to_string();
+                    terminal_lines.update(|lines| lines.push(TermLine::error(reason)));
                 } else if web_console_session.state.get_untracked()
                     != ConsoleConnectionState::Connected
                 {
@@ -1121,7 +1429,7 @@ fn App() -> impl IntoView {
                 }
             } else {
                 terminal_lines.update(|lines| {
-                    lines.push(TermLine::error("websocket session is not available"));
+                    lines.push(TermLine::error(SESSION_UNAVAILABLE));
                 });
             }
         }
@@ -1205,6 +1513,7 @@ fn App() -> impl IntoView {
                             subscription_tabs=subscription_tabs
                             active_subscription_tab=active_subscription_tab
                             stop_subscription=stop_subscription
+                            resubscribe=resubscribe
                             suggestions=move || suggestions.get()
                             suggestion_status=move || suggestion_status.get()
                             suggestion_continuation=move || suggestion_continuation.get()
@@ -1227,11 +1536,76 @@ fn App() -> impl IntoView {
     }
 }
 
+/// Closes the tab `tab_id`, deleting its subscription when it still delivers. A deletion the
+/// console cannot hand over leaves the tab showing its stream, with the reason.
+fn close_subscription_tab(
+    signals: WebConsoleSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    tab_id: u64,
+) {
+    let Some(request) = signals.begin_subscription_close(tab_id) else {
+        return;
+    };
+    let stop = ConsoleRequest::SubscriptionStop { tab_id, request };
+    let reason = match request_tx.get_untracked() {
+        Some(request_tx) => match request_tx.send(stop) {
+            Ok(()) => return,
+            Err(refusal) => refusal.current_context().to_string(),
+        },
+        None => SESSION_UNAVAILABLE.to_string(),
+    };
+    restore_failed_unsubscribe(signals.subscription_tabs, tab_id, reason);
+}
+
+/// Opens the subscription of the ended tab `tab_id` again, under its name.
+fn resubscribe_tab(
+    signals: WebConsoleSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    tab_id: u64,
+) {
+    let Some(request) = signals.begin_resubscribe(tab_id) else {
+        return;
+    };
+    send_subscription_start(
+        signals,
+        request_tx,
+        tab_id,
+        request,
+        SubscriptionOrigin::Console,
+    );
+}
+
+/// Hands the start of the tab `tab_id`'s subscription to the session. A start the console cannot
+/// hand over fails as a refused start does: the tab and the terminal show why, and a Create form
+/// that submitted it fails.
+fn send_subscription_start(
+    signals: WebConsoleSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    tab_id: u64,
+    request: SubscribeRequest,
+    origin: SubscriptionOrigin,
+) {
+    let start = ConsoleRequest::SubscriptionStart {
+        tab_id,
+        request,
+        origin,
+    };
+    let reason = match request_tx.get_untracked() {
+        Some(request_tx) => match request_tx.send(start) {
+            Ok(()) => return,
+            Err(refusal) => refusal.current_context().to_string(),
+        },
+        None => SESSION_UNAVAILABLE.to_string(),
+    };
+    fail_subscription_start(signals, tab_id, vec![TermLine::error(reason.clone())]);
+    fail_subscription_origin(signals, origin, reason);
+}
+
 /// Sends a Create form's persistent statement on the durable command path the REPL uses, echoing
 /// its masked presentation in the terminal.
 fn submit_create_command(
     signals: WebConsoleSignals,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     kind: CreateKind,
     presentation: String,
     command: CommandDispatch,
@@ -1276,18 +1650,14 @@ fn submit_create_command(
         purpose: CommandPurpose::Create(context),
     };
     let Some(request_tx) = request_tx.get_untracked() else {
-        create.failed(
-            attempt,
-            draft_revision,
-            "WebSocket session is not available".to_string(),
-        );
+        create.failed(attempt, draft_revision, SESSION_UNAVAILABLE.to_string());
         return;
     };
-    if request_tx.unbounded_send(queued).is_err() {
+    if let Err(refusal) = request_tx.send(queued) {
         create.failed(
             attempt,
             draft_revision,
-            "WebSocket command channel is closed".to_string(),
+            refusal.current_context().to_string(),
         );
     }
 }
@@ -1349,7 +1719,7 @@ fn AuthPanel(
 fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
     let state = RwSignal::new(ConsoleConnectionState::Connecting);
     let upload_base_url = RwSignal::new(web_console_http_base_url());
-    let (sender, receiver) = unbounded::<ConsoleRequest>();
+    let (sender, receiver) = request_handoff();
     let request_tx = RwSignal::new(Some(sender));
     let (abort, registration) = AbortHandle::new_pair();
     spawn_local(async move {
@@ -1378,7 +1748,7 @@ async fn run_websocket_session(
     signals: WebConsoleSignals,
     state: RwSignal<ConsoleConnectionState>,
     upload_base_url: RwSignal<Option<String>>,
-    mut queued: UnboundedReceiver<ConsoleRequest>,
+    mut queued: RequestReceiver,
 ) {
     let WebConsoleSignals {
         domains_loaded,
@@ -1398,7 +1768,7 @@ async fn run_websocket_session(
             redirected_url = None;
             if previous_was_authenticated {
                 requests = SessionRequests::new();
-                while queued.try_recv().is_ok() {}
+                queued.discard_waiting();
                 upload_base_url.set(web_console_http_base_url());
                 signals.clear_authenticated_view();
             }
@@ -1576,16 +1946,17 @@ async fn drain_closed_connection(
 
 /// Serves one connection until it ends.
 ///
-/// The connection first selects the active domain again, so the domain's observations resume, and
-/// attaches the session's transaction again. Ordered requests wait until the server confirms that
-/// the serving node leads and the transaction is attached, and then go out in the order the
-/// console issued them.
+/// The connection first selects the active domain again, so the domain's observations resume,
+/// restores the interrupted subscription tabs, and attaches the session's transaction again. The
+/// tabs come before the transaction, because a session that holds a transaction refuses
+/// subscriptions. Ordered requests wait until the server confirms that the serving node leads and
+/// the transaction is attached, and then go out in the order the console issued them.
 async fn serve_connection(
     signals: WebConsoleSignals,
     state: RwSignal<ConsoleConnectionState>,
     mut socket: WebSocket,
     requests: &mut SessionRequests,
-    queued: &mut UnboundedReceiver<ConsoleRequest>,
+    queued: &mut RequestReceiver,
     current_auth_token: &str,
 ) -> ConnectionEnd {
     let codec = ClientWebSocketCodec::new(SESSION_LIMITS);
@@ -1593,6 +1964,7 @@ async fn serve_connection(
     if let Some(domain) = signals.active_domain.get_untracked() {
         opening.push(ConsoleRequest::SelectDomain(SelectDomainRequest { domain }));
     }
+    opening.extend(signals.begin_restorations());
     let transaction_id = signals
         .transaction_status
         .with_untracked(|status| transaction_to_attach(status.as_ref()));
@@ -1611,7 +1983,6 @@ async fn serve_connection(
             return ConnectionEnd::Dropped;
         }
     }
-    queue_subscription_restorations(signals, requests);
     let mut retry_delay = Box::pin(wait_for_browser_delay(SUBSCRIPTION_RETRY_DELAY).fuse());
     loop {
         if signals.auth_token.get_untracked().as_deref() != Some(current_auth_token) {
@@ -1629,10 +2000,17 @@ async fn serve_connection(
                 if issued.request.inspects_transaction() {
                     signals.inspector.requested(issued.order.0);
                 }
-                if let Some(message) = requests.accept(issued)
-                    && !send_message(&mut socket, &codec, signals, requests, message).await
-                {
-                    return ConnectionEnd::Dropped;
+                match requests.accept(issued) {
+                    Admission::Sent(message) => {
+                        if !send_message(&mut socket, &codec, signals, requests, message).await {
+                            return ConnectionEnd::Dropped;
+                        }
+                    }
+                    Admission::Held => {}
+                    Admission::Refused(refused) => {
+                        let RefusedRequest { request, refusal } = *refused;
+                        fail_request(signals, requests, request, refusal.to_string());
+                    }
                 }
                 SessionStep::Continue
             }
@@ -1669,7 +2047,20 @@ async fn serve_connection(
             }
             () = retry_delay.as_mut() => {
                 retry_delay = Box::pin(wait_for_browser_delay(SUBSCRIPTION_RETRY_DELAY).fuse());
-                queue_subscription_restorations(signals, requests);
+                // A tab whose restoration was refused is tried again while the session is ready,
+                // has room for it in flight, and holds no transaction, which would refuse it again.
+                let transaction_active = signals
+                    .transaction_status
+                    .with_untracked(|status| transaction_is_active(status.as_ref()));
+                if requests.can_send_ordered() && !transaction_active {
+                    for request in signals.begin_restorations() {
+                        let issued = requests.issue(request);
+                        let message = requests.dispatch(issued);
+                        if !send_message(&mut socket, &codec, signals, requests, message).await {
+                            return ConnectionEnd::Dropped;
+                        }
+                    }
+                }
                 SessionStep::Continue
             }
         };
@@ -1699,15 +2090,25 @@ async fn serve_connection(
 }
 
 /// An acknowledged subscription belongs to the connection that ended. Its tab remains desired,
-/// but its previous generation must never accept rows from the replacement connection.
+/// but its previous generation must never accept rows from the replacement connection. A
+/// restoration that connection left unanswered ended with it, so its tab is interrupted again and
+/// the next connection restores it.
 fn interrupt_subscription_tabs(signals: WebConsoleSignals) {
     signals.subscription_tabs.update(|tabs| {
         for tab in tabs.iter_mut() {
-            if let SubscriptionTabState::Open(_) = &tab.state {
-                tab.state = SubscriptionTabState::Interrupted;
-                tab.lines.push(TermLine::info(
-                    "delivery interrupted; restoring on the next connection",
-                ));
+            match &tab.state {
+                SubscriptionTabState::Open(_) => {
+                    tab.state = SubscriptionTabState::Interrupted;
+                    tab.lines.push(TermLine::info(
+                        "delivery interrupted; restoring on the next connection",
+                    ));
+                }
+                SubscriptionTabState::Restoring => tab.state = SubscriptionTabState::Interrupted,
+                SubscriptionTabState::Pending
+                | SubscriptionTabState::Interrupted
+                | SubscriptionTabState::Ended
+                | SubscriptionTabState::Resubscribing
+                | SubscriptionTabState::Closing(_) => {}
             }
         }
         tabs.retain(|tab| !matches!(&tab.state, SubscriptionTabState::Closing(Some(_))));
@@ -1721,35 +2122,6 @@ fn interrupt_subscription_tabs(signals: WebConsoleSignals) {
         if !still_present {
             signals.active_subscription_tab.set(None);
         }
-    }
-}
-
-/// A tab acknowledged on an earlier connection is reissued once on the new connection. Starts
-/// that were already in flight remain in the request ledger and are replayed there instead.
-fn queue_subscription_restorations(signals: WebConsoleSignals, requests: &mut SessionRequests) {
-    let mut restore = Vec::new();
-    signals.subscription_tabs.update(|tabs| {
-        for tab in tabs.iter_mut() {
-            if let SubscriptionTabState::Interrupted = &tab.state {
-                tab.state = SubscriptionTabState::Restoring;
-                restore.push((
-                    tab.id,
-                    SubscribeRequest {
-                        domain: tab.domain.clone(),
-                        statement: tab.subscribe_command.clone(),
-                        subscription_type: SubscriptionType::Row,
-                    },
-                ));
-            }
-        }
-    });
-    for (tab_id, request) in restore {
-        let issued = requests.issue(ConsoleRequest::SubscriptionStart {
-            tab_id,
-            request,
-            origin: SubscriptionOrigin::Console,
-        });
-        requests.hold_again(issued);
     }
 }
 
@@ -2027,14 +2399,27 @@ fn apply_event(
             SessionStep::Continue
         }
         ServerEvent::SubscriptionEnded(ended) => {
-            let line = TermLine::error(ended.message);
-            append_subscription_line(signals.subscription_tabs, &ended.subscription, line);
+            signals.end_subscription(&ended);
             SessionStep::Continue
         }
         ServerEvent::DomainClockObserved(observed) => {
             let line = TermLine::info(format!(
                 "domain clock [{}]: {}",
                 observed.domain, observed.clock
+            ));
+            signals.terminal_lines.update(|lines| lines.push(line));
+            SessionStep::Continue
+        }
+        ServerEvent::DomainClockTicked(ticked) => {
+            let line = TermLine::info(format!(
+                "domain clock [{}] tick: generation {}, id {}, boundary {}, authority UTC {}, \
+                 node logical {}",
+                ticked.domain,
+                ticked.tick.generation,
+                ticked.tick.tick_id,
+                ticked.tick.logical_boundary.to_rfc3339(),
+                ticked.tick.authority_utc.to_rfc3339(),
+                ticked.tick.serving_logical.to_rfc3339(),
             ));
             signals.terminal_lines.update(|lines| lines.push(line));
             SessionStep::Continue
@@ -2380,7 +2765,9 @@ fn show_command_outcome(
 /// Applies the outcome of attaching the session's transaction.
 ///
 /// Once the transaction is attached, the requests held for it are released. A transaction that
-/// already finished, or that could not be attached, ends the requests held for it.
+/// already finished, or that could not be attached, ends the commands issued in it; the other
+/// held requests, such as the start of a new subscription tab, go out once the session is
+/// ready.
 fn apply_attach_outcome(
     signals: WebConsoleSignals,
     requests: &mut SessionRequests,
@@ -2398,7 +2785,7 @@ fn apply_attach_outcome(
             let active = status.lifecycle().is_active();
             adopt_transaction(signals, status);
             if !active {
-                requests.clear_held();
+                requests.drop_transaction_commands();
                 let lines = completed_lines(message);
                 signals
                     .terminal_lines
@@ -2408,7 +2795,7 @@ fn apply_attach_outcome(
         }
         AttachDisposition::AlreadyFinished(status) => {
             adopt_transaction(signals, status);
-            requests.clear_held();
+            requests.drop_transaction_commands();
             let lines = failed_lines(message, diagnostics, query);
             signals
                 .terminal_lines
@@ -2417,7 +2804,7 @@ fn apply_attach_outcome(
         }
         AttachDisposition::Failed => {
             signals.transaction_status.set(None);
-            requests.clear_held();
+            requests.drop_transaction_commands();
             let lines = failed_lines(message, diagnostics, query);
             signals
                 .terminal_lines
@@ -2473,7 +2860,9 @@ fn apply_subscribe_outcome(
                     return;
                 };
                 match tab.state.clone() {
-                    SubscriptionTabState::Pending | SubscriptionTabState::Restoring => {
+                    SubscriptionTabState::Pending
+                    | SubscriptionTabState::Restoring
+                    | SubscriptionTabState::Resubscribing => {
                         tab.state = SubscriptionTabState::Open(stream.clone());
                         opened = true;
                     }
@@ -2483,6 +2872,7 @@ fn apply_subscribe_outcome(
                     }
                     SubscriptionTabState::Open(_)
                     | SubscriptionTabState::Interrupted
+                    | SubscriptionTabState::Ended
                     | SubscriptionTabState::Closing(Some(_)) => {}
                 }
             });
@@ -2625,7 +3015,13 @@ fn fail_request(
                 .terminal_lines
                 .update(|lines| lines.push(TermLine::error(reason)));
         }
-        ConsoleRequest::Suggest(_) => signals.suggestions.set(Vec::new()),
+        ConsoleRequest::Suggest(_) => {
+            // An empty list alone would read as no matches.
+            signals.suggestions.set(Vec::new());
+            signals
+                .suggestion_status
+                .set(Some(SuggestionStatus::LookupFailed));
+        }
         ConsoleRequest::Choice { context, .. } => {
             signals
                 .create
@@ -2633,9 +3029,10 @@ fn fail_request(
         }
         ConsoleRequest::InspectTransaction(_) => signals.inspector.error.set(Some(reason)),
         ConsoleRequest::AttachTransaction(_) => {
-            // Without its transaction attached, the session cannot serve what was held for it.
+            // Without its transaction attached, the session cannot serve the commands issued in
+            // it. The other held requests do not depend on it.
             signals.transaction_status.set(None);
-            requests.clear_held();
+            requests.drop_transaction_commands();
             signals
                 .terminal_lines
                 .update(|lines| lines.push(TermLine::error(reason)));
@@ -2673,15 +3070,21 @@ fn apply_domain_list(signals: WebConsoleSignals, listed: Vec<DomainView>) {
     }
 }
 
-/// Keeps the latest snapshot of a domain's graph and entities.
+/// Keeps the latest snapshot of the active domain's graph and entities. A snapshot of a domain the
+/// console no longer shows, sent before the session learned of the newly selected domain, is
+/// dropped.
 fn apply_snapshot(signals: WebConsoleSignals, snapshot: &DomainSnapshotObserved) {
+    let observed = signals
+        .active_domain
+        .with_untracked(|active| active.as_ref() == Some(snapshot.domain()));
+    if !observed {
+        return;
+    }
     match DataflowGraph::deserialize(snapshot.graph_json().as_bytes()) {
         Ok(graph) => {
-            let view = DomainSnapshotView::new(snapshot.entities(), graph);
-            let domain = snapshot.domain().clone();
-            signals.domain_snapshots.update(|snapshots| {
-                snapshots.insert(domain, view);
-            });
+            let view =
+                DomainSnapshotView::new(snapshot.domain().clone(), snapshot.entities(), graph);
+            signals.domain_snapshot.set(Some(view));
         }
         Err(error) => {
             let reason = format!(
@@ -2845,7 +3248,8 @@ fn cancellation_reason(cancelled: RequestCancelled) -> String {
 }
 
 /// A creation failure leaves no live tab. A failed restoration keeps the acknowledged tab visible
-/// and interrupted, so it can be restored on the next connection.
+/// and interrupted, so it can be restored on the next connection. A failed resubscription leaves
+/// the tab ended, showing why, until the operator resubscribes or closes it.
 fn fail_subscription_start(signals: WebConsoleSignals, tab_id: u64, lines: Vec<TermLine>) {
     let mut remove = false;
     signals.subscription_tabs.update(|tabs| {
@@ -2858,8 +3262,13 @@ fn fail_subscription_start(signals: WebConsoleSignals, tab_id: u64, lines: Vec<T
                 tab.state = SubscriptionTabState::Interrupted;
                 tab.lines.extend(lines.clone());
             }
+            SubscriptionTabState::Resubscribing => {
+                tab.state = SubscriptionTabState::Ended;
+                tab.lines.extend(lines.clone());
+            }
             SubscriptionTabState::Open(_)
             | SubscriptionTabState::Interrupted
+            | SubscriptionTabState::Ended
             | SubscriptionTabState::Closing(Some(_)) => {}
         }
     });
@@ -3478,6 +3887,7 @@ fn Sidebar(
                                         upload_status.set(String::new());
                                         request_resource_describe(
                                             request_tx,
+                                            resource_details,
                                             describe_name.clone(),
                                             active_domain.get_untracked(),
                                         );
@@ -3598,8 +4008,11 @@ fn NavItem(
     }
 }
 
+/// Asks for the typed description of `resource`, which the resource dialog shows. A request the
+/// console cannot hand over leaves the dialog showing why.
 fn request_resource_describe(
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
+    resource_details: RwSignal<BTreeMap<String, ResourceDetailView>>,
     resource: String,
     domain: Option<DomainName>,
 ) {
@@ -3612,12 +4025,24 @@ fn request_resource_describe(
     };
     let queued = ConsoleRequest::Command {
         request,
-        purpose: CommandPurpose::ResourceDescription { resource },
+        purpose: CommandPurpose::ResourceDescription {
+            resource: resource.clone(),
+        },
     };
-    if let Some(tx) = request_tx.get_untracked() {
-        tx.unbounded_send(queued)
-            .means_shutdown("web console session");
-    }
+    let reason = match request_tx.get_untracked() {
+        Some(request_tx) => match request_tx.send(queued) {
+            Ok(()) => return,
+            Err(refusal) => refusal.current_context().to_string(),
+        },
+        None => SESSION_UNAVAILABLE.to_string(),
+    };
+    let detail = ResourceDetailView {
+        versions: Vec::new(),
+        status: reason,
+    };
+    resource_details.update(|details| {
+        details.insert(resource, detail);
+    });
 }
 
 /// Durable command admission reads the creation time embedded in a UUIDv7 retry identity, so a
@@ -3635,7 +4060,7 @@ fn ResourceDialog(
     upload_status: RwSignal<String>,
     upload_base_url: RwSignal<Option<String>>,
     auth_token: RwSignal<Option<String>>,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     active_domain: RwSignal<Option<DomainName>>,
     close: impl Fn() + Copy + Send + 'static,
 ) -> impl IntoView {
@@ -3684,7 +4109,12 @@ fn ResourceDialog(
             upload_abort.set(None);
             upload_status.set(message);
             uploading.set(false);
-            request_resource_describe(request_tx, resource_name, active_domain.get_untracked());
+            request_resource_describe(
+                request_tx,
+                details,
+                resource_name,
+                active_domain.get_untracked(),
+            );
         });
     };
     view! {
@@ -5034,6 +5464,7 @@ fn ReplPanel(
     subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
     active_subscription_tab: RwSignal<Option<u64>>,
     stop_subscription: impl Fn(u64) + Copy + Send + 'static,
+    resubscribe: impl Fn(u64) + Copy + Send + Sync + 'static,
     suggestions: impl Fn() -> Vec<WireSuggestion> + Copy + Send + 'static,
     suggestion_status: impl Fn() -> Option<SuggestionStatus> + Copy + Send + 'static,
     suggestion_continuation: impl Fn() -> Option<String> + Copy + Send + 'static,
@@ -5069,6 +5500,22 @@ fn ReplPanel(
         (Some(tab_id), lines)
     };
     let repl_active = move || active_subscription_tab.get().is_none();
+    // Submits the input as the operator sees it, and keeps it for `ArrowUp` when the history can.
+    let submit_input = move || {
+        let command = match input_ref.get_untracked() {
+            Some(element) => element.value(),
+            None => input.get_untracked(),
+        };
+        completion_cycle.set(None);
+        let mut pushed = HistoryPush::Kept;
+        command_history.update(|history| pushed = history.push(command.as_str()));
+        input.set(command.clone());
+        run_command(Some(command));
+        if pushed == HistoryPush::TooLarge {
+            terminal_lines
+                .update(|lines| lines.push(TermLine::info(COMMAND_TOO_LARGE_FOR_HISTORY)));
+        }
+    };
     view! {
         <section class="repl-panel" class:collapsed=move || collapsed.get()>
             <div class="repl-toolbar">
@@ -5123,6 +5570,20 @@ fn ReplPanel(
                                     <span class=move || if matches!(state(), SubscriptionTabState::Open(_)) { "live-dot" } else { "live-dot paused" }></span>
                                     <span>{title.clone()}</span>
                                 </button>
+                                <Show when=move || state().can_resubscribe() fallback=|| ()>
+                                    <button
+                                        type="button"
+                                        class="tab-resubscribe"
+                                        title="Resubscribe"
+                                        aria-label="Resubscribe"
+                                        on:click=move |event| {
+                                            event.stop_propagation();
+                                            resubscribe(tab_id);
+                                        }
+                                    >
+                                        "↻"
+                                    </button>
+                                </Show>
                                 <button
                                     type="button"
                                     class="tab-close"
@@ -5212,14 +5673,7 @@ fn ReplPanel(
             </div>
             <form class="prompt-row" class:hidden=move || !repl_active() on:submit=move |event| {
                 event.prevent_default();
-                let command = match input_ref.get_untracked() {
-                    Some(element) => element.value(),
-                    None => input.get_untracked(),
-                };
-                completion_cycle.set(None);
-                command_history.update(|history| history.push(command.as_str()));
-                input.set(command.clone());
-                run_command(Some(command));
+                submit_input();
             }>
                 <span>{move || {
                     match transaction_state() {
@@ -5280,11 +5734,16 @@ fn ReplPanel(
                                 None => input.get_untracked(),
                             };
                             completion_cycle.set(None);
-                            let mut command = None;
+                            let mut recalled = None;
                             command_history.update(|history| {
-                                command = history.previous(current);
+                                recalled = history.previous(current);
                             });
-                            if let Some(command) = command {
+                            if let Some(RecalledCommand { command, reached_omission }) = recalled {
+                                if reached_omission {
+                                    terminal_lines.update(|lines| {
+                                        lines.push(TermLine::info(COMMAND_HISTORY_MARKER));
+                                    });
+                                }
                                 input.set(command.clone());
                                 request_suggestions(command.clone(), command.len(), None);
                             }
@@ -5301,14 +5760,7 @@ fn ReplPanel(
                             }
                         } else if event.key() == "Enter" && (event.meta_key() || event.ctrl_key()) {
                             event.prevent_default();
-                            let command = match input_ref.get_untracked() {
-                                Some(element) => element.value(),
-                                None => input.get_untracked(),
-                            };
-                            completion_cycle.set(None);
-                            command_history.update(|history| history.push(command.as_str()));
-                            input.set(command.clone());
-                            run_command(Some(command));
+                            submit_input();
                         }
                     }
                 />
@@ -5324,38 +5776,102 @@ struct CompletionCycle {
     next_index: usize,
 }
 
+/// The most commands the REPL keeps for `ArrowUp` and `ArrowDown`.
+const MAX_COMMAND_HISTORY_RECORDS: usize = 256;
+/// The most bytes of command text the REPL keeps for them.
+const MAX_COMMAND_HISTORY_BYTES: usize = 256 * 1024;
+const COMMAND_HISTORY_MARKER: &str = "command history limit reached; earlier commands were omitted";
+const COMMAND_TOO_LARGE_FOR_HISTORY: &str =
+    "the command is larger than the command history keeps, so ArrowUp cannot recall it";
+const _: () = assert!(MAX_COMMAND_HISTORY_RECORDS > 0);
+
+/// The commands the REPL submitted, oldest first, bounded by count and by bytes. The oldest
+/// commands give way to newer ones, and a walk back through the history reports that it reached
+/// the point where earlier commands were omitted.
 #[derive(Default)]
 struct CommandHistory {
-    entries: Vec<String>,
+    entries: VecDeque<String>,
+    bytes: usize,
+    /// Whether commands older than the oldest one kept were omitted.
+    omitted: bool,
     position: Option<usize>,
     draft: String,
 }
 
+/// What the history did with a submitted command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryPush {
+    /// Nothing of the command is lost: it can be recalled, or it was empty.
+    Kept,
+    /// The command alone is larger than the whole history, so it cannot be recalled.
+    TooLarge,
+}
+
+/// A command a walk back through the history recalled.
+struct RecalledCommand {
+    command: String,
+    /// The walk arrived at the oldest command the history keeps, and earlier ones were omitted.
+    reached_omission: bool,
+}
+
 impl CommandHistory {
-    fn push(&mut self, command: &str) {
-        let command = command.trim();
-        if command.is_empty() {
-            return;
-        }
-        if self.entries.last().is_none_or(|entry| entry != command) {
-            self.entries.push(command.to_string());
-        }
+    fn push(&mut self, command: &str) -> HistoryPush {
         self.reset_navigation();
+        let command = command.trim();
+        let repeats_newest = self.entries.back().is_some_and(|entry| entry == command);
+        if command.is_empty() || repeats_newest {
+            return HistoryPush::Kept;
+        }
+        if command.len() > MAX_COMMAND_HISTORY_BYTES {
+            return HistoryPush::TooLarge;
+        }
+        while self.entries.len() >= MAX_COMMAND_HISTORY_RECORDS
+            || self.bytes.checked_add(command.len()).assured(
+                "the kept commands stay within the byte capacity, and the command was held to it \
+                 above, so their sum is at most twice the capacity",
+            ) > MAX_COMMAND_HISTORY_BYTES
+        {
+            let evicted = self
+                .entries
+                .pop_front()
+                .verified("the capacity condition requires an existing command to evict");
+            self.bytes = self
+                .bytes
+                .checked_sub(evicted.len())
+                .assured("the retained byte count includes the evicted command");
+            self.omitted = true;
+        }
+        self.bytes = self
+            .bytes
+            .checked_add(command.len())
+            .assured("the capacity loop left room for the new command");
+        self.entries.push_back(command.to_string());
+        HistoryPush::Kept
     }
 
-    fn previous(&mut self, current: String) -> Option<String> {
-        if self.entries.is_empty() {
-            return None;
-        }
-        let next_position = if let Some(position) = self.position {
+    fn previous(&mut self, current: String) -> Option<RecalledCommand> {
+        let newest = self.entries.len().checked_sub(1)?;
+        let next_position = match self.position {
             // Stepping back from the oldest entry stays on it.
-            position.saturating_sub(1)
-        } else {
-            self.draft = current;
-            self.entries.len() - 1
+            Some(0) => 0,
+            Some(position) => position
+                .checked_sub(1)
+                .verified("the arm above takes the oldest position"),
+            None => {
+                self.draft = current;
+                newest
+            }
         };
+        let arrived_at_oldest = next_position == 0 && self.position != Some(0);
         self.position = Some(next_position);
-        self.entries.get(next_position).cloned()
+        let command = self.entries.get(next_position).cloned().assured(
+            "a walk starts at the newest command and only moves back, and every push that changes \
+             the commands ends the walk",
+        );
+        Some(RecalledCommand {
+            command,
+            reached_omission: arrived_at_oldest && self.omitted,
+        })
     }
 
     fn next(&mut self) -> Option<String> {
@@ -6518,15 +7034,17 @@ impl SidebarDomain {
 /// The latest snapshot of one domain's graph and entities.
 #[derive(Clone, PartialEq)]
 struct DomainSnapshotView {
+    domain: DomainName,
     dataflow_graph: DataflowGraph,
     entities: Vec<EntityView>,
 }
 
 impl DomainSnapshotView {
-    fn new(entities: &[DomainEntity], dataflow_graph: DataflowGraph) -> Self {
+    fn new(domain: DomainName, entities: &[DomainEntity], dataflow_graph: DataflowGraph) -> Self {
         let mut entities = entities.iter().map(EntityView::from).collect::<Vec<_>>();
         entities.sort_by(EntityView::sidebar_order);
         Self {
+            domain,
             dataflow_graph,
             entities,
         }
@@ -6892,18 +7410,19 @@ mod tests {
     use leptos::prelude::Owner;
     use nervix_client_wire::{
         DomainClockAttachmentEndReason, DomainClockAttachmentEnded, DomainClockObserved,
-        DomainList, DomainsObserved, OutcomeOrigin, Reply, SourceSpan,
+        DomainClockTicked, DomainList, DomainsObserved, OutcomeOrigin, Reply, ReplyDelivery,
+        SessionLimitSettings, SourceSpan, SubscriptionEndReason,
     };
     use nervix_dataflow_graph::{
         DataflowBranchStatistics, DataflowEdge, DataflowNode, DataflowProcessorKind,
     };
     use nervix_models::{
         ClusterNodeName, DomainClockObservation, DomainClockObservedState, DomainClockPeriod,
-        DomainClockSkew, ImpactPlanningBasis, ImpactReportCompleteness, ModelName, NodeRef,
-        ResourceName, Timestamp, TransactionImpactReport, TransactionInspection,
-        TransactionInspectionRejection, TransactionInspectionTarget, TransactionLifecycle,
-        TransactionOperationAdmission, TransactionOperationNumber, TransactionPosition,
-        TransactionPreviewIdentity, TransactionStatus,
+        DomainClockSkew, DomainClockTickObservation, ImpactPlanningBasis, ImpactReportCompleteness,
+        ModelName, NodeRef, ResourceName, Timestamp, TransactionImpactReport,
+        TransactionInspection, TransactionInspectionRejection, TransactionInspectionTarget,
+        TransactionLifecycle, TransactionOperationAdmission, TransactionOperationNumber,
+        TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
     };
 
     use super::*;
@@ -7077,7 +7596,7 @@ mod tests {
             suggestion_status: RwSignal::new(None),
             suggestion_query: RwSignal::new(None),
             suggestion_continuation: RwSignal::new(None),
-            domain_snapshots: RwSignal::new(BTreeMap::new()),
+            domain_snapshot: RwSignal::new(None),
             cluster_counters: RwSignal::new(ClusterCounters::default()),
             active_domain: RwSignal::new(Some(domain.clone())),
             transaction_status: RwSignal::new(None),
@@ -7317,7 +7836,7 @@ mod tests {
             assert_eq!(signals.active_domain.get_untracked(), None);
             assert_eq!(signals.transaction_status.get_untracked(), None);
             assert!(signals.domains.get_untracked().is_empty());
-            assert!(signals.domain_snapshots.get_untracked().is_empty());
+            assert!(signals.domain_snapshot.get_untracked().is_none());
             assert!(signals.resource_details.get_untracked().is_empty());
             assert!(!signals.domains_loaded.get_untracked());
             assert!(signals.subscription_tabs.get_untracked().is_empty());
@@ -7341,12 +7860,19 @@ mod tests {
             (SubscriptionTabState::Open(stream.clone()), "active", true),
             (SubscriptionTabState::Interrupted, "interrupted", true),
             (SubscriptionTabState::Restoring, "restoring", true),
+            (SubscriptionTabState::Ended, "ended", true),
+            (SubscriptionTabState::Resubscribing, "resubscribing", true),
             (SubscriptionTabState::Closing(None), "closing", false),
             (SubscriptionTabState::Closing(Some(stream)), "closing", true),
         ];
         for (state, label, can_activate) in cases {
             assert_eq!(state.label(), label);
             assert_eq!(state.can_activate(), can_activate, "state {label}");
+            assert_eq!(
+                state.can_resubscribe(),
+                label == "ended",
+                "only an ended tab offers to resubscribe, not a {label} one"
+            );
         }
     }
 
@@ -7395,18 +7921,74 @@ mod tests {
                 );
             });
 
-            queue_subscription_restorations(signals, &mut requests);
-            queue_subscription_restorations(signals, &mut requests);
+            let mut restorations = signals.begin_restorations();
+            assert!(
+                signals.begin_restorations().is_empty(),
+                "one restoration is issued per interrupted tab"
+            );
             assert!(signals.subscription_tabs.with_untracked(|tabs| {
                 matches!(&tabs[0].state, SubscriptionTabState::Restoring)
             }));
-            requests.confirm_leader();
-            let messages = requests.release_held();
-            assert_eq!(messages.len(), 1, "one restore is held per interrupted tab");
-            let ClientRequest::Subscribe(request) = &messages[0].request else {
-                panic!("the held request restores the subscription");
+            assert_eq!(restorations.len(), 1);
+            let ConsoleRequest::SubscriptionStart {
+                tab_id,
+                request,
+                origin,
+            } = restorations.remove(0)
+            else {
+                panic!("the restoration opens the tab's subscription");
             };
+            assert_eq!(tab_id, 1);
             assert_eq!(request.statement, "CREATE SUBSCRIPTION live TO orders;");
+            assert_eq!(origin, SubscriptionOrigin::Restoration);
+            assert!(
+                requests.release_held().is_empty(),
+                "a restoration is never held"
+            );
+        });
+    }
+
+    #[test]
+    fn a_restoration_ends_with_its_connection_and_the_next_connection_restores_the_tab() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Interrupted);
+            let mut requests = SessionRequests::new();
+            for restoration in signals.begin_restorations() {
+                let issued = requests.issue(restoration);
+                requests.dispatch(issued);
+            }
+            let pending_tab = requests.issue(ConsoleRequest::SubscriptionStart {
+                tab_id: 2,
+                request: SubscribeRequest {
+                    domain: domain_name("tenant"),
+                    statement: "CREATE SUBSCRIPTION other TO orders;".to_string(),
+                    subscription_type: SubscriptionType::Row,
+                },
+                origin: SubscriptionOrigin::Console,
+            });
+            requests.dispatch(pending_tab);
+
+            requests.end_connection();
+            interrupt_subscription_tabs(signals);
+            assert!(signals.subscription_tabs.with_untracked(|tabs| {
+                matches!(&tabs[0].state, SubscriptionTabState::Interrupted)
+            }));
+            requests.confirm_leader();
+            let replayed = requests.release_held();
+            assert_eq!(
+                replayed.len(),
+                1,
+                "a new tab's start is replayed, but the restoration ended with its connection"
+            );
+            let ClientRequest::Subscribe(replayed) = &replayed[0].request else {
+                panic!("the new tab's start is replayed");
+            };
+            assert_eq!(replayed.statement, "CREATE SUBSCRIPTION other TO orders;");
+            assert_eq!(
+                signals.begin_restorations().len(),
+                1,
+                "the next connection restores the tab itself"
+            );
         });
     }
 
@@ -7449,10 +8031,11 @@ mod tests {
     }
 
     #[test]
-    fn closing_a_pending_or_interrupted_tab_never_sends_a_stale_delete() {
+    fn closing_a_pending_interrupted_or_ended_tab_never_sends_a_stale_delete() {
         for state in [
             SubscriptionTabState::Pending,
             SubscriptionTabState::Restoring,
+            SubscriptionTabState::Resubscribing,
         ] {
             Owner::new().with(|| {
                 let signals = subscription_signals(state);
@@ -7463,13 +8046,18 @@ mod tests {
                 assert!(signals.begin_subscription_close(1).is_none());
             });
         }
-        Owner::new().with(|| {
-            let signals = subscription_signals(SubscriptionTabState::Interrupted);
-            assert!(signals.begin_subscription_close(1).is_none());
-            assert!(signals.subscription_tabs.get_untracked().is_empty());
-            assert_eq!(signals.active_subscription_tab.get_untracked(), None);
-            assert!(signals.begin_subscription_close(1).is_none());
-        });
+        for state in [
+            SubscriptionTabState::Interrupted,
+            SubscriptionTabState::Ended,
+        ] {
+            Owner::new().with(|| {
+                let signals = subscription_signals(state);
+                assert!(signals.begin_subscription_close(1).is_none());
+                assert!(signals.subscription_tabs.get_untracked().is_empty());
+                assert_eq!(signals.active_subscription_tab.get_untracked(), None);
+                assert!(signals.begin_subscription_close(1).is_none());
+            });
+        }
     }
 
     #[test]
@@ -7649,6 +8237,34 @@ mod tests {
                     "error: domain clock [tenant]: the attachment ended because the domain no \
                      longer exists on the serving node",
                 ]
+            );
+        });
+    }
+
+    #[test]
+    fn domain_clock_tick_is_written_to_the_event_log() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let state = RwSignal::new(ConsoleConnectionState::Connected);
+            let mut requests = SessionRequests::new();
+            let ticked = ServerEvent::DomainClockTicked(DomainClockTicked {
+                domain: DomainName::parse("tenant").assured("the test domain name is valid"),
+                tick: DomainClockTickObservation {
+                    generation: 2,
+                    tick_id: 12,
+                    logical_boundary: Timestamp::from_unix_nanos(1_000),
+                    authority_utc: Timestamp::from_unix_nanos(2_000),
+                    serving_logical: Timestamp::from_unix_nanos(3_000),
+                },
+            });
+            let step = apply_event(signals, state, &mut requests, ticked);
+            assert!(matches!(step, SessionStep::Continue));
+            let lines = signals.terminal_lines.get_untracked().into_lines();
+            assert_eq!(
+                lines[0].line.text,
+                "domain clock [tenant] tick: generation 2, id 12, boundary \
+                 1970-01-01T00:00:00.000001Z, authority UTC 1970-01-01T00:00:00.000002Z, node \
+                 logical 1970-01-01T00:00:00.000003Z"
             );
         });
     }
@@ -7972,6 +8588,833 @@ mod tests {
         );
     }
 
+    /// The notice with which the server ends the generation `subscription`.
+    fn subscription_ended(subscription: SubscriptionHandle, message: &str) -> ServerEvent {
+        ServerEvent::SubscriptionEnded(SubscriptionEnded {
+            subscription,
+            reason: SubscriptionEndReason::RelayChanged,
+            message: message.to_string(),
+        })
+    }
+
+    #[test]
+    fn a_generation_the_server_ended_ends_its_tab_which_keeps_its_rows_and_is_not_restored() {
+        Owner::new().with(|| {
+            let stream = test_stream();
+            let signals = subscription_signals(SubscriptionTabState::Open(stream.clone()));
+            let state = RwSignal::new(ConsoleConnectionState::Connected);
+            let mut requests = SessionRequests::new();
+            signals.subscription_tabs.update(|tabs| {
+                tabs[0].lines.push(TermLine::output("{\"id\":1}"));
+            });
+
+            let earlier = SubscriptionHandle {
+                name: stream.subscription.name.clone(),
+                generation: NonZeroU64::new(2).assured("two is nonzero"),
+            };
+            let step = apply_event(
+                signals,
+                state,
+                &mut requests,
+                subscription_ended(earlier, "another generation ended"),
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert!(
+                signals
+                    .subscription_tabs
+                    .with_untracked(|tabs| { tabs[0].streams(&stream.subscription) })
+            );
+
+            apply_event(
+                signals,
+                state,
+                &mut requests,
+                subscription_ended(
+                    stream.subscription.clone(),
+                    "session subscription 'live' ended because relay 'orders' was redefined",
+                ),
+            );
+            signals.subscription_tabs.with_untracked(|tabs| {
+                assert!(matches!(&tabs[0].state, SubscriptionTabState::Ended));
+                assert!(!tabs[0].streams(&stream.subscription));
+                let texts = tabs[0]
+                    .lines
+                    .clone()
+                    .into_lines()
+                    .into_iter()
+                    .map(|entry| entry.line.text)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    texts,
+                    [
+                        "{\"id\":1}",
+                        "error: session subscription 'live' ended because relay 'orders' was \
+                         redefined",
+                    ]
+                );
+            });
+            assert_eq!(signals.active_subscription_tab.get_untracked(), Some(1));
+
+            interrupt_subscription_tabs(signals);
+            assert!(
+                signals.begin_restorations().is_empty(),
+                "a new connection does not change why the server ended the generation"
+            );
+            assert!(
+                signals.subscription_tabs.with_untracked(|tabs| {
+                    matches!(&tabs[0].state, SubscriptionTabState::Ended)
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn an_ending_that_reaches_a_closing_tab_removes_it() {
+        Owner::new().with(|| {
+            let stream = test_stream();
+            let signals = subscription_signals(SubscriptionTabState::Closing(Some(stream.clone())));
+            let request = UnsubscribeRequest {
+                subscription: stream.subscription.name.clone(),
+            };
+            signals.end_subscription(&SubscriptionEnded {
+                subscription: stream.subscription.clone(),
+                reason: SubscriptionEndReason::RelayRemoved,
+                message: "relay 'orders' no longer exists".to_string(),
+            });
+            assert!(signals.subscription_tabs.get_untracked().is_empty());
+            assert_eq!(signals.active_subscription_tab.get_untracked(), None);
+
+            apply_unsubscribe_outcome(
+                signals,
+                1,
+                &request,
+                UnsubscribeOutcome {
+                    disposition: UnsubscribeDisposition::Deleted(stream.subscription),
+                    message: "deleted".to_string(),
+                    diagnostics: Vec::new(),
+                },
+            );
+            assert!(
+                signals.subscription_tabs.get_untracked().is_empty(),
+                "the late deletion reply finds no tab to change"
+            );
+        });
+    }
+
+    #[test]
+    fn resubscribing_an_ended_tab_reopens_it_or_leaves_it_ended_with_the_refusal() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Ended);
+            signals.active_subscription_tab.set(None);
+            let mut requests = SessionRequests::new();
+
+            let request = signals
+                .begin_resubscribe(1)
+                .assured("an ended tab can be resubscribed");
+            assert_eq!(request.domain, domain_name("tenant"));
+            assert_eq!(request.statement, "CREATE SUBSCRIPTION live TO orders;");
+            assert_eq!(request.subscription_type, SubscriptionType::Row);
+            assert!(signals.subscription_tabs.with_untracked(|tabs| {
+                matches!(&tabs[0].state, SubscriptionTabState::Resubscribing)
+            }));
+            assert!(
+                signals.begin_resubscribe(1).is_none(),
+                "a resubscription in flight is not sent twice"
+            );
+
+            apply_subscribe_outcome(
+                signals,
+                &mut requests,
+                console_start(1),
+                SubscribeOutcome {
+                    disposition: SubscribeDisposition::Failed,
+                    message: "stream 'orders' does not exist in domain 'tenant'".to_string(),
+                    diagnostics: Vec::new(),
+                },
+            );
+            signals.subscription_tabs.with_untracked(|tabs| {
+                assert!(matches!(&tabs[0].state, SubscriptionTabState::Ended));
+                assert!(
+                    tabs[0].lines.clone().into_lines()[0]
+                        .line
+                        .text
+                        .contains("does not exist in domain 'tenant'")
+                );
+            });
+
+            signals
+                .begin_resubscribe(1)
+                .assured("a refused resubscription leaves the tab ended and resubscribable");
+            let reopened = SubscriptionHandle {
+                name: SubscriptionName::parse("live").assured("the test name is valid"),
+                generation: NonZeroU64::new(3).assured("three is nonzero"),
+            };
+            apply_subscribe_outcome(
+                signals,
+                &mut requests,
+                console_start(1),
+                SubscribeOutcome {
+                    disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
+                        subscription: reopened.clone(),
+                        domain: domain_name("tenant"),
+                        relay: RelayName::parse("orders").assured("the test relay is valid"),
+                        subscription_type: SubscriptionType::Row,
+                        schema: RowSchema {
+                            fields: Vec::new(),
+                            branch: None,
+                        },
+                    })),
+                    message: String::new(),
+                    diagnostics: Vec::new(),
+                },
+            );
+            assert!(
+                signals
+                    .subscription_tabs
+                    .with_untracked(|tabs| tabs[0].streams(&reopened))
+            );
+            assert_eq!(signals.active_subscription_tab.get_untracked(), Some(1));
+        });
+    }
+
+    #[test]
+    fn resubscribing_from_the_tab_sends_its_statement_or_leaves_it_ended_with_the_refusal() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Ended);
+            let (sender, mut receiver) = request_handoff();
+            let request_tx = RwSignal::new(Some(sender));
+            resubscribe_tab(signals, request_tx, 1);
+            let Some(ConsoleRequest::SubscriptionStart {
+                tab_id,
+                request,
+                origin,
+            }) = receiver.try_take()
+            else {
+                panic!("resubscribing hands the tab's start to the session");
+            };
+            assert_eq!(tab_id, 1);
+            assert_eq!(request.statement, "CREATE SUBSCRIPTION live TO orders;");
+            assert_eq!(origin, SubscriptionOrigin::Console);
+            resubscribe_tab(signals, request_tx, 1);
+            resubscribe_tab(signals, request_tx, 7);
+            assert!(
+                receiver.try_take().is_none(),
+                "only an ended tab that exists is resubscribed"
+            );
+        });
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Ended);
+            resubscribe_tab(signals, RwSignal::new(None), 1);
+            signals.subscription_tabs.with_untracked(|tabs| {
+                assert!(matches!(&tabs[0].state, SubscriptionTabState::Ended));
+                assert!(
+                    tabs[0].lines.clone().into_lines()[0]
+                        .line
+                        .text
+                        .contains(SESSION_UNAVAILABLE)
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn closing_an_open_tab_deletes_its_subscription_or_keeps_it_open_with_the_refusal() {
+        Owner::new().with(|| {
+            let stream = test_stream();
+            let signals = subscription_signals(SubscriptionTabState::Open(stream.clone()));
+            let (sender, mut receiver) = request_handoff();
+            close_subscription_tab(signals, RwSignal::new(Some(sender)), 1);
+            assert!(matches!(
+                receiver.try_take(),
+                Some(ConsoleRequest::SubscriptionStop { tab_id: 1, .. })
+            ));
+            assert!(signals.subscription_tabs.with_untracked(|tabs| {
+                matches!(&tabs[0].state, SubscriptionTabState::Closing(Some(_)))
+            }));
+        });
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Open(test_stream()));
+            close_subscription_tab(signals, RwSignal::new(None), 1);
+            signals.subscription_tabs.with_untracked(|tabs| {
+                assert!(matches!(&tabs[0].state, SubscriptionTabState::Open(_)));
+                assert!(
+                    tabs[0].lines.clone().into_lines()[0]
+                        .line
+                        .text
+                        .contains(SESSION_UNAVAILABLE)
+                );
+            });
+        });
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Ended);
+            let (sender, mut receiver) = request_handoff();
+            close_subscription_tab(signals, RwSignal::new(Some(sender)), 1);
+            assert!(signals.subscription_tabs.get_untracked().is_empty());
+            assert!(
+                receiver.try_take().is_none(),
+                "an ended tab closes without a deletion"
+            );
+        });
+    }
+
+    #[test]
+    fn a_subscription_start_reaches_the_session_or_fails_its_tab_with_the_refusal() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let request = SubscribeRequest {
+                domain: domain_name("tenant"),
+                statement: "CREATE SUBSCRIPTION live TO orders;".to_string(),
+                subscription_type: SubscriptionType::Row,
+            };
+            let (sender, mut receiver) = request_handoff();
+            send_subscription_start(
+                signals,
+                RwSignal::new(Some(sender.clone())),
+                1,
+                request.clone(),
+                SubscriptionOrigin::Console,
+            );
+            assert!(matches!(
+                receiver.try_take(),
+                Some(ConsoleRequest::SubscriptionStart { tab_id: 1, .. })
+            ));
+            assert!(signals.subscription_tabs.with_untracked(|tabs| {
+                matches!(&tabs[0].state, SubscriptionTabState::Pending)
+            }));
+
+            drop(receiver);
+            send_subscription_start(
+                signals,
+                RwSignal::new(Some(sender)),
+                1,
+                request,
+                SubscriptionOrigin::Console,
+            );
+            assert!(
+                signals.subscription_tabs.get_untracked().is_empty(),
+                "a new tab whose start was refused is removed"
+            );
+            assert_eq!(
+                signals.terminal_lines.get_untracked().into_lines()[0]
+                    .line
+                    .text,
+                "error: websocket command channel is closed"
+            );
+        });
+    }
+
+    #[test]
+    fn a_resource_description_the_console_cannot_hand_over_shows_why_in_its_dialog() {
+        Owner::new().with(|| {
+            let details = RwSignal::new(BTreeMap::<String, ResourceDetailView>::new());
+            let (sender, mut receiver) = request_handoff();
+            request_resource_describe(
+                RwSignal::new(Some(sender.clone())),
+                details,
+                "live".to_string(),
+                Some(domain_name("tenant")),
+            );
+            assert!(matches!(
+                receiver.try_take(),
+                Some(ConsoleRequest::Command {
+                    purpose: CommandPurpose::ResourceDescription { .. },
+                    ..
+                })
+            ));
+            assert!(details.get_untracked().is_empty());
+
+            drop(receiver);
+            request_resource_describe(
+                RwSignal::new(Some(sender)),
+                details,
+                "bundle".to_string(),
+                Some(domain_name("tenant")),
+            );
+            request_resource_describe(RwSignal::new(None), details, "other".to_string(), None);
+            let details = details.get_untracked();
+            assert_eq!(
+                details["bundle"].status,
+                "websocket command channel is closed"
+            );
+            assert_eq!(details["other"].status, SESSION_UNAVAILABLE);
+        });
+    }
+
+    /// A REPL command issued in the session's transaction, at its first accepted position.
+    fn transaction_command(query: &str) -> ConsoleRequest {
+        let ConsoleRequest::Command {
+            mut request,
+            purpose,
+        } = repl_command(query)
+        else {
+            panic!("the test builds a command");
+        };
+        request.expected_transaction_position = Some(TransactionPosition::new(1));
+        ConsoleRequest::Command { request, purpose }
+    }
+
+    /// The resource description the console requests on its own, outside any transaction.
+    fn resource_description(resource: &str) -> ConsoleRequest {
+        ConsoleRequest::Command {
+            request: CommandRequest {
+                query: format!("DESCRIBE RESOURCE {resource};"),
+                domain: Some(domain_name("tenant")),
+                execution_reference: command_execution_reference(),
+                expected_transaction_position: None,
+                expected_preview: None,
+            },
+            purpose: CommandPurpose::ResourceDescription {
+                resource: resource.to_string(),
+            },
+        }
+    }
+
+    fn reverted_transaction() -> TransactionStatus {
+        TransactionStatus::new(
+            "transaction".to_string(),
+            domain_name("tenant"),
+            TransactionLifecycle::Reverted,
+            TransactionPosition::new(1),
+            0,
+        )
+        .assured("no operation of the reverted test transaction applied")
+    }
+
+    #[test]
+    fn a_finished_or_failed_attach_ends_only_the_commands_issued_in_its_transaction() {
+        let attach_endings: [fn(WebConsoleSignals, &mut SessionRequests); 4] = [
+            |signals, requests| {
+                apply_attach_outcome(
+                    signals,
+                    requests,
+                    AttachOutcome {
+                        disposition: AttachDisposition::AlreadyFinished(reverted_transaction()),
+                        message: "transaction already finished".to_string(),
+                        diagnostics: Vec::new(),
+                    },
+                );
+            },
+            |signals, requests| {
+                apply_attach_outcome(
+                    signals,
+                    requests,
+                    AttachOutcome {
+                        disposition: AttachDisposition::Attached(reverted_transaction()),
+                        message: "transaction reverted".to_string(),
+                        diagnostics: Vec::new(),
+                    },
+                );
+            },
+            |signals, requests| {
+                apply_attach_outcome(
+                    signals,
+                    requests,
+                    AttachOutcome {
+                        disposition: AttachDisposition::Failed,
+                        message: "transaction is not retained".to_string(),
+                        diagnostics: Vec::new(),
+                    },
+                );
+            },
+            |signals, requests| {
+                let attach = ConsoleRequest::AttachTransaction(AttachTransactionRequest {
+                    transaction_id: "transaction".to_string(),
+                });
+                fail_request(
+                    signals,
+                    requests,
+                    attach,
+                    "the attach was rejected".to_string(),
+                );
+            },
+        ];
+        for end_attach in attach_endings {
+            Owner::new().with(|| {
+                let signals = subscription_signals(SubscriptionTabState::Pending);
+                signals.transaction_status.set(Some(
+                    TransactionStatus::new(
+                        "transaction".to_string(),
+                        domain_name("tenant"),
+                        TransactionLifecycle::Open,
+                        TransactionPosition::new(1),
+                        0,
+                    )
+                    .assured("no operation of the open test transaction applied"),
+                ));
+                let mut requests = SessionRequests::new();
+                let attach = requests.issue(ConsoleRequest::AttachTransaction(
+                    AttachTransactionRequest {
+                        transaction_id: "transaction".to_string(),
+                    },
+                ));
+                requests.dispatch(attach);
+                requests.confirm_leader();
+                let new_tab = requests.issue(ConsoleRequest::SubscriptionStart {
+                    tab_id: 1,
+                    request: SubscribeRequest {
+                        domain: domain_name("tenant"),
+                        statement: "CREATE SUBSCRIPTION live TO orders;".to_string(),
+                        subscription_type: SubscriptionType::Row,
+                    },
+                    origin: SubscriptionOrigin::Console,
+                });
+                assert!(matches!(requests.accept(new_tab), Admission::Held));
+                let in_transaction = requests.issue(transaction_command("REVERT;"));
+                assert!(matches!(requests.accept(in_transaction), Admission::Held));
+                let outside = requests.issue(resource_description("bundle"));
+                assert!(matches!(requests.accept(outside), Admission::Held));
+
+                end_attach(signals, &mut requests);
+                requests.answer(request_id(1));
+                let released = requests.release_held();
+                assert_eq!(released.len(), 2, "only the command issued in it ended");
+                let ClientRequest::Subscribe(start) = &released[0].request else {
+                    panic!("the tab's start goes out first, in its place");
+                };
+                assert_eq!(start.statement, "CREATE SUBSCRIPTION live TO orders;");
+                assert_eq!(
+                    sent_queries(&released[1..]),
+                    vec!["DESCRIBE RESOURCE bundle;"]
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn the_session_refuses_requests_past_its_outstanding_bounds_and_reports_them() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let mut requests = SessionRequests::new();
+            requests.confirm_leader();
+            for _ in 0..MAX_OUTSTANDING_REQUESTS {
+                let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
+                assert!(!matches!(requests.accept(issued), Admission::Refused(_)));
+            }
+            assert_eq!(requests.in_flight.len(), MAX_IN_FLIGHT_REQUESTS);
+
+            let issued = requests.issue(repl_command("LIST DOMAINS;"));
+            let Admission::Refused(refused) = requests.accept(issued) else {
+                panic!("a request past the outstanding bound is refused");
+            };
+            assert_eq!(
+                refused.refusal,
+                RequestRefusal::TooManyOutstanding {
+                    limit: MAX_OUTSTANDING_REQUESTS
+                }
+            );
+            let RefusedRequest { request, refusal } = *refused;
+            fail_request(signals, &mut requests, request, refusal.to_string());
+            assert_eq!(
+                signals.terminal_lines.get_untracked().into_lines()[0]
+                    .line
+                    .text,
+                "error: 256 requests are already outstanding in the console's session; this one \
+                 was not sent"
+            );
+
+            let completion = requests.issue(suggest("SH"));
+            let Admission::Refused(refused) = requests.accept(completion) else {
+                panic!("a completion request past the outstanding bound is refused");
+            };
+            let RefusedRequest { request, refusal } = *refused;
+            fail_request(signals, &mut requests, request, refusal.to_string());
+            assert!(signals.suggestions.get_untracked().is_empty());
+            assert_eq!(
+                signals.suggestion_status.get_untracked(),
+                Some(SuggestionStatus::LookupFailed),
+                "a refused completion request is not shown as having no matches"
+            );
+
+            let first = *requests
+                .in_flight
+                .keys()
+                .next()
+                .assured("the session has requests in flight");
+            assert!(requests.answer(first).is_some());
+            assert_eq!(
+                requests.release_held().len(),
+                1,
+                "a reply frees a place for the next held request"
+            );
+            let issued = requests.issue(repl_command("LIST DOMAINS;"));
+            assert!(
+                matches!(requests.accept(issued), Admission::Held),
+                "a request issued later waits behind the held ones"
+            );
+        });
+    }
+
+    #[test]
+    fn ordered_requests_beyond_the_in_flight_limit_wait_in_order_for_earlier_replies() {
+        let mut requests = SessionRequests::new();
+        requests.confirm_leader();
+        let mut sent_ids = Vec::new();
+        for index in 0..MAX_IN_FLIGHT_REQUESTS {
+            let issued = requests.issue(repl_command(&format!("SHOW {index};")));
+            sent_ids.push(sent(requests.accept(issued)).request_id);
+        }
+        for query in ["first to wait", "second to wait"] {
+            let issued = requests.issue(repl_command(query));
+            assert!(
+                matches!(requests.accept(issued), Admission::Held),
+                "the server admits no more requests in flight"
+            );
+        }
+        assert!(requests.release_held().is_empty());
+
+        assert!(requests.answer(sent_ids[0]).is_some());
+        assert_eq!(
+            sent_queries(&requests.release_held()),
+            vec!["first to wait"]
+        );
+        assert!(requests.answer(sent_ids[1]).is_some());
+        assert_eq!(
+            sent_queries(&requests.release_held()),
+            vec!["second to wait"]
+        );
+        assert_eq!(requests.in_flight.len(), MAX_IN_FLIGHT_REQUESTS);
+    }
+
+    #[test]
+    fn the_session_bounds_the_text_its_outstanding_requests_carry() {
+        let mut requests = SessionRequests::new();
+        let largest = requests.issue(repl_command(&"a".repeat(MAX_OUTSTANDING_REQUEST_BYTES)));
+        assert!(matches!(requests.accept(largest), Admission::Held));
+        let issued = requests.issue(repl_command("b"));
+        let Admission::Refused(refused) = requests.accept(issued) else {
+            panic!("text past the outstanding bound is refused");
+        };
+        assert_eq!(
+            refused.refusal,
+            RequestRefusal::TooMuchOutstandingText {
+                limit: MAX_OUTSTANDING_REQUEST_BYTES
+            }
+        );
+        let issued = requests.issue(ConsoleRequest::ListDomains);
+        assert!(
+            matches!(requests.accept(issued), Admission::Held),
+            "a request that carries no text still fits"
+        );
+    }
+
+    /// The first part of a completion reply to `request_id` too large for one frame.
+    fn first_suggestion_part(request_id: RequestId) -> ServerMessage {
+        let small_frames = SessionLimits::try_from(SessionLimitSettings {
+            frame_bytes: std::num::NonZeroUsize::new(1024).assured("a literal nonzero size"),
+            transfer_bytes: std::num::NonZeroUsize::new(SESSION_LIMITS.transfer_bytes())
+                .assured("the default transfer limit is nonzero"),
+            nesting_depth: std::num::NonZeroUsize::new(SESSION_LIMITS.nesting_depth())
+                .assured("the default nesting limit is nonzero"),
+            collection_entries: std::num::NonZeroUsize::new(SESSION_LIMITS.collection_entries())
+                .assured("the default collection limit is nonzero"),
+            string_bytes: std::num::NonZeroUsize::new(SESSION_LIMITS.string_bytes())
+                .assured("the default string limit is nonzero"),
+        })
+        .assured("a 1 KiB frame limit is the smallest a session admits");
+        let long = "SHOW ".repeat(1024);
+        let reply = Reply {
+            request_id,
+            body: ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                status: SuggestionStatus::Ready,
+                continuation: None,
+                suggestions: vec![WireSuggestion {
+                    value: long.clone(),
+                    kind: SuggestionKind::Text,
+                    edit: TextEdit {
+                        start: 0,
+                        end: 0,
+                        replacement: long,
+                    },
+                }],
+            }),
+        };
+        let ReplyDelivery::Transfer(mut parts) = reply
+            .encode(&small_frames)
+            .assured("the reply stays within the transfer limit")
+        else {
+            panic!("a reply larger than a frame travels as parts");
+        };
+        let first = parts
+            .next()
+            .assured("a transfer has a first part")
+            .verify(&small_frames)
+            .assured("an encoded part verifies under the limits it was encoded for");
+        ServerMessage::decode(&first).assured("a verified part decodes")
+    }
+
+    #[test]
+    fn a_superseded_completion_request_drops_its_partial_reply() {
+        let mut requests = SessionRequests::new();
+        let earlier = requests.issue(suggest("SH"));
+        let earlier = sent(requests.accept(earlier));
+        let part = first_suggestion_part(earlier.request_id);
+        assert!(matches!(requests.route(part), Routed::Pending));
+        assert!(requests.transfers.contains_key(&earlier.request_id));
+
+        let later = requests.issue(suggest("SHOW"));
+        sent(requests.accept(later));
+        assert!(
+            requests.transfers.is_empty(),
+            "the parts of a reply nobody awaits are not kept"
+        );
+    }
+
+    #[test]
+    fn command_history_keeps_the_latest_commands_and_reports_where_it_omitted_earlier_ones() {
+        let mut history = CommandHistory::default();
+        let issued = MAX_COMMAND_HISTORY_RECORDS + 10;
+        for index in 0..issued {
+            assert_eq!(history.push(&format!("SHOW {index};")), HistoryPush::Kept);
+        }
+        let mut recalled = Vec::new();
+        let mut omission_reports = 0;
+        for _ in 0..MAX_COMMAND_HISTORY_RECORDS {
+            let step = history
+                .previous("draft".to_string())
+                .assured("the history keeps commands to walk back through");
+            if step.reached_omission {
+                omission_reports += 1;
+            }
+            recalled.push(step.command);
+        }
+        assert_eq!(recalled[0], format!("SHOW {};", issued - 1));
+        assert_eq!(recalled[MAX_COMMAND_HISTORY_RECORDS - 1], "SHOW 10;");
+        assert_eq!(
+            omission_reports, 1,
+            "the walk reports the omission once, where it reaches the oldest command kept"
+        );
+
+        let stay = history
+            .previous("draft".to_string())
+            .assured("stepping back from the oldest command stays on it");
+        assert_eq!(stay.command, "SHOW 10;");
+        assert!(!stay.reached_omission);
+        assert_eq!(history.next().as_deref(), Some("SHOW 11;"));
+        for _ in 0..(MAX_COMMAND_HISTORY_RECORDS - 2) {
+            history.next();
+        }
+        assert_eq!(
+            history.next().as_deref(),
+            Some("draft"),
+            "walking forward past the newest command restores the draft"
+        );
+    }
+
+    #[test]
+    fn command_history_bounds_its_bytes_and_cannot_keep_a_command_larger_than_itself() {
+        let mut history = CommandHistory::default();
+        let half = MAX_COMMAND_HISTORY_BYTES / 2;
+        let first = "a".repeat(half);
+        let second = "b".repeat(half);
+        assert_eq!(history.push(&first), HistoryPush::Kept);
+        assert_eq!(history.push(&second), HistoryPush::Kept);
+        assert_eq!(
+            history.push(&second),
+            HistoryPush::Kept,
+            "a repeat adds nothing"
+        );
+        assert_eq!(
+            history.push("   "),
+            HistoryPush::Kept,
+            "an empty command adds nothing"
+        );
+        assert_eq!(history.entries.len(), 2);
+        assert!(!history.omitted);
+
+        assert_eq!(history.push("c"), HistoryPush::Kept);
+        assert_eq!(
+            history.entries.len(),
+            2,
+            "the oldest command gave way to the new one"
+        );
+        assert_eq!(history.bytes, half + 1);
+        assert_eq!(
+            history.push(&"x".repeat(MAX_COMMAND_HISTORY_BYTES + 1)),
+            HistoryPush::TooLarge
+        );
+        assert_eq!(
+            history.entries.len(),
+            2,
+            "a command too large to keep evicts nothing"
+        );
+
+        let newest = history
+            .previous(String::new())
+            .assured("the history keeps two commands");
+        assert_eq!(newest.command, "c");
+        assert!(!newest.reached_omission);
+        let oldest = history
+            .previous(String::new())
+            .assured("the history keeps two commands");
+        assert_eq!(oldest.command, second);
+        assert!(oldest.reached_omission);
+        assert!(CommandHistory::default().previous(String::new()).is_none());
+    }
+
+    /// A snapshot of `domain` as the server pushes it, whose graph is named after the domain.
+    fn observed_snapshot(domain: &str) -> ServerEvent {
+        let graph = DataflowGraph::new(domain)
+            .serialize()
+            .assured("an empty graph serializes");
+        let graph_json = String::from_utf8(graph).assured("a serialized graph is JSON text");
+        let frame = DomainSnapshotObserved::encode(
+            &domain_name(domain),
+            &graph_json,
+            &[DomainEntity::Resource {
+                name: ResourceName::parse(&format!("{domain}_bundle"))
+                    .assured("the test names a valid resource"),
+                latest_version: None,
+            }],
+            &SESSION_LIMITS,
+        )
+        .assured("a small snapshot fits a frame")
+        .verify(&SESSION_LIMITS)
+        .assured("an encoded snapshot verifies");
+        let ServerMessage::Event(event) =
+            ServerMessage::decode(&frame).assured("a verified snapshot decodes")
+        else {
+            panic!("a snapshot is an event");
+        };
+        event
+    }
+
+    #[test]
+    fn the_console_keeps_only_the_snapshot_of_the_domain_it_observes() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let state = RwSignal::new(ConsoleConnectionState::Connected);
+            let mut requests = SessionRequests::new();
+            let retained_resource = || match signals.domain_snapshot.get_untracked() {
+                Some(snapshot) => (
+                    snapshot.domain.to_string(),
+                    snapshot.entities[0].name.clone(),
+                ),
+                None => panic!("the console retains a snapshot"),
+            };
+
+            apply_event(signals, state, &mut requests, observed_snapshot("tenant"));
+            assert_eq!(
+                retained_resource(),
+                ("tenant".to_string(), "tenant_bundle".to_string())
+            );
+
+            apply_event(signals, state, &mut requests, observed_snapshot("other"));
+            assert_eq!(
+                retained_resource(),
+                ("tenant".to_string(), "tenant_bundle".to_string()),
+                "a snapshot of a domain the console does not show is dropped"
+            );
+
+            signals.active_domain.set(Some(domain_name("other")));
+            apply_event(signals, state, &mut requests, observed_snapshot("other"));
+            assert_eq!(
+                retained_resource(),
+                ("other".to_string(), "other_bundle".to_string()),
+                "the newly observed domain's snapshot replaces the previous one"
+            );
+        });
+    }
+
     #[test]
     fn untracked_domain_push_cannot_discard_a_pending_websocket_request() {
         let mut requests = SessionRequests::new();
@@ -8054,13 +9497,13 @@ mod tests {
         let first = requests.issue(repl_command("CREATE SCHEMA first ( value I64 );"));
         let second = requests.issue(repl_command("CREATE SCHEMA second ( value I64 );"));
         assert!(
-            requests.accept(first).is_none(),
+            matches!(requests.accept(first), Admission::Held),
             "an ordered request waits until the server confirms that it leads"
         );
-        assert!(requests.accept(second).is_none());
+        assert!(matches!(requests.accept(second), Admission::Held));
         let completion = requests.issue(suggest("CREATE "));
         assert!(
-            requests.accept(completion).is_some(),
+            matches!(requests.accept(completion), Admission::Sent(_)),
             "a completion request is sent at once"
         );
 
@@ -8103,15 +9546,9 @@ mod tests {
         let first = requests.issue(repl_command("first"));
         let second = requests.issue(repl_command("second"));
         let third = requests.issue(repl_command("third"));
-        let first = requests
-            .accept(first)
-            .assured("the leader can send the first request");
-        let second = requests
-            .accept(second)
-            .assured("the leader can send the second request");
-        let third = requests
-            .accept(third)
-            .assured("the leader can send the third request");
+        let first = sent(requests.accept(first));
+        let second = sent(requests.accept(second));
+        let third = sent(requests.accept(third));
         let sent = [first, second, third];
         assert!(requests.answer(sent[0].request_id).is_some());
         let name = SubscriptionName::parse("closing").assured("the test name is valid");
@@ -8119,7 +9556,7 @@ mod tests {
             tab_id: 9,
             request: UnsubscribeRequest { subscription: name },
         });
-        assert!(requests.accept(closing).is_some());
+        assert!(matches!(requests.accept(closing), Admission::Sent(_)));
 
         requests.end_connection();
         requests.confirm_leader();
@@ -8185,12 +9622,8 @@ mod tests {
         requests.confirm_leader();
         let first = requests.issue(repl_command("first"));
         let second = requests.issue(repl_command("second"));
-        let first = requests
-            .accept(first)
-            .assured("a ready session sends an ordered request at once");
-        let second = requests
-            .accept(second)
-            .assured("a ready session sends an ordered request at once");
+        let first = sent(requests.accept(first));
+        let second = sent(requests.accept(second));
         for detached in [second.request_id, first.request_id] {
             let Routed::Reply(answered) = requests.route(reply(detached, detached_command()))
             else {
@@ -8211,7 +9644,7 @@ mod tests {
         );
         let third = requests.issue(repl_command("third"));
         assert!(
-            requests.accept(third).is_none(),
+            matches!(requests.accept(third), Admission::Held),
             "a command issued during the attach waits behind the held ones"
         );
         let attach_reply = requests.route(reply(attach.request_id, attached()));
@@ -8225,13 +9658,9 @@ mod tests {
     fn only_the_latest_completion_request_is_awaited() {
         let mut requests = SessionRequests::new();
         let earlier = requests.issue(suggest("SH"));
-        let earlier = requests
-            .accept(earlier)
-            .assured("a completion request is sent at once");
+        let earlier = sent(requests.accept(earlier));
         let later = requests.issue(suggest("SHOW"));
-        let later = requests
-            .accept(later)
-            .assured("a completion request is sent at once");
+        let later = sent(requests.accept(later));
         let suggestions = || {
             ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
                 status: nervix_client_wire::SuggestionStatus::Ready,
@@ -8250,23 +9679,15 @@ mod tests {
     fn only_the_latest_request_for_each_typed_choice_control_is_awaited() {
         let mut requests = SessionRequests::new();
         let earlier = requests.issue(choice_request(ChoiceControl::DomainPace, 1));
-        let earlier = requests
-            .accept(earlier)
-            .assured("a choice request is sent without waiting for leadership");
+        let earlier = sent(requests.accept(earlier));
         assert!(matches!(earlier.request, ClientRequest::Choice(_)));
 
         let placement = requests.issue(choice_request(ChoiceControl::PlacementPolicy, 1));
-        let placement = requests
-            .accept(placement)
-            .assured("an independent choice control is sent at once");
+        let placement = sent(requests.accept(placement));
         let schema = requests.issue(choice_request(ChoiceControl::BranchSchema, 1));
-        let schema = requests
-            .accept(schema)
-            .assured("the branch schema control is sent independently");
+        let schema = sent(requests.accept(schema));
         let later = requests.issue(choice_request(ChoiceControl::DomainPace, 1));
-        let later = requests
-            .accept(later)
-            .assured("a newer request for the same control is sent at once");
+        let later = sent(requests.accept(later));
 
         assert!(matches!(
             requests.route(reply(earlier.request_id, ready_choice_reply())),
@@ -9131,6 +10552,7 @@ mod tests {
             latest_version: latest_version.and_then(NonZeroU64::new),
         };
         let snapshot = DomainSnapshotView::new(
+            DomainName::parse("demo").assured("the test names a valid domain"),
             &[
                 model(ModelKind::WireJsonSchema, "orders_json"),
                 resource("bundle", Some(2)),
@@ -9189,6 +10611,14 @@ mod tests {
             )),
             "orders input.user_id = 42"
         );
+    }
+
+    /// The message that carries a request the session sent at once.
+    fn sent(admission: Admission) -> ClientMessage {
+        let Admission::Sent(message) = admission else {
+            panic!("the session sends the request at once");
+        };
+        message
     }
 
     fn request_id(id: u64) -> RequestId {
@@ -9250,12 +10680,27 @@ mod tests {
         let target = match control {
             ChoiceControl::DomainPace => nervix_client_wire::ChoiceTarget::DomainPace,
             ChoiceControl::PlacementPolicy => nervix_client_wire::ChoiceTarget::PlacementPolicy,
-            ChoiceControl::BranchSchema | ChoiceControl::RelaySchema => {
-                nervix_client_wire::ChoiceTarget::Schema
-            }
+            ChoiceControl::BranchSchema
+            | ChoiceControl::RelaySchema
+            | ChoiceControl::CodecSchema => nervix_client_wire::ChoiceTarget::Schema,
             ChoiceControl::RelayBranch => nervix_client_wire::ChoiceTarget::Branch,
             ChoiceControl::SubscriptionRelay => nervix_client_wire::ChoiceTarget::Relay,
             ChoiceControl::SubscriptionField => nervix_client_wire::ChoiceTarget::RelayField,
+            ChoiceControl::CodecWireSchema => nervix_client_wire::ChoiceTarget::WireJsonSchema,
+            ChoiceControl::CodecResource
+            | ChoiceControl::SignalingResource
+            | ChoiceControl::ClientResource
+            | ChoiceControl::VhostResource => nervix_client_wire::ChoiceTarget::Resource,
+            ChoiceControl::CodecVersion
+            | ChoiceControl::SignalingVersion
+            | ChoiceControl::ClientVersion
+            | ChoiceControl::VhostVersion => {
+                nervix_client_wire::ChoiceTarget::CompletedResourceVersion
+            }
+            ChoiceControl::ClientSignaling | ChoiceControl::EndpointSignaling => {
+                nervix_client_wire::ChoiceTarget::SignalingProtocol
+            }
+            ChoiceControl::EndpointVhost => nervix_client_wire::ChoiceTarget::Vhost,
         };
         ConsoleRequest::Choice {
             request: ChoiceLookupRequest::new(target, Vec::new(), String::new()),
@@ -9349,7 +10794,7 @@ mod tests {
             )
             .assured("the test transaction has two accepted, unapplied operations");
             signals.transaction_status.set(Some(transaction));
-            let (sender, mut receiver) = unbounded();
+            let (sender, mut receiver) = request_handoff();
             submit_create_command(
                 signals,
                 RwSignal::new(Some(sender)),
@@ -9365,7 +10810,7 @@ mod tests {
                 revision,
             );
             let ConsoleRequest::Command { request, purpose } = receiver
-                .try_recv()
+                .try_take()
                 .assured("the shared command queue receives the popup command")
             else {
                 panic!("popup submission sends a command request");
@@ -9400,7 +10845,7 @@ mod tests {
                 revision,
             );
 
-            let (closed_sender, closed_receiver) = unbounded();
+            let (closed_sender, closed_receiver) = request_handoff();
             drop(closed_receiver);
             signals.create.open(CreateKind::User, None, "trigger");
             let (attempt, revision) = signals.create.begin_submission(true);

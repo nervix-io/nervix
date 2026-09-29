@@ -5,9 +5,9 @@
 //! - **Depends on.** Typed execution plans, the expression VM and runtime infrastructure.
 //! - **Must not know.** NSPL text, parser state or control-plane transactions.
 //!
-//! Ingestor and reingestor programs arrive lowered by their decision-layer plans. The remaining
-//! compile functions still receive semantic Models directly instead of a validated execution
-//! plan.
+//! Ingestor, reingestor and emitter programs arrive lowered by their decision-layer plans. Some
+//! processor compile functions still receive semantic Models directly instead of validated
+//! execution plans.
 
 use error_stack::ResultExt as _;
 
@@ -83,56 +83,32 @@ pub(in crate::runtime) enum RuntimeVmCompileError {
     RewriteMessageErrorLookups { node: ModelName },
     #[error("failed to compile LOOKUP_HASH_MAP calls in message-error SET for '{node}'")]
     CompileMessageErrorLookups { node: ModelName },
-    #[error("message-error SET compile failed for '{node}': {source}")]
-    CompileMessageErrorSet {
-        node: ModelName,
-        #[source]
-        source: nervix_vm::CompileError,
-    },
+    #[error("message-error SET compile failed for '{node}'")]
+    CompileMessageErrorSet { node: ModelName },
     #[error("{target} requires at least one input relay")]
     MissingKeyProjectionInput { target: KeyProjectionTarget },
     #[error("{target} is invalid")]
     InvalidKeyProjection { target: KeyProjectionTarget },
-    #[error("{target} type inference failed: {source}")]
-    InferKeyProjection {
-        target: KeyProjectionTarget,
-        #[source]
-        source: nervix_vm::CompileError,
-    },
+    #[error("{target} type inference failed")]
+    InferKeyProjection { target: KeyProjectionTarget },
     #[error("{target} inferred {actual} key fields for {expected} expressions")]
     KeyProjectionFieldCountMismatch {
         target: KeyProjectionTarget,
         expected: usize,
         actual: usize,
     },
-    #[error("{target} compile failed: {source}")]
-    CompileKeyProjection {
-        target: KeyProjectionTarget,
-        #[source]
-        source: nervix_vm::CompileError,
-    },
+    #[error("{target} compile failed")]
+    CompileKeyProjection { target: KeyProjectionTarget },
     #[error("constant expression is invalid")]
     InvalidConstantExpression,
-    #[error("constant expression type inference failed: {source}")]
-    InferConstantExpression {
-        #[source]
-        source: nervix_vm::CompileError,
-    },
-    #[error("constant expression compile failed: {source}")]
-    CompileConstantExpression {
-        #[source]
-        source: nervix_vm::CompileError,
-    },
-    #[error("failed to build the constant expression input batch: {source}")]
-    BuildConstantInput {
-        #[source]
-        source: nervix_vm::RuntimeError,
-    },
-    #[error("constant expression execution failed: {source}")]
-    ExecuteConstantExpression {
-        #[source]
-        source: nervix_vm::RuntimeError,
-    },
+    #[error("constant expression type inference failed")]
+    InferConstantExpression,
+    #[error("constant expression compile failed")]
+    CompileConstantExpression,
+    #[error("failed to build the constant expression input batch")]
+    BuildConstantInput,
+    #[error("constant expression execution failed")]
+    ExecuteConstantExpression,
     #[error("constant expression did not produce exactly one row")]
     ConstantExpressionRowCount,
     #[error("failed to read field '{field}' from the constant expression output")]
@@ -356,7 +332,7 @@ pub(super) struct RuntimeVmSchemaPair {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledDomainUdfs {
-    pub(super) models: Vec<CreateUdf>,
+    pub(super) programs: Vec<UdfProgram>,
     pub(super) executor: UdfExecutor,
 }
 
@@ -715,12 +691,7 @@ pub(super) fn compile_message_error_set_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|source| {
-        Report::new(RuntimeVmCompileError::CompileMessageErrorSet {
-            node: node.clone(),
-            source,
-        })
-    })?;
+    .change_context(RuntimeVmCompileError::CompileMessageErrorSet { node: node.clone() })?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
         materialized_interest,
@@ -898,13 +869,14 @@ pub(super) fn bind_scoped_filter_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
+    .map_err(|error| RuntimeError::VmCompile {
         domain: domain.as_str().to_string(),
         reason: format!(
             "filter compile failed for '{}': {}",
             identifier.as_str(),
-            error.message
+            error.current_context().message
         ),
+        report: error,
     })?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
@@ -1110,13 +1082,14 @@ pub(super) fn bind_processor_output_filter_map_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
+    .map_err(|error| RuntimeError::VmCompile {
         domain: domain.as_str().to_string(),
         reason: format!(
             "FILTER-MAP compile failed for '{}': {}",
             identifier.as_str(),
-            error.message
+            error.current_context().message
         ),
+        report: error,
     })?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
@@ -1211,13 +1184,14 @@ pub(super) fn bind_output_branch_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
+    .map_err(|error| RuntimeError::VmCompile {
         domain: domain.as_str().to_string(),
         reason: format!(
             "output branch compile failed for '{}': {}",
             identifier.as_str(),
-            error.message
+            error.current_context().message
         ),
+        report: error,
     })?;
     Ok(CompiledBranchProgram {
         program: CompiledProgramWithMaterializedInterest {
@@ -1328,13 +1302,14 @@ pub(super) fn compile_wasm_output_filter_map_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
+    .map_err(|error| RuntimeError::VmCompile {
         domain: domain.as_str().to_string(),
         reason: format!(
             "FILTER-MAP compile failed for '{}': {}",
             identifier.as_str(),
-            error.message
+            error.current_context().message
         ),
+        report: error,
     })?;
     Ok(Some(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
@@ -1345,103 +1320,20 @@ pub(super) fn compile_wasm_output_filter_map_program(
     }))
 }
 
-/// Which construction an emitter's route compiles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::runtime) enum EmitterRoute {
-    /// The construction the emitter declares, which an emitter declaring none does not compile.
-    Declared,
-    /// An HTTP emitter's construction without its header writes, which are request fields it
-    /// evaluates after `METHOD` and `PATH` and only for the records the route keeps. With a codec
-    /// body the route always compiles, because it finalizes the record the codec encodes.
-    HttpRequest,
-}
-
 pub(in crate::runtime) fn compile_emitter_filter_map_program(
     domain: &DomainName,
-    emitter: &CreateEmitter,
-    route: EmitterRoute,
+    emitter: &EmitterName,
+    route: Option<&EmitterRoutePlan>,
     schemas: RuntimeVmSchemaPair,
     context: RuntimeVmCompileContext<'_>,
 ) -> Result<Option<CompiledEmitterFilterMapProgram>, RuntimeError> {
-    let codec_route = emitter.body.codec().is_some();
-    let construction = match route {
-        EmitterRoute::Declared => {
-            if emitter.construction.is_empty() {
-                return Ok(None);
-            }
-            emitter.construction.clone()
-        }
-        EmitterRoute::HttpRequest => {
-            let construction = RouteConstruction {
-                invocations: Vec::new(),
-                ..emitter.construction.clone()
-            };
-            if construction.is_empty() && !codec_route {
-                return Ok(None);
-            }
-            construction
-        }
+    let Some(route) = route else {
+        return Ok(None);
     };
-    if !codec_route
-        && (construction.inherit.is_some()
-            || !construction.assignments.is_empty()
-            || !construction.invocations.is_empty())
-    {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "direct emitter '{}' supports VALUES and WHERE only",
-                emitter.name.as_str()
-            ),
-        });
-    }
-    let parsed = if codec_route {
-        lower_transforming_route(
-            &construction,
-            schemas.input.as_ref(),
-            schemas.output.as_ref(),
-        )
-    } else {
-        lower_route_construction(&construction, SemanticScopePolicy::read_only("input"))
-    }
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "emitter route '{}' is invalid: {reason}",
-            emitter.name.as_str()
-        ),
-    })?;
-    if parsed
-        .inner
-        .invoke
-        .iter()
-        .any(|invocation| invocation.inner.function == FunctionName::WriteHeader)
-        && !emit_sink_supports_headers(&emitter.sink)
-    {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "{} emitters do not support FILTER-MAP headers",
-                emitter.sink.transport_label()
-            ),
-        });
-    }
-    let inherited_count = if codec_route {
-        parsed
-            .inner
-            .set
-            .len()
-            .checked_sub(construction.assignments.len())
-            .verified(
-                "a compiled construction lists one set operation per inherited field before its \
-                 assignments",
-            )
-    } else {
-        0
-    };
+    let parsed = route.program.clone();
     let set_operations = (0..parsed.inner.set.len())
         .map(|index| {
-            if index < inherited_count {
+            if index < route.inherited_count {
                 MessageErrorOperation::Inherit
             } else {
                 MessageErrorOperation::Set
@@ -1461,15 +1353,18 @@ pub(in crate::runtime) fn compile_emitter_filter_map_program(
     let body = compile_emitter_filter_map_part(
         RuntimeCompileTarget {
             domain,
-            identifier: &ModelName::from(&emitter.name),
+            identifier: &ModelName::from(emitter),
         },
         parsed,
         schemas,
-        codec_route,
+        route.codec_route,
         error_sites,
         context,
     )?;
-    Ok(Some(CompiledEmitterFilterMapProgram { body, codec_route }))
+    Ok(Some(CompiledEmitterFilterMapProgram {
+        body,
+        codec_route: route.codec_route,
+    }))
 }
 
 pub(super) fn compile_emitter_filter_map_part(
@@ -1562,13 +1457,14 @@ pub(super) fn compile_emitter_filter_map_part(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
+    .map_err(|error| RuntimeError::VmCompile {
         domain: domain.as_str().to_string(),
         reason: format!(
             "FILTER-MAP compile failed for '{}': {}",
             identifier.as_str(),
-            error.message
+            error.current_context().message
         ),
+        report: error,
     })?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
@@ -1624,11 +1520,8 @@ pub(in crate::runtime) fn compile_key_projection_program(
     let signatures = runtime_udf_signatures(udfs);
     let key_types =
         infer_vm_set_expr_types_for_bindings_with_udfs(&parsed, bindings.clone(), signatures)
-            .map_err(|source| {
-                Report::new(RuntimeVmCompileError::InferKeyProjection {
-                    target: target.clone(),
-                    source,
-                })
+            .change_context(RuntimeVmCompileError::InferKeyProjection {
+                target: target.clone(),
             })?;
     if key_types.len() != expressions.len() {
         return Err(Report::new(
@@ -1660,7 +1553,7 @@ pub(in crate::runtime) fn compile_key_projection_program(
             },
         ),
     )
-    .map_err(|source| Report::new(RuntimeVmCompileError::CompileKeyProjection { target, source }))
+    .change_context(RuntimeVmCompileError::CompileKeyProjection { target })
 }
 
 pub(super) async fn evaluate_constant_expression_vm(
@@ -1695,7 +1588,7 @@ pub(super) async fn evaluate_constant_expression_vm(
         infer_bindings,
         runtime_udf_signatures(udfs),
     )
-    .map_err(|source| Report::new(RuntimeVmCompileError::InferConstantExpression { source }))?;
+    .change_context(RuntimeVmCompileError::InferConstantExpression)?;
     let output_schema = StdArc::new(arrow_schema::Schema::new(
         inferred
             .into_iter()
@@ -1722,9 +1615,7 @@ pub(super) async fn evaluate_constant_expression_vm(
                 },
             ),
         )
-        .map_err(|source| {
-            Report::new(RuntimeVmCompileError::CompileConstantExpression { source })
-        })?,
+        .change_context(RuntimeVmCompileError::CompileConstantExpression)?,
     );
     let input = VmTypedBatch::try_new_with_row_count(
         compiled.input_schema.clone(),
@@ -1736,7 +1627,7 @@ pub(super) async fn evaluate_constant_expression_vm(
             .collect(),
         1,
     )
-    .map_err(|source| Report::new(RuntimeVmCompileError::BuildConstantInput { source }))?;
+    .change_context(RuntimeVmCompileError::BuildConstantInput)?;
     let result = execute_program_with_selection_in_context(
         &compiled,
         &input,
@@ -1746,7 +1637,7 @@ pub(super) async fn evaluate_constant_expression_vm(
         },
     )
     .await
-    .map_err(|source| Report::new(RuntimeVmCompileError::ExecuteConstantExpression { source }))?;
+    .change_context(RuntimeVmCompileError::ExecuteConstantExpression)?;
     if !result.selected_rows.is_single(0) {
         return Err(Report::new(
             RuntimeVmCompileError::ConstantExpressionRowCount,
@@ -1873,13 +1764,14 @@ pub(super) fn bind_ingestor_filter_map_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
+    .map_err(|error| RuntimeError::VmCompile {
         domain: domain.as_str().to_string(),
         reason: format!(
             "FILTER-MAP compile failed for '{}': {}",
             identifier.as_str(),
-            error.message
+            error.current_context().message
         ),
+        report: error,
     })?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
@@ -1900,8 +1792,9 @@ pub(super) struct GeneratorSetProgramSchemas {
 
 pub(super) fn compile_generator_set_program(
     domain: &DomainName,
-    generator: &CreateGenerator,
-    output: &ProcessorOutput,
+    generator: &GeneratorName,
+    source_relay: &RelayName,
+    route: &GeneratorRoutePlan,
     schemas: GeneratorSetProgramSchemas,
     udfs: Option<&UdfExecutor>,
 ) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
@@ -1910,16 +1803,9 @@ pub(super) fn compile_generator_set_program(
         source: source_schema,
         branch: branch_schema,
     } = schemas;
-    let parsed = lower_set_only_route(&output.construction, output_schema.schema.as_ref())
-        .map_err(|reason| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "generator '{}' output '{}' is invalid: {reason}",
-                generator.name, output.relay
-            ),
-        })?;
+    let parsed = &route.program;
     let error_sites = compiled_message_error_sites(
-        &parsed,
+        parsed,
         &vec![MessageErrorOperation::Set; parsed.inner.set.len()],
         Some(MessageErrorOperation::RouteWhere),
     )
@@ -1930,11 +1816,8 @@ pub(super) fn compile_generator_set_program(
     let mut bindings = vec![
         VmCompileBinding::writable("output", output_schema.schema.clone())
             .with_sensitivity(output_schema.sensitivity.clone()),
-        VmCompileBinding::readonly(
-            format!("relay_state.{}", generator.materialized_relay),
-            source_schema.schema,
-        )
-        .with_sensitivity(source_schema.sensitivity),
+        VmCompileBinding::readonly(format!("relay_state.{source_relay}"), source_schema.schema)
+            .with_sensitivity(source_schema.sensitivity),
     ];
     if let Some(branch_schema) = branch_schema {
         bindings.push(
@@ -1943,7 +1826,7 @@ pub(super) fn compile_generator_set_program(
         );
     }
     let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
+        parsed,
         output_schema.schema,
         output_schema.sensitivity.clone(),
         bindings,
@@ -1955,12 +1838,15 @@ pub(super) fn compile_generator_set_program(
             },
         ),
     )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
+    .map_err(|error| RuntimeError::VmCompile {
         domain: domain.as_str().to_string(),
         reason: format!(
             "generator '{}' output '{}' compile failed: {}",
-            generator.name, output.relay, error.message
+            generator,
+            route.relay,
+            error.current_context().message
         ),
+        report: error,
     })?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
@@ -2240,6 +2126,94 @@ mod tests {
             error.contains("branch.tenant") || error.contains("namespace 'branch'"),
             "expected branch namespace error, got {error}"
         );
+    }
+
+    #[test]
+    fn route_type_failures_keep_the_vm_report_at_each_runtime_binding() {
+        let domain = domain("default");
+        let identifier = named::<ModelName>("invalid_mapping");
+        let relay = named::<RelayName>("mapped");
+        let schema = test_schema(&[("value", ParseAsType::I64)]).arrow_schema();
+        let route = construction("SET value = \"text\"");
+        let available_materialized_streams = HashMap::default();
+        let available_lookups = HashMap::default();
+        let branching = ResolvedBranching::unbranched();
+        let context = || RuntimeVmCompileContext {
+            available_materialized_streams: &available_materialized_streams,
+            available_lookups: &available_lookups,
+            current_branching: &branching,
+            udfs: None,
+        };
+        let schemas = || RuntimeVmSchemaPair {
+            input: schema.clone(),
+            input_sensitivity: VmSchemaSensitivity::default(),
+            output: schema.clone(),
+            output_sensitivity: VmSchemaSensitivity::default(),
+        };
+        let lowered = LoweredConstruction::transforming(&route, &schema, &schema)
+            .expect("the invalid assignment still lowers as a route");
+
+        let failures = [
+            (
+                "processor",
+                compile_processor_output_filter_map_program(
+                    RuntimeCompileTarget {
+                        domain: &domain,
+                        identifier: &identifier,
+                    },
+                    &[named("source")],
+                    &relay,
+                    &route,
+                    schemas(),
+                    None,
+                    context(),
+                )
+                .expect_err("a processor cannot assign STRING to an I64 output"),
+            ),
+            (
+                "WASM processor",
+                compile_wasm_output_filter_map_program(
+                    &domain,
+                    &identifier,
+                    &route,
+                    schema.clone(),
+                    VmSchemaSensitivity::default(),
+                    context(),
+                )
+                .expect_err("a WASM route cannot assign STRING to an I64 output"),
+            ),
+            (
+                "ingestor",
+                bind_ingestor_filter_map_program(
+                    RuntimeCompileTarget {
+                        domain: &domain,
+                        identifier: &identifier,
+                    },
+                    IngestMetadataKind::Headers,
+                    true,
+                    &lowered,
+                    schemas(),
+                    context(),
+                )
+                .expect_err("an ingestor cannot assign STRING to an I64 output"),
+            ),
+        ];
+        for (kind, error) in failures {
+            let RuntimeError::VmCompile {
+                domain: actual_domain,
+                reason,
+                report,
+            } = &error
+            else {
+                panic!("{kind} lost its VM compile report: {error:#}");
+            };
+            assert_eq!(actual_domain, domain.as_str());
+            assert!(reason.contains(identifier.as_str()), "{kind}: {reason}");
+            assert!(
+                reason.contains(&report.current_context().message),
+                "{kind} lost the VM's safe message: {error:#}"
+            );
+        }
     }
 
     #[test]
