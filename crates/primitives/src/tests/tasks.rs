@@ -13,7 +13,7 @@ use crate::{
 
 /// An abort-on-drop handle hands over its task's output, ends its task on request, and ends it when
 /// the handle is dropped.
-pub(super) async fn an_abort_on_drop_handle_ends_its_task_on_request_and_when_dropped() {
+pub(super) async fn abort_on_drop_handles_end_their_tasks() {
     let finished = AbortOnDropHandle::new(spawn(async { 7_u8 }));
     assert_eq!(finished.await.assured("the task returns a constant"), 7);
 

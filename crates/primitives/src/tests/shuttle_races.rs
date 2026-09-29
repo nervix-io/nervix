@@ -218,7 +218,10 @@ fn the_last_receiver_is_dropped_while_the_sender_waits_to_close() {
 
 #[test]
 fn shuttle_closing_never_misses_the_last_receivers_drop() {
-    shuttle::check_dfs(the_last_receiver_is_dropped_while_the_sender_waits_to_close, None);
+    shuttle::check_dfs(
+        the_last_receiver_is_dropped_while_the_sender_waits_to_close,
+        None,
+    );
 }
 
 /// Two waiters are registered and the first is cancelled while a single notification is sent. In

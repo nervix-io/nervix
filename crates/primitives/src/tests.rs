@@ -276,7 +276,7 @@ mod ordinary {
     #[cfg(feature = "native")]
     #[crate::test]
     async fn an_abort_on_drop_handle_keeps_its_contract() {
-        super::tasks::an_abort_on_drop_handle_ends_its_task_on_request_and_when_dropped().await;
+        super::tasks::abort_on_drop_handles_end_their_tasks().await;
     }
 }
 
@@ -420,11 +420,7 @@ mod shuttle_mode {
     #[test]
     fn an_abort_on_drop_handle_keeps_its_contract_under_shuttle() {
         shuttle::check_random(
-            || {
-                shuttle::future::block_on(
-                    super::tasks::an_abort_on_drop_handle_ends_its_task_on_request_and_when_dropped(),
-                );
-            },
+            || shuttle::future::block_on(super::tasks::abort_on_drop_handles_end_their_tasks()),
             16,
         );
     }
