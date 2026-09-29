@@ -378,6 +378,62 @@ The companion `write_once_rwlock_fields` count rejects names and shared referenc
 whose actual lifecycle is publication. The current shape uses an atomic optional reference and
 deletes the lock-backed form.
 
+## Execution-Sensitive Primitives
+
+Every atomic, ordering and fence in Nervix comes from `nervix_primitives::sync::atomic`. The
+`nervix-primitives` crate sits below the vocabulary and selects that family, together with the
+threads a model runs, for the build's execution mode: ordinary execution, Shuttle, Loom or Turmoil.
+A build uses one mode across its whole dependency graph. Every package that owns a `shuttle`, `loom`
+or `turmoil` feature forwards it to the primitive crate, and Cargo unifies that crate's features, so
+a vocabulary type, an engine and the server compiled into one test binary all use the same backend.
+Selection depends only on features, never on `cfg(test)`. Enabling two modes fails to compile with a
+diagnostic that names both, including when two different dependencies each enable one.
+
+Ordinary execution pays nothing for the boundary: each path re-exports the standard library item
+itself, with no wrapper, allocation, dispatch or scheduling point, so an atomic on a hot path costs
+exactly what it did before. The atomic surface is portable and builds for the browser console.
+Operating-system threads are the explicit `native` capability, and asking for a capability or a
+mode the target cannot provide is a compile error rather than another implementation.
+
+| Surface | Path | Ordinary | Shuttle | Loom | Turmoil |
+| --- | --- | --- | --- | --- | --- |
+| Atomic values, `Ordering`, `fence` | `nervix_primitives::sync::atomic` | The standard library's | Modeled: every operation is a scheduling point, and every ordering behaves as `SeqCst` | Modeled: explored under the C11 orderings Loom supports | The standard library's, on the simulated host's thread |
+| Threads, with `native` | `nervix_primitives::thread` | Operating-system threads | Modeled threads | Modeled threads | Operating-system threads outside the simulation |
+| Unmodeled atomics | `nervix_primitives::unmodeled::sync::atomic` | The standard library's | Outside the model | Outside the model | The standard library's |
+
+A modeled primitive exists only inside a run of its model. Using one outside that run is a test
+configuration failure the backend reports, and nothing falls back to a real primitive. A real atomic
+that must stay outside every model is reached through the unmodeled path, and each use needs a
+permission in `crates/primitives/unmodeled-permissions.toml` that names the file, the items, the
+owner, why a real atomic is required, and what that leaves unverified:
+
+| Owner | Why the atomic is real | What stays outside every check |
+| --- | --- | --- |
+| The Shuttle runners of execution, the interconnect and the server, and the Loom runner | Their statistics span every model execution they start and are read after the last one | Nothing a check claims; they are runner bookkeeping |
+| The WASM runtime's epoch driver | Its stop flag is read by an operating-system thread no model runs | When the epoch thread observes shutdown |
+| The VM benchmarks' allocation probe | A global allocator counts allocations made on every thread | Nothing; the benchmark claims nothing about synchronization |
+| The records of the relay gate and fan-out, entity gate, emitter record-write, durability barrier, WASM checkpoint, source host-loop, stream-slot and retained-archive Shuttle checks | A record changes in the same scheduling step as the operation it records, so recording adds no scheduling point | Nothing the owner does: records observe and never synchronize, and the owners' own atomics are modeled |
+
+A real atomic never carries the protocol under test, chooses its branches, supplies its wakeups or
+establishes an ordering an assertion relies on. `just validate-primitive-boundary` rejects every
+other path to a backend's atomics however it is spelled, an unmodeled use without its permission,
+and a permission nothing uses. `just validate-loom-dependencies` keeps Loom out of every ordinary
+dependency graph, and `just validate-execution-mode-conflicts` requires the combined-mode
+diagnostic.
+
+The other primitive families still reach their libraries through their current access paths. Each
+joins the boundary as one complete move, with every consumer migrated and its enforcement extended,
+and until then keeps the behavior this chapter describes:
+
+| Family | Current access path |
+| --- | --- |
+| Synchronous and asynchronous synchronization | `parking_lot`, `tokio::sync`, `tokio-util`, `tokio-stream` and `dashmap`, selected for Shuttle by feature-gated `extern crate` aliases in the server, execution, interconnect, consensus, WASM host, client and connector crates |
+| Publication and concurrent maps | The `nervix_execution::sync` adapters over `arc-swap` and `dashmap`, which add Shuttle scheduling points around each operation |
+| Tasks and threads | Tokio's task API through the same aliases; `nervix_execution::sync` for abort-on-drop handles, cancellation-token identity and the synchronous yield; `std::thread` directly, and a Shuttle alias in termination-signal supervision |
+| Shared ownership | `triomphe::Arc`, and `std::sync::Arc` where an external API such as a Tokio semaphore requires it; opaque in every mode |
+| Monotonic scheduling | Tokio's timers and instants, within the existing clock permissions |
+| Networking | Tokio's sockets, or Turmoil's when the interconnect's `turmoil` feature is enabled |
+
 ## Deterministic Concurrency Verification
 
 The ordering contracts above are checked against the production owners under Shuttle. A check
@@ -401,7 +457,11 @@ boundaries. With the feature off, these wrappers re-export the real libraries. F
 crate imports keep the product's `tokio`, `parking_lot`, and `dashmap` names; the ordinary build
 uses their normal behavior. The feature changes the test execution environment, not the public
 protocol. Edge I/O, networking, filesystem access, and signals remain real re-exports and are
-outside a Shuttle schedule.
+outside a Shuttle schedule. Every package that owns the feature forwards it to the primitive
+boundary, so every Nervix atomic in a Shuttle build is Shuttle's, including the ones inside
+vocabulary types such as `AtomicTimestamp` and inside dependencies such as the execution crate's
+cancellation. A check's own records use unmodeled atomics on purpose, under the permissions
+above, so that recording an operation adds no scheduling point to it.
 
 Some primitives are opaque to Shuttle: `arc-swap`, `async-broadcast`, `triomphe`, and
 `futures-channel` have no scheduler wrapper. Nervix routes `ArcSwap` and `ArcSwapOption` loads and
@@ -409,9 +469,7 @@ stores, plus `ArcSwap` compare-and-swap and read-copy-update, through its execut
 boundary. That boundary yields under Shuttle and calls the underlying primitive directly
 otherwise. It also supplies a scheduler-visible synchronous yield for admission spin waits.
 A check may claim an ordering around an opaque primitive only when its relevant calls have
-visible scheduling points. Shuttle cannot interrupt an arbitrary instruction inside it or a
-standard-library atomic. The protocol atomics that the checks explore use Shuttle's atomic types
-under the feature.
+visible scheduling points. Shuttle cannot interrupt an arbitrary instruction inside it.
 
 Even a wrapped Tokio primitive can hide a scheduling window. `shuttle-tokio` currently keeps
 `Notify` waiter registration behind a standard-library mutex, so registering `notified()` is not
@@ -422,13 +480,12 @@ check exercises release-before-wake, but does not prove its separate register-be
 That order remains a production owner contract until both sides of the race are scheduler-visible.
 
 Shuttle explores sequentially consistent schedules. It cannot prove that a chosen `Relaxed`,
-`Acquire`, or `Release` ordering is sufficient on weak-memory hardware. Loom is reserved for an
-actual memory-ordering claim over modeled atomics. The old copied dispatch-gate model was retired
-when Shuttle began exercising the production gate and fan-out. Cucumber remains the public
-behavior test: when a scheduling defect affects an NSPL operation, runtime output, or process
-outcome, its Shuttle regression is paired with a scenario through that interface. A scenario
-cannot exhaust the interleavings of an in-process protocol, and a Shuttle check cannot verify the
-whole cluster, socket, disk, or browser path.
+`Acquire`, or `Release` ordering is sufficient on weak-memory hardware; a claim that depends on one
+is a Loom model, described under [Memory-ordering models](#memory-ordering-models). Cucumber
+remains the public behavior test: when a scheduling defect affects an NSPL operation, runtime
+output, or process outcome, its Shuttle regression is paired with a scenario through that
+interface. A scenario cannot exhaust the interleavings of an in-process protocol, and neither a
+Shuttle check nor a Loom model can verify the whole cluster, socket, disk, or browser path.
 
 ### Check contract and runner
 
@@ -478,3 +535,65 @@ The checks of WASM checkpoint holds and the durability barrier use the same runn
 contract. Their state semantics live in the WASM state documentation; they do not turn Shuttle
 into a disk or replica simulator. [Deterministic interconnect simulation](./interconnect-simulation.md)
 and Cucumber cover the network and process behavior outside this in-process scheduling boundary.
+
+`shuttle_a_vocabulary_atomic_is_a_scheduling_point_in_the_server_build`
+(`src/shuttle_selection_tests.rs`) holds the selection itself to account: in the server's Shuttle
+build, an operation on the vocabulary crate's `AtomicTimestamp` must advance Shuttle's
+scheduling-point count, which it can only do when the feature reached that dependency's atomics.
+
+### Memory-ordering models
+
+A claim that one thread's writes are visible to another because of an ordering, rather than
+because both threads were scheduled in some order, is checked under Loom. Loom runs a model once for
+every schedule and every reordering the C11 memory model allows that it can distinguish, so a
+`Release` weakened to `Relaxed` shows up as an execution in which a reader sees the flag but not the
+write it was meant to publish. A model drives the actual synchronous production owner from Loom
+threads with Loom's atomics, both selected through the primitive boundary by the package's `loom`
+feature. When a protocol is embedded in asynchronous orchestration, the synchronous protocol is
+made independently testable and the runtime uses that same owner; a copied algorithm, a witness
+that a join or an extra lock publishes, or a real atomic does not make a model.
+
+Each model names its invariant with an `InvariantId` and runs through
+`nervix_model_harness::loom::explore`, which explores it to exhaustion: no preemption bound, no
+permutation or time budget, a branch limit of 1,000 thread switches per execution that fails the
+model rather than ending the search, and Loom's full thread count. A Loom setting in the environment
+that would change that search is refused. A completed search prints a record naming its invariant,
+its execution count and its bounds, and `just test-loom` accepts nothing else as a completed model.
+
+`crates/model-harness/loom-inventory.toml` registers every model by invariant. `just test-loom`
+lists the `loom_*` library tests of every registered package built with its `loom` feature, and a
+run over the whole inventory fails when a registered invariant's test is missing, ignored or did not
+complete, or when a discovered model is unregistered. Each model runs in its own process, and the
+command reports how many models it discovered, selected, executed and saw complete; a filter that
+selects none fails. A failed model leaves `target/loom-failures/<package>/<test>/`: the Loom
+checkpoint of the failed execution, the run's output, and metadata naming the invariant, revision,
+toolchain, Loom version and exploration bounds. `just test-loom-replay` resumes Loom from that
+checkpoint with location tracking and tracing, so the failed execution runs first. The artifacts
+hold model output only, never payloads or secrets. CI runs the models on every change and uploads
+the failure directory.
+
+Every model also registers a weakening that must make it fail. `just test-loom-qualification`
+applies each to a copy of the working tree, requires the model to fail with the registered message,
+and requires the checkpoint of that failure to replay it. This is what shows a model depends on the
+ordering it claims, rather than passing because something else synchronized its threads. A
+weakening whose original text no longer appears exactly once fails as well, so changing an owner's
+ordering means revisiting its qualification.
+
+Loom's own limits bound every claim. It does not model every relaxed behavior the C11 model
+permits, and an operation inside a third-party dependency, such as a `triomphe` reference count or
+an `arc-swap` publication, is invisible to it and excluded from the claim rather than given a
+fictional model. A standalone counter carries no cross-location claim, whatever its ordering.
+
+| Invariant | Claim | Model and qualification |
+| --- | --- | --- |
+| `execution.cancellation.publication` | A job that observes its cancellation also observes every write its awaiting caller made before the cancellation: raising the flag releases and observing it acquires. The witness is read the moment the job observes the cancellation, before any join could order the two threads | `loom_a_job_that_observes_cancellation_observes_every_write_made_before_it` (`crates/execution/src/cancellation.rs`); fails when either the raising store or the observing load is weakened to `Relaxed` |
+| `execution.cancellation.cancel-on-drop` | Dropping an armed obligation cancels its job: once the drop is ordered before a check, every clone of the job's signal reports it, and a check never loses a cancellation an earlier check observed | `loom_dropping_the_obligation_cancels_every_later_check_of_the_job` |
+| `execution.cancellation.disarm` | A disarmed obligation never cancels its job, whether the job checks while it is disarmed or after it is dropped. Disarming writes nothing, so the model has a single schedule and fails if disarming or the drop after it ever raises the flag | `loom_a_disarmed_obligation_never_cancels_its_job` |
+
+The cancellation protocol these models check is the bounded executor's. `Cancellation::armed`
+creates both ends of one job's cancellation: the executor keeps the obligation while its caller
+awaits the job and moves the signal into the job, which checks it between its bounded units.
+Dropping the awaiting caller drops the obligation and cancels the job, which keeps its memory charge
+until it returns; observing the job's value disarms the obligation first, so an ordinary completion
+never reports itself as cancelled. The executor keeps admission, charges and cancellation policy;
+the protocol it runs is the one the models explore.

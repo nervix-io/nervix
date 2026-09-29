@@ -149,12 +149,14 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   installation and reads, progress delivery, execution snapshots, admission, logical and physical
   deadline ownership, recovery, and distributed-time guarantees.
 - [Data-Plane Concurrency](docs/src/data-plane-concurrency.md) is the authoritative architecture
-  reference for synchronization on record, batch, remote-frame, and acknowledgement paths. Any
-  change to hot-path state publication, task or branch ownership, delivery or assignment fences,
-  or the data-plane lock ratchet must keep that chapter current in the same change. Its scope
-  includes the contentionless rule, published and pre-resolved state, mutable execution state,
-  bounded synchronization, review classification for new lock sites, and deterministic checks of
-  data-plane concurrency protocols.
+  reference for synchronization on record, batch, remote-frame, and acknowledgement paths, and for
+  the primitive boundary those paths are built from. Any change to hot-path state publication,
+  task or branch ownership, delivery or assignment fences, the data-plane lock ratchet, the
+  primitive boundary or its execution modes, or a Shuttle check or Loom model must keep that
+  chapter current in the same change. Its scope includes the contentionless rule, published and
+  pre-resolved state, mutable execution state, bounded synchronization, review classification for
+  new lock sites, the primitive surface with its per-mode visibility and permitted real primitives,
+  deterministic checks of data-plane concurrency protocols, and memory-ordering models.
 - [VM Functions](docs/src/vm-functions.md) is the authoritative architecture reference for the
   expression VM and its function catalog. Any change to expression lowering, the semantic catalog
   and function registration, type or sensitivity checking, constant folding or expression sharing,
@@ -209,7 +211,9 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 Nervix is layered. Innermost first, and each layer may name only the layers inside it:
 
 1. **Primitives.** Self-contained data structures and conversions that name nothing in Nervix.
-   They sit beneath the vocabulary and are reusable outside it.
+   They sit beneath the vocabulary and are reusable outside it. `nervix-primitives` is the boundary
+   through which every other layer obtains execution-sensitive primitives; see
+   [Execution-sensitive primitives](#execution-sensitive-primitives).
 2. **Vocabulary.** Models, names, timestamps, branch keys, and node references: the words every
    other layer speaks.
 3. **Language.** NSPL lexing, parsing, completion, and lowering into Models. The parser is an edge
@@ -269,6 +273,59 @@ source contract, the sink contract, or both, from `nervix-connector` in `crates/
 
 `just ratchet` and the clock-boundary check treat the connector crates as data plane, so code that
 moves into them keeps its counts and its clock rules.
+
+### Execution-sensitive primitives
+
+`nervix-primitives` in `crates/primitives` selects every execution-sensitive primitive for the
+build's execution mode: ordinary execution, or one of the `shuttle`, `loom` and `turmoil` modes.
+It sits in the primitives layer, below the vocabulary, so vocabulary types, engines, connectors,
+the server and the clients share one boundary. Callers express the operation they need; they never
+choose a backend.
+
+- Every atomic, `Ordering` and `fence` in Nervix-authored Rust comes from
+  `nervix_primitives::sync::atomic`. That covers libraries, binaries, connectors, clients, unit and
+  integration tests, harnesses, benchmarks, examples and authored macros. Paths to the standard
+  library's, `core`'s, Shuttle's or Loom's atomics, and local aliases that select between them, are
+  rejected however they are spelled: direct, renamed, grouped, qualified, globbed, through a
+  renamed `std`, `core` or `sync`, or inside a macro body or an inactive `cfg` branch.
+- A real atomic that must stay outside every model comes from
+  `nervix_primitives::unmodeled::sync::atomic`, and each use needs a permission in
+  `crates/primitives/unmodeled-permissions.toml` naming the file, the items, the owner, why a real
+  atomic is required, and what that leaves unverified. It may keep runner statistics across model
+  executions, serve a thread no model runs or an external API that requires the standard type, or
+  record what a check observes without adding a scheduling point. It never carries the protocol
+  under test, chooses its branches, supplies its wakeups, or establishes an ordering an assertion
+  relies on. A use without a permission, an unlisted item, and a permission nothing uses all fail.
+- The primitive crate owns mode selection. At most one mode is enabled in a dependency graph, and
+  every pair of modes, including a pair that separate dependencies enable, fails to compile there
+  with a diagnostic naming both. Selection depends only on features, never on `cfg(test)`; there is
+  no fallback from a modeled primitive to a real one, and a modeled primitive used outside its
+  model is a test configuration failure.
+- A package that owns a `shuttle`, `loom` or `turmoil` feature depends on `nervix-primitives`
+  directly and forwards the mode to it and to every workspace dependency that owns the same mode.
+  Cargo unifies features, so ordinary and modeled suites run in separate build invocations with
+  explicit features; a workspace-wide `--all-features` command excludes every package that owns a
+  mode.
+- Ordinary execution re-exports the standard library items directly and adds no allocation,
+  wrapper, dispatch, lock, reference-count operation or scheduling point.
+- The atomic surface is portable and builds for the browser. Operating-system threads are the
+  explicit `native` capability. Requesting a capability or a mode the target cannot provide fails
+  to compile instead of selecting another implementation.
+- Only `nervix-primitives` selects Loom and only `nervix-model-harness` runs Loom models; both take
+  it as an optional dependency, and no other package depends on `loom`. Ordinary dependency graphs,
+  with default features or without them, contain no model checker or simulator.
+- The remaining families, synchronous and asynchronous synchronization, tasks and threads,
+  publication and concurrent collections, shared ownership, monotonic scheduling and networking,
+  still use their current access paths until each moves through the boundary with its complete
+  consumer migration and its enforcement. A new execution-sensitive primitive joins the boundary
+  before any caller introduces it, and no change adds a new atomic bypass.
+
+`just validate-primitive-boundary`, `just validate-loom-dependencies` and
+`just validate-execution-mode-conflicts` enforce these rules in `just validate` and
+`just validate-ci`. Clippy's type lints resolve a re-export to its definition, so they cannot
+enforce where an item is imported from; the boundary check owns that, and Clippy keeps only
+genuinely forbidden types and operations. [Data-Plane Concurrency](docs/src/data-plane-concurrency.md)
+documents the surface, what each mode observes of it, and the permitted real primitives.
 
 ### Migration discipline
 
@@ -657,10 +714,24 @@ build and the existing tests, and nothing in it changes behavior.
 
 - A lock-free or wait-and-notify protocol on the data plane ships with a Shuttle check over its
   production owner that names and asserts its invariant. Run it through `just test-shuttle` in CI
-  and preserve a failing schedule for replay. Use Loom only for memory-ordering claims, which
-  Shuttle's sequentially consistent scheduler cannot establish. Concurrency tests have no
-  wall-clock bounds or sleep polls; express deadline choices and progress with scheduler-visible
-  events. A publicly observable outcome still needs its Cucumber scenario.
+  and preserve a failing schedule for replay. Concurrency tests have no wall-clock bounds or sleep
+  polls; express deadline choices and progress with scheduler-visible events. A publicly observable
+  outcome still needs its Cucumber scenario.
+- A claim that depends on memory ordering, such as cross-location publication or a fence
+  protocol, ships with a Loom model over its actual synchronous production owner. Shuttle's
+  sequentially consistent scheduler cannot establish such a claim. When the protocol is embedded
+  in async orchestration, make the synchronous protocol independently testable and have the runtime
+  use that same owner; a copied algorithm, a test-only reconstruction, a witness published by a
+  join or an extra lock, or a real atomic does not qualify. Name the invariant with an
+  `InvariantId`, explore it through `nervix_model_harness::loom::explore`, register it in
+  `crates/model-harness/loom-inventory.toml`, and register a `[[qualification]]` weakening that
+  must make the model fail. A standalone relaxed counter carries no cross-location claim, and an
+  operation inside an opaque dependency is excluded from a claim rather than given a fictional
+  model.
+- The evidence forms are complementary and none replaces another: Shuttle for interleavings of
+  production owners, Loom for memory-ordering claims of synchronous production owners, Turmoil for
+  network claims within the supported simulation, Cucumber for public behavior, and the external
+  Chaos suite against an immutable product image for real-process recovery.
 - [Integration Test Lifecycle](docs/src/integration-test-lifecycle.md) is the authoritative
   architecture reference for the lifecycle of the Cucumber scenario harness. Any change to how the
   harness starts, observes, diagnoses, or stops in-process nodes, server processes, scenarios, or
@@ -777,6 +848,16 @@ build and the existing tests, and nothing in it changes behavior.
   changes that add a label must keep it passing; a new finding is a defect, not something to record
   in its baseline. `just nspl-completion-walk-deep` relaxes deduplication to reach branches the
   gating budget stops short of.
+- A change to a primitive adapter or a synchronization protocol runs the checks of every mode it
+  affects: `just test-shuttle [filter]` for interleavings, `just test-loom [filter]` for
+  memory-ordering claims, and `just test-turmoil` for the simulated network, beside the ordinary
+  suite. `just test-primitives` runs the boundary's own conformance checks once per mode.
+  `just test-loom` runs every registered Loom model in its own process, fails when a registered
+  invariant is missing, ignored or incomplete, when a model is unregistered, or when a filter
+  selects nothing, and leaves a failed model's checkpoint and metadata for
+  `just test-loom-replay`. `just test-loom-qualification` shows each model fails under its
+  registered weakening. Required CI runs Shuttle, Loom and its qualification, and Turmoil
+  independently of the ordinary tests, and every one of them fails when it selects no check.
 - Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
   user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
   accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.
