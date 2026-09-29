@@ -55,6 +55,13 @@ validation errors while the draft stays editable. After submission, lookup loadi
 compilation or test failures retain their server diagnostics; correcting the same draft starts a
 new command without claiming the failed creation succeeded.
 
+Junction and reingestor drafts report the input, materialized dependency, route, or assignment
+whose required reference or expression is incomplete. A retained reference whose domain or
+upstream choice changed is reported as a changed context and must be selected again. These are
+local draft errors before canonical NSPL exists. A completed Model still passes through registry
+validation, whose schema, branch, sensitivity, and graph diagnostics remain authoritative and
+appear in the editable form after a rejected submission.
+
 The expression VM returns reports for compile, batch, and runtime failures. `CompileError` keeps
 its typed diagnostic code, stable code spelling, operation span, and safe message; validation adds
 the model and route context without losing that cause. Roto setup returns `UdfError` reports and

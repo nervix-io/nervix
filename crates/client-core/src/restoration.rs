@@ -1,5 +1,5 @@
-//! Restoring on a new exchange what a client holds: domain clocks, subscriptions, and native
-//! producer and consumer endpoint attachments.
+//! Restoring on a new exchange what a client holds: followed domain clocks, subscriptions the
+//! server acknowledged and did not end, and native producer and consumer endpoint attachments.
 //!
 //! Layer: edges.
 //!

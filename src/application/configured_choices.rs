@@ -47,6 +47,9 @@ pub(in crate::application) enum ConfiguredQuestion {
     IngestCodecs,
     IngestRelays(Option<BranchName>),
     BranchFields(NodeRef),
+    ProcessorCompatibleInputRelays(NodeRef),
+    ProcessorInputBranchRelays(NodeRef),
+    ProcessorMaterializedRelays(NodeRef),
 }
 
 /// The domain a lookup reads, and what it asks of that domain's configuration.
@@ -97,6 +100,24 @@ impl<'a> ConfiguredQuery<'a> {
                 return Self::ingest_branched_relays(request.dependencies());
             }
             ChoiceTarget::BranchField => return Self::branch_fields(request.dependencies()),
+            ChoiceTarget::ProcessorCompatibleInputRelay => {
+                return Self::processor_relays(
+                    request.dependencies(),
+                    ConfiguredQuestion::ProcessorCompatibleInputRelays,
+                );
+            }
+            ChoiceTarget::ProcessorInputBranchRelay => {
+                return Self::processor_relays(
+                    request.dependencies(),
+                    ConfiguredQuestion::ProcessorInputBranchRelays,
+                );
+            }
+            ChoiceTarget::ProcessorMaterializedRelay => {
+                return Self::processor_relays(
+                    request.dependencies(),
+                    ConfiguredQuestion::ProcessorMaterializedRelays,
+                );
+            }
             ChoiceTarget::DomainPace | ChoiceTarget::PlacementPolicy => return None,
             ChoiceTarget::IngestHttpSource
             | ChoiceTarget::IngestKafkaSource
@@ -224,6 +245,30 @@ impl<'a> ConfiguredQuery<'a> {
             question: ConfiguredQuestion::BranchFields(branch.clone()),
         })
     }
+
+    fn processor_relays(
+        dependencies: &'a [ChoiceSelection],
+        question: impl FnOnce(NodeRef) -> ConfiguredQuestion,
+    ) -> Option<Self> {
+        let [
+            ChoiceSelection {
+                value: ChoiceValue::Domain(domain),
+            },
+            ChoiceSelection {
+                value: ChoiceValue::Model(input),
+            },
+        ] = dependencies
+        else {
+            return None;
+        };
+        if input.kind != ModelKind::Relay {
+            return None;
+        }
+        Some(Self {
+            domain,
+            question: question(input.clone()),
+        })
+    }
 }
 
 /// The choices a question resolved to, and a digest of every definition that decided them.
@@ -288,7 +333,10 @@ impl ConfiguredChoices {
             | ConfiguredQuestion::WireAvroSchemas => self.models(question, &search),
             ConfiguredQuestion::IngestSource(_)
             | ConfiguredQuestion::IngestCodecs
-            | ConfiguredQuestion::IngestRelays(_) => self.models(question, &search),
+            | ConfiguredQuestion::IngestRelays(_)
+            | ConfiguredQuestion::ProcessorCompatibleInputRelays(_)
+            | ConfiguredQuestion::ProcessorInputBranchRelays(_)
+            | ConfiguredQuestion::ProcessorMaterializedRelays(_) => self.models(question, &search),
             ConfiguredQuestion::RelayFields(relay) => self.relay_fields(relay, &search),
             ConfiguredQuestion::CodecFields(codec) => self.codec_fields(codec, &search),
             ConfiguredQuestion::BranchFields(branch) => self.branch_fields(branch, &search),
@@ -304,6 +352,17 @@ impl ConfiguredChoices {
         question: &ConfiguredQuestion,
         search: &str,
     ) -> Result<ResolvedChoices, ChoiceStatus> {
+        let input = match question {
+            ConfiguredQuestion::ProcessorCompatibleInputRelays(input)
+            | ConfiguredQuestion::ProcessorInputBranchRelays(input)
+            | ConfiguredQuestion::ProcessorMaterializedRelays(input) => {
+                let Some(Model::Relay(relay)) = self.models.get(input) else {
+                    return Err(ChoiceStatus::MissingContext);
+                };
+                Some(relay)
+            }
+            _ => None,
+        };
         let mut candidates = Vec::new();
         // A listing of one kind reads every model of the domain; nothing is looked up by scanning.
         for model in self.models.models() {
@@ -353,6 +412,24 @@ impl ConfiguredChoices {
                 }
                 (ConfiguredQuestion::IngestRelays(branch), Model::Relay(relay))
                     if relay.branching.branch() == branch.as_ref() =>
+                {
+                    ModelCandidate::relay(relay)?
+                }
+                (ConfiguredQuestion::ProcessorCompatibleInputRelays(_), Model::Relay(relay))
+                    if input.is_some_and(|source| {
+                        source.schema == relay.schema && source.branching == relay.branching
+                    }) =>
+                {
+                    ModelCandidate::relay(relay)?
+                }
+                (ConfiguredQuestion::ProcessorInputBranchRelays(_), Model::Relay(relay))
+                    if input.is_some_and(|source| source.branching == relay.branching) =>
+                {
+                    ModelCandidate::relay(relay)?
+                }
+                (ConfiguredQuestion::ProcessorMaterializedRelays(_), Model::Relay(relay))
+                    if relay.materialized_state.is_some()
+                        && input.is_some_and(|source| source.branching == relay.branching) =>
                 {
                     ModelCandidate::relay(relay)?
                 }
@@ -411,6 +488,12 @@ impl ConfiguredChoices {
                 .cmp(&right.choice.presentation.label)
         });
         let mut digest = blake3::Hasher::new();
+        if let Some(input) = input {
+            let definition = input
+                .to_canonical_nspl()
+                .map_err(|_| ChoiceStatus::LookupFailed)?;
+            hash_choice_text(&mut digest, &definition);
+        }
         let mut choices = Vec::with_capacity(candidates.len());
         for candidate in candidates {
             hash_choice_text(&mut digest, &candidate.definition);
@@ -896,6 +979,113 @@ mod tests {
             ConfiguredQuery::of(&key_fields).map(|query| query.question),
             Some(ConfiguredQuestion::BranchFields(branch_ref)),
         );
+    }
+
+    #[test]
+    fn processor_questions_filter_exact_input_contracts_and_materialized_state() {
+        let tenant = BranchName::parse("by_tenant").assured("valid branch");
+        let models = vec![
+            schema(
+                "order_record",
+                vec![field("tenant", ParseAsType::String, false, false)],
+            ),
+            schema(
+                "other_record",
+                vec![field("tenant", ParseAsType::String, false, false)],
+            ),
+            branch("by_tenant", None),
+            relay(
+                "input",
+                "order_record",
+                RelayBranching::branched_by(tenant.clone()),
+                None,
+            ),
+            relay(
+                "same_contract",
+                "order_record",
+                RelayBranching::branched_by(tenant.clone()),
+                None,
+            ),
+            relay(
+                "other_schema",
+                "other_record",
+                RelayBranching::branched_by(tenant.clone()),
+                None,
+            ),
+            relay(
+                "other_branch",
+                "order_record",
+                RelayBranching::unbranched(),
+                None,
+            ),
+            relay(
+                "state",
+                "other_record",
+                RelayBranching::branched_by(tenant.clone()),
+                Some(MaterializedRelayState::LastByTimestamp),
+            ),
+            relay(
+                "unbranched_state",
+                "other_record",
+                RelayBranching::unbranched(),
+                Some(MaterializedRelayState::LastByTimestamp),
+            ),
+        ];
+        let configured = ConfiguredChoices::new(
+            domain(),
+            models,
+            ResourceVersionStatus::default(),
+            Vec::new(),
+        );
+        let input = relay_node("input");
+        let cases = [
+            (
+                ChoiceTarget::ProcessorCompatibleInputRelay,
+                ConfiguredQuestion::ProcessorCompatibleInputRelays(input.clone()),
+                vec!["input", "same_contract"],
+            ),
+            (
+                ChoiceTarget::ProcessorInputBranchRelay,
+                ConfiguredQuestion::ProcessorInputBranchRelays(input.clone()),
+                vec!["input", "other_schema", "same_contract", "state"],
+            ),
+            (
+                ChoiceTarget::ProcessorMaterializedRelay,
+                ConfiguredQuestion::ProcessorMaterializedRelays(input.clone()),
+                vec!["state"],
+            ),
+        ];
+        for (target, question, expected) in cases {
+            let request = ChoiceLookupRequest::new(
+                target,
+                vec![
+                    ChoiceSelection {
+                        value: ChoiceValue::Domain(domain()),
+                    },
+                    ChoiceSelection {
+                        value: ChoiceValue::Model(input.clone()),
+                    },
+                ],
+                String::new(),
+            );
+            assert_eq!(
+                ConfiguredQuery::of(&request).map(|query| query.question),
+                Some(question.clone())
+            );
+            let actual: Vec<_> = configured
+                .resolve(&question, "")
+                .assured("valid processor question")
+                .choices
+                .into_iter()
+                .map(|choice| choice.presentation.label)
+                .collect();
+            assert_eq!(actual, expected);
+        }
+        let missing = configured.resolve(
+            &ConfiguredQuestion::ProcessorCompatibleInputRelays(relay_node("missing")),
+            "",
+        );
+        assert!(matches!(missing, Err(ChoiceStatus::MissingContext)));
     }
 
     #[test]

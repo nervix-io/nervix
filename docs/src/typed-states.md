@@ -236,6 +236,14 @@ so a completed relay is never unbranched by omission; its materialized state is 
 relay selection retained after its captured domain changes is explicitly invalid until reselected;
 no empty name or fabricated Model stands for a missing selection.
 
+Junction and reingestor drafts use the same boundary. A junction's branch is unselected until the
+operator chooses unbranched execution or a named branch; a reingestor route separately chooses
+preserve, unbranched, or a named outgoing branch. A materialized dependency remains incomplete
+until its relay and absence policy are selected. Ordered input, dependency, assignment, and route
+drafts become the existing semantic Model only when every required choice and expression builds.
+Changing the captured domain or a dependent reference invalidates selected references while
+keeping the operator's draft text visible for correction.
+
 ## Validation And Failure Boundaries
 
 The registry rejects unresolved or contradictory contracts before a graph becomes active. It

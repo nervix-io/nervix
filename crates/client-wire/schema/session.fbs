@@ -176,7 +176,13 @@ enum ChoiceTarget : ubyte {
   IngestUnbranchedRelay,
   IngestBranchedRelay,
   /// Fields of the key schema selected by one branch reference.
-  BranchField
+  BranchField,
+  /// Relays with the same declared schema and exact branch as one selected input relay.
+  ProcessorCompatibleInputRelay,
+  /// Relays with the same exact branch as one selected input relay.
+  ProcessorInputBranchRelay,
+  /// Materialized relays with the same exact branch as one selected input relay.
+  ProcessorMaterializedRelay
 }
 
 enum DomainPaceChoice : ubyte {

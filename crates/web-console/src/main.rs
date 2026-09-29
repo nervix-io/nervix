@@ -11432,6 +11432,18 @@ mod tests {
                 nervix_client_wire::ChoiceTarget::RelayField
             }
             ChoiceControl::IngestBranchField => nervix_client_wire::ChoiceTarget::BranchField,
+            ChoiceControl::ProcessorInputRelay
+            | ChoiceControl::ProcessorRouteRelay
+            | ChoiceControl::ProcessorStateRelay
+            | ChoiceControl::ProcessorErrorRelay => nervix_client_wire::ChoiceTarget::Relay,
+            ChoiceControl::ProcessorBranch | ChoiceControl::ProcessorRouteBranch => {
+                nervix_client_wire::ChoiceTarget::Branch
+            }
+            ChoiceControl::ProcessorStateField
+            | ChoiceControl::ProcessorInputField
+            | ChoiceControl::ProcessorOutputField
+            | ChoiceControl::ProcessorErrorField => nervix_client_wire::ChoiceTarget::RelayField,
+            ChoiceControl::ProcessorBranchField => nervix_client_wire::ChoiceTarget::BranchField,
         };
         ConsoleRequest::Choice {
             request: ChoiceLookupRequest::new(target, Vec::new(), String::new()),
