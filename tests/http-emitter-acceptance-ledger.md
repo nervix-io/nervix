@@ -321,9 +321,10 @@ closed each criterion.
 
 [HTTP Emitter 09](https://app.clickup.com/t/86bc78nrz) composes the matrix the delivery tasks built
 and closes it. It ran on 29 September 2026 against `8803d2af`, the tip of `main`, once HTTP Emitter
-01 through 08 had landed: #410, #423, #433, #474, #486, #492, #506 and #539. Every result below
-comes from a local run through the repository recipes with the configured compiler wrapper, and
-every observable claim rests on a scenario or a test that ran, not on reading the source.
+01 through 08 had landed: #410, #423, #433, #474, #486, #492, #506 and #539, and ran again after
+merging `d9c65a00`, which moved the receiver fixture onto the primitive boundary. Every result
+below comes from a local run through the repository recipes with the configured compiler wrapper,
+and every observable claim rests on a scenario or a test that ran, not on reading the source.
 
 ### What the audit found open
 
@@ -418,6 +419,7 @@ branches and error routes, and node shutdown.
 | `just test-scenarios --input tests/features/tools/nspl_format.feature --retry 0` | 15 scenarios, 70 steps passed |
 | `just test-scenarios --input 'tests/features/runtime/http_\{emitter,emitter_responses,emitter_transport,emitter_retries,emitter_lifecycle,emitter_inspection,receiver\}.feature' --retry 0` | 180 scenarios at a load average near 50, with 24 run slots 94% busy: 165 passed. All 15 failures were three-node setup commands refused because leadership moved while the command was admitted or applied, 8 of them in scenarios this task left unchanged |
 | The same selection with the suite's two retries | 180 scenarios, 2,991 steps passed at a load average near 80, 12 of them after a retry. Eighteen of the 19 retried attempts failed at that setup step. The other lost its batch on three nodes in the unchanged unencodable-body scenario: the emitter could not fetch the `routes` relay's materialized state from its owner within the interconnect deadline, and it passed on retry |
+| The same selection after merging `d9c65a00`, with the suite's two retries | 180 scenarios, 2,870 steps passed without a retry; the receiver regressions, 14, and the formatter feature, 15 scenarios, passed again |
 | The [affected suites](#affected-suites) with the suite's two retries | 168 scenarios, 1,764 steps passed |
 | `just test-package-lib nervix-connector-http` | 15 passed |
 | `just test-package-lib nervix-models http_request` | 4 passed |
@@ -425,7 +427,7 @@ branches and error routes, and node shutdown.
 | `just test-shuttle-package nervix-server emitter_record_writes` | 5 Shuttle checks passed in 10 executions |
 | `just nspl-completion-walk` | No completion finding outside the baseline |
 | `just ratchet` | Passed with every count unchanged |
-| `just validate` | Passed: formatting, Clippy over every target including the scenario and liveness harnesses, the public NSPL skill, documented NSPL, clock boundaries, typed errors, the primitive boundary and the dependency checks |
+| `just validate` | Passed: formatting, Clippy over every target including the scenario and liveness harnesses, the public NSPL skill, documented NSPL, clock boundaries, typed errors, the primitive boundary and the dependency checks. After the merge, `just validate-primitive-boundary`, `just cargo-fmt-check` and `just cargo-clippy-package nervix-server --features 'benchmarks testing'` passed again |
 | `just book dev` | Passed: 159 documentation and script tests, and the HTML, `llms` and Markdown books |
 
 The lost batch follows the documented contract rather than an HTTP emitter rule. A transport failure
