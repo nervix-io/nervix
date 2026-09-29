@@ -911,21 +911,39 @@ not the peer it authenticated. Each forwarded producer then has a key the servin
 never reuses within its process, so a late frame about an ended producer can never reach a later
 one. The serving node sends `Open` with the domain, ingestor, expected fields, credit, and the
 largest batch one submission may carry, then the producer's `Submit` frames carrying the Arrow IPC
-bytes of each batch, and finally `Close` or `Detach`. The owning node answers with `Opened` and the
-producer's description or `Refused` with its refusal, then the producer's `Outcome` and `Admission`
-frames, and finally `Ended` with a reason or `Closed`. Frames of one producer keep their order in
-both directions, so its open precedes its batches and its outcomes, admission changes, and end
-follow the answer to its open. A batch travels at most once over the link, and the frames are
-validated and charged to the relay memory class like every other relay-pool operation.
+bytes of each batch and its `Clear` frames, and finally `Close` or `Detach`. The owning node answers
+with `Opened` and the producer's description or `Refused` with its refusal, then the producer's
+`Admitting`, `Outcome` and `Admission` frames, and finally `Ended` with a reason or `Closed`.
+Frames of one producer keep their order in both directions, so its open precedes its batches and
+its outcomes, admission changes, and end follow the answer to its open. A batch travels at most once
+over the link, and the frames are validated and charged to the relay memory class like every other
+relay-pool operation.
+
+The owning node queues a forwarded batch like any other, but admits it only once the serving node
+has cleared it. When the batch's turn in the ingestor's window comes, the owning node takes a slot
+of the window for it and sends `Admitting` naming the batch. The serving node records that the
+batch may now be admitted, answers `Clear`, and from then on counts the batch as possibly admitted;
+only on that `Clear` does the owning node hand the batch to its admission worker. The serving node
+clears only a batch it forwarded and holds no outcome for, and it answers in the order it was asked,
+so clearances return in the order the owning node requested them. Admitting a forwarded batch
+therefore costs one more round trip of the link. A batch awaiting its clearance holds its slot of
+the window, so a serving node that stops answering holds at most the slots it was asked to clear,
+until the silence limit ends its link.
 
 The serving node waits at most 20 seconds for the owning node to answer a forwarded open, including
 opening the link. Both ends send a heartbeat after two seconds without other frames and treat ten
 seconds without hearing anything as a lost link; the owning node skips a heartbeat rather than queue
 it behind 64 unsent answers. When a link ends for any reason, the serving node refuses the opens it
 has not heard back about as `EndpointUnavailable` and ends every producer the link carried as
-`OwnerLost`, whose batches without outcomes become `OutcomeUnknown` with cause `OwnerLost`. The
-owning node detaches the link's producers: their admitted batches continue through the graph with
-nobody left to answer them. A later producer opens a new link.
+`OwnerLost`. Before that end, it answers each batch of the producer that it never cleared — whether
+it sent the batch or the link ended before it could — as `NotAdmitted` with `ProducerEnded`: the
+owning node admits nothing without a clearance, so none of those batches entered the graph. Only
+the batches it cleared become `OutcomeUnknown` with cause `OwnerLost`. A crashed owning node closes
+its connections and ends the link at once; one that stops answering without closing them ends it
+when the silence limit passes. The owning node detaches the link's producers: their admitted
+batches continue through the graph with nobody left to answer them, and the batches it queued or
+was clearing are dropped unadmitted, releasing their slots of the window. A later producer opens a
+new link.
 
 Each end reserves the producer's granted bytes in its own 128 MiB producer budget: the serving node
 for the batches its session holds, and the owning node again for the batches it retains for another
