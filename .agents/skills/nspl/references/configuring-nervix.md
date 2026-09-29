@@ -196,7 +196,9 @@ relay. Do not use them to scan across branches.
   A batching OTEL emitter bounds each export request by the number of successfully mapped source
   records and the exact uncompressed protobuf size, including resource and scope. An oversized
   candidate is divided and an oversized singleton follows `ON MESSAGE ERROR`; without the clause,
-  OTEL keeps one export request per pending Arrow batch. A batching Sentry emitter places its
+  OTEL keeps one export request per pending Arrow batch. With or without it, a request whose outcome
+  is unknown, such as one that timed out or lost its response, is retried with the same bytes and
+  records rather than prepared again. A batching Sentry emitter places its
   members inside one event in one envelope, and a `SYSLOG` codec places complete member messages
   in one frame's JSON-array `MSG`.
   SQS `.fifo` queue names and `FIFO GROUP` appear together, and `FIFO GROUP FROM BRANCH` is used

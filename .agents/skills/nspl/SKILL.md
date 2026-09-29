@@ -178,7 +178,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   snapshot. Generator output and tokenless WASM output use it for generated watermarks, while
   source-token WASM output preserves source metadata. Omitted Sentry timestamps use domain time;
   explicit Sentry timestamps are preserved; OTEL `observed_time_unix_nano` and HTTP-date
-  `Retry-After` interpretation use actual UTC.
+  `Retry-After` interpretation use actual UTC, and a retried OTEL Export request keeps the observed
+  time it was prepared with.
 - Treat a session subscription `WHERE` clause as a predicate over the subscribed relay record.
   Bare fields, `message.<field>`, and `input.<field>` are equivalent there. Do not use `output`,
   `branch`, materialized `relay_state`, construction clauses, or side effects; subscription

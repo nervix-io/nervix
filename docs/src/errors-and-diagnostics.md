@@ -279,10 +279,15 @@ failure. An error handler whose own construction fails does not recursively invo
 
 A batch payload's rejection becomes one message error per member, each a copy of the sink's
 structured error: the members share its reference, so an operator can see that they failed
-together, while each keeps its own occurrence time and branch. A sink answer that breaks the write
-contract, by naming a record the write did not carry or answering twice for one, is not a message
-error of any member. It fails the attempt without a retry, and the emitter's unresolved rows then
-follow `ON MESSAGE ERROR` as a failed publish.
+together, while each keeps its own occurrence time and branch. A prepared row request's rejection,
+such as an OTEL Export request the receiver refused, does the same for every row the request
+carried. A sink answer that breaks the write contract, by naming a record the write did not carry
+or answering twice for one, is not a message error of any member. Neither is a row request sink's
+preparation that breaks its contract: one that answers for a row the write did not hand over,
+answers twice for a row, prepares rows out of source order, prepares a request that carries no row,
+or leaves a handed-over row unanswered. Either fails the attempt without a retry as the typed
+emitter error that names the violation, the preparation keeps nothing, and the emitter's unresolved
+rows then follow `ON MESSAGE ERROR` as a failed publish.
 
 The Sentry sink rejects a final serialized event above its decompressed event limit before sending
 the envelope. The Syslog sink rejects a UDP datagram above its payload limit, a stream frame whose
@@ -291,7 +296,11 @@ A batching OTEL sink measures the full protobuf Export request after mapping; if
 halving still leaves one source record above `MAX SIZE`, that record receives an external publish
 message error. Other members can be sent in bounded requests. An OTLP receiver's
 `partial_success` has no member identities, so it acknowledges the entire request and emits a
-warning instead of inventing per-record rejections.
+warning instead of inventing per-record rejections. An OTLP/gRPC export the receiver never answered
+— a timeout, a lost connection, an unreadable answer — is an infrastructure failure the host
+retries, whatever code tonic reports for it. An answered status other than `INVALID_ARGUMENT`,
+`RESOURCE_EXHAUSTED` or a code the OTLP specification lists as retryable is a misconfiguration
+failure, which the host does not retry.
 
 An HTTP emitter rejects a record at the first request field that fails, in the order it evaluates
 them: `METHOD`, `PATH`, and then each header write. A failed expression keeps the `evaluation`
