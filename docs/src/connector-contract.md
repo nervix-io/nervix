@@ -244,21 +244,22 @@ consumer edges from the new plan; it does not reconstruct the emitter from a Mod
 The host resolves resource mounts and binds the lowered VM programs to installed schemas and UDFs
 when it starts the task. A retry reopens the sink with the same typed configuration.
 
-The host prepares one batch for one of four sink contracts. A **record sink** receives
+The host prepares one write for one of four sink contracts. A **record sink** receives
 codec-encoded keys, payloads, headers, optional ordering groups, timestamps, and the identity the
-host assigned each record of the write. A **row sink** receives host-projected Arrow columns,
-target columns, selected rows, and bounded chunks; it encodes its external representation from
-those columns. A **row request sink** receives the same projected columns and prepares requests
-from them once: each prepared request is the exact bytes the connector will send and the source
-positions of the rows it carries. The host retains every prepared request and hands it back, under
-an identity it assigns for the write, until the connector answers for it. An **HTTP request sink**
-receives prepared requests: each carries the identity the host assigned it, the validated method,
-the target normalized on the client's origin, the application headers after case-insensitive
-replacement, and the exact body bytes the codec produced or no body at all. The host evaluates
-`VALUES` once per batch and excludes rows with mapping errors before calling a row sink or a row
-request sink. It retains the ACKs of the source rows every record, mapped row or request carries, so
-no runtime ACK map enters the connector. Each publish is one call per batch, never a virtual call
-per row.
+host assigned each record of the write. A **row sink** receives a run of host-projected Arrow
+carriers of one source relay and concrete branch, the target columns their mapped columns are
+written to, and each carrier's selected rows, execution time and, for a sink that retains them,
+acknowledgements; it encodes its external representation from those columns. A **row request
+sink** receives the same projected columns one carrier at a time and prepares requests from them
+once: each prepared request is the exact bytes the connector will send and the source positions of
+the rows it carries. The host retains every prepared request and hands it back, under an identity
+it assigns for the write, until the connector answers for it. An **HTTP request sink** receives
+prepared requests: each carries the identity the host assigned it, the validated method, the target
+normalized on the client's origin, the application headers after case-insensitive replacement, and
+the exact body bytes the codec produced or no body at all. The host evaluates `VALUES` once per
+batch and excludes rows with mapping errors before calling a row sink or a row request sink. It
+retains the ACKs of the source rows every record, mapped row or request carries, so no runtime ACK
+map enters the connector. Each publish is one call per write, never a virtual call per row.
 
 The host compiles a row or row request sink's `VALUES` projection before opening that sink. A failed VM
 inference or compilation retains its typed VM report under the domain and emitter context, then
@@ -266,9 +267,10 @@ the sink-initialization context. The emitter follows its existing initialization
 the connector never receives a partially compiled mapping.
 
 The ClickHouse row sink uses the shared columnar JSON writer for `JSONEachRow`. It prepares typed
-column readers and string escape masks once for a mapped batch, then writes each selected row in
-mapping order without building per-row JSON values. It keeps the host's bounded chunks, request
-cadence, and per-record outcomes.
+column readers and string escape masks once for each carrier of a write, then writes each selected
+row in mapping order without building per-row JSON values. It selects the writer's octet encoding
+for binary columns, so a `String` column stores a `BYTES` value's own octets rather than base64
+text. It keeps the host's request cadence and per-record outcomes.
 
 An ordering group exists only where the sink plan declares one; today that is the SQS
 `FIFO GROUP`. The host binds the lowered declaration, evaluates it once per filtered source batch, and
@@ -315,6 +317,14 @@ When that policy sends a failed emitter record to a DLQ, the host executes the m
 program bound during domain installation or replacement. The prepared route retains the input and
 optional attempted codec-record schemas, the source branch, relay target and flush cadence. The
 connector receives no error-record Model or VM program and makes no DLQ routing decision.
+
+Terminal node or domain teardown is a different boundary from a successful stop request. After
+its drain budget ends, it cancels an emitter task even when the connector is waiting for an
+external answer. The host drops that task's prepared payloads and unresolved ACK guards without
+turning the cancellation into a delivered response or a record-specific message error. The
+source's acknowledgement and recovery contract then decides whether the record returns. An
+entity-pause swap uses the stop request instead and cannot install the replacement until its old
+task drains successfully.
 
 For a record sink using the emitter `BATCH` clause, the host selects rows from successive
 Arc-backed Arrow carriers released by one flush. It retains each carrier's source relay, exact
@@ -366,13 +376,44 @@ the attempt for good releases them, and their members then follow the error poli
 unresolved row. A row sink names every member itself, so its retry writes only the rows it left
 unresolved; MongoDB's per-document results shrink a retried bulk write this way.
 
-OTEL is a row request sink. Without `BATCH` it prepares the successfully mapped rows of one Arrow
-carrier as one Export request. With `BATCH`, its typed plan passes the count and byte limits to the
-connector, which takes the successful positions in order into requests of at most `MAX MESSAGES`.
-It measures the exact uncompressed protobuf Export request, including resource and scope, before
-optional gzip or transport framing. An oversized candidate is halved; an oversized singleton is
-refused while preparing. The connector converts each row once and samples the log records'
-`observed_time_unix_nano` from actual UTC once per carrier, then encodes each request once.
+A row sink divides its own writes, because only the connector can measure what it sends. The
+host projects each buffered carrier once and hands the sink every run of successive carriers of
+one source relay and concrete branch in one call, so a write never spans relays or branches. The
+typed plan passes the emitter's `BATCH` limits to the connector, which narrows them to what its
+destination takes in one request and divides the run by one rule the contract crate owns:
+candidates in packing order of at most the row limit, a candidate whose exact measured size exceeds
+the byte limit halved and measured again with the rest returned to the front, and a single row that
+still exceeds it rejected alone. A row over `MAX SIZE` is a `validation` error of the `encode`
+operation; a row within it that the destination could never take is the destination's `external`
+rejection of the row. Every request answers for the rows it carried, and a failed request leaves its
+rows and every later request's unresolved for the host to retry, so a retry packs the same rows into
+the same requests again.
+
+The database sinks divide the whole run. ClickHouse measures the `JSONEachRow` body of an insert,
+each row's line encoded once and sent as a slice of one buffer. Postgres measures the one `unnest`
+statement every insert of the write executes and the text arrays it binds, exactly as the driver
+encodes them, and never lets that size exceed the largest protocol message the server reads, which
+bounds the Bind message that carries the arrays. MySQL measures each multi-row statement and every
+value's binary-protocol encoding, and narrows the row limit to the rows whose placeholders fit the
+65,535 one statement binds. MongoDB measures each inserted document with the `_id` the driver
+prepends, or each upsert's filter and update documents, and rejects a row whose document exceeds
+the server's 16 MiB document limit before any write, because the driver would refuse the whole write
+for it. A record-specific failure of a multi-row SQL write is isolated by writing its rows one at a
+time; a Postgres cardinality violation, which is how `ON CONFLICT DO UPDATE` refuses one insert that
+carries a key twice, is isolated the same way. MongoDB answers per document, so it needs no
+isolation pass.
+
+Iceberg is a row sink that stages each carrier of the run as its own file, which its commit
+publishes.
+
+OTEL is a row request sink, which the host hands one carrier per preparation. Without `BATCH` it
+prepares the successfully mapped rows of the carrier as one Export request. With `BATCH`, its typed
+plan passes the emitter's limits to the connector, which divides the successful positions by the
+same rule, measuring the exact uncompressed protobuf Export request, including resource and scope,
+before optional gzip or transport framing; a record whose request alone exceeds `MAX SIZE` is
+refused while preparing, as a `validation` error of the `encode` operation. The connector converts
+each row once and samples the log records' `observed_time_unix_nano` from actual UTC once per
+preparation, then encodes each request once.
 
 The retained boundary is that encoding: the exact protobuf bytes of the Export request and the
 positions of the rows it carries, kept in the emitter buffer beside the batch payloads and HTTP
@@ -467,7 +508,7 @@ sequenceDiagram
     participant External as External system
     Graph->>Host: Arrow batch and attached ACKs
     Host->>Host: Buffer, encode or project, and flush
-    Host->>Sink: One publish call per batch
+    Host->>Sink: One publish call per write
     Sink->>External: Write records or mapped rows
     Sink-->>Host: Delivered, rejected, and attempt failure
     opt Sink retains staged ACKs

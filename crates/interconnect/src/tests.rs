@@ -43,7 +43,7 @@ fn tls_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn test_tls() -> TlsConfigBundle {
+pub(crate) fn test_tls() -> TlsConfigBundle {
     static GENERATED: OnceLock<()> = OnceLock::new();
     GENERATED.get_or_init(|| {
         let status = Command::new("bash")
@@ -447,13 +447,163 @@ fn connection_limit_reserves_both_preconnected_directions() {
     };
     assert!(matches!(
         options.validate(),
-        Err(TransportError::InvalidOptions { .. })
+        Err(error) if matches!(error.current_context(), TransportError::InvalidOptions { .. })
     ));
 
     options.max_connections = 21;
     options
         .validate()
         .expect("one on-demand connection should fit after both preconnected directions");
+}
+
+#[test]
+fn invalid_transport_options_report_the_failed_contract() {
+    let cases = [
+        (
+            "max_peers",
+            TransportOptions {
+                max_peers: 0,
+                ..TransportOptions::default()
+            },
+        ),
+        (
+            "HTTP/2 windows",
+            TransportOptions {
+                initial_stream_window_bytes: 0,
+                ..TransportOptions::default()
+            },
+        ),
+        (
+            "transport deadlines",
+            TransportOptions {
+                request_timeout: Duration::ZERO,
+                ..TransportOptions::default()
+            },
+        ),
+        (
+            "max_reconnect_backoff",
+            TransportOptions {
+                max_reconnect_backoff: Duration::ZERO,
+                ..TransportOptions::default()
+            },
+        ),
+    ];
+    for (contract, options) in cases {
+        let error = options
+            .validate()
+            .expect_err("invalid options must be refused");
+        let TransportError::InvalidOptions { reason } = error.current_context() else {
+            panic!("wrong failure class: {error:?}");
+        };
+        assert!(reason.contains(contract), "{reason}");
+    }
+}
+
+#[tokio::test]
+async fn peer_quota_refuses_a_new_target_but_retains_the_registered_peer() {
+    let options = TransportOptions {
+        max_peers: 1,
+        ..TransportOptions::default()
+    };
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        ..
+    } = bound_transports_with_options(options).await;
+    let endpoint = NodeEndpoint::new("localhost", transport_b.local_addr().port());
+    transport_a
+        .register_outbound_target(node_b.clone(), endpoint.clone())
+        .expect("the first peer should fit the quota");
+    let node_c = ClusterNodeName::parse("node-c").expect("test node name should be valid");
+    let error = transport_a
+        .register_outbound_target(node_c, endpoint.clone())
+        .expect_err("another peer must exceed the quota");
+    assert!(matches!(
+        error.current_context(),
+        TransportError::PoolExhausted
+    ));
+    transport_a
+        .register_outbound_target(node_b, endpoint)
+        .expect("re-registering the current peer must remain possible");
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+#[tokio::test]
+async fn bootstrap_respects_the_peer_quota_before_registering_a_new_identity() {
+    let options = TransportOptions {
+        max_peers: 1,
+        ..TransportOptions::default()
+    };
+    let ConnectedTransports {
+        _authority: authority,
+        transport_a,
+        transport_b,
+        node_b,
+        ..
+    } = bound_transports_with_options(options).await;
+    transport_a
+        .register_outbound_target(
+            node_b.clone(),
+            NodeEndpoint::new("localhost", transport_b.local_addr().port()),
+        )
+        .expect("the first peer should fit the quota");
+
+    let node_c = ClusterNodeName::parse("node-c").expect("test node name should be valid");
+    let (transport_c, _incoming_c) = Transport::bind(
+        "127.0.0.1:0".parse().expect("test address should be valid"),
+        localhost_identity("test-cluster", node_c.clone()),
+        authority.issue("test-cluster", &node_c),
+        TransportOptions::default(),
+        Executor::default(),
+        test_resolver().await,
+    )
+    .await
+    .expect("third test transport should bind");
+    let error = transport_a
+        .bootstrap_target(PeerTarget::new(transport_c.local_addr(), "localhost"))
+        .await
+        .expect_err("bootstrap must respect the existing peer quota");
+    assert!(matches!(
+        error.current_context(),
+        TransportError::PoolExhausted
+    ));
+    assert!(!transport_a.is_connected_to(&node_c));
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+    transport_c.shutdown().await;
+}
+
+#[tokio::test]
+async fn one_way_control_send_refuses_a_typed_request() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        ..
+    } = connected_transports().await;
+    let error = transport_a
+        .send(
+            &node_b,
+            Envelope::Control(ControlEnvelope::Request(RequestEnvelope {
+                class: PoolClass::Management,
+                request: "test_echo".to_string(),
+                payload: Vec::new(),
+            })),
+        )
+        .await
+        .expect_err("typed requests require the request protocol");
+    assert!(matches!(
+        error.current_context(),
+        TransportError::Decode(reason)
+            if reason.contains("typed request envelopes cannot be sent as one-way controls")
+    ));
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
 }
 
 #[test]
@@ -510,6 +660,44 @@ fn certificate_binds_cluster_node_and_endpoint() {
     );
 }
 
+#[tokio::test]
+async fn rejected_tls_replacement_keeps_the_previous_identity_usable() {
+    let ConnectedTransports {
+        _authority: authority,
+        transport_a,
+        transport_b,
+        node_a,
+        node_b,
+        mut incoming_b,
+        ..
+    } = connected_transports().await;
+    let error = transport_a
+        .replace_tls(authority.issue("another-cluster", &node_a))
+        .await
+        .expect_err("a replacement certificate for another cluster must be rejected");
+    assert!(matches!(
+        error.current_context(),
+        TransportError::InvalidHandshake(_)
+    ));
+    assert!(error.contains::<TlsConfigError>());
+
+    transport_a
+        .send(&node_b, Envelope::Control(ControlEnvelope::Terminate))
+        .await
+        .expect("the original certificate must still authenticate the transport");
+    let received = timeout(Duration::from_secs(2), incoming_b.recv())
+        .await
+        .expect("the peer should receive the control message")
+        .expect("the peer should remain available");
+    assert!(matches!(
+        received.envelope,
+        Envelope::Control(ControlEnvelope::Terminate)
+    ));
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
 mod coordination;
 mod resolver;
 
@@ -537,7 +725,7 @@ async fn resource_streams_leave_the_reserved_snapshot_slot_responsive() {
                     let chunk = executor
                         .charge_owned(MemoryClass::Bulk, b"resource".to_vec())
                         .await
-                        .map_err(|error| StreamHandlerError::new(error.to_string()))?;
+                        .map_err(StreamHandlerError::with_cause)?;
                     let chunks = futures_util::stream::once(async move {
                         if !*release.borrow() {
                             release
@@ -560,7 +748,7 @@ async fn resource_streams_leave_the_reserved_snapshot_slot_responsive() {
                 let chunk = executor
                     .charge_owned(MemoryClass::Bulk, b"snapshot".to_vec())
                     .await
-                    .map_err(|error| StreamHandlerError::new(error.to_string()))?;
+                    .map_err(StreamHandlerError::with_cause)?;
                 Ok(StreamingResponse::new(
                     8,
                     futures_util::stream::iter([Ok(chunk)]),
@@ -643,7 +831,7 @@ async fn streamed_response_times_out_when_its_producer_stops_making_progress() {
         .register_stream_handler::<ResourceStreamRequest, _, _>(|_context, _request| async {
             Ok(StreamingResponse::new(
                 1,
-                futures_util::stream::pending::<Result<ChargedBytes, StreamHandlerError>>(),
+                futures_util::stream::pending::<Result<ChargedBytes, Report<StreamHandlerError>>>(),
             ))
         })
         .expect("resource stream handler should register");
@@ -674,6 +862,92 @@ async fn streamed_response_times_out_when_its_producer_stops_making_progress() {
 }
 
 #[tokio::test]
+async fn streamed_response_reports_a_producer_failure_to_the_reader() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        ..
+    } = connected_transports().await;
+    let release = StdArc::new(Notify::new());
+    transport_b
+        .register_stream_handler::<ResourceStreamRequest, _, _>({
+            let release = StdArc::clone(&release);
+            move |_context, _request| {
+                let release = StdArc::clone(&release);
+                async move {
+                    Ok(StreamingResponse::new(
+                        1,
+                        futures_util::stream::once(async move {
+                            release.notified().await;
+                            Err(StreamHandlerError::with_cause(Report::new(
+                                io::Error::other("resource read failed"),
+                            )))
+                        }),
+                    ))
+                }
+            }
+        })
+        .expect("resource stream handler should register");
+    let mut response = transport_a
+        .request_stream(&node_b, ResourceStreamRequest)
+        .await
+        .expect("response headers should arrive before producer failure");
+    release.notify_one();
+    let error = timeout(Duration::from_secs(2), response.next_chunk())
+        .await
+        .expect("the failed producer should reset the response promptly")
+        .expect_err("the reader must observe a failed stream");
+    assert!(matches!(
+        error.current_context(),
+        RequestError::Stream { .. }
+    ));
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+#[tokio::test]
+async fn rejected_stream_opening_retains_the_transport_cause() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        ..
+    } = connected_transports().await;
+    transport_b
+        .register_stream_handler::<ResourceStreamRequest, _, _>(|_context, _request| async {
+            Err::<StreamingResponse, _>(StreamHandlerError::with_cause(Report::new(
+                io::Error::other("stream source unavailable"),
+            )))
+        })
+        .expect("resource stream handler should register");
+    timeout(Duration::from_secs(5), async {
+        while !transport_a.is_connected_to(&node_b) {
+            tokio::task::consume_budget().await;
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the target should become ready");
+
+    let Err(error) = transport_a
+        .request_stream(&node_b, ResourceStreamRequest)
+        .await
+    else {
+        panic!("a rejected opening must fail before returning a stream");
+    };
+    assert!(matches!(
+        error.current_context(),
+        RequestError::Stream { .. }
+    ));
+    assert!(error.contains::<TransportError>());
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+#[tokio::test]
 async fn stream_slot_queueing_consumes_the_request_deadline() {
     let ConnectedTransports {
         transport_a,
@@ -688,7 +962,7 @@ async fn stream_slot_queueing_consumes_the_request_deadline() {
             }
             Ok(StreamingResponse::new(
                 1,
-                futures_util::stream::pending::<Result<ChargedBytes, StreamHandlerError>>(),
+                futures_util::stream::pending::<Result<ChargedBytes, Report<StreamHandlerError>>>(),
             ))
         })
         .assured("the deadline stream handler has a unique test name");
@@ -1126,7 +1400,7 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
         .await
         .expect_err("the authenticated sender must own the declared admission reply");
     assert!(matches!(
-        error,
+        error.current_context(),
         TransportError::RemoteRejected { status: 403, .. }
     ));
     transport_a
@@ -1149,7 +1423,7 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
         .await
         .expect_err("a second grant must wait until the first terminal outcome is sent");
     assert!(matches!(
-        error,
+        error.current_context(),
         TransportError::RemoteRejected { status: 429, .. }
     ));
 
@@ -1340,7 +1614,10 @@ async fn confirmed_cancellation_fences_attempt_before_grant_arrives() {
         )
         .await
         .expect_err("a confirmed cancellation must fence a later grant");
-    assert!(matches!(error, TransportError::RelayCancelled));
+    assert!(matches!(
+        error.current_context(),
+        TransportError::RelayCancelled
+    ));
     assert!(
         timeout(Duration::from_millis(100), incoming_b.recv())
             .await
@@ -1437,7 +1714,10 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
         .send(&node_b, Envelope::RelayPayload(payload))
         .await
         .expect_err("a cancelled delivery identity must remain fenced");
-    assert!(matches!(error, TransportError::RelayCancelled));
+    assert!(matches!(
+        error.current_context(),
+        TransportError::RelayCancelled
+    ));
     let next_delivery = RelayDelivery {
         channel_incarnation: [7; 16],
         sequence: 1,
@@ -1504,7 +1784,10 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
         .send(&node_b, Envelope::RelayPayload(retired_payload.clone()))
         .await
         .expect_err("a delivery below the reconciled watermark is indeterminate");
-    assert!(matches!(error, TransportError::RelayIndeterminate));
+    assert!(matches!(
+        error.current_context(),
+        TransportError::RelayIndeterminate
+    ));
     assert!(
         timeout(Duration::from_millis(100), incoming_b.recv())
             .await
@@ -1761,9 +2044,73 @@ async fn bootstrap_rejects_a_certificate_from_another_cluster() {
         .bootstrap_target(PeerTarget::new(transport_b.local_addr(), "localhost"))
         .await
         .expect_err("a peer certificate from another cluster must be rejected");
-    assert!(matches!(error, TransportError::InvalidHandshake(_)));
+    assert!(matches!(
+        error.current_context(),
+        TransportError::InvalidHandshake(_)
+    ));
 
     transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+#[tokio::test]
+async fn bootstrap_times_out_when_a_tcp_peer_never_completes_tls() {
+    let authority = TestCertificateAuthority::new();
+    let node_a = ClusterNodeName::parse("node-a").expect("test node name should be valid");
+    let options = TransportOptions {
+        connection_setup_timeout: Duration::from_millis(100),
+        ..TransportOptions::default()
+    };
+    let (transport_a, _incoming_a) = Transport::bind(
+        "127.0.0.1:0".parse().expect("test address should be valid"),
+        localhost_identity("test-cluster", node_a.clone()),
+        authority.issue("test-cluster", &node_a),
+        options,
+        Executor::default(),
+        test_resolver().await,
+    )
+    .await
+    .expect("test transport should bind");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("unresponsive TCP peer should bind");
+    let error = timeout(
+        Duration::from_secs(2),
+        transport_a.bootstrap_target(PeerTarget::new(
+            listener
+                .local_addr()
+                .expect("test peer should have an address"),
+            "localhost",
+        )),
+    )
+    .await
+    .expect("bootstrap must honor its setup deadline")
+    .expect_err("an unresponsive TLS peer must fail");
+    assert!(matches!(
+        error.current_context(),
+        TransportError::ConnectionSetupTimeout { timeout, .. }
+            if *timeout == Duration::from_millis(100)
+    ));
+
+    transport_a.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutdown_refuses_bootstrap_before_opening_a_connection() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        ..
+    } = bound_transports_with_options(TransportOptions::default()).await;
+    transport_a.shutdown().await;
+    let error = transport_a
+        .bootstrap_target(PeerTarget::new(transport_b.local_addr(), "localhost"))
+        .await
+        .expect_err("shutdown must fence new bootstrap attempts");
+    assert!(matches!(
+        error.current_context(),
+        TransportError::ShuttingDown
+    ));
     transport_b.shutdown().await;
 }
 
@@ -1782,7 +2129,19 @@ async fn invalid_rkyv_is_rejected_before_dispatch() {
     )
     .await;
 
-    assert!(matches!(result, Err(TransportError::Decode(_))));
+    let Err(error) = result else {
+        panic!("invalid rkyv must be rejected before dispatch");
+    };
+    assert!(matches!(error.current_context(), TransportError::Decode(_)));
+    assert!(error.contains::<rkyv::rancor::Error>());
+}
+
+#[test]
+fn stream_handler_failure_keeps_its_producer_cause() {
+    let cause = Report::new(io::Error::other("producer failed"));
+    let error = StreamHandlerError::with_cause(cause);
+    assert_eq!(error.current_context().to_string(), "producer failed");
+    assert!(error.contains::<io::Error>());
 }
 
 #[tokio::test]

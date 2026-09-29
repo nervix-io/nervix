@@ -83,30 +83,32 @@ impl TransportClock {
         &self,
         local: &CertificateIdentity,
         peer: &CertificateIdentity,
-    ) -> Result<Instant, TransportError> {
+    ) -> Result<Instant, Report<TransportError>> {
         let expires_at = local
             .not_after_unix_seconds
             .min(peer.not_after_unix_seconds);
         let now = self
             .unix_seconds()
-            .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+            .map_err(|error| TransportError::with_cause(error, TransportError::InvalidHandshake))?;
         let remaining = expires_at
             .checked_sub(now)
             .ok_or_else(|| TransportError::InvalidHandshake(TlsConfigError::Expired.to_string()))?;
         if remaining <= 0 {
-            return Err(TransportError::InvalidHandshake(
+            return Err(Report::new(TransportError::InvalidHandshake(
                 TlsConfigError::Expired.to_string(),
-            ));
+            )));
         }
-        let remaining = u64::try_from(remaining)
-            .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-        Instant::now()
+        let remaining = u64::try_from(remaining).map_err(|error| {
+            TransportError::with_cause(Report::new(error), TransportError::InvalidHandshake)
+        })?;
+        let deadline = Instant::now()
             .checked_add(Duration::from_secs(remaining))
             .ok_or_else(|| {
                 TransportError::InvalidHandshake(
                     "certificate expiration exceeds the monotonic clock range".to_string(),
                 )
-            })
+            })?;
+        Ok(deadline)
     }
 }
 
@@ -135,18 +137,21 @@ impl TlsConfigBundle {
         server_name: &str,
         cluster_id: &str,
         expected_node: Option<&ClusterNodeName>,
-    ) -> Result<AuthenticatedSession<client::TlsStream<IO>>, TransportError>
+    ) -> Result<AuthenticatedSession<client::TlsStream<IO>>, Report<TransportError>>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
         self.clock
             .ensure_current(&self.certificate)
-            .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-        let name = ServerName::try_from(server_name.to_string())
-            .map_err(|_| TransportError::InvalidServerName(server_name.to_string()))?;
+            .map_err(|error| TransportError::with_cause(error, TransportError::InvalidHandshake))?;
+        let name = ServerName::try_from(server_name.to_string()).map_err(|error| {
+            Report::new(error)
+                .change_context(TransportError::InvalidServerName(server_name.to_string()))
+        })?;
         let stream = TlsConnector::from(StdArc::clone(&self.client_config))
             .connect(name, io)
-            .await?;
+            .await
+            .map_err(TransportError::from)?;
         let (_, connection) = stream.get_ref();
         let negotiated = NegotiatedPeer {
             alpn: connection.alpn_protocol(),
@@ -175,7 +180,7 @@ impl TlsConfigBundle {
     {
         self.clock
             .ensure_current(&self.certificate)
-            .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+            .map_err(|error| TransportError::with_cause(error, TransportError::InvalidHandshake))?;
         let handshake = TlsAcceptor::from(StdArc::clone(&self.server_config)).accept(io);
         let Ok(accepted) = timeout(setup_timeout, handshake).await else {
             return Err(Report::new(TransportError::ConnectionSetupTimeout {
@@ -203,41 +208,90 @@ impl TlsConfigBundle {
         negotiated: &NegotiatedPeer<'_>,
         cluster_id: &str,
         expected_node: Option<&ClusterNodeName>,
-    ) -> Result<CertificateIdentity, TransportError> {
+    ) -> Result<CertificateIdentity, Report<TransportError>> {
         if negotiated.alpn != Some(b"h2".as_slice()) {
-            return Err(TransportError::InvalidHandshake(
+            return Err(Report::new(TransportError::InvalidHandshake(
                 "TLS did not negotiate ALPN h2".to_string(),
-            ));
+            )));
         }
         let Some(certificates) = negotiated.certificates else {
-            return Err(TransportError::InvalidHandshake(
+            return Err(Report::new(TransportError::InvalidHandshake(
                 "peer did not present a certificate".to_string(),
-            ));
+            )));
         };
         let Some(certificate) = certificates.first() else {
-            return Err(TransportError::InvalidHandshake(
+            return Err(Report::new(TransportError::InvalidHandshake(
                 "peer did not present a certificate".to_string(),
-            ));
+            )));
         };
         let identity = CertificateIdentity::from_certificate(certificate)
-            .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+            .map_err(|error| TransportError::with_cause(error, TransportError::InvalidHandshake))?;
         self.clock
             .ensure_current(&identity)
-            .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
+            .map_err(|error| TransportError::with_cause(error, TransportError::InvalidHandshake))?;
         if identity.cluster_id != cluster_id {
-            return Err(TransportError::InvalidHandshake(format!(
+            return Err(Report::new(TransportError::InvalidHandshake(format!(
                 "peer certificate identifies cluster '{}', expected '{}'",
                 identity.cluster_id, cluster_id
-            )));
+            ))));
         }
         if let Some(expected_node) = expected_node
             && &identity.node_id != expected_node
         {
-            return Err(TransportError::InvalidHandshake(format!(
+            return Err(Report::new(TransportError::InvalidHandshake(format!(
                 "peer certificate identifies node '{}', expected '{}'",
                 identity.node_id, expected_node
-            )));
+            ))));
         }
         Ok(identity)
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    #[test]
+    fn missing_tls_identity_and_protocol_keep_the_handshake_classification() {
+        let tls = crate::tests::test_tls();
+        for negotiated in [
+            NegotiatedPeer {
+                alpn: None,
+                certificates: None,
+            },
+            NegotiatedPeer {
+                alpn: Some(b"h2"),
+                certificates: None,
+            },
+            NegotiatedPeer {
+                alpn: Some(b"h2"),
+                certificates: Some(&[]),
+            },
+        ] {
+            let Err(error) = tls.authenticate_peer(&negotiated, "default", None) else {
+                panic!("an authenticated peer needs ALPN and a certificate");
+            };
+            assert!(matches!(
+                error.current_context(),
+                TransportError::InvalidHandshake(_)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_server_name_retains_its_parse_cause() {
+        let tls = crate::tests::test_tls();
+        let (stream, _other_end) = tokio::io::duplex(64);
+        let Err(error) = tls.connect(stream, "", "default", None).await else {
+            panic!("an empty server name must fail before TLS negotiation");
+        };
+        assert!(matches!(
+            error.current_context(),
+            TransportError::InvalidServerName(name) if name.is_empty()
+        ));
+        assert!(
+            error.frames().count() > 1,
+            "the parse cause must be retained"
+        );
     }
 }

@@ -276,6 +276,14 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_runtime_preparation_if_armed(&self, node_id: &ClusterNodeName) {
+        self.inner
+            .fault_injection
+            .pause_runtime_preparation_if_armed(node_id)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_command_reference_lookup_if_armed(&self, node_id: &ClusterNodeName) {
         self.inner
             .fault_injection

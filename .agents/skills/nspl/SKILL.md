@@ -330,8 +330,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a
   codec with `ON EMITTING BATCH`, and a batching protobuf codec needs `BATCH MESSAGE`. Compatible
   rows from successive Arrow carriers in one flush may share a payload, but rows from different
-  source relays or concrete branches cannot. For OTEL, the clause bounds each protobuf export
-  request by successful source-record count and uncompressed encoded size; see
+  source relays or concrete branches cannot. For the database sinks, the clause bounds each insert
+  or bulk write by row count and the exact size of what it carries; for OTEL, it bounds each
+  protobuf export request by successful source-record count and uncompressed encoded size; see
   [Emitters](../../../docs/src/emitters.md#batching).
   For SQS, use `FIFO GROUP FROM BRANCH|<string_expression>` exactly when the externally provisioned
   queue name ends in `.fifo`; `FROM BRANCH` requires branched input.

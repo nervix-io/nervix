@@ -19,7 +19,7 @@ use nervix_connector_mongodb::{MongoDbSink, MongoDbSinkConfig};
 use nervix_connector_mqtt::{MqttSink, MqttSinkConfig};
 use nervix_connector_mysql::{MySqlSink, MySqlSinkConfig};
 use nervix_connector_nats::{NatsSink, NatsSinkConfig};
-use nervix_connector_otel::{OtelBatchLimits, OtelSink, OtelSinkConfig};
+use nervix_connector_otel::{OtelSink, OtelSinkConfig};
 use nervix_connector_postgres::{PostgresSink, PostgresSinkConfig};
 use nervix_connector_pulsar::{PulsarSink, PulsarSinkConfig};
 use nervix_connector_rabbitmq::{RabbitMqSink, RabbitMqSinkConfig};
@@ -249,16 +249,12 @@ impl EmitterSinkStarter {
                     mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: None,
                 })?;
                 let config = OtelSinkConfig {
                     config: sink.client.config.entries.clone(),
                     dns: context.dns()?,
                     signal: sink.signal.clone(),
-                    batch: sink.batch.map(|policy| OtelBatchLimits {
-                        max_messages: policy.max_messages.get(),
-                        max_size: policy.max_size.bytes(),
-                    }),
+                    batch: sink.batch,
                     values: sink.values.clone(),
                     attributes: sink.attributes.clone(),
                     resource: sink.resource.clone(),
@@ -276,7 +272,6 @@ impl EmitterSinkStarter {
                     mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: Some(sink.batch.max_messages),
                 })?;
                 Self::row(
                     projection,
@@ -285,6 +280,7 @@ impl EmitterSinkStarter {
                             config: sink.client.config.entries.clone(),
                             table: sink.table.clone(),
                             dns: context.dns()?,
+                            batch: sink.batch,
                         },
                         context.sink_host(),
                     ),
@@ -299,7 +295,6 @@ impl EmitterSinkStarter {
                     mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: Some(sink.batch.max_messages),
                 })?;
                 let connections =
                     PooledSinkClient::lease(context, &sink.client, sink.pooled_client())
@@ -311,6 +306,7 @@ impl EmitterSinkStarter {
                         PostgresSinkConfig {
                             table: sink.table.clone(),
                             conflict_action: sink.conflict_action.clone(),
+                            batch: sink.batch,
                         },
                         Box::new(connections),
                         context.sink_host(),
@@ -326,7 +322,6 @@ impl EmitterSinkStarter {
                     mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: Some(sink.batch.max_messages),
                 })?;
                 let connections =
                     PooledSinkClient::lease(context, &sink.client, sink.pooled_client())
@@ -338,6 +333,7 @@ impl EmitterSinkStarter {
                         MySqlSinkConfig {
                             table: sink.table.clone(),
                             conflict_action: sink.conflict_action,
+                            batch: sink.batch,
                         },
                         Box::new(connections),
                         context.sink_host(),
@@ -353,7 +349,6 @@ impl EmitterSinkStarter {
                     mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: Some(sink.batch.max_messages),
                 })?;
                 let client = PooledSinkClient::lease(context, &sink.client, sink.pooled_client())
                     .await
@@ -365,6 +360,7 @@ impl EmitterSinkStarter {
                             config: sink.client.config.entries.clone(),
                             collection: sink.collection.clone(),
                             conflict_action: sink.conflict_action.clone(),
+                            batch: sink.batch,
                         },
                         Box::new(client),
                         context.sink_host(),
@@ -380,9 +376,6 @@ impl EmitterSinkStarter {
                     mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    // One commit reads every staged file back at once, so a staged write carries
-                    // the whole batch the host released to it.
-                    max_batch: None,
                 })?;
                 let mapped_schema = projection.mapped_schema().clone();
                 let opened = IcebergSink::new(

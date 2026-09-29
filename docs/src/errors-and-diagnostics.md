@@ -335,9 +335,20 @@ rows then follow `ON MESSAGE ERROR` as a failed publish.
 The Sentry sink rejects a final serialized event above its decompressed event limit before sending
 the envelope. The Syslog sink rejects a UDP datagram above its payload limit, a stream frame whose
 octet count needs more than ten digits, or an LF-bearing non-transparent TCP frame before writing.
-A batching OTEL sink measures the full protobuf Export request after mapping; if
-halving still leaves one source record above `MAX SIZE`, that record receives an external publish
-message error. Other members can be sent in bounded requests. An OTLP receiver's
+A row sink — ClickHouse, Postgres, MySQL or MongoDB — and a batching OTEL sink, which prepares
+its requests from mapped rows, measure each request they would send. If halving still leaves one
+row whose own request exceeds `MAX SIZE`, that row receives a `validation` message error of the
+`encode` operation naming the measured size and the limit, such as
+`Postgres insert of one row measures 1219 bytes, above MAX SIZE 600B`, and the other rows are sent
+in bounded requests. A row within `MAX SIZE` that its destination could never
+accept is the destination's `external` rejection of the `publish` operation, named with the
+destination's limit: a Postgres insert above the largest protocol message the server reads, or a
+MongoDB document above its 16 MiB document limit, which is rejected before the write that would
+carry it. A SQL write that fails for a reason specific to its rows is written again one row at a
+time, and each row the destination still refuses receives an `external` `publish` error with the
+destination's reason. That includes a violated MySQL `CHECK` constraint, which the server reports
+under the generic SQLSTATE `HY000`, and a Postgres cardinality violation, which is how
+`ON CONFLICT DO UPDATE` refuses one insert that carries a key twice. An OTLP receiver's
 `partial_success` has no member identities, so it acknowledges the entire request and emits a
 warning instead of inventing per-record rejections. An OTLP/gRPC export the receiver never answered
 — a timeout, a lost connection, an unreadable answer — is an infrastructure failure the host
@@ -393,6 +404,10 @@ boundary for an already classified failure; it is not used to recover a new clas
 replication and materialized-snapshot description use this envelope, and local errors retain the
 remote class alongside their target and placement. [Cluster Interconnect](./interconnect.md)
 defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries.
+Local interconnect transport, typed request, and streaming-handler failures carry reports through
+their callers. A layer that changes the failure's meaning adds context to the existing report, so
+the caller can still inspect the transport or producer cause. The HTTP/2 and rkyv boundary sends
+the classified remote result or its rejection text, rather than serializing the local cause chain.
 
 ```mermaid
 sequenceDiagram
@@ -473,6 +488,11 @@ refusals retain the server's message. It exits nonzero for a refusal. Transport 
 while attaching, reading events, or detaching retain their underlying report beneath the CLI
 operation that failed.
 
+The web console shows an automatic attach refusal in the clock panel and event log without
+retrying it. If its bounded request hand-off refuses a clock request before the session sends it,
+the console reports that local refusal in the event log; an automatic attach also leaves the panel
+in the refused state until the selected domain or connection changes.
+
 A producer answers with typed values rather than command dispositions. A refused open carries a
 `ClientProducerRefusal`, every submitted batch one `ClientSubmissionOutcome`, and an ended producer
 one `ClientProducerEndReason`; see [Producers](./client-session-protocol.md#producers). The outcome
@@ -522,7 +542,8 @@ in the type. A dropped result with no stated recovery class does not establish t
 The former `result_string_errors` debt measure is now a zero-tolerance rule:
 `just validate-typed-errors`, run by `just validate`, rejects `Result<_, String>` in product code
 without a baseline. `just ratchet` still counts `bare_error_signatures`: a Nervix error returned
-without an `error-stack` report cannot increase that debt. The ratchet also guards raw dropped
+without an `error-stack` report cannot increase that debt, including a locally owned error nested
+in a `Future` output or `Stream` item callback contract. The ratchet also guards raw dropped
 outcomes and panic sites. For a new fallible site, a reviewer asks in order: which layer decides its
 meaning; whether it is an ordinary outcome, a recoverable failure, or a broken invariant; which
 typed fields let the caller act; which context must cross each boundary; and which public

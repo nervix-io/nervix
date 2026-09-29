@@ -118,6 +118,12 @@ and `STOP` are individual `NO_PAUSE` steps with lifecycle effects; they determin
 model steps plan against a running or stopped domain. [Resource Versions And Bindings](./resource-versions.md#classification-and-state-effects)
 owns what each pinned resource version loads and which rebindings reset state.
 
+An automatic schedule change that moves work away from a node the leader has marked unavailable
+retains its planned and actual impact. Completion waits for the leader's current required runtime
+participants, including the connected local node, and does not wait for preparation by that
+unavailable node. If the node rejoins, its later catch-up is a separate application of the current
+revision; it does not change the committed step's impact report.
+
 ### Concrete joint and mixed-scope examples
 
 | Accepted sequence in one domain | Effective plan and interpretation |

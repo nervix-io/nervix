@@ -3,20 +3,22 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The record, mapped-row, row request and HTTP request sink traits, their lifecycle
-//!   hooks, typed start and publish failures, the identities a sink answers for — a record or
-//!   request the host assigned, or a mapped row's source position — the requests a row request sink
-//!   prepares from mapped rows, the outcome it answers with, and the opaque handles through which a
-//!   sink reports to its host or keeps host-owned acknowledgements alive.
+//!   hooks, typed start and publish failures, the carriers one mapped-row write covers, the
+//!   identities a sink answers for — a record or request the host assigned, or a mapped row's source
+//!   position — the requests a row request sink prepares from mapped rows, the outcome it answers
+//!   with, and the opaque handles through which a sink reports to its host or keeps host-owned
+//!   acknowledgements alive.
 //! - **Depends on.** Arrow batches, vocabulary values, `error-stack`, Tokio's monotonic instant,
 //!   and trait-object support.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, error-policy
 //!   implementations, or any connector driver.
 
-use std::{num::NonZeroUsize, ops::Range, path::PathBuf, time::Duration};
+use std::{num::NonZeroUsize, path::PathBuf, time::Duration};
 
 use arrow_array::RecordBatch;
 use async_trait::async_trait;
 use error_stack::Report;
+use meticulous::OptionExt as _;
 use nervix_models::{
     FieldPath, HttpApplicationHeaders, HttpMethod, HttpTarget, MessageErrorCode,
     MessageErrorOperation, StructuredMessageError, Timestamp,
@@ -215,6 +217,23 @@ impl<Id> RejectedSinkRecord<Id> {
         }
     }
 
+    /// A record whose own request measures more than the emitter's `MAX SIZE`, which the connector
+    /// found by measuring the record alone. It never reaches the destination.
+    pub fn oversize(id: Id, occurred_at: Timestamp, message: String) -> Self {
+        Self {
+            id,
+            error: StructuredMessageError {
+                reference: uuid::Uuid::now_v7(),
+                code: MessageErrorCode::Validation,
+                message,
+                operation: MessageErrorOperation::Encode,
+                operation_index: None,
+                fields: Default::default(),
+                occurred_at,
+            },
+        }
+    }
+
     /// A record whose mapped values the connector's own validation refused, naming the fields that
     /// carry them.
     pub fn invalid(
@@ -298,18 +317,15 @@ impl<Id> PerRecordOutcome<Id> {
     }
 }
 
-/// A host-projected Arrow batch and the rows one row sink writes, or one row request sink prepares
-/// requests, from it.
+/// One host-projected Arrow carrier of a mapped-row write and the rows a row sink writes, or a row
+/// request sink prepares requests, from it.
 ///
-/// `batch.column(i)` holds the values mapped to `target_columns[i]`, so a sink reads its columns by
-/// position and never resolves a name a mapping may have used twice.
-pub struct MappedSinkRows<'a> {
+/// `batch.column(i)` holds the values mapped to the write's `target_columns[i]`, so a sink reads
+/// its columns by position and never resolves a name a mapping may have used twice.
+pub struct MappedSinkCarrier<'a> {
     pub batch_index: usize,
     pub batch: &'a RecordBatch,
-    pub target_columns: &'a [String],
     pub selected_rows: &'a [usize],
-    /// Ranges into `selected_rows` that respect the emitter's declared maximum batch size.
-    pub selected_row_chunks: &'a [Range<usize>],
     /// When the host evaluated the mapping, which a rejected row is reported with and a sink whose
     /// commit cadence is a domain duration measures that cadence from.
     pub occurred_at: Timestamp,
@@ -317,6 +333,70 @@ pub struct MappedSinkRows<'a> {
     /// [`SinkLifecycle::retains_acknowledgements`]. The host builds them for no other sink, so a
     /// sink that acknowledges on the publish boundary receives none.
     pub acknowledgements: Option<SinkAcknowledgements>,
+}
+
+/// One mapped-row write: successive host-projected Arrow carriers of one source relay and concrete
+/// branch, in the order the host released them.
+///
+/// A write never spans source relays or branches, so every row it carries may travel in one
+/// request. Each carrier keeps its own mapped columns, execution time and acknowledgements. A row
+/// sink is handed every run of carriers; a row request sink is handed one carrier per preparation,
+/// because the host checks and retains what it prepared batch by batch.
+pub struct MappedSinkRows<'a> {
+    pub target_columns: &'a [String],
+    pub carriers: Vec<MappedSinkCarrier<'a>>,
+}
+
+/// One row a write carries: the carrier that holds it and its row there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MappedSinkMember {
+    pub carrier: usize,
+    pub row: usize,
+}
+
+/// The guarantee every lookup of a member's carrier relies on.
+const MEMBER_CARRIER: &str = "a member names a carrier of the write whose members it came from";
+
+impl MappedSinkRows<'_> {
+    /// Every row this write carries, in the order the host packs them: carrier by carrier, and
+    /// each carrier's selected rows in their order.
+    pub fn members(&self) -> Vec<MappedSinkMember> {
+        let mut members = Vec::with_capacity(self.member_count());
+        for (carrier, mapped) in self.carriers.iter().enumerate() {
+            for row in mapped.selected_rows {
+                members.push(MappedSinkMember { carrier, row: *row });
+            }
+        }
+        members
+    }
+
+    /// How many rows this write carries.
+    pub fn member_count(&self) -> usize {
+        let mut count = 0_usize;
+        for carrier in &self.carriers {
+            count = count
+                .checked_add(carrier.selected_rows.len())
+                .assured("the rows of one write are held in memory");
+        }
+        count
+    }
+
+    /// Where `member` sits in the host's buffered batches, which the sink answers for it under.
+    pub fn position(&self, member: MappedSinkMember) -> SinkRecordPosition {
+        let carrier = self.carriers.get(member.carrier).assured(MEMBER_CARRIER);
+        SinkRecordPosition {
+            batch_index: carrier.batch_index,
+            row_index: member.row,
+        }
+    }
+
+    /// When the host evaluated the mapping of the carrier that holds `member`.
+    pub fn occurred_at(&self, member: MappedSinkMember) -> Timestamp {
+        self.carriers
+            .get(member.carrier)
+            .assured(MEMBER_CARRIER)
+            .occurred_at
+    }
 }
 
 /// What one commit published, for the host's output metrics.

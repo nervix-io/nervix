@@ -1040,8 +1040,8 @@ impl Application {
                     #[cfg(not(feature = "testing"))]
                     drop(context);
                     #[cfg(feature = "testing")]
-                    let local_health_identity =
-                        health_fault_injection.health_response_identity(local_health_identity);
+                    let local_health_identity = health_fault_injection
+                        .health_response_identity(context.peer_node_id(), local_health_identity);
                     local_health_identity
                 }
             }
@@ -1053,6 +1053,18 @@ impl Application {
             completion::register_application_revision_handler(cluster.clone(), &interconnect);
         let startup = startup
             .require_handler_registration(&cluster, application_revision_handler)
+            .await?;
+        let completion_peers_handler = completion::register_completion_peers_handler(
+            cluster.clone(),
+            startup
+                .consensus
+                .as_ref()
+                .verified("startup assigns consensus before registering completion handlers")
+                .observer(),
+            &interconnect,
+        );
+        let startup = startup
+            .require_handler_registration(&cluster, completion_peers_handler)
             .await?;
         let ApplicationStartup {
             db,
@@ -1834,16 +1846,14 @@ impl Application {
                         .resource_store
                         .open_archive(&request.id)
                         .await
-                        .map_err(|error| StreamHandlerError::new(error.to_string()))?;
+                        .map_err(StreamHandlerError::with_cause)?;
                     let archive_bytes = reader.archive_bytes();
                     let chunks = stream::unfold(Some(reader), |reader| async move {
                         let mut reader = reader?;
                         match reader.next_chunk().await {
                             Ok(Some(chunk)) => Some((Ok(chunk), Some(reader))),
                             Ok(None) => None,
-                            Err(error) => {
-                                Some((Err(StreamHandlerError::new(error.to_string())), None))
-                            }
+                            Err(error) => Some((Err(StreamHandlerError::with_cause(error)), None)),
                         }
                     });
                     Ok(StreamingResponse::new(archive_bytes, chunks))

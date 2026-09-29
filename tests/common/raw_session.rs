@@ -14,7 +14,8 @@
 //!   protocol.
 //!
 //! The session reads frames only while a caller waits for something, so every reply and event
-//! that arrives while it waits for another is kept until asked for.
+//! that arrives while it waits for another is kept until asked for. A successful clock detach
+//! retires unread frames from that attachment; the ordered clock log still retains them.
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -31,11 +32,12 @@ use nervix_client_wire::{
     BackupArchiveStart, BackupDownloadFailed, BackupDownloadMessage, BackupDownloadRequest,
     CancelRequest, ClientMessage, ClientRequest, CommandDisposition, CommandOutcome,
     CommandRequest, DetachDomainClockRequest, Diagnostic, DomainClockAttachmentEnded,
-    DomainClockObserved, DomainClockTicked, LeaderRedirect, NoticeLevel, OutcomeOrigin, Reply,
-    ReplyBody, RequestId, RowSchema, ServerEvent, ServerFrame, ServerMessage, SessionEndReason,
-    SessionLimits, SubscribeDisposition, SubscribeRequest, SubscriptionEnded, SubscriptionHandle,
-    SubscriptionType, TransferAssembly, UnsubscribeDisposition, UnsubscribeRequest, UploadChunk,
-    UploadReply, UploadStart, VerifiedFrame,
+    DomainClockDetachDisposition, DomainClockObserved, DomainClockTicked, LeaderRedirect,
+    NoticeLevel, OutcomeOrigin, Reply, ReplyBody, RequestId, RowSchema, ServerEvent, ServerFrame,
+    ServerMessage, SessionEndReason, SessionLimits, SubscribeDisposition, SubscribeRequest,
+    SubscriptionEnded, SubscriptionHandle, SubscriptionType, TransferAssembly,
+    UnsubscribeDisposition, UnsubscribeRequest, UploadChunk, UploadReply, UploadStart,
+    VerifiedFrame,
     grpc::{
         ClientBackupDownloadCodec, ClientExchangeCodec, ClientUploadCodec, DOWNLOAD_BACKUP_PATH,
         EXCHANGE_PATH, FrameDecoder, UPLOAD_RESOURCE_PATH,
@@ -626,7 +628,16 @@ impl TestSession {
                     self.closed_subscriptions.insert(handle.clone());
                 }
             }
-            ReplyBody::DomainClockAttach(_) | ReplyBody::DomainClockDetach(_) => {
+            ReplyBody::DomainClockAttach(_) => {
+                self.clock_log.push(TestClockLogEntry::Reply(request_id));
+            }
+            ReplyBody::DomainClockDetach(outcome) => {
+                if let DomainClockDetachDisposition::Detached(domain) = &outcome.disposition {
+                    // These frames arrived before the detach reply. Keep their ordering evidence
+                    // in clock_log without presenting them as events after the attachment ended.
+                    self.pending_clock_frames
+                        .retain(|frame| frame.domain() != domain);
+                }
                 self.clock_log.push(TestClockLogEntry::Reply(request_id));
             }
             _ => {}

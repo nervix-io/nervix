@@ -306,6 +306,22 @@ USING` selects a codec body. `DROP ENCODE` is invalid for HTTP; use a complete `
 WITHOUT BODY` replacement. The retained construction and error scopes must be valid for the new
 selection.
 
+Changing the HTTP sink, method, path, client reference, body selection, or publishing mode uses
+`ENTITY_PAUSE`. The emitter drains every admitted request with the client and request fields that
+prepared it before the replacement starts. If that drain fails, the change fails and the old
+definition remains active; an unanswered request is never sent to the proposed destination.
+Changing only `FLUSH` is `DYNAMIC`, while adding or removing a source relay uses `DOMAIN_PAUSE`.
+Changing the `CLIENT` definition itself follows the domain-pause configuration lifecycle.
+
+`ALTER` retains the emitter's `INHERIT`, `SET`, `INVOKE`, and error clauses, so a body-mode change
+must remain valid with all of them. To change construction or header invocations, use `DROP
+EMITTER` and `CREATE EMITTER` for the same name in one transaction. The complete candidate is
+validated before the transaction commits and has the same effective drain obligation as an
+`ALTER` replacement. A destination that remains unavailable can prevent that drain. The operator
+can repair it, or `STOP` the domain, change the emitter while stopped, and `START` again. Stopping
+discards prepared requests and retry state; attached work depends on its source's redelivery
+contract, and an endpoint that applied a request before losing its response may see a duplicate.
+
 While confirmations or infrastructure retries are pending, the emitter stops consuming from its
 relays and keeps upstream ACK leases alive. `FLUSH` still controls when and how much work enters a
 flush; `MODE` controls when each record in that flush counts as published. `ATTACHED` and
@@ -371,9 +387,10 @@ unit it was written in. `DESCRIBE EMITTER` reports it on the line after `sink:`,
 The complete contract for batch payloads — packing, containers per wire format, exact size
 measurement and failure attribution for every sink — is defined in
 [Optional emitter batching](https://github.com/nervix-io/nervix/blob/main/docs/specifications/emitter-batching.md).
-The database sinks bound every sequential insert or bulk write by `MAX MESSAGES`, as their sections
-below describe. An OTEL emitter with the clause bounds each export request; without it, OTEL keeps
-one request per pending Arrow batch. Iceberg keeps its data-file and commit boundaries.
+The database sinks bound every insert or bulk write by both limits, as
+[Database writes](#database-writes) describes. An OTEL emitter with the clause bounds each export
+request; without it, OTEL keeps one request per pending Arrow batch. Iceberg keeps its data-file
+and commit boundaries.
 
 ### Batch payloads
 
@@ -516,6 +533,71 @@ within it.
 Redis rejects a value above its `proto-max-bulk-len` itself, and that rejection follows
 `ON MESSAGE ERROR` like the ones above. ZeroMQ fixes no limit; a receiving socket configured with a
 maximum message size drops a larger message after the sending socket has accepted it.
+
+### Database writes
+
+ClickHouse, Postgres, MySQL and MongoDB always write several rows at once, so their emitters
+require the clause. A flush hands the sink every run of rows from successive Arrow carriers of one
+source relay and concrete branch, in the order the emitter would have published them, and the sink
+writes the run as inserts or bulk writes of at most `MAX MESSAGES` rows. Every source record stays
+one row or one document: an array or `VEC` value is one column value, never a set of rows, and no
+destination schema changes.
+
+| Sink | One write | `MAX SIZE` measures |
+| --- | --- | --- |
+| ClickHouse | One `INSERT INTO <table> FORMAT JSONEachRow` request | The request body, one JSON line and newline per row, before the client compresses it |
+| Postgres | One `INSERT ... SELECT ... FROM unnest(...)` statement binding one text array per mapped column | The statement text and every bound array as the extended-query protocol encodes it: a 20-byte array header, then a four-byte length and the value's text for each row |
+| MySQL | One multi-row `INSERT ... VALUES (...), (...)` statement | The statement text and every bound value as the binary protocol encodes it |
+| MongoDB | One unordered `insert_many`, or one unordered bulk write of upserts under `ON CONFLICT` | Each inserted document as the driver writes it, with the `_id` it adds to a document that has none, or each upsert's filter and update documents |
+
+Everything around the measured payload is framing outside `MAX SIZE`: HTTP headers and the
+statement in the ClickHouse URL, each Postgres parameter's own length word and the protocol
+messages, the MySQL packet headers and the parameter types and null bitmap of its execute packet,
+and the command and operation fields around MongoDB documents, the fields the driver adds to every
+command, and the wire-protocol header. The measured size is exact, and a write of exactly
+`MAX SIZE` bytes is sent. A candidate that measures more is halved, and its first half is measured
+again while the rest returns to the front of the next candidate. A row whose own write still
+measures more follows `ON MESSAGE ERROR` with code `validation`, operation `encode`, and a message
+naming the limit, such as `Postgres insert of one row measures 1219 bytes, above MAX SIZE 600B`.
+The rows around it are written.
+
+The destination's own limits bound every write too. A MySQL statement binds at most 65,535
+placeholders, so an insert carries at most as many rows as fit them: 13,107 rows of five mapped
+columns, whatever `MAX MESSAGES` allows. Postgres reads no protocol message above 1,073,741,822
+bytes, and a write's measured size is never smaller than the message that carries its arrays, so a
+Postgres write is kept within that size too; a row whose own insert exceeds it follows
+`ON MESSAGE ERROR` as an `external` `publish` error. A MongoDB document holds at most 16 MiB, so a
+row whose document exceeds it follows `ON MESSAGE ERROR` as an `external` `publish` error naming
+16777216 bytes before any write, and the rows around it are written. MongoDB takes 100,000 writes
+in one command, more than `MAX MESSAGES` allows, and its driver divides a write larger than the
+`maxMessageSizeBytes` the server reports into several commands whose documents it still answers
+for one by one.
+
+A write that fails for a reason specific to its rows — a constraint, a value its column cannot
+hold, a packet the server refuses as too large — is written again one row at a time, so the rows
+the destination accepts land and only the rows it refuses follow `ON MESSAGE ERROR`, each with the
+destination's own reason. This includes a Postgres `ON CONFLICT DO UPDATE` whose insert carries one
+key twice, which Postgres refuses for the whole statement: row by row, the later row updates the
+one before it, exactly as the rows would one insert at a time. MySQL applies the rows of one insert
+in order,
+so a key repeated in one write is updated by its later row under `DO UPDATE` and keeps its first
+row under `DO NOTHING`. A MongoDB write is unordered: one server applies its upserts in the order
+the write lists them, with the same result, while a sharded deployment may apply them in parallel.
+MongoDB names every document it rejects, so its healthy documents are delivered by the write itself
+without a row-by-row pass.
+
+A write whose outcome is unknown — the connection failed or the destination stopped answering — is
+retried with its rows unresolved. The rows before it stay delivered, so the retry packs the same
+rows into the same writes again, and a write the destination already took is taken twice; use a
+conflict policy where duplicates matter. Where MongoDB answered for some documents of a write, the
+retry carries only the documents it left unresolved.
+
+Each sink writes a `BYTES` value in its native binary form: the octets themselves in a ClickHouse
+`String`, the `bytea` hex format Postgres reads back as the same octets, the octets bound to a MySQL
+binary or blob column, and generic BSON binary data in MongoDB. An `ARRAY` or `VEC` value is a JSON
+array in ClickHouse's `JSONEachRow` and in the JSON text Postgres and MySQL bind for it, and a BSON
+array in MongoDB; inside that JSON text a `BYTES` element is the padded base64 text every Nervix JSON
+value carries octets as.
 
 ## Altering emitters
 
@@ -1063,8 +1145,8 @@ Without `BATCH`, each pending Arrow batch becomes one Export request containing 
 scope, and all successfully converted records. With `BATCH`, the connector keeps that resource and
 scope in every request, takes successfully converted records in source order, and divides them by
 `MAX MESSAGES` and the exact protobuf size of each Export request. When a candidate exceeds `MAX
-SIZE`, it is halved until each request fits or a singleton is rejected through `ON MESSAGE ERROR`.
-The byte limit measures the uncompressed protobuf request before optional gzip; HTTP and gRPC
+SIZE`, it is halved until each request fits, and a record whose request alone exceeds it follows
+`ON MESSAGE ERROR` as a `validation` error of the `encode` operation. The byte limit measures the uncompressed protobuf request before optional gzip; HTTP and gRPC
 framing and headers are outside it. `FLUSH ... MAX BATCH SIZE` continues to measure the Arrow batch.
 
 Nervix prepares each Export request once. It stamps log `observed_time_unix_nano` from the node's
@@ -1137,19 +1219,22 @@ an unreachable answer fails the insert, which the emitter retries on its `RETRY 
 acknowledged until ClickHouse returns the insert's result. A pooled connection stays in use when its
 host's answer changes, and the next connection resolves again.
 
-ClickHouse requires the [batching clause](#batching). A larger flush is split into sequential
-inserts of at most `MAX MESSAGES` records, and each successful insert is an acknowledgment. For ClickHouse, Postgres, and
-MySQL, a failed multi-row insert is classified first as record-specific or infrastructure-wide.
+ClickHouse requires the [batching clause](#batching). A flush is written as inserts of at most
+`MAX MESSAGES` rows whose `JSONEachRow` body is at most `MAX SIZE` bytes, as
+[Database writes](#database-writes) describes, and each successful insert is an acknowledgment.
 ClickHouse writes each `JSONEachRow` line directly from the mapped Arrow columns in `VALUES`
 order, using the same typed JSON column writer as schemaful JSON emission. Null mapped values are
-written as `null`, including null list elements. Column names are escaped once for the publish
-batch, and string values use the batch's escape classification.
+written as `null`, including null list elements. Column names are escaped once for each write, and
+string values use their carrier's escape classification.
 `F32` columns keep ClickHouse's JSON number formatting after widening to `F64`; schemaful JSON
-codecs format `F32` directly.
-Infrastructure failures retry with backpressure. A record-specific failure is isolated by
-re-executing the chunk one record at a time so healthy rows land and only poison rows follow `ON
-MESSAGE ERROR`. Isolation can reapply rows from the failed chunk; use the sink's idempotent write
-facilities where available. Chunking also means one flush is not an atomic database transaction.
+codecs format `F32` directly. A `BYTES` value is written as its own octets, which a `String` column
+stores unchanged, where schemaful JSON codecs write padded base64.
+For ClickHouse, Postgres, and MySQL, a failed multi-row insert is classified first as
+record-specific or infrastructure-wide. Infrastructure failures retry with backpressure. A
+record-specific failure is isolated by re-executing the insert one record at a time so healthy rows
+land and only poison rows follow `ON MESSAGE ERROR`. Isolation can reapply rows from the failed
+insert; use the sink's idempotent write facilities where available. Dividing a flush into inserts
+also means one flush is not an atomic database transaction.
 
 ### Postgres
 
@@ -1170,10 +1255,11 @@ CREATE EMITTER to_pg
 ```
 
 Postgres emitters use `VALUES` expressions and insert batches with `INSERT ... SELECT ... FROM
-unnest(...)`. The [batching clause](#batching) is required, and its `MAX MESSAGES` is enforced as
-the maximum records in each sequential insert. The insert result acknowledges those records. On the poison-isolation path,
-tables without an idempotent `ON CONFLICT` policy may observe duplicates when healthy records are
-re-executed.
+unnest(...)`. The [batching clause](#batching) is required: each insert carries at most
+`MAX MESSAGES` records, and its statement text and bound arrays measure at most `MAX SIZE` bytes, as
+[Database writes](#database-writes) describes. The insert result acknowledges those records. On the
+poison-isolation path, tables without an idempotent `ON CONFLICT` policy may observe duplicates when
+healthy records are re-executed.
 
 Postgres emitters may include an insert conflict policy after `VALUES`:
 
@@ -1184,6 +1270,8 @@ ON CONFLICT DO NOTHING
 ```
 
 `DO UPDATE` updates every mapped `VALUES` column except the conflict target columns, and requires a conflict target. `DO NOTHING` may be used with or without a target.
+Postgres refuses a `DO UPDATE` insert that carries one conflict key twice, so such an insert is
+written again one record at a time, and the later record updates the earlier one.
 
 Postgres clients declare their connection-pool bounds and connect with a `postgres://` or
 `postgresql://` URL. The URL must select one of two TLS policies: `sslmode=disable` for an
@@ -1222,9 +1310,13 @@ CREATE EMITTER to_mysql
 ```
 
 MySQL emitters use `VALUES` expressions and insert batches with a multi-row `INSERT ... VALUES (?,
-...), ...` command. The [batching clause](#batching) is required, and its `MAX MESSAGES` is
-enforced as the maximum records in each sequential insert. The insert result acknowledges those records. Conflict clauses are the user's
-tool for bounding duplicates when poison isolation re-executes a failed chunk.
+...), ...` command. The [batching clause](#batching) is required: each insert carries at most
+`MAX MESSAGES` records and no more than fit the 65,535 placeholders one statement binds, and its
+statement text and bound values measure at most `MAX SIZE` bytes, as
+[Database writes](#database-writes) describes. The insert result acknowledges those records.
+Conflict clauses are the user's tool for bounding duplicates when poison isolation re-executes a
+failed insert. Declare a `MAX SIZE` no larger than the server's `max_allowed_packet`, 64 MiB by
+default on MySQL 8.x, which the client applies to every packet it sends.
 
 MySQL emitters may include an insert conflict policy after `VALUES`:
 
@@ -1268,9 +1360,12 @@ CREATE EMITTER to_mongodb
 ```
 
 MongoDB emitters use `VALUES` expressions and bulk writes. The [batching clause](#batching) is
-required, and its `MAX MESSAGES` is enforced as the maximum documents in each write. MongoDB reports per-document outcomes, so healthy
-documents acknowledge and poison documents follow `ON MESSAGE ERROR` without a separate isolation
-pass. Transient or infrastructure failures retry only the undelivered documents.
+required: each write carries at most `MAX MESSAGES` documents, which measure at most `MAX SIZE`
+bytes, as [Database writes](#database-writes) describes. MongoDB reports per-document outcomes, so
+healthy documents acknowledge and poison documents follow `ON MESSAGE ERROR` without a separate
+isolation pass. Transient or infrastructure failures retry only the undelivered documents. A
+document larger than MongoDB's 16 MiB document limit is rejected before the write that would carry
+it.
 
 Every mapped integer is written as a BSON 64-bit signed integer, and a `U64` value above that range
 has no BSON integer at all. Such a record is rejected before its document is written: it follows
@@ -1289,7 +1384,7 @@ ON CONFLICT ("mongodb_user_id") DO NOTHING
 MongoDB conflict policies require a target list because the emitter must build an explicit upsert filter. Target fields must be mapped in `VALUES`. `DO UPDATE` updates every mapped field except the conflict target fields and inserts the full mapped document when no existing document matches. `DO NOTHING` inserts only when no document matches the target.
 
 Emitters using either MongoDB `ON CONFLICT` form require MongoDB 8.0 or newer because those modes
-execute as one bulk write per chunk.
+execute each write as one client bulk write.
 
 MongoDB clients declare their connection-pool bounds and use a MongoDB connection URL and database
 name. See [Database Client Connection Pools](database-client-pools.md) for the accepted counts:

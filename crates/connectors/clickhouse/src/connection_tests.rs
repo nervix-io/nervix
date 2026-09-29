@@ -117,8 +117,13 @@ fn stand_in(listener: TcpListener) -> JoinHandle<String> {
 }
 
 async fn insert(client: &ClickHouseClient) -> Result<(), ClickHouseWriteError> {
-    ClickHouseSink::publish_json_lines(client, "events", &[r#"{"id":1}"#], Some(GENEROUS_TIMEOUT))
-        .await
+    ClickHouseSink::insert(
+        client,
+        "events",
+        Bytes::from_static(b"{\"id\":1}\n"),
+        Some(GENEROUS_TIMEOUT),
+    )
+    .await
 }
 
 #[tokio::test]

@@ -17,6 +17,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::ClusterNodeName;
 use rcgen::{
@@ -173,7 +174,7 @@ async fn serve(tls: TlsConfigBundle, trace: SemanticTrace) -> io::Result<()> {
 
 /// Open one authenticated session to the server, recording the decision. An accepted session is
 /// held until its certificate deadline drains it.
-async fn dial(tls: &TlsConfigBundle, trace: &SemanticTrace) -> Option<TransportError> {
+async fn dial(tls: &TlsConfigBundle, trace: &SemanticTrace) -> Option<Report<TransportError>> {
     dial_expecting(tls, trace, "server").await
 }
 
@@ -182,7 +183,7 @@ async fn dial_expecting(
     tls: &TlsConfigBundle,
     trace: &SemanticTrace,
     expected_node: &str,
-) -> Option<TransportError> {
+) -> Option<Report<TransportError>> {
     let tcp = match turmoil::net::TcpStream::connect(("server", PORT)).await {
         Ok(tcp) => tcp,
         Err(error) => {
@@ -203,7 +204,7 @@ async fn dial_expecting(
             None
         }
         Err(error) => {
-            trace.record("client", outcome(&error));
+            trace.record("client", outcome(error.current_context()));
             Some(error)
         }
     }
@@ -576,7 +577,7 @@ fn a_server_certificate_for_another_node_is_rejected() {
             );
             let error = dial_expecting(&tls, &client_trace, "elsewhere").await;
             assert!(
-                matches!(error, Some(TransportError::InvalidHandshake(_))),
+                matches!(error.as_ref(), Some(report) if matches!(report.current_context(), TransportError::InvalidHandshake(_))),
                 "{error:?}"
             );
             Ok(())
