@@ -1002,6 +1002,7 @@ pub(super) fn install_test_domain_execution(
             shutdown,
             routing: runtime.stage_domain_routing(domain, routing),
             entrypoints: Arc::default(),
+            message_error_plans: Arc::default(),
             branched_entrypoints: HashMap::default(),
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),

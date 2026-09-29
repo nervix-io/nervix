@@ -74,6 +74,29 @@ fn a_field_reference_round_trips_as_a_choice_dependency() {
 }
 
 #[test]
+fn a_codec_field_choice_round_trips_with_its_domain_and_codec() {
+    let message = ClientMessage {
+        request_id: request(2),
+        request: ClientRequest::Choice(ChoiceLookupRequest::new(
+            ChoiceTarget::CodecField,
+            vec![
+                ChoiceSelection {
+                    value: ChoiceValue::Domain(name("tenant")),
+                },
+                ChoiceSelection {
+                    value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                        nervix_models::ModelKind::Codec,
+                        name::<nervix_models::ModelName>("entry_codec"),
+                    )),
+                },
+            ],
+            "id".to_string(),
+        )),
+    };
+    assert_eq!(round_trip_client(&message), message);
+}
+
+#[test]
 fn request_identity_spans_its_full_range() {
     for id in [1, u64::MAX] {
         let message = ClientMessage {

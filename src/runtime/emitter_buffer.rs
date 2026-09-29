@@ -3,8 +3,8 @@
 //! Layer: data plane.
 //! - **Owns.** The emitter's buffer of released batches with their source relay and branch, the
 //!   request an HTTP emitter admitted each row with and what a later rejection of the row reads,
-//!   message and byte accounting, where every row stands in its publication, the batch payloads
-//!   and HTTP requests retained for the rows they carry, and flush cadence.
+//!   message and byte accounting, where every row stands in its publication, the batch payloads,
+//!   HTTP requests and prepared row requests retained for the rows they carry, and flush cadence.
 //! - **Depends on.** Relay batches and their acknowledgements, the emitter's flush policy, and the
 //!   domain clock its cadence is resolved against.
 //! - **Must not know.** Which connector publishes the batches, how their rows are encoded or
@@ -83,8 +83,8 @@ enum BufferedRow {
     /// No attempt has prepared the row for its sink yet, or the attempt that did left it for the
     /// next one.
     Pending,
-    /// A batch payload or HTTP request the emitter retains carries the row, so only the sink's
-    /// answer for it resolves the row.
+    /// A batch payload, HTTP request or prepared row request the emitter retains carries the row,
+    /// so only the sink's answer for it resolves the row.
     Prepared,
     /// The row was delivered, or rejected once its message error was delivered.
     Resolved,
@@ -359,8 +359,8 @@ impl EmitterPublishBatch {
         Ok(())
     }
 
-    /// Records that a retained batch payload or HTTP request carries `row`, which only the sink's
-    /// answer for it resolves from now on.
+    /// Records that a retained batch payload, HTTP request or prepared row request carries `row`,
+    /// which only the sink's answer for it resolves from now on.
     pub(super) fn mark_prepared(&mut self, row: usize) -> EmitterRuntimeResult<()> {
         let row_count = self.rows.len();
         let state = self.rows.get_mut(row).ok_or_else(|| {
@@ -493,30 +493,34 @@ impl PublishReport {
 /// deadline exactly as they were.
 ///
 /// The buffer is the one owner of everything a failed attempt leaves behind: the batches, whose
-/// acknowledgements the retry keeps alive, where each of their rows stands, and the batch payloads
-/// or HTTP requests an attempt already offered to the sink without learning their outcome. Its
-/// connector may be reopened between attempts, so none of that lives with the connector.
+/// acknowledgements the retry keeps alive, where each of their rows stands, and the batch payloads,
+/// HTTP requests or prepared row requests an attempt already offered to the sink without learning
+/// their outcome. Its connector may be reopened between attempts, so none of that lives with the
+/// connector.
 #[derive(Default)]
 pub(super) struct EmitterBatchBuffer {
     flush_policy: Option<RuntimeFlushPolicy>,
     pending: Vec<EmitterPublishBatch>,
     /// The batch payloads a record sink was handed and has not answered for.
     payloads: PreparedPayloads<EncodedPayload>,
-    /// The requests an HTTP sink was handed and has not answered for. An emitter publishes through
-    /// one sink, so at most one of the two holds anything.
+    /// The requests an HTTP sink was handed and has not answered for.
     requests: PreparedPayloads<PreparedHttpRequest>,
+    /// The requests a row request sink prepared and has not answered for. An emitter publishes
+    /// through one sink, so at most one of the three holds anything.
+    row_requests: PreparedPayloads<RowRequestBody>,
     pending_messages: u64,
     pending_bytes: u64,
     cadence: BranchBufferTimer,
     buffered_messages: Arc<EmitterBufferedMessages>,
 }
 
-/// What one flush hands the emitter's sink: the buffered batches, and the batch payloads or HTTP
-/// requests earlier attempts prepared from their rows and retained.
+/// What one flush hands the emitter's sink: the buffered batches, and the batch payloads, HTTP
+/// requests or row requests earlier attempts prepared from their rows and retained.
 pub(super) struct EmitterPublication<'a> {
     pub(super) batches: &'a mut [EmitterPublishBatch],
     pub(super) payloads: &'a mut PreparedPayloads<EncodedPayload>,
     pub(super) requests: &'a mut PreparedPayloads<PreparedHttpRequest>,
+    pub(super) row_requests: &'a mut PreparedPayloads<RowRequestBody>,
 }
 
 impl EmitterBatchBuffer {
@@ -530,6 +534,7 @@ impl EmitterBatchBuffer {
             pending: Vec::new(),
             payloads: PreparedPayloads::default(),
             requests: PreparedPayloads::default(),
+            row_requests: PreparedPayloads::default(),
             pending_messages: 0,
             pending_bytes: 0,
             cadence: BranchBufferTimer::default(),
@@ -591,6 +596,7 @@ impl EmitterBatchBuffer {
             batches: self.pending.as_mut_slice(),
             payloads: &mut self.payloads,
             requests: &mut self.requests,
+            row_requests: &mut self.row_requests,
         }
     }
 
@@ -616,6 +622,7 @@ impl EmitterBatchBuffer {
             pending: Vec::new(),
             payloads: PreparedPayloads::default(),
             requests: PreparedPayloads::default(),
+            row_requests: PreparedPayloads::default(),
             pending_messages: 0,
             pending_bytes: 0,
             cadence: BranchBufferTimer::default(),
@@ -701,6 +708,7 @@ impl EmitterBatchBuffer {
         let pending = std::mem::take(&mut self.pending);
         self.payloads.clear();
         self.requests.clear();
+        self.row_requests.clear();
         self.pending_messages = 0;
         self.pending_bytes = 0;
         self.cadence.clear();
@@ -712,6 +720,7 @@ impl EmitterBatchBuffer {
         self.pending.clear();
         self.payloads.clear();
         self.requests.clear();
+        self.row_requests.clear();
         self.pending_messages = 0;
         self.pending_bytes = 0;
         self.cadence.clear();

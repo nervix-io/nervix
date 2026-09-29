@@ -39,6 +39,9 @@ pub enum ChoiceTarget {
     CompletedResourceVersion,
     Vhost,
     SignalingProtocol,
+    Codec,
+    /// Fields of the output schema selected by one configured codec.
+    CodecField,
 }
 
 wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
@@ -55,6 +58,8 @@ wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
     CompletedResourceVersion,
     Vhost,
     SignalingProtocol,
+    Codec,
+    CodecField,
 });
 
 /// Whether a domain clock advances with wall time.

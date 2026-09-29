@@ -3,16 +3,19 @@
 //! Outside the layer order: a harness test crate.
 //!
 //! - **Owns.** Registration of the focused node-liveness, node-startup, phase-deadline,
-//!   status-request, port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client and HTTP-receiver
-//!   regressions with Rust's test runner, and the stand-in nodes and clients those regressions talk
-//!   to.
+//!   status-request, port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client,
+//!   HTTP-receiver and gRPC-receiver regressions with Rust's test runner, and the stand-in nodes and
+//!   clients those regressions talk to.
 //! - **Depends on.** The node-liveness, node-startup, phase-deadline, status-request, port-pool,
-//!   cluster-teardown, scenario-phase, suite-watchdog, Redis-client and HTTP-receiver harness modules, and the
-//!   client wire session protocol the stand-in nodes answer status requests with.
+//!   cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver and
+//!   gRPC-receiver harness modules, and the client wire session protocol the stand-in nodes answer
+//!   status requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #[path = "common/cluster_teardown.rs"]
 mod cluster_teardown;
+#[path = "common/grpc_receiver.rs"]
+mod grpc_receiver;
 #[path = "common/http_receiver.rs"]
 mod http_receiver;
 #[path = "common/node_liveness.rs"]
@@ -838,6 +841,7 @@ mod tests {
             inspection: None,
             wasm_state: None,
             resource: None,
+            backup: None,
         }
     }
 
@@ -3615,6 +3619,282 @@ mod http_receiver_tests {
                 "{line}: {error:?}"
             );
         }
+    }
+}
+
+mod grpc_receiver_tests {
+    use std::{
+        net::{Ipv4Addr, SocketAddr},
+        time::Duration,
+    };
+
+    use bytes::Bytes;
+    use meticulous::ResultExt as _;
+    use nervix_recovery::Discarded as _;
+    use tokio::net::TcpStream;
+
+    use crate::{
+        grpc_receiver::{GrpcAnswer, GrpcReceiver, MAX_REQUEST_MESSAGE_BYTES},
+        http_receiver::RECEIVER_CONNECTION_STOP_BUDGET,
+    };
+
+    /// How long a regression waits for something the receiver does promptly on an idle machine.
+    const WITHIN: Duration = Duration::from_secs(10);
+    const METHOD: &str = "/nervix.test.Receiver/Call";
+
+    async fn start() -> GrpcReceiver {
+        GrpcReceiver::start(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .assured("a loopback receiver binds an ephemeral port")
+    }
+
+    /// An HTTP/2 connection to `receiver`, driven by a task of its own until either side ends it.
+    async fn connect(receiver: &GrpcReceiver) -> h2::client::SendRequest<Bytes> {
+        let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, receiver.port()))
+            .await
+            .assured("the receiver is listening");
+        let (send_request, connection) = h2::client::handshake(stream)
+            .await
+            .assured("the receiver completes an HTTP/2 handshake");
+        tokio::spawn(async move {
+            connection
+                .await
+                .discarded("a regression reads how the connection ended from its calls");
+        });
+        send_request
+    }
+
+    /// One gRPC message with `flag` as its compressed flag.
+    fn message(flag: u8, bytes: &[u8]) -> Bytes {
+        let length = u32::try_from(bytes.len()).assured("a regression message is small");
+        let mut framed = vec![flag];
+        framed.extend_from_slice(&length.to_be_bytes());
+        framed.extend_from_slice(bytes);
+        Bytes::from(framed)
+    }
+
+    /// How one call ended.
+    #[derive(Debug, PartialEq, Eq)]
+    enum CallEnd {
+        /// The receiver answered with this `grpc-status`.
+        Status(String),
+        /// The receiver closed the connection or reset the call without answering.
+        NoAnswer,
+    }
+
+    /// Makes one call whose whole request is `body` and reads how the receiver ended it.
+    async fn call(send_request: &mut h2::client::SendRequest<Bytes>, body: Bytes) -> CallEnd {
+        let request = http::Request::builder()
+            .method("POST")
+            .uri(format!("http://127.0.0.1{METHOD}"))
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .body(())
+            .assured("the regression request is well formed");
+        let mut ready = send_request
+            .clone()
+            .ready()
+            .await
+            .assured("the connection accepts another call");
+        let (response, mut stream) = ready
+            .send_request(request, false)
+            .assured("the connection accepts another call");
+        stream
+            .send_data(body, true)
+            .assured("an open call accepts its request");
+        let response = tokio::time::timeout(WITHIN, response)
+            .await
+            .assured("the receiver ends every call it does not hold");
+        let Ok(response) = response else {
+            return CallEnd::NoAnswer;
+        };
+        if let Some(status) = response.headers().get("grpc-status") {
+            return CallEnd::Status(status.to_str().assured("a status is ASCII").to_string());
+        }
+        let mut body = response.into_body();
+        while let Some(chunk) = body.data().await {
+            if chunk.is_err() {
+                return CallEnd::NoAnswer;
+            }
+        }
+        match body.trailers().await {
+            Ok(Some(trailers)) => match trailers.get("grpc-status") {
+                Some(status) => {
+                    CallEnd::Status(status.to_str().assured("a status is ASCII").to_string())
+                }
+                None => CallEnd::NoAnswer,
+            },
+            Ok(None) | Err(_) => CallEnd::NoAnswer,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_grpc_receiver_captures_calls_and_answers_its_script_in_order() {
+        let receiver = start().await;
+        assert_eq!(
+            receiver.origin(),
+            format!("http://127.0.0.1:{}", receiver.port()),
+            "a client dials the receiver's loopback port without TLS"
+        );
+        receiver.script([
+            GrpcAnswer::Status(tonic::Code::Unavailable),
+            GrpcAnswer::Accept,
+        ]);
+        let mut connection = connect(&receiver).await;
+
+        let first = call(&mut connection, message(0, b"first")).await;
+        let second = call(&mut connection, message(1, b"second")).await;
+        let unscripted = call(&mut connection, message(0, b"third")).await;
+
+        assert_eq!(first, CallEnd::Status("14".to_string()));
+        assert_eq!(second, CallEnd::Status("0".to_string()));
+        assert_eq!(
+            unscripted,
+            CallEnd::Status("0".to_string()),
+            "a call beyond the script is accepted"
+        );
+        let captured = receiver.captured();
+        assert_eq!(captured.len(), 3);
+        for call in &captured {
+            assert_eq!(call.path, METHOD);
+            assert_eq!(
+                call.header_values("content-type"),
+                vec![b"application/grpc".as_slice()]
+            );
+        }
+        assert_eq!(
+            captured
+                .iter()
+                .map(|call| (call.compressed, call.message.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (false, b"first".to_vec()),
+                (true, b"second".to_vec()),
+                (false, b"third".to_vec()),
+            ],
+            "every message is captured exactly as it arrived, compressed flag included"
+        );
+        let stop = receiver.stop().await;
+        assert!(!stop.was_forced(), "{stop}");
+        assert_eq!((stop.captured, stop.faults), (3, 0));
+    }
+
+    #[tokio::test]
+    async fn a_lost_grpc_answer_is_captured_and_its_connection_closes_without_one() {
+        let receiver = start().await;
+        receiver.script([GrpcAnswer::LoseResponse]);
+        let mut connection = connect(&receiver).await;
+
+        let lost = call(&mut connection, message(0, b"lost")).await;
+        let mut reconnected = connect(&receiver).await;
+        let resent = call(&mut reconnected, message(0, b"lost")).await;
+
+        assert_eq!(lost, CallEnd::NoAnswer);
+        assert_eq!(resent, CallEnd::Status("0".to_string()));
+        let captured = receiver.captured();
+        assert_eq!(
+            captured.len(),
+            2,
+            "the call whose answer was lost is still captured"
+        );
+        assert_eq!(
+            captured[0], captured[1],
+            "a resent call captures as the same call"
+        );
+        let stop = receiver.stop().await;
+        assert!(!stop.was_forced(), "{stop}");
+    }
+
+    #[tokio::test]
+    async fn held_grpc_calls_end_when_the_client_resets_them_or_the_receiver_stops() {
+        let receiver = start().await;
+        receiver.script([GrpcAnswer::HoldResponse, GrpcAnswer::HoldResponse]);
+        let connection = connect(&receiver).await;
+        let request = || {
+            http::Request::builder()
+                .method("POST")
+                .uri(format!("http://127.0.0.1{METHOD}"))
+                .header("content-type", "application/grpc")
+                .body(())
+                .assured("the regression request is well formed")
+        };
+
+        // The client gives up on the first held call, as a request deadline does.
+        let mut ready = connection
+            .clone()
+            .ready()
+            .await
+            .assured("the connection accepts a call");
+        let (_held, mut held_stream) = ready
+            .send_request(request(), false)
+            .assured("the connection accepts a call");
+        held_stream
+            .send_data(message(0, b"held"), true)
+            .assured("an open call accepts its request");
+        receiver
+            .wait_for_calls(1, WITHIN)
+            .await
+            .assured("the receiver captures a held call before holding it");
+        held_stream.send_reset(h2::Reason::CANCEL);
+        let second = tokio::spawn({
+            let mut connection = connection.clone();
+            async move { call(&mut connection, message(0, b"held until stop")).await }
+        });
+        receiver
+            .wait_for_calls(2, WITHIN)
+            .await
+            .assured("a reset call leaves its connection serving the next one");
+
+        let stop = receiver.stop().await;
+
+        assert!(
+            !stop.was_forced() && stop.elapsed < RECEIVER_CONNECTION_STOP_BUDGET,
+            "a held call observes the stop rather than waiting to be aborted: {stop}"
+        );
+        assert_eq!(
+            second.await.assured("the held call's task ends"),
+            CallEnd::NoAnswer
+        );
+        drop(connection);
+    }
+
+    #[tokio::test]
+    async fn a_request_that_is_not_one_bounded_message_is_a_fault_not_a_capture() {
+        let receiver = start().await;
+        let mut connection = connect(&receiver).await;
+        let above_limit = u32::try_from(MAX_REQUEST_MESSAGE_BYTES + 1)
+            .assured("the message limit fits a gRPC length prefix");
+        let mut declared_above_limit = vec![0];
+        declared_above_limit.extend_from_slice(&above_limit.to_be_bytes());
+        let mut trailing = message(0, b"one").to_vec();
+        trailing.push(0);
+        let malformed = [
+            Bytes::from_static(&[0, 0, 0]),
+            Bytes::from(declared_above_limit),
+            message(0, b"four").slice(..7),
+            Bytes::from(trailing),
+            message(7, b"flag"),
+        ];
+
+        for body in malformed {
+            let ended = call(&mut connection, body).await;
+            assert_eq!(
+                ended,
+                CallEnd::Status("13".to_string()),
+                "a malformed request is answered with INTERNAL"
+            );
+        }
+
+        let error = receiver
+            .wait_for_calls(1, Duration::from_millis(50))
+            .await
+            .expect_err("no malformed request is captured");
+        assert!(
+            error.to_string().contains("unknown compressed flag 7"),
+            "the wait reports the latest fault: {error}"
+        );
+        let stop = receiver.stop().await;
+        assert_eq!((stop.captured, stop.faults), (0, 5));
     }
 }
 

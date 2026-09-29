@@ -141,6 +141,7 @@ Feature: Runtime node error policies
       """
       "operation":"publish","source_user_id":42
       """
+    And the last relay subscription payload contains key fragment '{"user_id":42}'
 
     Examples:
       | cluster_size | replica_count |

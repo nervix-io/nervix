@@ -40,6 +40,14 @@ stored number. Creation succeeds only after the selected file has decoded and th
 on every current live node, including while the domain is stopped. The next command may run
 `LOOKUP` immediately; malformed input fails creation.
 
+The web console's **Create → Hash map** form gathers the name, key field, resource, completed
+version or `LATEST`, file path, and codec as structured controls. The key-field picker lists the
+selected codec's output schema fields with their exact types. The form submits the current Model's
+canonical NSPL and waits for this same loading boundary before showing **Completed**. A failed
+load leaves the entered draft visible for inspection. The transaction can already have committed
+the Model before a malformed line fails activation, so a retry under the same name does not replace
+that Model.
+
 A resource file is read line by line, and each non-blank line is one payload for the codec. With a
 schemaful codec, such as a JSON wire schema over JSON Lines, each line is one entry:
 

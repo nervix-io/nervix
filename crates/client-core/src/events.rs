@@ -37,6 +37,9 @@ pub enum SubscriptionEvent {
 }
 
 impl SubscriptionEvent {
+    /// The bytes an event is charged for itself, beyond the frame its rows keep alive.
+    pub(crate) const HEADER_BYTES: usize = std::mem::size_of::<Self>();
+
     /// The subscription the event belongs to.
     pub fn subscription(&self) -> &SubscriptionHandle {
         match self {
@@ -49,6 +52,8 @@ impl SubscriptionEvent {
         }
     }
 
+    /// The bytes the event holds while it waits to be read: the whole frame its rows were read
+    /// from, and the event itself.
     pub(crate) fn queued_bytes(&self) -> usize {
         let dynamic_bytes = match self {
             Self::Rows(rows) => rows.rows.frame().len(),
@@ -59,7 +64,7 @@ impl SubscriptionEvent {
             | Self::ConsumerOverflow(_) => 0,
         };
         dynamic_bytes
-            .checked_add(std::mem::size_of::<Self>())
+            .checked_add(Self::HEADER_BYTES)
             .assured("an event's decoded frame and in-memory header fit the process address space")
     }
 }

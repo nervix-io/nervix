@@ -53,11 +53,12 @@ pub use ingest_metadata::{
 pub use service_url::{ServiceUrl, ServiceUrlError};
 pub use sink::{
     AckConfirmation, BrokerPublishingMode, HttpRequestSink, MappedSinkRows, PerRecordOutcome,
-    PerRecordOutcomeParts, RecordSink, RejectedSinkRecord, RowSink, SinkAcknowledgementServices,
+    PerRecordOutcomeParts, PreparedRowRequest, RecordSink, RejectedSinkRecord,
+    RowRequestPreparation, RowRequestSink, RowSink, SinkAcknowledgementServices,
     SinkAcknowledgements, SinkCommitReport, SinkDeadline, SinkEventReporter,
     SinkGeneralErrorHandler, SinkHost, SinkHostServices, SinkHttpRequest, SinkLifecycle,
     SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId, SinkRecordPosition,
-    SinkRetryDelay, SinkStagingDirectory, SinkStartError, SinkStartResult,
+    SinkRetryDelay, SinkRowRequest, SinkStagingDirectory, SinkStartError, SinkStartResult,
     SinkTransientErrorStatus,
 };
 pub use source::{
