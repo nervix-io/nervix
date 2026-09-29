@@ -46,7 +46,7 @@ fn planning_error_message_includes_attached_validation_detail() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn attaching_an_overdue_transaction_atomically_expires_it() {
     let TestService {
         service,
@@ -141,7 +141,7 @@ fn transaction_recovery_rotates_fairly_after_the_last_considered_identity() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn process_command_commits_explicit_transaction_without_trailing_semicolon() {
     let TestService {
         service,
@@ -228,7 +228,7 @@ async fn process_command_commits_explicit_transaction_without_trailing_semicolon
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn process_command_queues_transaction_across_requests_and_reverts() {
     let TestService {
         service,
@@ -338,7 +338,7 @@ async fn process_command_queues_transaction_across_requests_and_reverts() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn process_command_rejects_begin_inside_begin() {
     let TestService {
         service,
@@ -388,7 +388,7 @@ async fn process_command_rejects_begin_inside_begin() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn process_command_rejects_domain_and_user_creation_inside_a_transaction() {
     let TestService {
         service,
@@ -454,7 +454,7 @@ async fn process_command_rejects_domain_and_user_creation_inside_a_transaction()
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn process_command_rejects_begin_without_an_existing_domain() {
     let TestService {
         service,
@@ -499,7 +499,7 @@ async fn process_command_rejects_begin_without_an_existing_domain() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn process_command_rejects_statements_selecting_another_domain() {
     let TestService {
         service,
@@ -564,7 +564,7 @@ async fn process_command_rejects_statements_selecting_another_domain() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn attaching_to_committed_transaction_returns_the_recorded_aggregate() {
     let TestService {
         service,

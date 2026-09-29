@@ -391,7 +391,7 @@ impl<'node> NodeStartup<'node> {
         target: &mut impl StartableNode,
     ) -> Result<(), Report<NodeStartupExhausted>> {
         for attempt in 1..=NODE_START_ATTEMPTS {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self.budget.has_passed() {
                 return Err(self.exhausted(StartupEnd::BudgetSpent));
             }

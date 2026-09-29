@@ -8,9 +8,6 @@
 //!   and rustls.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 mod config;
 mod sink;
 mod source;

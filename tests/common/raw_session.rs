@@ -49,8 +49,8 @@ use nervix_models::{
     RestoreArchive, SubscriptionName, TransactionPosition, TransactionStatus,
 };
 use nervix_nspl::client_statement::{ClientStatement, parse_client_statement_sources};
-use tokio::{sync::mpsc, time::Instant};
-use tokio_stream::wrappers::ReceiverStream;
+use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc};
+use tokio::time::Instant;
 use tonic::{
     Request, Status, Streaming,
     codec::{Codec, EncodeBuf, Encoder},
@@ -344,7 +344,7 @@ pub(crate) async fn send_upload(server: &str, upload: TestUpload<'_>) -> io::Res
         };
         frames.push(frame.map_err(io::Error::other)?);
     }
-    let request = authorized(tokio_stream::iter(frames))?;
+    let request = authorized(nervix_primitives::stream::iter(frames))?;
     let response = client
         .client_streaming(
             request,
@@ -422,7 +422,7 @@ pub(crate) async fn download_backup(
     let mut bytes = Vec::new();
     let mut chunks = 0_usize;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let next = tokio::time::timeout(DOWNLOAD_FRAME_TIMEOUT, frames.message())
             .await
             .map_err(|_| io::Error::other("a download frame did not arrive within a minute"))?;
@@ -528,7 +528,7 @@ pub(crate) async fn send_restore(
     let path = http::uri::PathAndQuery::from_static(RESTORE_BACKUP_PATH);
     let codec = ClientRestoreCodec::new(limits);
     let Some(chunks) = restore.abandon_after_chunks else {
-        let request = authorized(tokio_stream::iter(frames))?;
+        let request = authorized(nervix_primitives::stream::iter(frames))?;
         let call = client.client_streaming(request, path, codec);
         let response = match tokio::time::timeout(RESTORE_REPLY_TIMEOUT, call).await {
             Ok(Ok(response)) => response,
@@ -550,7 +550,10 @@ pub(crate) async fn send_restore(
     frames.truncate(sent);
     // The stream never ends, so only a node that refuses it outright answers before the client
     // goes away; dropping the call resets the stream, as a lost connection does.
-    let parts = tokio_stream::StreamExt::chain(tokio_stream::iter(frames), tokio_stream::pending());
+    let parts = nervix_primitives::stream::StreamExt::chain(
+        nervix_primitives::stream::iter(frames),
+        nervix_primitives::stream::pending(),
+    );
     let request = authorized(parts)?;
     let call = client.client_streaming(request, path, codec);
     match tokio::time::timeout(RESTORE_ABANDON_HOLD, call).await {
@@ -879,7 +882,7 @@ impl TestSession {
     ) -> io::Result<Option<TestClockFrame>> {
         let deadline = Instant::now() + timeout_duration;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(frame) = self.pending_clock_frames.pop_front() {
                 return Ok(Some(frame));
             }
@@ -929,7 +932,7 @@ impl TestSession {
     async fn received_reply(&mut self, request_id: RequestId) -> io::Result<ReceivedReply> {
         let deadline = Instant::now() + REPLY_TIMEOUT;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(reply) = self.replies.remove(&request_id) {
                 return Ok(reply);
             }
@@ -1273,7 +1276,7 @@ impl TestSession {
     ) -> io::Result<Option<TestSubscriptionEvent>> {
         let deadline = Instant::now() + timeout_duration;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(event) = self.pending_subscriptions.pop_front() {
                 return Ok(Some(event));
             }
@@ -1310,7 +1313,7 @@ impl TestSession {
     ) -> io::Result<Option<SubscriptionEnded>> {
         let deadline = Instant::now() + timeout_duration;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(ended) = self.pending_subscription_ends.pop_front() {
                 return Ok(Some(ended));
             }
@@ -1332,7 +1335,7 @@ impl TestSession {
     pub(crate) async fn read_for(&mut self, duration: Duration) -> io::Result<()> {
         let deadline = Instant::now() + duration;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let read = tokio::time::timeout_at(deadline, self.read_frame()).await;
             match read {
                 Ok(open) => {
@@ -1351,7 +1354,7 @@ impl TestSession {
     ) -> io::Result<Option<TestServerEvent>> {
         let deadline = Instant::now() + timeout_duration;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(event) = self.pending_server_errors.pop_front() {
                 return Ok(Some(event));
             }
@@ -1376,7 +1379,7 @@ impl TestSession {
     ) -> io::Result<Status> {
         let deadline = Instant::now() + timeout_duration;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(status) = &self.ended {
                 return Ok(status.clone());
             }

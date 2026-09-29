@@ -38,9 +38,8 @@ use nervix_models::{
     ClientProducerGrant, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
     DomainStatus, IngestorInput, MAX_CLIENT_PRODUCERS_PER_SESSION,
 };
+use nervix_primitives::sync::{blocking::Mutex, mpsc};
 use nervix_recovery::Discarded as _;
-use parking_lot::Mutex;
-use tokio::sync::mpsc;
 use tracing::debug;
 use triomphe::Arc;
 
@@ -576,8 +575,8 @@ enum PumpEnd {
 impl ProducerPump {
     async fn run(mut self) {
         let end = loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 biased;
                 () = self.shared.ended() => {
                     // The session is gone: dropping the route detaches the producer, and admitted
@@ -750,7 +749,7 @@ impl ProducerPump {
         };
         let outstanding = std::mem::take(&mut self.outstanding);
         for (submission, bytes) in outstanding {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.credit.release(bytes);
             let outcome = SubmissionOutcome {
                 outcome: ClientSubmissionOutcome::OutcomeUnknown(cause),

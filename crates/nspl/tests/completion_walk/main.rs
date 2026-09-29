@@ -101,7 +101,7 @@ impl Cli {
 
     fn jobs(&self) -> usize {
         self.jobs.unwrap_or_else(|| {
-            std::thread::available_parallelism()
+            nervix_primitives::thread::available_parallelism()
                 .map(std::num::NonZeroUsize::get)
                 .unwrap_or(1)
         })

@@ -211,7 +211,7 @@ impl SessionServiceImpl {
     ) {
         let attribution = ImpactAttribution::for_range(operations);
         for expansion in self.inner.runtime.recovery_expansions(revision) {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let rebuilds = expansion.scope.into_iter().map(|node| RebuildImpact {
                 node: ImpactNodeCoverage::all_executions(node),
                 reason: RebuildReason::Recovery,
@@ -360,7 +360,7 @@ impl SessionServiceImpl {
 
         if let TransactionState::Finished(finished) = &completed.state {
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if self
                     .wait_for_authoritative_revision(finished.outcome_revision)
                     .await

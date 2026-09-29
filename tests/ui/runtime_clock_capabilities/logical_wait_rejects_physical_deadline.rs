@@ -1,6 +1,6 @@
 use nervix_connector::physical_time::PhysicalDeadline;
 use nervix_server::runtime::clock_capability_compile_tests::{DomainClock, LogicalDeadline};
-use tokio_util::sync::CancellationToken;
+use nervix_primitives::sync::CancellationToken;
 
 async fn forbidden(clock: &DomainClock, deadline: PhysicalDeadline) {
     let deadline: LogicalDeadline = deadline;

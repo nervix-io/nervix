@@ -164,7 +164,7 @@ impl BrokerSourceConnector for ZeroMqSource {
         _request: SourceBatchRequest,
     ) -> SourceResult<SourceBatch<Self::Message>> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(socket) = self.socket.as_mut() else {
                 return Ok(SourceBatch::ResumeRequired);
             };

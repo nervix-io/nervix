@@ -18,12 +18,12 @@ use nervix_connector::{
 };
 use nervix_dns::{DnsConfiguration, DnsLookupError, DnsLookupFailure, DnsResolver, NameServers};
 use nervix_models::{ClientConfigEntry, QueueName, Timestamp};
+use nervix_primitives::task::JoinHandle;
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
-    task::JoinHandle,
 };
 
 use crate::{
@@ -103,7 +103,7 @@ fn client_config(endpoint: &str) -> Vec<ClientConfigEntry> {
 /// A service on `listener` that answers `connections` connections, one request each, with the URL
 /// of the queue, and returns the requests as they arrived.
 fn stand_in(listener: TcpListener, connections: usize) -> JoinHandle<Vec<String>> {
-    tokio::spawn(async move {
+    nervix_primitives::task::spawn(async move {
         let mut requests = Vec::with_capacity(connections);
         for _ in 0..connections {
             let (stream, _) = listener
@@ -190,7 +190,7 @@ fn message_of<C>(report: &error_stack::Report<C>) -> Option<&str> {
         .map(String::as_str)
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn requests_reach_the_answer_that_accepts_signed_for_the_configured_host() {
     let fixture = Fixture::start().await;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -248,7 +248,7 @@ async fn requests_reach_the_answer_that_accepts_signed_for_the_configured_host()
     assert!(fixture.authority.questions_for(SERVICE) > 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_literal_endpoint_is_dialled_without_a_lookup() {
     let fixture = Fixture::start().await;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -281,7 +281,7 @@ async fn a_literal_endpoint_is_dialled_without_a_lookup() {
     assert_eq!(fixture.authority.total_questions(), 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_host_that_does_not_resolve_is_the_typed_cause_of_the_queue_lookup_failure() {
     let fixture = Fixture::start().await;
     fixture.authority.set(
@@ -317,7 +317,7 @@ async fn a_host_that_does_not_resolve_is_the_typed_cause_of_the_queue_lookup_fai
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_refused_connection_is_described_by_its_causes() {
     let fixture = Fixture::start().await;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -377,7 +377,7 @@ async fn closed_port() -> u16 {
     port
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_send_that_cannot_connect_fails_the_publish_without_answering_a_record() {
     let fixture = Fixture::start().await;
     let port = closed_port().await;
@@ -427,7 +427,7 @@ async fn a_send_that_cannot_connect_fails_the_publish_without_answering_a_record
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_ca_file_that_cannot_be_read_is_a_configuration_failure() {
     let fixture = Fixture::start().await;
     let mut config = client_config("https://sqs.nervix.test:9325");
@@ -448,7 +448,7 @@ async fn a_ca_file_that_cannot_be_read_is_a_configuration_failure() {
     assert!(message.contains("TLS CA certificate"), "{message}");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_source_that_cannot_reach_the_service_fails_to_open_its_queue() {
     let fixture = Fixture::start().await;
     let port = closed_port().await;

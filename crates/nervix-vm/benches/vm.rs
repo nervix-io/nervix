@@ -2581,8 +2581,8 @@ fn conditional_arm_benches(c: &mut Criterion) {
     group.finish();
 }
 
-fn benchmark_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
+fn benchmark_runtime() -> nervix_primitives::runtime::Runtime {
+    nervix_primitives::runtime::Builder::new_current_thread()
         .build()
         .expect("benchmark runtime must build")
 }

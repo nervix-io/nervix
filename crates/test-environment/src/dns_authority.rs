@@ -37,9 +37,12 @@ use hickory_proto::{
     },
 };
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_primitives::{
+    sync::{blocking::Mutex, oneshot},
+    task::JoinHandle,
+};
 use nervix_recovery::Discarded as _;
-use parking_lot::Mutex;
-use tokio::{net::UdpSocket, sync::oneshot, task::JoinHandle, time::timeout};
+use tokio::{net::UdpSocket, time::timeout};
 
 /// The distinct names whose questions the authority counts one by one.
 pub const MAX_COUNTED_NAMES: usize = 1_024;
@@ -97,7 +100,8 @@ impl DnsAuthority {
         let address = socket.local_addr()?;
         let state = Arc::new(AuthorityState::default());
         let (stop, stopped) = oneshot::channel();
-        let task = tokio::spawn(Self::answer(socket, Arc::clone(&state), stopped));
+        let task =
+            nervix_primitives::task::spawn(Self::answer(socket, Arc::clone(&state), stopped));
         Ok(Self {
             address,
             state,
@@ -170,8 +174,8 @@ impl DnsAuthority {
     ) {
         let mut buffer = vec![0_u8; MAX_MESSAGE_BYTES];
         loop {
-            tokio::task::consume_budget().await;
-            let received = tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            let received = nervix_primitives::select! {
                 _ = &mut stopped => return,
                 received = socket.recv_from(&mut buffer) => received,
             };

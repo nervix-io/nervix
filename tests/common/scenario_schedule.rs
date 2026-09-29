@@ -14,8 +14,7 @@ use std::{
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use parking_lot::Mutex;
-use tokio::sync::{oneshot, watch};
+use nervix_primitives::sync::{blocking::Mutex, oneshot, watch};
 
 pub(crate) const WEB_CONSOLE_FEATURE_NAMES: [&str; 4] = [
     "Web console NSPL REPL",
@@ -296,8 +295,8 @@ impl ScenarioRunSlots {
         };
         waiting_for(reason);
         loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 biased;
                 admission = &mut granted => {
                     return admission.assured(

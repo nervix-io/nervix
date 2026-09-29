@@ -7,27 +7,26 @@
 //! - **Depends on.** The transport and its test certificates.
 //! - **Must not know.** The runtime or control plane that uses the transport.
 
-use std::{
-    collections::BTreeSet,
-    path::PathBuf,
-    process::Command,
-    sync::{Arc as StdArc, OnceLock},
-};
+use std::{collections::BTreeSet, path::PathBuf, process::Command, sync::Arc as StdArc};
 
 use futures_util::FutureExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{CpuClass, MemoryClass};
 use nervix_models::RemoteAckOutcome;
-use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
+use nervix_primitives::{
+    sync::{
+        Notify,
+        atomic::{AtomicUsize, Ordering},
+        watch,
+    },
+    unmodeled::sync::OnceLock,
+};
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType,
 };
 use tempfile::{TempDir, tempdir};
-use tokio::{
-    sync::{Notify, watch},
-    time::{Instant, timeout, timeout_at},
-};
+use tokio::time::{Instant, timeout, timeout_at};
 
 use super::*;
 
@@ -410,7 +409,7 @@ async fn bound_transports_with_options(options: TransportOptions) -> ConnectedTr
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn send_waits_for_a_target_registered_after_the_operation_starts() {
     let ConnectedTransports {
         transport_a,
@@ -517,7 +516,7 @@ fn invalid_transport_options_report_the_failed_contract() {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn peer_quota_refuses_a_new_target_but_retains_the_registered_peer() {
     let options = TransportOptions {
         max_peers: 1,
@@ -549,7 +548,7 @@ async fn peer_quota_refuses_a_new_target_but_retains_the_registered_peer() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn bootstrap_respects_the_peer_quota_before_registering_a_new_identity() {
     let options = TransportOptions {
         max_peers: 1,
@@ -595,7 +594,7 @@ async fn bootstrap_respects_the_peer_quota_before_registering_a_new_identity() {
     transport_c.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn one_way_control_send_refuses_a_typed_request() {
     let ConnectedTransports {
         transport_a,
@@ -632,7 +631,7 @@ fn relay_acknowledgements_use_the_management_pool() {
     assert_eq!(envelope.pool_class(), PoolClass::Management);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn connection_binding_drives_response_flow_control() {
     let options = TransportOptions {
         initial_stream_window_bytes: 1,
@@ -647,11 +646,11 @@ async fn connection_binding_drives_response_flow_control() {
 
     timeout(Duration::from_secs(2), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if transport_a.is_connected_to(&node_b) {
                 break;
             }
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -676,7 +675,7 @@ fn certificate_binds_cluster_node_and_endpoint() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn rejected_tls_replacement_keeps_the_previous_identity_usable() {
     let ConnectedTransports {
         _authority: authority,
@@ -721,7 +720,7 @@ use resolver::{localhost_identity, test_resolver};
 
 mod lease;
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn resource_streams_leave_the_reserved_snapshot_slot_responsive() {
     let ConnectedTransports {
         transport_a,
@@ -774,8 +773,8 @@ async fn resource_streams_leave_the_reserved_snapshot_slot_responsive() {
         .expect("snapshot stream handler should register");
     timeout(Duration::from_secs(5), async {
         while !transport_a.is_connected_to(&node_b) {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -831,7 +830,7 @@ async fn resource_streams_leave_the_reserved_snapshot_slot_responsive() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn streamed_response_times_out_when_its_producer_stops_making_progress() {
     let options = TransportOptions {
         progress_timeout: Duration::from_millis(50),
@@ -853,8 +852,8 @@ async fn streamed_response_times_out_when_its_producer_stops_making_progress() {
         .expect("resource stream handler should register");
     timeout(Duration::from_secs(5), async {
         while !transport_a.is_connected_to(&node_b) {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -877,7 +876,7 @@ async fn streamed_response_times_out_when_its_producer_stops_making_progress() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn streamed_response_reports_a_producer_failure_to_the_reader() {
     let ConnectedTransports {
         transport_a,
@@ -923,7 +922,7 @@ async fn streamed_response_reports_a_producer_failure_to_the_reader() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn rejected_stream_opening_retains_the_transport_cause() {
     let ConnectedTransports {
         transport_a,
@@ -940,8 +939,8 @@ async fn rejected_stream_opening_retains_the_transport_cause() {
         .expect("resource stream handler should register");
     timeout(Duration::from_secs(5), async {
         while !transport_a.is_connected_to(&node_b) {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -963,7 +962,7 @@ async fn rejected_stream_opening_retains_the_transport_cause() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn stream_slot_queueing_consumes_the_request_deadline() {
     let ConnectedTransports {
         transport_a,
@@ -984,8 +983,8 @@ async fn stream_slot_queueing_consumes_the_request_deadline() {
         .assured("the deadline stream handler has a unique test name");
     timeout(Duration::from_secs(5), async {
         while !transport_a.is_connected_to(&node_b) {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -1003,7 +1002,7 @@ async fn stream_slot_queueing_consumes_the_request_deadline() {
 
     let queued_transport = transport_a.clone();
     let queued_node = node_b.clone();
-    let queued = tokio::spawn(async move {
+    let queued = nervix_primitives::task::spawn(async move {
         queued_transport
             .request_stream(
                 &queued_node,
@@ -1032,7 +1031,7 @@ async fn stream_slot_queueing_consumes_the_request_deadline() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn queued_replication_request_wakes_when_the_stream_slot_is_released() {
     let ConnectedTransports {
         transport_a,
@@ -1061,11 +1060,11 @@ async fn queued_replication_request_wakes_when_the_stream_slot_is_released() {
         .expect("replication handler should register");
     timeout(Duration::from_secs(5), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if transport_a.is_connected_to(&node_b) {
                 break;
             }
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -1073,7 +1072,7 @@ async fn queued_replication_request_wakes_when_the_stream_slot_is_released() {
 
     let first_requester = transport_a.clone();
     let first_target = node_b.clone();
-    let first = tokio::spawn(async move {
+    let first = nervix_primitives::task::spawn(async move {
         first_requester
             .request(&first_target, ReplicationRequest { wait: true })
             .await
@@ -1086,14 +1085,14 @@ async fn queued_replication_request_wakes_when_the_stream_slot_is_released() {
     let second_target = node_b.clone();
     let second_started = StdArc::new(Notify::new());
     let second_started_in_task = StdArc::clone(&second_started);
-    let second = tokio::spawn(async move {
+    let second = nervix_primitives::task::spawn(async move {
         second_started_in_task.notify_one();
         second_requester
             .request(&second_target, ReplicationRequest { wait: false })
             .await
     });
     second_started.notified().await;
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
     release.notify_one();
 
     timeout(Duration::from_secs(2), async {
@@ -1113,7 +1112,7 @@ async fn queued_replication_request_wakes_when_the_stream_slot_is_released() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn bulk_work_does_not_block_the_management_pool() {
     let ConnectedTransports {
         transport_a,
@@ -1146,8 +1145,9 @@ async fn bulk_work_does_not_block_the_management_pool() {
 
     let requester = transport_a.clone();
     let bulk_target = node_b.clone();
-    let bulk =
-        tokio::spawn(async move { requester.request(&bulk_target, BlockingBulkRequest).await });
+    let bulk = nervix_primitives::task::spawn(async move {
+        requester.request(&bulk_target, BlockingBulkRequest).await
+    });
     timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("bulk handler should start");
@@ -1171,7 +1171,7 @@ async fn bulk_work_does_not_block_the_management_pool() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn slow_management_work_cannot_consume_cancellation_streams() {
     let ConnectedTransports {
         transport_a,
@@ -1209,19 +1209,19 @@ async fn slow_management_work_cannot_consume_cancellation_streams() {
     for _ in 0..connection::stream_slots::MANAGEMENT_SHARED_STREAMS {
         let requester = transport_a.clone();
         let target = node_b.clone();
-        blocked.push(tokio::spawn(async move {
+        blocked.push(nervix_primitives::task::spawn(async move {
             requester.request(&target, BlockingManagementRequest).await
         }));
     }
     timeout(Duration::from_secs(2), async {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if started.load(Ordering::Acquire)
                 == connection::stream_slots::MANAGEMENT_SHARED_STREAMS
             {
                 break;
             }
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -1253,7 +1253,7 @@ mod duplex;
 
 mod progress;
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn discovery_subquota_cannot_crowd_out_management_requests() {
     let options = TransportOptions {
         incoming_queue_capacity: 1,
@@ -1308,8 +1308,9 @@ async fn discovery_subquota_cannot_crowd_out_management_requests() {
 
     let requester = transport_a.clone();
     let target = node_b.clone();
-    let discovery =
-        tokio::spawn(async move { requester.request(&target, BlockingDiscoveryRequest).await });
+    let discovery = nervix_primitives::task::spawn(async move {
+        requester.request(&target, BlockingDiscoveryRequest).await
+    });
     timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("the first discovery handler should start");
@@ -1367,7 +1368,7 @@ async fn discovery_subquota_cannot_crowd_out_management_requests() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
     let options = TransportOptions {
         incoming_queue_capacity: 1,
@@ -1468,7 +1469,7 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
     .expect("redeemed grant expiry work should not delay transport shutdown");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
     let options = TransportOptions {
         incoming_queue_capacity: 1,
@@ -1531,7 +1532,7 @@ async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
     let outcome_sender = transport_b.clone();
     let outcome_target = node_a.clone();
     let terminal = registration(52, &node_a).resolution(RemoteAckOutcome::Ack);
-    let mut outcome_task = tokio::spawn(async move {
+    let mut outcome_task = nervix_primitives::task::spawn(async move {
         outcome_sender
             .send(&outcome_target, Envelope::Ack(terminal))
             .await
@@ -1567,7 +1568,7 @@ async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn confirmed_cancellation_fences_attempt_before_grant_arrives() {
     let ConnectedTransports {
         transport_a,
@@ -1625,7 +1626,7 @@ async fn confirmed_cancellation_fences_attempt_before_grant_arrives() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn cancelled_relay_admission_can_never_reach_runtime() {
     let ConnectedTransports {
         transport_a,
@@ -1786,7 +1787,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn same_epoch_retry_of_admitted_relay_does_not_enqueue_twice() {
     let ConnectedTransports {
         transport_a,
@@ -1858,7 +1859,7 @@ async fn same_epoch_retry_of_admitted_relay_does_not_enqueue_twice() {
 /// reserved admission.
 async fn next_non_progress_envelope(incoming: &mut mpsc::Receiver<ReceivedEnvelope>) -> Envelope {
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let received = timeout(Duration::from_secs(2), incoming.recv())
             .await
             .expect("the next envelope should arrive")
@@ -1872,7 +1873,7 @@ async fn next_non_progress_envelope(incoming: &mut mpsc::Receiver<ReceivedEnvelo
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_outcome_addressed_to_an_earlier_registrar_run_leaves_the_current_admission_pending() {
     let ConnectedTransports {
         transport_a,
@@ -1971,7 +1972,7 @@ async fn an_outcome_addressed_to_an_earlier_registrar_run_leaves_the_current_adm
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn receiver_process_restart_makes_unresolved_relay_indeterminate() {
     let ConnectedTransports {
         _authority: authority,
@@ -2046,7 +2047,7 @@ async fn receiver_process_restart_makes_unresolved_relay_indeterminate() {
     replacement_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn reserved_relay_work_reports_progress_before_runtime_admission() {
     let ConnectedTransports {
         transport_a,
@@ -2103,7 +2104,7 @@ async fn reserved_relay_work_reports_progress_before_runtime_admission() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn bootstrap_rejects_a_certificate_from_another_cluster() {
     let authority = TestCertificateAuthority::new();
     let node_a = ClusterNodeName::parse("node-a").expect("test node name should be valid");
@@ -2142,7 +2143,7 @@ async fn bootstrap_rejects_a_certificate_from_another_cluster() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn bootstrap_times_out_when_a_tcp_peer_never_completes_tls() {
     let authority = TestCertificateAuthority::new();
     let node_a = ClusterNodeName::parse("node-a").expect("test node name should be valid");
@@ -2184,7 +2185,7 @@ async fn bootstrap_times_out_when_a_tcp_peer_never_completes_tls() {
     transport_a.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn shutdown_refuses_bootstrap_before_opening_a_connection() {
     let ConnectedTransports {
         transport_a,
@@ -2203,7 +2204,7 @@ async fn shutdown_refuses_bootstrap_before_opening_a_connection() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn invalid_rkyv_is_rejected_before_dispatch() {
     let executor = Executor::default();
     let bytes = executor
@@ -2233,7 +2234,7 @@ fn stream_handler_failure_keeps_its_producer_cause() {
     assert!(error.contains::<io::Error>());
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn membership_removal_cancels_an_active_request() {
     let ConnectedTransports {
         transport_a,
@@ -2257,7 +2258,10 @@ async fn membership_removal_cancels_an_active_request() {
         .expect("hanging handler should register");
     let requester = transport_a.clone();
     let target = node_b.clone();
-    let request = tokio::spawn(async move { requester.request(&target, HangingRequest).await });
+    let request =
+        nervix_primitives::task::spawn(
+            async move { requester.request(&target, HangingRequest).await },
+        );
     timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("hanging request should reach its handler");
@@ -2278,7 +2282,7 @@ async fn membership_removal_cancels_an_active_request() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn shutdown_cancels_an_active_request() {
     let ConnectedTransports {
         transport_a,
@@ -2301,7 +2305,10 @@ async fn shutdown_cancels_an_active_request() {
         .expect("hanging handler should register");
     let requester = transport_a.clone();
     let target = node_b.clone();
-    let request = tokio::spawn(async move { requester.request(&target, HangingRequest).await });
+    let request =
+        nervix_primitives::task::spawn(
+            async move { requester.request(&target, HangingRequest).await },
+        );
     timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("hanging request should reach its handler");

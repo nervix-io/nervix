@@ -19,9 +19,9 @@ use nervix_client_wire::{
     grpc::{ClientExchangeCodec, EXCHANGE_PATH},
 };
 use nervix_models::CommandExecutionReference;
+use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc};
 use thiserror::Error;
-use tokio::{sync::mpsc, time::Duration};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::time::Duration;
 use tonic::{
     Request,
     codegen::http,
@@ -264,7 +264,7 @@ impl StatusEndpoint {
         sent.map_err(|_| Report::new(StatusRequestError::SendCommand))?;
 
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let received = StatusOperation::ReceiveResponse
                 .within(deadline, responses.message())
                 .await?;

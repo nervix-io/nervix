@@ -71,7 +71,7 @@ fn repeat_program() -> Arc<CompiledProgram> {
 
 fn measure_batch(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    runtime: &tokio::runtime::Runtime,
+    runtime: &nervix_primitives::runtime::Runtime,
     name: &str,
     shape: &str,
     program: &Arc<CompiledProgram>,

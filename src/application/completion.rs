@@ -19,9 +19,8 @@ use nervix_interconnect::{
     HttpsListenerInstallation, HttpsListenerInstallationRequest, Transport,
 };
 use nervix_models::{ClusterNodeIdentity, ClusterNodeName};
+use nervix_primitives::{sync::CancellationToken, task::JoinHandle};
 use thiserror::Error;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 use triomphe::Arc;
 
 use super::{
@@ -189,7 +188,7 @@ async fn probe_application_revisions(
 
     let mut completed_nodes = BTreeSet::new();
     while let Some(completed_node) = probes.next().await {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if let Some(completed_node) = completed_node {
             completed_nodes.insert(completed_node);
         }
@@ -246,7 +245,7 @@ async fn probe_https_listeners(
 
     let mut probed = Vec::new();
     while let Some(listener) = probes.next().await {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         probed.push(listener);
     }
     probed
@@ -265,7 +264,7 @@ pub(in crate::application) async fn wait_for_application_revision(
     let mut deadline_elapsed = false;
 
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let mut cluster_state = cluster.subscribe_state_changes().await;
         let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
         tokio::pin!(cluster_change);
@@ -281,7 +280,7 @@ pub(in crate::application) async fn wait_for_application_revision(
                     pending_nodes: vec![pending_node],
                 });
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 biased;
                 _ = tokio::time::sleep_until(deadline) => deadline_elapsed = true,
                 _ = &mut cluster_change => {},
@@ -321,7 +320,7 @@ pub(in crate::application) async fn wait_for_application_revision(
         );
         tokio::pin!(probes);
         let completed_before_probe = directly_completed_nodes.len();
-        tokio::select! {
+        nervix_primitives::select! {
             biased;
             _ = tokio::time::sleep_until(deadline) => {
                 deadline_elapsed = true;
@@ -329,7 +328,7 @@ pub(in crate::application) async fn wait_for_application_revision(
             observed_nodes = &mut probes => {
                 directly_completed_nodes.extend(observed_nodes);
                 if directly_completed_nodes.len() == completed_before_probe {
-                    tokio::select! {
+                    nervix_primitives::select! {
                         biased;
                         _ = tokio::time::sleep_until(deadline) => {
                             deadline_elapsed = true;
@@ -349,12 +348,12 @@ pub(in crate::application) fn spawn_authoritative_revision_reporting(
     shutdown: CancellationToken,
 ) -> JoinHandle<()> {
     let mut applied_revision = consensus.subscribe_applied();
-    tokio::spawn(async move {
+    nervix_primitives::task::spawn(async move {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let revision = *applied_revision.borrow_and_update();
             cluster.set_local_authoritative_revision(revision).await;
-            tokio::select! {
+            nervix_primitives::select! {
                 _ = shutdown.cancelled() => break,
                 changed = applied_revision.changed() => {
                     if changed.is_err() {
@@ -472,7 +471,7 @@ impl SessionServiceImpl {
         let local_identity = self.inner.cluster.local_node_identity().await;
 
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some((tenure, expected_nodes)) = completion_peers(
                 &self.inner.cluster,
                 &self.inner.consensus,
@@ -535,7 +534,7 @@ impl SessionServiceImpl {
                     pending_nodes,
                 }));
             }
-            tokio::select! {
+            nervix_primitives::select! {
                 biased;
                 _ = tokio::time::sleep_until(deadline) => {}
                 _ = tokio::time::sleep(APPLICATION_REVISION_PROBE_RETRY) => {}
@@ -645,7 +644,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_https_listener_barrier_waits_until_the_listener_installs_the_revision() {
         let TestService { service, path, .. } = build_test_service(false).await;
         let certificates = service.inner.https_certificates.clone();
