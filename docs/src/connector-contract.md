@@ -229,28 +229,31 @@ sequenceDiagram
 Each domain revision decides one typed emitter execution plan per scheduled emitter before
 publishing the domain execution. The plan resolves its sink clients and codec, retains its ordered
 source relay edges and lowered source predicates, and lowers its route, HTTP request fields, SQS
-ordering group and row sink mappings. It also converts OTEL resource literals and the Iceberg
-commit cadence and size into connector values. Initial startup, reassignment and an entity swap
-use that same plan. A swap publishes new source and remote consumer edges from the new plan; it
-does not reconstruct the emitter from a Model in the host. The host resolves resource mounts and
-binds the lowered VM programs to installed schemas and UDFs when it starts the task. A retry
-reopens the sink with the same typed configuration.
+ordering group and the mappings of row and row request sinks. It also converts OTEL resource
+literals and the Iceberg commit cadence and size into connector values. Initial startup,
+reassignment and an entity swap use that same plan. A swap publishes new source and remote
+consumer edges from the new plan; it does not reconstruct the emitter from a Model in the host.
+The host resolves resource mounts and binds the lowered VM programs to installed schemas and UDFs
+when it starts the task. A retry reopens the sink with the same typed configuration.
 
-The host prepares one write for one of three sink contracts. A **record sink** receives
+The host prepares one write for one of four sink contracts. A **record sink** receives
 codec-encoded keys, payloads, headers, optional ordering groups, timestamps, and the identity the
 host assigned each record of the write. A **row sink** receives a run of host-projected Arrow
 carriers of one source relay and concrete branch, the target columns their mapped columns are
 written to, and each carrier's selected rows, execution time and, for a sink that retains them,
-acknowledgements; it encodes its external representation from those columns. An **HTTP request
-sink** receives prepared requests: each carries the identity the
-host assigned it, the validated method, the target normalized on the client's origin, the
-application headers after case-insensitive replacement, and the exact body bytes the codec
-produced or no body at all. The host evaluates `VALUES` once per batch and excludes rows with
-mapping errors before calling a row sink. It retains the ACKs of the source rows every record,
-mapped row or request carries, so no runtime ACK map enters the connector. Each publish is one call
-per write, never a virtual call per row.
+acknowledgements; it encodes its external representation from those columns. A **row request
+sink** receives the same projected columns one carrier at a time and prepares requests from them
+once: each prepared request is the exact bytes the connector will send and the source positions of
+the rows it carries. The host retains every prepared request and hands it back, under an identity
+it assigns for the write, until the connector answers for it. An **HTTP request sink** receives
+prepared requests: each carries the identity the host assigned it, the validated method, the target
+normalized on the client's origin, the application headers after case-insensitive replacement, and
+the exact body bytes the codec produced or no body at all. The host evaluates `VALUES` once per
+batch and excludes rows with mapping errors before calling a row sink or a row request sink. It
+retains the ACKs of the source rows every record, mapped row or request carries, so no runtime ACK
+map enters the connector. Each publish is one call per write, never a virtual call per row.
 
-The host compiles a row sink's `VALUES` projection before opening that sink. A failed VM
+The host compiles a row or row request sink's `VALUES` projection before opening that sink. A failed VM
 inference or compilation retains its typed VM report under the domain and emitter context, then
 the sink-initialization context. The emitter follows its existing initialization retry policy;
 the connector never receives a partially compiled mapping.
@@ -272,11 +275,19 @@ whose plan declares no group carries nothing beside its batches.
 
 Each connector classifies definite delivery and rejection per record, and may report one
 infrastructure failure for the attempt. A record sink answers for a record under the identity the
-host gave it, and a row sink answers for a mapped row under that row's source position. The host
-checks a record sink's answers against the write before applying any of them: an answer for a
-record the write did not carry, or a second answer for one record, breaks the contract and fails
-the attempt without a retry. A record left unanswered without a reported failure leaves the attempt
-unresolved, and the host retries it, because nothing says that record was not written. The host
+host gave it, and a row sink answers for a mapped row under that row's source position. A row
+request sink refuses a mapped row under its position while it prepares requests, and answers for a
+prepared request under the identity the host gave it. The host checks a record or request sink's
+answers against the write before applying any of them: an answer for a record the write did not
+carry, or a second answer for one record, breaks the contract and fails the attempt without a
+retry. A record left unanswered without a reported failure leaves the attempt unresolved, and the
+host retries it, because nothing says that record was not written. It checks a row request sink's
+preparation the same way before it retains anything: every row it handed over must be a member of
+exactly one request or refused, every request must carry a row, and every member must follow the
+members of the requests before it in source order, so the retained requests are sent in the order
+the connector prepared them. A preparation that breaks any of these fails the attempt without a
+retry and retains nothing, because the same connector would prepare the same rows the same way
+again. The host
 applies the answers to the corresponding ACK roots and error policy. The emitter task owns its buffer, maximum batch size, flush cadence,
 retry schedule, fault injection, stop deadline, and metrics. The connector owns the external
 operation and its completion point. A receiver-requested delay, which a connector attaches to the
@@ -293,6 +304,11 @@ the owned work and decides whether to reconnect, and a terminal failure routes e
 source batch through the emitter's message error policy. Stop requests retain their separate
 deadline-bounded final flush and transport finish, and a stopped interaction performs its final
 drain before the loop exits.
+
+When that policy sends a failed emitter record to a DLQ, the host executes the message-error SET
+program bound during domain installation or replacement. The prepared route retains the input and
+optional attempted codec-record schemas, the source branch, relay target and flush cadence. The
+connector receives no error-record Model or VM program and makes no DLQ routing decision.
 
 For a record sink using the emitter `BATCH` clause, the host selects rows from successive
 Arc-backed Arrow carriers released by one flush. It retains each carrier's source relay, exact
@@ -371,13 +387,48 @@ time; a Postgres cardinality violation, which is how `ON CONFLICT DO UPDATE` ref
 carries a key twice, is isolated the same way. MongoDB answers per document, so it needs no
 isolation pass.
 
-OTEL is a row sink that exports carrier by carrier. Without `BATCH` it exports the successfully
-mapped rows of one carrier in one request. With `BATCH`, it converts each selected row of a carrier
-once and divides the successful positions by the same rule, measuring the exact uncompressed
-protobuf Export request, including resource and scope, before optional gzip or transport framing.
+Iceberg is a row sink that stages each carrier of the run as its own file, which its commit
+publishes.
+
+OTEL is a row request sink, which the host hands one carrier per preparation. Without `BATCH` it
+prepares the successfully mapped rows of the carrier as one Export request. With `BATCH`, its typed
+plan passes the emitter's limits to the connector, which divides the successful positions by the
+same rule, measuring the exact uncompressed protobuf Export request, including resource and scope,
+before optional gzip or transport framing; a record whose request alone exceeds `MAX SIZE` is
+refused while preparing, as a `validation` error of the `encode` operation. The connector converts
+each row once and samples the log records' `observed_time_unix_nano` from actual UTC once per
+preparation, then encodes each request once.
+
+The retained boundary is that encoding: the exact protobuf bytes of the Export request and the
+positions of the rows it carries, kept in the emitter buffer beside the batch payloads and HTTP
+requests other sinks retain. It is the quantity `MAX SIZE` measures and the message the receiver
+decodes. Gzip and the gRPC or HTTP framing are applied to it on every attempt; both are
+deterministic functions of those bytes and of the client configuration, which cannot change while
+the emitter runs, so an attempt compresses the retained bytes exactly as the one before it did.
+Keeping compressed or framed bytes instead would tie the retained request to one transport
+attempt, and the gRPC client compresses a message itself. Over gRPC the connector sends the retained
+bytes through a pass-through codec rather than re-encoding a message.
+
+The host hands the retained requests to the connector in the order they were prepared, ahead of any
+request prepared after them. An accepted request delivers every row it carries, a request the
+receiver refuses rejects every row it carries with one shared error reference, and neither is sent
+again. A request whose outcome the connector did not learn stays retained with its bytes and rows,
+and so does every request after it in that write. The next attempt, whether a retry, a force flush
+or a drain, sends it byte for byte, observed timestamps included, through whichever connector the
+emitter holds by then; the host reopens an OTEL connector after a failed publish, which is why the
+retained request lives with the buffer. Its rows are never mapped, converted or regrouped again.
 A receiver's `partial_success` still acknowledges the whole request with a warning, because OTLP
-does not identify the rejected members. Iceberg stages each carrier of the run as its own file,
-which its commit publishes.
+does not identify the rejected members.
+
+An OTLP/gRPC export whose receiver never answered is retried: tonic reports a request timeout, a
+connection lost before the answer, or an answer it cannot read as a status carrying the local
+failure as its source, which no status a receiver sends has. An answered status is classified by
+its code: `INVALID_ARGUMENT` refuses the request, `RESOURCE_EXHAUSTED` and the codes the OTLP
+specification lists as retryable — `CANCELLED`, `DEADLINE_EXCEEDED`, `ABORTED`, `OUT_OF_RANGE`,
+`UNAVAILABLE` and `DATA_LOSS` — are retried no sooner than the receiver's `RetryInfo`, and any other
+code fails the attempt as a configuration the endpoint cannot accept. OTLP/HTTP retries a
+connection failure, a timeout, a lost response, and HTTP `429` or `5xx`, refuses on `400`, and fails
+on any other status.
 
 An HTTP emitter's request fields are the host's, not the connector's. When the emitter admits a
 batch, the host evaluates one compiled program over each record's original input, its finalized

@@ -1049,7 +1049,7 @@ mod tests {
         ResourceUploads, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus, Timestamp,
         UserName,
     };
-    use nervix_nspl::client_statement::upload_resource_path_fragment;
+    use nervix_nspl::client_statement::local_path_fragment;
     use sorted_vec::SortedVec;
 
     use super::{
@@ -1307,36 +1307,22 @@ mod tests {
         );
     }
 
+    fn local_path_at_end(input: &str) -> Option<&str> {
+        let local_path = local_path_fragment(input, input.len())?;
+        Some(local_path.fragment)
+    }
+
     #[test]
-    fn upload_resource_path_fragment_is_detected_for_upload_resource_path() {
+    fn a_local_path_is_detected_where_upload_resource_expects_one() {
         assert_eq!(
-            upload_resource_path_fragment(
-                "UPLOAD RESOURCE proto VERSION '/tmp/pro",
-                "UPLOAD RESOURCE proto VERSION '/tmp/pro".len(),
-            ),
+            local_path_at_end("UPLOAD RESOURCE proto VERSION '/tmp/pro"),
             Some("/tmp/pro")
         );
         assert_eq!(
-            upload_resource_path_fragment(
-                "UPLOAD RESOURCE proto VERSION ",
-                "UPLOAD RESOURCE proto VERSION ".len(),
-            ),
+            local_path_at_end("UPLOAD RESOURCE proto VERSION "),
             Some("")
         );
-        assert_eq!(
-            upload_resource_path_fragment(
-                "UPLOAD RESOURCE proto VERSION ",
-                "UPLOAD RESOURCE proto VERSION '".len(),
-            ),
-            Some("")
-        );
-        assert_eq!(
-            upload_resource_path_fragment(
-                "DESCRIBE RESOURCE proto VERSION ",
-                "DESCRIBE RESOURCE proto VERSION ".len(),
-            ),
-            None
-        );
+        assert_eq!(local_path_at_end("DESCRIBE RESOURCE proto VERSION "), None);
     }
 
     #[tokio::test]

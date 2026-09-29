@@ -22,7 +22,7 @@ use strum::{AsRefStr, EnumIter, EnumProperty, EnumString, IntoEnumIterator, Into
 use thiserror::Error;
 
 use crate::{
-    AlterSchema, AlterWireSchema, AvroType, BranchKeyFingerprint, BranchName, CborType,
+    AlterSchema, AlterWireSchema, AvroType, Backup, BranchKeyFingerprint, BranchName, CborType,
     ChannelName, ClientName, ClusterNodeName, CodecName, CollectionName, CommandExecutionReference,
     ConsumerGroupName, CorrelatorName, CreateAvroWireSchema, CreateCborWireSchema,
     CreateJsonWireSchema, CreateSchema, CreateUdf, DeduplicatorName, DomainClockPeriod,
@@ -49,6 +49,7 @@ pub enum Statement {
     RebindResource(RebindResource),
     ResetWasmState(ResetWasmState),
     UploadResource(UploadResource),
+    Backup(Backup),
     StartDomain(StartDomain),
     StopDomain(StopDomain),
     Create(CreateStatement<Box<Model<RequestedResourceVersion>>>),
@@ -136,6 +137,7 @@ impl Statement {
             | Self::CreateUser(_)
             | Self::CreateResource(_)
             | Self::UploadResource(_)
+            | Self::Backup(_)
             | Self::StartDomain(_)
             | Self::StopDomain(_)
             | Self::DropNode(_)

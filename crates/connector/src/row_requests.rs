@@ -1,8 +1,9 @@
-//! How a row sink divides the rows of one write into the requests its destination takes.
+//! How a row sink or a row request sink divides mapped rows into the requests its destination
+//! takes.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The limits one request of a row sink stays within — the emitter's `BATCH` limits,
+//! - **Owns.** The limits one request of such a sink stays within — the emitter's `BATCH` limits,
 //!   narrowed by what the destination accepts in one request — the division rule, and the
 //!   rejection of a row whose own request exceeds a limit: candidates in packing order hold at
 //!   most the row limit, a candidate whose measured request exceeds the byte limit is halved and
@@ -21,7 +22,7 @@ use nervix_models::{EmitterBatchPolicy, PayloadSizeLimit, Timestamp};
 
 use crate::sink::RejectedSinkRecord;
 
-/// The most rows and measured bytes one request of a row sink carries.
+/// The most rows and measured bytes one request of a row or row request sink carries.
 ///
 /// They start as the emitter's `BATCH MAX MESSAGES` and `MAX SIZE`, and a sink narrows them to what
 /// its destination accepts in one request, such as the placeholders one MySQL statement binds or

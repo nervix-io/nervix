@@ -2,9 +2,9 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The source and sink contracts, including the rule a row sink divides one write into
-//!   requests by, the host handles a connector may call, and the value
-//!   types that cross the boundary: a client's resolved configuration entries and the resource
+//! - **Owns.** The source and sink contracts, including the rule a row or row request sink divides
+//!   mapped rows into requests by, the host handles a connector may call, and the value types that
+//!   cross the boundary: a client's resolved configuration entries and the resource
 //!   mounts they read files from, the TLS material and HTTP client settings built from those
 //!   entries, service URL parsing, the parsed retry policy, physical deadlines and the actual-UTC
 //!   read a source stamps arrival with, the transport-header trait a source message implements,
@@ -58,12 +58,13 @@ pub use row_requests::{
 pub use service_url::{ServiceUrl, ServiceUrlError};
 pub use sink::{
     AckConfirmation, BrokerPublishingMode, HttpRequestSink, MappedSinkCarrier, MappedSinkMember,
-    MappedSinkRows, PerRecordOutcome, PerRecordOutcomeParts, RecordSink, RejectedSinkRecord,
-    RowSink, SinkAcknowledgementServices, SinkAcknowledgements, SinkCommitReport, SinkDeadline,
+    MappedSinkRows, PerRecordOutcome, PerRecordOutcomeParts, PreparedRowRequest, RecordSink,
+    RejectedSinkRecord, RowRequestPreparation, RowRequestSink, RowSink,
+    SinkAcknowledgementServices, SinkAcknowledgements, SinkCommitReport, SinkDeadline,
     SinkEventReporter, SinkGeneralErrorHandler, SinkHost, SinkHostServices, SinkHttpRequest,
     SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId,
-    SinkRecordPosition, SinkRetryDelay, SinkStagingDirectory, SinkStartError, SinkStartResult,
-    SinkTransientErrorStatus,
+    SinkRecordPosition, SinkRetryDelay, SinkRowRequest, SinkStagingDirectory, SinkStartError,
+    SinkStartResult, SinkTransientErrorStatus,
 };
 pub use source::{
     BrokerSourceConnector, PacedSourceConnector, SourceAckPolicy, SourceAcknowledgement,

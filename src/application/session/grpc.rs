@@ -2,11 +2,12 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** The `nervix.session.Session` gRPC service: routing its two methods, authenticating
-//!   each call from its metadata before any frame is read, holding every message to the session
-//!   frame limit, and ending a call with the status of the transport failure that ended it.
-//! - **Depends on.** The session engine and upload handling, the client wire gRPC codecs, and
-//!   tonic's server primitives.
+//! - **Owns.** The `nervix.session.Session` gRPC service: routing its three methods,
+//!   authenticating each call from its metadata before any frame is read, holding every message to
+//!   the session frame limit, and ending a call with the status of the transport failure that ended
+//!   it.
+//! - **Depends on.** The session engine, upload handling and backup downloads, the client wire
+//!   gRPC codecs, and tonic's server primitives.
 //! - **Must not know.** What any request does.
 //!
 //! A call that fails authentication ends with `UNAUTHENTICATED`. A message above the frame limit
@@ -24,10 +25,11 @@ use std::{
 
 use futures_util::{Stream, StreamExt as _, stream};
 use nervix_client_wire::{
-    ClientFrame, EncodedFrame, ServerFrame, SessionLimits, UploadFrame, UploadReplyFrame,
-    VerifiedFrame,
+    BackupDownloadFrame, BackupDownloadRequestFrame, ClientFrame, EncodedFrame, ServerFrame,
+    SessionLimits, UploadFrame, UploadReplyFrame, VerifiedFrame,
     grpc::{
-        EXCHANGE_PATH, SERVICE_NAME, ServerExchangeCodec, ServerUploadCodec, UPLOAD_RESOURCE_PATH,
+        DOWNLOAD_BACKUP_PATH, EXCHANGE_PATH, SERVICE_NAME, ServerBackupDownloadCodec,
+        ServerExchangeCodec, ServerUploadCodec, UPLOAD_RESOURCE_PATH,
     },
 };
 use nervix_recovery::Discarded as _;
@@ -37,7 +39,9 @@ use tonic::{
     Request, Response, Status, Streaming,
     body::Body,
     codegen::{BoxFuture, Service, http},
-    server::{ClientStreamingService, Grpc, NamedService, StreamingService},
+    server::{
+        ClientStreamingService, Grpc, NamedService, ServerStreamingService, StreamingService,
+    },
 };
 
 use super::{InboundFrame, SessionTransport, outbound};
@@ -90,8 +94,15 @@ impl Service<http::Request<Body>> for SessionGrpcService {
                 let upload = Upload { service, limits };
                 Ok(grpc.client_streaming(upload, request).await)
             }),
+            DOWNLOAD_BACKUP_PATH => Box::pin(async move {
+                let mut grpc = Grpc::new(ServerBackupDownloadCodec::new(limits))
+                    .max_decoding_message_size(limits.frame_bytes())
+                    .max_encoding_message_size(limits.frame_bytes());
+                let download = Download { service, limits };
+                Ok(grpc.server_streaming(download, request).await)
+            }),
             _ => Box::pin(async move {
-                let status = Status::unimplemented("the session service serves two methods");
+                let status = Status::unimplemented("the session service serves three methods");
                 Ok(status.into_http())
             }),
         }
@@ -202,6 +213,42 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for Upload {
                     "the upload reply does not fit a frame: {error}"
                 ))),
             }
+        })
+    }
+}
+
+/// One backup download call.
+struct Download {
+    service: SessionServiceImpl,
+    limits: SessionLimits,
+}
+
+type DownloadStream =
+    Pin<Box<dyn Stream<Item = Result<EncodedFrame<BackupDownloadFrame>, Status>> + Send + 'static>>;
+
+impl ServerStreamingService<VerifiedFrame<BackupDownloadRequestFrame>> for Download {
+    type Response = EncodedFrame<BackupDownloadFrame>;
+    type ResponseStream = DownloadStream;
+    type Future = BoxFuture<Response<DownloadStream>, Status>;
+
+    fn call(
+        &mut self,
+        request: Request<VerifiedFrame<BackupDownloadRequestFrame>>,
+    ) -> Self::Future {
+        let service = self.service.clone();
+        let limits = self.limits;
+        Box::pin(async move {
+            let user = service
+                .authenticate_grpc_metadata(request.metadata())
+                .await?;
+            let frames = service
+                .serve_backup_download(user, request.get_ref(), limits)
+                .await
+                .map_err(|error| {
+                    Status::internal(format!("the download answer does not fit a frame: {error}"))
+                })?;
+            let responses: DownloadStream = Box::pin(frames.into_stream().map(Ok));
+            Ok(Response::new(responses))
         })
     }
 }

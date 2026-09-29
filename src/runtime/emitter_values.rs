@@ -2,18 +2,20 @@
 //!
 //! Layer: data plane.
 //! - **Owns.** Binding one emitter's lowered `VALUES` mapping once, evaluating it once per batch
-//!   into an Arrow batch of mapped columns, the rows each batch still has to write, and handing a
-//!   row sink every run of successive projected batches of one source relay and concrete branch in
-//!   one write.
-//! - **Depends on.** The VM's compile and execute API, Arrow batches and the connector contract's
-//!   row sink and mapped-carrier value types.
+//!   into an Arrow batch of mapped columns, the rows each batch still has to write, handing a row
+//!   sink every run of successive projected batches of one source relay and concrete branch in one
+//!   write, and handing a row request sink each projected batch to prepare requests from, whose
+//!   prepared requests the emitter retains and hands back until the sink answers for them.
+//! - **Depends on.** The VM's compile and execute API, Arrow batches, the connector contract's row
+//!   sink, row request sink and mapped-carrier value types, and the retained payloads and checked
+//!   answers a write is resolved through.
 //! - **Must not know.** Which external system consumes the mapped rows, how it divides a write into
 //!   requests, or how it encodes them.
 
 use async_trait::async_trait;
 use nervix_connector::{
-    MappedSinkCarrier, MappedSinkRows, RowSink, SinkAcknowledgements, SinkLifecycle,
-    SinkRecordPosition,
+    MappedSinkCarrier, MappedSinkRows, RowRequestSink, RowSink, SinkAcknowledgements,
+    SinkLifecycle, SinkRecordPosition,
 };
 
 use super::*;
@@ -179,6 +181,119 @@ impl ProjectedRun {
             source,
             carriers: vec![first],
         }
+    }
+}
+
+/// A row request sink and the host projection whose mapped columns it prepares requests from.
+///
+/// The mapping is evaluated here, once per batch, and the sink prepares each request once. The
+/// emitter retains every prepared request with the rows it carries until the sink answers for it,
+/// so a request whose outcome the emitter did not learn is sent again exactly as it was prepared,
+/// and its rows are never mapped or prepared again.
+pub(in crate::runtime) struct MappedRequestSink {
+    sink: Box<dyn RowRequestSink>,
+    projection: MappedValuesProjection,
+}
+
+impl MappedRequestSink {
+    pub(in crate::runtime) fn new(
+        sink: Box<dyn RowRequestSink>,
+        projection: MappedValuesProjection,
+    ) -> Self {
+        Self { sink, projection }
+    }
+}
+
+#[async_trait]
+impl EmitterSink for MappedRequestSink {
+    fn lifecycle(&self) -> &dyn SinkLifecycle {
+        &*self.sink
+    }
+
+    fn lifecycle_mut(&mut self) -> &mut dyn SinkLifecycle {
+        &mut *self.sink
+    }
+
+    /// Prepares requests from every row no retained request carries yet, one projection and one
+    /// preparation per batch, and sends every retained request in one write: the ones earlier
+    /// attempts prepared and the sink left unanswered, exactly as they were first sent, followed by
+    /// the ones prepared now.
+    async fn publish_batches(
+        &mut self,
+        context: &EmitterSinkContext,
+        publication: EmitterPublication<'_>,
+    ) -> EmitterRuntimeResult<()> {
+        let EmitterPublication {
+            batches,
+            row_requests,
+            ..
+        } = publication;
+        for batch_index in 0..batches.len() {
+            tokio::task::consume_budget().await;
+            let mut projected = {
+                let batch = &batches[batch_index];
+                let pending_rows = batch.pending_record_rows();
+                // A batch whose rows retained requests carry, or an earlier attempt resolved, has
+                // nothing left to prepare.
+                if pending_rows.is_empty() {
+                    continue;
+                }
+                self.projection
+                    .project(
+                        batch_index,
+                        batch.relay_batch(),
+                        batch.execution_now(),
+                        &pending_rows,
+                    )
+                    .await?
+            };
+            let rejected = projected.take_rejected();
+            finish_rejected_records(context, batches, rejected, MessageErrorOperation::Values)
+                .await?;
+            if projected.is_empty() {
+                continue;
+            }
+            // The host checks and retains what the sink prepared batch by batch, so each
+            // preparation is handed exactly one carrier.
+            let carrier = projected.sink_carrier(None);
+            let occurred_at = carrier.occurred_at;
+            let rows = MappedSinkRows {
+                target_columns: self.projection.target_columns(),
+                carriers: vec![carrier],
+            };
+            let preparation = self
+                .sink
+                .prepare(rows)
+                .await
+                .map_err(sink_publish_failure)?;
+            let checked = CheckedPreparation::check(
+                preparation,
+                batch_index,
+                projected.selected_rows(),
+                occurred_at,
+            )?;
+            for request in checked.requests {
+                row_requests.retain(request, batches)?;
+            }
+            finish_rejected_records(
+                context,
+                batches,
+                checked.rejected,
+                MessageErrorOperation::Publish,
+            )
+            .await?;
+        }
+        if row_requests.is_empty() {
+            return Ok(());
+        }
+        let PreparedWrite { records, payloads } = row_requests.next_write();
+        let request_count = records.len();
+        let outcome = self.sink.publish(records).await;
+        let outcome = context.received_outcome(request_count, outcome);
+        row_requests
+            .answers(batches, payloads, outcome)?
+            .apply(context, batches, DeliveredAcknowledgements::Host)
+            .await
     }
 }
 
@@ -561,7 +676,7 @@ impl ProjectedValueRows {
         &self.selected_rows
     }
 
-    /// This batch as one carrier of a row sink write.
+    /// This batch as one carrier of a mapped-row write.
     pub(in crate::runtime) fn sink_carrier(
         &self,
         acknowledgements: Option<SinkAcknowledgements>,
@@ -578,13 +693,19 @@ impl ProjectedValueRows {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use futures_util::FutureExt as _;
-    use nervix_connector::PerRecordOutcome;
+    use nervix_connector::{
+        PerRecordOutcome, PreparedRowRequest, RowRequestPreparation, SinkPublishError,
+        SinkPublishResult, SinkRecordId, SinkRowRequest,
+    };
     use nervix_models::ClickHouseValueMapping;
+    use parking_lot::Mutex;
 
     use super::*;
     use crate::{
-        runtime::test_fixtures::{expression, named, sink_context, test_schema},
+        runtime::test_fixtures::{expression, input_schema, named, sink_context, test_schema},
         runtime_schema::test_runtime_row,
     };
 
@@ -668,6 +789,7 @@ mod tests {
                 batches: &mut batches,
                 payloads: &mut PreparedPayloads::default(),
                 requests: &mut PreparedPayloads::default(),
+                row_requests: &mut PreparedPayloads::default(),
             },
         )
         .await
@@ -889,6 +1011,315 @@ mod tests {
             (wide_allocations.alloc_calls, wide_allocations.realloc_calls),
             "projecting 64 times as many rows must cost the same allocations"
         );
+    }
+
+    /// How the scripted row request sink answers one write.
+    enum RequestAnswer {
+        /// The first request is delivered, and the sink fails before it answers for the rest.
+        DeliverFirstThenFail,
+        /// Every request of the write is delivered.
+        DeliverAll,
+    }
+
+    /// One request the scripted sink was handed: its identity and its bytes.
+    #[derive(Debug, PartialEq, Eq)]
+    struct HandedRequest {
+        id: usize,
+        body: Vec<u8>,
+    }
+
+    impl HandedRequest {
+        fn new(id: usize, body: &str) -> Self {
+            Self {
+                id,
+                body: body.as_bytes().to_vec(),
+            }
+        }
+    }
+
+    /// A row request sink that prepares one request for each pair of rows, whose bytes name the
+    /// rows and the preparation that made them, and answers every write from a script.
+    struct ScriptedRequestSink {
+        preparations: Arc<AtomicUsize>,
+        writes: Arc<Mutex<Vec<Vec<HandedRequest>>>>,
+        answers: VecDeque<RequestAnswer>,
+    }
+
+    impl SinkLifecycle for ScriptedRequestSink {}
+
+    #[async_trait]
+    impl RowRequestSink for ScriptedRequestSink {
+        async fn prepare(
+            &mut self,
+            rows: MappedSinkRows<'_>,
+        ) -> SinkPublishResult<RowRequestPreparation> {
+            let preparation = self.preparations.fetch_add(1, Ordering::SeqCst);
+            let mut prepared = RowRequestPreparation::default();
+            for carrier in &rows.carriers {
+                for pair in carrier.selected_rows.chunks(2) {
+                    let mut members = Vec::with_capacity(pair.len());
+                    for row in pair {
+                        members.push(SinkRecordPosition {
+                            batch_index: carrier.batch_index,
+                            row_index: *row,
+                        });
+                    }
+                    prepared.requests.push(PreparedRowRequest {
+                        members,
+                        body: format!("preparation {preparation} of {pair:?}").into_bytes(),
+                    });
+                }
+            }
+            Ok(prepared)
+        }
+
+        async fn publish(
+            &mut self,
+            requests: Vec<SinkRowRequest>,
+        ) -> PerRecordOutcome<SinkRecordId> {
+            self.writes.lock().push(
+                requests
+                    .iter()
+                    .map(|request| HandedRequest {
+                        id: request.id.index(),
+                        body: request.body.clone(),
+                    })
+                    .collect(),
+            );
+            let mut outcome = PerRecordOutcome::with_capacity(requests.len());
+            let answer = self
+                .answers
+                .pop_front()
+                .expect("the test scripts an answer for every write it makes");
+            match answer {
+                RequestAnswer::DeliverFirstThenFail => {
+                    outcome.deliver(requests[0].id);
+                    outcome.fail(Report::new(SinkPublishError::Publish { sink: "scripted" }));
+                }
+                RequestAnswer::DeliverAll => {
+                    for request in &requests {
+                        outcome.deliver(request.id);
+                    }
+                }
+            }
+            outcome
+        }
+    }
+
+    /// One buffered batch whose rows each carry an acknowledgement root of their own, and the
+    /// completions of those roots in row order.
+    fn acknowledged_batch(values: &[i64]) -> (EmitterPublishBatch, Vec<AckCompletion>) {
+        let mut messages = Vec::with_capacity(values.len());
+        let mut completions = Vec::with_capacity(values.len());
+        for value in values {
+            let (acks, completion) = AckSet::root();
+            messages.push(RelayMessage {
+                key: None,
+                record: test_runtime_row([("value".to_string(), RuntimeValue::I64(*value))]),
+                acks,
+            });
+            completions.push(completion);
+        }
+        let batch = RelayRecordBatch::from_messages(input_schema(), messages)
+            .expect("the test rows match the emitter input schema");
+        (
+            EmitterPublishBatch::from_batch(batch, Timestamp::from_unix_nanos(10)),
+            completions,
+        )
+    }
+
+    /// The projection an OTEL-like emitter maps its one input value through.
+    fn value_projection() -> MappedValuesProjection {
+        let domain: DomainName = named("test_domain");
+        let emitter: EmitterName = named("test_emitter");
+        let values = [mapping("value", "input.value")];
+        let mapping = MappedValuesPlan::decide(&emitter, "OTEL", "otel", &values)
+            .expect("the mapping should lower");
+        MappedValuesProjection::compile(MappedValuesProjectionInit {
+            label: "OTEL",
+            namespace: "otel",
+            domain: &domain,
+            emitter: &emitter,
+            mapping: &mapping,
+            input_schema: input_schema().arrow_schema(),
+            udfs: None,
+        })
+        .expect("the test VALUES mapping should compile")
+    }
+
+    /// A scripted row request sink paired with its projection, and what the test reads back from
+    /// it: how many preparations it made, and every write it was handed.
+    struct ScriptedRequests {
+        sink: MappedRequestSink,
+        preparations: Arc<AtomicUsize>,
+        writes: Arc<Mutex<Vec<Vec<HandedRequest>>>>,
+    }
+
+    fn scripted_requests(answers: impl IntoIterator<Item = RequestAnswer>) -> ScriptedRequests {
+        let preparations = Arc::new(AtomicUsize::new(0));
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let sink = ScriptedRequestSink {
+            preparations: preparations.clone(),
+            writes: writes.clone(),
+            answers: answers.into_iter().collect(),
+        };
+        ScriptedRequests {
+            sink: MappedRequestSink::new(Box::new(sink), value_projection()),
+            preparations,
+            writes,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_whose_outcome_is_unknown_is_sent_again_unchanged_without_preparing_it_again()
+    {
+        let context = sink_context();
+        let ScriptedRequests {
+            mut sink,
+            preparations,
+            writes,
+        } = scripted_requests([
+            RequestAnswer::DeliverFirstThenFail,
+            RequestAnswer::DeliverAll,
+        ]);
+        let (first, first_completions) = acknowledged_batch(&[1, 2, 3]);
+        let mut batches = vec![first];
+        let mut row_requests = PreparedPayloads::default();
+
+        let failed = sink
+            .publish_batches(
+                &context,
+                EmitterPublication {
+                    batches: &mut batches,
+                    payloads: &mut PreparedPayloads::default(),
+                    requests: &mut PreparedPayloads::default(),
+                    row_requests: &mut row_requests,
+                },
+            )
+            .await
+            .expect_err("the sink failed before answering for its second request");
+        assert!(emitter_publish_error_is_retryable(&failed));
+        assert_eq!(batches[0].resolved_rows(), vec![true, true, false]);
+        assert!(
+            batches[0].pending_record_rows().is_empty(),
+            "the unanswered request still carries its row, so no attempt prepares it again"
+        );
+
+        // A batch buffered after the failed attempt is prepared on its own, after the request the
+        // emitter kept.
+        let (second, second_completions) = acknowledged_batch(&[4]);
+        batches.push(second);
+        sink.publish_batches(
+            &context,
+            EmitterPublication {
+                batches: &mut batches,
+                payloads: &mut PreparedPayloads::default(),
+                requests: &mut PreparedPayloads::default(),
+                row_requests: &mut row_requests,
+            },
+        )
+        .await
+        .expect("the retry is delivered");
+
+        assert_eq!(
+            *writes.lock(),
+            vec![
+                vec![
+                    HandedRequest::new(0, "preparation 0 of [0, 1]"),
+                    HandedRequest::new(1, "preparation 0 of [2]"),
+                ],
+                vec![
+                    HandedRequest::new(0, "preparation 0 of [2]"),
+                    HandedRequest::new(1, "preparation 1 of [0]"),
+                ],
+            ],
+            "the retry sends the kept request byte for byte, ahead of the one prepared after it"
+        );
+        assert_eq!(
+            preparations.load(Ordering::SeqCst),
+            2,
+            "each batch is prepared once"
+        );
+        assert!(row_requests.is_empty());
+        for completion in first_completions.into_iter().chain(second_completions) {
+            assert_eq!(completion.wait().await, AckOutcome::Ack);
+        }
+    }
+
+    /// A row request sink whose preparation answers for a row it was never handed.
+    struct ForeignRowSink;
+
+    impl SinkLifecycle for ForeignRowSink {}
+
+    #[async_trait]
+    impl RowRequestSink for ForeignRowSink {
+        async fn prepare(
+            &mut self,
+            rows: MappedSinkRows<'_>,
+        ) -> SinkPublishResult<RowRequestPreparation> {
+            let carrier = rows
+                .carriers
+                .first()
+                .expect("the host hands every preparation one carrier");
+            let mut members = Vec::new();
+            for row in carrier.selected_rows {
+                members.push(SinkRecordPosition {
+                    batch_index: carrier.batch_index,
+                    row_index: *row,
+                });
+            }
+            members.push(SinkRecordPosition {
+                batch_index: carrier.batch_index,
+                row_index: carrier.batch.num_rows(),
+            });
+            Ok(RowRequestPreparation {
+                requests: vec![PreparedRowRequest {
+                    members,
+                    body: b"every row and one more".to_vec(),
+                }],
+                rejected: Vec::new(),
+            })
+        }
+
+        async fn publish(
+            &mut self,
+            _requests: Vec<SinkRowRequest>,
+        ) -> PerRecordOutcome<SinkRecordId> {
+            panic!("a preparation that breaks its contract is never sent");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_preparation_that_breaks_its_contract_keeps_nothing_and_is_not_retried() {
+        let context = sink_context();
+        let mut sink = MappedRequestSink::new(Box::new(ForeignRowSink), value_projection());
+        let (batch, _completions) = acknowledged_batch(&[1, 2]);
+        let mut batches = vec![batch];
+        let mut row_requests = PreparedPayloads::default();
+
+        let error = sink
+            .publish_batches(
+                &context,
+                EmitterPublication {
+                    batches: &mut batches,
+                    payloads: &mut PreparedPayloads::default(),
+                    requests: &mut PreparedPayloads::default(),
+                    row_requests: &mut row_requests,
+                },
+            )
+            .await
+            .expect_err("the preparation names a row the write did not hand over");
+
+        assert_eq!(
+            *error.current_context(),
+            EmitterRuntimeError::RowPreparation {
+                batch_index: 0,
+                violation: RowPreparationViolation::Unselected { batch: 0, row: 2 },
+            }
+        );
+        assert!(!emitter_publish_error_is_retryable(&error));
+        assert!(row_requests.is_empty());
+        assert_eq!(batches[0].pending_record_rows(), vec![0, 1]);
     }
 
     #[test]
