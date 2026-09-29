@@ -29,9 +29,10 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 
 | ID | Package and invariant | Domain | Ordinary cases | Input limit |
 | --- | --- | --- | ---: | ---: |
+| `client-emitter-wire` | `nervix-client-wire` native emitter frame round-trip equality | all current request, reply, refusal and settlement variants with bounded exact schema, window, identity, branch and batch fields, v1 | 256 | 128 bytes |
 | `nspl-expression` | `nervix-nspl` expression render/reparse equality | current structured expressions, v1 | 256 | 128 bytes |
-| `nspl-model` | `nervix-nspl` canonical Model render/reparse equality | current generated Create Models, v1 | 256 | 128 bytes |
-| `nspl-archive-model` | `nervix-nspl` archive document/reparse equality | ordered generated Models, v1 | 64 | 128 bytes |
+| `nspl-model` | `nervix-nspl` canonical Model render/reparse equality | current generated Create Models, including client emitters, v2 | 256 | 128 bytes |
+| `nspl-archive-model` | `nervix-nspl` archive document/reparse equality | ordered generated Models, including client emitters, v2 | 64 | 128 bytes |
 | `backup-record-manifest` | `nervix-backup` record and manifest encode/decode equality | current domain record and manifest, v1 | 256 | 128 bytes |
 
 The inventory also records exact full test names, required features, corpus paths, case timeouts

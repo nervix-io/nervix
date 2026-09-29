@@ -154,6 +154,21 @@ impl RelayDispatchGate {
         RelayDispatchPermit { gate: self }
     }
 
+    /// A buffered owner batch cannot wait behind a schedule swap: the swap's drain includes that
+    /// batch, so waiting would hold the drain open. Reject it and let its source retry instead.
+    pub(in crate::runtime) fn try_acquire_dispatch(&self) -> Option<RelayDispatchPermit<'_>> {
+        if self.try_enter() {
+            Some(RelayDispatchPermit { gate: self })
+        } else {
+            self.clear_if_expired();
+            if self.try_enter() {
+                Some(RelayDispatchPermit { gate: self })
+            } else {
+                None
+            }
+        }
+    }
+
     pub(in crate::runtime) async fn acquire_owned(gate: &Arc<Self>) -> OwnedRelayDispatchPermit {
         gate.acquire().await;
         OwnedRelayDispatchPermit { gate: gate.clone() }
@@ -162,11 +177,9 @@ impl RelayDispatchGate {
     async fn acquire(&self) {
         loop {
             nervix_primitives::task::consume_budget().await;
-            self.increment_in_flight_dispatches();
-            if !self.closed.load(Ordering::SeqCst) {
+            if self.try_enter() {
                 return;
             }
-            self.decrement_in_flight_dispatches();
 
             self.clear_if_expired();
             let changed = self.changed.notified();
@@ -192,6 +205,15 @@ impl RelayDispatchGate {
                 changed.await;
             }
         }
+    }
+
+    fn try_enter(&self) -> bool {
+        self.increment_in_flight_dispatches();
+        if !self.closed.load(Ordering::SeqCst) {
+            return true;
+        }
+        self.decrement_in_flight_dispatches();
+        false
     }
 
     /// Whether an ownership or lifecycle operation currently fences this relay.

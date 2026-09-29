@@ -503,6 +503,14 @@ earlier attempt left unanswered, with the bytes and members it was first written
 emitter's drain sends every Export request it prepared and did not learn the outcome of, and the
 emitter buffer counts those members as work the node still holds until they resolve.
 
+A native client emitter reaches its success boundary only on application ACK. Force flush prepares
+its bounded Arrow IPC batches, but a waiting consumer read or a batch already sent to a session
+does not drain them. Closing public sessions during intake stop detaches their consumers and
+revokes attempts; remaining prepared batches wait for another consumer within the physical drain
+deadline. On deadline expiry terminal teardown cancels the emitter task and discards volatile
+attempt history. An attached upstream source may replay after restart, including a batch whose
+application effect happened but whose ACK was lost. No durable consumer cursor is restored.
+
 An HTTP emitter force-flushes its collected records into one request per eligible record, then
 waits for complete successful final response headers. Each attempt and retry wait remains bounded
 by the remaining physical drain deadline, even in a paced domain. A request still unanswered at

@@ -343,7 +343,7 @@ fn gen_json_path(g: &mut ByteGen) -> nervix_models::JsonPath {
 
 pub(crate) fn gen_model(bytes: &[u8]) -> Model<RequestedResourceVersion> {
     let mut g = ByteGen::new(bytes);
-    match g.next_u8() % 30 {
+    match g.next_u8() % 31 {
         0 => {
             let field_count = usize::from(g.next_u8());
             let field_count = (field_count % 5) + 1;
@@ -1091,6 +1091,48 @@ pub(crate) fn gen_model(bytes: &[u8]) -> Model<RequestedResourceVersion> {
                     value: "127.0.0.1:514".to_string(),
                 },
             ],
+        }),
+        30 => Model::Emitter(CreateEmitter {
+            name: g.name(),
+            from: ProcessorInputs::single(g.name()),
+            body: nervix_models::EmitterBody::Client,
+            sink: Box::new(EmitSink::Client { schema: g.name() }),
+            publishing_mode: EmitterPublishingMode::ClientAck {
+                window: if g.bool() {
+                    nervix_models::AckWindow::Sequential
+                } else {
+                    nervix_models::AckWindow::Parallel {
+                        max: g.bounded_nonzero_u64(nonzero!(1u64), nonzero!(16u64)),
+                    }
+                },
+                ack_timeout: format!("{}s", g.bounded_u64(1, 60)),
+                retry_policy: RetryPolicy {
+                    backoff: "100ms".to_string(),
+                    max_backoff: "1s".to_string(),
+                },
+            },
+            batch: Some(nervix_models::EmitterBatchPolicy {
+                max_messages: nervix_models::BatchMessageLimit::try_from(g.bounded_u64(1, 65_536))
+                    .assured("generated count is within the client batch limit"),
+                max_size: "1MiB".parse().assured("the generated IPC size is positive"),
+            }),
+            flush_policy: if g.bool() {
+                FlushPolicy::Immediate
+            } else {
+                FlushPolicy::Each {
+                    interval: "100ms".to_string(),
+                    max_batch_size: "1MiB".to_string(),
+                }
+            },
+            mode: if g.bool() {
+                AckMode::Attached
+            } else {
+                AckMode::Detached
+            },
+            error_policies: ErrorPolicies::handled_by_log(),
+            construction: crate::semantic_program::parse_route_construction("INHERIT ALL")
+                .assured("the generated client construction parses"),
+            materialized_state: Vec::new(),
         }),
         _ => Model::Ingestor(CreateIngestor {
             name: g.name(),

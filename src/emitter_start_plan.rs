@@ -38,11 +38,11 @@ use nervix_connector_otel::{
 use nervix_connector_postgres::PostgresConflictAction;
 use nervix_connector_sqs::SqsPublishingMode;
 use nervix_models::{
-    AckWindow, Assignment, AssignmentTarget, ChannelName, ClickHouseValueMapping,
-    ClientConfigEntry, ClientName, ClientPoolBounds, ClientResourceMount, CollectionName,
-    CreateEmitter, EmitSink, EmitterBatchPolicy, EmitterPublishingMode, Expression, FieldName,
-    HttpOrigin, IcebergCatalog, IcebergStorageBackend, Literal, Model, QueueName, RetryPolicy,
-    RouteConstruction, SubjectName, TableName, TopicName,
+    AckWindow, Assignment, AssignmentTarget, CLIENT_CONSUMER_SESSION_BYTES, ChannelName,
+    ClickHouseValueMapping, ClientConfigEntry, ClientName, ClientPoolBounds, ClientResourceMount,
+    CollectionName, CreateEmitter, EmitSink, EmitterBatchPolicy, EmitterPublishingMode, Expression,
+    FieldName, HttpOrigin, IcebergCatalog, IcebergStorageBackend, Literal, Model, QueueName,
+    RetryPolicy, RouteConstruction, SchemaName, SubjectName, TableName, TopicName,
 };
 use nervix_vm::{
     SemanticScopePolicy, lower_route_construction,
@@ -127,6 +127,8 @@ pub(super) enum EmitterStartPlanError {
     ZeroAckTimeout,
     #[error("{sink} emitter declares no BATCH MAX MESSAGES <n> MAX SIZE <bytes>")]
     BatchRequired { sink: &'static str },
+    #[error("CLIENT emitter batch maximum {bytes} bytes exceeds the 32 MiB consumer window")]
+    ClientBatchTooLarge { bytes: u64 },
     #[error("HTTP emitter client '{client}' declares no http or https origin endpoint")]
     InvalidHttpEndpoint { client: ClientName },
     #[error("{sink} emitter '{emitter}' requires at least one VALUES mapping")]
@@ -282,7 +284,10 @@ impl EmitterStartPlanError {
             sink: sink.transport_label(),
             expected: sink.expected_client_type(),
             found: Self::found_label(client),
-            client: sink.client().clone(),
+            client: sink
+                .client()
+                .verified("only external sinks resolve client Models")
+                .clone(),
         })
     }
 
@@ -727,6 +732,7 @@ impl IcebergSinkPlan<DeclaredClientConfig> {
 /// The sink one emitter publishes to, with each connector's typed configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum EmitterSinkPlan<Config = ResolvedClientConfig> {
+    Client(ClientSinkPlan),
     Http(HttpSinkPlan<Config>),
     Kafka(KafkaSinkPlan<Config>),
     Pulsar(PulsarSinkPlan<Config>),
@@ -753,6 +759,7 @@ impl<Config> EmitterSinkPlan<Config> {
     /// message.
     pub(super) fn batch(&self) -> Option<EmitterBatchPolicy> {
         match self {
+            Self::Client(plan) => Some(plan.batch),
             // Every request carries one source record.
             Self::Http(_) => None,
             Self::Kafka(plan) => plan.batch,
@@ -777,6 +784,7 @@ impl<Config> EmitterSinkPlan<Config> {
     /// The transport this sink publishes over, as the emitter's diagnostics name it.
     pub(super) fn label(&self) -> &'static str {
         match self {
+            Self::Client(_) => "client",
             Self::Http(_) => "http",
             Self::Kafka(_) => "kafka",
             Self::Pulsar(_) => "pulsar",
@@ -806,6 +814,7 @@ impl EmitterSinkPlan<DeclaredClientConfig> {
         ) -> Result<ResolvedClientConfig, Failure>,
     ) -> Result<EmitterSinkPlan, Failure> {
         let resolved = match self {
+            Self::Client(plan) => EmitterSinkPlan::Client(plan),
             Self::Http(plan) => EmitterSinkPlan::Http(plan.resolve_clients(resolve)?),
             Self::Kafka(plan) => EmitterSinkPlan::Kafka(plan.resolve_clients(resolve)?),
             Self::Pulsar(plan) => EmitterSinkPlan::Pulsar(plan.resolve_clients(resolve)?),
@@ -847,6 +856,15 @@ pub(super) struct EmitterStartPlan<Config = ResolvedClientConfig> {
     pub(super) sink: EmitterSinkPlan<Config>,
 }
 
+/// The native output contract whose deliveries are acknowledged by session consumers.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ClientSinkPlan {
+    pub(super) schema: SchemaName,
+    pub(super) window: AckWindow,
+    pub(super) ack_timeout: Duration,
+    pub(super) batch: EmitterBatchPolicy,
+}
+
 impl EmitterStartPlan<DeclaredClientConfig> {
     /// Decides the plan for `emitter` from the client Models its sink names.
     pub(super) fn decide(
@@ -856,10 +874,42 @@ impl EmitterStartPlan<DeclaredClientConfig> {
         let sink = emitter.sink.as_ref();
         let mode = &emitter.publishing_mode;
         let retry_policy = Self::decide_retry_policy(mode.retry_policy())?;
+        if let EmitSink::Client { schema } = sink {
+            let EmitterPublishingMode::ClientAck {
+                window,
+                ack_timeout,
+                ..
+            } = mode
+            else {
+                return Err(EmitterStartPlanError::unsupported_mode(sink, mode));
+            };
+            let ack_timeout = EmitterDurationSetting::AckTimeout.parse(ack_timeout)?;
+            if ack_timeout.is_zero() {
+                return Err(Report::new(EmitterStartPlanError::ZeroAckTimeout));
+            }
+            let batch = Self::require_batch(sink, emitter.batch)?;
+            if batch.max_size.bytes().get() > CLIENT_CONSUMER_SESSION_BYTES {
+                return Err(Report::new(EmitterStartPlanError::ClientBatchTooLarge {
+                    bytes: batch.max_size.bytes().get(),
+                }));
+            }
+            return Ok(Self {
+                retry_policy,
+                sink: EmitterSinkPlan::Client(ClientSinkPlan {
+                    schema: schema.clone(),
+                    window: *window,
+                    ack_timeout,
+                    batch,
+                }),
+            });
+        }
+        let client_name = sink
+            .client()
+            .verified("every non-CLIENT sink names an external client");
         let Some(client) = clients.client else {
             return Err(Report::new(EmitterStartPlanError::MissingClient {
                 sink: sink.transport_label(),
-                client: sink.client().clone(),
+                client: client_name.clone(),
             }));
         };
         let sink_plan = match (sink, client) {

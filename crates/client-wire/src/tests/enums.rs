@@ -13,6 +13,9 @@ use crate::{
     codec::UndeclaredEnumValue,
     command::{ALL_EXECUTION_REFERENCE_CONFLICTS, ALL_UNKNOWN_OUTCOME_CAUSES},
     common::{ALL_MODEL_KINDS, ALL_OUTCOME_ORIGINS},
+    consumer::{
+        ALL_EMITTER_CLOSE_DISPOSITIONS, ALL_EMITTER_OPEN_REFUSALS, ALL_EMITTER_SETTLEMENTS,
+    },
     domain::ALL_DOMAIN_STATUSES,
     domain_clock::ALL_DOMAIN_CLOCK_ATTACHMENT_END_REASONS,
     event::ALL_NOTICE_LEVELS,
@@ -163,6 +166,18 @@ fn every_enum_maps_exactly_to_its_schema_enum() {
         wire::ProducerAdmission::ENUM_VALUES,
     );
     assert_exact_mapping(ALL_PRODUCER_REFUSALS, wire::ProducerRefusal::ENUM_VALUES);
+    assert_exact_mapping(
+        ALL_EMITTER_OPEN_REFUSALS,
+        wire::EmitterOpenRefusal::ENUM_VALUES,
+    );
+    assert_exact_mapping(
+        ALL_EMITTER_SETTLEMENTS,
+        wire::EmitterSettlement::ENUM_VALUES,
+    );
+    assert_exact_mapping(
+        ALL_EMITTER_CLOSE_DISPOSITIONS,
+        wire::EmitterCloseDisposition::ENUM_VALUES,
+    );
     assert_exact_mapping(
         ALL_PROCESSING_FAILURES,
         wire::ProcessingFailure::ENUM_VALUES,

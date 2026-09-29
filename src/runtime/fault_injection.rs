@@ -96,4 +96,9 @@ impl ConfiguredFaultInjection {
     ) -> bool {
         false
     }
+
+    pub(in crate::runtime) async fn pause_owner_relay_fanout_if_armed(&self, _domain: &DomainName) {
+    }
+
+    pub(in crate::runtime) fn mark_owner_relay_fanout_complete(&self, _domain: &DomainName) {}
 }

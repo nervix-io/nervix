@@ -8,13 +8,49 @@
 
 use meticulous::ResultExt as _;
 use nervix_client_wire::CommandRequest;
+#[cfg(feature = "testing")]
+use nervix_consensus::{ConsensusTestProbe, StorageBoundary};
 use nervix_models::{DomainName, DomainSchedule, PlacementPolicy};
 use nervix_recovery::Discarded as _;
 
+#[cfg(feature = "testing")]
+use super::super::test_fixtures::build_test_service_with_probe;
 use super::super::{
     subscription::SessionSubscriptions,
     test_fixtures::{TestService, build_test_service, named, test_execution_reference},
 };
+
+#[cfg(feature = "testing")]
+#[nervix_primitives::test]
+async fn drain_reports_cordon_storage_failure_without_cordoning_the_node() {
+    let probe = ConsensusTestProbe::default();
+    let TestService {
+        service,
+        registry,
+        path,
+    } = build_test_service_with_probe(true, probe.clone()).await;
+    let local_node = service.inner.consensus.local_node_id().clone();
+    probe.storage_fault().fail_next(
+        format!("cordon-node:{local_node}"),
+        StorageBoundary::BeforeCommit,
+    );
+
+    let result = service.drain_node(local_node.clone(), None).await;
+    assert!(!result.succeeded(), "{result:?}");
+    assert!(result.message.contains("consensus storage"), "{result:?}");
+    assert!(
+        !service
+            .inner
+            .consensus
+            .cordoned_node_ids()
+            .await
+            .contains(&local_node)
+    );
+
+    drop(service);
+    drop(registry);
+    let _ = std::fs::remove_dir_all(path);
+}
 
 #[nervix_primitives::test]
 async fn schedule_publication_keeps_the_basis_it_prepared() {

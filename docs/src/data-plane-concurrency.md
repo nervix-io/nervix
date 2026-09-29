@@ -287,6 +287,31 @@ A session's producer credit is held under a short mutex, taken by the receive lo
 arrives and returned by the producer's task before it queues that batch's reply, so a client that
 sends only after reading a reply always finds room. The mutex never crosses an await.
 
+### Client emitter attempts
+
+Each running native client emitter has one actor for its volatile output. Its channel serializes
+consumer attach/detach, prepared-payload publication, assignment, settlement, timeout and
+cancellation. An attempt has exactly one owner and ACK reference. Revocation returns its worker's
+batch and byte credit and marks that reference stale before the payload can be assigned again.
+Sequential dispatch checks every earlier unresolved delivery of the same source relay and
+concrete branch; parallel dispatch counts assigned attempts against that stream's shared window.
+The actor keeps only a bounded queue of completed references for duplicate ACK recognition.
+
+The node's consumer grant and retained-output byte counters are separate atomics. A session's
+consumer count and credit use one short mutex; neither that mutex nor a runtime map guard crosses
+an await. A retained payload reserves actual bytes until application settlement or cancellation,
+and its prepared Arrow bytes and source members remain owned by the emitter host until the
+result is applied. A consumer read uses an asynchronous receiver lock only for that consumer; it
+cannot hold the session receive loop or the ordered command lane. Settlement is a concurrent
+request, so a quiescing command cannot prevent the application ACK it waits for.
+The `shuttle_competing_consumer_grants_never_exceed_the_node_budget` check explores competing
+session grants against the production atomic budget. The
+`shuttle_consumer_loss_and_ack_race_release_one_retained_delivery` check runs the production
+delivery owner with deterministic attempt references and no timer wakeups to explore ACK versus
+consumer detachment. The `shuttle_publish_cancellation_and_ack_race_release_one_reservation`
+check also races publisher cancellation against application ACK and verifies retained byte credit
+returns once. Timeout revocation is covered by the ordinary owner and public scenarios.
+
 ### Node quiesce accounting
 
 Every entity on a node keeps one set of quiesce counts. A drain reads them to decide whether the
@@ -346,6 +371,20 @@ The engagement state is consulted only while the gate is closed. Once all earlie
 the engagement owns a lease and the protected mutation can proceed. The acquisition deadline bounds
 waiting for that fence; a successfully acquired lease remains engaged until its owner releases or
 drops it.
+
+An owner buffer admits a batch before its fan-out begins. Fan-out therefore takes a nonwaiting
+dispatch permit before it reads any local or remote runtime-consumer route and holds the permit
+until fan-out has attached the consumer ACK shares and resolved the owner's share. A schedule swap
+cannot replace the routes while that permit is live. If the gate has closed first, fan-out fails
+the record ACKs and returns the batch for source retry. Waiting for the gate here would deadlock
+the swap, because the swap's drain counts the
+buffered batch. The same sequentially consistent gate protocol orders the nonwaiting attempt and
+the swap engagement.
+
+The three-node attached-emitter move scenario injects a stale zero buffered-batch drain report
+while an owner batch is paused. That puts fan-out beside the local swap even when the coordinator's
+usual drain would wait for the batch, and verifies that the local gate independently prevents an
+ACK for a batch the moved consumer missed.
 
 A WASM state reset adds a narrower gate without putting a lock on relay dispatch. Under a short
 whole-relay publication fence, the relay atomically replaces an immutable list of scoped reset
@@ -687,6 +726,7 @@ A family of names means each member runs independently through the recipe.
 | Force-flush obligations (`src/runtime/force_flush.rs`) | `shuttle_two_participant_generation_waits_for_every_obligation` prevents completion before all participants live at publication complete and redelivers a dropped, unhandled completion; `shuttle_stale_completions_never_clear_a_newer_generation` prevents an old completion from clearing new work; `shuttle_published_generation_wakes_a_waiting_participant` catches a lost publication wakeup; `shuttle_participant_lifecycle_balances_obligations_through_close` balances `pending()` across subscribe, request, participant drop, and close. |
 | Ingestor intake (`src/runtime/ingestors/source_shuttle_tests.rs`; `src/runtime/ingestor_quiesce.rs`) | `shuttle_broker_source_observes_engagement_during_dispatch`, `shuttle_paced_source_observes_engagement_during_dispatch`, and `shuttle_request_source_observes_engagement_during_dispatch` exercise host-loop engagement for memory pressure, entity gate, handoff, and shutdown: after engagement returns, no further payload dispatches, and a change during dispatch is observed. `shuttle_an_open_control_answers_intake_without_waiting_on_retained_payloads` keeps the open decision independent of a retained-payload lock. |
 | Relay dispatch gate and fan-out (`src/runtime/relay_channel_shuttle_tests.rs`) | `shuttle_dispatch_permits_never_overlap_a_quiescent_lease_and_release_frees_every_waiter`, `shuttle_overlapping_gate_leases_all_release_before_dispatch_resumes`, `shuttle_expired_gate_fence_frees_every_waiter_without_reporting_quiescence`, `shuttle_canceled_dispatch_returns_its_permit_to_the_gate_fence`, and `shuttle_dispatches_parked_behind_a_lease_wake_only_on_its_release` hold the fence, lease, expiry, cancellation, and waiter contract; in-flight dispatches drain before quiescence. `shuttle_capacity_shrink_keeps_buffered_batches_and_wakes_publishers_after_the_drain`, `shuttle_capacity_growth_admits_waiting_publishers_without_a_take`, `shuttle_publishers_wait_for_the_slowest_consumer_and_skip_consumers_that_leave`, and `shuttle_losing_every_consumer_delivers_or_returns_the_waiting_batch` keep queued batches across capacity changes, release waiting publishers, and return or deliver each batch when receivers leave. |
+| Relay owner fan-out (`src/runtime/relay_boundary_shuttle_tests.rs`) | `shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves` keeps a live sibling from completing a source ACK while another attached consumer leaves under a schedule fence; after release, a retry reaches the live consumer. |
 | Assignment authority and state updates (`src/runtime/state_store_shuttle_tests.rs`, `materialized_state.rs`, `kafka_offset_state.rs`) | `shuttle_a_rebind_yields_until_the_operation_admitted_under_its_replaced_binding_finishes` and `shuttle_no_operation_admitted_under_a_superseded_binding_outlives_its_superseding_rebind` fence admitted work even when generations reuse an even or odd counter. `shuttle_snapshot_installation_never_overlaps_origination_or_a_capture` keeps exclusive installation apart from originators and captures. `shuttle_an_originator_update_proceeds_while_the_assignment_barrier_is_held` and `shuttle_a_committed_offset_proceeds_while_the_assignment_barrier_is_held` keep ordinary admitted updates independent of a capture's barrier. |
 | ACK tree (`src/runtime_ack.rs`) | The `shuttle_tests` checks `concurrent_attachment_and_final_ack_leave_exact_tracking`, `concurrent_wait_and_active_ack_exempt_the_remaining_root`, `concurrent_wait_release_and_completion_leave_no_tracking`, `attachment_losing_its_reservation_to_completion_resolves_no_share`, `attachment_losing_its_reservation_to_completion_parks_no_share`, `wait_release_racing_the_last_active_ack_holds_domain_and_ingestor_handoff_once`, and `attachment_racing_the_last_active_share_into_wait_publishes_one_active_share` keep pending, active, and handoff counts exact across attachment and `REQUIRED WAIT`. `concurrent_success_and_failure_choose_one_terminal_transition`, `fan_out_across_ingestors_with_a_failing_root_resolves_each_root_once_with_exact_counts`, and `parked_and_fanned_out_roots_hold_exact_counts_at_every_quiescent_point` require one terminal result per root, one observed completion, and zero outstanding counts after resolution. |
 | Forwarded acknowledgement silence (`src/runtime/remote_dispatch_shuttle_tests.rs`) | `shuttle_a_terminal_outcome_racing_the_final_sweep_resolves_the_share_once` races the receiver's terminal outcome against the sweep that would fail a forwarded share: exactly one of them removes it, and the root delivers that one's outcome. `shuttle_a_report_racing_the_final_sweep_keeps_the_share_it_reached` races a report against the same sweep: a report that reached the share keeps it pending with its root unresolved, and only a report that found it removed lets the sweep fail it. |

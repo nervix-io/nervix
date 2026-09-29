@@ -2,6 +2,7 @@
 
 mod backups;
 mod conformance;
+mod consumers;
 mod domain_clocks;
 mod enums;
 mod events;

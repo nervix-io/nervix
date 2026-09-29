@@ -699,11 +699,9 @@ impl SessionServiceImpl {
                         plan.scope,
                     )
                     .await?;
-                    return Err(
-                        Report::new(error).change_context(WasmStateResetError::Publish {
-                            processor: processor.clone(),
-                        }),
-                    );
+                    return Err(error.change_context(WasmStateResetError::Publish {
+                        processor: processor.clone(),
+                    }));
                 }
             } else {
                 plan.published = true;
@@ -772,11 +770,11 @@ impl SessionServiceImpl {
                     plan.scope,
                     WasmStateResetPhase::Ready,
                 ) {
-                    return Err(Report::new(error).change_context(
-                        WasmStateResetError::CommittedNotUsable {
+                    return Err(
+                        error.change_context(WasmStateResetError::CommittedNotUsable {
                             processor: processor.clone(),
-                        },
-                    ));
+                        }),
+                    );
                 }
             }
         }

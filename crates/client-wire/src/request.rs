@@ -12,6 +12,9 @@ use crate::{
     choice::ChoiceLookupRequest,
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_size},
     common::{RequestId, WireValueError},
+    consumer::{
+        CloseEmitterRequest, OpenEmitterRequest, ReadEmitterBatchRequest, SettleEmitterBatchRequest,
+    },
     frame::{ClientFrame, EncodedFrame, VerifiedFrame},
     limits::SessionLimits,
     producer::{CloseIngestorRequest, OpenIngestorRequest, SubmitBatchRequest},
@@ -178,6 +181,10 @@ pub enum ClientRequest {
     OpenIngestor(OpenIngestorRequest),
     SubmitBatch(SubmitBatchRequest),
     CloseIngestor(CloseIngestorRequest),
+    OpenEmitter(OpenEmitterRequest),
+    ReadEmitterBatch(ReadEmitterBatchRequest),
+    SettleEmitterBatch(SettleEmitterBatchRequest),
+    CloseEmitter(CloseEmitterRequest),
 }
 
 /// One request of a session.
@@ -379,6 +386,22 @@ impl ClientRequest {
                 wire::ClientRequest::CloseIngestorRequest,
                 close.encode(encoder),
             ),
+            Self::OpenEmitter(open) => EncodedUnion::new(
+                wire::ClientRequest::OpenEmitterRequest,
+                open.encode(encoder)?,
+            ),
+            Self::ReadEmitterBatch(read) => EncodedUnion::new(
+                wire::ClientRequest::ReadEmitterBatchRequest,
+                read.encode(encoder),
+            ),
+            Self::SettleEmitterBatch(settle) => EncodedUnion::new(
+                wire::ClientRequest::SettleEmitterBatchRequest,
+                settle.encode(encoder)?,
+            ),
+            Self::CloseEmitter(close) => EncodedUnion::new(
+                wire::ClientRequest::CloseEmitterRequest,
+                close.encode(encoder),
+            ),
         };
         Ok(union)
     }
@@ -502,6 +525,22 @@ impl ClientRequest {
             wire::ClientRequest::CloseIngestorRequest => {
                 let close = request_member(message.request_as_close_ingestor_request());
                 Self::CloseIngestor(CloseIngestorRequest::decode(decoder, close)?)
+            }
+            wire::ClientRequest::OpenEmitterRequest => {
+                let open = request_member(message.request_as_open_emitter_request());
+                Self::OpenEmitter(OpenEmitterRequest::decode(decoder, open)?)
+            }
+            wire::ClientRequest::ReadEmitterBatchRequest => {
+                let read = request_member(message.request_as_read_emitter_batch_request());
+                Self::ReadEmitterBatch(ReadEmitterBatchRequest::decode(decoder, read)?)
+            }
+            wire::ClientRequest::SettleEmitterBatchRequest => {
+                let settle = request_member(message.request_as_settle_emitter_batch_request());
+                Self::SettleEmitterBatch(SettleEmitterBatchRequest::decode(decoder, settle)?)
+            }
+            wire::ClientRequest::CloseEmitterRequest => {
+                let close = request_member(message.request_as_close_emitter_request());
+                Self::CloseEmitter(CloseEmitterRequest::decode(decoder, close)?)
             }
             undeclared => {
                 return Err(decoder.unknown_union("ClientMessage.request", undeclared.0));

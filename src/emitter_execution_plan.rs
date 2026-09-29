@@ -27,6 +27,7 @@ use triomphe::Arc;
 use crate::{
     emitter_start_plan::{DeclaredClientConfig, EmitterClientModels, EmitterStartPlan},
     registry::{DomainActivationPlan, LoweredFilter},
+    runtime_schema::CompiledSchema,
 };
 
 const HTTP_REQUEST_NAMESPACE: &str = "http_request";
@@ -47,6 +48,11 @@ pub(crate) enum EmitterExecutionPlanError {
     MissingCodec {
         emitter: EmitterName,
         codec: CodecName,
+    },
+    #[error("emitter '{emitter}' exports a missing CLIENT output schema '{schema}'")]
+    MissingClientSchema {
+        emitter: EmitterName,
+        schema: nervix_models::SchemaName,
     },
     #[error("emitter '{emitter}' cannot plan its sink")]
     Sink { emitter: EmitterName },
@@ -101,6 +107,8 @@ pub(crate) struct EmitterExecutionPlan {
     pub(crate) inputs: Vec<EmitterInputPlan>,
     pub(crate) collect_policy: Option<InputCollectPolicy>,
     pub(crate) codec: Option<CodecName>,
+    /// The validated schema of the rows handed to this emitter's sink.
+    pub(crate) output_schema: Arc<CompiledSchema>,
     pub(crate) sink: EmitterStartPlan<DeclaredClientConfig>,
     pub(crate) route: Option<EmitterRoutePlan>,
     pub(crate) http_request: Option<SpannedNode<Program>>,
@@ -116,8 +124,12 @@ impl EmitterExecutionPlan {
         nodes: &ScheduledNodes,
         activation: &DomainActivationPlan,
     ) -> error_stack::Result<Self, EmitterExecutionPlanError> {
-        let client_node = nodes.get(&NodeRef::new(ModelKind::Client, emitter.sink.client()));
-        let client = client_node.map(|node| node.config.as_ref());
+        let client = match emitter.sink.client() {
+            Some(name) => nodes
+                .get(&NodeRef::new(ModelKind::Client, name))
+                .map(|node| node.config.as_ref()),
+            None => None,
+        };
         let catalog_client = match emitter.sink.catalog_client() {
             Some(catalog) => nodes
                 .get(&NodeRef::new(ModelKind::Client, catalog))
@@ -171,19 +183,42 @@ impl EmitterExecutionPlan {
             })
         })?;
         let codec = emitter.body.codec().cloned();
-        let output_schema = match &codec {
-            Some(codec) => {
-                let planned = activation.codecs.get(codec).ok_or_else(|| {
-                    Report::new(EmitterExecutionPlanError::MissingCodec {
+        let output_schema = match emitter.sink.as_ref() {
+            nervix_models::EmitSink::Client { schema } => activation
+                .schemas
+                .get(schema)
+                .ok_or_else(|| {
+                    Report::new(EmitterExecutionPlanError::MissingClientSchema {
                         emitter: emitter.name.clone(),
-                        codec: codec.clone(),
+                        schema: schema.clone(),
                     })
-                })?;
-                planned.schema.arrow_schema()
-            }
-            None => input_schema.clone(),
+                })?
+                .clone(),
+            _ => match &codec {
+                Some(codec) => {
+                    let planned = activation.codecs.get(codec).ok_or_else(|| {
+                        Report::new(EmitterExecutionPlanError::MissingCodec {
+                            emitter: emitter.name.clone(),
+                            codec: codec.clone(),
+                        })
+                    })?;
+                    planned.schema.clone()
+                }
+                None => activation
+                    .relays
+                    .get(
+                        emitter
+                            .from
+                            .relays()
+                            .first()
+                            .verified("an emitter has an input relay"),
+                    )
+                    .verified("the input relay was resolved above")
+                    .schema
+                    .clone(),
+            },
         };
-        let route = Self::route(emitter, &input_schema, &output_schema)?;
+        let route = Self::route(emitter, &input_schema, &output_schema.arrow_schema())?;
         let http_request = Self::http_request(emitter)?;
         let ordering_group = Self::ordering_group(emitter, &input_schema)?;
         Ok(Self {
@@ -192,6 +227,7 @@ impl EmitterExecutionPlan {
             inputs,
             collect_policy: emitter.from.collect_policy.clone(),
             codec,
+            output_schema,
             sink,
             route,
             http_request,
@@ -207,7 +243,8 @@ impl EmitterExecutionPlan {
         input: &arrow_schema::Schema,
         output: &arrow_schema::Schema,
     ) -> error_stack::Result<Option<EmitterRoutePlan>, EmitterExecutionPlanError> {
-        let codec_route = emitter.body.codec().is_some();
+        let codec_route = emitter.body.codec().is_some()
+            || matches!(emitter.body, nervix_models::EmitterBody::Client);
         if emitter.construction.is_empty()
             && !matches!(emitter.sink.as_ref(), nervix_models::EmitSink::Http { .. })
         {

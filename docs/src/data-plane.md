@@ -81,6 +81,12 @@ Detached consumers receive the batch without an upstream ACK dependency. The sou
 only when all attached descendants succeed. Any attached failure fails the shared source attempt,
 even when another descendant has already completed an external side effect.
 
+The relay owner holds a dispatch permit while it selects and fans out to attached consumers. If a
+schedule swap has already closed that gate before a buffered batch begins fan-out, the owner fails
+the batch's ACKs and lets the source retry under the new schedule. This prevents a sibling attached
+consumer on the old node from completing the source ACK while a moving consumer is absent from the
+owner's routes.
+
 A batch that a relay owner routes to another node for its attached consumers carries record
 acknowledgements for them. If no attached consumer of the relay runs on that node when the batch
 reaches its runtime, because the consumer moved away after the owner routed the batch, the batch
