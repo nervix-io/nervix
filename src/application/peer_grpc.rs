@@ -3,12 +3,14 @@
 //! Layer: edges.
 //!
 //! - **Owns.** The connect options a client uses to reach a peer's session service.
-//! - **Depends on.** The internal TLS material and the credentials a client presents.
+//! - **Depends on.** The internal TLS material, the credentials a client presents, and the node's
+//!   resolver for named peer endpoints.
 //! - **Must not know.** What the caller asks the peer to do.
 
 use nervix_client_core::{
-    ConnectOptions as ClientConnectOptions, TlsRequirement as ClientTlsRequirement,
+    ConnectDns, ConnectOptions as ClientConnectOptions, TlsRequirement as ClientTlsRequirement,
 };
+use nervix_dns::DnsResolver;
 
 use super::{
     authentication::BasicAuthCredentials,
@@ -18,8 +20,9 @@ use super::{
 pub(in crate::application) fn grpc_client_connect_options(
     server: &str,
     credentials: Option<&BasicAuthCredentials>,
+    dns: Option<&DnsResolver>,
 ) -> ClientConnectOptions {
-    ClientConnectOptions {
+    let mut options = ClientConnectOptions {
         tls_requirement: Some(ClientTlsRequirement::Preferred),
         ca_certificate_pem: server
             .starts_with("https://")
@@ -28,5 +31,9 @@ pub(in crate::application) fn grpc_client_connect_options(
         username: credentials.map(|credentials| credentials.username.clone()),
         password: credentials.map(|credentials| credentials.password.clone()),
         ..ClientConnectOptions::default()
+    };
+    if let Some(dns) = dns {
+        options.dns = ConnectDns::Resolver(dns.clone());
     }
+    options
 }

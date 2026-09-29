@@ -2,13 +2,16 @@
 //!
 //! - **Owns.** The connect options, the channel a server is reached over, the `authorization`
 //!   metadata every call carries, and the directory of servers a lost session reconnects to.
-//! - **Depends on.** tonic's transport and rustls.
+//! - **Depends on.** tonic's transport, rustls, and the native DNS resolver.
 //! - **Must not know.** What the calls on a channel carry.
 
 use std::{str::FromStr as _, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use hyper_util::client::legacy::connect::HttpConnector;
 use indexmap::IndexSet;
+use meticulous::OptionExt as _;
+use nervix_dns::{DnsConfiguration, DnsConfigurationError, DnsResolver};
 use nervix_recovery::Discarded as _;
 use rustls::crypto::aws_lc_rs;
 use tonic::{
@@ -45,6 +48,8 @@ pub enum TlsRequirement {
 
 #[derive(Debug, Clone)]
 pub struct ConnectOptions {
+    /// Native DNS configuration, or an existing resolver shared with this client's owner.
+    pub dns: ConnectDns,
     pub tls_requirement: Option<TlsRequirement>,
     pub ca_certificate_pem: Option<Vec<u8>>,
     pub username: Option<String>,
@@ -59,6 +64,7 @@ pub struct ConnectOptions {
 impl Default for ConnectOptions {
     fn default() -> Self {
         Self {
+            dns: ConnectDns::Configuration(DnsConfiguration::system()),
             tls_requirement: None,
             ca_certificate_pem: None,
             username: None,
@@ -69,6 +75,15 @@ impl Default for ConnectOptions {
             retry_timeout: Duration::from_secs(120),
         }
     }
+}
+
+/// Where a native client's Hickory resolver comes from.
+#[derive(Debug, Clone)]
+pub enum ConnectDns {
+    /// Load the named resolver and hosts files once for this client.
+    Configuration(DnsConfiguration),
+    /// Share a resolver already owned by the caller's runtime.
+    Resolver(DnsResolver),
 }
 
 impl ConnectOptions {
@@ -94,6 +109,7 @@ impl ConnectOptions {
 #[derive(Clone)]
 pub(crate) struct GrpcConnector {
     options: ConnectOptions,
+    dns: Option<DnsResolver>,
     /// The `authorization` metadata, built once from the credentials when the client has them.
     authorization: Option<AsciiMetadataValue>,
 }
@@ -106,8 +122,23 @@ impl GrpcConnector {
         };
         Ok(Self {
             options,
+            dns: None,
             authorization,
         })
+    }
+
+    /// Load DNS at the client's safe setup boundary, or reuse its owner's resolver.
+    pub(crate) async fn load_dns(
+        &mut self,
+    ) -> Result<(), error_stack::Report<DnsConfigurationError>> {
+        let dns = match &self.options.dns {
+            ConnectDns::Configuration(configuration) => {
+                DnsResolver::load(configuration.clone()).await?
+            }
+            ConnectDns::Resolver(dns) => dns.clone(),
+        };
+        self.dns = Some(dns);
+        Ok(())
     }
 
     pub(crate) async fn connect(&self, server: &Url) -> Result<Channel, ClientError> {
@@ -129,7 +160,19 @@ impl GrpcConnector {
                 .tls_config(tls)
                 .map_err(ClientError::ConfigureTls)?;
         }
-        endpoint.connect().await.map_err(ClientError::ConnectServer)
+        let dns = self
+            .dns
+            .as_ref()
+            .assured("Client::connect_with_options loads DNS before opening any server channel");
+        let mut connector = HttpConnector::new_with_resolver(dns.clone());
+        connector.enforce_http(false);
+        connector.set_nodelay(endpoint.get_tcp_nodelay());
+        connector.set_keepalive(endpoint.get_tcp_keepalive());
+        connector.set_connect_timeout(endpoint.get_connect_timeout());
+        endpoint
+            .connect_with_connector(connector)
+            .await
+            .map_err(ClientError::ConnectServer)
     }
 
     pub(crate) fn validate_server(

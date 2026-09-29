@@ -116,6 +116,10 @@ the download of a backup's archive; see [Backup Downloads](#backup-downloads).
 - **T-2.** A server address MUST be an `http` or `https` origin whose path is `/` and that has no
   query, fragment, or user information, as an advertised `grpc_uri` is. A client that started over
   `https` MUST NOT follow a redirect or a seed to `http`.
+  A native client that resolves a hostname to one or more addresses MUST retain the original URI
+  authority and verify the TLS certificate against that hostname on every connection, including
+  redirects and reconnects. DNS and address attempts MUST fit within the client's connection
+  deadline.
 - **T-3.** A WebSocket client MUST connect to `/console/ws` on the leader's console endpoint, using
   `ws` for an `http` endpoint and `wss` for an `https` one, and MUST send binary messages only. It
   MUST treat a close with code `1003`, `1007`, or `1009` as a defect in what it sent.

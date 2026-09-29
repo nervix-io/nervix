@@ -262,12 +262,16 @@ impl Client {
             // the caller did not explicitly request TLS for every seed and redirect.
             options.tls_requirement = Some(TlsRequirement::Required);
         }
-        let connector =
+        let mut connector =
             GrpcConnector::new(options).map_err(ClientError::BuildAuthenticationMetadata)?;
         connector.validate_server(&server)?;
         for seed in connector.seed_servers() {
             connector.validate_server(seed)?;
         }
+        connector
+            .load_dns()
+            .await
+            .map_err(ClientError::LoadDnsConfiguration)?;
         let mut servers = ServerDirectory::with_seeds(server, connector.seed_servers());
         let events = SessionEvents::new();
         let mut last_error = None;
@@ -290,14 +294,18 @@ impl Client {
         Err(last_error.assured("the primary server is always one configured candidate"))
     }
 
-    /// A client whose session runs on `channel`. It knows no server address, so a lost session
-    /// cannot be reconnected.
+    /// A client whose session starts on `channel`. It can follow advertised redirects and later
+    /// reconnect to servers it has learned, but it has no initial server address or seed.
     pub async fn from_channel(
         channel: Channel,
         domain: Option<DomainName>,
     ) -> error_stack::Result<Self, ClientError> {
-        let connector = GrpcConnector::new(ConnectOptions::default())
+        let mut connector = GrpcConnector::new(ConnectOptions::default())
             .map_err(ClientError::BuildAuthenticationMetadata)?;
+        connector
+            .load_dns()
+            .await
+            .map_err(ClientError::LoadDnsConfiguration)?;
         let events = SessionEvents::new();
         let exchange = Exchange::open(channel, &connector, events.sinks.clone()).await?;
         Ok(Self::assemble(

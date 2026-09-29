@@ -18,6 +18,8 @@ tls_assets_are_valid() {
     openssl x509 -in "${node_cert}" -noout >/dev/null 2>&1 || return 1
     openssl x509 -in "${node_cert}" -noout -ext subjectAltName 2>/dev/null \
         | grep -Fq 'URI:nervix://cluster/default/node/node-1' || return 1
+    openssl x509 -in "${node_cert}" -noout -ext subjectAltName 2>/dev/null \
+        | grep -Fq 'DNS:native-session.nervix.test' || return 1
     openssl pkey -in "${node_key}" -noout >/dev/null 2>&1 || return 1
     openssl verify -CAfile "${ca_cert}" "${node_cert}" >/dev/null 2>&1 || return 1
     openssl pkcs12 -in "${kafka_keystore}" -passin "pass:${kafka_keystore_password}" -nokeys >/dev/null 2>&1 || return 1
@@ -74,6 +76,7 @@ subjectAltName = @alt_names
 
 [ alt_names ]
 DNS.1 = localhost
+DNS.2 = native-session.nervix.test
 IP.1 = 127.0.0.1
 URI.1 = nervix://cluster/default/node/node-1
 EOF

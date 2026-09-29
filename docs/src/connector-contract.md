@@ -135,6 +135,22 @@ standard retry mode, which makes up to three attempts at a request whose connect
 failures included, before the source reports the failure. Pooled connections stay open when their
 host's answer changes or expires; the next connection resolves again.
 
+### DNS for OTEL gRPC
+
+The OTEL sink receives the node's resolver in its typed sink configuration. Its gRPC transport
+builds Tonic's lazy channel with a custom Hyper `HttpConnector` that resolves through that
+resolver. Constructing the sink or channel asks no DNS question and opens no connection. When an
+export first needs a connection, Hyper resolves the configured endpoint's host, tries its IPv4 and
+IPv6 answers in order, and applies the endpoint port. Tonic keeps the original URI for HTTP/2
+authority and TLS server-name verification, and retains its configured roots, optional client
+identity, metadata, compression, and request timeout. Its connection timeout encloses DNS, address
+attempts, and TLS; the DNS hook has a 30-second ceiling when there is no shorter deadline.
+
+An unresolved name or failed connection remains an infrastructure export failure under the sink
+host's existing retry and ACK policy. A successful pooled channel may outlive an answer's TTL; a
+new connection resolves again through the node resolver. OTEL HTTP protobuf continues to use the
+shared Reqwest path described above.
+
 ```mermaid
 sequenceDiagram
     participant NSPL as NSPL and Models

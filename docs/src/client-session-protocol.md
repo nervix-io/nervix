@@ -766,6 +766,14 @@ call fails as uncertain and names the execution reference. The Rust client, the 
 never send `CancelRequest`: a caller that stops waiting only drops its waiter, and the reply, when
 it comes, is discarded.
 
+For native Rust sessions, the client loads a Hickory resolver during setup or uses one its owner
+provided. It resolves the hostname of each selected server, seed, and redirect on a new connection
+attempt, preserving the advertised URI's authority and TLS name. Tonic's connection timeout spans
+DNS, address attempts, and TLS. A lookup takes at most 30 seconds when no shorter connection
+deadline cancels it. Failed resolution is a connection failure under the same bounded reconnect
+policy. Server-internal sessions to a peer's session service reuse the node's loaded resolver.
+Browser WebSocket and fetch resolution remains owned by the browser.
+
 ### Reconnecting A Session
 
 A lost session takes everything session-scoped with it. The Rust client rebuilds it in a fixed

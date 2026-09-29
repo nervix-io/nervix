@@ -53,16 +53,46 @@ Feature: CLI public session dispatch
       | 1            |
       | 3            |
 
-  Scenario: CLI follows the leader from a follower session
-    Given a 3 node nervix cluster is started
+  Scenario Outline: CLI connects by hostname over <mode> through the configured DNS fixture
+    Given client grpc transport is configured with mode "<mode>"
+    And cluster peers are addressed by "DNS names"
+    And a <cluster_size> node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI executes "LIST DOMAINS;" on node "{{leader}}" through fixture DNS
+    Then the CLI output contains "{{domain}}"
+    And the DNS fixture eventually receives a question for "native-session.nervix.test"
+
+    Examples:
+      | cluster_size | mode  |
+      | 1            | http  |
+      | 3            | http  |
+      | 1            | https |
+      | 3            | https |
+
+  Scenario: CLI rejects a TLS certificate for a different DNS hostname
+    Given client grpc transport is configured with mode "https"
+    And cluster peers are addressed by "DNS names"
+    And a 1 node nervix cluster is started
+    When the CLI executes "LIST DOMAINS;" on node "node-1" through fixture DNS name "unlisted-session.test"
+    Then the CLI fails with "certificate"
+    And the DNS fixture eventually receives a question for "unlisted-session.test"
+
+  Scenario: CLI connects by hostname and follows the leader from a follower session
+    Given cluster peers are addressed by "DNS names"
+    And a 3 node nervix cluster is started
     When these NSPL commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "follower"
-    When the CLI executes "LIST DOMAINS;" on node "{{follower}}"
+    When the CLI executes "LIST DOMAINS;" on node "{{follower}}" through fixture DNS
     Then the CLI output contains "{{domain}}"
+    And the DNS fixture eventually receives a question for "native-session.nervix.test"
 
   Scenario: CLI rejects incorrect credentials through a public session
     Given a 1 node nervix cluster is started

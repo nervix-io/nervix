@@ -1164,6 +1164,10 @@ impl Cluster {
         Ok(())
     }
 
+    pub(crate) fn dns_configuration(&self) -> Option<DnsConfiguration> {
+        self.dns.as_ref().map(ClusterDns::configuration)
+    }
+
     /// Answer a service's `name` with `answer` in place of its addresses.
     pub(crate) fn answer_dns_service(&self, name: &str, answer: FixtureAnswer) -> io::Result<()> {
         let Some(dns) = &self.dns else {
