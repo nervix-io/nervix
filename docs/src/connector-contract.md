@@ -6,6 +6,9 @@ defines who owns the work after validation: the shared connector contract, each 
 transport, and the host that drives it. [Data Plane](./data-plane.md) describes what happens to
 the resulting Arrow batches inside the graph.
 
+[Execution Plans](./execution-plans.md) describes how one committed revision supplies those typed
+source and sink plans to the host.
+
 ## Ownership and dependency direction
 
 | Layer | Responsibility |

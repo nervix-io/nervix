@@ -3,9 +3,9 @@ Feature: Cross-language client conformance
   protocol and prints the same report, so one expected report is the oracle for every language.
   The shared Rust binding is driven from C, C++, Python, Java and Ruby, and in process through
   its C ABI; Go over native gRPC and TypeScript on Node.js and Bun over the binary WebSocket are
-  independent implementations generated from the schema. Every binding host also follows a paced
-  domain clock through the binding and reads the state and the first tick of the generation the
-  scenario starts.
+  independent implementations generated from the schema. Every binding host also attaches to a
+  paced domain clock that is already running, reads the clock the attach reported before it uses a
+  tick, and keeps the generations a STOP and START and a restored session report apart.
 
   The rows cover the extremes of every integer width, 64-bit values on both sides of the
   JavaScript safe-integer boundary, an absent and a present-zero optional value, strings with
@@ -195,61 +195,91 @@ Feature: Cross-language client conformance
       | bun     | 1            |
       | bun     | 3            |
 
-  Scenario Outline: A <runtime> client follows a paced domain clock through the shared binding
+  Scenario Outline: A <runtime> client reads the running domain clock it attached to before its ticks and keeps its generations apart
+    # Holding the clock authority's first progress proves which node owns it, and that every live
+    # node has installed the started generation, because the authority emits only after that. The
+    # probe enters on another node when the cluster has one, reads the clock the attach reported
+    # through the binding before it uses a tick, then follows a STOP and START and the attachment
+    # the binding restores after the scenario cuts its session, without a tick of one generation
+    # following the state of another.
     Given a <cluster_size> node nervix cluster is started
+    And the active domain is "authority_domain"
     And the leader node is configured with these NSPL commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
       """
-    When the "<runtime>" client probe attaches to the domain clock on node "node-1"
-    And these NSPL commands are executed on the leader node
+    And the gRPC endpoint of node "<entry_node>" is forwarded from fixture address "127.0.0.1"
+    And domain clock progress for domain "{{domain}}" on node "<clock_owner>" is paused before delivery
+    When these NSPL commands are executed on the leader node
       """
       START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
       """
+    Then domain clock progress for domain "{{domain}}" on node "<clock_owner>" reaches the delivery pause within the authority observation budget
+    When domain clock progress for domain "{{domain}}" on node "<clock_owner>" resumes
+    And the "<runtime>" client probe attaches to the domain clock through the forwarded gRPC endpoint of node "<entry_node>"
+    Then within "120s" the client probe prints "TICK domain={{domain}} generation=1 boundary=origin+(id-1)*period"
+    When these NSPL commands are executed on the leader node
+      """
+      STOP;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      START AT '2031-01-01T00:00:00Z' TIME RATE 4.0;
+      """
+    Then within "120s" the client probe prints "TICK domain={{domain}} generation=2 boundary=origin+(id-1)*period"
+    When the TCP forwarder at "127.0.0.1" stops
+    Then within "120s" the client probe prints "INTERRUPTED domain={{domain}}"
+    When the TCP forwarder at "127.0.0.1" restarts
     Then within "180s" the client probe reports
       """
       ATTACHED completed
-      STATE domain={{domain}} generation=1 state=paced period=100000000 skew=10000000 origin=1893456000000000000 rate=f64:4000000000000000
+      CLOCK domain={{domain}} generation=1 state=paced period=100000000 skew=10000000 origin=1893456000000000000 rate=f64:4000000000000000
+      PROJECTION domain={{domain}} generation=1 anchor=origin wait=50000000 window=origin..origin skew=admitted beyond=refused
       TICK domain={{domain}} generation=1 boundary=origin+(id-1)*period
+      STATE domain={{domain}} generation=2 state=paced period=100000000 skew=10000000 origin=1924992000000000000 rate=f64:4010000000000000
+      TICK domain={{domain}} generation=2 boundary=origin+(id-1)*period
+      INTERRUPTED domain={{domain}}
+      STATE domain={{domain}} generation=2 state=paced period=100000000 skew=10000000 origin=1924992000000000000 rate=f64:4010000000000000
+      TICK domain={{domain}} generation=2 boundary=origin+(id-1)*period
       DETACHED completed
       CHECKS ok
       PASS
       """
 
     Examples: the C ABI in process
-      | runtime          | cluster_size |
-      | c-abi-in-process | 1            |
-      | c-abi-in-process | 3            |
+      | runtime          | cluster_size | clock_owner | entry_node |
+      | c-abi-in-process | 1            | node-1      | node-1     |
+      | c-abi-in-process | 3            | node-2      | node-1     |
 
     @client_conformance_toolchain @client_probe_c
     Examples: C over the shared Rust binding
-      | runtime | cluster_size |
-      | c       | 1            |
-      | c       | 3            |
+      | runtime | cluster_size | clock_owner | entry_node |
+      | c       | 1            | node-1      | node-1     |
+      | c       | 3            | node-2      | node-1     |
 
     @client_conformance_toolchain @client_probe_cpp
     Examples: C++ over the shared Rust binding
-      | runtime | cluster_size |
-      | c++     | 1            |
-      | c++     | 3            |
+      | runtime | cluster_size | clock_owner | entry_node |
+      | c++     | 1            | node-1      | node-1     |
+      | c++     | 3            | node-2      | node-1     |
 
     @client_conformance_toolchain @client_probe_python
     Examples: CPython over the shared Rust binding
-      | runtime | cluster_size |
-      | python  | 1            |
-      | python  | 3            |
+      | runtime | cluster_size | clock_owner | entry_node |
+      | python  | 1            | node-1      | node-1     |
+      | python  | 3            | node-2      | node-1     |
 
     @client_conformance_toolchain @client_probe_java
     Examples: Java over the shared Rust binding
-      | runtime | cluster_size |
-      | java    | 1            |
-      | java    | 3            |
+      | runtime | cluster_size | clock_owner | entry_node |
+      | java    | 1            | node-1      | node-1     |
+      | java    | 3            | node-2      | node-1     |
 
     @client_conformance_toolchain @client_probe_ruby
     Examples: Ruby over the shared Rust binding
-      | runtime | cluster_size |
-      | ruby    | 1            |
-      | ruby    | 3            |
+      | runtime | cluster_size | clock_owner | entry_node |
+      | ruby    | 1            | node-1      | node-1     |
+      | ruby    | 3            | node-2      | node-1     |
 
   Scenario Outline: A <runtime> client reads every frame of the conformance corpus the Rust encoder wrote
     When the "<runtime>" client probe decodes the conformance corpus

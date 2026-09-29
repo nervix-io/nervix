@@ -3274,8 +3274,14 @@ async fn when_client_probe_subscribes(
     start_client_probe(world, runtime, &node_id, target, SUBSCRIBED_LINE).await;
 }
 
-#[when(expr = "the {string} client probe attaches to the domain clock on node {string}")]
-async fn when_client_probe_attaches_to_the_domain_clock(
+/// Starts a probe that follows the domain's clock through the TCP forwarder a preceding step stood
+/// in front of `node_id`'s gRPC endpoint, so the scenario can end the probe's session by stopping
+/// the forwarder.
+#[when(
+    expr = "the {string} client probe attaches to the domain clock through the forwarded gRPC \
+            endpoint of node {string}"
+)]
+async fn when_client_probe_attaches_to_the_domain_clock_through_forwarder(
     world: &mut ScenarioWorld,
     runtime: String,
     node_id: String,
@@ -3284,8 +3290,28 @@ async fn when_client_probe_attaches_to_the_domain_clock(
         .parse()
         .expect("the step names a known probe runtime");
     let node_id = expand_placeholders(world, &node_id);
-    let target = client_probe_target(world, &node_id, ProbeExercise::DomainClock);
+    let forwarded = world
+        .placeholders
+        .get("forwarded_grpc")
+        .verified("a preceding step forwarded the node's gRPC endpoint")
+        .clone();
+    let mut target = client_probe_target(world, &node_id, ProbeExercise::DomainClock);
+    target.grpc_uri = forwarded;
     start_client_probe(world, runtime, &node_id, target, ATTACHED_LINE).await;
+}
+
+#[then(expr = "within {string} the client probe prints {string}")]
+async fn then_client_probe_prints(world: &mut ScenarioWorld, within: String, line: String) {
+    let within =
+        humantime::parse_duration(&within).expect("step duration must be a valid duration");
+    let line = expand_placeholders(world, &line);
+    world
+        .client_probe
+        .as_mut()
+        .verified("a preceding step started a client probe")
+        .wait_for_line(&line, within)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 #[when(expr = "the {string} client probe decodes the conformance corpus")]
@@ -9509,6 +9535,66 @@ async fn when_node_is_restarted_with_new_interconnect_addresses(
             .restart_node_with_new_interconnect_address(&node_id)
             .await
             .expect("failed to restart node with a new interconnect address");
+    }
+}
+
+#[then(
+    expr = "the leader eventually records node {string} at its current interconnect address in \
+            Raft membership"
+)]
+async fn then_leader_records_current_raft_address(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let endpoint = world
+        .cluster()
+        .interconnect_endpoint(&node_id)
+        .expect("the restarted node has an interconnect endpoint");
+    let expected = format!("- {node_id} [voter] {endpoint}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        tokio::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let status = run_nspl_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
+            .await
+            .expect("leader cluster status must be available");
+        if status.lines().any(|line| line == expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Raft membership did not record {expected}; last leader status: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(expr = "the leader Raft log index remains unchanged for {string}")]
+async fn then_leader_raft_log_stays_still(world: &mut ScenarioWorld, duration: String) {
+    let duration = humantime::parse_duration(&duration).expect("the observation duration is valid");
+    let leader = current_leader_node(world).await;
+    let deadline = Instant::now() + duration;
+    let mut initial = None;
+    loop {
+        tokio::task::consume_budget().await;
+        let status = run_nspl_commands_on_node(world, &leader, "SHOW CLUSTER STATUS;")
+            .await
+            .expect("leader cluster status must be available");
+        let index = status
+            .lines()
+            .find_map(|line| line.strip_prefix("raft.last_log_index: "))
+            .expect("cluster status reports a Raft log index")
+            .parse::<u64>()
+            .expect("Raft log index is numeric");
+        match initial {
+            Some(initial) => assert_eq!(
+                index, initial,
+                "leader Raft log grew after membership converged; last status: {status}"
+            ),
+            None => initial = Some(index),
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
