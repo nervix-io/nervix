@@ -142,10 +142,7 @@ struct WebConsoleSession {
 impl WebConsoleSession {
     /// Sends on the active connection. A disconnected session returns `Ok(false)`; a full
     /// hand-off returns its refusal so the control can explain why the request was not sent.
-    fn send_when_connected(
-        &self,
-        request: ConsoleRequest,
-    ) -> Result<bool, Report<RequestRefusal>> {
+    fn send_when_connected(&self, request: ConsoleRequest) -> Result<bool, Report<RequestRefusal>> {
         if self.state.get_untracked() != ConsoleConnectionState::Connected {
             return Ok(false);
         }
