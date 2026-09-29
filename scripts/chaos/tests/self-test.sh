@@ -617,3 +617,4 @@ fi
 
 printf 'chaos harness self-test passed\n'
 "${script_dir}/degraded-self-test.sh"
+"${script_dir}/docker-events-self-test.sh"

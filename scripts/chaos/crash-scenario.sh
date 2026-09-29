@@ -129,21 +129,6 @@ surviving_owners_ready() {
     grep -Fxq 'status: OK' "${output_dir}/emitter-survivor.attempt.txt" || return 1
 }
 
-node_events_are_expected() {
-    local target_id="$1"
-    local output="$2"
-    local since="$3"
-    run_bounded 20 docker events \
-        --since "${since}" --until "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" \
-        --filter "label=io.nervix.chaos.run=${run_id}" \
-        --filter label=io.nervix.chaos.role=node \
-        --format '{{json .}}' >"${output}"
-    jq -s -e --arg target_id "${target_id}" '
-        all(.[] | select(.Action == "die"); .Actor.ID == $target_id and .Actor.Attributes.exitCode == "137")
-        and all(.[] | select(.Action == "kill"); .Actor.ID == $target_id and .Actor.Attributes.signal == "9")
-    ' "${output}" >/dev/null
-}
-
 other_node_instances_unchanged() {
     local target="$1"
     local before="$2"
@@ -241,8 +226,9 @@ run_crash() {
     output_before="$(topic_end_offset chaos_output)"
     [[ "${source_before}" =~ ^[0-9]+$ && "${output_before}" =~ ^[0-9]+$ ]] \
         || crash_fail setup 'broker offsets unavailable before SIGKILL'
-    local fault_since kill_requested_ms kill_completed_ms
+    local fault_since fault_since_ns kill_requested_ms kill_completed_ms
     fault_since="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+    fault_since_ns="$(date -d "${fault_since}" +%s%N)"
     kill_requested_ms="$(epoch_ms)"
     jq -n \
         --arg image "${pumba_image_id}" \
@@ -272,10 +258,9 @@ run_crash() {
     grep -Fq "dryrun=false id=${container_id}" "${crash_dir}/pumba.txt" \
         || crash_fail injection 'Pumba did not report the selected container killed'
     inspect_target "${container_id}" "${crash_dir}/killed.json"
-    run_bounded 20 docker events --since "${fault_since}" \
-        --until "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" \
-        --filter "container=${container_id}" --format '{{json .}}' \
-        >"${crash_dir}/kill-events.ndjson"
+    docker_event_window "${fault_since_ns}" "${crash_dir}/kill-events.ndjson" \
+        --container "${container_id}" \
+        || crash_fail controller 'the live Docker event recording does not cover the SIGKILL'
     "${script_dir}/verify-crash-evidence.sh" killed "${run_id}" "${project_name}" \
         "${selected_host}" "${image_id}" "${crash_dir}/before.json" \
         "${crash_dir}/killed.json" "${crash_dir}/kill-events.ndjson"
@@ -391,8 +376,12 @@ run_crash() {
     local source_after output_after
     source_after="$(topic_end_offset chaos_input)"
     output_after="$(topic_end_offset chaos_output)"
-    node_events_are_expected "${container_id}" "${crash_dir}/all-node-events.ndjson" "${fault_since}" \
-        || crash_fail product 'a non-target node exited unexpectedly during the fault'
+    docker_event_window "${fault_since_ns}" "${crash_dir}/all-node-events.ndjson" --role node \
+        || crash_fail controller 'the live Docker event recording does not cover the fault through recovery'
+    "${script_dir}/verify-docker-events.sh" lifecycle \
+        --events "${crash_dir}/all-node-events.ndjson" --target "${container_id}" \
+        --expect kill:9 --expect die:137 --expect start \
+        || crash_fail product 'node lifecycle events other than the SIGKILL, its exit and the explicit restart occurred during the fault'
     other_node_instances_unchanged "${selected_host}" "${crash_dir}/before-all-nodes.json" \
         || crash_fail product 'a non-target node changed container or process incarnation'
     inspect_target "${container_id}" "${crash_dir}/final.json"
@@ -427,7 +416,7 @@ run_crash() {
         --argjson output_before "${output_before}" \
         --argjson output_while_stopped "${output_while_stopped}" \
         --argjson output_after "${output_after}" \
-        '{scenario:$scenario,node:$node,container_id:$container_id,observed_leader:$observed_leader,recovered_leader:$recovered_leader,fault_since:$fault_since,kill_duration_ms:$kill_ms,held_outage_ms:$outage_ms,election_ms:$election_ms,placement_ms:$placement_ms,delivery_resume_ms:$delivery_resume_ms,listener_recovery_ms:$listener_recovery_ms,settled_recovery_ms:$settled_recovery_ms,source_offset_before:$source_before,source_offset_while_stopped:$source_while_stopped,source_offset_after:$source_after,output_offset_before:$output_before,output_offset_while_stopped:$output_while_stopped,output_offset_after:$output_after,kill_verified:true,listener_recovered:true,cluster_settled:true,control:"crash/control-results.json",node_events:"crash/all-node-events.ndjson"}' \
+        '{scenario:$scenario,node:$node,container_id:$container_id,observed_leader:$observed_leader,recovered_leader:$recovered_leader,fault_since:$fault_since,kill_duration_ms:$kill_ms,held_outage_ms:$outage_ms,election_ms:$election_ms,placement_ms:$placement_ms,delivery_resume_ms:$delivery_resume_ms,listener_recovery_ms:$listener_recovery_ms,settled_recovery_ms:$settled_recovery_ms,source_offset_before:$source_before,source_offset_while_stopped:$source_while_stopped,source_offset_after:$source_after,output_offset_before:$output_before,output_offset_while_stopped:$output_while_stopped,output_offset_after:$output_after,kill_verified:true,listener_recovered:true,cluster_settled:true,control:"crash/control-results.json",node_events:"crash/all-node-events.ndjson",node_event_recording:"crash/all-node-events.recording.json"}' \
         >"${artifact_dir}/results/crash-progress.json"
 
     phase 'crash traffic final boundary'
