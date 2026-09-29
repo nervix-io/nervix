@@ -16,6 +16,13 @@ from scripts import bolero
 
 
 class InventoryTests(unittest.TestCase):
+    def assert_invalid_inventory(self, text: str, message: str) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "inventory.toml"
+            path.write_text(text)
+            with self.assertRaisesRegex(bolero.BoleroError, message):
+                bolero.load_inventory(path)
+
     def test_inventory_has_four_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual(len(inventory.targets), 4)
@@ -59,6 +66,62 @@ class InventoryTests(unittest.TestCase):
     def test_empty_selection_fails(self) -> None:
         with self.assertRaisesRegex(bolero.BoleroError, "no Bolero targets selected"):
             bolero.select(bolero.load_inventory(), "absent-target")
+
+    def test_tool_pins_and_target_identity_are_required(self) -> None:
+        text = bolero.INVENTORY.read_text()
+        for before, after, message in (
+            ('cargo_bolero = "0.13.4"', 'cargo_bolero = "0.13"', "exact version"),
+            ('nightly = "nightly-2026-09-17"', 'nightly = "nightly"', "dated toolchain"),
+            ('sanitizer = "address"', 'sanitizer = "none"', "real sanitizer"),
+            ('id = "nspl-expression"', 'id = "Invalid ID"', "invalid target id"),
+            ('test_target = "lib"', 'test_target = "bin"', "invalid cargo test target"),
+            ('invariant = "', 'invariant = "" # ', "invariant is required"),
+        ):
+            with self.subTest(message=message):
+                self.assert_invalid_inventory(text.replace(before, after, 1), message)
+
+    def test_paths_and_missing_source_are_rejected(self) -> None:
+        text = bolero.INVENTORY.read_text()
+        self.assert_invalid_inventory(
+            text.replace('source = "crates/nspl/src/statement_tests.rs"', 'source = ""', 1),
+            "repository-relative path",
+        )
+        self.assert_invalid_inventory(
+            text.replace('source = "crates/nspl/src/statement_tests.rs"',
+                         'source = "../statement_tests.rs"', 1),
+            "normalized repository-relative path",
+        )
+        self.assert_invalid_inventory(
+            text.replace('source = "crates/nspl/src/statement_tests.rs"',
+                         'source = "crates/nspl/src/missing.rs"', 1),
+            "missing source",
+        )
+
+    def test_inventory_sections_and_fields_are_closed(self) -> None:
+        text = bolero.INVENTORY.read_text()
+        self.assert_invalid_inventory(text + '\n[extra]\nvalue = 1\n',
+                                      "only tool and target")
+        self.assert_invalid_inventory(
+            text.replace('campaign_fuzz_seconds = 300',
+                         'campaign_fuzz_seconds = 300\nextra = 1', 1),
+            "tool section",
+        )
+        self.assert_invalid_inventory(
+            text.replace('domain_version = 1', 'unknown = 1', 1),
+            "missing or unknown fields",
+        )
+
+    def test_target_names_and_empty_registry_are_rejected(self) -> None:
+        text = bolero.INVENTORY.read_text()
+        self.assert_invalid_inventory(
+            text.replace('statement::tests::bolero_expression_roundtrip_minimal_parentheses',
+                         'statement::tests::expression_roundtrip_minimal_parentheses', 1),
+            "test name must start with bolero_",
+        )
+        self.assert_invalid_inventory(
+            'target = []\n' + text.split('[[target]]')[0],
+            "inventory contains no targets",
+        )
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -123,6 +186,56 @@ class DiscoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(bolero.BoleroError, "package mismatch"):
                 bolero.discover(self.inventory)
 
+    def test_target_specific_bolero_dependency_is_discovered(self) -> None:
+        self.assertTrue(bolero.declares_bolero({
+            "target": {"cfg(unix)": {"dev-dependencies": {"bolero": "0.13.4"}}}
+        }))
+
+    def test_source_scan_rejects_unregistered_macro_shapes(self) -> None:
+        cases = (
+            ("bolero::check!();", "no owning function"),
+            ("fn ordinary() { bolero::check!(); }", "must start with bolero_"),
+            ("fn bolero_one() { check!(); }", "qualify bolero::check!"),
+            ("fn bolero_one() { bolero::check!(); }\n"
+             "fn bolero_one() { bolero::check!(); }", "duplicate Bolero function"),
+        )
+        for content, message in cases:
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as directory:
+                manifest = pathlib.Path(directory) / "Cargo.toml"
+                manifest.write_text("[package]\nname = 'scan'\n")
+                (manifest.parent / "lib.rs").write_text(content)
+                with self.assertRaisesRegex(bolero.BoleroError, message):
+                    bolero.static_targets(manifest)
+
+    def test_compiled_selection_must_match_inventory_and_work_directory(self) -> None:
+        def listed(package: str, test_target: str, ignored: bool) -> list[str]:
+            return [] if ignored else [
+                item["test_name"] for item in self.compiled(package, test_target)
+            ]
+
+        with (
+            mock.patch.object(bolero, "static_targets", side_effect=self.source_functions),
+            mock.patch.object(bolero, "listed_tests", side_effect=listed),
+            mock.patch.object(bolero, "compiled_targets", side_effect=lambda package, test_target:
+                              self.compiled(package, test_target)[:-1]),
+        ):
+            with self.assertRaisesRegex(bolero.BoleroError, "listed Bolero tests"):
+                bolero.discover(self.inventory)
+
+        def misplaced(package: str, test_target: str) -> list[dict[str, str]]:
+            targets = self.compiled(package, test_target)
+            if package == "nervix-backup":
+                targets[0]["work_dir"] = "/tmp/wrong-bolero-work-directory"
+            return targets
+
+        with (
+            mock.patch.object(bolero, "static_targets", side_effect=self.source_functions),
+            mock.patch.object(bolero, "listed_tests", side_effect=listed),
+            mock.patch.object(bolero, "compiled_targets", side_effect=misplaced),
+        ):
+            with self.assertRaisesRegex(bolero.BoleroError, "compiled work directory"):
+                bolero.discover(self.inventory)
+
 
 class ExecutionTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -132,6 +245,9 @@ class ExecutionTests(unittest.TestCase):
     def test_command_propagates_engine_exit_and_timeout(self) -> None:
         with self.assertRaisesRegex(bolero.BoleroError, "exited 7"):
             bolero.command([sys.executable, "-c", "raise SystemExit(7)"])
+        with self.assertRaisesRegex(bolero.BoleroError, "timed out"):
+            bolero.command([sys.executable, "-c", "import time; time.sleep(5)"],
+                           timeout=1)
         with tempfile.TemporaryDirectory() as directory:
             log = pathlib.Path(directory) / "timeout.log"
             with self.assertRaisesRegex(bolero.BoleroError, "timed out"):
@@ -152,6 +268,51 @@ class ExecutionTests(unittest.TestCase):
         with mock.patch.object(bolero, "command", return_value=missing_cases):
             with self.assertRaisesRegex(bolero.BoleroError, "expected 256"):
                 bolero.test_targets(self.inventory, (self.target,))
+
+    def test_ordinary_run_rejects_missing_assertion_and_corpus(self) -> None:
+        for output, message in (
+            ("test result: ok. 0 passed; 0 failed", "exactly once"),
+            ("test result: ok. 1 passed; 0 failed", "input counts"),
+            ("test result: ok. 1 passed; 0 failed\n"
+             "corpus inputs: 0 | rng inputs: 256", "corpus was not replayed"),
+        ):
+            with self.subTest(message=message):
+                result = subprocess.CompletedProcess([], 0, output, "")
+                with mock.patch.object(bolero, "command", return_value=result):
+                    with self.assertRaisesRegex(bolero.BoleroError, message):
+                        bolero.test_targets(self.inventory, (self.target,))
+
+    def test_tool_version_and_instrumented_binary_are_required(self) -> None:
+        mismatch = subprocess.CompletedProcess([], 0, "cargo-bolero 0.12.0", "")
+        with mock.patch.object(bolero, "command", return_value=mismatch):
+            with self.assertRaisesRegex(bolero.BoleroError, "required"):
+                bolero.verify_tool(self.inventory)
+        with tempfile.TemporaryDirectory() as directory:
+            build = subprocess.CompletedProcess([], 0, "no executable", "")
+            with mock.patch.object(bolero, "command", return_value=build):
+                with self.assertRaisesRegex(bolero.BoleroError, "expected one instrumented"):
+                    bolero.build_instrumented(self.inventory, self.target,
+                                              pathlib.Path(directory))
+
+    def test_feature_and_integration_test_target_arguments(self) -> None:
+        target = dataclasses.replace(self.target, test_target="test:property_suite",
+                                     features=("fuzz-support",))
+        self.assertIn("property_suite", bolero.cargo_test_args(target))
+        self.assertIn("fuzz-support", bolero.cargo_test_args(target))
+        self.assertIn("fuzz-support", bolero.bolero_args(self.inventory, target))
+
+    def test_fuzz_build_failure_records_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                mock.patch.object(bolero, "run_dir", return_value=pathlib.Path(directory)),
+                mock.patch.object(bolero, "verify_tool"),
+                mock.patch.object(bolero, "build_instrumented",
+                                  side_effect=bolero.BoleroError("build failed")),
+                mock.patch.object(bolero, "metadata") as metadata,
+            ):
+                with self.assertRaisesRegex(bolero.BoleroError, "build failed"):
+                    bolero.fuzz_targets(self.inventory, (self.target,), 1)
+                self.assertEqual(metadata.call_args.args[3], "failed build")
 
     def test_fuzz_copies_seed_corpus_and_requires_engine_completion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -207,6 +368,70 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(staged[0].read_bytes(), input_file.read_bytes())
             self.assertEqual(execute.call_args.kwargs["env"]["BOLERO_RANDOM_ITERATIONS"],
                              "0")
+
+    def test_replay_rejects_missing_large_or_unconfirmed_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            target = dataclasses.replace(self.target, corpus=temporary / "corpus")
+            missing = temporary / "missing"
+            with self.assertRaisesRegex(bolero.BoleroError, "does not exist"):
+                bolero.replay(target, missing)
+            failure = temporary / "failure"
+            failure.write_bytes(b"x" * (target.max_input_bytes + 1))
+            with self.assertRaisesRegex(bolero.BoleroError, "exceeds"):
+                bolero.replay(target, failure)
+            failure.write_bytes(b"\x42")
+            for result, message in (
+                (subprocess.CompletedProcess([], 101, "unrelated test failed", ""),
+                 "outside the selected property"),
+                (subprocess.CompletedProcess([], 0, "test result: ok. 1 passed", ""),
+                 "saved input was not replayed"),
+            ):
+                with self.subTest(message=message), mock.patch.object(
+                    bolero, "command", return_value=result
+                ):
+                    with self.assertRaisesRegex(bolero.BoleroError, message):
+                        bolero.replay(target, failure)
+
+    def test_reduction_requires_a_saved_crash_and_failing_minimum(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            failure = temporary / "failure"
+            with self.assertRaisesRegex(bolero.BoleroError, "does not exist"):
+                with mock.patch.object(bolero, "verify_tool"):
+                    bolero.reduce_failure(self.inventory, self.target, failure)
+            failure.write_bytes(b"x" * (self.target.max_input_bytes + 1))
+            with self.assertRaisesRegex(bolero.BoleroError, "exceeds"):
+                with mock.patch.object(bolero, "verify_tool"):
+                    bolero.reduce_failure(self.inventory, self.target, failure)
+            failure.write_bytes(b"\x42\x00")
+            run = temporary / "run"
+            run.mkdir()
+            with (
+                mock.patch.object(bolero, "verify_tool"),
+                mock.patch.object(bolero, "run_dir", return_value=run),
+                mock.patch.object(bolero, "build_instrumented",
+                                  return_value=bolero.ROOT / "fake-binary"),
+                mock.patch.object(bolero, "run_instrumented"),
+                mock.patch.object(bolero, "metadata"),
+            ):
+                with self.assertRaisesRegex(bolero.BoleroError, "did not save"):
+                    bolero.reduce_failure(self.inventory, self.target, failure)
+
+            def save_minimum(*args: object, **kwargs: object) -> None:
+                (run / "minimized").write_bytes(b"\x42")
+
+            with (
+                mock.patch.object(bolero, "verify_tool"),
+                mock.patch.object(bolero, "run_dir", return_value=run),
+                mock.patch.object(bolero, "build_instrumented",
+                                  return_value=bolero.ROOT / "fake-binary"),
+                mock.patch.object(bolero, "run_instrumented", side_effect=save_minimum),
+                mock.patch.object(bolero, "replay", return_value=0),
+                mock.patch.object(bolero, "metadata"),
+            ):
+                with self.assertRaisesRegex(bolero.BoleroError, "no longer fails"):
+                    bolero.reduce_failure(self.inventory, self.target, failure)
 
 
 class CliTests(unittest.TestCase):
