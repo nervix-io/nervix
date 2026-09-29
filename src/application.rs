@@ -127,6 +127,7 @@ use crate::{
 mod admitted_connection;
 mod authentication;
 mod background_task;
+mod backup;
 mod cluster_status;
 mod command_execution;
 mod command_result;
@@ -1814,6 +1815,7 @@ impl Application {
                 ownership_handoff_operations: tokio::sync::Mutex::new(()),
                 resource_upload_executions: DashMap::with_hasher(RandomState::new()),
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
+                retained_backups: Default::default(),
             }),
         };
         #[cfg(feature = "testing")]
@@ -2400,6 +2402,9 @@ impl Application {
                 if is_leader {
                     transaction_service.reconcile_transactions_once().await;
                 }
+                // A backup archive outlives leadership on the node that assembled it, so every
+                // node releases the archives whose retry validity ended.
+                transaction_service.sweep_retained_backups();
                 tokio::select! {
                     _ = transaction_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_millis(250)) => {}

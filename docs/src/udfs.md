@@ -93,6 +93,12 @@ sensitivity of their arguments.
 Roto `test` blocks execute during `CREATE UDF`. If any test rejects, creation fails with
 `Roto test block failed` and the UDF is not persisted.
 
+The web console's **Create → Roto UDF** form edits ordered arguments and the result with the exact
+schema types, optional flags, volatility, and a source editor that keeps the function and its test
+blocks verbatim. It renders the completed Model as canonical NSPL and shows **Completed** only
+after compilation and all Roto tests succeed. A rejected test leaves the entered declaration and
+source in the form for correction.
+
 ## Nulls, errors, and volatility
 
 `OPTIONAL` controls boundary nullability; it does not change the Roto column type.

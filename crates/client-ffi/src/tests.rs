@@ -11,8 +11,9 @@ use std::{
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
-    ClientError, CommandDisposition, CommandExecutionReference, CommandOutcome, Diagnostic,
-    LeaderRedirect, OutcomeOrigin, RowSchema, SourceSpan, SubscriptionEvent, SubscriptionHandle,
+    ArchiveDigest, BackupArchiveSummary, BackupDownloadError, BackupResources, ClientError,
+    CommandDisposition, CommandExecutionReference, CommandOutcome, Diagnostic, LeaderRedirect,
+    OutcomeOrigin, RowSchema, SourceSpan, SubscriptionEvent, SubscriptionHandle,
     SubscriptionInterruption, SubscriptionOpened, SubscriptionRowsEvent, UnknownOutcomeCause,
     wire::{
         CellWriter, RequestRejection, RowBranch, RowsSkippedCause, ServerEvent, ServerMessage,
@@ -29,11 +30,11 @@ use crate::{
     nx_error_execution_reference, nx_error_free, nx_error_kind_of, nx_error_message,
     nx_event_cell_varlen, nx_event_column_fixed, nx_event_column_states, nx_event_column_varlen,
     nx_event_frame, nx_event_kind_of, nx_event_release, nx_event_retain, nx_event_row_count,
-    nx_event_schema, nx_event_subscription, nx_execution_free, nx_outcome_diagnostic,
-    nx_outcome_diagnostic_count, nx_outcome_disposition, nx_outcome_execution_reference,
-    nx_outcome_free, nx_outcome_message, nx_outcome_schema, nx_outcome_subscription,
-    nx_schema_branch, nx_schema_field, nx_schema_field_count, nx_schema_free, nx_session_connect,
-    nx_session_free,
+    nx_event_schema, nx_event_subscription, nx_execution_free, nx_outcome_backup,
+    nx_outcome_diagnostic, nx_outcome_diagnostic_count, nx_outcome_disposition,
+    nx_outcome_execution_reference, nx_outcome_free, nx_outcome_message, nx_outcome_schema,
+    nx_outcome_subscription, nx_schema_branch, nx_schema_field, nx_schema_field_count,
+    nx_schema_free, nx_session_connect, nx_session_free,
 };
 
 const ROWS: i32 = 1;
@@ -743,6 +744,10 @@ fn every_event_kind_reports_its_subscription_and_count() {
 }
 
 fn outcome(disposition: CommandDisposition, subscription: bool) -> Outcome {
+    Outcome::new(command_outcome(disposition, subscription))
+}
+
+fn command_outcome(disposition: CommandDisposition, subscription: bool) -> CommandOutcome {
     let opened = SubscriptionOpened {
         subscription: handle(),
         domain: name("tenant"),
@@ -750,7 +755,7 @@ fn outcome(disposition: CommandDisposition, subscription: bool) -> Outcome {
         subscription_type: SubscriptionType::Row,
         schema: schema(),
     };
-    Outcome::new(CommandOutcome {
+    CommandOutcome {
         execution_reference: Some(
             CommandExecutionReference::parse("reference-1").assured("a valid reference"),
         ),
@@ -775,7 +780,8 @@ fn outcome(disposition: CommandDisposition, subscription: bool) -> Outcome {
         resource: None,
         subscription: subscription.then(|| Box::new(opened)),
         resource_upload: None,
-    })
+        backup: None,
+    }
 }
 
 #[test]
@@ -924,6 +930,49 @@ unsafe fn read_schema(schema: *mut Schema) {
 }
 
 #[test]
+fn a_backup_outcome_reports_its_archive() {
+    let mut backup = command_outcome(
+        CommandDisposition::Completed {
+            already_existed: false,
+        },
+        false,
+    );
+    backup.backup = Some(Box::new(BackupArchiveSummary {
+        total_bytes: NonZeroU64::new(4096).assured("a non-zero size"),
+        digest: ArchiveDigest::from_bytes([9; 32]),
+        captured_at: Timestamp::from_unix_nanos(1),
+        retained_until: Timestamp::from_unix_nanos(2),
+        resources: BackupResources::Included,
+        users: Some(1),
+        domains: Vec::new(),
+    }));
+    let backup = Box::into_raw(Box::new(Outcome::new(backup)));
+    let without = Box::into_raw(Box::new(outcome(CommandDisposition::Failed, false)));
+    let mut total_bytes = 0;
+    let mut digest = ptr::null();
+    let mut digest_len = 0;
+    // SAFETY: both outcomes are live until they are freed, and every out-parameter is writable.
+    unsafe {
+        assert!(nx_outcome_backup(
+            backup,
+            &mut total_bytes,
+            &mut digest,
+            &mut digest_len
+        ));
+        assert_eq!(total_bytes, 4096);
+        assert_eq!(slice::from_raw_parts(digest, digest_len), &[9; 32]);
+        assert!(!nx_outcome_backup(
+            without,
+            &mut total_bytes,
+            &mut digest,
+            &mut digest_len
+        ));
+        nx_outcome_free(backup);
+        nx_outcome_free(without);
+    }
+}
+
+#[test]
 fn an_outcome_without_a_subscription_has_no_schema() {
     let outcome = Box::into_raw(Box::new(outcome(CommandDisposition::Failed, false)));
     let mut name = ptr::null();
@@ -1053,6 +1102,32 @@ fn client_errors_are_classified_and_keep_their_causes() {
         let failure = crate::Failure::from(error);
         assert_eq!(failure.kind(), kind);
         assert_eq!(failure.execution_reference(), None);
+    }
+    let downloads = [
+        (
+            BackupDownloadError::Refused {
+                failure: nervix_client_core::wire::BackupDownloadFailure::Expired,
+                message: "expired".to_string(),
+            },
+            FailureKind::Rejected,
+        ),
+        (BackupDownloadError::Stalled, FailureKind::Transport),
+        (BackupDownloadError::Mismatch, FailureKind::Protocol),
+        (
+            BackupDownloadError::Write {
+                path: "archive.nvxb".into(),
+                kind: std::io::ErrorKind::PermissionDenied,
+            },
+            FailureKind::InvalidArgument,
+        ),
+    ];
+    for (source, kind) in downloads {
+        let failure = crate::Failure::from(ClientError::BackupDownload {
+            reference: reference.clone(),
+            source,
+        });
+        assert_eq!(failure.kind(), kind);
+        assert_eq!(failure.execution_reference(), Some(&reference));
     }
     let handed_out = Box::into_raw(Box::new(uncertain));
     let mut text = ptr::null();
