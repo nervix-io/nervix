@@ -11,7 +11,6 @@
 
 use std::{
     net::{IpAddr, SocketAddr},
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::Duration,
 };
 
@@ -23,6 +22,7 @@ use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
     DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RemoteRuntimeField,
 };
+use nervix_primitives::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};

@@ -9,7 +9,6 @@ use std::{
     collections::BTreeSet,
     fmt, io,
     ops::{Bound, RangeBounds},
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use error_stack::Report;
@@ -17,6 +16,7 @@ use fjall::{Database, Keyspace, KeyspaceCreateOptions, Readable as _, Snapshot a
 use futures_util::{FutureExt as _, Stream, StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Executor, MemoryClass, Reservation, StorageClass};
+use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use openraft::{
     Snapshot, SnapshotMeta, StoredMembership,
     entry::{EntryPayload, RaftPayload},

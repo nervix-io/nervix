@@ -6,16 +6,10 @@
 //! - **Depends on.** The entity gate types, the relay dispatch gate, and the server Shuttle runner.
 //! - **Must not know.** What an entity is, what a relay carries, or what a work item does.
 
-// The standard library's atomics are not Shuttle scheduling points, so each record below changes in
-// the same scheduling step as the operation it records. The counters under test are Shuttle's
-// atomics, so a check reads them while another task is between two of its own adjustments.
-use std::{
-    collections::BTreeSet,
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
-};
+// Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
+// scheduling step as the operation it records. The counters under test are Shuttle's atomics, so a
+// check reads them while another task is between two of its own adjustments.
+use std::{collections::BTreeSet, sync::Arc as StdArc};
 
 use ahash::RandomState;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -25,6 +19,7 @@ use nervix_models::{
     ClusterNodeName, CoordinationIdentity, DomainName, DomainNodeRef, ModelKind, ModelName,
     NodeRef, RelayName,
 };
+use nervix_primitives::unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::{
     sync::{Notify, oneshot},
     time::{Duration, Instant},

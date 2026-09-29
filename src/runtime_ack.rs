@@ -9,15 +9,11 @@
 //! - **Must not know.** What is being acknowledged. It counts outstanding work, and ack state is
 //!   hot-path memory that is never persisted.
 
-#[cfg(not(feature = "shuttle"))]
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-
 use meticulous::OptionExt as _;
+use nervix_primitives::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use nervix_recovery::NoReceiver as _;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "shuttle")]
-use shuttle::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::{oneshot, watch};
 use triomphe::Arc;
 

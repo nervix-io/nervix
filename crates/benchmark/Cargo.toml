@@ -20,6 +20,7 @@ meticulous = { workspace = true }
 nervix-approx-into = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-models = { workspace = true }
+nervix-primitives = { workspace = true }
 nervix-recovery = { workspace = true }
 nervix-test-environment = { workspace = true }
 ordered-float = { workspace = true }

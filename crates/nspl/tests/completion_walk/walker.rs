@@ -11,10 +11,10 @@
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use ahash_compile_time::{HashSet, HashSetExt};
+use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{
     grammar::{Grammar, ParseOutcome},

@@ -13,11 +13,7 @@
 //! never be given capacity the connection does not have and the shared remainder is always what
 //! the reservations leave behind.
 
-#[cfg(not(feature = "shuttle"))]
-use std::sync::atomic::{AtomicBool, Ordering};
-
-#[cfg(feature = "shuttle")]
-use shuttle::sync::atomic::{AtomicBool, Ordering};
+use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
 
 use super::*;
 
