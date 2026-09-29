@@ -574,7 +574,7 @@ impl WebsocketSignalingSession {
         D: SignalingDataSink,
     {
         while !pending.is_empty() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(message) = websocket.next().await else {
                 return Err(WebsocketSignalingError::Closed);
             };
@@ -721,7 +721,7 @@ mod tests {
         SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
         SignalingWireFormat,
     };
-    use parking_lot::Mutex;
+    use nervix_primitives::sync::blocking::Mutex;
     use serde_json::json;
     use tokio_tungstenite::tungstenite::protocol::Role;
 
@@ -1065,7 +1065,7 @@ mod tests {
         let failure = StdArc::new(Mutex::new(None::<String>));
         let peer_failure = StdArc::clone(&failure);
 
-        let peer = tokio::spawn(async move {
+        let peer = nervix_primitives::task::spawn(async move {
             let mut peer = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
             for step in steps {
                 match step {
@@ -1105,7 +1105,7 @@ mod tests {
         result
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn timing_out_names_only_the_matchers_that_never_matched() {
         let error = run_against_peer(
             protocol(
@@ -1136,7 +1136,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn payload_arriving_before_the_relay_opens_is_dropped() {
         let buffered = run_against_peer(
             protocol(
@@ -1164,7 +1164,7 @@ mod tests {
         assert!(buffered.is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_later_step_sends_with_state_captured_by_an_earlier_one() {
         let buffered = run_against_peer(
             protocol(
@@ -1200,7 +1200,7 @@ mod tests {
         assert!(buffered.is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_later_step_withholds_its_sends_until_the_current_one_is_satisfied() {
         let error = run_against_peer(
             protocol(
@@ -1234,7 +1234,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn accept_data_opens_the_relay_mid_handshake() {
         let sink = RecordingSink::default();
         let error = run_against_peer_with(
@@ -1274,7 +1274,7 @@ mod tests {
         assert_eq!(sink.accepted(), vec![br#"{"seq":2}"#.to_vec()]);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn accept_data_on_connect_streams_from_the_first_frame() {
         let sink = RecordingSink::default();
         let error = run_against_peer_with(
@@ -1304,7 +1304,7 @@ mod tests {
         assert_eq!(sink.accepted(), vec![br#"{"seq":1}"#.to_vec()]);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_step_scoped_fail_guard_rejects_during_its_own_step() {
         let error = run_against_peer(
             protocol(
@@ -1338,7 +1338,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn payload_is_dropped_when_the_opening_step_is_never_satisfied() {
         let sink = RecordingSink::default();
         let error = run_against_peer_with(
@@ -1374,7 +1374,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_capture_that_does_not_produce_an_object_fails_the_handshake() {
         let error = run_against_peer(
             protocol(
@@ -1400,7 +1400,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_fail_matcher_rejects_before_a_lenient_wait_matcher_consumes_the_frame() {
         let error = run_against_peer(
             protocol(

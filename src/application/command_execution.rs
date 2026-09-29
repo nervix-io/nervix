@@ -24,14 +24,16 @@ use nervix_consensus::{
     CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, ConsensusConflict,
     ConsensusError, RestoreExecution,
 };
-use nervix_execution::sync::DashMap;
 use nervix_models::{
     CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus, Restore,
     RestoreArchive, Statement, Timestamp, TransactionPosition, TransactionStatus, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
+use nervix_primitives::{
+    collections::DashMap,
+    sync::{Mutex as AsyncMutex, OwnedMutexGuard},
+};
 use thiserror::Error;
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tracing::warn;
 
 use super::{
@@ -436,7 +438,7 @@ impl SessionServiceImpl {
             .await;
         let maintenance_due = reconciliation.maintenance_due;
         for reference in reconciliation.applying {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(execution_guard) = self.inner.command_executions.try_lock(reference.clone())
             else {
                 continue;
@@ -1240,7 +1242,7 @@ mod tests {
         assert!(replicated_admission_refusal(&reference, &unrelated).is_none());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn command_execution_owner_entry_survives_a_waiter_and_leaves_with_its_last_guard() {
         let owners = CommandExecutionOwners::default();
         let reference = CommandExecutionReference::parse("request.owners")
@@ -1248,7 +1250,7 @@ mod tests {
         let first = owners.lock(reference.clone()).await;
         let late_lock = owners.lock_for(&reference);
         let waiter_lock = late_lock.clone();
-        let waiter = tokio::spawn(async move {
+        let waiter = nervix_primitives::task::spawn(async move {
             let guard = waiter_lock.mutex.clone().lock_owned().await;
             (waiter_lock, guard)
         });

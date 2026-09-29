@@ -9,8 +9,10 @@
 
 use std::sync::Arc as StdArc;
 
-use nervix_execution::sync::ArcSwap;
-use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use nervix_primitives::{
+    publication::ArcSwap,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use super::lsm_sequence::LsmSequence;
 

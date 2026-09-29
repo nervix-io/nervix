@@ -150,7 +150,7 @@ pub(super) async fn encode_pending_broker_payloads(
     if codec.requires_blocking_encode() {
         let arrow_batch = batch.relay_batch().batch.clone();
         let codec_name = codec.name.as_str().to_string();
-        return tokio::task::spawn_blocking(move || {
+        return nervix_primitives::task::spawn_blocking(move || {
             let encoder = codec.batch_encoder(&arrow_batch)?;
             Ok::<_, CodecError>(
                 pending_rows
@@ -197,7 +197,7 @@ async fn encode_broker_records(
     let mut encoded = Vec::new();
     let mut rejected = Vec::new();
     for (batch_index, batch) in batches.iter().enumerate() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let pending_rows = batch.pending_record_rows();
         let batch_acks = batch.merged_acks();
         let payloads = await_emitter_confirmation(
@@ -207,7 +207,7 @@ async fn encode_broker_records(
         .await?;
 
         for PendingRowPayload { row_index, payload } in payloads {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let key = batch
                 .relay_batch()
                 .keys
@@ -277,7 +277,7 @@ async fn sink_records(
     let mut rows = RowRecords::with_capacity(encoded.len());
     let mut rejected = Vec::new();
     for record in encoded {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let position = record.position();
         let message_group = match record.message_group {
             Ok(message_group) => message_group,
@@ -324,7 +324,7 @@ async fn pack_batch_records(
     let mut rejected = Vec::new();
     let mut carriers = Vec::with_capacity(batches.len());
     for (batch_index, batch) in batches.iter().enumerate() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let mut rows = Vec::new();
         for row in batch.rows_to_pack() {
             // A payload packed now never spans the rows a retained payload carries, so the two
@@ -375,7 +375,7 @@ async fn pack_batch_records(
         );
     }
     for outcome in packing.outcomes {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match outcome {
             PackedOutcome::Payload(BatchPayload {
                 rows,
@@ -542,7 +542,7 @@ async fn pack_pending_rows(
         return pack_buffered_batches(&codec, carriers, policy).map_err(initialization_failed);
     }
     let codec_name = codec.name.as_str().to_string();
-    tokio::task::spawn_blocking(move || pack_buffered_batches(&codec, carriers, policy))
+    nervix_primitives::task::spawn_blocking(move || pack_buffered_batches(&codec, carriers, policy))
         .await
         .map_err(|error| {
             Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
@@ -563,7 +563,7 @@ mod tests {
         BatchMessageLimit, CodecWireFormat, CreateCodec, CreateWireSchema, JsonType,
         ResolvedCodecWireFormat, WireSchemaField,
     };
-    use parking_lot::Mutex;
+    use nervix_primitives::sync::blocking::Mutex;
 
     use super::*;
     use crate::{
@@ -660,7 +660,7 @@ mod tests {
         )
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_retry_writes_the_retained_payloads_unchanged_before_packing_new_rows() {
         let context = sink_context();
         let writes = Arc::new(Mutex::new(Vec::new()));
@@ -735,7 +735,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn one_record_per_row_is_encoded_again_after_a_stalled_write() {
         let context = sink_context();
         let writes = Arc::new(Mutex::new(Vec::new()));

@@ -2448,7 +2448,7 @@ mod tests {
         },
     };
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_create_if_not_exists_returns_already_existed_for_models() {
         let TestService {
             service,
@@ -2496,7 +2496,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn persistent_model_command_replays_one_terminal_result_for_its_reference() {
         let TestService {
             service,
@@ -2540,7 +2540,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_rejects_implicit_semicolon_batch() {
         let TestService {
             service,
@@ -2577,7 +2577,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_batch_returns_prior_successes_before_error() {
         let TestService {
             service,
@@ -2631,7 +2631,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_model_create_batch_is_atomic_on_registry_failure() {
         let TestService {
             service,
@@ -2675,7 +2675,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_preserves_detached_deduplicator_and_emitter_modes() {
         let TestService {
             service,
@@ -2739,7 +2739,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_creates_junction_model() {
         let TestService {
             service,
@@ -2801,7 +2801,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn process_command_creates_deduplicator_model() {
         let TestService {
             service,

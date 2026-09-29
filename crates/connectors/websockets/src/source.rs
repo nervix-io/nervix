@@ -20,8 +20,9 @@ use nervix_connector::{
 };
 use nervix_dns::{ConnectionBudget, DnsResolver};
 use nervix_models::ClientConfigEntry;
+use nervix_primitives::sync::mpsc;
 use thiserror::Error;
-use tokio::{net::TcpStream, sync::mpsc, time::timeout};
+use tokio::{net::TcpStream, time::timeout};
 use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream, client_async_tls_with_config, tungstenite::Message,
 };
@@ -207,7 +208,7 @@ impl SourceConnector for WebsocketSource {
         });
         let mut connected = None;
         for attempt in budget.attempts(&addresses) {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let result = timeout(attempt.budget, async {
                 let stream = TcpStream::connect(attempt.address)
                     .await
@@ -283,7 +284,7 @@ impl BrokerSourceConnector for WebsocketSource {
             )]));
         }
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(relay) = self.relay.as_mut() else {
                 return Ok(SourceBatch::ResumeRequired);
             };
@@ -405,7 +406,7 @@ mod tests {
         }]
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn resume_tries_the_next_address_and_preserves_host_path_and_query() {
         let fixture = DnsFixture::start().await;
         let listener = TcpListener::bind("127.0.8.2:0")
@@ -422,7 +423,7 @@ mod tests {
         let endpoint_url = format!("ws://websocket.nervix.test:{port}/socket/path?item=42");
         let plan = WebsocketSourcePlan::new(endpoint(endpoint_url), None, fixture.resolver.clone())
             .assured("the WebSocket endpoint is valid");
-        let server = tokio::spawn(async move {
+        let server = nervix_primitives::task::spawn(async move {
             let (mut stream, _) = listener
                 .accept()
                 .await
@@ -486,7 +487,7 @@ mod tests {
         assert!(fixture.authority.questions_for("websocket.nervix.test") > 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn resume_connects_to_a_literal_ipv6_endpoint_without_a_dns_question() {
         let fixture = DnsFixture::start().await;
         let listener = TcpListener::bind("[::1]:0")
@@ -499,7 +500,7 @@ mod tests {
             fixture.resolver.clone(),
         )
         .assured("the literal IPv6 endpoint is valid");
-        let server = tokio::spawn(async move {
+        let server = nervix_primitives::task::spawn(async move {
             let (stream, _) = listener
                 .accept()
                 .await
@@ -523,7 +524,7 @@ mod tests {
         assert_eq!(fixture.authority.total_questions(), 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn source_plan_uses_url_default_ports_and_rejects_other_schemes() {
         let fixture = DnsFixture::start().await;
         for (url, port, requires_tls) in [

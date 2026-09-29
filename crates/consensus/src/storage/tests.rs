@@ -200,7 +200,7 @@ impl Harness {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn node_admission_fence_recovers_after_reopen() -> TestResult {
     let mut harness = Harness::new().await?;
     let identity = ClusterNodeIdentity::new(
@@ -233,7 +233,7 @@ async fn node_admission_fence_recovers_after_reopen() -> TestResult {
 /// domain mutation publishes, for one concrete branch and then for every branch, are exactly what the
 /// store recovers after a restart, and a publication that does not hold the domain mutation lease
 /// changes neither the stored generations nor anything else.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutation_lease()
 -> TestResult {
     let mut harness = Harness::new().await?;
@@ -387,10 +387,10 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn record_state_and_applied_position_recover_together_at_each_boundary() -> TestResult {
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let mut harness = Harness::new().await?;
         let domain = Harness::domain("tenant");
         let schedule = DomainSchedule::new(domain.id.clone(), [], vec![]);
@@ -469,13 +469,13 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn votes_appends_and_commit_positions_report_failures_and_recover_durable_values()
 -> TestResult {
     for operation in ["vote", "append", "committed"] {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut harness = Harness::new().await?;
             harness
                 .store
@@ -546,10 +546,10 @@ async fn votes_appends_and_commit_positions_report_failures_and_recover_durable_
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn responses_and_notifications_wait_for_storage_on_a_single_async_worker() -> TestResult {
     for operation in ["vote", "append", "committed", "put-domain:tenant"] {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let harness = Harness::new().await?;
         let pause = harness
             .store
@@ -558,7 +558,7 @@ async fn responses_and_notifications_wait_for_storage_on_a_single_async_worker()
             .pause_next(operation.to_owned(), StorageBoundary::BeforeCommit);
         let notifications = harness.store.inner.domain_tx.subscribe();
         let mut store = harness.store.clone();
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             match operation {
                 "vote" => store.save_vote(&VoteOf::new(3, Harness::node())).await,
                 "append" => store
@@ -595,7 +595,7 @@ async fn responses_and_notifications_wait_for_storage_on_a_single_async_worker()
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_committed_range_is_published_once_after_its_single_durable_write() -> TestResult {
     let harness = Harness::new().await?;
     let mut entries = Vec::new();
@@ -620,7 +620,9 @@ async fn a_committed_range_is_published_once_after_its_single_durable_write() ->
         .pause_next("put-domain:third".to_owned(), StorageBoundary::BeforeCommit);
     let notifications = harness.store.inner.domain_tx.subscribe();
     let mut store = harness.store.clone();
-    let task = tokio::spawn(async move { store.apply(futures_util::stream::iter(entries)).await });
+    let task = nervix_primitives::task::spawn(async move {
+        store.apply(futures_util::stream::iter(entries)).await
+    });
     tokio::time::timeout(Duration::from_secs(10), pause.entered()).await?;
     assert!(
         !task.is_finished(),
@@ -646,10 +648,10 @@ async fn a_committed_range_is_published_once_after_its_single_durable_write() ->
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_range_is_split_where_the_next_entry_would_exceed_its_write() -> TestResult {
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let mut harness = Harness::new().await?;
         let reservation = StoreInner::reserve(&harness.executor, MemoryClass::Commands).await?;
         let limit = DurableBatch::byte_limit(&reservation)?;
@@ -699,7 +701,7 @@ async fn a_range_is_split_where_the_next_entry_would_exceed_its_write() -> TestR
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn entries_before_one_that_cannot_be_stored_are_written_first() -> TestResult {
     let mut harness = Harness::new().await?;
     let reservation = StoreInner::reserve(&harness.executor, MemoryClass::Commands).await?;
@@ -730,7 +732,7 @@ async fn entries_before_one_that_cannot_be_stored_are_written_first() -> TestRes
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_queued_vote_runs_after_a_ready_append_batch() -> TestResult {
     let mut harness = Harness::new().await?;
     let append_pause = harness
@@ -739,7 +741,7 @@ async fn a_queued_vote_runs_after_a_ready_append_batch() -> TestResult {
         .faults
         .pause_next("append".into(), StorageBoundary::BeforeCommit);
     let mut log = harness.store.clone();
-    let append = tokio::spawn(async move {
+    let append = nervix_primitives::task::spawn(async move {
         log.blocking_append(
             (1..=2).map(|index| EntryOf::<TypeConfig>::new_blank(Harness::log_id(index))),
         )
@@ -752,11 +754,13 @@ async fn a_queued_vote_runs_after_a_ready_append_batch() -> TestResult {
         .faults
         .pause_next("vote".into(), StorageBoundary::BeforeCommit);
     let mut log = harness.store.clone();
-    let vote = tokio::spawn(async move { log.save_vote(&VoteOf::new(4, Harness::node())).await });
+    let vote = nervix_primitives::task::spawn(async move {
+        log.save_vote(&VoteOf::new(4, Harness::node())).await
+    });
     tokio::time::timeout(Duration::from_secs(10), async {
         while harness.executor.snapshot().consensus_storage.pending == 0 {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await?;
@@ -781,7 +785,7 @@ async fn a_queued_vote_runs_after_a_ready_append_batch() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn complete_log_reads_return_every_entry_in_a_large_range() -> TestResult {
     const ENTRY_BYTES: usize = 768 * 1024;
     const ENTRY_COUNT: u64 = 3;
@@ -814,7 +818,7 @@ async fn complete_log_reads_return_every_entry_in_a_large_range() -> TestResult 
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn log_entry_stream_reads_a_large_range_in_separate_chunks() -> TestResult {
     const ENTRY_BYTES: usize = 768 * 1024;
     const ENTRY_COUNT: u64 = 3;
@@ -842,7 +846,7 @@ async fn log_entry_stream_reads_a_large_range_in_separate_chunks() -> TestResult
 
     let mut indexes = vec![1];
     while let Some(entry) = entries.next().await {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         indexes.push(entry?.log_id.index);
     }
     assert_eq!(indexes, vec![1, 2, 3]);
@@ -859,7 +863,7 @@ async fn log_entry_stream_reads_a_large_range_in_separate_chunks() -> TestResult
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn log_entry_stream_yields_at_the_entry_count_bound() -> TestResult {
     let entry_count = MAX_APPEND_BATCH_ENTRIES
         .checked_add(1)
@@ -875,7 +879,7 @@ async fn log_entry_stream_yields_at_the_entry_count_bound() -> TestResult {
     let entries = reader.entries_stream(..).await;
     tokio::pin!(entries);
     for expected in 1..=MAX_APPEND_BATCH_ENTRIES {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let entry = entries
             .next()
             .await
@@ -895,7 +899,7 @@ async fn log_entry_stream_yields_at_the_entry_count_bound() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn leader_bounded_log_stream_revalidates_the_vote_between_chunks() -> TestResult {
     const ENTRY_BYTES: usize = 768 * 1024;
 
@@ -935,7 +939,7 @@ async fn leader_bounded_log_stream_revalidates_the_vote_between_chunks() -> Test
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn idle_wait_joins_a_blocking_job_abandoned_by_its_async_caller() -> TestResult {
     let harness = Harness::new().await?;
     let pause = harness
@@ -944,7 +948,7 @@ async fn idle_wait_joins_a_blocking_job_abandoned_by_its_async_caller() -> TestR
         .faults
         .pause_next("append".into(), StorageBoundary::BeforeCommit);
     let mut log = harness.store.clone();
-    let append = tokio::spawn(async move {
+    let append = nervix_primitives::task::spawn(async move {
         log.blocking_append([EntryOf::<TypeConfig>::new_blank(Harness::log_id(1))])
             .await
     });
@@ -957,11 +961,11 @@ async fn idle_wait_joins_a_blocking_job_abandoned_by_its_async_caller() -> TestR
     assert!(cancelled.is_cancelled());
 
     let store = harness.store.clone();
-    let idle = tokio::spawn(async move { store.wait_for_idle().await });
+    let idle = nervix_primitives::task::spawn(async move { store.wait_for_idle().await });
     tokio::time::timeout(Duration::from_secs(10), async {
         while harness.executor.snapshot().consensus_storage.pending == 0 {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await?;
@@ -977,12 +981,12 @@ async fn idle_wait_joins_a_blocking_job_abandoned_by_its_async_caller() -> TestR
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn purge_and_truncation_recover_with_their_position_metadata() -> TestResult {
     for operation in ["purge", "truncate"] {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut harness = Harness::new().await?;
             harness.append(6).await?;
             harness
@@ -1024,7 +1028,7 @@ async fn purge_and_truncation_recover_with_their_position_metadata() -> TestResu
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn retained_log_bytes_follow_purge_truncation_and_reopen_without_flushing() -> TestResult {
     let mut harness = Harness::new().await?;
     harness.append(6).await?;
@@ -1053,7 +1057,7 @@ async fn retained_log_bytes_follow_purge_truncation_and_reopen_without_flushing(
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn snapshots_recover_state_and_snapshot_metadata_atomically() -> TestResult {
     let mut source = Harness::new().await?;
     source
@@ -1068,7 +1072,7 @@ async fn snapshots_recover_state_and_snapshot_metadata_atomically() -> TestResul
     let built = source.store.build_snapshot().await?;
     let expected = source.store.inner.state();
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let mut target = Harness::new().await?;
         target
             .apply(
@@ -1133,7 +1137,7 @@ async fn snapshots_recover_state_and_snapshot_metadata_atomically() -> TestResul
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_interrupted_installation_finishes_on_the_next_start() -> TestResult {
     let mut source = Harness::new().await?;
     source
@@ -1149,7 +1153,7 @@ async fn an_interrupted_installation_finishes_on_the_next_start() -> TestResult 
     let expected = source.store.inner.state();
     for operation in ["snapshot_clear", "snapshot_records", "snapshot_installed"] {
         for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut target = Harness::new().await?;
             target
                 .apply(
@@ -1196,7 +1200,7 @@ async fn an_interrupted_installation_finishes_on_the_next_start() -> TestResult 
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_snapshot_is_sealed_as_bounded_sections() -> TestResult {
     let mut source = Harness::new().await?;
     for index in 1..=8 {
@@ -1239,7 +1243,7 @@ async fn a_snapshot_is_sealed_as_bounded_sections() -> TestResult {
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_time() -> TestResult {
     const RECORD_BYTES: usize = 40 * 1024;
     const RECORDS: u64 = 12;
@@ -1275,9 +1279,9 @@ async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_ti
         .faults
         .pause_next("snapshot_section".to_owned(), StorageBoundary::AfterSync);
     let mut builder = source.store.clone();
-    let mut build = tokio::spawn(async move { builder.build_snapshot().await });
+    let mut build = nervix_primitives::task::spawn(async move { builder.build_snapshot().await });
     tokio::time::timeout(Duration::from_secs(10), async {
-        tokio::select! {
+        nervix_primitives::select! {
             () = pause.entered() => Ok(()),
             result = &mut build => match result {
                 Ok(Ok(_)) => Err(
@@ -1308,7 +1312,7 @@ async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_ti
         Harness::admission(following_index, RECORD_BYTES)?,
     );
     let mut log_store = source.store.clone();
-    let append = tokio::spawn(async move {
+    let append = nervix_primitives::task::spawn(async move {
         log_store
             .blocking_append([EntryOf::<TypeConfig>::new_blank(Harness::log_id(
                 following_index,
@@ -1317,8 +1321,8 @@ async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_ti
     });
     tokio::time::timeout(Duration::from_secs(10), async {
         while executor.snapshot().consensus_storage.pending < 1 {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -1338,15 +1342,15 @@ async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_ti
     // cannot hold a second reservation beside the append. Queue it behind the next paused section
     // after the append has released its reservation.
     let mut live_store = source.store.clone();
-    let apply = tokio::spawn(async move {
+    let apply = nervix_primitives::task::spawn(async move {
         live_store
             .apply(futures_util::stream::iter([Ok((following, None))]))
             .await
     });
     tokio::time::timeout(Duration::from_secs(10), async {
         while executor.snapshot().consensus_storage.pending < 1 {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
         }
     })
     .await
@@ -1400,7 +1404,7 @@ async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_ti
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_superseded_generation_is_deleted_once_nothing_reads_it() -> TestResult {
     let mut source = Harness::new().await?;
     source
@@ -1455,7 +1459,7 @@ struct DiskState {
 
 #[derive(Default)]
 struct CrashDisk {
-    state: parking_lot::Mutex<DiskState>,
+    state: nervix_primitives::sync::blocking::Mutex<DiskState>,
 }
 
 impl CrashDisk {
@@ -1514,12 +1518,12 @@ impl CommitBackend for CrashDisk {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn power_loss_discards_unsynced_records_and_keeps_whole_synced_revisions() -> TestResult {
     let harness = Harness::new().await?;
     let reservation = StoreInner::reserve(&harness.executor, MemoryClass::Commands).await?;
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let disk = CrashDisk::default();
         let mut preceding = StateMachineData::default();
         let domain = Harness::domain("tenant");
@@ -1570,7 +1574,7 @@ async fn power_loss_discards_unsynced_records_and_keeps_whole_synced_revisions()
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn replica_update_writes_one_record_and_metadata_amid_unrelated_graphs() -> TestResult {
     let harness = Harness::new().await?;
     let mut preceding = StateMachineData::default();
@@ -1641,7 +1645,7 @@ async fn replica_update_writes_one_record_and_metadata_amid_unrelated_graphs() -
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn transaction_append_and_preview_recover_as_one_revision() -> TestResult {
     use nervix_models::{StartDomain, Statement, Timestamp, UserName};
 
@@ -1651,7 +1655,7 @@ async fn transaction_append_and_preview_recover_as_one_revision() -> TestResult 
     };
 
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let mut harness = Harness::new().await?;
         let domain = Harness::domain("tenant");
         let owner = UserName::parse("operator")?;
@@ -1739,7 +1743,7 @@ async fn transaction_append_and_preview_recover_as_one_revision() -> TestResult 
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn transaction_report_and_frozen_plan_survive_snapshot_installation() -> TestResult {
     use nervix_models::{StartDomain, Statement, Timestamp, UserName};
 
@@ -1868,7 +1872,7 @@ async fn transaction_report_and_frozen_plan_survive_snapshot_installation() -> T
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn reclaimed_command_retry_fence_survives_snapshot_installation() -> TestResult {
     let mut source = Harness::new().await?;
     let reference = Harness::command_reference(1);
@@ -1944,7 +1948,7 @@ async fn reclaimed_command_retry_fence_survives_snapshot_installation() -> TestR
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_position() -> TestResult {
     use nervix_models::{StartDomain, Statement, Timestamp, UserName};
 
@@ -1954,7 +1958,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
         TransactionStepResult,
     };
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let mut harness = Harness::new().await?;
         let domain = Harness::domain("tenant");
         let owner = UserName::parse("operator")?;
@@ -2226,11 +2230,11 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn membership_recovery_uses_the_same_atomic_application_metadata() -> TestResult {
     use std::collections::BTreeSet;
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let mut harness = Harness::new().await?;
         let membership = openraft::Membership::new(
             vec![BTreeSet::from([Harness::node()])],
@@ -2272,7 +2276,7 @@ async fn membership_recovery_uses_the_same_atomic_application_metadata() -> Test
     Ok(())
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn current_record_storage_requires_its_metadata() -> TestResult {
     let mut harness = Harness::new().await?;
     harness

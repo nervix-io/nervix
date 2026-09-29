@@ -394,7 +394,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
         if !selects_output(output_index) {
             continue;
         }
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let output_schema = match relay_schema_for_routing(
             &routing,
             &context.branch.domain,
@@ -456,7 +456,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
         if !selects_output(output_index) {
             continue;
         }
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let (batches, errors) = match evaluate_processor_output_events(
             &mut context,
             output,

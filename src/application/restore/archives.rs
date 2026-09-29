@@ -24,7 +24,7 @@ use bytes::Bytes;
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
 use nervix_models::{CommandExecutionReference, RestoreArchive, Timestamp, UserName};
-use parking_lot::Mutex;
+use nervix_primitives::sync::blocking::Mutex;
 use thiserror::Error;
 use triomphe::Arc;
 
@@ -126,7 +126,7 @@ where
     };
     let mut received = 0_u64;
     while let Some(part) = parts.next().await {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let bytes = match part {
             Ok(RestoreStreamPart::Chunk(bytes)) => bytes,
             Ok(RestoreStreamPart::Invalid(reason)) => {
@@ -290,8 +290,10 @@ pub(super) mod test_staging {
     use arch_into::ArchInto as _;
     use bytes::Bytes;
     use error_stack::Report;
-    use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
-    use parking_lot::Mutex;
+    use nervix_primitives::sync::{
+        atomic::{AtomicUsize, Ordering},
+        blocking::Mutex,
+    };
 
     use super::{RestoreStaging, RestoreStagingWriter, StagingFailure, StagingRefusal};
     use crate::application::backup::retained::RetainedArtifact;
@@ -386,7 +388,7 @@ pub(super) mod test_staging {
 
         async fn write(&mut self, bytes: Bytes) -> Result<(), Report<StagingFailure>> {
             // Writing a chunk is a storage job other tasks run beside.
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
             self.bytes.extend_from_slice(&bytes);
             Ok(())
         }
@@ -455,7 +457,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn the_declared_archive_is_staged_and_holds_its_quota_until_it_is_dropped() {
         let quota = StdArc::new(Quota::default());
         let staging = MemoryStaging::new(quota.clone());
@@ -469,7 +471,7 @@ mod tests {
         assert_eq!(quota.releases(), BTreeMap::from([(0, 1)]));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn chunks_past_the_declared_size_are_refused_and_release_the_quota() {
         let quota = StdArc::new(Quota::default());
         let staging = MemoryStaging::new(quota.clone());
@@ -485,7 +487,7 @@ mod tests {
         assert_eq!(quota.releases(), BTreeMap::from([(0, 1)]));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_stream_that_ends_early_is_refused_as_truncated() {
         let quota = StdArc::new(Quota::default());
         let staging = MemoryStaging::new(quota.clone());
@@ -502,7 +504,7 @@ mod tests {
         assert_eq!(quota.releases(), BTreeMap::from([(0, 1)]));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn bytes_without_the_declared_digest_are_refused() {
         let quota = StdArc::new(Quota::default());
         let staging = MemoryStaging::new(quota.clone());
@@ -513,7 +515,7 @@ mod tests {
         assert_eq!(quota.releases(), BTreeMap::from([(0, 1)]));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_frame_that_is_not_a_chunk_is_refused() {
         let staging = MemoryStaging::new(StdArc::new(Quota::default()));
         let parts = vec![Ok(RestoreStreamPart::Invalid(
@@ -528,7 +530,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_transport_failure_ends_staging_with_the_transport_error() {
         let quota = StdArc::new(Quota::default());
         let staging = MemoryStaging::new(quota.clone());
@@ -543,7 +545,7 @@ mod tests {
         assert_eq!(quota.releases(), BTreeMap::from([(0, 1)]));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_staging_area_that_cannot_hold_the_archive_refuses_it_before_reading() {
         let quota = StdArc::new(Quota::default());
         let staging = MemoryStaging {
@@ -564,7 +566,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_retained_archive_is_read_only_by_its_owner_under_its_identity() {
         let quota = StdArc::new(Quota::default());
         let archives = RestoreArchives::default();
@@ -616,7 +618,7 @@ mod tests {
         assert_eq!(quota.releases(), BTreeMap::from([(1, 1)]));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_released_archive_stays_until_the_restore_reading_it_ends() {
         let quota = StdArc::new(Quota::default());
         let archives = RestoreArchives::default();
@@ -640,7 +642,7 @@ mod tests {
         assert_eq!(quota.releases(), BTreeMap::from([(0, 1)]));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_retry_replaces_the_archive_an_earlier_attempt_retained() {
         let quota = StdArc::new(Quota::default());
         let archives = RestoreArchives::default();
@@ -659,7 +661,7 @@ mod tests {
         assert_eq!(quota.releases(), BTreeMap::from([(0, 1)]));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_sweep_releases_only_the_archives_whose_retention_ended() {
         let quota = StdArc::new(Quota::default());
         let archives = RestoreArchives::default();

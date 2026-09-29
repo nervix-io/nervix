@@ -208,7 +208,7 @@ impl TransportState {
             .await?;
             return Ok(());
         }
-        let handled = tokio::select! {
+        let handled = nervix_primitives::select! {
             handled = self.requests.handle_stream(
                 &self.executor,
                 peer_node_id,
@@ -294,7 +294,7 @@ async fn send_stream_chunk(
 ) -> Result<(), Report<TransportError>> {
     let mut offset = 0;
     while offset < body.len() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let remaining = body
             .len()
             .checked_sub(offset)
@@ -351,7 +351,7 @@ impl TransportState {
             .map_err(TransportError::from)?;
         let mut sent = 0_u64;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let next = match timeout(progress_timeout, response.chunks.next()).await {
                 Ok(next) => next,
                 Err(_) => {

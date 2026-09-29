@@ -25,10 +25,8 @@ use nervix_models::{
     TransactionPosition, TransactionPreviewIdentity, TransactionStatus, UploadResource,
 };
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
-use tokio::{
-    sync::Mutex,
-    time::{Instant, sleep},
-};
+use nervix_primitives::sync::Mutex;
+use tokio::time::{Instant, sleep};
 use tonic::transport::Channel;
 use triomphe::Arc;
 use url::Url;
@@ -281,7 +279,7 @@ impl Client {
         let mut last_error = None;
         let deadline = Instant::now() + connector.retry_timeout();
         for candidate in servers.reconnect_candidates() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let attempt = async {
                 let channel = connector.connect(&candidate).await?;
                 Exchange::open(channel, &connector, events.sinks.clone()).await
@@ -626,7 +624,7 @@ impl Client {
         let inspected = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
             let _command_guard = self.inner.command_lock.lock().await;
             for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let request = ClientRequest::InspectTransaction(InspectTransactionRequest {
                     target: target.clone(),
                     operation,
@@ -683,7 +681,7 @@ impl Client {
         execution: &ExecutionHandle,
     ) -> Result<CommandOutcome, ClientError> {
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let outcome = match self.execute_once(execution).await {
                 Ok(outcome) => outcome,
                 Err(error) if error.retryable_session_failure() => {
@@ -804,7 +802,7 @@ impl Client {
                 let client = self.clone();
                 let statement = statement.clone();
                 let offset = *offset;
-                let result = tokio::spawn(async move {
+                let result = nervix_primitives::task::spawn(async move {
                     client
                         .create_subscription(attempt, requests, statement, offset)
                         .await
@@ -837,12 +835,11 @@ impl Client {
                     Cancellation::Delete(attempt) => attempt,
                 };
                 let client = self.clone();
-                let result =
-                    tokio::spawn(
-                        async move { client.delete_subscription(attempt, requests).await },
-                    )
-                    .await
-                    .map_err(ClientError::SubscriptionTask)?;
+                let result = nervix_primitives::task::spawn(async move {
+                    client.delete_subscription(attempt, requests).await
+                })
+                .await
+                .map_err(ClientError::SubscriptionTask)?;
                 result.map_err(ClientError::subscription_operation)
             }
             StatementRoute::Restore(restore) => {
@@ -941,7 +938,7 @@ impl Client {
         let desired = &self.inner.events.sinks.desired;
         let mut changed = desired.watch();
         while desired.deletion_waits(&attempt) {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             changed
                 .changed()
                 .await
@@ -993,7 +990,7 @@ impl Client {
         transaction_id: &str,
     ) -> Result<nervix_client_wire::AttachOutcome, ClientError> {
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let request = ClientRequest::AttachTransaction(AttachTransactionRequest {
                 transaction_id: transaction_id.to_string(),
             });
@@ -1067,7 +1064,7 @@ impl Client {
         );
         let deadline = Instant::now() + self.inner.connector.retry_timeout();
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let exchange = match &captured {
                 Some(exchange) => exchange.clone(),
                 None => self.inner.exchange.lock().await.requests(),
@@ -1173,13 +1170,13 @@ impl Client {
     /// open another on.
     pub async fn next_subscription(&self) -> Result<SubscriptionEvent, ClientError> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Some(event) = self.inner.events.sinks.desired.take_event() {
                 return Ok(event);
             }
             let desired = &self.inner.events.sinks.desired;
             let mut desired_changed = desired.watch();
-            let result = tokio::select! {
+            let result = nervix_primitives::select! {
                 result = self.inner.events.sinks.subscriptions.next() => result,
                 changed = desired_changed.changed() => {
                     changed.assured(
@@ -1223,7 +1220,7 @@ impl Client {
                     if !self.can_reconnect().await {
                         return Err(ClientError::SessionClosed);
                     }
-                    tokio::select! {
+                    nervix_primitives::select! {
                         () = self.inner.events.sinks.subscriptions.resumed() => {}
                         changed = desired_changed.changed() => {
                             changed.assured(
@@ -1248,7 +1245,7 @@ impl Client {
     pub async fn next_server_event(&self) -> Result<ServerEvent, ClientError> {
         let notices = &self.inner.events.sinks.notices;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match notices.next().await {
                 Ok(event) => return Ok(event),
                 Err(error) if *error.current_context() == EventQueueError::Overflow => {
@@ -1327,7 +1324,7 @@ impl Client {
     ) -> error_stack::Result<DomainClockEvent, ClientError> {
         let clocks = &self.inner.events.sinks.clocks;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut changed = clocks.watch();
             if let Some(event) = clocks.take_event() {
                 return Ok(event);
@@ -1361,7 +1358,7 @@ impl Client {
     ) -> error_stack::Result<ReplyBody, ClientError> {
         let answered = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
             for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 match self.request(request.clone(), None).await {
                     Ok(body) => return Ok(body),
                     Err(error) if error.retryable_session_failure() => {
@@ -1388,7 +1385,7 @@ impl Client {
     pub async fn next_domain_list(&self) -> Result<Vec<DomainInfo>, ClientError> {
         let mut observed = self.inner.events.domains.lock().await;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if observed.changed().await.is_err() {
                 return Err(ClientError::SessionClosed);
             }
@@ -1543,13 +1540,13 @@ impl Client {
             let mut delay = Self::LEADER_ELECTION_RETRY_DELAY;
             let mut last_error = None;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let candidates = self.inner.servers.lock().await.reconnect_candidates();
                 if candidates.is_empty() {
                     break 'recovery SessionRecovery::Unavailable;
                 }
                 for server in candidates {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     match tokio::time::timeout_at(deadline, self.reconnect_unlocked(&server)).await
                     {
                         Ok(Ok(())) => break 'recovery SessionRecovery::Ready,

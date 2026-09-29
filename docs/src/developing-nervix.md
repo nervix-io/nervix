@@ -199,6 +199,11 @@ For test runs:
 just test
 ```
 
+For representation properties and sanitizer fuzzing, see
+[Property Testing And Fuzzing](./property-testing-and-fuzzing.md). The focused entry points are
+`just test-bolero [filter]`, `just fuzz-list` and
+`just fuzz <target> [duration]`. `just help` lists the recipes.
+
 Connector crates have a focused recipe. `just test-connectors` runs the unit tests of the
 `nervix-connector` contract crate and of every `nervix-connector-*` integration crate. Arguments are
 passed to the test binaries, so a test name filter narrows the run:
@@ -263,9 +268,23 @@ just test-loom-replay target/loom-failures/<package>/<test>
 ```
 
 `just test-loom-qualification` applies each registered weakening to a copy of the working tree and
-requires its model to fail, and `just test-primitives` runs the primitive boundary's conformance
-checks once per execution mode. [Data-Plane Concurrency](./data-plane-concurrency.md) defines the
-primitive boundary, what each mode observes, and every model's claim.
+requires its model to fail.
+
+### Primitive boundary
+
+`just test-primitives` builds `nervix-primitives` once per execution mode and runs its conformance
+checks: which backend each mode selects, the same contract scripts of every family against the
+ordinary libraries and against the Shuttle adapters, the Shuttle checks that a publication between
+a read and a waiter's registration is reached, and the check that a Loom build takes the ordinary
+libraries for the families Loom does not model. Run it after changing an adapter or the families a
+mode provides:
+
+```bash
+just test-primitives
+```
+
+[Data-Plane Concurrency](./data-plane-concurrency.md) defines the primitive boundary, what each
+mode observes, and every model's claim.
 
 ### Deterministic network simulation
 

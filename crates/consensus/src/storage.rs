@@ -16,7 +16,11 @@ use fjall::{Database, Keyspace, KeyspaceCreateOptions, Readable as _, Snapshot a
 use futures_util::{FutureExt as _, Stream, StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Executor, MemoryClass, Reservation, StorageClass};
-use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use nervix_primitives::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    blocking::{Mutex, RwLock},
+    watch,
+};
 use openraft::{
     Snapshot, SnapshotMeta, StoredMembership,
     entry::{EntryPayload, RaftPayload},
@@ -28,10 +32,8 @@ use openraft::{
     },
     type_config::alias::{EntryOf, LeaderIdOf},
 };
-use parking_lot::{Mutex, RwLock};
 use rkyv::{Archive, Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::watch;
 use triomphe::Arc;
 
 #[cfg(test)]
@@ -833,7 +835,7 @@ impl StoreInner {
                 .run(MemoryClass::Bulk, |inner, _| GenerationSeal::open(inner))
                 .await?;
             while !seal.complete {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 seal.write_next(self, generation, section_limit).await?;
             }
             let log_bytes_at_open = seal.log_bytes_at_open;
@@ -968,7 +970,7 @@ impl StoreInner {
         })
         .await?;
         for index in 0..manifest.section_count {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let bytes = self.read_section(generation, index).await?;
             self.run(MemoryClass::Bulk, move |inner, reservation| {
                 let section: SnapshotSection = storage_decode(&bytes)?;
@@ -1500,7 +1502,7 @@ impl LogEntryStream {
         // receives. Make crossing a chunk boundary pending before starting another storage job,
         // so that the apply job for the chunk already in hand reaches the ordered worker first.
         if crossed_chunk_boundary {
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
         }
         let read_result = self
             .inner
@@ -1774,7 +1776,7 @@ impl RaftStateMachine<TypeConfig> for FjallStore {
         // Gathering ready entries may already have reached the end of the stream.
         let mut entries = entries.fuse();
         while let Some(item) = entries.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut ready = vec![item?];
             // Entries the stream yields without waiting share one storage job. An entry it still
             // has to read starts the next job, so entries already read are never held back.

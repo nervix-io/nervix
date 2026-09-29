@@ -1225,7 +1225,8 @@ fn main() {
 
 #[cfg(test)]
 fn initialize_test_executor() {
-    static EXECUTOR: std::sync::Once = std::sync::Once::new();
+    static EXECUTOR: nervix_primitives::unmodeled::sync::Once =
+        nervix_primitives::unmodeled::sync::Once::new();
     EXECUTOR.call_once(|| {
         any_spawner::Executor::init_futures_executor()
             .assured("the test process initializes the Leptos executor once");

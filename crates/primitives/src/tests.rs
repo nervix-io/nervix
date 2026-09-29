@@ -1,9 +1,22 @@
 //! The boundary's conformance: which backend each mode selects, and that every operation of the
-//! surface behaves as the standard library defines it under that backend.
+//! surface behaves as its library defines it under that backend.
 //!
 //! `just test-primitives` runs this module once per mode. Each mode's checks run the same
-//! [`exercise_the_atomic_surface`], so a backend that lacks an operation fails to compile here and a
-//! backend that answers one differently fails here, rather than in the first owner that uses it.
+//! [`exercise_the_atomic_surface`] and the same scripts of the native families, so a backend that
+//! lacks an operation fails to compile here and a backend that answers one differently fails here,
+//! rather than in the first owner that uses it. The Shuttle checks also show that the scheduler
+//! reaches the races its adapters exist for.
+
+#[cfg(all(feature = "native", not(feature = "loom")))]
+mod families;
+#[cfg(all(feature = "native", not(feature = "loom")))]
+mod notification;
+#[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
+mod shuttle_races;
+#[cfg(all(feature = "native", not(feature = "loom")))]
+mod tasks;
+#[cfg(all(feature = "native", not(feature = "loom")))]
+mod watch_channel;
 
 use std::{any::TypeId, ptr};
 
@@ -159,6 +172,112 @@ mod ordinary {
     fn native_threads_are_operating_system_threads() {
         exercise_threads();
     }
+
+    /// Ordinary execution selects each library's own items: no wrapper, dispatch or scheduling
+    /// point stands between a caller and the primitive.
+    #[cfg(feature = "native")]
+    #[test]
+    fn ordinary_execution_selects_each_librarys_own_items() {
+        assert!(is_same_type::<crate::sync::Notify, tokio::sync::Notify>());
+        assert!(is_same_type::<crate::sync::Semaphore, tokio::sync::Semaphore>());
+        assert!(is_same_type::<
+            crate::sync::watch::Sender<u8>,
+            tokio::sync::watch::Sender<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::sync::mpsc::Sender<u8>,
+            tokio::sync::mpsc::Sender<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::sync::CancellationToken,
+            tokio_util::sync::CancellationToken,
+        >());
+        assert!(is_same_type::<
+            crate::sync::blocking::Mutex<u8>,
+            parking_lot::Mutex<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::sync::blocking::Condvar,
+            parking_lot::Condvar,
+        >());
+        assert!(is_same_type::<
+            crate::sync::blocking::OnceLock<u8>,
+            std::sync::OnceLock<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::task::JoinHandle<u8>,
+            tokio::task::JoinHandle<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::task::AbortOnDropHandle<u8>,
+            tokio_util::task::AbortOnDropHandle<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::runtime::Runtime,
+            tokio::runtime::Runtime,
+        >());
+        assert!(is_same_type::<
+            crate::__private::runtime::Builder,
+            tokio::runtime::Builder,
+        >());
+        assert!(is_same_type::<
+            crate::collections::DashMap<u8, u8>,
+            dashmap::DashMap<u8, u8>,
+        >());
+        assert!(is_same_type::<
+            crate::collections::ConcurrentQueue<u8>,
+            concurrent_queue::ConcurrentQueue<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::publication::ArcSwap<u8>,
+            arc_swap::ArcSwap<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::stream::wrappers::ReceiverStream<u8>,
+            tokio_stream::wrappers::ReceiverStream<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::thread::JoinHandle<u8>,
+            std::thread::JoinHandle<u8>,
+        >());
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn notify_keeps_its_registration_contract() {
+        super::notification::keeps_the_registration_contract();
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn the_watch_channel_keeps_its_contract() {
+        super::watch_channel::keeps_the_channel_contract();
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn the_other_native_families_keep_their_contracts() {
+        super::families::keep_their_contracts();
+    }
+
+    /// The test attribute builds the selected runtime and passes its arguments through, so a task
+    /// the test spawns runs on the worker threads it asked for.
+    #[cfg(feature = "native")]
+    #[crate::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_test_attribute_runs_the_selected_runtime() {
+        use meticulous::ResultExt as _;
+
+        let spawned = crate::task::spawn(async { 7_u8 });
+        assert_eq!(spawned.await.assured("the task returns a constant"), 7);
+        let runtime = crate::runtime::Handle::current();
+        assert_eq!(runtime.metrics().num_workers(), 2);
+    }
+
+    #[cfg(feature = "native")]
+    #[crate::test]
+    async fn an_abort_on_drop_handle_keeps_its_contract() {
+        super::tasks::abort_on_drop_handles_end_their_tasks().await;
+    }
 }
 
 #[cfg(feature = "shuttle")]
@@ -234,6 +353,121 @@ mod shuttle_mode {
     fn native_threads_are_shuttle_threads() {
         shuttle::check_random(exercise_threads, 1);
     }
+
+    /// Shuttle's modeled Tokio, Tokio Util, Tokio Stream and `parking_lot` supply the families this
+    /// crate does not adapt, and every endpoint of a channel family comes from one of them.
+    #[cfg(feature = "native")]
+    #[test]
+    fn shuttle_selects_the_modeled_libraries() {
+        assert!(is_same_type::<
+            crate::sync::Semaphore,
+            shuttle_tokio::sync::Semaphore,
+        >());
+        assert!(is_same_type::<
+            crate::sync::mpsc::Sender<u8>,
+            shuttle_tokio::sync::mpsc::Sender<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::sync::blocking::Mutex<u8>,
+            shuttle_parking_lot::Mutex<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::sync::blocking::mpsc::Sender<u8>,
+            shuttle::sync::mpsc::Sender<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::task::JoinHandle<u8>,
+            shuttle_tokio::task::JoinHandle<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::runtime::Runtime,
+            shuttle_tokio::runtime::Runtime,
+        >());
+        assert!(is_same_type::<
+            crate::__private::runtime::Builder,
+            shuttle_tokio::runtime::Builder,
+        >());
+        assert!(is_same_type::<
+            crate::stream::wrappers::ReceiverStream<u8>,
+            shuttle_tokio_stream::wrappers::ReceiverStream<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::thread::JoinHandle<u8>,
+            shuttle::thread::JoinHandle<u8>,
+        >());
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn notify_keeps_its_registration_contract_under_shuttle() {
+        shuttle::check_random(super::notification::keeps_the_registration_contract, 1);
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn the_watch_channel_keeps_its_contract_under_shuttle() {
+        shuttle::check_random(super::watch_channel::keeps_the_channel_contract, 1);
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn the_other_native_families_keep_their_contracts_under_shuttle() {
+        shuttle::check_random(super::families::keep_their_contracts, 1);
+    }
+
+    /// The script spawns tasks, so it runs under several schedules: its outcomes hold in each.
+    #[cfg(feature = "native")]
+    #[test]
+    fn an_abort_on_drop_handle_keeps_its_contract_under_shuttle() {
+        shuttle::check_random(
+            || shuttle::future::block_on(super::tasks::abort_on_drop_handles_end_their_tasks()),
+            16,
+        );
+    }
+
+    /// Each registration and notification of `Notify`, and each read of the watch channel's version
+    /// that registers or decides, lets the scheduler choose the next task. A drop does not.
+    #[cfg(feature = "native")]
+    #[test]
+    fn every_registration_and_notification_is_a_scheduling_point() {
+        use std::pin::pin;
+
+        use crate::sync::{Notify, watch};
+
+        shuttle::check_random(
+            || {
+                let notify = Notify::new();
+                let before = context_switches();
+                let mut created = pin!(notify.notified());
+                assert!(context_switches() > before);
+                let before = context_switches();
+                assert!(!created.as_mut().enable());
+                assert!(context_switches() > before);
+                let before = context_switches();
+                notify.notify_one();
+                assert!(context_switches() > before);
+                let before = context_switches();
+                notify.notify_waiters();
+                assert!(context_switches() > before);
+                let unregistered = Box::pin(notify.notified());
+                let before = context_switches();
+                drop(unregistered);
+                assert_eq!(context_switches(), before);
+
+                let (sender, receiver) = watch::channel(0_u8);
+                let before = context_switches();
+                let subscribed = sender.subscribe();
+                assert!(context_switches() > before);
+                let before = context_switches();
+                assert!(receiver.has_changed().is_ok());
+                assert!(context_switches() > before);
+                let before = context_switches();
+                drop(subscribed);
+                assert_eq!(context_switches(), before);
+            },
+            1,
+        );
+    }
 }
 
 #[cfg(feature = "loom")]
@@ -270,5 +504,39 @@ mod loom_mode {
     #[test]
     fn native_threads_are_loom_threads() {
         loom::model(exercise_threads);
+    }
+
+    /// Loom models the threads a model spawns, joins, parks and yields, and nothing of the async,
+    /// thread-blocking, collection or publication families, which a Loom build takes from the
+    /// ordinary libraries, outside every model.
+    #[cfg(feature = "native")]
+    #[test]
+    fn loom_takes_the_ordinary_libraries_for_the_families_it_does_not_model() {
+        assert!(is_same_type::<
+            crate::thread::JoinHandle<u8>,
+            loom::thread::JoinHandle<u8>,
+        >());
+        assert!(is_same_type::<crate::thread::Builder, loom::thread::Builder>());
+        assert!(is_same_type::<crate::sync::Notify, tokio::sync::Notify>());
+        assert!(is_same_type::<
+            crate::sync::watch::Sender<u8>,
+            tokio::sync::watch::Sender<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::sync::blocking::Mutex<u8>,
+            parking_lot::Mutex<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::task::JoinHandle<u8>,
+            tokio::task::JoinHandle<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::collections::DashMap<u8, u8>,
+            dashmap::DashMap<u8, u8>,
+        >());
+        assert!(is_same_type::<
+            crate::publication::ArcSwap<u8>,
+            arc_swap::ArcSwap<u8>,
+        >());
     }
 }

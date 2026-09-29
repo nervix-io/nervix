@@ -38,14 +38,14 @@ use nervix_models::{
     DomainName, NodeEndpoint, NodeServiceUrl, NodeServiceUrlParseError, ResourceName,
     ResourceUploadIdentity, ResourceUploadKey, UserName,
 };
+use nervix_primitives::{sync::CancellationToken, task::JoinSet};
 use rustls::ServerConfig;
-use tokio::{net::TcpListener, task::JoinSet};
+use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{handshake::derive_accept_key, protocol::Role},
 };
-use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::{
@@ -171,7 +171,7 @@ async fn handle_web_console_request(
         let on_upgrade = upgrade::on(&mut request);
         let service_tasks = service.inner.service_tasks.clone();
         service_tasks.spawn(async move {
-            let upgraded = tokio::select! {
+            let upgraded = nervix_primitives::select! {
                 _ = service.inner.admission_shutdown.cancelled() => return,
                 upgraded = on_upgrade => upgraded,
             };
@@ -298,7 +298,7 @@ pub(in crate::application) async fn serve_web_console_http(
     let mut connection_tasks = JoinSet::new();
 
     loop {
-        let accepted = tokio::select! {
+        let accepted = nervix_primitives::select! {
             _ = shutdown.cancelled() => {
                 break;
             }
@@ -341,7 +341,7 @@ pub(in crate::application) async fn serve_web_console_https(
     let mut connection_tasks = JoinSet::new();
 
     loop {
-        let accepted = tokio::select! {
+        let accepted = nervix_primitives::select! {
             _ = shutdown.cancelled() => {
                 break;
             }
@@ -538,7 +538,7 @@ impl SessionServiceImpl {
                     format!("failed to read multipart field: {error}"),
                 )
             })? {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if field.name() != Some("file") {
                     continue;
                 }
@@ -559,7 +559,7 @@ impl SessionServiceImpl {
                         format!("failed to read uploaded file chunk: {error}"),
                     )
                 })? {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let chunk = self
                         .inner
                         .resource_store

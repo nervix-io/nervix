@@ -49,7 +49,7 @@ use interconnect_relay::InterconnectRelayPayloadLane;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{ConsensusSettings, RaftRetentionPolicy, TransactionState};
 use nervix_dns::{DnsConfiguration, DnsResolver};
-use nervix_execution::{Executor, sync::DashMap};
+use nervix_execution::Executor;
 use nervix_interconnect::{
     ActivateOwnershipHandoffStateRequest as RemoteActivateOwnershipHandoffStateRequest,
     ApplicationHealthProbe,
@@ -86,6 +86,7 @@ use nervix_interconnect::{
 use nervix_models::{
     ClusterNodeName, DomainName, DomainStatus, ModelKind, NodeEndpoint, NodeServiceUrl, UserName,
 };
+use nervix_primitives::{collections::DashMap, sync::broadcast};
 use observability_http::serve_observability_http;
 use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecoveryCoordinator};
 use scheduling::{
@@ -106,7 +107,6 @@ use tls::{
 };
 use tokio::{
     net::TcpListener,
-    sync::broadcast,
     time::{Duration, sleep},
 };
 use transaction::{
@@ -1105,7 +1105,7 @@ impl Application {
             .install_node_observations(node_observations.clone());
         let mut background_tasks = Vec::new();
         let scheduler_delay_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             node_observations
                 .sample_scheduler_delay(scheduler_delay_shutdown)
                 .await;
@@ -1127,7 +1127,7 @@ impl Application {
         let membership_reconcile_shutdown = shutdown.clone();
         let interconnect_tls_transport = interconnect.clone();
         let interconnect_tls_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             reload_interconnect_tls(
                 interconnect_tls_transport,
                 interconnect_tls_paths,
@@ -1139,15 +1139,15 @@ impl Application {
         if let Some(controller) = memory_pressure_controller {
             let memory_runtime = runtime.clone();
             let memory_shutdown = shutdown.clone();
-            background_tasks.push(tokio::spawn(async move {
+            background_tasks.push(nervix_primitives::task::spawn(async move {
                 controller.run(memory_runtime, memory_shutdown).await;
             }));
         }
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             sleep(Duration::from_millis(500)).await;
             let mut initialized = false;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if membership_reconcile_shutdown.is_cancelled() {
                     break;
                 }
@@ -1170,7 +1170,7 @@ impl Application {
                 {
                     warn!(%error, "raft membership reconciliation failed");
                 }
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = membership_reconcile_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_secs(1)) => {}
                 }
@@ -1182,10 +1182,10 @@ impl Application {
             let consensus_for_leadership_transfer = consensus.administrator();
             let leadership_transfer_shutdown = shutdown.clone();
             let leadership_transfer_local_node_id = node_id.clone();
-            background_tasks.push(tokio::spawn(async move {
+            background_tasks.push(nervix_primitives::task::spawn(async move {
                 loop {
-                    tokio::task::consume_budget().await;
-                    tokio::select! {
+                    nervix_primitives::task::consume_budget().await;
+                    nervix_primitives::select! {
                         _ = leadership_transfer_shutdown.cancelled() => break,
                         request = leadership_transfer_rx.recv() => {
                             match request {
@@ -1218,13 +1218,13 @@ impl Application {
                 }
             }));
         }
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             sleep(Duration::from_millis(500)).await;
             let reconcile_started = tokio::time::Instant::now();
             let mut default_user_resolved = false;
             let mut missing_init_default_user_password_warned = false;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 // A pass waits on consensus writes and on requests to peers, and neither completes
                 // once the peers have stopped. The pass therefore ends with drain support rather
                 // than holding terminal teardown until the grace period aborts the whole task.
@@ -1329,7 +1329,7 @@ impl Application {
                         }
                     }
                     loop {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         let Ok(automatic_schedule_input) =
                             consensus_for_reconcile.automatic_schedule_input().await
                         else {
@@ -1404,7 +1404,7 @@ impl Application {
                         let mut automatic_decision_selected = false;
                         let mut automatic_decision_published = false;
                         for domain_schedule in current_schedule.domains.values() {
-                            tokio::task::consume_budget().await;
+                            nervix_primitives::task::consume_budget().await;
                             if active_domains.contains(&domain_schedule.domain)
                                 || committing_domains.contains(&domain_schedule.domain)
                                 || runtime_for_reconcile
@@ -1489,7 +1489,7 @@ impl Application {
                         }
                         if !automatic_decision_selected {
                             for (domain, graph) in active_graphs {
-                                tokio::task::consume_budget().await;
+                                nervix_primitives::task::consume_budget().await;
                                 if committing_domains.contains(&domain)
                                     || runtime_for_reconcile.domain_alter_is_active(&domain)
                                 {
@@ -1609,7 +1609,7 @@ impl Application {
                 let Some(()) = reconcile_shutdown.run_until_cancelled(reconcile_pass).await else {
                     break;
                 };
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = reconcile_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_secs(1)) => {}
                 }
@@ -1621,10 +1621,10 @@ impl Application {
         let local_node_id = node_id;
         let mut awaiting_initial_bootstrap_peer = has_bootstrap_candidates;
         let health_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             sleep(Duration::from_millis(500)).await;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if health_shutdown.is_cancelled() {
                     break;
                 }
@@ -1722,8 +1722,8 @@ impl Application {
                 // peer's one-second timeout. Publication checks the current incarnation and
                 // endpoint, so a result superseded by discovery is still discarded.
                 loop {
-                    tokio::task::consume_budget().await;
-                    tokio::select! {
+                    nervix_primitives::task::consume_budget().await;
+                    nervix_primitives::select! {
                         _ = health_shutdown.cancelled() => return,
                         result = probe_results.next() => match result {
                             Some(result) => {
@@ -1733,7 +1733,7 @@ impl Application {
                         }
                     }
                 }
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = health_shutdown.cancelled() => break,
                     changed = health_topology.changed() => {
                         changed.assured(
@@ -1764,7 +1764,7 @@ impl Application {
         let interconnect_for_schedule = interconnect.clone();
         let schedule_shutdown = shutdown.clone();
         let schedule_runtime_admission = runtime_admission.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             let application = RuntimeStateApplication {
                 runtime: &runtime_for_schedule,
                 https_certificates: &certificates_for_schedule,
@@ -1779,8 +1779,8 @@ impl Application {
                 warn!(error = %error, "failed to apply initial cluster schedule");
             }
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     _ = schedule_shutdown.cancelled() => break,
                     changed = schedule_rx.changed() => {
                         if changed.is_err() {
@@ -1833,7 +1833,7 @@ impl Application {
                 command_executions: Default::default(),
                 transaction_executions: DashMap::with_hasher(RandomState::new()),
                 transaction_recovery: Default::default(),
-                ownership_handoff_operations: tokio::sync::Mutex::new(()),
+                ownership_handoff_operations: nervix_primitives::sync::Mutex::new(()),
                 resource_upload_executions: DashMap::with_hasher(RandomState::new()),
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
                 retained_backups: Default::default(),
@@ -2382,7 +2382,7 @@ impl Application {
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
         let ownership_handoff_reconciliation_service = service.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             ownership_handoff_reconciliation_service
                 .run_ownership_handoff_preparation_reconciliation()
                 .await;
@@ -2390,10 +2390,10 @@ impl Application {
 
         let transaction_service = service.clone();
         let transaction_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             let mut observed_leadership = None;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let is_leader = transaction_service
                     .inner
                     .consensus
@@ -2416,7 +2416,7 @@ impl Application {
                                 error = %error,
                                 "failed to synchronize registry after leadership state change"
                             );
-                            tokio::select! {
+                            nervix_primitives::select! {
                                 _ = transaction_shutdown.cancelled() => break,
                                 _ = sleep(Duration::from_millis(250)) => {}
                             }
@@ -2431,7 +2431,7 @@ impl Application {
                 // node releases the archives whose retry validity ended.
                 transaction_service.sweep_retained_backups();
                 transaction_service.sweep_restore_archives();
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = transaction_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_millis(250)) => {}
                 }
@@ -2440,7 +2440,7 @@ impl Application {
 
         let clock_authority_service = service.clone();
         let clock_authority_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             run_domain_clock_authority_reconciliation(
                 clock_authority_service,
                 clock_authority_shutdown,
@@ -2451,10 +2451,10 @@ impl Application {
         let runtime_event_service = service.clone();
         let runtime_event_shutdown = shutdown.clone();
         let mut runtime_event_rx = runtime.subscribe_events();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     _ = runtime_event_shutdown.cancelled() => break,
                     received = runtime_event_rx.recv() => match received {
                         Ok(RuntimeEvent::Error(message)) => {
@@ -2463,7 +2463,7 @@ impl Application {
                             node_ids.sort();
                             node_ids.dedup();
                             for node_id in node_ids {
-                                tokio::task::consume_budget().await;
+                                nervix_primitives::task::consume_budget().await;
                                 if node_id == runtime_event_service.inner.consensus.local_node_id().clone() {
                                     continue;
                                 }
@@ -2499,15 +2499,15 @@ impl Application {
 
         let resource_service = service.clone();
         let resource_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             sleep(Duration::from_millis(500)).await;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if resource_shutdown.is_cancelled() {
                     break;
                 }
                 resource_service.reconcile_resources_once().await;
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = resource_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_secs(1)) => {}
                 }
@@ -2516,15 +2516,15 @@ impl Application {
 
         let domain_apply_service = service.clone();
         let domain_apply_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             let mut domains_rx = domain_apply_service.inner.consensus.subscribe_domains();
             if let Err(error) = domain_apply_service.apply_current_cluster_state().await {
                 warn!(error = %error, "failed to apply cluster schedule after initial domain sync");
             }
 
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     _ = domain_apply_shutdown.cancelled() => break,
                     changed = domains_rx.changed() => {
                         if changed.is_err() {
@@ -2540,13 +2540,13 @@ impl Application {
 
         let clock_service = service.clone();
         let clock_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             let mut domain_state_rx = clock_service.inner.runtime.subscribe_domain_state();
             let mut tasks: HashMap<DomainName, DomainClockTask> = HashMap::new();
             let mut retirements = DomainClockRetirements::default();
 
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 reconcile_domain_clock_tasks(
                     &clock_service,
                     &clock_shutdown,
@@ -2554,7 +2554,7 @@ impl Application {
                     &mut retirements,
                 )
                 .await;
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = clock_shutdown.cancelled() => break,
                     changed = domain_state_rx.changed() => {
                         if changed.is_err() {
@@ -2573,13 +2573,13 @@ impl Application {
 
         let kafka_schedule_service = service.clone();
         let kafka_schedule_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             let mut schedule_rx = kafka_schedule_service.inner.consensus.subscribe_schedule();
             let mut tasks: HashMap<KafkaPartitionWatcherKey, KafkaPartitionWatcherTask> =
                 HashMap::new();
 
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let schedule = kafka_schedule_service
                     .inner
                     .consensus
@@ -2588,7 +2588,7 @@ impl Application {
                 kafka_schedule_service
                     .reconcile_kafka_partition_watchers(&schedule, &mut tasks)
                     .await;
-                tokio::select! {
+                nervix_primitives::select! {
                     _ = kafka_schedule_shutdown.cancelled() => break,
                     changed = schedule_rx.changed() => {
                         if changed.is_err() {
@@ -2608,7 +2608,7 @@ impl Application {
             InterconnectRelayPayloadLane::new();
         let relay_payload_shutdown = shutdown.clone();
         let runtime_for_relay_payloads = runtime.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             InterconnectRelayPayloadLane::run(
                 interconnect_relay_payload_rx,
                 runtime_for_relay_payloads,
@@ -2620,10 +2620,10 @@ impl Application {
         let interconnect_shutdown = shutdown.clone();
         let runtime_for_interconnect = runtime.clone();
         let service_for_interconnect = service.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     _ = interconnect_shutdown.cancelled() => break,
                     message = interconnect_rx.recv() => {
                         let Some(message) = message else {
@@ -2696,10 +2696,10 @@ impl Application {
         let cluster_events = events.clone();
         let mut cluster_event_rx = cluster.subscribe_events();
         let cluster_events_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     _ = cluster_events_shutdown.cancelled() => break,
                     received = cluster_event_rx.recv() => match received {
                         Ok(message) => cluster_events.relay_info(message),
@@ -2714,10 +2714,10 @@ impl Application {
         let consensus_events = events.clone();
         let mut consensus_event_rx = consensus.observer().subscribe_events();
         let consensus_events_shutdown = shutdown.clone();
-        background_tasks.push(tokio::spawn(async move {
+        background_tasks.push(nervix_primitives::task::spawn(async move {
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     _ = consensus_events_shutdown.cancelled() => break,
                     received = consensus_event_rx.recv() => match received {
                         Ok(message) => consensus_events.relay_info(message),
@@ -2808,7 +2808,7 @@ impl Application {
         };
 
         let public_listeners_shutdown = shutdown_coordinator.clone();
-        let public_listeners = tokio::spawn(async move {
+        let public_listeners = nervix_primitives::task::spawn(async move {
             let (
                 api_result,
                 http_result,
@@ -2900,7 +2900,7 @@ impl Application {
             .change_context(AppError::ShutdownCluster);
         interconnect.shutdown().await;
 
-        let database_owner_outcome = tokio::task::spawn_blocking(move || {
+        let database_owner_outcome = nervix_primitives::task::spawn_blocking(move || {
             drop(service);
             drop(runtime);
             drop(consensus);

@@ -58,11 +58,16 @@ use nervix_models::{
     SubscriptionLiteral, SubscriptionName, TransactionPreviewIdentity, UserName,
 };
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
-use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
+use nervix_primitives::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        oneshot,
+    },
+    task::JoinHandle,
+};
 use nervix_recovery::Discarded as _;
 use nonzero_ext::nonzero;
 use sorted_vec::SortedSet;
-use tokio::{sync::oneshot, task::JoinHandle};
 use triomphe::Arc;
 
 use self::delivery::SubscriptionDelivery;
@@ -579,7 +584,7 @@ impl SessionSubscriptions {
             subscription.withdrawal.withdraw();
         }
         for (_, subscription) in subscriptions {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             subscription.withdraw().await;
         }
     }
@@ -645,7 +650,7 @@ async fn select_subscription_rows(
     let mut failed_rows = 0_u64;
     let mut first_failure = None;
     for row in 0..row_count {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if let (Some(predicate), Some(now)) = (predicate, now) {
             let passed = match batch.runtime_row(row) {
                 Ok(record) => execute_subscription_predicate_on_record(predicate, &record, now)
@@ -977,7 +982,7 @@ impl SessionServiceImpl {
             .collect::<FuturesUnordered<_>>();
         let mut errors = BTreeMap::new();
         while let Some((node_id, result)) = checks.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Err(error) = result {
                 errors.insert(node_id.clone(), error);
             }
@@ -1357,7 +1362,7 @@ impl SessionServiceImpl {
             lease,
             service: self.clone(),
         };
-        let delivery_task = tokio::spawn(generation.run(announced));
+        let delivery_task = nervix_primitives::task::spawn(generation.run(announced));
 
         Ok(OpenedSubscription {
             opened,
@@ -1458,7 +1463,7 @@ impl SessionServiceImpl {
         }
 
         for operation in request.operations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let result = match operation {
                 CommandExecutionTransactionOperation::Queue(statement) => {
                     self.queue_identified_transaction_statement(
@@ -1526,7 +1531,7 @@ impl SessionServiceImpl {
         let mut transaction = None;
 
         for operation in operations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let result = match operation {
                 SessionCommandOperation::Begin { domain } => {
                     match self.resolve_transaction_domain(domain.as_ref()).await {
@@ -1617,8 +1622,8 @@ mod tests {
         RowSchema, ServerEvent, ServerMessage, SubscriptionEndReason, VerifiedFrame,
     };
     use nervix_models::{SchemaField, SubscriptionDeliveryBehavior};
+    use nervix_primitives::sync::CancellationToken;
     use tokio::time::{Duration, timeout};
-    use tokio_util::sync::CancellationToken;
 
     use super::{
         super::{
@@ -1725,7 +1730,7 @@ mod tests {
                 handle,
                 domain,
                 withdrawal,
-                delivery: tokio::spawn(generation.run(announced)),
+                delivery: nervix_primitives::task::spawn(generation.run(announced)),
             },
             announce,
         }
@@ -1910,7 +1915,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn subscription_interest_request_preserves_the_remote_target() {
         let TestService {
             service,
@@ -2014,7 +2019,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn announced_subscriptions_track_names_generations_and_withdrawal() {
         let TestService { service, path, .. } = build_test_service(false).await;
         let (delivery, _frames) = session_delivery();
@@ -2073,7 +2078,7 @@ mod tests {
         remove_test_directory(path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn deleting_two_same_relay_subscriptions_withdraws_the_interest_exactly() {
         let TestService { service, path, .. } = build_test_service(false).await;
         let domain = default_domain();
@@ -2128,7 +2133,7 @@ mod tests {
         remove_test_directory(path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_unannounced_subscription_releases_everything_and_sends_nothing() {
         let TestService { service, path, .. } = build_test_service(false).await;
         let domain = default_domain();
@@ -2172,7 +2177,7 @@ mod tests {
         remove_test_directory(path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn deleting_a_blocking_subscription_whose_client_reads_nothing_releases_its_relay() {
         let TestService { service, path, .. } = build_test_service(false).await;
         let domain = default_domain();
@@ -2209,13 +2214,13 @@ mod tests {
         }
         let held_schema = schema.clone();
         let held = events.clone();
-        let held_publisher = tokio::spawn(async move {
+        let held_publisher = nervix_primitives::task::spawn(async move {
             held.publish_for_test(user_id_batch(&held_schema, 999))
                 .await
         });
         timeout(WAIT, async {
             while events.waiting_publishers() == 0 {
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await
@@ -2245,7 +2250,7 @@ mod tests {
         remove_test_directory(path);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_closed_relay_ends_the_subscription_with_a_typed_reason_as_its_last_frame() {
         let TestService { service, path, .. } = build_test_service(false).await;
         let domain = default_domain();
@@ -2289,7 +2294,7 @@ mod tests {
 
         timeout(WAIT, async {
             while subscriptions.contains_name(&named("live_events")) {
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
             }
         })
         .await
