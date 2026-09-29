@@ -312,6 +312,12 @@ of the internal report. The route may inspect the eligible original input, its c
 materialized-state snapshot, and an all-optional `partial_output` of construction completed before
 failure. An error handler whose own construction fails does not recursively invoke itself.
 
+Paced ingest admission reports a rejected event timestamp as a message error with code
+`validation` and operation `admit`. A null declared timestamp has the same classification and
+names its field. The host keeps the rejected row's source metadata and ACK attached while each
+output route applies its message-error policy. Accepted rows from the same decoded group continue
+through their normal routes.
+
 Before a domain execution or replacement becomes active, the registry selects each DLQ route and
 resolves its source, partial-output and destination schemas, branch declarations and flush
 contract, then lowers its ordered SET assignments. The runtime binds that program, lookups, state

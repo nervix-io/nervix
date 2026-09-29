@@ -10,6 +10,7 @@
 use std::sync::Arc as StdArc;
 
 use ahash::HashMap;
+use arrow_buffer::BooleanBuffer;
 use nervix_connector::{IngestMetadataRow, NoIngestHeaders};
 use nervix_models::{
     AckMode, CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
@@ -137,7 +138,10 @@ fn two_ingest_rows() -> IngestGroupRows {
             .expect("test rows should form one ingest group");
     IngestGroupRows {
         batch: Arc::new(batch),
-        record_metadata: vec![RuntimeRecordMetadata::test(); 2],
+        record_metadata: RecordMetadataColumns::from_rows([
+            RuntimeRecordMetadata::test(),
+            RuntimeRecordMetadata::test(),
+        ]),
         ingest_metadata: ingest_metadata_for_test(
             IngestMetadataKind::Headers,
             &[
@@ -631,9 +635,9 @@ fn ingest_group_rows_validate_views_and_selection_alignment() {
     ));
 
     let mut misaligned = two_ingest_rows();
-    misaligned.record_metadata.pop();
+    misaligned.record_metadata = RecordMetadataColumns::from_rows([RuntimeRecordMetadata::test()]);
     let alignment_error = expect_failure(
-        misaligned.select(&[true, false]),
+        misaligned.select(&BooleanBuffer::collect_bool(2, |row| row == 0)),
         "selection must reject misaligned sidecars",
     );
     assert!(matches!(
@@ -647,7 +651,7 @@ fn ingest_group_rows_validate_views_and_selection_alignment() {
     ));
 
     let selection_error = expect_failure(
-        two_ingest_rows().select(&[true]),
+        two_ingest_rows().select(&BooleanBuffer::new_set(1)),
         "selection length must match the ingest group",
     );
     assert!(matches!(
@@ -659,7 +663,7 @@ fn ingest_group_rows_validate_views_and_selection_alignment() {
     ));
 
     let selected = two_ingest_rows()
-        .select(&[false, true])
+        .select(&BooleanBuffer::collect_bool(2, |row| row == 1))
         .expect("a row-aligned selection must succeed");
     assert_eq!(selected.len(), 1);
     assert_eq!(selected.record_metadata.len(), 1);
@@ -669,6 +673,13 @@ fn ingest_group_rows_validate_views_and_selection_alignment() {
         selected.batch.value(0, "value").expect("readable value"),
         Some(RuntimeValue::I64(2))
     );
+
+    let unchanged = two_ingest_rows();
+    let original_batch = unchanged.batch.clone();
+    let unchanged = unchanged
+        .select(&BooleanBuffer::new_set(2))
+        .expect("an all-true bitmap keeps the whole group");
+    assert!(Arc::ptr_eq(&original_batch, &unchanged.batch));
 }
 
 #[tokio::test]

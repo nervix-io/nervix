@@ -6,6 +6,7 @@
 //!   explicit execution timestamps.
 //! - **Must not know.** NSPL parsing, source-client lifecycle or persisted control state.
 
+use arrow_buffer::BooleanBuffer;
 use nervix_connector::{IngestMetadataRow, SourceMetadataScope};
 use nervix_models::IngestSourceKind;
 
@@ -374,7 +375,7 @@ impl IngestFilterMapMetadata {
         })
     }
 
-    pub(super) fn select(&self, keep: &[bool]) -> IngestMetadataResult<Self> {
+    pub(super) fn select(&self, keep: &BooleanBuffer) -> IngestMetadataResult<Self> {
         if keep.len() != self.len() {
             return Err(Report::new(
                 IngestMetadataError::SelectionRowCountMismatch {
@@ -388,8 +389,8 @@ impl IngestFilterMapMetadata {
             rows: Arc::new(
                 self.rows
                     .iter()
-                    .zip(keep)
-                    .filter_map(|(row, keep)| keep.then_some(*row))
+                    .enumerate()
+                    .filter_map(|(index, row)| keep.value(index).then_some(*row))
                     .collect(),
             ),
         })
@@ -683,7 +684,7 @@ mod tests {
         ));
 
         let selection = metadata
-            .select(&[])
+            .select(&BooleanBuffer::new_unset(0))
             .expect_err("selection and metadata row counts must agree");
         assert!(matches!(
             selection.current_context(),
@@ -888,7 +889,7 @@ mod tests {
             .expect("Kafka offsets must remain INT64");
         assert_eq!(offsets.values(), &[42, 43]);
         let selected = grouped_metadata
-            .select(&[false, true])
+            .select(&BooleanBuffer::collect_bool(2, |row| row == 1))
             .expect("metadata row selection must succeed");
         let selected_offset = selected
             .field_column("offset")
@@ -1101,8 +1102,10 @@ mod tests {
                 },
             ],
         );
-        let grouped_runtime_metadata =
-            vec![record.metadata().clone(), second_record.metadata().clone()];
+        let grouped_runtime_metadata = RecordMetadataColumns::from_rows([
+            record.metadata().clone(),
+            second_record.metadata().clone(),
+        ]);
         let grouped_keys = vec![None, None];
         let grouped_outcomes = evaluate_filter_map_on_batch(
             ModelKind::Ingestor.as_str(),
