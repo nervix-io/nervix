@@ -125,6 +125,7 @@ use crate::common::{
         CapturedRequest, ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET,
         ReceiverFault, ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
+    kafka_group_member::ExternalKafkaGroupMember,
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     raw_session::{TestUpload, TestUploadPart, WireOutcome as _},
@@ -347,6 +348,8 @@ struct ScenarioWorld {
     last_server_error: Option<String>,
     last_auth_attempts_elapsed: Option<Duration>,
     broker_observer: Option<BrokerObserver>,
+    /// The Kafka consumer group members a scenario runs beside Nervix's consumers, by group.
+    external_kafka_members: BTreeMap<String, ExternalKafkaGroupMember>,
     last_broker_payload: Option<String>,
     last_broker_headers: Vec<(String, String)>,
     clickhouse_table: Option<String>,
@@ -11205,6 +11208,66 @@ async fn then_kafka_consumer_group_eventually_has_consumers(
         .wait_for_kafka_consumer_group_members(&group, expected)
         .await
         .expect("kafka consumer group did not reach expected member count");
+}
+
+/// Joins a member that Nervix does not run to the group. It takes the topic's first partitions from
+/// Nervix's consumers and holds them, reading without committing, until it leaves.
+#[when(expr = "an external member joins Kafka consumer group {string} on topic {string}")]
+async fn when_an_external_member_joins_kafka_consumer_group(
+    world: &mut ScenarioWorld,
+    group: String,
+    topic: String,
+) {
+    let group = expand_placeholders(world, &group);
+    let topic = expand_placeholders(world, &topic);
+    assert!(
+        !world.external_kafka_members.contains_key(&group),
+        "an external member already belongs to Kafka consumer group '{group}'"
+    );
+    let member = world
+        .cluster()
+        .join_external_kafka_group_member(&group, &topic)
+        .expect("the external Kafka group member should join");
+    world.external_kafka_members.insert(group, member);
+}
+
+#[then(
+    expr = "within {string} the external member of Kafka consumer group {string} holds topic \
+            {string} partition {int}"
+)]
+async fn then_the_external_member_of_kafka_consumer_group_holds_partition(
+    world: &mut ScenarioWorld,
+    duration: String,
+    group: String,
+    topic: String,
+    partition: i32,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let group = expand_placeholders(world, &group);
+    let topic = expand_placeholders(world, &topic);
+    world
+        .external_kafka_members
+        .get_mut(&group)
+        .unwrap_or_else(|| panic!("no external member belongs to Kafka consumer group '{group}'"))
+        .wait_until_assigned(&topic, partition, duration)
+        .await
+        .expect("the external Kafka group member was not assigned the partition");
+}
+
+#[when(expr = "the external member leaves Kafka consumer group {string}")]
+async fn when_the_external_member_leaves_kafka_consumer_group(
+    world: &mut ScenarioWorld,
+    group: String,
+) {
+    let group = expand_placeholders(world, &group);
+    world
+        .external_kafka_members
+        .remove(&group)
+        .unwrap_or_else(|| panic!("no external member belongs to Kafka consumer group '{group}'"))
+        .leave()
+        .await
+        .expect("the external Kafka group member should leave");
 }
 
 #[then(

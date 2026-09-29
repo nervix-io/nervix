@@ -265,10 +265,13 @@ timeout. The host waits for every accepted message's ACK outcome before acknowle
 transport positions. A failed or timed-out ACK rejects the positions and retries according to the
 source's delivery policy. If rejection itself fails, the host retains those positions, suspends
 the source, and reestablishes its assignment. It retries the same rejection before polling any
-later batch or committing a later position. A transport without an acknowledged delivery mode has
-no redelivery guarantee from Nervix. The sequence below shows an acknowledged broker policy. The
-precise source-specific effects and NSPL modes are in
-[Ingestors](./ingestors.md) and [Shutdown And Recovery](./shutdown.md#connector-contracts).
+later batch or committing a later position, so a retried rejection must not depend on a poll. The
+[Kafka source](#integration-specific-boundaries) therefore does not seek a partition that a
+consumer-group rebalance has moved away, because only a poll can assign that partition again. A
+transport without an acknowledged delivery mode has no redelivery guarantee from Nervix. The
+sequence below shows an acknowledged broker policy. The precise source-specific effects and NSPL
+modes are in [Ingestors](./ingestors.md) and
+[Shutdown And Recovery](./shutdown.md#connector-contracts).
 
 ```mermaid
 sequenceDiagram
@@ -601,6 +604,11 @@ sequenceDiagram
 ## Integration-specific boundaries
 
 - **Kafka source.** The driver inspects topic partitions and reads or commits Kafka offsets.
+  A rejection seeks each rejected partition the consumer is still assigned back to its earliest
+  unacknowledged record. A consumer-group rebalance can move a partition to another group member
+  while its batch is in flight, and Kafka cannot seek a partition the consumer no longer fetches.
+  That partition needs no seek: whichever member is assigned it next, this consumer included,
+  resumes it from the committed offset, which never passes an unacknowledged record.
   With `OFFSET BY DOMAIN`, the host supplies typed access to replicated next-offset state and a
   committed partition schedule. The leader observes partition topology and commits assignments;
   executing sources follow that schedule. Offset snapshots can lag a crash, so this mode remains
