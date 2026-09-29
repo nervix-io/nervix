@@ -1388,6 +1388,101 @@ mod tests {
         );
     }
 
+    /// A client ingestor reading batches of `payload` into `events`, under the policy durations
+    /// its statement declares.
+    fn client_ingestor_model(ack_timeout: &str, backoff: &str, max_backoff: &str) -> Model {
+        Model::Ingestor(CreateIngestor {
+            name: named("source"),
+            output_routes: with_inherit_all(ProcessorOutputs::single(named("events")))
+                .with_flush_policy(FlushPolicy::Immediate)
+                .with_branch(OutputBranch::Unbranched),
+            input: nervix_models::IngestorInput::Client(nervix_models::ClientIngestSource {
+                schema: named("payload"),
+                mode: nervix_models::ClientIngestMode {
+                    window: AckWindow::Parallel {
+                        max: nonzero!(4u64),
+                    },
+                    ack_timeout: ack_timeout.to_string(),
+                    retry_policy: nervix_models::RetryPolicy {
+                        backoff: backoff.to_string(),
+                        max_backoff: max_backoff.to_string(),
+                    },
+                },
+            }),
+            timestamp_source: None,
+            general_error_policy: GeneralErrorPolicy::Log,
+            filter_where: None,
+        })
+    }
+
+    /// The client input of a fixture ingestor that reads client batches.
+    fn client_plan(plan: &IngestorStartPlan) -> &ClientIngestorStartPlan {
+        let IngestorInputPlan::Client(client) = &plan.input else {
+            panic!(
+                "the fixture ingestor reads client batches, planned as {:?}",
+                plan.input
+            );
+        };
+        client
+    }
+
+    #[test]
+    fn plans_a_client_ingestor_with_its_schema_policy_and_window() {
+        let models = vec![
+            schema("payload"),
+            relay("events", "payload"),
+            client_ingestor_model("30s", "100ms", "1s"),
+        ];
+
+        let plans = planned_entrypoints(models).assured("a validated client ingestor plans");
+        let plan = client_plan(start_plan(&plans));
+
+        assert_eq!(plan.schema_name, named("payload"));
+        assert_eq!(
+            plan.policy,
+            ClientProducerPolicy {
+                window: AckWindow::Parallel {
+                    max: nonzero!(4u64),
+                },
+                ack_timeout: Duration::from_secs(30),
+                retry_backoff: Duration::from_millis(100),
+                retry_max_backoff: Duration::from_secs(1),
+            }
+        );
+        assert_eq!(plan.window_size().get(), 4);
+        assert_eq!(plan, &plan.clone(), "plans compare by what they decide");
+    }
+
+    #[rstest]
+    #[case::unparsable_timeout("soon", "100ms", "1s", "ACK TIMEOUT", "soon")]
+    #[case::zero_timeout("0s", "100ms", "1s", "ACK TIMEOUT", "0s")]
+    #[case::zero_backoff("30s", "0ms", "1s", "RETRY POLICY BACKOFF", "0ms")]
+    #[case::unparsable_maximum("30s", "100ms", "later", "RETRY POLICY MAX", "later")]
+    fn rejects_a_client_policy_duration_that_is_not_positive(
+        #[case] ack_timeout: &str,
+        #[case] backoff: &str,
+        #[case] max_backoff: &str,
+        #[case] clause: &'static str,
+        #[case] value: &str,
+    ) {
+        let models = vec![
+            schema("payload"),
+            relay("events", "payload"),
+            client_ingestor_model(ack_timeout, backoff, max_backoff),
+        ];
+
+        let error = planned_entrypoints(models).expect_err("the registry admits no such duration");
+
+        assert_eq!(
+            error.current_context(),
+            &EntrypointPlanError::InvalidClientDuration {
+                ingestor: named("source"),
+                clause,
+                value: value.to_string(),
+            }
+        );
+    }
+
     #[test]
     fn rejects_a_resolved_source_of_another_kind() {
         let mut models = domain_models(http_case().source, http_case().source_model);

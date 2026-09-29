@@ -171,48 +171,71 @@ async fn one_canonical_batch_of_the_schema_is_decoded_with_its_rows() {
 async fn another_schema_is_refused_with_its_first_difference() {
     let field =
         |name: &str, data_type: DataType, nullable: bool| Field::new(name, data_type, nullable);
+    /// A schema a batch was written in, the first difference from the ingestor's schema, and how
+    /// the refusal describes it.
+    struct Case {
+        submitted: Schema,
+        difference: ClientSchemaDifference,
+        message: &'static str,
+    }
     let cases = [
-        (
-            Schema::new(vec![field("id", DataType::UInt64, false)]),
-            ClientSchemaDifference::FieldCount {
+        Case {
+            submitted: Schema::new(vec![field("id", DataType::UInt64, false)]),
+            difference: ClientSchemaDifference::FieldCount {
                 expected: 2,
                 found: 1,
             },
-        ),
-        (
-            Schema::new(vec![
+            message: "it has 1 fields where the ingestor's schema has 2",
+        },
+        Case {
+            submitted: Schema::new(vec![
                 field("id", DataType::UInt64, false),
                 field("remark", DataType::Utf8, true),
             ]),
-            ClientSchemaDifference::FieldName {
+            difference: ClientSchemaDifference::FieldName {
                 index: 1,
                 expected: "note".to_string(),
                 found: "remark".to_string(),
             },
-        ),
-        (
-            Schema::new(vec![
+            message: "field 1 is 'remark' where the ingestor's schema has 'note'",
+        },
+        Case {
+            submitted: Schema::new(vec![
                 field("id", DataType::Int64, false),
                 field("note", DataType::Utf8, true),
             ]),
-            ClientSchemaDifference::FieldType {
+            difference: ClientSchemaDifference::FieldType {
                 field: "id".to_string(),
                 expected: DataType::UInt64,
                 found: DataType::Int64,
             },
-        ),
-        (
-            Schema::new(vec![
+            message: "field 'id' is Int64 where the ingestor's schema has UInt64",
+        },
+        Case {
+            submitted: Schema::new(vec![
                 field("id", DataType::UInt64, true),
                 field("note", DataType::Utf8, true),
             ]),
-            ClientSchemaDifference::FieldNullability {
+            difference: ClientSchemaDifference::FieldNullability {
                 field: "id".to_string(),
                 expected_nullable: false,
             },
-        ),
-        (
-            Schema::new_with_metadata(
+            message: "field 'id' is nullable where the ingestor's schema declares it required",
+        },
+        Case {
+            submitted: Schema::new(vec![
+                field("id", DataType::UInt64, false),
+                field("note", DataType::Utf8, false),
+            ]),
+            difference: ClientSchemaDifference::FieldNullability {
+                field: "note".to_string(),
+                expected_nullable: true,
+            },
+            message: "field 'note' is not nullable where the ingestor's schema declares it \
+                      optional",
+        },
+        Case {
+            submitted: Schema::new_with_metadata(
                 vec![
                     field("id", DataType::UInt64, false),
                     field("note", DataType::Utf8, true),
@@ -221,10 +244,16 @@ async fn another_schema_is_refused_with_its_first_difference() {
                     .into_iter()
                     .collect(),
             ),
-            ClientSchemaDifference::Metadata,
-        ),
+            difference: ClientSchemaDifference::Metadata,
+            message: "it carries schema or field metadata, which the ingestor's schema does not",
+        },
     ];
-    for (submitted, difference) in cases {
+    for Case {
+        submitted,
+        difference,
+        message,
+    } in cases
+    {
         let submitted = StdArc::new(submitted);
         let mut columns = Vec::new();
         for field in submitted.fields() {
@@ -241,6 +270,7 @@ async fn another_schema_is_refused_with_its_first_difference() {
             panic!("{difference} is refused as a schema mismatch, not {refused:?}");
         };
         assert_eq!(found, difference);
+        assert_eq!(found.to_string(), message);
     }
 }
 
@@ -275,6 +305,10 @@ async fn rows_and_bytes_beyond_the_limits_are_refused_before_decoding() {
         decode(three.clone(), two_rows).await,
         Err(ClientBatchError::TooManyRows { rows: 3, limit: 2 })
     ));
+    assert_eq!(
+        defect(decode(three.clone(), two_rows).await),
+        ClientBatchDefect::TooManyRows
+    );
     let size = u64::try_from(three.len()).assured("a small stream");
     let smaller = ClientBatchLimits {
         max_bytes: NonZeroU64::new(size - 1).assured("a stream has more than one byte"),
@@ -365,9 +399,95 @@ async fn a_compressed_batch_is_refused() {
     body.extend_from_slice(&framed(builder.finished_data(), &[]));
     body.extend_from_slice(&parts[2]);
     assert!(matches!(
-        decode(body, limits()).await,
+        decode(body.clone(), limits()).await,
         Err(ClientBatchError::Compressed)
     ));
+    assert_eq!(
+        defect(decode(body, limits()).await),
+        ClientBatchDefect::Compressed
+    );
+}
+
+/// A framed record batch message without a body, declaring `rows` rows, or with no record batch
+/// header at all for `None`, and the body length `body_length`.
+fn record_batch_message(rows: Option<i64>, body_length: i64) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::new();
+    let header = match rows {
+        Some(length) => {
+            let batch = IpcRecordBatch::create(
+                &mut builder,
+                &RecordBatchArgs {
+                    length,
+                    ..RecordBatchArgs::default()
+                },
+            );
+            Some(batch.as_union_value())
+        }
+        None => None,
+    };
+    let message = Message::create(
+        &mut builder,
+        &MessageArgs {
+            version: MetadataVersion::V5,
+            header_type: MessageHeader::RecordBatch,
+            header,
+            bodyLength: body_length,
+            custom_metadata: None,
+        },
+    );
+    builder.finish(message, None);
+    framed(builder.finished_data(), &[])
+}
+
+#[tokio::test]
+async fn a_stream_whose_framing_or_headers_break_the_format_names_what_is_wrong() {
+    let canonical = stream(&arrow_schema(), &[batch_of(arrow_schema(), &[1])]);
+    let parts = messages(&canonical);
+    let end_of_stream = parts[2].clone();
+    let between_schema_and_end = |message: Vec<u8>| {
+        let mut body = parts[0].clone();
+        body.extend_from_slice(&message);
+        body.extend_from_slice(&end_of_stream);
+        body
+    };
+    let mut negative_metadata_length = vec![0xff; 4];
+    negative_metadata_length.extend_from_slice(&(-8_i32).to_le_bytes());
+    let cases = [
+        (
+            end_of_stream.clone(),
+            "the stream ends before its schema message",
+        ),
+        (
+            negative_metadata_length,
+            "a message declares a negative metadata length",
+        ),
+        (
+            between_schema_and_end(record_batch_message(Some(-1), 0)),
+            "a record batch declares a negative row count",
+        ),
+        (
+            between_schema_and_end(record_batch_message(Some(1), -8)),
+            "a message declares a body length outside this body",
+        ),
+    ];
+    for (body, expected) in cases {
+        let refused = decode(body, limits()).await;
+        let Err(ClientBatchError::Malformed { reason }) = refused else {
+            panic!("a body is malformed because {expected}, not {refused:?}");
+        };
+        assert_eq!(reason, expected);
+    }
+    // The message verifier refuses a record batch message whose header is missing.
+    assert_eq!(
+        defect(
+            decode(
+                between_schema_and_end(record_batch_message(None, 0)),
+                limits()
+            )
+            .await
+        ),
+        ClientBatchDefect::Malformed
+    );
 }
 
 #[tokio::test]

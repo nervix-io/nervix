@@ -251,11 +251,10 @@ impl<'a> IpcMessages<'a> {
                 let kind = header.variant_name().unwrap_or("unknown");
                 return Err(Report::new(ClientBatchError::UnexpectedMessage { kind }));
             }
-            let Some(batch) = message.header_as_record_batch() else {
-                return Err(ClientBatchError::malformed(
-                    "a record batch message carries no record batch header",
-                ));
-            };
+            let batch = message.header_as_record_batch().verified(
+                "the message verifier admits a union type only beside its value, and the type is \
+                 a record batch, checked above",
+            );
             if batch.compression().is_some() {
                 return Err(Report::new(ClientBatchError::Compressed));
             }

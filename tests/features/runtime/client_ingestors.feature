@@ -161,7 +161,9 @@ Feature: Client ingestors
       CREATE SCHEMA order_in (
         region STRING, order_id STRING, amount I64, card STRING SENSITIVE
       );
+      CREATE SCHEMA order_error (order_id STRING, code STRING);
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
+      CREATE RELAY order_errors SCHEMA order_error UNBRANCHED;
       CREATE INGESTOR orders_in
         FROM CLIENT SCHEMA order_in
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
@@ -173,6 +175,20 @@ Feature: Client ingestors
           UNBRANCHED
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE INGESTOR routed_in
+        FROM CLIENT SCHEMA order_in
+          MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+          ON QUIESCE SUSPEND
+        TIMESTAMP NOW
+        TO orders
+          INHERIT ALL
+          SET amount = input.amount * 100
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR SEND TO order_errors
+            SET order_id = input.order_id,
+                code = error.code
         ON GENERAL ERROR LOG;
       CREATE INGESTOR lenient_in
         FROM CLIENT SCHEMA order_in
@@ -192,6 +208,14 @@ Feature: Client ingestors
       CREATE EMITTER published FROM orders
         TO HTTP sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
+          MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+          WITHOUT BODY
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE EMITTER diverted FROM order_errors
+        TO HTTP sink_api
+          METHOD 'POST' PATH concat('/errors/', input.order_id, '/', input.code)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
         FLUSH IMMEDIATE
@@ -232,6 +256,23 @@ Feature: Client ingestors
     And HTTP receiver "sink" request 2 is
       """
       POST /orders/eu/o-3
+      """
+    # SEND TO acknowledges the failed row once its error record is published to the error relay,
+    # whose own emitter delivers it like any other record.
+    When <session> opens producer "routed" on ingestor "routed_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
+    And producer "routed" submits batch "diverted" with rows
+      | region | order_id | amount              | card   |
+      | eu     | o-5      | 5                   | 4111-5 |
+      | eu     | o-6      | 9223372036854775807 | 4111-6 |
+    Then batch "diverted" completes
+    And HTTP receiver "sink" eventually receives at least 4 requests
+    And HTTP receiver "sink" captured one request that is
+      """
+      POST /orders/eu/o-5
+      """
+    And HTTP receiver "sink" captured one request that is
+      """
+      POST /errors/o-6/evaluation
       """
 
     Examples:
