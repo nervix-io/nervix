@@ -4,7 +4,7 @@
 //! This module only exists with the `benchmarks` feature. Its public surface deliberately exposes
 //! benchmark operations and observations instead of Nervix runtime carriers or channels.
 
-use std::{num::NonZeroUsize, sync::OnceLock, time::Duration};
+use std::{num::NonZeroUsize, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
@@ -12,7 +12,10 @@ use nervix_models::{
     DomainStartPoint, DomainState, DomainStatus, FieldName, ModelKind, ModelName, ParseAsType,
     PlacementPolicy, RelayName, SchemaName, Timestamp,
 };
-use nervix_primitives::sync::{mpsc, watch};
+use nervix_primitives::{
+    sync::{mpsc, watch},
+    unmodeled::sync::OnceLock,
+};
 
 use super::{
     DomainClockLifecycle, NodeQuiesceCounters, RelayBroadcast, RelayMessage, RelayRecordBatch,

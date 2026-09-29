@@ -689,7 +689,7 @@ mod tests {
 
     #[cfg(feature = "shuttle")]
     mod shuttle_checks {
-        use shuttle::{sync::mpsc, thread};
+        use nervix_primitives::{sync::blocking::mpsc, thread};
 
         use super::*;
         use crate::shuttle_test::check_interleavings;

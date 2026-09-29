@@ -39,10 +39,10 @@ use lapin::{
     tcp::TLSConfig,
     uri::{AMQPScheme, AMQPUri},
 };
-use meticulous::ResultExt as _;
 use nervix_connector::{client_config_value, client_tls_paths, read_tls_file};
 use nervix_dns::{ConnectionBudget, DnsLookupFailure, DnsResolver};
 use nervix_models::ClientConfigEntry;
+use nervix_primitives::sync::blocking::Mutex;
 use thiserror::Error;
 use tokio::time::timeout;
 use url::{Host, Url};
@@ -281,24 +281,21 @@ impl RabbitMqBroker {
     /// Run the AMQP handshake over `stream`.
     ///
     /// Lapin asks its transport hook for a stream once per connection, since its own reconnection
-    /// stays off; the hook hands over the stream established here through a one-slot channel.
+    /// stays off; the hook takes the stream established here from a slot that holds it once.
     async fn handshake(
         &self,
         runtime: TokioRuntime,
         stream: BrokerStream,
     ) -> RabbitMqConnectResult<Connection> {
-        let (transport, handed_over) = flume::bounded(1);
-        transport
-            .send(stream)
-            .verified("the channel has room for its one transport, and its receiver is held here");
+        let handed_over = Mutex::new(Some(stream));
         let connected = Connection::connector(
             self.uri.clone(),
             runtime,
             async move |_uri, _runtime| {
-                let handed = handed_over.try_recv();
+                let handed = handed_over.lock().take();
                 match handed {
-                    Ok(stream) => Ok(stream),
-                    Err(_) => Err(lapin::Error::from(io::Error::other(
+                    Some(stream) => Ok(stream),
+                    None => Err(lapin::Error::from(io::Error::other(
                         "a RabbitMQ connection is given its transport once; a lost connection is \
                          replaced by a new one",
                     ))),

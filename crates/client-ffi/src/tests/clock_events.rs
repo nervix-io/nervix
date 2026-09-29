@@ -10,7 +10,6 @@ use std::{
     net::SocketAddr,
     ptr, slice,
     task::{Context, Poll},
-    thread,
     time::Duration,
 };
 
@@ -31,6 +30,7 @@ use nervix_primitives::{
     runtime::Runtime,
     stream::wrappers::{ReceiverStream, TcpListenerStream},
     sync::mpsc,
+    thread,
 };
 use tokio::net::TcpListener;
 use tonic::{

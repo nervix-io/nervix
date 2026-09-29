@@ -36,17 +36,11 @@
 //! [`SUITE_CLEANUP_RESERVE`] after its budget expires. What is left is the budget, and a healthy
 //! suite finishes inside it with [`SUITE_SLACK`] to spare.
 
-use std::{
-    collections::BTreeMap,
-    fmt,
-    future::Future,
-    io::Write as _,
-    sync::{Arc as StdArc, LazyLock},
-};
+use std::{collections::BTreeMap, fmt, future::Future, io::Write as _, sync::Arc as StdArc};
 
 use nervix_primitives::sync::{
     atomic::{AtomicU64, Ordering},
-    blocking::Mutex,
+    blocking::{LazyLock, Mutex},
 };
 use nervix_recovery::Reported as _;
 use tokio::time::Duration;

@@ -5,11 +5,9 @@
 //! test needs before it can exercise anything. A fixture used by one module belongs in
 //! that module's own test module instead.
 
-use std::{
-    collections::BTreeMap,
-    num::NonZeroUsize,
-    sync::{Arc as StdArc, OnceLock},
-};
+use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc as StdArc};
+
+use nervix_primitives::unmodeled::sync::OnceLock;
 
 pub(in crate::runtime) const STUPID_CHANNEL_CAPACITY_REMOVE_ME: NonZeroUsize = NonZeroUsize::MIN;
 

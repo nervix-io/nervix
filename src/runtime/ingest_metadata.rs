@@ -197,7 +197,7 @@ pub(super) struct IngestMetadataBuilders {
 // Counted per thread so a test observes only the groups it opened itself, while the rest of
 // the suite exercises the same builders in parallel.
 #[cfg(test)]
-thread_local! {
+nervix_primitives::thread_local! {
     pub(super) static INGEST_METADATA_BUILDER_SETS_OPENED: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
     pub(super) static INGEST_METADATA_COLUMN_SETS_BUILT: std::cell::Cell<usize> =

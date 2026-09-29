@@ -2279,8 +2279,7 @@ mod shuttle_lifecycle_tests {
     use std::collections::BTreeMap;
 
     use nervix_models::DomainTimeRate;
-    use nervix_primitives::sync::blocking::Mutex;
-    use shuttle::thread;
+    use nervix_primitives::{sync::blocking::Mutex, thread};
 
     use super::*;
     use crate::{

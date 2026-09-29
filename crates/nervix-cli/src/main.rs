@@ -11,11 +11,11 @@
 
 use std::{
     collections::BTreeSet,
-    io::{self, Write},
+    io,
+    io::Write,
     net::SocketAddr,
     ops::Range,
     path::{Path, PathBuf},
-    sync::Mutex as StdMutex,
 };
 
 use arch_into::ArchInto as _;
@@ -41,7 +41,10 @@ use nervix_nspl::client_statement::{
 };
 use nervix_primitives::{
     runtime::Handle,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        blocking::Mutex,
+    },
     task::block_in_place,
 };
 use nervix_recovery::{Discarded as _, Reported as _};
@@ -222,7 +225,7 @@ enum CliTlsRequirement {
 struct GrpcCompleter {
     runtime: Handle,
     client: Client,
-    buffer_prefix: Arc<StdMutex<String>>,
+    buffer_prefix: Arc<Mutex<String>>,
 }
 
 #[derive(Debug, Error)]
@@ -303,10 +306,7 @@ async fn collect_suggestions(
 
 impl Completer for GrpcCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
-        let prefix = match self.buffer_prefix.lock() {
-            Ok(prefix) => prefix.clone(),
-            Err(_) => String::new(),
-        };
+        let prefix = self.buffer_prefix.lock().clone();
         let pos = line.floor_char_boundary(pos.min(line.len()));
         let Some(cursor) = prefix.len().checked_add(pos) else {
             return Vec::new();
@@ -593,7 +593,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
         return Ok(());
     }
 
-    let buffer_prefix = Arc::new(StdMutex::new(String::new()));
+    let buffer_prefix = Arc::new(Mutex::new(String::new()));
 
     let completer = GrpcCompleter {
         runtime: Handle::current(),
@@ -624,9 +624,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             )
         };
 
-        if let Ok(mut guard) = buffer_prefix.lock() {
-            *guard = buffer.clone();
-        }
+        *buffer_prefix.lock() = buffer.clone();
 
         let mut line_editor = create_line_editor(completer.clone())?;
 

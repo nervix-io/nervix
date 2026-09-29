@@ -7,21 +7,19 @@
 //! - **Depends on.** The transport and its test certificates.
 //! - **Must not know.** The runtime or control plane that uses the transport.
 
-use std::{
-    collections::BTreeSet,
-    path::PathBuf,
-    process::Command,
-    sync::{Arc as StdArc, OnceLock},
-};
+use std::{collections::BTreeSet, path::PathBuf, process::Command, sync::Arc as StdArc};
 
 use futures_util::FutureExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{CpuClass, MemoryClass};
 use nervix_models::RemoteAckOutcome;
-use nervix_primitives::sync::{
-    Notify,
-    atomic::{AtomicUsize, Ordering},
-    watch,
+use nervix_primitives::{
+    sync::{
+        Notify,
+        atomic::{AtomicUsize, Ordering},
+        watch,
+    },
+    unmodeled::sync::OnceLock,
 };
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,

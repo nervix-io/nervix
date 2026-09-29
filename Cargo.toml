@@ -76,7 +76,6 @@ chrono = { workspace = true }
 ciborium = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
-concurrent-queue = { workspace = true }
 error-stack = { workspace = true }
 fastrand = { workspace = true }
 fjall = { workspace = true }
@@ -418,7 +417,6 @@ fjall = "3.0.4"
 flatbuffers = "25.12.19"
 flatc-rust = "0.2.0"
 flate2 = "1"
-flume = { version = "0.12", default-features = false }
 futures-channel = "0.3"
 futures-util = "0.3"
 gloo-net = "0.7"

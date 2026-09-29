@@ -51,7 +51,7 @@ mod tests {
         future, io,
         net::{Ipv4Addr, SocketAddr},
         path::PathBuf,
-        sync::{Arc as StdArc, LazyLock},
+        sync::Arc as StdArc,
         time::Duration,
     };
 
@@ -70,7 +70,7 @@ mod tests {
         sync::{
             CancellationToken, Notify,
             atomic::{AtomicUsize, Ordering},
-            blocking::Mutex,
+            blocking::{LazyLock, Mutex},
             mpsc, oneshot,
         },
         task::JoinHandle,

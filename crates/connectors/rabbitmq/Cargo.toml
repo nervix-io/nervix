@@ -21,7 +21,6 @@ shuttle = [
 async-rs = { workspace = true }
 async-trait = { workspace = true }
 error-stack = { workspace = true }
-flume = { workspace = true }
 futures-util = { workspace = true }
 humantime = { workspace = true }
 lapin = { workspace = true }

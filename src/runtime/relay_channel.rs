@@ -16,10 +16,10 @@ use std::{
     task::{Context, Poll},
 };
 
-use concurrent_queue::{ConcurrentQueue, PopError, PushError};
 use futures_util::task::AtomicWaker;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
+    collections::{ConcurrentQueue, PopError, PushError},
     publication::{ArcSwap, Guard},
     sync::{
         Notify,

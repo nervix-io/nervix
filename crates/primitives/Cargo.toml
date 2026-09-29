@@ -16,6 +16,7 @@ default = []
 # fails when it is used.
 native = [
   "dep:arc-swap",
+  "dep:concurrent-queue",
   "dep:dashmap",
   "dep:nervix-primitives-macros",
   "dep:parking_lot",
@@ -44,8 +45,10 @@ turmoil = []
 
 [dependencies]
 arc-swap = { workspace = true, optional = true }
+concurrent-queue = { workspace = true, optional = true }
 dashmap = { workspace = true, optional = true }
 loom = { workspace = true, optional = true }
+meticulous = { workspace = true }
 nervix-primitives-macros = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 shuttle = { workspace = true, optional = true }
@@ -56,6 +59,7 @@ shuttle-tokio = { workspace = true, features = [
   "rt",
   "rt-multi-thread",
   "sync",
+  "time",
 ], optional = true }
 shuttle-tokio-stream = { workspace = true, optional = true }
 shuttle-tokio-util = { workspace = true, features = ["rt"], optional = true }
@@ -64,9 +68,8 @@ tokio = { workspace = true, features = [
   "rt",
   "rt-multi-thread",
   "sync",
+  "time",
 ], optional = true }
 tokio-stream = { workspace = true, features = ["net"], optional = true }
 tokio-util = { workspace = true, features = ["rt"], optional = true }
 
-[dev-dependencies]
-meticulous = { workspace = true }

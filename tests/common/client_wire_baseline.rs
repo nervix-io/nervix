@@ -1281,7 +1281,7 @@ fn capture_environment() -> Result<Environment> {
         .to_string();
     let meminfo = fs::read_to_string("/proc/meminfo").context("failed to read /proc/meminfo")?;
     let physical_memory_bytes = status_kib(&meminfo, "MemTotal")?;
-    let logical_cpus = std::thread::available_parallelism()
+    let logical_cpus = nervix_primitives::thread::available_parallelism()
         .context("failed to determine logical CPU count")?
         .get();
     let clock_ticks_per_second = command_output("getconf", &["CLK_TCK"])?

@@ -650,7 +650,7 @@ fn retained_references_keep_the_frame_until_the_last_one_is_released() {
         "a retained reference addresses the same event"
     );
     let second = Shared(second);
-    std::thread::spawn(move || drop(second))
+    nervix_primitives::thread::spawn(move || drop(second))
         .join()
         .assured("releasing on another thread does not panic");
     let mut again = ptr::null();

@@ -946,7 +946,7 @@ async fn wait_for_collection_deadlines(
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroUsize, sync::OnceLock};
+    use std::num::NonZeroUsize;
 
     use arch_into::ArchInto as _;
     use meticulous::ResultExt as _;
@@ -954,6 +954,7 @@ mod tests {
     use nervix_models::{
         CreateSchema, FieldName, ModelName, ParseAsType, RelayName, SchemaName, Timestamp,
     };
+    use nervix_primitives::unmodeled::sync::OnceLock;
 
     use super::*;
     use crate::{

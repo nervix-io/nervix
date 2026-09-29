@@ -10,6 +10,7 @@ use std::{
     time::Duration,
 };
 
+use meticulous::ResultExt as _;
 use nervix_dns::{DnsConfiguration, DnsLookupFailure, DnsResolver, NameServers};
 use nervix_models::ClientConfigEntry;
 use nervix_primitives::task::JoinHandle;

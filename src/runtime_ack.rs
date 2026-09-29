@@ -1006,8 +1006,7 @@ mod tests {
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
     use meticulous::{OptionExt as _, ResultExt as _};
-    use nervix_primitives::sync::oneshot::error::TryRecvError;
-    use shuttle::thread;
+    use nervix_primitives::{sync::oneshot::error::TryRecvError, thread};
     use triomphe::Arc;
 
     use super::{

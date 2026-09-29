@@ -558,7 +558,8 @@ mod tests {
 
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
-    use shuttle::{future::block_on, thread};
+    use nervix_primitives::thread;
+    use shuttle::future::block_on;
 
     use super::*;
     use crate::{

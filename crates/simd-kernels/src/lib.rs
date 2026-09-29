@@ -11,10 +11,9 @@
 mod admission;
 mod elapsed;
 
-use std::sync::OnceLock;
-
 use error_stack::Report;
 use fearless_simd::{Level, dispatch, prelude::*};
+use nervix_primitives::unmodeled::sync::OnceLock;
 use thiserror::Error;
 
 pub use crate::{

@@ -16,25 +16,6 @@ use triomphe::Arc;
 
 use super::shutdown::{BeforeDeadline, ShutdownDeadline, ShutdownPhaseOutcome};
 
-#[cfg(not(feature = "shuttle"))]
-fn run_until_cancelled_owned<F>(
-    cancellation: CancellationToken,
-    task: F,
-) -> impl Future<Output = Option<F::Output>>
-where
-    F: Future,
-{
-    cancellation.run_until_cancelled_owned(task)
-}
-
-#[cfg(feature = "shuttle")]
-async fn run_until_cancelled_owned<F>(cancellation: CancellationToken, task: F) -> Option<F::Output>
-where
-    F: Future,
-{
-    cancellation.run_until_cancelled(task).await
-}
-
 /// The tracker and the cancellation every service task shares.
 struct ServiceTasksInner {
     tracker: TaskTracker,
@@ -70,7 +51,7 @@ impl ServiceTasks {
         let cancellation = self.inner.deadline_cancellation.clone();
         self.inner
             .tracker
-            .spawn(run_until_cancelled_owned(cancellation, task))
+            .spawn(cancellation.run_until_cancelled_owned(task))
     }
 
     /// Waits for every service task until the shutdown deadline, then cancels the ones still

@@ -67,7 +67,7 @@ fn racing_registrations_publish_every_handler_once() {
     for name in DISTINCT_NAMES {
         let requests = Arc::clone(&requests);
         let registration = HandlerRegistration::Request(Arc::clone(&handler));
-        distinct.push(shuttle::thread::spawn(move || {
+        distinct.push(nervix_primitives::thread::spawn(move || {
             requests.publish_handler(name, registration)
         }));
     }
@@ -75,7 +75,7 @@ fn racing_registrations_publish_every_handler_once() {
     for _ in 0..CONTESTED_REGISTRATIONS {
         let requests = Arc::clone(&requests);
         let registration = HandlerRegistration::Request(Arc::clone(&handler));
-        contested.push(shuttle::thread::spawn(move || {
+        contested.push(nervix_primitives::thread::spawn(move || {
             requests.publish_handler(CONTESTED_NAME, registration)
         }));
     }

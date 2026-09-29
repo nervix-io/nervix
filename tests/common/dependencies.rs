@@ -1,10 +1,9 @@
 use std::{
     fmt, io,
     path::{Path, PathBuf},
-    sync::OnceLock,
 };
 
-use nervix_primitives::sync::Mutex;
+use nervix_primitives::sync::{Mutex, blocking::OnceLock};
 pub(crate) use nervix_test_environment::{
     CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
     KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,

@@ -33,21 +33,18 @@ pub use enabled::{StorageFault, StoragePause};
 
 #[cfg(any(test, feature = "testing"))]
 mod enabled {
-    use std::{thread, time::Duration};
+    use std::time::Duration;
 
-    #[cfg(not(feature = "shuttle"))]
-    use nervix_primitives::sync::blocking::Condvar as GateCondition;
-    use nervix_primitives::sync::{
-        Notify,
-        blocking::{Mutex, RwLock},
+    use nervix_primitives::{
+        sync::{
+            Notify,
+            blocking::{Condvar, Mutex, RwLock},
+        },
+        thread,
     };
     use triomphe::Arc;
 
     use super::*;
-
-    #[cfg(feature = "shuttle")]
-    #[derive(Debug, Default)]
-    struct GateCondition;
 
     #[derive(Clone, Debug, Default)]
     pub struct StorageFault {
@@ -76,32 +73,16 @@ mod enabled {
     #[derive(Debug, Default)]
     struct Gate {
         released: Mutex<bool>,
-        condition: GateCondition,
+        condition: Condvar,
         entered: Notify,
     }
 
-    #[cfg(not(feature = "shuttle"))]
     fn wait_until_released(gate: &Gate) {
         let mut released = gate.released.lock();
         while !*released {
             gate.condition.wait(&mut released);
         }
     }
-
-    #[cfg(feature = "shuttle")]
-    fn wait_until_released(gate: &Gate) {
-        while !*gate.released.lock() {
-            nervix_primitives::thread::yield_now();
-        }
-    }
-
-    #[cfg(not(feature = "shuttle"))]
-    fn notify_release(condition: &GateCondition) {
-        condition.notify_all();
-    }
-
-    #[cfg(feature = "shuttle")]
-    fn notify_release(_condition: &GateCondition) {}
 
     /// Dropping a test's pause releases the worker, including when an assertion panics.
     pub struct StoragePause {
@@ -114,7 +95,7 @@ mod enabled {
         }
         pub fn release(&self) {
             *self.gate.released.lock() = true;
-            notify_release(&self.gate.condition);
+            self.gate.condition.notify_all();
         }
     }
     impl Drop for StoragePause {

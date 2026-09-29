@@ -2053,7 +2053,7 @@ fn reinstalling_schema_fingerprints_never_exposes_a_node_without_one() {
 
     let reads_stopped = AtomicBool::new(false);
     let missed = AtomicBool::new(false);
-    std::thread::scope(|scope| {
+    nervix_primitives::thread::scope(|scope| {
         scope.spawn(|| {
             while !reads_stopped.load(Ordering::Relaxed) {
                 match resolve() {

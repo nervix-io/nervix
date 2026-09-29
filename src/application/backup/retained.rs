@@ -645,8 +645,11 @@ mod shuttle_tests {
     use std::sync::Arc as StdArc;
 
     use nervix_client_wire::{BackupDownloadMessage, SessionLimits};
-    use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
-    use shuttle::{future::block_on, thread};
+    use nervix_primitives::{
+        thread,
+        unmodeled::sync::atomic::{AtomicUsize, Ordering},
+    };
+    use shuttle::future::block_on;
 
     use super::{test_archives::*, *};
     use crate::shuttle_test::check_interleavings;
@@ -792,7 +795,7 @@ mod shuttle_tests {
                         mpsc::channel::<EncodedFrame<BackupDownloadFrame>>(DOWNLOAD_FRAME_CAPACITY);
                     let limits = SessionLimits::DEFAULT;
                     let expected = bytes.clone();
-                    let reader = shuttle::future::spawn(async move {
+                    let reader = nervix_primitives::task::spawn(async move {
                         let mut received = Vec::new();
                         while let Some(frame) = receiver.recv().await {
                             let frame = frame

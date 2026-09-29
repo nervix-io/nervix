@@ -31,18 +31,29 @@
 //! bounded synchronous job body is one scheduling step. Storage jobs still use the blocking pool
 //! and are outside the simulated target. The same admission, cancellation and charge ownership
 //! apply in either build mode.
+//!
+//! A Loom build is the cancellation protocol and the models that explore it, and nothing else. Loom
+//! models synchronous owners, and the primitive boundary gives a Loom build no async runtime, so the
+//! executor that runs jobs on Tokio is not part of it; outside the models' test build, a Loom build
+//! of this crate is empty.
+#![cfg(any(test, not(feature = "loom")))]
 
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
 
 mod cancellation;
+#[cfg(not(feature = "loom"))]
 mod executor;
+#[cfg(not(feature = "loom"))]
 mod limits;
+#[cfg(not(feature = "loom"))]
 mod memory;
+#[cfg(not(feature = "loom"))]
 mod workers;
 
+pub use crate::cancellation::{Cancellation, Cancelled};
+#[cfg(not(feature = "loom"))]
 pub use crate::{
-    cancellation::{Cancellation, Cancelled},
     executor::{ExecutionFailure, Executor, ExecutorSnapshot},
     limits::{
         CpuClass, ExecutionConfig, ExecutionConfigError, MemoryBudgets, MemoryClass,

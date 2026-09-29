@@ -98,7 +98,9 @@ impl TestParallelismArgs {
 
 impl TestParallelism {
     pub fn detect() -> Self {
-        Self::from_available_cpus(std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
+        Self::from_available_cpus(
+            nervix_primitives::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN),
+        )
     }
 
     const fn from_available_cpus(available_cpus: NonZeroUsize) -> Self {

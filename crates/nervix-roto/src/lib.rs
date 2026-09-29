@@ -219,7 +219,7 @@ struct CallState {
     fatal: Option<String>,
 }
 
-thread_local! {
+nervix_primitives::thread_local! {
     static CALL_STATE: RefCell<Option<CallState>> = const { RefCell::new(None) };
 }
 
@@ -1593,8 +1593,10 @@ mod tests {
     fn compiles_independent_udfs_concurrently() {
         const COMPILER_COUNT: usize = 16;
 
-        let barrier = StdArc::new(std::sync::Barrier::new(COMPILER_COUNT));
-        std::thread::scope(|scope| {
+        let barrier = StdArc::new(nervix_primitives::sync::blocking::Barrier::new(
+            COMPILER_COUNT,
+        ));
+        nervix_primitives::thread::scope(|scope| {
             let compilers = (0..COMPILER_COUNT)
                 .map(|_| {
                     let barrier = barrier.clone();

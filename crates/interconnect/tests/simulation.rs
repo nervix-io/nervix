@@ -108,7 +108,7 @@ fn bounded_cpu_job_runs_on_the_simulated_scheduler() {
                 let trace = trace.clone();
                 async move {
                     HostSupervisor::run(async move {
-                        let scheduler_thread = std::thread::current().id();
+                        let scheduler_thread = nervix_primitives::thread::current().id();
                         let executor = Executor::default();
                         for (cpu, memory) in [
                             (CpuClass::Control, MemoryClass::Management),
@@ -121,7 +121,9 @@ fn bounded_cpu_job_runs_on_the_simulated_scheduler() {
                                 .try_reserve(memory, 1024)
                                 .expect("the memory class starts with room");
                             let job_thread = executor
-                                .run_cpu(cpu, reservation, |_, _| std::thread::current().id())
+                                .run_cpu(cpu, reservation, |_, _| {
+                                    nervix_primitives::thread::current().id()
+                                })
                                 .await
                                 .expect("the bounded job completes");
                             assert_eq!(job_thread, scheduler_thread);
@@ -283,7 +285,7 @@ fn simulation_wall_bound_is_outside_simulated_time() {
     let mut configuration = config(41);
     configuration.bounds.wall_duration = Duration::from_millis(1);
     let result = configuration.run("stalled scheduler", |simulation| {
-        std::thread::sleep(Duration::from_millis(100));
+        nervix_primitives::thread::sleep(Duration::from_millis(100));
         simulation.client("observer", async { Ok(()) });
     });
     let Err(error) = result else {
@@ -304,7 +306,7 @@ fn simulation_wall_bound_reports_where_simulated_time_stopped() {
         simulation.client("observer", async {
             tokio::time::sleep(Duration::from_millis(5)).await;
             // Blocking the scheduler thread stops simulated time inside this step.
-            std::thread::sleep(Duration::from_secs(2));
+            nervix_primitives::thread::sleep(Duration::from_secs(2));
             Ok(())
         });
     });

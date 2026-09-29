@@ -12,13 +12,17 @@
 //! | Atomics, orderings and fences | [`sync::atomic`] | Portable |
 //! | Async synchronization: locks, notification, semaphores, channels, cancellation | [`sync`] | `native` |
 //! | Thread-blocking synchronization: locks, condition variables, barriers, one-time initialization, channels | `sync::blocking` | `native` |
-//! | Tasks: spawning, joining, yielding, aborting, cooperative budgeting | `task` | `native` |
-//! | The async runtime, and the attributes and macros that build and drive it | `runtime`, `test`, `main`, `select!` | `native` |
+//! | Tasks: spawning, joining, yielding, aborting, tracking, cooperative budgeting | `task` | `native` |
+//! | The async runtime, and the attributes and macro that build and drive it | `runtime`, `test`, `main`, `select!` | `native` |
 //! | Streams over channels | `stream` | `native` |
 //! | Atomic reference publication | `publication` | `native` |
-//! | Concurrent maps | `collections` | `native` |
-//! | Operating-system threads | `thread` | `native` |
+//! | Concurrent maps and queues | `collections` | `native` |
+//! | Operating-system threads and thread-local storage | `thread`, `thread_local!` | `native` |
 //! | Real primitives outside every model | [`unmodeled`] | As the family |
+//!
+//! Loom models isolated synchronous owners, so a Loom build provides atomics, threads and
+//! thread-local storage, and no other native family: an async operation is unavailable there
+//! rather than silently real.
 //!
 //! Ordinary execution pays nothing for the boundary: every path is a direct re-export of the
 //! library item, with no wrapper, allocation, dispatch or scheduling point. A modeled primitive
@@ -39,6 +43,49 @@
 //!   from, and the Shuttle or Loom runtime while that mode is selected.
 //! - **Must not know.** Anything in Nervix, and any scenario, exploration bound or assertion of a
 //!   check. It selects a backend; the harness that runs a model owns how the model is explored.
+
+// A Loom build has atomics, threads and thread-local storage, and no async family: naming one fails
+// to compile rather than running a real primitive. `just test-primitives` runs these in that build.
+#![cfg_attr(
+    all(feature = "loom", feature = "native"),
+    doc = r#"
+In a Loom build the atomics, threads and thread-local storage are available:
+
+```
+use nervix_primitives::{sync::atomic::AtomicBool, thread::spawn};
+```
+
+and no other native family is, so a Loom build that names one fails to compile:
+
+```compile_fail,E0432
+use nervix_primitives::sync::Notify;
+```
+
+```compile_fail,E0432
+use nervix_primitives::sync::blocking::Mutex;
+```
+
+```compile_fail,E0432
+use nervix_primitives::task::spawn;
+```
+
+```compile_fail,E0432
+use nervix_primitives::runtime::Runtime;
+```
+
+```compile_fail,E0432
+use nervix_primitives::select;
+```
+
+```compile_fail,E0432
+use nervix_primitives::collections::DashMap;
+```
+
+```compile_fail,E0432
+use nervix_primitives::publication::ArcSwap;
+```
+"#
+)]
 
 #[cfg(all(feature = "loom", feature = "shuttle"))]
 compile_error!(
@@ -76,30 +123,47 @@ compile_error!(
 #[cfg(feature = "native")]
 extern crate self as nervix_primitives;
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(feature = "loom")))]
 pub mod collections;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(feature = "loom")))]
 pub mod publication;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(feature = "loom")))]
 pub mod runtime;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
+mod scheduling;
+#[cfg(all(feature = "native", not(feature = "loom")))]
 pub mod stream;
 pub mod sync;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(feature = "loom")))]
 pub mod task;
 #[cfg(feature = "native")]
 pub mod thread;
 pub mod unmodeled;
 
+#[cfg(all(feature = "native", not(any(feature = "loom", feature = "shuttle"))))]
+pub use std::thread_local;
+
+#[cfg(all(feature = "native", feature = "loom"))]
+pub use loom::thread_local;
 /// Run an async `main` on the runtime of the build's execution mode.
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(feature = "loom")))]
 pub use nervix_primitives_macros::main;
 /// Run an async test on the runtime of the build's execution mode.
-#[cfg(feature = "native")]
+///
+/// The arguments are Tokio's test attribute's, except `crate`: the execution mode decides the
+/// runtime, so naming one fails to compile.
+///
+/// ```compile_fail
+/// #[nervix_primitives::test(crate = "tokio")]
+/// async fn picks_its_own_runtime() {}
+/// ```
+#[cfg(all(feature = "native", not(feature = "loom")))]
 pub use nervix_primitives_macros::test;
-#[cfg(all(feature = "native", feature = "shuttle"))]
+#[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
+pub use shuttle::thread_local;
+#[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
 pub use shuttle_tokio::select;
-#[cfg(all(feature = "native", not(feature = "shuttle")))]
+#[cfg(all(feature = "native", not(any(feature = "loom", feature = "shuttle"))))]
 pub use tokio::select;
 
 /// What the runtime attributes expand to: Tokio's attributes, and the items their expansion names
@@ -108,7 +172,7 @@ pub use tokio::select;
 /// The attributes are Tokio's in every mode because they build their runtime only through the
 /// crate path they are given. Shuttle's own test attribute instead finds its runtime by reading the
 /// calling package's manifest for a dependency of a fixed name, so it is not used.
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(feature = "loom")))]
 #[doc(hidden)]
 pub mod __private {
     #[cfg(feature = "shuttle")]

@@ -4,7 +4,7 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::PathBuf,
-    sync::{Arc as StdArc, LazyLock, OnceLock},
+    sync::Arc as StdArc,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -47,6 +47,7 @@ use nervix_interconnect::{
     Transport, TransportClock, TransportIdentity, TransportOptions,
 };
 use nervix_models::{ClusterNodeName, NodeEndpoint};
+use nervix_primitives::sync::blocking::{LazyLock, OnceLock};
 
 /// Cucumber node ids are fixed strings from the feature files, so they always parse.
 pub(crate) fn node_name(raw: &str) -> ClusterNodeName {

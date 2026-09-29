@@ -7,13 +7,13 @@
 //! - **Depends on.** Consensus observation, Tokio synchronization, and process shutdown.
 //! - **Must not know.** Runtime graph internals, connector implementations, or scheduling policy.
 
-use std::{sync::OnceLock, time::Duration};
+use std::time::Duration;
 
 use error_stack::Report;
 use meticulous::ResultExt as _;
 use nervix_consensus::{ConsensusRuntimeState, Observer};
 use nervix_models::{ClusterNodeName, ClusterSchedule};
-use nervix_primitives::sync::{CancellationToken, Mutex, MutexGuard};
+use nervix_primitives::sync::{CancellationToken, Mutex, MutexGuard, blocking::OnceLock};
 use tracing::{info, warn};
 
 use crate::{

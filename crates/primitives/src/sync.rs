@@ -6,27 +6,47 @@
 //! family, with its permits and errors, so a producer and its consumer always come from the same
 //! backend. [`atomic`] is the portable atomic family, and `blocking` holds the primitives that block
 //! the calling thread.
+//!
+//! A Shuttle build takes Shuttle's modeled Tokio for the locks, semaphores, one-time cells and the
+//! `mpsc`, `oneshot` and `broadcast` channels. `Notify` and `watch` are this crate's own, with
+//! Tokio's semantics and a scheduling point before every waiter registration, because Shuttle's
+//! keep their registrations out of the scheduler's sight. The cancellation token wraps Shuttle's
+//! to give it Tokio Util's clone identity and owned operations. Loom models synchronous owners
+//! only, so none of these, nor `blocking`, exists in a Loom build.
 
 pub mod atomic;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", not(feature = "loom")))]
 pub mod blocking;
 
-#[cfg(all(feature = "native", not(feature = "shuttle")))]
+#[cfg(all(feature = "native", not(any(feature = "loom", feature = "shuttle"))))]
 pub use tokio::sync::{
     AcquireError, Mutex, MutexGuard, Notify, OnceCell, OwnedMutexGuard, OwnedSemaphorePermit,
     Semaphore, SemaphorePermit, TryAcquireError, broadcast, futures, mpsc, oneshot, watch,
 };
-#[cfg(all(feature = "native", not(feature = "shuttle")))]
+#[cfg(all(feature = "native", not(any(feature = "loom", feature = "shuttle"))))]
 pub use tokio_util::sync::{CancellationToken, DropGuard, WaitForCancellationFutureOwned};
 
-#[cfg(all(feature = "native", feature = "shuttle"))]
+#[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
 mod cancellation;
-#[cfg(all(feature = "native", feature = "shuttle"))]
+#[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
+mod notify;
+#[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
+pub mod watch;
+
+#[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
 pub use cancellation::CancellationToken;
-#[cfg(all(feature = "native", feature = "shuttle"))]
+#[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
+pub use notify::Notify;
+#[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
 pub use shuttle_tokio::sync::{
-    AcquireError, Mutex, MutexGuard, Notify, OnceCell, OwnedMutexGuard, OwnedSemaphorePermit,
-    Semaphore, SemaphorePermit, TryAcquireError, broadcast, futures, mpsc, oneshot, watch,
+    AcquireError, Mutex, MutexGuard, OnceCell, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore,
+    SemaphorePermit, TryAcquireError, broadcast, mpsc, oneshot,
 };
-#[cfg(all(feature = "native", feature = "shuttle"))]
+#[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
 pub use shuttle_tokio_util::sync::{DropGuard, WaitForCancellationFutureOwned};
+
+/// The futures of the synchronization primitives above.
+#[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
+pub mod futures {
+    pub use super::notify::Notified;
+}

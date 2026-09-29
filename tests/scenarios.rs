@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     str::FromStr,
-    sync::{Arc as StdArc, Mutex as StdMutex, OnceLock},
+    sync::Arc as StdArc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -66,7 +66,13 @@ use mysql_async::{
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_client_core::{Client, CommandOutcome as ClientCommandOutcome, ConnectDns};
 use nervix_dns::{DnsConfiguration, NameServers};
-use nervix_primitives::{sync::CancellationToken, task::AbortOnDropHandle};
+use nervix_primitives::{
+    sync::{
+        CancellationToken,
+        blocking::{Mutex as BlockingMutex, OnceLock},
+    },
+    task::AbortOnDropHandle,
+};
 use nervix_recovery::Discarded as _;
 use nervix_server::{
     FaultInjection, SchedulerMode, WasmStateResetRequestError, application::InternalTransportMode,
@@ -152,7 +158,8 @@ const TEST_LOG_DIR: &str = "tests/logs";
 const CUCUMBER_LOG_FILE: &str = "tests/logs/cucumber.log";
 static ONNX_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 static ICEBERG_TABLE_PROVISION_LOCK: OnceLock<nervix_primitives::sync::Mutex<()>> = OnceLock::new();
-static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<StdMutex<BTreeMap<String, String>>> = OnceLock::new();
+static SUITE_DEPENDENCY_ENDPOINTS: OnceLock<BlockingMutex<BTreeMap<String, String>>> =
+    OnceLock::new();
 const WEB_CONSOLE_ASSERTION_TIMEOUT: Duration = Duration::from_secs(30);
 const ZEROMQ_OBSERVER_BIND_ATTEMPTS: usize = 8;
 const DURABLE_CATCH_UP_STORAGE_COMMITS_PER_ENTRY: u32 = 2;
@@ -253,7 +260,7 @@ struct SavedHealthyPlacement {
 /// One long-running CLI clock follower and the bounded stdout lines its assertions inspect.
 struct CliClockProcess {
     child: tokio::process::Child,
-    lines: StdArc<StdMutex<VecDeque<String>>>,
+    lines: StdArc<BlockingMutex<VecDeque<String>>>,
     _reader: AbortOnDropHandle<()>,
 }
 
@@ -316,7 +323,7 @@ struct ScenarioWorld {
     last_command_disposition: Option<nervix_client_wire::CommandDisposition>,
     last_cli_output: Option<Output>,
     cli_subscription_process: Option<tokio::process::Child>,
-    cli_subscription_lines: Option<StdArc<StdMutex<VecDeque<String>>>>,
+    cli_subscription_lines: Option<StdArc<BlockingMutex<VecDeque<String>>>>,
     cli_subscription_reader: Option<AbortOnDropHandle<()>>,
     cli_clock_process: Option<CliClockProcess>,
     /// The interactive CLI a scenario types into through a pseudo-terminal.
@@ -3806,15 +3813,13 @@ async fn when_cli_subscribes_to_relay(world: &mut ScenarioWorld, relay: String, 
         .stdout
         .take()
         .verified("the CLI process was started with piped stdout");
-    let lines = StdArc::new(StdMutex::new(VecDeque::new()));
+    let lines = StdArc::new(BlockingMutex::new(VecDeque::new()));
     let reader_lines = lines.clone();
     let task = nervix_primitives::task::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stdout).lines();
         while let Ok(Some(line)) = reader.next_line().await {
             nervix_primitives::task::consume_budget().await;
-            let mut retained = reader_lines
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut retained = reader_lines.lock();
             if retained.len() == 256 {
                 retained.pop_front();
             }
@@ -3837,18 +3842,14 @@ async fn then_cli_subscription_output_contains(world: &mut ScenarioWorld, expect
     loop {
         nervix_primitives::task::consume_budget().await;
         let found = {
-            let retained = lines
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let retained = lines.lock();
             retained.iter().any(|line| line.contains(&expected))
         };
         if found {
             return;
         }
         if Instant::now() >= deadline {
-            let retained = lines
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let retained = lines.lock();
             panic!("CLI subscription output did not contain {expected:?}: {retained:?}");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3931,15 +3932,13 @@ fn start_cli_clock_process(world: &mut ScenarioWorld, domain: &str, grpc_uri: &s
         .stdout
         .take()
         .verified("the CLI clock process was started with piped stdout");
-    let lines = StdArc::new(StdMutex::new(VecDeque::new()));
+    let lines = StdArc::new(BlockingMutex::new(VecDeque::new()));
     let reader_lines = lines.clone();
     let reader = nervix_primitives::task::spawn(async move {
         let mut stdout = tokio::io::BufReader::new(stdout).lines();
         while let Ok(Some(line)) = stdout.next_line().await {
             nervix_primitives::task::consume_budget().await;
-            let mut retained = reader_lines
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut retained = reader_lines.lock();
             if retained.len() == 2048 {
                 retained.pop_front();
             }
@@ -3968,9 +3967,7 @@ async fn wait_for_cli_clock_output(
     loop {
         nervix_primitives::task::consume_budget().await;
         {
-            let retained = lines
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let retained = lines.lock();
             if matches(&retained) {
                 return;
             }
@@ -4796,9 +4793,8 @@ fn then_dependency_endpoint_remains_stable_for_the_test_suite(
         .unwrap_or_else(|error| panic!("{error}"))
         .to_string();
     let mut observed = SUITE_DEPENDENCY_ENDPOINTS
-        .get_or_init(|| StdMutex::new(BTreeMap::new()))
-        .lock()
-        .expect("suite dependency endpoint observations must not be poisoned");
+        .get_or_init(|| BlockingMutex::new(BTreeMap::new()))
+        .lock();
     match observed.get(&endpoint_key) {
         Some(existing) => assert_eq!(
             existing, &endpoint,

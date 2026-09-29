@@ -6982,7 +6982,6 @@ dependencies = [
  "async-rs",
  "async-trait",
  "error-stack",
- "flume",
  "futures-util",
  "humantime",
  "lapin",
@@ -7376,6 +7375,7 @@ name = "nervix-primitives"
 version = "0.1.0-dev"
 dependencies = [
  "arc-swap",
+ "concurrent-queue",
  "dashmap 6.2.1",
  "loom",
  "meticulous",
@@ -7400,6 +7400,7 @@ version = "0.1.0-dev"
 name = "nervix-recovery"
 version = "0.1.0-dev"
 dependencies = [
+ "nervix-primitives",
  "tracing",
  "tracing-subscriber",
 ]
@@ -7465,7 +7466,6 @@ dependencies = [
  "ciborium",
  "clap",
  "clap_complete",
- "concurrent-queue",
  "criterion 0.5.1",
  "cucumber",
  "error-stack",
@@ -7603,6 +7603,7 @@ dependencies = [
  "fearless_simd",
  "hdrhistogram",
  "meticulous",
+ "nervix-primitives",
  "thiserror 2.0.21",
 ]
 
@@ -7742,6 +7743,7 @@ dependencies = [
  "nervix-dataflow-graph",
  "nervix-models",
  "nervix-nspl",
+ "nervix-primitives",
  "nervix-recovery",
  "strum 0.26.3",
  "thiserror 2.0.21",

@@ -789,7 +789,7 @@ impl EvaluatedWindowArguments {
 // Counted per thread so a test observes only the argument programs it ran itself, while the rest
 // of the suite evaluates windows in parallel.
 #[cfg(test)]
-thread_local! {
+nervix_primitives::thread_local! {
     pub(super) static WINDOW_ARGUMENT_VM_EXECUTIONS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }

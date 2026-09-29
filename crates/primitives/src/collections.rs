@@ -1,12 +1,18 @@
 //! Concurrent collections, selected for the build's execution mode.
 //!
 //! A [`DashMap`] shards its entries behind locks. In a Shuttle build those locks are Shuttle's, so a
-//! check observes every shard acquisition; the ordinary build re-exports DashMap unchanged.
+//! check observes every shard acquisition. A [`ConcurrentQueue`] is lock-free and opaque to every
+//! model, so a Shuttle build runs each of its operations between two scheduling points: a check can
+//! order an owner's use of the queue against other tasks, and the queue's own memory safety stays
+//! unmodeled. The ordinary build re-exports both unchanged.
 
+#[cfg(not(feature = "shuttle"))]
+pub use concurrent_queue::ConcurrentQueue;
+pub use concurrent_queue::{PopError, PushError};
 #[cfg(not(feature = "shuttle"))]
 pub use dashmap::DashMap;
 #[cfg(feature = "shuttle")]
-pub use scheduled::DashMap;
+pub use scheduled::{ConcurrentQueue, DashMap};
 
 pub mod dash_map {
     //! The entries of a [`DashMap`](super::DashMap).
@@ -24,6 +30,8 @@ mod scheduled {
         marker::PhantomData,
         ops::{Deref, DerefMut},
     };
+
+    use crate::scheduling;
 
     /// A concurrent map whose lock operations are visible to Shuttle.
     ///
@@ -94,6 +102,45 @@ mod scheduled {
     impl<K, V, S> DerefMut for DashMap<K, V, S> {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.inner
+        }
+    }
+
+    /// A lock-free queue whose operations Shuttle can schedule around.
+    #[derive(Debug)]
+    pub struct ConcurrentQueue<T> {
+        inner: concurrent_queue::ConcurrentQueue<T>,
+    }
+
+    impl<T> ConcurrentQueue<T> {
+        pub fn unbounded() -> Self {
+            Self {
+                inner: concurrent_queue::ConcurrentQueue::unbounded(),
+            }
+        }
+
+        pub fn push(&self, value: T) -> Result<(), concurrent_queue::PushError<T>> {
+            scheduling::around(|| self.inner.push(value))
+        }
+
+        pub fn pop(&self) -> Result<T, concurrent_queue::PopError> {
+            scheduling::around(|| self.inner.pop())
+        }
+
+        /// Close the queue. Returns whether this call closed it.
+        pub fn close(&self) -> bool {
+            scheduling::around(|| self.inner.close())
+        }
+
+        pub fn is_closed(&self) -> bool {
+            scheduling::around(|| self.inner.is_closed())
+        }
+
+        pub fn len(&self) -> usize {
+            scheduling::around(|| self.inner.len())
+        }
+
+        pub fn is_empty(&self) -> bool {
+            scheduling::around(|| self.inner.is_empty())
         }
     }
 

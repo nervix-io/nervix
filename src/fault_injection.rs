@@ -190,7 +190,7 @@ impl std::fmt::Debug for ConsensusProbe {
 struct NodeBulkExecution {
     executor: Executor,
     /// Occupying jobs outlive the map guard while they run, so their release senders are shared.
-    holders: Arc<Mutex<Vec<std::sync::mpsc::Sender<()>>>>,
+    holders: Arc<Mutex<Vec<nervix_primitives::sync::blocking::mpsc::Sender<()>>>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -724,7 +724,7 @@ impl FaultInjection {
                 .unwrap_or_else(|error| {
                     panic!("bulk admission must accept a zero charge: {error}")
                 });
-            let (holder, held) = std::sync::mpsc::channel();
+            let (holder, held) = nervix_primitives::sync::blocking::mpsc::channel();
             holders.lock().push(holder);
             let executor = executor.clone();
             let started = started.clone();

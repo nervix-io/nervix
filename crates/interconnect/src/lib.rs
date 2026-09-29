@@ -10,7 +10,7 @@
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
 
-use std::{collections::BTreeMap, io, net::SocketAddr, sync::OnceLock, time::Duration};
+use std::{collections::BTreeMap, io, net::SocketAddr, time::Duration};
 
 use error_stack::Report;
 use nervix_dns::{DnsLookupError, DnsLookupFailure};
@@ -22,7 +22,7 @@ use nervix_models::{
     RelayName, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
     RemoteRuntimeRecordMetadata, ResourceName, SubscriptionBinding, WasmStateResetScope,
 };
-use nervix_primitives::sync::mpsc;
+use nervix_primitives::{sync::mpsc, unmodeled::sync::OnceLock};
 use nervix_recovery::Discarded as _;
 use rkyv::{Archive, Deserialize, Serialize};
 use strum::IntoStaticStr;

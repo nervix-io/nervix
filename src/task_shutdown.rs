@@ -80,12 +80,9 @@ fn report_join_failure(error: &JoinError, task: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io,
-        sync::{Arc, Mutex},
-    };
+    use std::{io, sync::Arc};
 
-    use meticulous::ResultExt as _;
+    use nervix_primitives::sync::blocking::Mutex;
     use tracing_subscriber::fmt::MakeWriter;
 
     use super::*;
@@ -96,23 +93,13 @@ mod tests {
 
     impl CapturedLogs {
         fn contents(&self) -> String {
-            String::from_utf8_lossy(
-                &self
-                    .0
-                    .lock()
-                    .verified("no test holds this lock across a panic")
-                    .clone(),
-            )
-            .into_owned()
+            String::from_utf8_lossy(&self.0.lock().clone()).into_owned()
         }
     }
 
     impl io::Write for CapturedLogs {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .verified("no test holds this lock across a panic")
-                .extend_from_slice(buf);
+            self.0.lock().extend_from_slice(buf);
             Ok(buf.len())
         }
 

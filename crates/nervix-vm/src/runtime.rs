@@ -5888,10 +5888,7 @@ mod list_tests;
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::{Mutex, mpsc},
-        time::Duration,
-    };
+    use std::time::Duration;
 
     use arrow_array::{
         BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
@@ -5900,6 +5897,7 @@ mod tests {
     };
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
     use nervix_models::Timestamp;
+    use nervix_primitives::sync::blocking::{Mutex, mpsc};
     use uuid::{Uuid, Version};
 
     use super::*;
@@ -5959,7 +5957,6 @@ mod tests {
         ) -> error_stack::Result<InjectedResult, RuntimeError> {
             self.release
                 .lock()
-                .expect("release receiver lock must be available")
                 .recv_timeout(Duration::from_secs(1))
                 .map_err(|error| {
                     Report::new(RuntimeError::InjectedFunctionFailed {
