@@ -203,7 +203,7 @@ pub(super) enum CorrelatorSide {
 // Counted per thread so a test observes only the programs it ran itself, while the rest of the
 // suite correlates in parallel.
 #[cfg(test)]
-thread_local! {
+nervix_primitives::thread_local! {
     pub(super) static CORRELATOR_WHERE_VM_EXECUTIONS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
     pub(super) static CORRELATOR_OUTPUT_VM_EXECUTIONS: std::cell::Cell<usize> =
@@ -1339,7 +1339,7 @@ mod tests {
         assert_eq!(row_value(&combined, "id"), None);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn correlator_where_matches_pending_candidates_in_one_vm_execution() {
         let left_schema = test_schema(&[("id", ParseAsType::U32), ("marker", ParseAsType::I64)]);
         let right_schema = test_schema(&[("id", ParseAsType::U32)]);
@@ -1442,7 +1442,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn correlator_output_evaluates_all_matched_pairs_once_per_route() {
         let left_schema = test_schema(&[("id", ParseAsType::U32)]);
         let right_schema = test_schema(&[("score", ParseAsType::I64)]);

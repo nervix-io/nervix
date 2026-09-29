@@ -1081,7 +1081,11 @@ pub(super) async fn branched_entrypoint_batch_from_inputs_blocking(
     inputs: Vec<BranchedEntrypointInput>,
 ) -> Result<Arc<BranchedEntrypointBatch>, IngestGroupFailure<Vec<AckSet>>> {
     let acks = branched_entrypoint_inputs_acks(&inputs);
-    match tokio::task::spawn_blocking(move || BranchedEntrypointBatch::from_inputs(inputs)).await {
+    match nervix_primitives::task::spawn_blocking(move || {
+        BranchedEntrypointBatch::from_inputs(inputs)
+    })
+    .await
+    {
         Ok(Ok(batch)) => Ok(Arc::new(batch)),
         Ok(Err(error)) => Err(error),
         Err(error) => Err(IngestGroupFailure::new(
@@ -1106,7 +1110,7 @@ pub(super) async fn branched_branch_filter_blocking(
 ) -> Result<(Option<BranchKey>, RelayRecordBatch), IngestGroupFailure<Vec<AckSet>>> {
     let failure_input = input.clone();
     let key = selection.key.clone();
-    match tokio::task::spawn_blocking(move || {
+    match nervix_primitives::task::spawn_blocking(move || {
         input
             .filter_branch(selection, ack_boundary)
             .map(|batch| (key, batch))
@@ -1145,12 +1149,14 @@ pub(super) async fn decode_ingested_payload(
     let codec_name = codec.name.as_str().to_string();
     let blocking_codec = codec.clone();
     let payload = Bytes::copy_from_slice(payload);
-    let unfolded = tokio::task::spawn_blocking(move || blocking_codec.unfold_on_ingestion(payload))
-        .await
-        .map_err(|error| CodecError::InvalidCodec {
-            codec: codec_name,
-            reason: format!("blocking decode task failed: {error}"),
-        })??;
+    let unfolded = nervix_primitives::task::spawn_blocking(move || {
+        blocking_codec.unfold_on_ingestion(payload)
+    })
+    .await
+    .map_err(|error| CodecError::InvalidCodec {
+        codec: codec_name,
+        reason: format!("blocking decode task failed: {error}"),
+    })??;
     unfolded.append_to(codec, builder)
 }
 
@@ -1234,7 +1240,7 @@ impl Runtime {
 
         let mut first_error = None;
         for RoutedGroup { relay, messages } in groups {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let acks = messages
                 .iter()
                 .map(|message| message.acks.clone())
@@ -1435,7 +1441,7 @@ impl Runtime {
             let mut keep = BooleanBufferBuilder::new(rows.len());
             let mut transformed = Vec::new();
             for (row, outcome) in outcomes.into_iter().enumerate() {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 match outcome {
                     SingleRecordFilterMapOutcome::Filtered => {
                         keep.append(false);
@@ -1501,7 +1507,7 @@ impl Runtime {
         };
         if admitted.count_set_bits() != rows.len() {
             for row in 0..rows.len() {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if admitted.value(row) {
                     continue;
                 }
@@ -1576,7 +1582,7 @@ impl Runtime {
             .map(|_| Vec::<RoutedOutcome>::new())
             .collect::<Vec<_>>();
         for (output_index, output) in output_routes.routes.iter().enumerate() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let side_inputs = self
                 .load_materialized_side_inputs(
                     routing,
@@ -1726,7 +1732,7 @@ impl Runtime {
         }
 
         for (row, outcomes) in routed.into_iter().enumerate() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let acks = std::mem::replace(&mut rows.acks[row], AckSet::empty());
             if outcomes.is_empty() {
                 acks.ack_success();
@@ -1934,7 +1940,7 @@ impl Runtime {
             flush,
         } = dispatch;
         for source_payload in payload.payloads() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             // A request carries all of its payloads or none of them, so a payload that fails to
             // decode takes the payloads decoded before it back out of the group.
             if let Err(error) = collector.decode_payload(&codec, source_payload).await {

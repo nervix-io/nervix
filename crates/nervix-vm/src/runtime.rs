@@ -56,7 +56,7 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
-use tokio::task;
+use nervix_primitives::task;
 use uuid::{NoContext, Timestamp as UuidTimestamp, Uuid};
 
 use crate::{
@@ -5877,10 +5877,7 @@ mod list_tests;
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::{Mutex, mpsc},
-        time::Duration,
-    };
+    use std::time::Duration;
 
     use arrow_array::{
         BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
@@ -5889,6 +5886,7 @@ mod tests {
     };
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
     use nervix_models::Timestamp;
+    use nervix_primitives::sync::blocking::{Mutex, mpsc};
     use uuid::{Uuid, Version};
 
     use super::*;
@@ -5948,7 +5946,6 @@ mod tests {
         ) -> error_stack::Result<InjectedResult, RuntimeError> {
             self.release
                 .lock()
-                .expect("release receiver lock must be available")
                 .recv_timeout(Duration::from_secs(1))
                 .map_err(|error| {
                     Report::new(RuntimeError::InjectedFunctionFailed {
@@ -9025,7 +9022,7 @@ mod tests {
         assert_eq!(second_value.value(0), "second");
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[nervix_primitives::test(flavor = "current_thread")]
     async fn blocking_injector_policy_offloads_small_batches() {
         let parsed = parse_program("SET route = read_header(input.header_name)")
             .expect("program must parse");
@@ -9063,7 +9060,7 @@ mod tests {
         let (result, ()) = tokio::join!(
             execute_program_with_selection_in_context(&compiled, &batch, &context),
             async move {
-                tokio::task::yield_now().await;
+                nervix_primitives::task::yield_now().await;
                 release_tx
                     .send(())
                     .expect("blocking injector must still be waiting");

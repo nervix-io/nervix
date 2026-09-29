@@ -28,8 +28,8 @@ use nervix_client_wire::{
     grpc::{ClientRestoreCodec, RESTORE_BACKUP_PATH},
 };
 use nervix_models::{ArchiveDigest, CommandExecutionReference, Restore, RestoreArchive};
-use tokio::{fs::File, io::AsyncReadExt as _, sync::mpsc};
-use tokio_stream::wrappers::ReceiverStream;
+use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc};
+use tokio::{fs::File, io::AsyncReadExt as _};
 use tonic::{Request, Response, Status, codegen::http::uri::PathAndQuery, transport::Channel};
 
 use crate::{
@@ -57,7 +57,7 @@ const RESTORE_REQUEST_ID: RequestId = RequestId::new(NonZeroU64::MIN);
 
 /// Reads the whole archive at `path` once, off the async workers, to measure and digest it.
 async fn measure_archive(path: PathBuf) -> io::Result<RestoreDigest> {
-    let measure = tokio::task::spawn_blocking(move || -> io::Result<RestoreDigest> {
+    let measure = nervix_primitives::task::spawn_blocking(move || -> io::Result<RestoreDigest> {
         let mut file = std::fs::File::open(&path)?;
         let mut hasher = blake3::Hasher::new();
         let mut buffer = vec![0_u8; RESTORE_CHUNK_BYTES];
@@ -152,7 +152,7 @@ impl Client {
         let statement = restore.to_canonical_nspl();
         let frame_timeout = self.inner.connector.request_timeout();
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let start = RestoreStart {
                 request_id: RESTORE_REQUEST_ID,
                 execution_reference: reference.clone(),
@@ -279,7 +279,13 @@ impl RestoreStreamAttempt {
             frame_timeout,
         } = self;
         let (frames, outbound) = mpsc::channel(RESTORE_FRAME_CAPACITY);
-        let feeder = tokio::spawn(feed(start, archive, frames, frame_timeout, on_progress));
+        let feeder = nervix_primitives::task::spawn(feed(
+            start,
+            archive,
+            frames,
+            frame_timeout,
+            on_progress,
+        ));
         let mut client = tonic::client::Grpc::new(channel)
             .max_decoding_message_size(SESSION_LIMITS.frame_bytes())
             .max_encoding_message_size(SESSION_LIMITS.frame_bytes());
@@ -297,7 +303,7 @@ impl RestoreStreamAttempt {
         );
         tokio::pin!(call);
         tokio::pin!(feeder);
-        let fed = tokio::select! {
+        let fed = nervix_primitives::select! {
             reply = &mut call => return reply.map_err(|status| AttemptFailure::Transport(Box::new(status))),
             fed = &mut feeder => fed,
         };
@@ -343,7 +349,7 @@ async fn feed(
     }
     let mut buffer = vec![0_u8; RESTORE_CHUNK_BYTES];
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let read = match archive.read(&mut buffer).await {
             Ok(read) => read,
             Err(error) => return Feeding::ReadFailed(error.kind()),

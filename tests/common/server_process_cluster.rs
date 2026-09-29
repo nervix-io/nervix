@@ -65,7 +65,7 @@ impl ServerProcessCluster {
         let mut nodes = BTreeMap::new();
         nodes.insert("node-1".to_string(), bootstrap);
         for index in 2..=NODE_COUNT {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let node_id = format!("node-{index}");
             let node_root = tempfile::Builder::new()
                 .prefix(&format!("{node_id}-"))
@@ -158,7 +158,7 @@ impl ServerProcessCluster {
             process.send_signal(Signal::SIGKILL)?;
         }
         for (node_id, process) in &mut self.nodes {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let status = process.wait_for_exit().await?;
             if status.signal() != Some(nix::libc::SIGKILL) {
                 return Err(io::Error::other(format!(
@@ -177,7 +177,7 @@ impl ServerProcessCluster {
             process.restart_without_waiting()?;
         }
         for process in self.nodes.values_mut() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             process.wait_until_ready().await?;
         }
         self.wait_for_voters().await
@@ -192,7 +192,7 @@ impl ServerProcessCluster {
     async fn leader_entry(&self) -> io::Result<(&String, &ServerProcess)> {
         let mut answers = Vec::new();
         for (node_id, process) in &self.nodes {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if process.has_exited() || self.frozen.contains(node_id) {
                 continue;
             }
@@ -231,11 +231,11 @@ impl ServerProcessCluster {
         let deadline = PhaseDeadline::after(CLUSTER_READY_TIMEOUT);
         let mut last_statuses = BTreeMap::new();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut leader: Option<String> = None;
             let mut ready = true;
             for (node_id, process) in &self.nodes {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let status = process
                     .status_endpoint()
                     .cluster_status(deadline.nested(STATUS_REQUEST_TIMEOUT))

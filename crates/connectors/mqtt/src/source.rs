@@ -302,7 +302,7 @@ impl MqttSourcePlan {
         connection: &mut MqttConnection,
     ) -> MqttSourceResult<()> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match connection.eventloop.poll().await {
                 Ok(Event::Incoming(Incoming::ConnAck(connack))) => {
                     if connack.session_present {
@@ -404,7 +404,7 @@ impl MqttSource {
 
     async fn next_publish(connection: &mut MqttConnection) -> MqttSourceResult<Publish> {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match connection.eventloop.poll().await {
                 Ok(Event::Incoming(Incoming::Publish(publish))) => return Ok(publish),
                 Ok(Event::Incoming(_) | Event::Outgoing(_) | Event::Auth(_)) => {}
@@ -516,8 +516,8 @@ impl BrokerSourceConnector for MqttSource {
         };
         let mut failure = None;
         while messages.len() < request.max_messages.get() {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 _ = sleep_until(deadline) => break,
                 next = Self::next_publish(connection) => {
                     match next {
@@ -546,7 +546,7 @@ impl BrokerSourceConnector for MqttSource {
                 .change_context(SourceError::Acknowledge { connector: MQTT }));
         };
         for position in positions {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             connection
                 .client
                 .ack(&position.publish)
@@ -563,7 +563,7 @@ impl BrokerSourceConnector for MqttSource {
     /// publish is delivered again from here, ahead of anything the broker sends next.
     async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
         for position in positions.iter().rev() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.replay.push_front(position.publish.clone());
         }
         Ok(())
@@ -788,7 +788,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn rejected_publishes_replay_in_order_before_the_broker_is_polled() {
         let plan = MqttSourcePlan::new(MqttSourceSettings {
             instances: vec![vec![entry("addr", "mqtt://127.0.0.1:1")]],

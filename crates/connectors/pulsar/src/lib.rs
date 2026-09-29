@@ -235,7 +235,7 @@ impl PulsarSink {
         outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) {
         for record in records {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
             let sent = self.producer.send_non_blocking(Self::message(record)).await;
@@ -271,7 +271,7 @@ impl PulsarSink {
     ) {
         let mut pending: VecDeque<PendingPulsarConfirmation> = VecDeque::new();
         for record in records {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
             let sent = self.producer.send_non_blocking(Self::message(record)).await;
@@ -308,7 +308,7 @@ impl PulsarSink {
             }
         }
         while !pending.is_empty() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Err(error) = Self::confirm_oldest(&mut pending, timeout, outcome).await {
                 outcome.fail(error);
                 return;
@@ -346,7 +346,7 @@ impl PulsarSink {
                 humantime::format_duration(timeout)
             )));
         }
-        let result = tokio::select! {
+        let result = nervix_primitives::select! {
             biased;
             result = &mut oldest.confirmation => Some(result),
             _ = sleep(remaining) => None,
@@ -488,6 +488,7 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use futures_util::{SinkExt as _, StreamExt as _};
+    use nervix_primitives::sync::mpsc;
     use pulsar::message::{
         Codec as PulsarCodec, Message as PulsarFrame,
         proto::{
@@ -500,10 +501,7 @@ mod tests {
         },
     };
     use tempfile::tempdir;
-    use tokio::{
-        net::{TcpListener, TcpStream},
-        sync::mpsc,
-    };
+    use tokio::net::{TcpListener, TcpStream};
     use tokio_util::codec::Framed;
 
     use super::*;
@@ -670,13 +668,13 @@ mod tests {
             let service_url = format!("pulsar://{addr}");
             let (received_tx, received) = mpsc::unbounded_channel();
             let lookup_url = service_url.clone();
-            tokio::spawn(async move {
+            nervix_primitives::task::spawn(async move {
                 loop {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let Ok((stream, _)) = listener.accept().await else {
                         return;
                     };
-                    tokio::spawn(Self::serve(
+                    nervix_primitives::task::spawn(Self::serve(
                         Framed::new(stream, PulsarCodec),
                         lookup_url.clone(),
                         max_message_size,
@@ -700,7 +698,7 @@ mod tests {
         ) {
             let mut held: Vec<HeldMessage> = Vec::new();
             while let Some(Ok(frame)) = connection.next().await {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let command = frame.command;
                 let mut replies = Vec::new();
                 if command.connect.is_some() {
@@ -951,7 +949,7 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_message_above_the_announced_maximum_is_rejected_before_it_is_written() {
         for mode in [BrokerPublishingMode::NoAck, confirmed(1)] {
             let mut broker = FakeBroker::start(Some(4096), AnswerOrder::OnArrival).await;
@@ -988,7 +986,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_message_the_broker_refuses_is_rejected_and_the_window_continues() {
         let broker = FakeBroker::start(Some(4096), AnswerOrder::OnArrival).await;
         let mut sink = sink(&broker, confirmed(2)).await;
@@ -1021,7 +1019,7 @@ mod tests {
     /// The broker answers the three newer messages before it fails the oldest one, so their
     /// answers are in by the time the sink returns the failure. The delivered and the refused one
     /// are not sent again by the retry; the one that failed like the oldest is left to it.
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn answers_behind_a_failed_oldest_message_are_kept_including_a_refusal() {
         let broker = FakeBroker::start(None, AnswerOrder::OldestLastAfter(4)).await;
         let mut sink = sink(&broker, confirmed(4)).await;

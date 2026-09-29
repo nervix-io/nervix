@@ -25,7 +25,7 @@ httpdate = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
-nervix-primitives = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 reqwest = { workspace = true, features = ["rustls"] }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }

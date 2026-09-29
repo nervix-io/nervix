@@ -34,7 +34,7 @@ use nervix_models::{
     ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal, DomainName,
     IngestorName, ParseAsType, SchemaField,
 };
-use tokio::sync::watch;
+use nervix_primitives::sync::watch;
 
 use super::*;
 use crate::common::producer_session::{ProducerFrame, RawProducerSession};
@@ -500,7 +500,7 @@ async fn open_named_producer(
     let deadline = Instant::now() + within;
     let producer = expand_placeholders(world, &producer);
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let opened = open_producer(world, session.clone(), &ingestor, &fields, limits).await;
         let refused = match opened {
             Ok(opened) => {
@@ -553,7 +553,7 @@ async fn refused_open_with(
 ) {
     let deadline = Instant::now() + PRODUCER_EXPECTATION_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let opened = open_producer(world, session.clone(), &ingestor, &fields, limits).await;
         let Err(refused) = opened else {
             panic!("a producer on ingestor '{ingestor}' opened although it must be refused");
@@ -856,7 +856,7 @@ async fn submit(world: &mut ScenarioWorld, producer: String, batch: String, body
                 SubmittedBody::Written(body) => ProducerBatch::from_arrow_ipc(body),
             };
             let (identified, id) = watch::channel(None);
-            let wait = tokio::spawn(async move {
+            let wait = nervix_primitives::task::spawn(async move {
                 let submitted = native.submit(body).await;
                 let id = submitted.map_err(|error| error.to_string())?;
                 identified.send_replace(Some(id));
@@ -1123,7 +1123,7 @@ async fn when_producer_rejoins_batch(world: &mut ScenarioWorld, producer: String
         panic!("only the Rust client rejoins a submission");
     };
     let native = native.clone();
-    let wait = tokio::spawn(async move {
+    let wait = nervix_primitives::task::spawn(async move {
         let outcome = native.rejoin(id).await.map_err(|error| error.to_string())?;
         Ok(Answered {
             outcome: ObservedOutcome::from_native(outcome),
@@ -1155,7 +1155,7 @@ async fn then_producer_reports_admission(
     let deadline = Instant::now() + PRODUCER_EXPECTATION_TIMEOUT;
     let raw = match world.scenario_producer(&producer) {
         ScenarioProducer::Native(native) => loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if native.admission() == expected {
                 return;
             }
@@ -1202,7 +1202,7 @@ async fn then_producer_ends(world: &mut ScenarioWorld, producer: String, expecte
     let deadline = Instant::now() + PRODUCER_EXPECTATION_TIMEOUT;
     let raw = match world.scenario_producer(&producer) {
         ScenarioProducer::Native(native) => loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match native.end() {
                 Some(ProducerEnd::Ended { reason, message }) => {
                     assert_eq!(
@@ -1333,7 +1333,7 @@ async fn then_leader_describes_ingestor_with(
     let ingestor = expand_placeholders(world, &ingestor);
     let deadline = Instant::now() + within;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let leader = running_leader_node(world).await;
         let described = world
             .cluster()

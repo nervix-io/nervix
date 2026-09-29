@@ -27,10 +27,8 @@ use nervix_client_wire::{
 use nervix_dataflow_graph::DataflowGraph;
 use nervix_execution::{CpuClass, MemoryClass};
 use nervix_models::{DomainName, DomainStatus, RelayName, RequestedResourceVersion};
-use tokio::{
-    sync::broadcast::error::RecvError,
-    time::{Duration, MissedTickBehavior, interval},
-};
+use nervix_primitives::sync::broadcast::error::RecvError;
+use tokio::time::{Duration, MissedTickBehavior, interval};
 use tracing::{debug, warn};
 use triomphe::Arc;
 
@@ -68,8 +66,8 @@ pub(super) async fn run_session_events(shared: Arc<SessionShared>) {
     leadership_check.reset();
 
     loop {
-        tokio::task::consume_budget().await;
-        tokio::select! {
+        nervix_primitives::task::consume_budget().await;
+        nervix_primitives::select! {
             biased;
             _ = shared.ended() => return,
             notice = notices.recv() => match notice {
@@ -350,7 +348,7 @@ impl SessionServiceImpl {
         let runtime = &self.inner.runtime;
         graph.statistics = runtime.dataflow_domain_statistics(domain);
         for node in &mut graph.nodes {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some((kind, identifier)) = dataflow_metric_target(&node.id) else {
                 continue;
             };

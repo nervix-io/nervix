@@ -139,7 +139,7 @@ impl From<GrpcAuthenticationError> for Status {
 }
 
 async fn hash_password(password: String) -> error_stack::Result<String, PasswordHashError> {
-    tokio::task::spawn_blocking(move || {
+    nervix_primitives::task::spawn_blocking(move || {
         let mut rng = OsRng;
         let salt = SaltString::generate(&mut rng);
         password_argon2()
@@ -155,7 +155,7 @@ pub(in crate::application) async fn verify_password_hash(
     password_hash: String,
     password: String,
 ) -> bool {
-    tokio::task::spawn_blocking(move || {
+    nervix_primitives::task::spawn_blocking(move || {
         let Ok(parsed_hash) = PasswordHash::new(&password_hash) else {
             return false;
         };
@@ -368,7 +368,7 @@ mod tests {
     use super::*;
     use crate::application::test_fixtures::{TestService, build_test_service};
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn testing_feature_hashes_passwords_with_lean_argon2_params() {
         let password_hash = hash_password("secret".to_string())
             .await
@@ -400,7 +400,7 @@ mod tests {
         assert!(verify_password_hash(password_hash, "secret".to_string()).await);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn user_creation_retries_preserve_the_admitted_credentials() {
         let TestService {
             service,

@@ -13,10 +13,9 @@ mod elapsed;
 mod flags;
 mod window;
 
-use std::sync::OnceLock;
-
 use error_stack::Report;
 use fearless_simd::{Level, dispatch, prelude::*};
+use nervix_primitives::unmodeled::sync::OnceLock;
 use thiserror::Error;
 pub use window::{
     RunCoMoments, RunMoments, RunSum, RunValidity, bucket_indices, co_moments, compensated_sum,

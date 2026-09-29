@@ -28,8 +28,7 @@ use nervix_client_wire::{
 };
 use nervix_consensus::{CommandExecution, CommandExecutionState};
 use nervix_models::{CommandExecutionReference, Timestamp, UserName};
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc};
 use tracing::{debug, info};
 
 use super::outcome::leader_redirect;

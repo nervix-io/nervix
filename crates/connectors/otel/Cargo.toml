@@ -10,12 +10,7 @@ workspace = true
 
 [features]
 default = []
-shuttle = [
-  "dep:shuttle-tokio",
-  "nervix-connector/shuttle",
-  "nervix-primitives/shuttle",
-  "shuttle-tokio/shuttle",
-]
+shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
 
 [dependencies]
 ahash = { workspace = true }
@@ -31,7 +26,7 @@ nervix-approx-into = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
-nervix-primitives = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 opentelemetry-proto = { workspace = true, features = [
   "gen-tonic",
   "logs",
@@ -49,12 +44,6 @@ reqwest = { workspace = true, features = [
   "json",
   "rustls",
 ] }
-shuttle-tokio = { workspace = true, features = [
-  "macros",
-  "rt",
-  "sync",
-  "time",
-], optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing = { workspace = true }
@@ -62,7 +51,6 @@ url = { workspace = true }
 
 [dev-dependencies]
 nervix-test-environment = { workspace = true }
-parking_lot = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = [
   "io-util",
@@ -70,4 +58,3 @@ tokio = { workspace = true, features = [
   "net",
   "rt-multi-thread",
 ] }
-tokio-stream = { workspace = true, features = ["net"] }

@@ -158,7 +158,7 @@ impl HttpSink {
         let mut connected = None;
         let mut last_failure = None;
         for address in addresses {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match Self::connect_address(address).await {
                 Ok(stream) => {
                     connected = Some(stream);
@@ -280,7 +280,7 @@ impl HttpRequestSink for HttpSink {
     async fn publish(&mut self, requests: Vec<SinkHttpRequest>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(requests.len());
         for request in requests {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let response = match self.send(&request).await {
                 Ok(response) => response,
                 Err(error) => {
@@ -404,7 +404,7 @@ mod tests {
 
     async fn final_response(head: &'static [u8]) -> FinalResponse {
         let (mut client, mut server) = tokio::io::duplex(1024);
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             use tokio::io::AsyncWriteExt as _;
             server
                 .write_all(head)
@@ -416,7 +416,7 @@ mod tests {
             .assured("the fixture response head is complete and valid")
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_retryable_status_carries_only_the_delay_its_retry_after_asks_for() {
         let limited = final_response(
             b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 0\r\n\r\n",
@@ -503,7 +503,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_refused_connection_keeps_its_cause_and_the_sink_keeps_its_client() {
         let unused = std::net::TcpListener::bind("127.0.0.1:0")
             .assured("the test host has a free loopback port");

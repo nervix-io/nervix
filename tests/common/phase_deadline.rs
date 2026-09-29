@@ -118,7 +118,7 @@ impl PhaseDeadline {
             last_failure: None,
         };
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self.has_passed() {
                 return Err(expired);
             }

@@ -15,7 +15,7 @@ impl Runtime {
         let snapshot_interval = self.inner.state_snapshot_interval;
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        Some(tokio::spawn(async move {
+        Some(nervix_primitives::task::spawn(async move {
             let flush_latest_snapshot =
                 |state: &KafkaOffsetStatePersistence,
                  store: &RuntimeStateStore|
@@ -36,8 +36,8 @@ impl Runtime {
                     Ok(Some(snapshot.lsm))
                 };
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             match flush_latest_snapshot(&state, &store) {
@@ -82,11 +82,11 @@ impl Runtime {
             snapshot_interval.min(self.inner.state_replication_poll_interval);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        Some(tokio::spawn(async move {
+        Some(nervix_primitives::task::spawn(async move {
             let mut next_persist = Instant::now() + snapshot_interval;
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             if let Err(error) = state.request_publication(&snapshot_requests).await {
@@ -149,7 +149,7 @@ impl Runtime {
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         let executor = self.inner.executor.clone();
-        Some(tokio::spawn(async move {
+        Some(nervix_primitives::task::spawn(async move {
             let flush_latest_snapshot =
                 async |state: &MaterializedRelayStatePersistence,
                        store: &Arc<RuntimeStateStore>| {
@@ -197,8 +197,8 @@ impl Runtime {
                     Ok::<Option<u64>, RuntimePersistenceError>(Some(revision))
                 };
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             match flush_latest_snapshot(&state, &store).await {
@@ -235,7 +235,7 @@ impl Runtime {
         let snapshot_interval = self.inner.state_snapshot_interval;
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        Some(tokio::spawn(async move {
+        Some(nervix_primitives::task::spawn(async move {
             let flush_latest_snapshot =
                 |state: &ReplicatedBranchAggregatedState,
                  metrics: &RuntimeMetrics,
@@ -259,8 +259,8 @@ impl Runtime {
                     Ok::<Option<u64>, RuntimePersistenceError>(Some(snapshot.lsm))
                 };
             loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {
                             match flush_latest_snapshot(&state, &metrics, &store) {
@@ -299,10 +299,10 @@ impl Runtime {
         let notification = self.state_checkpoint_notification(&placement);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        Some(tokio::spawn(async move {
+        Some(nervix_primitives::task::spawn(async move {
             let mut initial_sync_pending = true;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if !runtime
                     .wait_for_state_replica_sync_trigger(
                         &mut shutdown_rx,
@@ -391,10 +391,10 @@ impl Runtime {
         let notification = self.state_checkpoint_notification(&branch_lru);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        Ok(Some(tokio::spawn(async move {
+        Ok(Some(nervix_primitives::task::spawn(async move {
             let mut initial_sync_pending = true;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if !runtime
                     .wait_for_state_replica_sync_trigger(
                         &mut shutdown_rx,
@@ -465,7 +465,7 @@ impl Runtime {
                     }
                 };
                 for branch in branches {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let placement = match runtime.state_placement(
                         &branch_lru.domain,
                         state_kind,
@@ -527,10 +527,10 @@ impl Runtime {
         let notification = self.state_checkpoint_notification(state.read().placement());
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        Some(tokio::spawn(async move {
+        Some(nervix_primitives::task::spawn(async move {
             let mut initial_sync_pending = true;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if !runtime
                     .wait_for_state_replica_sync_trigger(
                         &mut shutdown_rx,
@@ -593,10 +593,10 @@ impl Runtime {
         let notification = self.state_checkpoint_notification(&state.placement);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        Some(tokio::spawn(async move {
+        Some(nervix_primitives::task::spawn(async move {
             let mut initial_sync_pending = true;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 if !runtime
                     .wait_for_state_replica_sync_trigger(
                         &mut shutdown_rx,
