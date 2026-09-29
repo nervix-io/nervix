@@ -75,7 +75,7 @@ struct ConfirmationRecord {
     reported: [AtomicBool; REPLICAS.len()],
     /// Offers a locally durable checkpoint to the replicas, as the owner notifies them once the
     /// checkpoint is on its storage.
-    offered: tokio::sync::Notify,
+    offered: nervix_primitives::sync::Notify,
 }
 
 impl ConfirmationRecord {
@@ -180,7 +180,7 @@ async fn inspect(state: StdArc<ReplicatedWasmProcessorState>, record: StdArc<Con
                 "a replica-confirmed checkpoint must count every required replica as confirmed"
             );
         }
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
     }
 }
 
@@ -195,14 +195,15 @@ fn a_checkpoint_waiting_for_its_replicas_misses_no_confirmation() {
         let record = StdArc::new(ConfirmationRecord::default());
         let mut replicating = Vec::with_capacity(REPLICAS.len());
         for replica in 0..REPLICAS.len() {
-            replicating.push(tokio::spawn(replicate(
+            replicating.push(nervix_primitives::task::spawn(replicate(
                 state.clone(),
                 record.clone(),
                 replica,
             )));
         }
-        let inspecting = tokio::spawn(inspect(state.clone(), record.clone()));
-        let owner = tokio::spawn(checkpoint_and_confirm(state.clone(), record.clone()));
+        let inspecting = nervix_primitives::task::spawn(inspect(state.clone(), record.clone()));
+        let owner =
+            nervix_primitives::task::spawn(checkpoint_and_confirm(state.clone(), record.clone()));
         owner.await.assured(MODEL_TASK_JOINS);
         for replica in replicating {
             replica.await.assured(MODEL_TASK_JOINS);
@@ -251,7 +252,7 @@ fn held_input_resolves_once_after_its_checkpoint(checkpoint: CheckpointEnd, deli
         let released = StdArc::new(AtomicBool::new(false));
 
         let observed_release = released.clone();
-        let observer = tokio::spawn(async move {
+        let observer = nervix_primitives::task::spawn(async move {
             let outcome = completion.wait().await;
             if outcome == AckOutcome::Ack {
                 assert!(
@@ -262,15 +263,15 @@ fn held_input_resolves_once_after_its_checkpoint(checkpoint: CheckpointEnd, deli
             }
             outcome
         });
-        let delivering = tokio::spawn(async move {
+        let delivering = nervix_primitives::task::spawn(async move {
             match delivery {
                 DeliveryEnd::Succeeded => delivered.ack_success(),
                 DeliveryEnd::Failed => delivered.no_ack("delivery failed"),
             }
         });
-        let branch = tokio::spawn(async move {
+        let branch = nervix_primitives::task::spawn(async move {
             processing.ack_success();
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
             match checkpoint {
                 CheckpointEnd::Completed => {
                     released.store(true, Ordering::SeqCst);

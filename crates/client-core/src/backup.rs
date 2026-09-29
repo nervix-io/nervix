@@ -177,7 +177,7 @@ impl Client {
             }
         };
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             file.restart().await?;
             let ended = self
                 .download_attempt(request.clone(), summary, &mut file)
@@ -256,7 +256,7 @@ impl Client {
             return Err(Report::new(BackupDownloadError::Mismatch));
         }
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.next_download_frame(&mut frames).await? {
                 BackupDownloadMessage::Chunk(chunk) => {
                     file.append(chunk.bytes(), summary.total_bytes.get())
@@ -431,7 +431,8 @@ impl DownloadFile {
         }
         let target = destination.to_path_buf();
         let staged = self.staged;
-        let persisted = tokio::task::spawn_blocking(move || staged.persist(&target)).await;
+        let persisted =
+            nervix_primitives::task::spawn_blocking(move || staged.persist(&target)).await;
         let error = match persisted {
             Ok(Ok(_)) => return Ok(()),
             Ok(Err(error)) => error.error,

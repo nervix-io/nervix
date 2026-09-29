@@ -9,7 +9,7 @@ use std::sync::Arc as StdArc;
 
 use ahash::HashMap;
 use nervix_models::{AckMode, ErrorPolicies, ModelKind, ModelName, NodeRef};
-use shuttle::thread;
+use nervix_primitives::thread;
 
 use super::*;
 use crate::{

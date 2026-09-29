@@ -209,12 +209,17 @@ test-execution *args:
     cargo test --package nervix-execution --lib -- {{ args }}
 
 # Run the primitive boundary's conformance checks once per execution mode. Each mode runs the same
-# atomic surface against its own backend and checks that it selected that backend, so an operation a
-# backend lacks or answers differently fails here. Every mode is its own build, because Cargo would
-# unify the features of one. The portable surface is also built for the browser target.
+# contract scripts of every family against its own backend and checks that it selected that backend,
+# so an operation a backend lacks or answers differently fails here. The Shuttle build also shows
+# that its adapters let the scheduler reach a publication between a read and a waiter's
+# registration, and the Loom build that it takes the ordinary libraries for the families Loom does
+# not model. The documentation tests show that a runtime attribute refuses a crate path. Every mode
+# is its own build, because Cargo would unify the features of one.
+# The portable surface is also built for the browser target.
 test-primitives:
     cargo test --package nervix-primitives --lib
     cargo test --package nervix-primitives --features native --lib
+    cargo test --package nervix-primitives --features native --doc
     cargo test --package nervix-primitives --features 'shuttle native' --lib
     cargo test --package nervix-primitives --features 'loom native' --lib
     cargo test --package nervix-primitives --features 'turmoil native' --lib

@@ -18,6 +18,7 @@ nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-jaq = { workspace = true }
 nervix-models = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 prost = { workspace = true }
 prost-reflect = { workspace = true, features = ["serde"] }
 serde_json = { workspace = true }
@@ -36,5 +37,4 @@ url = { workspace = true }
 
 [dev-dependencies]
 nervix-test-environment = { workspace = true }
-parking_lot = { workspace = true }
 tempfile = { workspace = true }

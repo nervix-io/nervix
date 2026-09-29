@@ -480,7 +480,8 @@ pub(in crate::runtime) struct IngestorQuiesceControl {
     published: ArcSwap<IngestorQuiescePublication>,
     /// Intake reaches the retained payloads only under a buffering decision, and replay only while
     /// `buffered_records` counts some.
-    pub(super) buffers: parking_lot::Mutex<HashMap<u64, IngestorQuiesceBuffer>>,
+    pub(super) buffers:
+        nervix_primitives::sync::blocking::Mutex<HashMap<u64, IngestorQuiesceBuffer>>,
     pub(super) changed: Notify,
     /// Changes only while `buffers` is locked, so whenever that lock is free it counts exactly the
     /// payloads retained.
@@ -513,7 +514,7 @@ impl IngestorQuiesceControl {
         let publication = IngestorQuiescePublication::new(IngestorQuiesceReasons::default(), modes);
         Self {
             published: ArcSwap::from_pointee(publication),
-            buffers: parking_lot::Mutex::new(HashMap::default()),
+            buffers: nervix_primitives::sync::blocking::Mutex::new(HashMap::default()),
             changed: Notify::new(),
             buffered_records: AtomicUsize::new(0),
             buffered_bytes: AtomicUsize::new(0),
@@ -597,7 +598,7 @@ impl IngestorQuiesceControl {
     pub(in crate::runtime) async fn wait_until_not_suspended(&self) {
         let mut observation = self.observation();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if !observation.publication.decision.suspends_intake() {
                 return;
             }
@@ -1130,7 +1131,7 @@ impl Runtime {
             "ingestor fault injector failed source",
             Duration::from_millis(250),
         );
-        tokio::select! {
+        nervix_primitives::select! {
             changed = shutdown_rx.changed() => changed.is_err() || *shutdown_rx.borrow(),
             _ = sleep(Duration::from_millis(250)) => false,
         }
@@ -1149,7 +1150,7 @@ impl Runtime {
 
         let mut quiesced = 0;
         for key in ingestors {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self
                 .engage_ingestor_quiesce(
                     &key.domain,
@@ -1206,8 +1207,10 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use nervix_models::{IngestQuiesceMode, IngestQuiesceOverflow, IngestorName, ModelKind};
-    use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
-    use tokio::sync::watch;
+    use nervix_primitives::sync::{
+        atomic::{AtomicBool, Ordering},
+        watch,
+    };
     use triomphe::Arc;
 
     use super::*;
@@ -1559,7 +1562,7 @@ mod tests {
         assert_eq!(control.counters().dropped_total, 1);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn memory_pressure_quiesces_registered_ingestors_without_stopping_them() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1568,7 +1571,7 @@ mod tests {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let stopped = Arc::new(AtomicBool::new(false));
         let task_stopped = stopped.clone();
-        let task = tokio::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             let _ = shutdown_rx.wait_for(|shutdown| *shutdown).await;
             task_stopped.store(true, Ordering::SeqCst);
         });
@@ -1616,7 +1619,7 @@ mod tests {
             .expect("test ingestor should stop");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn memory_pressure_resume_clears_pause_when_no_ingestors_are_pending() {
         let runtime = Runtime::default();
 
@@ -1633,7 +1636,7 @@ mod tests {
 
     #[cfg(feature = "shuttle")]
     mod shuttle_checks {
-        use shuttle::{sync::mpsc, thread};
+        use nervix_primitives::{sync::blocking::mpsc, thread};
 
         use super::*;
         use crate::shuttle_test::check_interleavings;

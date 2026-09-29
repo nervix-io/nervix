@@ -224,7 +224,7 @@ pub(super) async fn encode_window_processor_snapshot(
     let mut accumulators = Vec::with_capacity(snapshot.accumulators.len());
     let mut typed_sections = Vec::new();
     for (demand, accumulator) in snapshot.accumulators.iter().enumerate() {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         match accumulator {
             WindowAccumulatorSnapshot::Retained => {
                 accumulators.push(WindowAccumulatorDescriptor::Retained);
@@ -245,7 +245,7 @@ pub(super) async fn encode_window_processor_snapshot(
                     .attach_printable(error)
                 })?;
                 for removals in delayed_removals.chunks(chunk_rows) {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let section = WindowDelayedRemovalSection {
                         demand,
                         removals: removals.to_vec(),
@@ -453,7 +453,7 @@ pub(super) async fn decode_window_processor_snapshot(
     let mut offset = argument_end;
     let typed_limit = executor.limits().snapshot_record_bytes.as_u64();
     for _ in 0..header.typed_sections {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let length_end = offset
             .checked_add(4)
             .ok_or_else(|| invalid(WindowSnapshotIssue::Length))?;
@@ -558,7 +558,7 @@ pub(super) async fn decode_window_processor_snapshot(
     let mut entries = Vec::with_capacity(input.records.len());
     for (index, (input, arguments)) in input.records.into_iter().zip(arguments.records).enumerate()
     {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if arguments.branch.is_some() {
             return Err(invalid(WindowSnapshotIssue::ArgumentBranch));
         }
@@ -732,7 +732,7 @@ mod tests {
         runtime_schema::{RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow, RuntimeValue},
     };
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn window_snapshot_seals_and_restores_shared_arrow_columns() {
         let plan = window_plan(
             "SET count = COUNT(input.latency)",
@@ -815,7 +815,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn empty_window_snapshot_preserves_typed_delayed_removals() {
         let plan = window_plan(
             "SET count = COUNT(input.latency)",

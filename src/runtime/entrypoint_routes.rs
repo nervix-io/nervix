@@ -862,7 +862,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn reingestor_runtimes_start_one_entrypoint_set_per_reingestor() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -902,7 +902,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_reingestor_start_that_fails_registers_no_consumer_and_starts_nothing() {
         let runtime = Runtime::default();
         let domain = domain("default");

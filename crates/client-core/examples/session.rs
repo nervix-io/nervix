@@ -2,7 +2,7 @@
 //! its first batch.
 
 #[cfg(not(feature = "shuttle"))]
-#[tokio::main(flavor = "current_thread")]
+#[nervix_primitives::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use nervix_client_core::{Client, DomainName, SubscriptionEvent, SubscriptionRequest};
 

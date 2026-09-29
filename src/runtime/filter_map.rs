@@ -1530,7 +1530,7 @@ mod tests {
         .verified("INHERIT ALL requires a filter-map program")
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn filter_map_batch_validates_every_sidecar_length() {
         let schema = test_schema(&[("value", ParseAsType::I64)]);
         let program = validation_filter_map_program(&schema);
@@ -1847,7 +1847,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn filter_map_can_read_branch_namespace() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -1942,7 +1942,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn projection_can_read_branch_namespace() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -2043,7 +2043,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn inherit_all_preserves_fixed_size_array_values_through_the_vm() {
         let schema = test_schema(&[(
             "vector",
@@ -2110,7 +2110,7 @@ mod tests {
         assert_eq!(row_value(&record, "vector"), Some(expected));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn ordered_set_error_reports_operation_index_and_previous_partial_value() {
         let input_schema = test_schema(&[
             ("amount", ParseAsType::I64),
@@ -2251,7 +2251,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -2385,7 +2385,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn subscription_predicate_reports_a_typed_evaluation_error() {
         use crate::runtime::subscription_predicate::SubscriptionPredicateExecutionError;
 
@@ -2431,7 +2431,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn subscription_predicate_evaluates_only_selected_arrow_row() {
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let where_clause = expression("input.value = (3 AS U32)");
@@ -2482,7 +2482,7 @@ mod tests {
         assert!(selected);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn filter_map_internal_types_roundtrip_matches_http_logic_fixture() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),
@@ -2698,7 +2698,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn large_vm_batches_preserve_results_through_public_vm_api() {
         let input_schema = test_schema(&[
             ("tenant", ParseAsType::String),

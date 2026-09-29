@@ -183,7 +183,7 @@ fn expect_failure<T, E>(result: Result<T, E>, reason: &str) -> E {
 
 /// A group of `n` messages must cost one set of Arrow columns, not `n` single-row batches and
 /// a concatenation.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_group_builds_one_record_column_set_for_all_of_its_messages() {
     let codec = grouped_event_codec();
     let mut collector = IngestRouteCollector::new(
@@ -241,7 +241,7 @@ async fn ingest_group_builds_one_record_column_set_for_all_of_its_messages() {
 
 /// An acknowledged poll group decodes its whole batch up front and then accepts the payloads
 /// one at a time, so a contribution covers a prefix of what the group has decoded.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_group_accepts_its_decoded_payloads_one_at_a_time() {
     let codec = grouped_event_codec();
     let mut collector = IngestRouteCollector::new(
@@ -282,7 +282,7 @@ async fn ingest_group_accepts_its_decoded_payloads_one_at_a_time() {
 
 /// A payload the codec rejects stays attributable to its own message: the group keeps the rows
 /// around it, and its records, metadata and ACKs stay row-aligned.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode() {
     let codec = grouped_event_codec();
     let mut collector = IngestRouteCollector::new(
@@ -330,7 +330,7 @@ async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode(
 
 /// Every message a payload unfolds into takes the payload's metadata and a share of its ACK
 /// set, so the source's acknowledgement waits for all of them.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_group_gives_every_unfolded_message_its_payload_metadata_and_an_ack_share() {
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
@@ -389,7 +389,7 @@ async fn ingest_group_gives_every_unfolded_message_its_payload_metadata_and_an_a
 
 /// A payload that unfolds into no message is acknowledged when it is accepted, and it neither
 /// opens the group nor schedules its idle close.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_group_acknowledges_a_payload_that_unfolds_into_no_messages() {
     let codec = unfolding_event_codec(".[] | select(.keep)");
     let mut collector = IngestRouteCollector::new(
@@ -426,7 +426,7 @@ async fn ingest_group_acknowledges_a_payload_that_unfolds_into_no_messages() {
 
 /// A payload that fails part-way through unfolding contributes no message, and the group keeps
 /// the messages of the payloads around it.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_unfolding() {
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
@@ -473,7 +473,7 @@ async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_
 
 /// A rejected payload in an otherwise empty group releases the rows it abandoned instead of
 /// keeping them allocated until a message arrives.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_group_releases_the_rows_a_rejected_payload_abandoned_in_an_empty_group() {
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
@@ -682,7 +682,7 @@ fn ingest_group_rows_validate_views_and_selection_alignment() {
     assert!(Arc::ptr_eq(&original_batch, &unchanged.batch));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
     let codec = grouped_event_codec();
     let mut undispatched = IngestRouteCollector::new(
@@ -756,7 +756,7 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
     assert_eq!(collector.pending.undispatched_payloads(), 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingest_collector_flush_reports_missing_route_dependencies() {
     let runtime = Runtime::default();
     let test_domain = domain("default");
@@ -885,7 +885,7 @@ fn branched_entrypoint_batch_reports_structural_input_errors() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn branched_entrypoint_batch_groups_and_filters_each_branch() {
     let batch = BranchedEntrypointBatch::from_inputs(vec![
         branched_input("acme", 1),
@@ -977,7 +977,7 @@ async fn branched_entrypoint_batch_groups_and_filters_each_branch() {
     ));
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn branched_root_without_children_acks_success() {
     let runtime = Runtime::default();
     let root_domain = domain("default");
@@ -1072,7 +1072,7 @@ async fn branched_root_without_children_acks_success() {
         .expect("relay owner should stop");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
     let runtime = Runtime::default();
     let domain = domain("default");
@@ -1146,7 +1146,7 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
         .expect("relay owner should stop");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_branch() {
     let cases = [
         (
@@ -1161,7 +1161,7 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
         ),
     ];
     for (source_kind, ack_boundary, source) in cases {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let runtime = Runtime::default();
         let domain = domain("default");
         install_unpaced_test_domain(&runtime, &domain);

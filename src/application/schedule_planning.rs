@@ -389,7 +389,7 @@ mod tests {
             &planned, &unrelated, &voters,
         ));
     }
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn captured_planning_basis_classifies_each_stale_input() {
         let TestService {
             service,

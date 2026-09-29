@@ -28,10 +28,11 @@ use nervix_client_wire::{
     ProducerEnded, ProducerId, ReplyBody, RequestId, ServerEvent, ServerFrame, ServerMessage,
     SessionLimits, TransferAssembly, VerifiedFrame,
 };
-use parking_lot::Mutex;
-use tokio::sync::{Notify, mpsc};
+use nervix_primitives::{
+    sync::{Notify, blocking::Mutex, mpsc},
+    task::AbortOnDropHandle,
+};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tokio_util::task::AbortOnDropHandle;
 use triomphe::Arc;
 
 /// How many frames the session queues for its transport before a send waits.
@@ -156,7 +157,7 @@ impl Inbox {
     ) -> io::Result<T> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let changed = self.changed.notified();
             let mut changed = std::pin::pin!(changed);
             changed.as_mut().enable();
@@ -209,9 +210,9 @@ impl RawProducerSession {
         let (frames, mut outgoing) = mpsc::channel::<EncodedFrame<ClientFrame>>(OUTBOUND_FRAMES);
         let inbox = Arc::new(Inbox::default());
         let writer_inbox = inbox.clone();
-        let writer = tokio::spawn(async move {
+        let writer = nervix_primitives::task::spawn(async move {
             while let Some(frame) = outgoing.recv().await {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let message = WsMessage::Binary(frame.into_bytes().to_vec());
                 if let Err(error) = sink.send(message).await {
                     writer_inbox.end(format!("the WebSocket refused a frame: {error}"));
@@ -220,9 +221,9 @@ impl RawProducerSession {
             }
         });
         let reader_inbox = inbox.clone();
-        let reader = tokio::spawn(async move {
+        let reader = nervix_primitives::task::spawn(async move {
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let Some(message) = stream.next().await else {
                     reader_inbox.end("the WebSocket ended".to_string());
                     return;

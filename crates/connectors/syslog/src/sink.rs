@@ -113,7 +113,7 @@ impl SyslogSink {
             SyslogProtocol::Udp => {
                 let mut report = Report::new(SinkStartError::Initialize { sink: SYSLOG });
                 for attempt in budget.attempts(&addresses) {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let local = SocketAddr::new(
                         match attempt.address.ip() {
                             IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -146,7 +146,7 @@ impl SyslogSink {
             SyslogProtocol::Tcp => {
                 let mut report = Report::new(SinkStartError::Initialize { sink: SYSLOG });
                 for attempt in budget.attempts(&addresses) {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let stream = timeout(attempt.budget, TcpStream::connect(attempt.address)).await;
                     match stream {
                         Ok(Ok(stream)) => {
@@ -179,7 +179,7 @@ impl SyslogSink {
                     TlsConnector::from(config.tls_client_config().map_err(Self::config_error)?);
                 let mut report = Report::new(SinkStartError::Initialize { sink: SYSLOG });
                 for attempt in budget.attempts(&addresses) {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     let connected = timeout(attempt.budget, async {
                         let stream = TcpStream::connect(attempt.address).await?;
                         stream.set_nodelay(true)?;
@@ -284,7 +284,7 @@ impl RecordSink for SyslogSink {
         // and may therefore be delivered twice.
         let mut staged_deliveries = Vec::with_capacity(records.len());
         for record in records {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if let Err(reason) = self.validate_payload(&record.payload) {
                 outcome.reject(record.rejected(reason.to_string()));
                 continue;
@@ -441,7 +441,7 @@ mod tests {
         .assured("the test endpoint is a valid Syslog client")
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn tcp_tries_dns_answers_in_order_and_writes_to_the_reachable_address() {
         let fixture = DnsFixture::start("").await;
         let listener = tokio::net::TcpListener::bind("127.0.7.2:0")
@@ -483,7 +483,7 @@ mod tests {
         assert_eq!(&frame, b"5 hello");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn udp_literal_ipv6_uses_an_ipv6_socket() {
         let fixture = DnsFixture::start("").await;
         let receiver = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0))
@@ -516,7 +516,7 @@ mod tests {
         assert_eq!(&payload, b"ipv6");
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn tcp_uses_the_hosts_file_before_dns() {
         let fixture = DnsFixture::start("127.0.7.2 listed.nervix.test\n").await;
         let listener = tokio::net::TcpListener::bind("127.0.7.2:0")
@@ -538,7 +538,7 @@ mod tests {
         assert_eq!(fixture.authority.questions_for("listed.nervix.test"), 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn missing_name_is_an_initialization_failure_with_the_dns_cause() {
         let fixture = DnsFixture::start("").await;
         fixture.authority.set(
@@ -559,7 +559,7 @@ mod tests {
         assert!(format!("{failure:?}").contains("the name does not exist"));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn stream_writer_emits_both_rfc6587_framings() {
         for (framing, expected) in [
             (SyslogFraming::OctetCounting, b"5 hello".as_slice()),
@@ -579,7 +579,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn sink_rejects_udp_oversize_and_non_transparent_lf() {
         let udp = sink(config("udp", None)).await;
         let oversized = vec![0_u8; MAX_UDP_PAYLOAD_SIZE + 1];

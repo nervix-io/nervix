@@ -154,11 +154,11 @@ async fn serve(tls: TlsConfigBundle, trace: SemanticTrace) -> io::Result<()> {
     let listener =
         turmoil::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, PORT))).await?;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let (tcp, peer_addr) = listener.accept().await?;
         let tls = tls.clone();
         let trace = trace.clone();
-        tokio::spawn(async move {
+        nervix_primitives::task::spawn(async move {
             match tls.accept(tcp, peer_addr, SETUP_TIMEOUT, CLUSTER).await {
                 Ok(session) => {
                     trace.record("server", format!("accepted {}", session.peer.node_id));
@@ -196,7 +196,7 @@ async fn dial_expecting(
         Ok(session) => {
             trace.record("client", format!("accepted {}", session.peer.node_id));
             let trace = trace.clone();
-            tokio::spawn(async move {
+            nervix_primitives::task::spawn(async move {
                 sleep_until(session.expires_at).await;
                 trace.record("client", "certificate deadline drained the session");
                 drop(session.stream);

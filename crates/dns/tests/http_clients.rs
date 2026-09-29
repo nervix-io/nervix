@@ -100,7 +100,7 @@ async fn serve_on(listener: tokio::net::TcpListener, body: &'static str) {
         .assured("the test response can be written");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn reqwest_13_uses_all_answers_and_keeps_the_url_authority() {
     let fixture = Fixture::start().await;
     let reachable = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -115,7 +115,7 @@ async fn reqwest_13_uses_all_answers_and_keeps_the_url_authority() {
         .local_addr()
         .assured("the listener has an address")
         .port();
-    let server = tokio::spawn(async move {
+    let server = nervix_primitives::task::spawn(async move {
         let (mut stream, _) = listener.accept().await.assured("the test client connects");
         let mut request = [0_u8; 2048];
         let length = stream
@@ -150,7 +150,7 @@ async fn reqwest_13_uses_all_answers_and_keeps_the_url_authority() {
     server.await.assured("the HTTP server task finishes");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn reqwest_12_uses_the_same_resolver_without_a_public_fallback() {
     let fixture = Fixture::start().await;
     fixture.answer(
@@ -164,7 +164,7 @@ async fn reqwest_12_uses_the_same_resolver_without_a_public_fallback() {
         .local_addr()
         .assured("the listener has an address")
         .port();
-    let server = tokio::spawn(async move {
+    let server = nervix_primitives::task::spawn(async move {
         let (mut stream, _) = listener.accept().await.assured("the test client connects");
         let mut request = [0_u8; 2048];
         stream
@@ -205,7 +205,7 @@ async fn reqwest_12_uses_the_same_resolver_without_a_public_fallback() {
     server.await.assured("the HTTP server task finishes");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn request_timeout_cancels_a_silent_dns_lookup() {
     let fixture = Fixture::start().await;
     fixture.authority.set(NAME, DnsAnswer::Silent);
@@ -231,7 +231,7 @@ async fn request_timeout_cancels_a_silent_dns_lookup() {
     assert!(fixture.authority.questions_for(NAME) > 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn ttl_expiry_reconnects_to_a_changed_answer() {
     let fixture = Fixture::start().await;
     let first_ip = Ipv4Addr::new(127, 0, 0, 1);
@@ -243,7 +243,7 @@ async fn ttl_expiry_reconnects_to_a_changed_answer() {
         .local_addr()
         .assured("the first endpoint has an address")
         .port();
-    let first_server = tokio::spawn(async move {
+    let first_server = nervix_primitives::task::spawn(async move {
         let (mut stream, _) = first.accept().await.assured("the first request connects");
         let mut request = [0_u8; 2048];
         stream
@@ -255,7 +255,7 @@ async fn ttl_expiry_reconnects_to_a_changed_answer() {
             .await
             .assured("the first response can be written");
     });
-    let second_server = tokio::spawn(serve_once(
+    let second_server = nervix_primitives::task::spawn(serve_once(
         SocketAddr::new(IpAddr::V4(second_ip), port),
         "two",
     ));
@@ -302,7 +302,7 @@ async fn ttl_expiry_reconnects_to_a_changed_answer() {
     );
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn redirect_destination_uses_the_configured_resolver() {
     const SOURCE: &str = "redirect.nervix.test";
     const DESTINATION: &str = "destination.nervix.test";
@@ -330,7 +330,7 @@ async fn redirect_destination_uses_the_configured_resolver() {
         .local_addr()
         .assured("the destination has an address")
         .port();
-    let source_server = tokio::spawn(async move {
+    let source_server = nervix_primitives::task::spawn(async move {
         let (mut stream, _) = source
             .accept()
             .await
@@ -348,7 +348,7 @@ async fn redirect_destination_uses_the_configured_resolver() {
             .await
             .assured("the redirect is writable");
     });
-    let target_server = tokio::spawn(async move {
+    let target_server = nervix_primitives::task::spawn(async move {
         let (mut stream, _) = target
             .accept()
             .await
@@ -396,7 +396,7 @@ impl Fixture {
     }
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn hyper_connector_uses_all_answers_and_keeps_the_url_authority() {
     let fixture = Fixture::start().await;
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -414,7 +414,7 @@ async fn hyper_connector_uses_all_answers_and_keeps_the_url_authority() {
         ],
         Duration::from_secs(1),
     );
-    let server = tokio::spawn(serve_on(listener, "hyper"));
+    let server = nervix_primitives::task::spawn(serve_on(listener, "hyper"));
     let client = HyperClient::builder(TokioExecutor::new())
         .build::<_, Empty<Bytes>>(HttpConnector::new_with_resolver(fixture.resolver.clone()));
     let uri = format!("http://{NAME}:{port}/test")
@@ -431,7 +431,7 @@ async fn hyper_connector_uses_all_answers_and_keeps_the_url_authority() {
     assert!(fixture.authority.questions_for(NAME) > 0);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn hyper_connector_failures_keep_the_typed_lookup_failure() {
     let fixture = Fixture::start().await;
     fixture.answer_name_not_found();
@@ -451,7 +451,7 @@ async fn hyper_connector_failures_keep_the_typed_lookup_failure() {
     assert_eq!(lookup.failure(), DnsLookupFailure::NameNotFound);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn smithy_hook_answers_every_address_and_fails_with_the_typed_lookup_failure() {
     const MISSING: &str = "missing.nervix.test";
     let fixture = Fixture::start().await;
@@ -484,7 +484,7 @@ async fn smithy_hook_answers_every_address_and_fails_with_the_typed_lookup_failu
     assert_eq!(lookup.failure(), DnsLookupFailure::NameNotFound);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn reqwest_failures_keep_the_typed_lookup_failure() {
     let fixture = Fixture::start().await;
     fixture.answer_name_not_found();

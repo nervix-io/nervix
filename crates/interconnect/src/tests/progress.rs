@@ -8,7 +8,7 @@
 
 use super::*;
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn progress_work_cannot_consume_liveness_streams() {
     let ConnectedTransports {
         transport_a,
@@ -60,7 +60,7 @@ async fn progress_work_cannot_consume_liveness_streams() {
     for _ in 0..connection::stream_slots::MANAGEMENT_PROGRESS_STREAMS {
         let requester = transport_a.clone();
         let target = node_b.clone();
-        blocked.push(tokio::spawn(async move {
+        blocked.push(nervix_primitives::task::spawn(async move {
             requester.request(&target, BlockingProgressRequest).await
         }));
     }
@@ -75,7 +75,10 @@ async fn progress_work_cannot_consume_liveness_streams() {
 
     let requester = transport_a.clone();
     let target = node_b.clone();
-    let liveness = tokio::spawn(async move { requester.request(&target, LivenessRequest).await });
+    let liveness =
+        nervix_primitives::task::spawn(
+            async move { requester.request(&target, LivenessRequest).await },
+        );
     timeout_at(
         observation_deadline,
         liveness_entered_rx.wait_for(|entered| *entered),

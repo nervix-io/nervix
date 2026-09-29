@@ -186,7 +186,7 @@ mod tests {
         .assured("a one-field test row matches its one-field test schema")
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_subscriber_attaches_only_under_the_declared_definition() {
         let subscriptions = RelaySubscriptions::new();
         assert_eq!(
@@ -207,7 +207,7 @@ mod tests {
         assert!(attached.recv().await.is_some());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn redeclaring_the_same_definition_keeps_subscribers_attached() {
         let subscriptions = RelaySubscriptions::new();
         subscriptions.declare(definition(false));
@@ -223,7 +223,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_new_definition_closes_subscribers_before_its_first_batch() {
         let subscriptions = RelaySubscriptions::new();
         subscriptions.declare(definition(false));
@@ -248,7 +248,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn withdrawing_the_relay_closes_its_subscribers() {
         let subscriptions = RelaySubscriptions::new();
         subscriptions.declare(definition(false));

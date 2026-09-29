@@ -14,37 +14,24 @@ default = []
 loom = ["nervix-model-harness/loom", "nervix-primitives/loom"]
 shuttle = [
   "dep:shuttle",
-  "dep:shuttle-dashmap",
-  "dep:shuttle-parking-lot",
   "dep:shuttle-tokio",
-  "dep:shuttle-tokio-util",
   "nervix-primitives/shuttle",
-  "shuttle-dashmap/shuttle",
-  "shuttle-parking-lot/shuttle",
   "shuttle-tokio/shuttle",
-  "shuttle-tokio-util/shuttle",
 ]
 turmoil = ["dep:turmoil", "nervix-primitives/turmoil"]
 
 [dependencies]
-arc-swap = { workspace = true }
 arch-into = { workspace = true }
-dashmap = { workspace = true }
 error-stack = { workspace = true }
 meticulous = { workspace = true }
-nervix-primitives = { workspace = true }
-parking_lot = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 shuttle = { workspace = true, optional = true }
-shuttle-dashmap = { workspace = true, optional = true }
-shuttle-parking-lot = { workspace = true, optional = true }
 shuttle-tokio = { workspace = true, features = [
   "full",
   "test-util",
 ], optional = true }
-shuttle-tokio-util = { workspace = true, features = ["rt"], optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tokio-util = { workspace = true, features = ["rt"] }
 triomphe = { workspace = true }
 turmoil = { workspace = true, optional = true }
 ubyte = { workspace = true }

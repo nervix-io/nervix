@@ -56,7 +56,7 @@ fn register_counting_handler(transport: &Transport) {
         .assured("the fresh test transport has no duplex handler with this name");
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_duplex_stream_answers_every_frame_in_submission_order() {
     let ConnectedTransports {
         transport_a,
@@ -111,7 +111,7 @@ async fn a_duplex_stream_answers_every_frame_in_submission_order() {
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn a_duplex_sender_reports_when_its_peer_last_accepted_its_bytes() {
     let ConnectedTransports {
         transport_a,
@@ -172,7 +172,7 @@ impl InterconnectRequest for ReplicationShareRequest {
     const TIMEOUT: Duration = Duration::from_secs(5);
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn an_open_append_stream_cannot_consume_shared_replication_streams() {
     let ConnectedTransports {
         transport_a,
@@ -239,7 +239,7 @@ const HELD_FRAMES: u64 = 4;
 /// it answers a batch only once it has appended it durably. The charge for each decoded frame has
 /// to stay with the frame for exactly that long: released at the decode boundary it would leave
 /// the node holding batches no budget can see, and no backpressure would ever reach the leader.
-#[tokio::test]
+#[nervix_primitives::test]
 async fn frames_a_handler_holds_stay_charged_to_its_class_until_it_drops_them() {
     let ConnectedTransports {
         transport_a,
@@ -255,7 +255,7 @@ async fn frames_a_handler_holds_stay_charged_to_its_class_until_it_drops_them() 
             async move {
                 // Decode every frame and hold it, answering none, as a follower does while its
                 // core has not caught up with what the leader has already sent.
-                tokio::spawn(async move {
+                nervix_primitives::task::spawn(async move {
                     let mut items = items;
                     while let Ok(Some(charged)) = items.next().await {
                         if held.send(charged).is_err() {
@@ -308,7 +308,7 @@ async fn frames_a_handler_holds_stay_charged_to_its_class_until_it_drops_them() 
     transport_b.shutdown().await;
 }
 
-#[tokio::test]
+#[nervix_primitives::test]
 async fn opening_a_duplex_stream_without_a_handler_fails() {
     let ConnectedTransports {
         transport_a,

@@ -12,4 +12,5 @@ workspace = true
 tracing = { workspace = true }
 
 [dev-dependencies]
+nervix-primitives = { workspace = true, features = ["native"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }

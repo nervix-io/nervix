@@ -10,9 +10,8 @@ use std::{collections::VecDeque, time::Duration};
 use ahash::HashMap;
 use nervix_client_wire::{SubscribeRequest, SubscriptionHandle, SubscriptionType};
 use nervix_models::{CreateSubscription, DomainName, SubscriptionName};
+use nervix_primitives::sync::{blocking::Mutex, watch};
 use nervix_recovery::Discarded as _;
-use parking_lot::Mutex;
-use tokio::sync::watch;
 use triomphe::Arc;
 
 use crate::events::SubscriptionEvent;
