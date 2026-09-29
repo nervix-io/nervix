@@ -13,17 +13,17 @@ use std::{collections::BTreeSet, sync::Arc as StdArc};
 
 use ahash::RandomState;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::sync::DashMap;
 use nervix_interconnect::EntityGatePurpose;
 use nervix_models::{
     ClusterNodeName, CoordinationIdentity, DomainName, DomainNodeRef, ModelKind, ModelName,
     NodeRef, RelayName,
 };
-use nervix_primitives::unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use tokio::{
+use nervix_primitives::{
+    collections::DashMap,
     sync::{Notify, oneshot},
-    time::{Duration, Instant},
+    unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+use tokio::time::{Duration, Instant};
 use triomphe::Arc;
 
 use super::{
@@ -137,15 +137,15 @@ async fn publish_batches(
     batches: usize,
 ) {
     for _ in 0..batches {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let permit = gate.acquire_dispatch().await;
         records.work_admitted();
         let mut work = NodeQuiesceWorkGuard::begin(counters.clone());
         records.work_admitted();
         drop(permit);
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         work.park_for_required_materialized_state();
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         work.resume_from_required_materialized_state();
         drop(work);
     }
@@ -195,7 +195,7 @@ fn a_hold_fences_every_relay_it_names(deadline: Instant) {
         let intakes = gates
             .iter()
             .map(|gate| {
-                tokio::spawn(publish_batches(
+                nervix_primitives::task::spawn(publish_batches(
                     gate.clone(),
                     counters.clone(),
                     records.clone(),
@@ -203,7 +203,7 @@ fn a_hold_fences_every_relay_it_names(deadline: Instant) {
                 ))
             })
             .collect::<Vec<_>>();
-        let holder = tokio::spawn(hold_twice(
+        let holder = nervix_primitives::task::spawn(hold_twice(
             gates.clone(),
             records.clone(),
             quiescent,
@@ -224,8 +224,8 @@ fn a_hold_fences_every_relay_it_names(deadline: Instant) {
         // total this node holds is what a quiescent hold keeps from rising.
         let mut outstanding = counters.outstanding_work();
         for _ in 0..DRAIN_OBSERVATIONS {
-            tokio::task::consume_budget().await;
-            tokio::task::yield_now().await;
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
             let still_outstanding = counters.outstanding_work();
             assert!(
                 still_outstanding <= outstanding,
@@ -239,7 +239,7 @@ fn a_hold_fences_every_relay_it_names(deadline: Instant) {
             .assured("the hold waits for this release before re-engaging");
 
         for intake in intakes {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             intake.await.assured(CHECK_TASK_JOINS);
         }
         holder.await.assured(CHECK_TASK_JOINS);
@@ -290,9 +290,9 @@ async fn park_and_resume(
         .send(())
         .assured("the drain observer waits for this work item to be admitted");
     for _ in 0..MATERIALIZED_ROUNDS {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         work.park_for_required_materialized_state();
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
         work.resume_from_required_materialized_state();
     }
     observed
@@ -311,13 +311,13 @@ async fn observe_drain(
         .await
         .assured("the parking work item reports its admission before this observer reads");
     for _ in 0..DRAIN_OBSERVATIONS {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert_ne!(
             counters.outstanding_work(),
             0,
             "a node still holding one admitted work item reported that it holds none"
         );
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
     }
     observed
         .send(())
@@ -330,12 +330,16 @@ fn a_parked_work_item_is_never_missing_from_the_counters() {
         let (admitted, work_is_admitted) = oneshot::channel();
         let (observed, drain_is_observed) = oneshot::channel();
 
-        let parking = tokio::spawn(park_and_resume(
+        let parking = nervix_primitives::task::spawn(park_and_resume(
             counters.clone(),
             admitted,
             drain_is_observed,
         ));
-        let observer = tokio::spawn(observe_drain(counters.clone(), work_is_admitted, observed));
+        let observer = nervix_primitives::task::spawn(observe_drain(
+            counters.clone(),
+            work_is_admitted,
+            observed,
+        ));
 
         parking.await.assured(CHECK_TASK_JOINS);
         observer.await.assured(CHECK_TASK_JOINS);
@@ -362,15 +366,15 @@ fn shuttle_a_work_item_parked_for_materialized_state_is_never_missing_from_a_dra
 async fn buffer_output_batches(counters: Arc<NodeQuiesceCounters>) {
     let mut gauge = OutputBufferQuiesceGauge::new(counters);
     gauge.add_batch();
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
     gauge.add_batch();
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
     gauge.remove_batches(1);
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
     gauge.add_batch();
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
     gauge.remove_batches(2);
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
     gauge.add_batch();
     drop(gauge);
 }
@@ -395,9 +399,9 @@ async fn republish_branch_depths(counters: Arc<NodeQuiesceCounters>) {
             output_buffers: 2,
         },
     ] {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         gauges.publish(depths);
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
     }
     drop(gauges);
 }
@@ -405,23 +409,23 @@ async fn republish_branch_depths(counters: Arc<NodeQuiesceCounters>) {
 /// Runs one work item through a park, a resume and its release beside the two gauges.
 async fn admit_and_park_once(counters: Arc<NodeQuiesceCounters>) {
     let mut work = NodeQuiesceWorkGuard::begin(counters);
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
     work.park_for_required_materialized_state();
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
     work.resume_from_required_materialized_state();
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
     drop(work);
 }
 
 /// Reads the node's counters while the gauges and the work item are still adjusting them.
 async fn observe_gauge_bounds(counters: Arc<NodeQuiesceCounters>) {
     for _ in 0..GAUGE_OBSERVATIONS {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             counters.outstanding_work() <= MOST_WORK_THE_GAUGE_CHECK_HOLDS,
             "a withdrawn count fell below zero and wrapped"
         );
-        tokio::task::yield_now().await;
+        nervix_primitives::task::yield_now().await;
     }
 }
 
@@ -429,10 +433,11 @@ fn every_gauge_withdraws_exactly_what_it_contributed() {
     shuttle::future::block_on(async {
         let counters = Arc::new(NodeQuiesceCounters::default());
 
-        let buffering = tokio::spawn(buffer_output_batches(counters.clone()));
-        let republishing = tokio::spawn(republish_branch_depths(counters.clone()));
-        let admitting = tokio::spawn(admit_and_park_once(counters.clone()));
-        let observer = tokio::spawn(observe_gauge_bounds(counters.clone()));
+        let buffering = nervix_primitives::task::spawn(buffer_output_batches(counters.clone()));
+        let republishing =
+            nervix_primitives::task::spawn(republish_branch_depths(counters.clone()));
+        let admitting = nervix_primitives::task::spawn(admit_and_park_once(counters.clone()));
+        let observer = nervix_primitives::task::spawn(observe_gauge_bounds(counters.clone()));
 
         buffering.await.assured(CHECK_TASK_JOINS);
         republishing.await.assured(CHECK_TASK_JOINS);
@@ -529,16 +534,23 @@ fn one_engagement_wakes_every_waiter_and_is_taken_once(deadline: Instant) {
         let records = StdArc::new(OperationRecords::default());
 
         let waiters = (0..ENGAGEMENT_WAITERS)
-            .map(|_| tokio::spawn(wait_for_engagement(operation.clone(), records.clone())))
+            .map(|_| {
+                nervix_primitives::task::spawn(wait_for_engagement(
+                    operation.clone(),
+                    records.clone(),
+                ))
+            })
             .collect::<Vec<_>>();
         let releasers = (0..RELEASING_TASKS)
-            .map(|_| tokio::spawn(take_and_release(operation.clone(), records.clone())))
+            .map(|_| {
+                nervix_primitives::task::spawn(take_and_release(operation.clone(), records.clone()))
+            })
             .collect::<Vec<_>>();
 
         let engaging = operation.clone();
         let engaged_gate = gate.clone();
-        let engagement = tokio::spawn(async move {
-            tokio::task::yield_now().await;
+        let engagement = nervix_primitives::task::spawn(async move {
+            nervix_primitives::task::yield_now().await;
             engaging.complete(EntityAlterHold {
                 coordination: coordination(),
                 gates: engage(
@@ -554,11 +566,11 @@ fn one_engagement_wakes_every_waiter_and_is_taken_once(deadline: Instant) {
 
         engagement.await.assured(CHECK_TASK_JOINS);
         for waiter in waiters {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             waiter.await.assured(CHECK_TASK_JOINS);
         }
         for releaser in releasers {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             releaser.await.assured(CHECK_TASK_JOINS);
         }
 
@@ -594,9 +606,9 @@ fn shuttle_every_engagement_waiter_wakes_and_exactly_one_release_takes_the_hold(
 
 /// Acquires and drops one dispatch permit, which the engaged hold parks until it is dropped.
 async fn dispatch_once(gate: Arc<RelayDispatchGate>) {
-    tokio::task::consume_budget().await;
+    nervix_primitives::task::consume_budget().await;
     let permit = gate.acquire_dispatch().await;
-    tokio::task::yield_now().await;
+    nervix_primitives::task::yield_now().await;
     drop(permit);
 }
 
@@ -605,19 +617,19 @@ fn a_hold_dropped_before_its_fence_completes_reopens_every_relay(deadline: Insta
         let gates = relay_gates(FENCED_RELAYS);
         let dispatchers = gates
             .iter()
-            .map(|gate| tokio::spawn(dispatch_once(gate.clone())))
+            .map(|gate| nervix_primitives::task::spawn(dispatch_once(gate.clone())))
             .collect::<Vec<_>>();
 
         let dropping = gates.clone();
-        let holder = tokio::spawn(async move {
+        let holder = nervix_primitives::task::spawn(async move {
             let hold = engage(&dropping, "shuttle abandoned hold", deadline);
-            tokio::task::yield_now().await;
+            nervix_primitives::task::yield_now().await;
             drop(hold);
         });
 
         holder.await.assured(CHECK_TASK_JOINS);
         for dispatcher in dispatchers {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             dispatcher.await.assured(CHECK_TASK_JOINS);
         }
 
@@ -652,7 +664,7 @@ fn one_failed_engagement_wakes_every_waiter_with_its_failure() {
             .map(|_| {
                 let operation = operation.clone();
                 let records = records.clone();
-                tokio::spawn(async move {
+                nervix_primitives::task::spawn(async move {
                     let Err(report) = operation.wait_until_held().await else {
                         panic!("a failed engagement never reports a hold");
                     };
@@ -668,13 +680,15 @@ fn one_failed_engagement_wakes_every_waiter_with_its_failure() {
             })
             .collect::<Vec<_>>();
         let releasers = (0..RELEASING_TASKS)
-            .map(|_| tokio::spawn(take_and_release(operation.clone(), records.clone())))
+            .map(|_| {
+                nervix_primitives::task::spawn(take_and_release(operation.clone(), records.clone()))
+            })
             .collect::<Vec<_>>();
 
         let failing = operation.clone();
         let failing_domain = domain.clone();
-        let engagement = tokio::spawn(async move {
-            tokio::task::yield_now().await;
+        let engagement = nervix_primitives::task::spawn(async move {
+            nervix_primitives::task::yield_now().await;
             failing.fail(EntityGateOperationError::RelayFenceDeadline {
                 domain: failing_domain,
             });
@@ -682,11 +696,11 @@ fn one_failed_engagement_wakes_every_waiter_with_its_failure() {
 
         engagement.await.assured(CHECK_TASK_JOINS);
         for waiter in waiters {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             waiter.await.assured(CHECK_TASK_JOINS);
         }
         for releaser in releasers {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             releaser.await.assured(CHECK_TASK_JOINS);
         }
 
@@ -718,7 +732,7 @@ fn shuttle_a_failed_engagement_wakes_every_waiter_with_its_failure() {
 /// still sees the entity frozen, and the wait it registers next has nothing left to wake it.
 async fn wait_until_thawed(watch: Arc<OwnershipHandoffFreezeWatch>) {
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let freeze = watch.observe();
         if !freeze.is_frozen() {
             return;
@@ -752,14 +766,14 @@ fn releasing_an_ownership_handoff_wakes_every_frozen_waiter(deadline: Instant) {
             key.clone(),
         ));
         let waiters = (0..FREEZE_WAITERS)
-            .map(|_| tokio::spawn(wait_until_thawed(watch.clone())))
+            .map(|_| nervix_primitives::task::spawn(wait_until_thawed(watch.clone())))
             .collect::<Vec<_>>();
 
         let releasing_entities = frozen_entities.clone();
         let releasing_changed = changed.clone();
         let releasing_domain = domain.clone();
         let released_gate = gate.clone();
-        let release = tokio::spawn(async move {
+        let release = nervix_primitives::task::spawn(async move {
             let ingestors = DashMap::with_hasher(RandomState::with_seeds(0, 0, 0, 0));
             let ingestor_quiescence = DashMap::with_hasher(RandomState::with_seeds(0, 0, 0, 0));
             Runtime::release_entity_alter_hold(
@@ -785,7 +799,7 @@ fn releasing_an_ownership_handoff_wakes_every_frozen_waiter(deadline: Instant) {
 
         release.await.assured(CHECK_TASK_JOINS);
         for waiter in waiters {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             waiter.await.assured(CHECK_TASK_JOINS);
         }
 

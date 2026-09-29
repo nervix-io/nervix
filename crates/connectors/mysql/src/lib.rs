@@ -65,7 +65,7 @@ pub struct MySqlPool {
 }
 
 /// The maintenance task of one pool, stopped with the pool it maintains.
-struct PoolMaintenance(tokio::task::JoinHandle<()>);
+struct PoolMaintenance(nervix_primitives::task::JoinHandle<()>);
 
 impl Drop for PoolMaintenance {
     fn drop(&mut self) {
@@ -172,7 +172,7 @@ fn is_record_server_error(state: &str, code: u16) -> bool {
 /// capacity a writer already holds.
 async fn maintain_minimum(pool: DriverPool, minimum: usize) {
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         tokio::time::sleep(MAINTENANCE_INTERVAL).await;
         let established = pool.metrics().connection_count.load(Ordering::Relaxed);
         let Some(shortfall) = minimum.checked_sub(established) else {
@@ -240,7 +240,10 @@ impl MySqlPool {
             connect().attach_printable(format!("failed to validate connection: {source}"))
         })?;
         drop(conn);
-        let maintenance = PoolMaintenance(tokio::spawn(maintain_minimum(pool.clone(), minimum)));
+        let maintenance = PoolMaintenance(nervix_primitives::task::spawn(maintain_minimum(
+            pool.clone(),
+            minimum,
+        )));
         Ok(Self {
             pool,
             _maintenance: maintenance,
@@ -418,7 +421,7 @@ impl RowSink for MySqlSink {
             );
         }
         for request in requests.requests {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let written = match request {
                 RowRequest::Write {
                     members: written, ..
@@ -445,7 +448,7 @@ impl RowSink for MySqlSink {
                 // policy. The values the failed insert took are bound again from the row's columns.
                 Err(error) if error.is_record_error() && written.len() > 1 => {
                     for index in written {
-                        tokio::task::consume_budget().await;
+                        nervix_primitives::task::consume_budget().await;
                         let member = members[index];
                         let params = carriers
                             .get(member.carrier)

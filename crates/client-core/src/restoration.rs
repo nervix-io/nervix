@@ -186,7 +186,7 @@ impl Restoration {
     /// Attaches every clock the client follows, before the exchange is published.
     pub(crate) async fn attach_followed_clocks(&mut self) {
         for domain in self.sinks.clocks.followed_domains() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             self.attach_clock(domain).await;
         }
     }
@@ -195,7 +195,7 @@ impl Restoration {
     /// for yet: a clock the client began to follow there while this exchange was opening.
     pub(crate) async fn attach_interrupted_clocks(&mut self) {
         for domain in self.sinks.clocks.interrupted_domains() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self.attached.contains(&domain) {
                 continue;
             }
@@ -216,7 +216,7 @@ impl Restoration {
     /// as a new generation.
     pub(crate) async fn open_subscriptions(&mut self) {
         for attempt in self.sinks.desired.restore(self.generation.clone()) {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let request = ClientRequest::Subscribe(attempt.contract.request());
             let sent = self.channel.send(request).await;
             self.subscriptions
@@ -233,7 +233,7 @@ impl Restoration {
                 clocks: self.sinks.clocks.clone(),
                 domain: clock.domain,
             };
-            tokio::spawn(follower.run(clock.sent));
+            nervix_primitives::task::spawn(follower.run(clock.sent));
         }
         for subscription in self.subscriptions {
             let follower = SubscriptionFollower {
@@ -241,7 +241,7 @@ impl Restoration {
                 desired: self.sinks.desired.clone(),
                 generation: self.generation.clone(),
             };
-            tokio::spawn(follower.run(subscription.attempt, subscription.sent));
+            nervix_primitives::task::spawn(follower.run(subscription.attempt, subscription.sent));
         }
     }
 }
@@ -258,7 +258,7 @@ impl ClockFollower {
         let mut sent = sent;
         let mut delay = RestorationDelay::default();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let reply = self
                 .channel
                 .reply(sent, RequestKind::AttachDomainClock)
@@ -318,7 +318,7 @@ impl SubscriptionFollower {
         let mut sent = sent;
         let mut delay = RestorationDelay::default();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let reply = self.channel.reply(sent, RequestKind::Subscribe).await;
             let message = match reply {
                 Ok(ReplyBody::Subscribe(outcome)) => match &outcome.disposition {

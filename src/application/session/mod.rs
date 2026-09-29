@@ -67,9 +67,11 @@ use nervix_models::{
 use nervix_nspl::client_statement::{
     ClientStatement, ParsedClientStatement, parse_client_statement_sources,
 };
-use parking_lot::{Mutex, RwLock};
-use tokio::{
-    sync::{mpsc, watch},
+use nervix_primitives::{
+    sync::{
+        blocking::{Mutex, RwLock},
+        mpsc, watch,
+    },
     task::AbortHandle,
 };
 use tracing::{debug, warn};
@@ -323,7 +325,7 @@ impl SessionShared {
             }
             ReplyDelivery::Transfer(parts) => {
                 for part in parts {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     if self.send_frame(part).await.is_err() {
                         debug!(%request_id, "the session ended during a reply transfer");
                         return QueuedReply::Nothing;
@@ -599,8 +601,8 @@ impl SessionServiceImpl {
 
         let mut closed_cleanly = false;
         loop {
-            tokio::task::consume_budget().await;
-            let item = tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            let item = nervix_primitives::select! {
                 biased;
                 _ = shared.ended() => break,
                 _ = self.inner.admission_shutdown.cancelled() => {
@@ -614,7 +616,7 @@ impl SessionServiceImpl {
                     // Taking a frame can wait for room to answer it, which a client that reads
                     // nothing never makes. Neither the node stopping nor the session ending waits
                     // on that client.
-                    let accepted = tokio::select! {
+                    let accepted = nervix_primitives::select! {
                         biased;
                         _ = shared.ended() => break,
                         _ = self.inner.admission_shutdown.cancelled() => {
@@ -845,7 +847,7 @@ async fn run_ordered_lane(
 ) -> SessionSubscriptions {
     let mut clock_attachments = ClockAttachments::default();
     while let Some(item) = work.recv().await {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         // A request cancelled while it waited was already answered by its cancellation.
         if item.admission.is_cancelled() {
             continue;
@@ -982,7 +984,7 @@ async fn serve_command(
     let processing = shared
         .service
         .process_command(command, subscriptions, admission);
-    let processed = tokio::select! {
+    let processed = nervix_primitives::select! {
         biased;
         processed = processing => processed,
         _ = admission.cancelled_before_admission() => Err(CancelledBeforeAdmission),

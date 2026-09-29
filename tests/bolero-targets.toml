@@ -1,0 +1,64 @@
+# One entry for every compiled Bolero property. Paths are Bolero 0.13.4's actual
+# source-adjacent work directories, so ordinary cargo test replays corpus files.
+[tool]
+campaign_fuzz_seconds = 300
+cargo_bolero = "0.13.4"
+nightly = "nightly-2026-09-17"
+pr_fuzz_seconds = 30
+sanitizer = "address"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nspl/src/__fuzz__/statement__tests__bolero_expression_roundtrip_minimal_parentheses/corpus"
+domain_version = 1
+features = []
+id = "nspl-expression"
+invariant = "Rendering and reparsing a generated current expression preserves its complete structured value."
+max_input_bytes = 128
+package = "nervix-nspl"
+random_iterations = 256
+source = "crates/nspl/src/statement_tests.rs"
+test = "statement::tests::bolero_expression_roundtrip_minimal_parentheses"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nspl/src/__fuzz__/statement__tests__bolero_model_roundtrip_canonical_nspl/corpus"
+domain_version = 1
+features = []
+id = "nspl-model"
+invariant = "Canonical NSPL reparses to the complete generated current Create Model."
+max_input_bytes = 128
+package = "nervix-nspl"
+random_iterations = 256
+source = "crates/nspl/src/statement_tests.rs"
+test = "statement::tests::bolero_model_roundtrip_canonical_nspl"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nspl/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
+domain_version = 1
+features = []
+id = "nspl-archive-model"
+invariant = "An archived canonical Model document reparses to the complete ordered generated Model sequence."
+max_input_bytes = 128
+package = "nervix-nspl"
+random_iterations = 64
+source = "crates/nspl/src/backup/mod.rs"
+test = "backup::tests::bolero_models_exported_through_an_archive_reparse_to_themselves"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/backup/src/__fuzz__/tests__bolero_domain_records_and_manifests_round_trip/corpus"
+domain_version = 1
+features = []
+id = "backup-record-manifest"
+invariant = "Current domain records and backup manifests decode from their own encoding to complete equal values."
+max_input_bytes = 128
+package = "nervix-backup"
+random_iterations = 256
+source = "crates/backup/src/tests.rs"
+test = "tests::bolero_domain_records_and_manifests_round_trip"
+test_target = "lib"

@@ -342,7 +342,7 @@ impl SessionServiceImpl {
         planned: &crate::registry::PlannedMutations,
     ) -> error_stack::Result<(), ModelBindingValidationError> {
         for model in planned.changed_models() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match model {
                 Model::Ingestor(ingestor) => {
                     if pace.is_paced() && ingestor.timestamp_source.is_none() {
@@ -530,7 +530,7 @@ impl SessionServiceImpl {
         let processor_file = processor.file.clone();
         let model_metadata = tokio::time::timeout(
             Duration::from_secs(30),
-            tokio::task::spawn_blocking(move || {
+            nervix_primitives::task::spawn_blocking(move || {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     Self::inspect_onnx_model_metadata(&processor_name, &processor_file, &path)
                 }))

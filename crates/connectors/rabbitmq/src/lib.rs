@@ -224,7 +224,7 @@ impl RabbitMqSink {
         outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut written = Vec::with_capacity(unsent.len());
             let observed = match self.write_unconfirmed(&mut unsent, &mut written).await {
                 Ok(()) => {
@@ -261,7 +261,7 @@ impl RabbitMqSink {
         written: &mut Vec<SinkRecord>,
     ) -> lapin::Result<()> {
         while let Some(record) = unsent.pop_front() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             match self.publish_message(&record).await {
                 // Outside confirm mode Lapin resolves the confirm at once, and it carries nothing.
                 Ok(_not_requested) => written.push(record),
@@ -325,7 +325,7 @@ impl RabbitMqSink {
         outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut pending = VecDeque::new();
             let written = self
                 .write_confirmed(&mut unsent, &mut pending, confirmation, outcome)
@@ -371,7 +371,7 @@ impl RabbitMqSink {
         outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) -> Result<(), ConfirmedStop> {
         while let Some(record) = unsent.pop_front() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let confirmation = match self.publish_message(&record).await {
                 Ok(confirmation) => confirmation,
                 Err(observed) => {
@@ -394,7 +394,7 @@ impl RabbitMqSink {
             }
         }
         while !pending.is_empty() {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             Self::confirm_oldest(pending, timeout, outcome).await?;
         }
         Ok(())
@@ -418,7 +418,7 @@ impl RabbitMqSink {
             Self::harvest_ready_after_oldest_failure(pending, outcome);
             return Err(ConfirmedStop::Failed(Self::confirm_timeout_error(timeout)));
         }
-        let result = tokio::select! {
+        let result = nervix_primitives::select! {
             biased;
             result = &mut oldest.confirmation => Some(result),
             _ = sleep(remaining) => None,

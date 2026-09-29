@@ -1,6 +1,3 @@
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 use std::time::{Duration, Instant};
 
 use arch_into::ArchInto as _;
@@ -15,7 +12,7 @@ const FAN_IN_SOURCES: usize = 8;
 const DELIVERY_OBSERVATION_ROWS: [usize; 3] = [1, 64, 1_024];
 
 fn consume_ready_batches(source_count: usize, iterations: u64) -> Duration {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("benchmark runtime must build");
@@ -25,17 +22,17 @@ fn consume_ready_batches(source_count: usize, iterations: u64) -> Duration {
         let mut completed = 0;
         let mut elapsed = Duration::ZERO;
         while completed < iterations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let chunk = READY_CHUNK.min(iterations - completed);
             for offset in 0..chunk {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 benchmark
                     .enqueue((completed + offset).arch_into() % source_count)
                     .await;
             }
             let started = Instant::now();
             for _ in 0..chunk {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 black_box(match benchmark.next().await {
                     RelayInteractionBenchmarkEvent::Batch { rows } => rows,
                     event => panic!("expected a ready batch, observed {event:?}"),
@@ -49,7 +46,7 @@ fn consume_ready_batches(source_count: usize, iterations: u64) -> Duration {
 }
 
 fn force_drain_collections(iterations: u64) -> Duration {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("benchmark runtime must build");
@@ -59,9 +56,9 @@ fn force_drain_collections(iterations: u64) -> Duration {
         let mut benchmark = RelayInteractionBenchmark::collecting(FAN_IN_SOURCES, capacity);
         let mut elapsed = Duration::ZERO;
         for iteration in 0..iterations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             for batch in 0..COLLECTED_BATCHES {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 benchmark
                     .enqueue((iteration + batch).arch_into() % FAN_IN_SOURCES)
                     .await;
@@ -70,7 +67,7 @@ fn force_drain_collections(iterations: u64) -> Duration {
             let started = Instant::now();
             let mut drained_rows = 0;
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 match benchmark.next().await {
                     RelayInteractionBenchmarkEvent::Batch { rows } => drained_rows += rows,
                     RelayInteractionBenchmarkEvent::ForceFlush => break,
@@ -86,7 +83,7 @@ fn force_drain_collections(iterations: u64) -> Duration {
 }
 
 fn due_wakes(iterations: u64) -> Duration {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("benchmark runtime must build");
@@ -94,7 +91,7 @@ fn due_wakes(iterations: u64) -> Duration {
         let mut benchmark = RelayInteractionBenchmark::pass_through(1, 1);
         let started = Instant::now();
         for _ in 0..iterations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             assert_eq!(
                 benchmark.wake_now().await,
                 RelayInteractionBenchmarkEvent::Wake
@@ -106,7 +103,7 @@ fn due_wakes(iterations: u64) -> Duration {
 }
 
 fn graceful_commands(iterations: u64) -> Duration {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("benchmark runtime must build");
@@ -114,7 +111,7 @@ fn graceful_commands(iterations: u64) -> Duration {
         let mut benchmark = RelayInteractionBenchmark::pass_through(1, 1);
         let started = Instant::now();
         for _ in 0..iterations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             benchmark.graceful_command().await;
             assert_eq!(
                 benchmark.next().await,
@@ -127,7 +124,7 @@ fn graceful_commands(iterations: u64) -> Duration {
 }
 
 fn receiver_shutdowns(iterations: u64) -> Duration {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("benchmark runtime must build");
@@ -135,7 +132,7 @@ fn receiver_shutdowns(iterations: u64) -> Duration {
         let mut benchmark = RelayInteractionBenchmark::pass_through(1, 1);
         let started = Instant::now();
         for _ in 0..iterations {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             benchmark.shutdown();
             assert_eq!(
                 benchmark.next().await,

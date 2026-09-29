@@ -23,6 +23,7 @@ use nervix_connector::{
     SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
 };
 use nervix_models::{ClientConfigEntry, KafkaPartitionSchedule, Timestamp, TopicName};
+use nervix_primitives::sync::watch;
 use rdkafka::{
     config::ClientConfig,
     consumer::{CommitMode, Consumer, StreamConsumer},
@@ -30,10 +31,7 @@ use rdkafka::{
     topic_partition_list::{Offset, TopicPartitionList},
 };
 use thiserror::Error;
-use tokio::{
-    sync::watch,
-    time::{Instant, sleep_until},
-};
+use tokio::time::{Instant, sleep_until};
 use tracing::{debug, warn};
 use triomphe::Arc;
 
@@ -453,7 +451,7 @@ impl BrokerSourceConnector for KafkaSource {
     ) -> SourceResult<SourceBatch<Self::Message>> {
         let first = match &mut self.offset_mode {
             KafkaSourceOffsetMode::Domain { rebalance, .. } => {
-                tokio::select! {
+                nervix_primitives::select! {
                     changed = rebalance.changed() => {
                         return if changed.is_ok() {
                             Ok(SourceBatch::ResumeRequired)
@@ -487,8 +485,8 @@ impl BrokerSourceConnector for KafkaSource {
                 .attach(KafkaSourceError::BatchDeadline)
         })?;
         while messages.len() < request.max_messages.get() {
-            tokio::task::consume_budget().await;
-            tokio::select! {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
                 _ = sleep_until(deadline) => break,
                 next = self.consumer.recv() => {
                     match next {
@@ -516,7 +514,7 @@ impl BrokerSourceConnector for KafkaSource {
                 .change_context(SourceError::Acknowledge { connector: KAFKA }),
             KafkaSourceOffsetMode::Domain { offsets, .. } => {
                 for position in positions {
-                    tokio::task::consume_budget().await;
+                    nervix_primitives::task::consume_budget().await;
                     offsets
                         .commit(position)
                         .await
@@ -534,7 +532,7 @@ impl BrokerSourceConnector for KafkaSource {
             .assigned_partitions()
             .change_context(SourceError::Reject { connector: KAFKA })?;
         for position in starts {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             // Kafka can seek only a partition this consumer is fetching. A rebalance may have moved
             // the partition to another group member while the batch was in flight; it needs no
             // seek, because whichever member is assigned it next, this one included, resumes it
@@ -988,7 +986,7 @@ impl TopicPartitionInspector {
     pub async fn partitions(&self, topic: &str) -> Result<Vec<i32>, Report<KafkaSourceError>> {
         let consumer = self.consumer.clone();
         let topic = topic.to_string();
-        tokio::task::spawn_blocking(move || topic_partitions(&consumer, &topic))
+        nervix_primitives::task::spawn_blocking(move || topic_partitions(&consumer, &topic))
             .await
             .map_err(|source| {
                 Report::new(KafkaSourceError::InspectPartitions)

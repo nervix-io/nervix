@@ -12,9 +12,6 @@
 //!   connector implementation. A FIFO message group arrives already evaluated for its record, so
 //!   the expression behind it stays with the host.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 mod connection;
 mod source;
 
@@ -328,7 +325,7 @@ impl SqsSink {
         outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) {
         for record in records {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut request = self
                 .client
                 .send_message()
@@ -367,7 +364,7 @@ impl SqsSink {
         outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) {
         for records in Self::batch_chunks(records) {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let mut request = self.client.send_message_batch().queue_url(&self.queue_url);
             for (index, record) in records.iter().enumerate() {
                 let mut entry = SendMessageBatchRequestEntry::builder()
@@ -656,7 +653,7 @@ impl RecordSink for SqsSink {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         let mut prepared = Vec::with_capacity(records.len());
         for record in records {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
             match PreparedSqsRecord::new(record) {
@@ -1028,7 +1025,7 @@ mod tests {
         assert!(SqsSink::validate_group_id("contains space").is_err());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn client_timeout_bounds_each_request_while_sdk_retries_stay_disabled() {
         let fixture = Fixture::start().await;
         let client = SqsSink::client_from_config(&client_config("275"), fixture.dns())
@@ -1057,7 +1054,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn client_rejects_an_invalid_request_timeout() {
         let fixture = Fixture::start().await;
         let error = SqsSink::client_from_config(&client_config("later"), fixture.dns())

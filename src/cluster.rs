@@ -28,7 +28,6 @@ use error_stack::Report;
 use futures_util::future::join_all;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{GossipNode, GossipState};
-use nervix_execution::sync::{ArcSwap, DashMap, Guard};
 use nervix_interconnect::{
     ApplicationRevisionResponse, InterconnectRequest, PeerTarget, PoolClass, RequestContext,
     RequestError, RequestSubquota, Transport as InterconnectTransport, TransportError,
@@ -36,19 +35,15 @@ use nervix_interconnect::{
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, NodeEndpoint, NodeServiceUrl,
 };
-use nervix_recovery::Discarded as _;
-use parking_lot::Mutex;
-use rkyv::{Archive, Deserialize, Serialize};
-#[cfg(not(feature = "shuttle"))]
-use tokio as chitchat_tokio;
-use tokio::{
-    sync::{broadcast, mpsc, watch},
+use nervix_primitives::{
+    collections::DashMap,
+    publication::{ArcSwap, Guard},
+    stream::StreamExt,
+    sync::{CancellationToken, blocking::Mutex, broadcast, mpsc, watch},
     task::JoinHandle,
 };
-#[cfg(feature = "shuttle")]
-use tokio_real as chitchat_tokio;
-use tokio_stream::StreamExt;
-use tokio_util::sync::CancellationToken;
+use nervix_recovery::Discarded as _;
+use rkyv::{Archive, Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 const KEY_CLUSTER_ID: &str = "cluster_id";
@@ -74,7 +69,7 @@ const MAX_GOSSIP_MESSAGE_BYTES: usize = 60 * 1024;
 
 pub struct ClusterHandle {
     local_incarnation: nervix_models::ClusterNodeIncarnation,
-    chitchat: Arc<chitchat_tokio::sync::Mutex<Chitchat>>,
+    chitchat: Arc<nervix_primitives::unmodeled::sync::Mutex<Chitchat>>,
     /// The membership task owns the other reference and replaces this snapshot whenever the
     /// Chitchat live-node state watcher changes.
     subscription_interest: Arc<SubscriptionInterestPublication>,
@@ -203,7 +198,7 @@ impl SubscriptionInterestPublication {
     ) {
         let mut changes = self.changed.subscribe();
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if self
                 .load()
                 .contains(subscriber, domain, relay, minimum_version)
@@ -768,12 +763,12 @@ impl PeerHealthStateWatcher {
         let scheduling_revision = self.state.borrow_and_update().scheduling_revision();
         async move {
             loop {
-                tokio::task::consume_budget().await;
+                nervix_primitives::task::consume_budget().await;
                 let next_transition = self
                     .state
                     .borrow()
                     .next_effective_transition(Instant::now(), self.observation_freshness);
-                tokio::select! {
+                nervix_primitives::select! {
                     changed = self.state.changed() => {
                         changed.assured(
                             "the cluster handle retains its peer-health state sender for its \
@@ -803,7 +798,8 @@ impl PeerHealthStateWatcher {
 /// retained-input change. The watcher owns that deadline so consumers can re-evaluate cluster state
 /// without sampling it on an interval.
 pub(crate) struct ClusterStateWatcher {
-    live_node_states: chitchat_tokio::sync::watch::Receiver<BTreeMap<ChitchatId, NodeState>>,
+    live_node_states:
+        nervix_primitives::unmodeled::sync::watch::Receiver<BTreeMap<ChitchatId, NodeState>>,
     peer_health_state: PeerHealthStateWatcher,
 }
 
@@ -817,7 +813,7 @@ impl ClusterStateWatcher {
         } = self;
         let peer_health_change = peer_health_state.wait_for_change_or_next_transition();
         async move {
-            tokio::select! {
+            nervix_primitives::select! {
                 changed = live_node_states.changed() => changed.assured(
                     "the cluster handle retains its Chitchat state sender for its lifetime",
                 ),
@@ -896,7 +892,7 @@ struct InterconnectGossipTransportInner {
     interconnect: InterconnectTransport,
     fault_injection: crate::ConfiguredFaultInjection,
     routes: DashMap<SocketAddr, GossipRoute>,
-    outgoing: DashMap<SocketAddr, chitchat_tokio::sync::mpsc::Sender<Vec<u8>>>,
+    outgoing: DashMap<SocketAddr, nervix_primitives::unmodeled::sync::mpsc::Sender<Vec<u8>>>,
     incoming_tx: mpsc::Sender<GossipDatagram>,
     incoming_rx: Mutex<Option<mpsc::Receiver<GossipDatagram>>>,
     /// Cancelled by [`InterconnectGossipTransport::close`]; every exchange in flight or started
@@ -1066,10 +1062,11 @@ impl InterconnectGossipTransport {
             .outgoing
             .entry(to)
             .or_insert_with(|| {
-                let (sender, receiver) =
-                    chitchat_tokio::sync::mpsc::channel(GOSSIP_OUTGOING_QUEUE_CAPACITY);
+                let (sender, receiver) = nervix_primitives::unmodeled::sync::mpsc::channel(
+                    GOSSIP_OUTGOING_QUEUE_CAPACITY,
+                );
                 let transport = self.clone();
-                chitchat_tokio::spawn(async move {
+                nervix_primitives::unmodeled::task::spawn(async move {
                     transport.send_queued(to, receiver).await;
                 });
                 sender
@@ -1078,11 +1075,11 @@ impl InterconnectGossipTransport {
             .clone();
         match sender.try_send(payload) {
             Ok(()) => Ok(()),
-            Err(chitchat_tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            Err(nervix_primitives::unmodeled::sync::mpsc::error::TrySendError::Full(_)) => {
                 debug!(peer = %to, "dropped gossip datagram because the peer queue is full");
                 Ok(())
             }
-            Err(chitchat_tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            Err(nervix_primitives::unmodeled::sync::mpsc::error::TrySendError::Closed(_)) => {
                 anyhow::bail!("interconnect gossip peer queue is closed")
             }
         }
@@ -1091,11 +1088,11 @@ impl InterconnectGossipTransport {
     async fn send_queued(
         &self,
         to: SocketAddr,
-        mut receiver: chitchat_tokio::sync::mpsc::Receiver<Vec<u8>>,
+        mut receiver: nervix_primitives::unmodeled::sync::mpsc::Receiver<Vec<u8>>,
     ) {
         loop {
-            chitchat_tokio::task::consume_budget().await;
-            let payload = chitchat_tokio::select! {
+            nervix_primitives::unmodeled::task::consume_budget().await;
+            let payload = nervix_primitives::unmodeled::select! {
                 _ = self.inner.closed.cancelled() => return,
                 payload = receiver.recv() => match payload {
                     Some(payload) => payload,
@@ -1150,7 +1147,7 @@ impl InterconnectGossipTransport {
             }
         };
         if let Some(delay) = self.inner.fault_injection.gossip_send_delay(&node_id) {
-            chitchat_tokio::time::sleep(delay).await;
+            nervix_primitives::unmodeled::time::sleep(delay).await;
         }
         let response = self
             .inner
@@ -1343,9 +1340,9 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
     let subscription_interest_publisher = subscription_interest.clone();
     let event_tx = events.clone();
     let route_transport = transport.clone();
-    let membership_task = tokio::spawn(async move {
+    let membership_task = nervix_primitives::task::spawn(async move {
         while let Some(nodes) = live_nodes.next().await {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             subscription_interest_publisher.publish(&nodes);
             route_transport.refresh_routes(&nodes);
             let report = membership_report(&nodes);
@@ -1414,7 +1411,7 @@ impl ClusterHandle {
 
     pub(crate) async fn subscribe_live_node_states(
         &self,
-    ) -> chitchat_tokio::sync::watch::Receiver<BTreeMap<ChitchatId, NodeState>> {
+    ) -> nervix_primitives::unmodeled::sync::watch::Receiver<BTreeMap<ChitchatId, NodeState>> {
         self.chitchat.lock().await.live_nodes_watcher()
     }
 
@@ -2049,7 +2046,7 @@ mod tests {
         assert!(request.to_string().contains("timed out"));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn gossip_reconnects_a_known_route_after_its_outbound_target_is_retired() {
         let node = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");
         let interconnect =
@@ -2473,7 +2470,7 @@ mod tests {
         assert!(!withdrawn.contains(&health_identity("node-2", 9), "sales", "events", 1));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn subscription_interest_visibility_requires_the_current_advertisement() {
         let (node_id, mut state) = subscription_state("node-1", 7, 7101, &[("sales", "events")]);
         let subscriber = health_identity("node-1", 7);
@@ -2764,11 +2761,11 @@ mod tests {
         assert!(capacity.unavailable_nodes().is_empty());
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn cluster_state_watcher_observes_a_health_target_change_after_wait_preparation() {
         let observation_freshness = Duration::from_secs(10);
         let (_live_state, live_state_receiver) =
-            chitchat_tokio::sync::watch::channel(BTreeMap::new());
+            nervix_primitives::unmodeled::sync::watch::channel(BTreeMap::new());
         let (peer_health_state, peer_health_state_receiver) =
             watch::channel(PeerHealthStateSnapshot::default());
         let mut watcher = ClusterStateWatcher {
@@ -2787,10 +2784,10 @@ mod tests {
             );
         });
 
-        tokio::select! {
+        nervix_primitives::select! {
             biased;
             _ = &mut waiting => {}
-            () = tokio::task::yield_now() => {
+            () = nervix_primitives::task::yield_now() => {
                 panic!("a health target update after wait preparation must wake the waiter")
             }
         }

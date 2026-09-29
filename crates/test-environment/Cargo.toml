@@ -15,8 +15,8 @@ clap = { workspace = true, features = ["derive", "env"] }
 error-stack = { workspace = true }
 hickory-proto = { workspace = true }
 meticulous = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
-parking_lot = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

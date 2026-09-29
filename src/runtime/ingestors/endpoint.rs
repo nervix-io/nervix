@@ -287,7 +287,7 @@ mod tests {
         runtime
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn endpoint_source_binds_its_routes_while_its_ingestor_runs() {
         let domain = domain("default");
         let ingestor = named::<IngestorName>("event_source");

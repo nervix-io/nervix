@@ -22,14 +22,18 @@ use std::{
     sync::Arc,
 };
 
-use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
+use nervix_primitives::{
+    sync::{
+        CancellationToken,
+        atomic::{AtomicU64, Ordering},
+    },
+    task::JoinHandle,
+};
 use nervix_recovery::Discarded as _;
 use tokio::{
     io::copy_bidirectional,
     net::{TcpListener, TcpStream},
-    task::JoinHandle,
 };
-use tokio_util::sync::CancellationToken;
 
 use crate::common::port_pool::{next_port, release_test_ports};
 
@@ -130,7 +134,7 @@ impl TcpForwarder {
     fn start(listener: TcpListener, target: SocketAddr) -> Self {
         let accepted = Arc::new(AtomicU64::new(0));
         let connections = CancellationToken::new();
-        let listener = tokio::spawn(Self::accept(
+        let listener = nervix_primitives::task::spawn(Self::accept(
             listener,
             target,
             accepted.clone(),
@@ -150,12 +154,12 @@ impl TcpForwarder {
         connections: CancellationToken,
     ) {
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Ok((downstream, _)) = listener.accept().await else {
                 return;
             };
             accepted.fetch_add(1, Ordering::Relaxed);
-            tokio::spawn(Self::forward(downstream, target, connections.clone()));
+            nervix_primitives::task::spawn(Self::forward(downstream, target, connections.clone()));
         }
     }
 
@@ -164,7 +168,7 @@ impl TcpForwarder {
         let Ok(mut upstream) = TcpStream::connect(target).await else {
             return;
         };
-        tokio::select! {
+        nervix_primitives::select! {
             _ = stopped.cancelled() => {}
             _ = copy_bidirectional(&mut downstream, &mut upstream) => {}
         }

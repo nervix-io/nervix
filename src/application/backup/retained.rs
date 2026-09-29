@@ -28,9 +28,8 @@ use nervix_client_wire::{
     BackupDownloadMessage, EncodedFrame, SessionLimits,
 };
 use nervix_models::{CommandExecutionReference, Timestamp, UserName};
-use parking_lot::Mutex;
+use nervix_primitives::sync::{blocking::Mutex, mpsc};
 use thiserror::Error;
-use tokio::sync::mpsc;
 use triomphe::Arc;
 
 /// Archive bytes one download frame carries at most.
@@ -277,7 +276,7 @@ where
     let chunk_bytes = DOWNLOAD_CHUNK_BYTES.min(limits.frame_bytes() / 2);
     let chunk_bytes: u64 = chunk_bytes.arch_into();
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let chunk = match source.next_chunk(chunk_bytes).await {
             Ok(Some(chunk)) => chunk,
             Ok(None) => break,
@@ -459,7 +458,7 @@ mod tests {
         bytes
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_complete_download_collects_the_archive_and_releases_it_once() {
         let releases = StdArc::new(AtomicUsize::new(0));
         let registry = RetainedBackups::default();
@@ -472,7 +471,7 @@ mod tests {
             .open(&reference("backup-1"), &user("alice"), at(10))
             .assured("the owner opens a retained archive");
         let (sender, receiver) = mpsc::channel(DOWNLOAD_FRAME_CAPACITY);
-        let received = tokio::spawn(receive(receiver));
+        let received = nervix_primitives::task::spawn(receive(receiver));
         let end = stream_archive(lease, source, sender, SessionLimits::DEFAULT).await;
         assert_eq!(end, DownloadEnd::Collected);
         assert_eq!(received.await.assured("the receiver finishes"), expected);
@@ -585,7 +584,7 @@ mod tests {
         assert_eq!(releases.load(Ordering::SeqCst), 2);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_download_that_loses_its_client_keeps_the_archive_retained() {
         let releases = StdArc::new(AtomicUsize::new(0));
         let registry = RetainedBackups::default();
@@ -596,7 +595,7 @@ mod tests {
             .open(&reference("lost"), &user("alice"), at(10))
             .assured("the owner opens a retained archive");
         let (sender, mut receiver) = mpsc::channel(DOWNLOAD_FRAME_CAPACITY);
-        let reader = tokio::spawn(async move {
+        let reader = nervix_primitives::task::spawn(async move {
             receiver.recv().await.assured("the start frame arrives");
             drop(receiver);
         });
@@ -607,7 +606,7 @@ mod tests {
         assert_eq!(releases.load(Ordering::SeqCst), 0);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn an_archive_that_cannot_be_read_ends_its_download_with_a_refusal() {
         let releases = StdArc::new(AtomicUsize::new(0));
         let registry = RetainedBackups::default();
@@ -646,8 +645,11 @@ mod shuttle_tests {
     use std::sync::Arc as StdArc;
 
     use nervix_client_wire::{BackupDownloadMessage, SessionLimits};
-    use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
-    use shuttle::{future::block_on, thread};
+    use nervix_primitives::{
+        thread,
+        unmodeled::sync::atomic::{AtomicUsize, Ordering},
+    };
+    use shuttle::future::block_on;
 
     use super::{test_archives::*, *};
     use crate::shuttle_test::check_interleavings;
@@ -793,7 +795,7 @@ mod shuttle_tests {
                         mpsc::channel::<EncodedFrame<BackupDownloadFrame>>(DOWNLOAD_FRAME_CAPACITY);
                     let limits = SessionLimits::DEFAULT;
                     let expected = bytes.clone();
-                    let reader = shuttle::future::spawn(async move {
+                    let reader = nervix_primitives::task::spawn(async move {
                         let mut received = Vec::new();
                         while let Some(frame) = receiver.recv().await {
                             let frame = frame

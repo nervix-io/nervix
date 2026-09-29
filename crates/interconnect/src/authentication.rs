@@ -278,7 +278,7 @@ mod report_tests {
         }
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn malformed_server_name_retains_its_parse_cause() {
         let tls = crate::tests::test_tls();
         let (stream, _other_end) = tokio::io::duplex(64);

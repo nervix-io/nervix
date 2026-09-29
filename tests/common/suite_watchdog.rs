@@ -36,17 +36,11 @@
 //! [`SUITE_CLEANUP_RESERVE`] after its budget expires. What is left is the budget, and a healthy
 //! suite finishes inside it with [`SUITE_SLACK`] to spare.
 
-use std::{
-    collections::BTreeMap,
-    fmt,
-    future::Future,
-    io::Write as _,
-    sync::{Arc as StdArc, LazyLock},
-};
+use std::{collections::BTreeMap, fmt, future::Future, io::Write as _, sync::Arc as StdArc};
 
 use meticulous::OptionExt as _;
+use nervix_primitives::sync::blocking::{LazyLock, Mutex};
 use nervix_recovery::Reported as _;
-use parking_lot::Mutex;
 use tokio::time::Duration;
 
 use super::{
@@ -492,7 +486,7 @@ impl WatchdogCleanup {
         let asked = request_stop_of_every_live_node();
         let deadline = PhaseDeadline::after(window);
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let still_live = LiveCluster::live();
             if still_live.is_empty() || deadline.has_passed() {
                 return Self {

@@ -5,8 +5,8 @@
 //! - **Owns.** One librdkafka consumer subscribed to one topic in a named group, the thread that
 //!   polls it so the group can rebalance, the partitions the group currently assigns it, and
 //!   leaving the group.
-//! - **Depends on.** rust-rdkafka through the Kafka connector's testing re-export, Tokio's watch
-//!   channel, and standard threads.
+//! - **Depends on.** rust-rdkafka through the Kafka connector's testing re-export, and the watch
+//!   channel, synchronous channel, blocking tasks and threads of the primitives boundary.
 //! - **Must not know.** Nervix, its ingestors, or the offsets they commit.
 //!
 //! # Taking a partition
@@ -18,19 +18,20 @@
 //! reads the messages of those partitions and never commits an offset, so the group's committed
 //! position stays exactly where Nervix's consumers left it.
 
-use std::{
-    collections::BTreeSet,
-    io,
-    sync::mpsc::{self, TryRecvError},
-    thread,
-    time::Duration,
-};
+use std::{collections::BTreeSet, io, time::Duration};
 
 use nervix_connector_kafka::testing_rdkafka::{
     config::ClientConfig,
     consumer::{BaseConsumer, Consumer},
 };
-use tokio::sync::watch;
+use nervix_primitives::{
+    sync::{
+        blocking::mpsc::{self, TryRecvError},
+        watch,
+    },
+    task::spawn_blocking,
+    thread::{self, JoinHandle},
+};
 
 /// Sorts before `rdkafka`, the client id of a Nervix consumer that sets none.
 const EXTERNAL_MEMBER_CLIENT_ID: &str = "external-group-member";
@@ -45,7 +46,7 @@ pub(crate) struct ExternalKafkaGroupMember {
     leave: mpsc::Sender<()>,
     /// The partitions of `topic` the group assigned the member at its latest poll.
     assignment: watch::Receiver<BTreeSet<i32>>,
-    poller: thread::JoinHandle<()>,
+    poller: JoinHandle<()>,
 }
 
 impl ExternalKafkaGroupMember {
@@ -118,7 +119,7 @@ impl ExternalKafkaGroupMember {
             .send(())
             .map_err(|_| io::Error::other("the external member stopped polling on its own"))?;
         let poller = self.poller;
-        let joined = tokio::task::spawn_blocking(move || poller.join())
+        let joined = spawn_blocking(move || poller.join())
             .await
             .map_err(io::Error::other)?;
         joined.map_err(|_| io::Error::other("the external member's polling thread panicked"))

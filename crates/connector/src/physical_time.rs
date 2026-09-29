@@ -76,13 +76,13 @@ pub fn actual_utc_now() -> Timestamp {
 mod tests {
     use super::*;
 
-    #[tokio::test(start_paused = true)]
+    #[nervix_primitives::test(start_paused = true)]
     async fn physical_deadline_waits_on_the_monotonic_timer() {
         let capability = PhysicalDeadlineCapability::operational();
         let deadline = capability
             .after(Duration::from_secs(2))
             .expect("the fixture timeout fits the monotonic clock");
-        let waiter = tokio::spawn(async move {
+        let waiter = nervix_primitives::task::spawn(async move {
             capability.wait_until(deadline).await;
         });
 

@@ -9,7 +9,6 @@
 
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
-use bolero::check;
 use meticulous::ResultExt as _;
 use nervix_models::{
     AckMode, AlterRelay, AlterRelayOperation, AvroType, BranchName, BranchSelection,
@@ -2815,8 +2814,9 @@ fn canonical_statements_roundtrip(
 
 #[test]
 fn bolero_expression_roundtrip_minimal_parentheses() {
-    check!()
-        .with_test_time(std::time::Duration::from_millis(400))
+    bolero::check!()
+        .with_iterations(128)
+        .with_max_len(128)
         .for_each(|bytes: &[u8]| {
             let mut g = ByteGen::new(bytes);
             let expression = gen_expression(&mut g, 4);
@@ -2833,8 +2833,9 @@ fn bolero_expression_roundtrip_minimal_parentheses() {
 
 #[test]
 fn bolero_model_roundtrip_canonical_nspl() {
-    check!()
-        .with_test_time(std::time::Duration::from_millis(150))
+    bolero::check!()
+        .with_iterations(128)
+        .with_max_len(128)
         .for_each(|bytes: &[u8]| {
             let model = gen_model(bytes);
             let canonical = model

@@ -69,7 +69,7 @@ pub(in crate::application) async fn run_restore_steps<S: RestoreSteps>(
         });
     }
     for report in &mut reports {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         if report.outcome == RestoreStepOutcome::Applied {
             continue;
         }
@@ -101,8 +101,10 @@ pub(in crate::application) async fn run_restore_steps<S: RestoreSteps>(
 mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::DomainName;
-    use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
-    use parking_lot::Mutex;
+    use nervix_primitives::sync::{
+        atomic::{AtomicUsize, Ordering},
+        blocking::Mutex,
+    };
 
     use super::*;
     use crate::application::model_mutation::command_error;
@@ -157,7 +159,7 @@ mod tests {
         run.steps.iter().map(|report| report.outcome).collect()
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_run_applies_only_the_steps_not_recorded_in_order() {
         let effects = recording(None);
         let recorded = BTreeSet::from([RestoreStep::Users]);
@@ -167,7 +169,7 @@ mod tests {
         assert_eq!(outcomes(&run), [RestoreStepOutcome::Applied; 4]);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn a_failed_step_ends_the_run_and_leaves_the_rest_unattempted() {
         let failing = RestoreStep::ImportResources(domain("prod"));
         let effects = recording(Some((failing.clone(), false)));
@@ -192,7 +194,7 @@ mod tests {
         assert_eq!(effects.attempts.load(Ordering::SeqCst), 3);
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn lost_leadership_leaves_the_restore_for_the_next_leader() {
         let effects = recording(Some((RestoreStep::CreateDomain(domain("prod")), true)));
         let run = run_restore_steps(&steps(), &BTreeSet::new(), &effects).await;

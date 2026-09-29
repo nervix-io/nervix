@@ -8,10 +8,10 @@
 use std::sync::Arc as StdArc;
 
 use nervix_connector::{IngestMessageHeaders, IngestMetadataRow};
+use nervix_primitives::sync::{mpsc, oneshot, watch};
 // The dispatch count is a record: an unmodeled atomic is not a Shuttle scheduling point, so it
 // changes in the same scheduling step as the dispatch it counts.
 use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
-use tokio::sync::{mpsc, oneshot, watch};
 
 use super::*;
 use crate::shuttle_test::{check_pct, check_random};
@@ -166,7 +166,7 @@ impl SourceHostServices for ChannelHost {
         batch: SourceIntakeBatch<'_>,
     ) -> SourceIntakeResult<SourceIntakeOutcome> {
         for message in batch.messages {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let payload = BufferedIngestPayload::new(
                 message.payload,
                 BufferedIngestMetadata::without_headers(),
@@ -260,7 +260,7 @@ impl PacedSourceHostServices for ChannelHost {
     async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool> {
         let mut messages = Vec::with_capacity(poll.messages.len());
         for message in &poll.messages {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             messages.push(SourceIntakeMessage {
                 payload: &message.payload,
                 metadata: IngestMetadataRow::Headers {
@@ -309,14 +309,14 @@ const OBSERVATION_STEPS: usize = 64;
 
 async fn observe_within_steps(mut observed: oneshot::Receiver<()>) {
     for _ in 0..OBSERVATION_STEPS {
-        tokio::task::consume_budget().await;
-        tokio::select! {
+        nervix_primitives::task::consume_budget().await;
+        nervix_primitives::select! {
             biased;
             result = &mut observed => {
                 result.assured("the host reports observation while its check is alive");
                 return;
             }
-            _ = tokio::task::yield_now() => {}
+            _ = nervix_primitives::task::yield_now() => {}
         }
     }
     panic!("the host did not observe quiesce engagement within {OBSERVATION_STEPS} steps");
@@ -371,14 +371,14 @@ fn engagement_during_dispatch(family: SourceFamily, cause: IngestorQuiesceCause)
             send_message(&replays, 1).await;
         }
         let loop_task = match family {
-            SourceFamily::Broker => tokio::spawn(run_source_instance_with_retry(
+            SourceFamily::Broker => nervix_primitives::task::spawn(run_source_instance_with_retry(
                 source,
                 SourceHost::new(host),
                 SourceAckPolicy::None,
                 SOURCE_RECONNECT_POLICY,
                 shutdown_rx,
             )),
-            SourceFamily::Paced => tokio::spawn(run_paced_source(
+            SourceFamily::Paced => nervix_primitives::task::spawn(run_paced_source(
                 source,
                 host,
                 ChannelCadence {
@@ -386,7 +386,7 @@ fn engagement_during_dispatch(family: SourceFamily, cause: IngestorQuiesceCause)
                 },
                 shutdown_rx,
             )),
-            SourceFamily::Request => tokio::spawn(run_request_source(
+            SourceFamily::Request => nervix_primitives::task::spawn(run_request_source(
                 source,
                 SourceHost::new(host),
                 shutdown_rx,
@@ -408,7 +408,7 @@ fn engagement_during_dispatch(family: SourceFamily, cause: IngestorQuiesceCause)
             .await
             .assured("the source begins its first dispatch");
         let (engaged, engagement_returned) = oneshot::channel();
-        let engager = tokio::spawn({
+        let engager = nervix_primitives::task::spawn({
             let quiesce = quiesce.clone();
             async move {
                 quiesce.engage(cause);
@@ -441,7 +441,7 @@ fn engagement_during_dispatch(family: SourceFamily, cause: IngestorQuiesceCause)
             1,
             "only the pre-engagement payload may have reached dispatch"
         );
-        let releaser = tokio::spawn(async move {
+        let releaser = nervix_primitives::task::spawn(async move {
             quiesce.release(cause);
         });
         releaser.await.assured(JOIN);

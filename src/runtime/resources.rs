@@ -342,7 +342,7 @@ impl Runtime {
         let task_resource = id.identifier.clone();
         let task_version = id.version;
         let descriptor_id = id.clone();
-        let file_descriptor_set = tokio::task::spawn_blocking(move || {
+        let file_descriptor_set = nervix_primitives::task::spawn_blocking(move || {
             compile_config.compile_descriptor_set(&store, &descriptor_id)
         })
         .await
@@ -647,7 +647,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn protobuf_descriptor_pool_requires_a_resource_store() {
         let domain = DomainName::parse("tenant").expect("valid domain");
         let resource = named::<ResourceName>("events_proto");
@@ -705,7 +705,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn client_resource_mounts_expand_into_runtime_paths() {
         let store_root = tempdir().expect("resource store tempdir");
         let source_root = tempdir().expect("resource source tempdir");

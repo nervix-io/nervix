@@ -61,7 +61,7 @@ unsafe impl GlobalAlloc for MeteredAllocator {
 }
 
 pub(super) fn measure(
-    runtime: &tokio::runtime::Runtime,
+    runtime: &nervix_primitives::runtime::Runtime,
     name: &str,
     shape: &str,
     program: &Arc<CompiledProgram>,

@@ -159,7 +159,7 @@ async fn when_active_session_collects_completion_pages(
     let mut values = Vec::new();
     let mut page_count = 0_usize;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let request = SuggestRequest::new(input.clone(), cursor, domain.clone())
             .assured("scenario cursor is a character boundary")
             .with_page(page_size, continuation.take())
@@ -486,7 +486,7 @@ async fn then_node_redirects_without_an_endpoint(
     let deadline = Instant::now() + duration;
     let mut last = None;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         assert!(
             Instant::now() < deadline,
             "node '{node_id}' never redirected to '{leader}' without an endpoint within \
@@ -558,7 +558,7 @@ async fn then_console_websocket_closes_with_code(
         .unwrap_or_else(|error| panic!("the console WebSocket refused the message: {error}"));
     let deadline = Instant::now() + SESSION_END_TIMEOUT;
     loop {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let remaining = deadline.saturating_duration_since(Instant::now());
         let received = tokio::time::timeout(remaining, socket.next())
             .await

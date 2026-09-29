@@ -705,7 +705,7 @@ impl Runtime {
         }
 
         for relay_interest in &interest.relays {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let Some(relay_values) = self
                 .load_materialized_relay_values(
                     routing,
@@ -806,7 +806,7 @@ impl Runtime {
         let mut resolved = HashMap::default();
         let mut declared = HashSet::default();
         for dependency in dependencies {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             if !declared.insert(dependency.relay.clone()) {
                 return Err(Report::new(MaterializedReadError::DuplicateDependency {
                     domain: domain.clone(),
@@ -913,7 +913,7 @@ impl Runtime {
         } = wait;
         let mut required_wait = None;
         loop {
-            tokio::task::consume_budget().await;
+            nervix_primitives::task::consume_budget().await;
             let execution_now = domain_clock
                 .snapshot()
                 .change_context(MaterializedReadError::DomainClock {
@@ -966,7 +966,7 @@ impl Runtime {
                         }
                         return Ok(None);
                     }
-                    tokio::select! {
+                    nervix_primitives::select! {
                         _ = changed => {}
                         _ = sleep(self.inner.state_replication_poll_interval) => {}
                         result = shutdown_rx.changed() => {
@@ -1009,10 +1009,8 @@ mod tests {
     use ahash::HashMap;
     use nervix_interconnect::{RemoteOperationFailure, RemoteOperationSubject};
     use nervix_models::{Assignment, AssignmentTarget, Expression, ParseAsType};
-    use tokio::{
-        sync::watch,
-        time::{Duration, timeout},
-    };
+    use nervix_primitives::sync::watch;
+    use tokio::time::{Duration, timeout};
 
     use super::*;
     use crate::{
@@ -1085,7 +1083,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_order() {
         let runtime = Runtime::default();
         let domain = domain("default");

@@ -3,7 +3,6 @@ use std::{
     fs,
     io::Write as _,
     path::{Path, PathBuf},
-    thread,
     time::{Duration, Instant},
 };
 
@@ -13,9 +12,14 @@ use clap::{Parser, Subcommand};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_benchmark::LoadShape;
-use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use nervix_primitives::{
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
+        blocking::Mutex,
+    },
+    thread,
+};
 use nervix_recovery::Discarded as _;
-use parking_lot::Mutex;
 use rdkafka::{
     ClientContext, Message, Offset, TopicPartitionList,
     config::ClientConfig,

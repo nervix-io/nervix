@@ -1120,7 +1120,7 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
     } = context;
     let mut plans = HashMap::with_capacity(specs.len());
     for spec in specs {
-        tokio::task::consume_budget().await;
+        nervix_primitives::task::consume_budget().await;
         let node = NodeRef::new(spec.spec.kind, spec.spec.processor.clone());
         if let Some(published) = previous.get(&node)
             && spec.reuses_prepared_revision(Some(&published.source))

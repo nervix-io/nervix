@@ -213,7 +213,7 @@ struct ProgressState {
 /// standard error is a terminal.
 struct ProgressLine {
     state: Arc<ProgressState>,
-    drawing: Option<tokio::task::JoinHandle<()>>,
+    drawing: Option<nervix_primitives::task::JoinHandle<()>>,
 }
 
 impl ProgressLine {
@@ -227,7 +227,7 @@ impl ProgressLine {
         if std::io::stderr().is_terminal() {
             let state = state.clone();
             let source = source.to_string();
-            drawing = Some(tokio::spawn(async move {
+            drawing = Some(nervix_primitives::task::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
                 loop {
                     interval.tick().await;
