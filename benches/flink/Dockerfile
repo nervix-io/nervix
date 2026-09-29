@@ -12,4 +12,7 @@ RUN curl --fail --location --silent --show-error \
 COPY --chown=flink:flink start.sh /opt/flink/benchmark-start.sh
 RUN chmod 755 /opt/flink/benchmark-start.sh
 
-ENV TASK_MANAGER_NUMBER_OF_TASK_SLOTS=64
+# The catalog runs up to 16 Kafka lanes plus stateful SQL operators in one TaskManager.
+# Flink's image default of 1728m exhausts the JVM heap under that parallelism.
+ENV TASK_MANAGER_NUMBER_OF_TASK_SLOTS=64 \
+    FLINK_PROPERTIES="taskmanager.memory.process.size: 8g"

@@ -56,6 +56,8 @@ The local and CI `run-all` recipes build the Flink image before starting the cat
 container starts a local JobManager and TaskManager, submits the rendered SQL job, and signals
 readiness only after the job reaches `RUNNING`. Flink assigns Kafka partitions directly, so its
 manifests disable the consumer-group membership precheck; the output parity gate remains required.
+The benchmark image gives the TaskManager an 8 GiB process budget for the catalog's 16-lane
+stateful workloads.
 
 Build the local Nervix binaries once and run every workload implementation in catalog order:
 
