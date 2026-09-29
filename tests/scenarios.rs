@@ -113,8 +113,8 @@ use crate::common::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
         KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
         MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR,
-        POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, RUSTFS_ADDR,
-        SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
+        POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR,
+        REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
@@ -7394,6 +7394,12 @@ async fn given_rabbitmq_endpoints_have_fixture_dns(world: &mut ScenarioWorld, na
     publish_fixture_name(world, RABBITMQ_TLS_ADDR, &name, "rabbitmq_tls_dns_addr");
 }
 
+#[given(expr = "the Redis endpoints are published under fixture DNS name {string}")]
+async fn given_redis_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
+    publish_fixture_name(world, REDIS_ADDR, &name, "redis_dns_addr");
+    publish_fixture_name(world, REDIS_TLS_ADDR, &name, "redis_tls_dns_addr");
+}
+
 #[given(expr = "the ClickHouse endpoints are published under fixture DNS name {string}")]
 async fn given_clickhouse_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
     publish_fixture_name(world, CLICKHOUSE_ADDR, &name, "clickhouse_dns_addr");
@@ -7481,6 +7487,14 @@ async fn given_rabbitmq_is_forwarded(world: &mut ScenarioWorld, name: String, ad
         "rabbitmq_forwarded_addr",
     )
     .await;
+}
+
+/// Stand TCP forwarders to Redis so the fixture can move its answer between independently
+/// stoppable addresses while the source and command pool reconnect.
+#[given(expr = "Redis is forwarded as {string} from the fixture addresses {string}")]
+async fn given_redis_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
+    let endpoint = started_dependency(world, REDIS_ADDR);
+    forward_under_fixture_name(world, &endpoint, &name, &addresses, "redis_forwarded_addr").await;
 }
 
 /// Stand TCP forwarders to the plain ClickHouse HTTP listener at `addresses`, and record in
