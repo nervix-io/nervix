@@ -178,6 +178,13 @@ restoration carries a domain but no invented generation or end reason. A mismatc
 timestamp. The paced and tick accessors allow omitted output pointers for fields a host does not
 need.
 
+The clock of a followed domain, `nx_domain_clock`, always has a generation and a state, so those
+accessors cannot fail. A domain the session does not follow reads as a NULL clock rather than a
+stopped one, a clock without an accepted tick answers `false` from `nx_domain_clock_tick` rather
+than a zero tick, and an unpaced clock reports no admission window rather than an unbounded one.
+Only a paced clock has a mapping for `nx_domain_clock_paced`, and a stopped or uninstalled clock has
+no logical time, so its projections return `NX_ERROR_TYPE` instead of a fabricated instant.
+
 Completion replies likewise carry a `SuggestionStatus` variant for ready, missing, stale, or failed
 context and an optional continuation. The server resolves typed semantic references from one
 committed configuration read with the requesting session's ordered transaction prefix applied;

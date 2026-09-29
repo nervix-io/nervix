@@ -246,7 +246,8 @@ the serving node's reading gives it a cluster-side anchor.
 Both statements are session-local, are refused while a transaction is open, and follow each domain
 at most once. See [Domain Clock Attachment](sessions.md#domain-clock-attachment) for the delivery
 contract and [Rust Client Library](client-library.md#following-a-domain-clock) for the helper that
-performs this arithmetic.
+performs this arithmetic, which the shared C binding exposes to its hosts through
+`nx_session_domain_clock`.
 
 ## Execution-Time Snapshots
 

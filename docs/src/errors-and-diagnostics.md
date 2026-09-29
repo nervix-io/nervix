@@ -539,7 +539,13 @@ reporting boundary. It classifies the typed current context as an `NX_ERROR_*` k
 the report's contextual message. A cancelled or expired wait returns `NX_ERROR_CANCELLED` or
 `NX_ERROR_DEADLINE` without writing an event handle. Clock accessors return `NX_ERROR_TYPE` when
 the event kind or installation state lacks a requested field and leave outputs untouched;
-generation, state, and end-reason accessors require a non-null output pointer.
+generation, state, and end-reason accessors require a non-null output pointer. The projections of
+an `nx_domain_clock` convert the Rust client's `error_stack::Report<DomainClockReadError>` the same
+way: a stopped or uninstalled clock is `NX_ERROR_TYPE`, because it holds no logical time to read,
+and arithmetic outside the timestamp range is `NX_ERROR_INVALID_ARGUMENT`, because the instant the
+host passed is out of range for that clock. An attach refusal is not an error of the call: it
+completes with `NX_DISPOSITION_FAILED` and the server's message, and `nx_session_domain_clock`
+reports whether the session follows the clock afterwards.
 
 The CLI's `domain-clock` subcommand classifies attach refusals from those variants. A missing
 domain and an already attached clock have distinct typed CLI errors; other attach and detach
