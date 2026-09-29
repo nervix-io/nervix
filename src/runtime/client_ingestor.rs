@@ -150,12 +150,16 @@ pub(crate) struct ClientProducerOpenRequest {
 }
 
 /// Where the payloads of a producer are retained while they are outstanding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum ClientProducerRetention {
     /// The producer's session is on this node, whose budget its session already reserved.
     Local,
-    /// The producer's session is on another node, which forwards its payloads here.
-    Forwarded,
+    /// The producer's session is on another node, which forwards its payloads here. The endpoint
+    /// admits none of them before that node cleared it: it names each batch whose turn has come
+    /// on `clearance_requests`, and the clearance returns through the producer's handle.
+    Forwarded {
+        clearance_requests: mpsc::UnboundedSender<ClientSubmissionId>,
+    },
 }
 
 /// An opened producer: what it was told, the handle it submits through, and the events that
@@ -209,6 +213,19 @@ impl ClientProducerHandle {
             body,
         };
         // An endpoint that ended already told the producer so, and that end answers the batch.
+        self.commands
+            .send(command)
+            .means_shutdown("client ingestor endpoint");
+    }
+
+    /// Clears one batch of a forwarded producer for admission: the node that serves the producer
+    /// has recorded that the batch may now be admitted. A batch the endpoint already refused, or a
+    /// producer that already ended, ignores it.
+    pub(crate) fn clear(&self, submission: ClientSubmissionId) {
+        let command = EndpointCommand::Clear {
+            attachment: self.attachment,
+            submission,
+        };
         self.commands
             .send(command)
             .means_shutdown("client ingestor endpoint");
@@ -350,6 +367,10 @@ enum EndpointCommand {
         submission: ClientSubmissionId,
         body: Bytes,
     },
+    Clear {
+        attachment: ClientAttachmentId,
+        submission: ClientSubmissionId,
+    },
     Close {
         attachment: ClientAttachmentId,
     },
@@ -370,8 +391,22 @@ struct AttachCommand {
     expected_fields: Vec<SchemaField>,
     limits: ClientProducerLimits,
     max_batch_bytes: NonZeroU64,
-    reservation: Option<ClientProducerReservation>,
+    serving: ProducerServing,
     reply: oneshot::Sender<Result<AttachedProducer, ClientProducerRefusal>>,
+}
+
+/// How a producer's batches reach the endpoint, which decides how one is admitted.
+enum ProducerServing {
+    /// The producer's session is on this node. Its batch goes to the worker when its turn comes.
+    Local,
+    /// Another node serves the producer's session and forwards its batches. When a batch's turn
+    /// comes, the endpoint asks that node to clear it and admits it only once it did, so that node
+    /// knows which batches may have been admitted if this node is lost.
+    Forwarded {
+        /// The node budget reserved for the payloads this node retains for the other node.
+        _reservation: ClientProducerReservation,
+        clearance_requests: mpsc::UnboundedSender<ClientSubmissionId>,
+    },
 }
 
 struct AttachedProducer {
@@ -420,27 +455,66 @@ struct Attachment {
     contract: ClientEndpointContract,
     grant: ClientProducerGrant,
     queue: VecDeque<QueuedSubmission>,
+    /// Batches of a forwarded producer whose turn came, each holding a slot of the window, while
+    /// their serving node clears them, in the order the clearances were requested.
+    clearing: VecDeque<QueuedSubmission>,
+    /// Batches of a forwarded producer that their serving node cleared, each holding a slot of the
+    /// window, until the worker is free to take them.
+    cleared: VecDeque<QueuedSubmission>,
     /// Batches admitted or handed to the worker, not yet answered, with their payload bytes.
     outstanding: HashMap<ClientSubmissionId, u64>,
-    /// Payload bytes of every queued and outstanding batch.
+    /// Payload bytes of every batch the attachment holds.
     held_bytes: u64,
     events: mpsc::UnboundedSender<ClientProducerEvent>,
     admission: watch::Sender<ClientProducerAdmission>,
     /// Set once the producer asked to close; the attachment is released once nothing is
     /// outstanding.
     closing: bool,
-    /// The node budget this attachment reserved for payloads another node forwards, which marks
-    /// the producer as served through that node.
-    forwarded: Option<ClientProducerReservation>,
+    serving: ProducerServing,
 }
 
 impl Attachment {
     /// Batches this attachment holds that have not been answered.
     fn held_batches(&self) -> usize {
-        self.queue
-            .len()
+        let unadmitted = self
+            .slotted_batches()
+            .checked_add(self.queue.len())
+            .assured("every count is bounded by the attachment's granted batches");
+        unadmitted
             .checked_add(self.outstanding.len())
+            .assured("every count is bounded by the attachment's granted batches")
+    }
+
+    /// Batches that hold a slot of the window without having reached the worker: those being
+    /// cleared and those cleared.
+    fn slotted_batches(&self) -> usize {
+        self.clearing
+            .len()
+            .checked_add(self.cleared.len())
             .assured("both counts are bounded by the attachment's granted batches")
+    }
+
+    fn is_forwarded(&self) -> bool {
+        match self.serving {
+            ProducerServing::Local => false,
+            ProducerServing::Forwarded { .. } => true,
+        }
+    }
+
+    /// Makes `batch` outstanding and returns the job that hands it to the worker.
+    fn outstanding_job(
+        &mut self,
+        attachment: ClientAttachmentId,
+        batch: QueuedSubmission,
+    ) -> AdmissionJob {
+        let bytes: u64 = batch.body.len().arch_into();
+        self.outstanding.insert(batch.submission, bytes);
+        AdmissionJob {
+            attachment,
+            submission: batch.submission,
+            body: batch.body,
+            max_batch_bytes: self.grant.max_batch_bytes,
+        }
     }
 
     /// Answers one batch, counting its outcome once.
@@ -461,27 +535,37 @@ impl Attachment {
         self.events.send(event).means_peer_left("client producer");
     }
 
-    /// Refuses every batch still queued, in the order the producer sent them.
-    fn refuse_queued(&mut self, series: &ClientIngestorSeries, refusal: ClientSubmissionRefusal) {
-        while let Some(queued) = self.queue.pop_front() {
-            let bytes: u64 = queued.body.len().arch_into();
+    /// Refuses every batch that has not reached the worker, in the order the producer sent them.
+    /// Those cleared or being cleared held slots of the window, which the caller releases.
+    fn refuse_unadmitted(
+        &mut self,
+        series: &ClientIngestorSeries,
+        refusal: ClientSubmissionRefusal,
+    ) {
+        // Oldest first: a cleared batch was asked about before any batch still being cleared,
+        // and both left the queue before the batches still in it.
+        let mut unadmitted = std::mem::take(&mut self.cleared);
+        unadmitted.append(&mut self.clearing);
+        unadmitted.append(&mut self.queue);
+        for batch in unadmitted {
+            let bytes: u64 = batch.body.len().arch_into();
             self.held_bytes = self
                 .held_bytes
                 .checked_sub(bytes)
-                .verified("a queued batch's bytes were added when it was queued");
+                .verified("a held batch's bytes were added when it was queued");
             self.answer(
                 series,
-                queued.submission,
+                batch.submission,
                 ClientSubmissionOutcome::NotAdmitted(refusal),
                 None,
             );
         }
     }
 
-    /// Ends the attachment: every queued batch is refused, every outstanding one's outcome is
-    /// unknown, and the reason is the last event.
+    /// Ends the attachment: every batch that has not reached the worker is refused, every
+    /// outstanding one's outcome is unknown, and the reason is the last event.
     fn end(mut self, series: &ClientIngestorSeries, reason: ClientProducerEndReason) {
-        self.refuse_queued(series, ClientSubmissionRefusal::ProducerEnded);
+        self.refuse_unadmitted(series, ClientSubmissionRefusal::ProducerEnded);
         let outstanding = std::mem::take(&mut self.outstanding);
         for submission in outstanding.into_keys() {
             self.answer(
@@ -563,14 +647,17 @@ impl Runtime {
             Some(endpoint) => endpoint.commands.clone(),
             None => return Err(self.client_producer_refusal(&domain, &ingestor)),
         };
-        let reservation = match retention {
-            ClientProducerRetention::Local => None,
-            ClientProducerRetention::Forwarded => {
+        let serving = match retention {
+            ClientProducerRetention::Local => ProducerServing::Local,
+            ClientProducerRetention::Forwarded { clearance_requests } => {
                 let Some(reservation) = self.inner.client_producer_budget.try_reserve(limits.bytes)
                 else {
                     return Err(ClientProducerRefusal::NodeCapacityExhausted);
                 };
-                Some(reservation)
+                ProducerServing::Forwarded {
+                    _reservation: reservation,
+                    clearance_requests,
+                }
             }
         };
         let (reply, attached) = oneshot::channel();
@@ -578,7 +665,7 @@ impl Runtime {
             expected_fields,
             limits,
             max_batch_bytes,
-            reservation,
+            serving,
             reply,
         });
         if commands.send(command).is_err() {
@@ -930,6 +1017,10 @@ impl Endpoint {
                     submission,
                     body,
                 } => self.submit(attachment, submission, body),
+                EndpointCommand::Clear {
+                    attachment,
+                    submission,
+                } => self.clear(attachment, submission),
                 EndpointCommand::Close { attachment } => self.close(attachment),
                 EndpointCommand::Detach { attachment } => self.detach(attachment),
                 EndpointCommand::Install(execution) => self.install(execution),
@@ -954,11 +1045,10 @@ impl Endpoint {
             expected_fields,
             limits,
             max_batch_bytes,
-            reservation,
+            serving,
             reply,
         } = attach;
-        let attached =
-            self.attached_producer(expected_fields, limits, max_batch_bytes, reservation);
+        let attached = self.attached_producer(expected_fields, limits, max_batch_bytes, serving);
         if reply.send(attached).is_err() {
             // The open was cancelled before its answer arrived; the new attachment has no
             // producer and is released.
@@ -975,7 +1065,7 @@ impl Endpoint {
         expected_fields: Vec<SchemaField>,
         limits: ClientProducerLimits,
         max_batch_bytes: NonZeroU64,
-        reservation: Option<ClientProducerReservation>,
+        serving: ProducerServing,
     ) -> Result<AttachedProducer, ClientProducerRefusal> {
         let Some(execution) = self.execution.clone() else {
             return Err(ClientProducerRefusal::EndpointUnavailable);
@@ -1012,12 +1102,14 @@ impl Endpoint {
                 contract: execution.contract,
                 grant,
                 queue: VecDeque::new(),
+                clearing: VecDeque::new(),
+                cleared: VecDeque::new(),
                 outstanding: HashMap::new(),
                 held_bytes: 0,
                 events,
                 admission,
                 closing: false,
-                forwarded: reservation,
+                serving,
             },
         );
         debug!(
@@ -1086,14 +1178,45 @@ impl Endpoint {
         entry.queue.push_back(QueuedSubmission { submission, body });
     }
 
+    /// Moves a batch its serving node cleared to the batches awaiting the worker. Clearances arrive
+    /// in the order the endpoint asked for them, so a clearance names the oldest batch still being
+    /// cleared, or a batch the endpoint already refused, which it ignores.
+    fn clear(&mut self, attachment: ClientAttachmentId, submission: ClientSubmissionId) {
+        let Some(entry) = self.attachments.get_mut(&attachment) else {
+            // The producer ended or detached, and every batch it held with it.
+            return;
+        };
+        let Some(oldest) = entry.clearing.front() else {
+            return;
+        };
+        if oldest.submission != submission {
+            return;
+        }
+        let cleared = entry
+            .clearing
+            .pop_front()
+            .verified("the oldest batch being cleared was found above");
+        entry.cleared.push_back(cleared);
+    }
+
     fn close(&mut self, attachment: ClientAttachmentId) {
         let Some(entry) = self.attachments.get_mut(&attachment) else {
             // The attachment already ended, which closed its outcomes.
             return;
         };
-        entry.refuse_queued(&self.series, ClientSubmissionRefusal::ProducerEnded);
+        let released = entry.slotted_batches();
+        entry.refuse_unadmitted(&self.series, ClientSubmissionRefusal::ProducerEnded);
         entry.closing = true;
+        self.release_window_slots(released);
         self.release_if_closed(attachment);
+    }
+
+    /// Returns the slots of the window that batches held without reaching the worker.
+    fn release_window_slots(&mut self, slots: usize) {
+        self.window_used = self
+            .window_used
+            .checked_sub(slots)
+            .verified("every batch being cleared or cleared holds one slot of the window");
     }
 
     /// Releases a closing attachment once every batch it admitted has its outcome. Dropping it
@@ -1117,15 +1240,19 @@ impl Endpoint {
         );
     }
 
+    /// Lets go of a producer without answering it. Its admitted batches continue in the graph,
+    /// and the batches it held that never reached the worker are dropped with their slots.
     fn detach(&mut self, attachment: ClientAttachmentId) {
-        if self.attachments.shift_remove(&attachment).is_some() {
-            debug!(
-                domain = self.domain.as_str(),
-                ingestor = self.ingestor.as_str(),
-                attachment = %attachment,
-                "a producer detached from a client ingestor"
-            );
-        }
+        let Some(entry) = self.attachments.shift_remove(&attachment) else {
+            return;
+        };
+        self.release_window_slots(entry.slotted_batches());
+        debug!(
+            domain = self.domain.as_str(),
+            ingestor = self.ingestor.as_str(),
+            attachment = %attachment,
+            "a producer detached from a client ingestor"
+        );
     }
 
     fn install(&mut self, execution: Arc<ClientExecution>) {
@@ -1189,9 +1316,13 @@ impl Endpoint {
         self.intake = intake;
         let admission = intake.admission();
         let refusal = intake.refusal();
+        let mut released: usize = 0;
         for entry in self.attachments.values_mut() {
             if let Some(refusal) = refusal {
-                entry.refuse_queued(&self.series, refusal);
+                released = released
+                    .checked_add(entry.slotted_batches())
+                    .assured("the released slots are bounded by the window");
+                entry.refuse_unadmitted(&self.series, refusal);
             }
             entry.admission.send_if_modified(|current| {
                 let changed = *current != admission;
@@ -1199,6 +1330,7 @@ impl Endpoint {
                 changed
             });
         }
+        self.release_window_slots(released);
     }
 
     fn admission(&mut self, report: AdmissionReport) {
@@ -1298,72 +1430,141 @@ impl Endpoint {
         self.acknowledgements.push(Box::pin(resolution));
     }
 
-    /// Hands the worker the next batch, taking the attachments in turn, while the execution admits,
-    /// the worker is free and the window has room.
+    /// Hands out every batch the execution can take now, while it admits. A batch its serving node
+    /// cleared already holds a slot of the window, so it takes a free worker first. While the
+    /// window has room, the attachments then take their turns: a local producer's next batch goes
+    /// to a free worker, and a forwarded producer's next batch holds a slot while its serving node
+    /// clears it, which needs no worker.
     fn pump(&mut self) {
         let Some(execution) = self.execution.clone() else {
             return;
         };
-        if self.intake != ClientIntakeState::Open
-            || self.in_worker.is_some()
-            || self.window_used >= execution.window.get()
-            || self.attachments.is_empty()
-        {
+        if self.intake != ClientIntakeState::Open {
             return;
         }
+        // Each batch handed out takes the worker or a slot of the window, so this ends after at
+        // most one batch per slot and one more for the worker.
+        while self.hand_out_one(&execution) {}
+    }
+
+    /// Hands out one batch, or returns `false` when nothing can be handed out now.
+    fn hand_out_one(&mut self, execution: &ClientExecution) -> bool {
+        if self.in_worker.is_none() && self.hand_cleared_batch(execution) {
+            return true;
+        }
+        if self.window_used >= execution.window.get() {
+            return false;
+        }
+        self.take_next_turn(execution)
+    }
+
+    /// The attachment `step` places after the one whose turn is next, among `count` of them.
+    fn turn_index(&self, step: usize, count: usize) -> usize {
+        let position = self
+            .cursor
+            .checked_add(step)
+            .assured("the cursor and the step are both bounded by the attachment count");
+        position % count
+    }
+
+    /// Hands the free worker the oldest cleared batch of the first attachment in turn that holds
+    /// one.
+    fn hand_cleared_batch(&mut self, execution: &ClientExecution) -> bool {
         let count = self.attachments.len();
         for step in 0..count {
-            let index = self
-                .cursor
-                .checked_add(step)
-                .assured("the cursor and the step are both below the attachment count")
-                % count;
+            let index = self.turn_index(step, count);
             let Some((id, entry)) = self.attachments.get_index_mut(index) else {
                 continue;
             };
-            let Some(queued) = entry.queue.pop_front() else {
+            let Some(cleared) = entry.cleared.pop_front() else {
                 continue;
             };
-            let id = *id;
-            let bytes: u64 = queued.body.len().arch_into();
-            entry.outstanding.insert(queued.submission, bytes);
-            let job = AdmissionJob {
-                attachment: id,
-                submission: queued.submission,
-                body: queued.body,
-                max_batch_bytes: entry.grant.max_batch_bytes,
-            };
-            match execution.jobs.try_send(job) {
-                Ok(()) => {
-                    self.in_worker = Some(WorkerBatch {
-                        attachment: id,
-                        submission: queued.submission,
-                    });
-                    self.window_used = self
-                        .window_used
-                        .checked_add(1)
-                        .assured("the window is below its configured size, checked above");
-                    self.cursor = index
-                        .checked_add(1)
-                        .assured("an index below the attachment count has a successor");
-                }
-                Err(error) => {
-                    // The worker stopped without this execution being uninstalled yet; the
-                    // batch is refused like any batch arriving while admission is held.
-                    let job = match error {
-                        mpsc::error::TrySendError::Full(job)
-                        | mpsc::error::TrySendError::Closed(job) => job,
-                    };
-                    self.answer_outstanding(
-                        job.attachment,
-                        job.submission,
-                        ClientSubmissionOutcome::NotAdmitted(ClientSubmissionRefusal::Suspended),
-                        None,
-                    );
-                }
-            }
-            return;
+            let job = entry.outstanding_job(*id, cleared);
+            self.dispatch(execution, job);
+            return true;
         }
+        false
+    }
+
+    /// Gives the next attachment in turn that queued a batch a slot of the window for it. A local
+    /// producer's batch needs the worker as well, so a local producer is passed over while the
+    /// worker is busy; a forwarded producer's batch is sent to be cleared instead.
+    fn take_next_turn(&mut self, execution: &ClientExecution) -> bool {
+        let worker_free = self.in_worker.is_none();
+        let count = self.attachments.len();
+        for step in 0..count {
+            let index = self.turn_index(step, count);
+            let Some((id, entry)) = self.attachments.get_index_mut(index) else {
+                continue;
+            };
+            let forwarded = entry.is_forwarded();
+            if entry.queue.is_empty() || (!forwarded && !worker_free) {
+                continue;
+            }
+            let attachment = *id;
+            let queued = entry
+                .queue
+                .pop_front()
+                .verified("the attachment's queue was found holding a batch above");
+            if let ProducerServing::Forwarded {
+                clearance_requests, ..
+            } = &entry.serving
+            {
+                // A serving node that is gone detaches the producer, which returns the slot.
+                clearance_requests
+                    .send(queued.submission)
+                    .means_peer_left("forwarded client producer");
+                entry.clearing.push_back(queued);
+                self.take_window_slot(index);
+                return true;
+            }
+            let job = entry.outstanding_job(attachment, queued);
+            self.take_window_slot(index);
+            self.dispatch(execution, job);
+            return true;
+        }
+        false
+    }
+
+    /// Takes one slot of the window for the batch of the attachment at `index`, whose turn it was,
+    /// and passes the turn to the attachment after it.
+    fn take_window_slot(&mut self, index: usize) {
+        self.window_used = self
+            .window_used
+            .checked_add(1)
+            .assured("the window is below its configured size, checked before a turn is taken");
+        self.cursor = index
+            .checked_add(1)
+            .assured("an index below the attachment count has a successor");
+    }
+
+    /// Hands the free worker one outstanding batch that holds a slot of the window. A worker that
+    /// stopped before its execution was uninstalled takes nothing: the batch is refused like any
+    /// batch arriving while admission is held, and its slot is returned.
+    fn dispatch(&mut self, execution: &ClientExecution, job: AdmissionJob) {
+        let handed = WorkerBatch {
+            attachment: job.attachment,
+            submission: job.submission,
+        };
+        let refused = match execution.jobs.try_send(job) {
+            Ok(()) => {
+                self.in_worker = Some(handed);
+                return;
+            }
+            Err(mpsc::error::TrySendError::Full(job) | mpsc::error::TrySendError::Closed(job)) => {
+                job
+            }
+        };
+        self.window_used = self
+            .window_used
+            .checked_sub(1)
+            .verified("the batch the worker did not take held one slot of the window");
+        self.answer_outstanding(
+            refused.attachment,
+            refused.submission,
+            ClientSubmissionOutcome::NotAdmitted(ClientSubmissionRefusal::Suspended),
+            None,
+        );
     }
 
     fn end_attachment(&mut self, attachment: ClientAttachmentId, reason: ClientProducerEndReason) {
@@ -1383,6 +1584,7 @@ impl Endpoint {
             // The worker still reports the batch; its report finds the attachment gone.
             debug!("an ended producer had a batch with the admission worker");
         }
+        self.release_window_slots(entry.slotted_batches());
         entry.end(&self.series, reason);
     }
 
@@ -1420,7 +1622,7 @@ impl Endpoint {
                 .producers
                 .checked_add(1)
                 .assured("every counted attachment is held in memory");
-            if entry.forwarded.is_some() {
+            if entry.is_forwarded() {
                 gauges.forwarded_producers = gauges
                     .forwarded_producers
                     .checked_add(1)

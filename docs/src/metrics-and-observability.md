@@ -145,7 +145,10 @@ refusal of a batch that was not admitted (`invalid_batch`, `suspended`, `busy`, 
 the uncertainty of one whose outcome is unknown (`interrupted`, `owner_lost`), or `none` for a
 completed batch. No label carries a payload value, a producer, or an attachment identity. A batch
 the serving session refused before it reached the node that executes the ingestor, such as one
-beyond its producer's credit, is answered by the session and not counted here.
+beyond its producer's credit, is answered by the session and not counted here. So is every batch the
+node that forwards a producer answers itself once it lost the node that executes the ingestor: a
+batch it never cleared for admission as `not_admitted` with `producer_ended`, and a cleared one as
+`outcome_unknown` with `owner_lost`.
 [Ingestors](ingestors.md#observing-client-ingestors) describes the same counts in `SHOW INGESTORS`
 and `DESCRIBE INGESTOR`.
 

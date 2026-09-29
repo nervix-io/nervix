@@ -147,6 +147,7 @@ mod common;
 mod database_batches;
 mod domain_clock_attachment;
 mod ingestion_time;
+mod process_cluster;
 mod session_protocol;
 
 const SCENARIOS_PATH: &str = "tests/features";
@@ -1293,6 +1294,25 @@ async fn then_http_receiver_captured_one_request_that_is(
         &format!("HTTP receiver '{name}' request '{}'", expected.request_line),
         request,
     );
+}
+
+/// Asserts that no captured request has `request_line`. A scenario uses it for a request that must
+/// never be sent at all, once later requests that it would have preceded have arrived.
+#[then(expr = "HTTP receiver {string} captured no request with request line {string}")]
+async fn then_http_receiver_captured_no_request_with_request_line(
+    world: &mut ScenarioWorld,
+    name: String,
+    request_line: String,
+) {
+    let request_line = expand_placeholders(world, &request_line);
+    let captured = http_receiver(world, &name).captured();
+    for request in &captured {
+        let captured_line = format!("{} {}", request.method, request.target);
+        assert_ne!(
+            captured_line, request_line,
+            "HTTP receiver '{name}' captured a request that must never be sent:\n{request}"
+        );
+    }
 }
 
 /// Compares two captured requests, counted from 1, byte for byte: request line, every header field
