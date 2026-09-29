@@ -189,19 +189,31 @@ impl Moments {
         }
     }
 
-    pub(super) fn of_row(column: &ArgumentColumn, row: usize) -> Self {
-        match column.number_at(row) {
-            Some(value) => Self::of_value(value),
-            None => Self::EMPTY,
+    pub(super) fn of_rows(column: &ArgumentColumn, rows: Range<usize>) -> Self {
+        let run = column.number_run(rows).moments();
+        Self {
+            count: run.count,
+            mean: run.mean,
+            squares: run.squares,
         }
     }
 
-    pub(super) fn of_rows(column: &ArgumentColumn, rows: Range<usize>) -> Self {
-        let mut moments = Self::EMPTY;
-        for row in rows {
-            moments = Self::merge(moments, Self::of_row(column, row));
-        }
-        moments
+    /// Rebuild every row suffix of a typed run in reverse order.
+    pub(super) fn refold_run(
+        column: &ArgumentColumn,
+        rows: Range<usize>,
+        mut newer: Self,
+        front: &mut Vec<Self>,
+    ) -> Self {
+        column.number_run(rows).visit_reverse(|value| {
+            let row = match value {
+                Some(value) => Self::of_value(value),
+                None => Self::EMPTY,
+            };
+            newer = Self::merge(row, newer);
+            front.push(newer);
+        });
+        newer
     }
 
     fn mean(&self) -> Option<f64> {
@@ -239,14 +251,7 @@ impl Moments {
 }
 
 impl CoMoments {
-    pub(super) fn of_row(arguments: &WindowArguments<ArgumentColumn>, row: usize) -> Self {
-        let second = arguments
-            .second()
-            .verified("co-moments are planned only for two-argument functions");
-        let (Some(first), Some(second)) = (arguments.first().number_at(row), second.number_at(row))
-        else {
-            return Self::EMPTY;
-        };
+    fn of_values(first: f64, second: f64) -> Self {
         Self {
             count: 1,
             first_mean: first,
@@ -258,11 +263,49 @@ impl CoMoments {
     }
 
     pub(super) fn of_rows(arguments: &WindowArguments<ArgumentColumn>, rows: Range<usize>) -> Self {
-        let mut moments = Self::EMPTY;
-        for row in rows {
-            moments = Self::merge(moments, Self::of_row(arguments, row));
+        let second = arguments
+            .second()
+            .verified("co-moments require a second argument");
+        let run = arguments
+            .first()
+            .number_run(rows.clone())
+            .co_moments(second.number_run(rows));
+        Self {
+            count: run.count,
+            first_mean: run.first_mean,
+            second_mean: run.second_mean,
+            first_squares: run.first_squares,
+            second_squares: run.second_squares,
+            cross_products: run.cross_products,
         }
-        moments
+    }
+
+    /// Rebuild one paired typed run's suffixes. Both columns are visited without a per-row type
+    /// match; the temporary second-argument values are bounded by the surviving run's rows.
+    pub(super) fn refold_run(
+        arguments: &WindowArguments<ArgumentColumn>,
+        rows: Range<usize>,
+        mut newer: Self,
+        front: &mut Vec<Self>,
+    ) -> Self {
+        let second = arguments
+            .second()
+            .verified("co-moments require a second argument");
+        let mut second_values = Vec::with_capacity(rows.len());
+        second
+            .number_run(rows.clone())
+            .visit_reverse(|value| second_values.push(value));
+        let mut index = 0;
+        arguments.first().number_run(rows).visit_reverse(|first| {
+            let row = match (first, second_values[index]) {
+                (Some(first), Some(second)) => Self::of_values(first, second),
+                _ => Self::EMPTY,
+            };
+            index += 1;
+            newer = Self::merge(row, newer);
+            front.push(newer);
+        });
+        newer
     }
 
     fn is_finite(&self) -> bool {
@@ -474,7 +517,18 @@ mod tests {
         for value in &values {
             if retained.len() == width {
                 let survivors = retained.iter().copied().collect::<Vec<f64>>();
-                stacks.retract_oldest(1, width, |position| Moments::of_value(survivors[position]));
+                stacks.retract_oldest_runs(
+                    1,
+                    width,
+                    || std::iter::once(1..width),
+                    |run, mut newer, front| {
+                        for position in run.rev() {
+                            newer = Moments::merge(Moments::of_value(survivors[position]), newer);
+                            front.push(newer);
+                        }
+                        newer
+                    },
+                );
                 retained.pop_front();
             }
             retained.push_back(*value);
@@ -509,7 +563,18 @@ mod tests {
         let rows = [1e16, 1.0, 3.0];
         stacks.admit(Moments::of_value(rows[0]));
         stacks.admit(Moments::of_value(rows[1]));
-        stacks.retract_oldest(1, 2, |position| Moments::of_value(rows[position]));
+        stacks.retract_oldest_runs(
+            1,
+            2,
+            || std::iter::once(1..2),
+            |run, mut newer, front| {
+                for position in run.rev() {
+                    newer = Moments::merge(Moments::of_value(rows[position]), newer);
+                    front.push(newer);
+                }
+                newer
+            },
+        );
         stacks.admit(Moments::of_value(rows[2]));
         let aggregate = stacks.aggregate();
         assert_eq!(aggregate.mean(), Some(2.0));

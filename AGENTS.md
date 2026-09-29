@@ -302,6 +302,12 @@ choose a backend.
   record what a check observes without adding a scheduling point. It never carries the protocol
   under test, chooses its branches, supplies its wakeups, or establishes an ordering an assertion
   relies on. A use without a permission, an unlisted item, and a permission nothing uses all fail.
+- A selected atomic belongs to the model execution that constructs it. It never lives in a
+  `static`, directly, through a wrapper, an array or a type alias, or in a `thread_local!`, and it
+  is never constructed in a const context, which Loom's atomics do not support. Process-wide state
+  moves onto the owner whose lifetime it has, such as a node's service or its Raft network; a count
+  a unit test reads is kept per thread; and state that must outlive every test and model is a real
+  atomic under a permission.
 - The primitive crate owns mode selection. At most one mode is enabled in a dependency graph, and
   every pair of modes, including a pair that separate dependencies enable, fails to compile there
   with a diagnostic naming both. Selection depends only on features, never on `cfg(test)`; there is
@@ -704,6 +710,25 @@ build and the existing tests, and nothing in it changes behavior.
 
 ### Test-first changes
 
+- Bolero is the default for lossless encode/decode and representation conversions. Every new or
+  changed pair ships in the same change with a property over bounded, valid current values that
+  asserts the decoded or converted-back value equals the complete original value. Preserve every
+  significant field, order, branch, identity, null, type and sensitivity. If ordinary equality is
+  insufficient, define an explicit complete oracle, such as float bit equality or Arrow schema
+  and logical values with validity. Never compare only selected fields or normalize away a failure.
+- Canonicalizing, lossy and one-way conversions state and test their actual contract; separately
+  test exact round trips on a lossless domain when one exists. Keep malformed-input rejection in
+  separate targets so a generator cannot pass by producing mostly invalid values. Generate bounded
+  current shapes with supported variants and deliberate boundaries; do not retain historical
+  fixtures. Model/reference, operation-sequence, scalar/SIMD differential and encoded-size
+  properties also use Bolero when appropriate.
+- Every Bolero property is an ordinary test and a registered custom fuzz target in
+  `tests/bolero-targets.toml`, with one stable ID, exact package and test identity, required
+  features, domain version, source-adjacent corpus, input/case budgets and invariant. Use the same
+  production path and complete assertion in ordinary randomized/corpus and coverage-guided
+  libFuzzer runs. Registration and both CI modes are mandatory even while other work is concurrent.
+  Keep generators in dev/test code, preserve inward dependencies, and keep modeled execution
+  features and model-checker dependencies out of ordinary and fuzz builds.
 - For a bug, first add or identify a focused test or cucumber scenario and confirm that it fails for
   the expected reason. Implement only after the reproducer is red, rerun it until green, then run
   the appropriate broader validation.
@@ -821,6 +846,13 @@ build and the existing tests, and nothing in it changes behavior.
   required dependencies, environment, and ordering for builds, checks, lints, tests, benchmarks,
   and formatting. When the needed invocation has no recipe, add a focused `justfile` recipe and use
   it instead of running Cargo directly.
+- Use `just test-bolero [filter]` for bounded randomized cases and checked-in corpus replay,
+  `just fuzz-list` to inspect registered targets, `just fuzz <target> [duration]` or
+  `just fuzz-all [duration]` for sanitizer-backed libFuzzer, and `just fuzz-replay` /
+  `just fuzz-reduce` for saved exact inputs. `just validate-bolero` enforces inventory and
+  scoped compiled discovery. A random seed identifies one generated case, not an entire
+  entropy-driven campaign. Keep failures, their minimization and revision/toolchain/flag metadata
+  before cleanup.
 - Use `just validate` for formatting and validation.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, `as`
   casts outside imports and qualified paths, bare `unwrap` and `expect`, outcomes dropped with
@@ -863,7 +895,8 @@ build and the existing tests, and nothing in it changes behavior.
   selects nothing, and leaves a failed model's checkpoint and metadata for
   `just test-loom-replay`. `just test-loom-qualification` shows each model fails under its
   registered weakening. Required CI runs Shuttle, Loom and its qualification, and Turmoil
-  independently of the ordinary tests.
+  independently of the ordinary tests. `just cargo-clippy-loom`, part of `just lint`, keeps every
+  Loom build compiling, including the server and consensus libraries as they ship and in test mode.
 - Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
   user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
   accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.

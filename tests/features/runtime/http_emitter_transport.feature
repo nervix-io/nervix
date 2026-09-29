@@ -110,14 +110,19 @@ Feature: HTTP emitter transport failures and TLS identity
       [{"event_id":"1"}]
       """
     Then HTTP receiver "secure" eventually records a failed TLS handshake
+    # The request stays pending on every retry, and the emitter reports the handshake's own cause.
+    And within "30s" DESCRIBE EMITTER "published" on the leader node contains
+      """
+      transient error: HTTP TLS handshake failed: invalid peer certificate: <tls_failure>
+      """
     And HTTP receiver "secure" has captured exactly 0 requests
 
     Examples:
-      | cluster_size | case       | certificate_host | ca_setting                                  |
-      | 1            | no trust   | 127.0.0.1        |                                             |
-      | 3            | no trust   | 127.0.0.1        |                                             |
-      | 1            | wrong host | localhost        | , 'tls_ca_file' = '{{receiver_tls}}/ca.pem' |
-      | 3            | wrong host | localhost        | , 'tls_ca_file' = '{{receiver_tls}}/ca.pem' |
+      | cluster_size | case       | certificate_host | ca_setting                                  | tls_failure                    |
+      | 1            | no trust   | 127.0.0.1        |                                             | UnknownIssuer                  |
+      | 3            | no trust   | 127.0.0.1        |                                             | UnknownIssuer                  |
+      | 1            | wrong host | localhost        | , 'tls_ca_file' = '{{receiver_tls}}/ca.pem' | certificate not valid for name |
+      | 3            | wrong host | localhost        | , 'tls_ca_file' = '{{receiver_tls}}/ca.pem' | certificate not valid for name |
 
   @http_emitter_transport
   Scenario Outline: An HTTP emitter retries after <failure> without passing the next record

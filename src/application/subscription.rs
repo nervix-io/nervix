@@ -90,8 +90,6 @@ use crate::{
     task_shutdown::JoinShutdown,
 };
 
-static SESSION_SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 #[derive(Debug, thiserror::Error)]
 pub(in crate::application) enum SessionCommandPlanError {
     #[error("transaction is already active")]
@@ -609,11 +607,13 @@ struct SubscriptionSelection {
 /// Which rows of one relay batch pass a subscription's filter and sampling.
 ///
 /// The filter reads the domain's execution time once for the batch. A row the filter cannot
-/// evaluate is skipped and counted, and the first failure is reported for the batch.
+/// evaluate is skipped and counted, and the first failure is reported for the batch. Sampling
+/// takes its draws from the node's `sampler`.
 async fn select_subscription_rows(
     batch: &RelayRecordBatch,
     predicate: Option<&CompiledSubscriptionPredicate>,
     batch_sample_rate: Option<f64>,
+    sampler: &SubscriptionSampler,
     runtime: &Runtime,
     domain: &DomainName,
 ) -> SubscriptionSelection {
@@ -671,7 +671,7 @@ async fn select_subscription_rows(
             .branch_keys()
             .get(row)
             .verified("a relay batch carries one branch key per row");
-        if !subscription_sample_passes(batch_sample_rate, key.as_ref()) {
+        if !sampler.passes(batch_sample_rate, key.as_ref()) {
             continue;
         }
         rows.push(row);
@@ -812,28 +812,44 @@ fn parse_subscription_batch_sample_rate(
     }
 }
 
-fn subscription_sample_passes(batch_sample_rate: Option<f64>, key: Option<&BranchKey>) -> bool {
-    let Some(rate) = batch_sample_rate else {
-        return true;
-    };
-    if rate >= 1.0 {
-        return true;
-    }
-    if rate <= 0.0 {
-        return false;
-    }
+/// The pseudo-random draws `BATCH SAMPLE RATE` takes, shared by every subscription on one node.
+///
+/// A draw hashes the next value of the node's draw sequence with the row's branch key. Every
+/// subscription on the node takes its draws from the same sequence, so two subscriptions sampling
+/// one relay draw independently rather than choosing the same rows. The node's session service
+/// owns the sampler, and the sequence starts again when the node does.
+#[derive(Debug, Default)]
+pub(in crate::application) struct SubscriptionSampler {
+    draws: AtomicU64,
+}
 
-    let counter = SESSION_SAMPLE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut hasher = Hasher::new();
-    hasher.update(&counter.to_le_bytes());
-    if let Some(key) = key {
-        hasher.update(key.as_str().as_bytes());
+impl SubscriptionSampler {
+    /// Whether a selected row of branch `key` passes sampling at `batch_sample_rate`. A missing
+    /// rate and the rates 1 and 0 decide without taking a draw.
+    fn passes(&self, batch_sample_rate: Option<f64>, key: Option<&BranchKey>) -> bool {
+        let Some(rate) = batch_sample_rate else {
+            return true;
+        };
+        if rate >= 1.0 {
+            return true;
+        }
+        if rate <= 0.0 {
+            return false;
+        }
+
+        // The sequence wraps after 2^64 draws, which only repeats a hash input.
+        let sequence = self.draws.fetch_add(1, Ordering::Relaxed);
+        let mut hasher = Hasher::new();
+        hasher.update(&sequence.to_le_bytes());
+        if let Some(key) = key {
+            hasher.update(key.as_str().as_bytes());
+        }
+        let hash = hasher.finalize();
+        let mut bytes = [0_u8; 8];
+        bytes.copy_from_slice(&hash.as_bytes()[..8]);
+        let draw = u64::from_le_bytes(bytes).approx_into::<f64>() / u64::MAX.approx_into::<f64>();
+        draw < rate
     }
-    let hash = hasher.finalize();
-    let mut bytes = [0_u8; 8];
-    bytes.copy_from_slice(&hash.as_bytes()[..8]);
-    let draw = u64::from_le_bytes(bytes).approx_into::<f64>() / u64::MAX.approx_into::<f64>();
-    draw < rate
 }
 
 pub(in crate::application) fn parse_subscription_literal(
@@ -1938,12 +1954,64 @@ mod tests {
         assert!(parse_subscription_batch_sample_rate(Some("bad")).is_err());
     }
 
-    #[test]
-    fn subscription_sampling_respects_extreme_rates() {
+    /// The decisions `sampler` makes for `rows` consecutive rows of one branch at `rate`.
+    fn sample_rows(sampler: &SubscriptionSampler, rate: f64, rows: usize) -> Vec<bool> {
         let key = string_branch_key("tenant", "acme");
-        assert!(subscription_sample_passes(None, key.as_ref()));
-        assert!(subscription_sample_passes(Some(1.0), key.as_ref()));
-        assert!(!subscription_sample_passes(Some(0.0), key.as_ref()));
+        let mut decisions = Vec::with_capacity(rows);
+        for _ in 0..rows {
+            decisions.push(sampler.passes(Some(rate), key.as_ref()));
+        }
+        decisions
+    }
+
+    #[test]
+    fn subscription_sampling_decides_extreme_rates_without_a_draw() {
+        let sampler = SubscriptionSampler::default();
+        let key = string_branch_key("tenant", "acme");
+        assert!(sampler.passes(None, key.as_ref()));
+        assert!(sampler.passes(Some(1.0), key.as_ref()));
+        assert!(!sampler.passes(Some(0.0), key.as_ref()));
+        assert_eq!(sampler.draws.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn subscription_sampling_passes_about_its_rate_of_rows() {
+        let sampler = SubscriptionSampler::default();
+        let decisions = sample_rows(&sampler, 0.25, 10_000);
+        let mut passed = 0_usize;
+        for decision in decisions {
+            if decision {
+                passed += 1;
+            }
+        }
+        assert!(
+            (2_000..=3_000).contains(&passed),
+            "{passed} of 10000 rows passed a 0.25 sample"
+        );
+    }
+
+    #[test]
+    fn subscriptions_on_one_node_share_its_draws_and_nodes_do_not() {
+        let node = SubscriptionSampler::default();
+        let mut first_subscription = Vec::new();
+        let mut second_subscription = Vec::new();
+        // Two subscriptions to one relay each sample every row of it.
+        for _ in 0..64 {
+            first_subscription.extend(sample_rows(&node, 0.5, 1));
+            second_subscription.extend(sample_rows(&node, 0.5, 1));
+        }
+        assert_ne!(
+            first_subscription, second_subscription,
+            "subscriptions on one node draw independently rather than choosing the same rows"
+        );
+
+        let other_node = SubscriptionSampler::default();
+        let started_node = SubscriptionSampler::default();
+        assert_eq!(
+            sample_rows(&other_node, 0.5, 64),
+            sample_rows(&started_node, 0.5, 64),
+            "the draws of this node never advance another node's sequence"
+        );
     }
 
     #[tokio::test]

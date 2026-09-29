@@ -148,6 +148,12 @@ The boundary between them is kept in four places.
   exit. On restart it launches all existing stores before awaiting readiness, so no one voter is
   required to answer without the persisted quorum. Each node must then report the same leader and
   all three voters through its public status endpoint.
+  It can also fault one voter while the other two keep the quorum: `SIGKILL`, after which a step
+  waits for that child to exit and checks the signal, or `SIGSTOP`, which freezes the process with
+  its connections open, so its peers hear nothing from it and see no reset until `SIGCONT` lets it
+  run again. A killed voter restarts from its own database and ports, and the step then waits for
+  the same leader and three voters as a whole restart does. While a voter is killed or frozen, the
+  fixture asks only the running ones which node leads.
 - **Test defaults.** An in-process node's shutdown timeout defaults to four minutes rather than the
   product's `50s`, which leaves the bounded shutdown phases scenarios configure by default room to
   finish, so only a scenario about the deadline reaches it. A server process runs with the product
@@ -174,7 +180,7 @@ second module runs the operation, it is named after the owner.
 | An HTTP receiver wait: captured requests or a recorded fault | `http_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
 | A gRPC receiver wait: captured calls | `grpc_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
 | A server process's readiness, exit, or log line | `server_process.rs` | 120, 120, and 60 seconds | The step fails, quoting the last 80 lines of the process log |
-| Convergence of a restarted real-process cluster | `server_process_cluster.rs` | 120 seconds, with each status request capped at 10 seconds | The step fails with the last status or typed request failure from every member |
+| Convergence of a started or restarted real-process cluster, or of one restarted member | `server_process_cluster.rs` | 120 seconds, with each status request capped at 10 seconds | The step fails with the last status or typed request failure from every member |
 | A one-shot CLI command or a streaming output assertion | `tests/scenarios.rs` | 60 seconds for a command, 30 seconds for a subscription line, 10 or 20 seconds for a clock line, and 10 seconds for clock-process exit after Ctrl-C | The step fails with the process result or retained output lines |
 | Text the interactive CLI is expected to display, its startup banner included | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds, pressing Enter every 250 milliseconds so the REPL draws a prompt and prints the events it queued; a row expected from repeated HTTP posts gets 2 seconds after each post within the same 60 | The step fails quoting the newest 40 lines the terminal displayed, with control sequences removed and repeated lines collapsed |
 | The interactive CLI's exit after the scenario types `exit` | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds | The step fails with the exit status or the elapsed wait, quoting the same transcript |
@@ -627,7 +633,11 @@ a real child process, because an in-process node cannot show whether the process
 signal to its shutdown coordinator. The fixture gives each process its own ports, database
 directory, and interconnect credentials, forms a single-node cluster, and captures its standard
 output and error in one log. It removes every `NERVIX_*` variable and `RUST_LOG` from the child's
-environment, so the runner's configuration cannot silently reconfigure the server.
+environment, so the runner's configuration cannot silently reconfigure the server. A claim about a
+node process dying while its peers keep running, such as what a client producer is told when the
+node that executes its ingestor or serves its session is killed or frozen, runs the three-process
+cluster and faults one member, because only a real process death closes, or stops answering on,
+every connection the node held at once without running any of its shutdown.
 
 Readiness uses the same probe outcomes as an in-process node, probing every 100 milliseconds within
 120 seconds, and fails at once with the exit status when the process exits first. Waiting for an
@@ -812,12 +822,18 @@ starts with its target in `NERVIX_PROBE_*` variables and its standard input clos
 one report line per observation on standard output, and the fixture keeps every line it read.
 
 A probe's waits are bounded twice. The step that starts it waits at most 180 seconds for the line
-that says its subscription is open, and the step that reads its report waits the duration the step
-names for the probe to end, 180 seconds against a cluster and 60 against the corpus. Each probe also
-ends itself: it gives up on its rows after 120 seconds, or on its whole run after 170. A failure
-quotes every report line read so far, the exit status, and the probe's standard error. Dropping the
-fixture kills a child process, so a failed scenario never leaves a probe running; the in-process
-probe ends when its session fails against the stopped cluster, or at its own deadline.
+that says its subscription is open or its clock attach completed. A later step can wait, for the
+duration it names, for one more line the probe prints, so a scenario acts between the probe's
+observations: the clock probe prints the first tick of a generation before the scenario stops and
+starts the domain, and the interruption before the scenario restarts the TCP forwarder the probe
+entered through. Every line read on the way is kept for the report. The step that reads the report
+waits the duration the step names for the probe to end, 180 seconds against a cluster and 60 against
+the corpus. Each probe also ends itself: a binding probe gives up on its rows, or on each stage of
+the clock it follows, after 120 seconds, and the Go and TypeScript probes give up on their whole run
+after 170. A failure quotes every report line read so far, the exit status, and the probe's
+standard error. Dropping the fixture kills a child process, so a failed scenario never leaves a
+probe running; the in-process probe ends when its session fails against the stopped cluster, or at
+its own deadline.
 
 Every example of a runtime other than the in-process probe is tagged `@client_conformance_toolchain`
 and one `@client_probe_<runtime>` tag, and the suite excludes the first tag unless a run selects its

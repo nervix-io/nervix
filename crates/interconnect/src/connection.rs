@@ -342,7 +342,9 @@ struct RelayGrant {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct RelayAdmissionKey {
     peer_node_id: ClusterNodeName,
-    ack_id: u64,
+    /// The whole registration, whose registrar run keeps an admission that an earlier run of the
+    /// same node numbered alike from naming this one.
+    registration: RemoteAckRegistration,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -1619,7 +1621,7 @@ impl TransportState {
             } else {
                 let key = RelayAdmissionKey {
                     peer_node_id: node_id.clone(),
-                    ack_id: ack.ack_id,
+                    registration: ack.registration.clone(),
                 };
                 let record = self
                     .relay_admissions
@@ -2233,7 +2235,7 @@ impl TransportState {
             } else {
                 Some(RelayAdmissionKey {
                     peer_node_id: peer.node_id.clone(),
-                    ack_id: ack.ack_id,
+                    registration: ack.registration.clone(),
                 })
             };
             if ack.outcome == RemoteAckOutcome::Alive {

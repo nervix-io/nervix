@@ -78,7 +78,10 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{CreateClientSqs, RabbitMqIngestMode, SqsIngestMode};
+    use nervix_models::{
+        ClientPoolBounds, CreateClientRedis, CreateClientSqs, RabbitMqIngestMode,
+        RedisPubSubIngestMode, SqsIngestMode,
+    };
 
     use super::*;
 
@@ -164,6 +167,21 @@ mod tests {
                     config: Vec::new(),
                 }),
             ),
+            (
+                IngestSource::RedisPubSub {
+                    client: client_name.clone(),
+                    channel: named("events"),
+                    mode: RedisPubSubIngestMode::NoAckSequential,
+                    quiesce: IngestQuiesceMode::Drop,
+                },
+                Model::ClientRedis(CreateClientRedis {
+                    name: client_name.clone(),
+                    pool: ClientPoolBounds::new(0, nonzero_ext::nonzero!(1u32))
+                        .assured("zero is below one"),
+                    mount: None,
+                    config: Vec::new(),
+                }),
+            ),
         ] {
             let ingestor = CreateIngestor {
                 name: named("source"),
@@ -234,6 +252,9 @@ mod tests {
                     source.compose(&runtime, &plan.ingestor).await
                 }
                 SourceStartPlan::RabbitMq(source) => source.compose(&runtime, &plan.ingestor).await,
+                SourceStartPlan::RedisPubSub(source) => {
+                    source.compose(&runtime, &plan.ingestor).await
+                }
                 SourceStartPlan::Sqs(source) => source.compose(&runtime, &plan.ingestor).await,
                 _ => panic!("the fixture only includes sources that resolve names"),
             };

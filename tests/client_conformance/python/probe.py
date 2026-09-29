@@ -4,8 +4,9 @@ It prints the same conformance report as every other probe. Bulk data stays borr
 frame is a memoryview over the binding's buffer that keeps the event alive for as long as the view
 exists, and every column is copied into a ctypes array in one call. ctypes releases the GIL for
 every call, so a blocked wait never stops another Python thread from cancelling it. Run with the
-`clock` argument, it attaches to the domain's clock instead, reads the state and the first tick of
-the generation the scenario starts, and detaches.
+`clock` argument, it attaches to the domain's running clock instead, reads the clock the attach
+reported before its first tick, follows the generation a STOP and START begin and the attachment
+restored after its session ends, and detaches.
 """
 
 import ctypes
@@ -163,6 +164,39 @@ nx_clock_event_tick = declare(
 )
 nx_clock_event_retain = declare("nx_clock_event_retain", HANDLE, HANDLE)
 nx_clock_event_release = declare("nx_clock_event_release", None, HANDLE)
+nx_session_domain_clock = declare(
+    "nx_session_domain_clock", HANDLE, HANDLE, ctypes.c_char_p, SIZE, OUT_HANDLE
+)
+nx_domain_clock_generation = declare("nx_domain_clock_generation", ctypes.c_uint64, HANDLE)
+nx_domain_clock_state = declare("nx_domain_clock_state", ctypes.c_int32, HANDLE)
+nx_domain_clock_paced = declare(
+    "nx_domain_clock_paced", HANDLE, HANDLE, ctypes.POINTER(ctypes.c_uint64),
+    ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_int64),
+    ctypes.POINTER(ctypes.c_int64), ctypes.POINTER(ctypes.c_double),
+)
+nx_domain_clock_tick = declare(
+    "nx_domain_clock_tick", ctypes.c_bool, HANDLE, ctypes.POINTER(ctypes.c_uint64),
+    ctypes.POINTER(ctypes.c_int64), ctypes.POINTER(ctypes.c_int64),
+    ctypes.POINTER(ctypes.c_int64),
+)
+nx_domain_clock_logical_time_at = declare(
+    "nx_domain_clock_logical_time_at", HANDLE, HANDLE, ctypes.c_int64,
+    ctypes.POINTER(ctypes.c_int64),
+)
+nx_domain_clock_wall_duration_until = declare(
+    "nx_domain_clock_wall_duration_until", HANDLE, HANDLE, ctypes.c_int64, ctypes.c_int64,
+    ctypes.POINTER(ctypes.c_uint64),
+)
+nx_domain_clock_admission_window = declare(
+    "nx_domain_clock_admission_window", HANDLE, HANDLE, ctypes.c_int64,
+    ctypes.POINTER(ctypes.c_bool), ctypes.POINTER(ctypes.c_int64), ctypes.POINTER(ctypes.c_int64),
+)
+nx_domain_clock_admits = declare(
+    "nx_domain_clock_admits", HANDLE, HANDLE, ctypes.c_int64, ctypes.c_int64,
+    ctypes.POINTER(ctypes.c_bool),
+)
+nx_domain_clock_retain = declare("nx_domain_clock_retain", HANDLE, HANDLE)
+nx_domain_clock_release = declare("nx_domain_clock_release", None, HANDLE)
 
 
 class Failure(Exception):
@@ -352,31 +386,16 @@ class ClockEvent:
         return state.value
 
     def paced(self):
-        """The committed clock of a paced state. The UTC anchor depends on when the scenario's
-        START committed, so it is not read."""
-        period, skew = ctypes.c_uint64(), ctypes.c_uint64()
-        origin, rate = ctypes.c_int64(), ctypes.c_double()
-        check(
-            nx_clock_event_paced(
-                self.handle, ctypes.byref(period), ctypes.byref(skew), ctypes.byref(origin), None,
-                ctypes.byref(rate),
-            )
-        )
-        return {
-            "generation": self.generation(),
-            "period": period.value,
-            "skew": skew.value,
-            "origin": origin.value,
-            "rate": rate.value,
-        }
+        return paced_clock(nx_clock_event_paced, self.handle, self.generation())
 
     def tick(self):
-        tick_id, boundary = ctypes.c_uint64(), ctypes.c_int64()
-        authority_utc, serving_logical = ctypes.c_int64(), ctypes.c_int64()
+        """The progress a tick reports. The authority's UTC observation depends on when the tick
+        was accepted, so it is not read."""
+        tick_id, boundary, serving_logical = ctypes.c_uint64(), ctypes.c_int64(), ctypes.c_int64()
         check(
             nx_clock_event_tick(
-                self.handle, ctypes.byref(tick_id), ctypes.byref(boundary),
-                ctypes.byref(authority_utc), ctypes.byref(serving_logical),
+                self.handle, ctypes.byref(tick_id), ctypes.byref(boundary), None,
+                ctypes.byref(serving_logical),
             )
         )
         return {
@@ -385,6 +404,83 @@ class ClockEvent:
             "boundary": boundary.value,
             "serving_logical": serving_logical.value,
         }
+
+
+def paced_clock(read, handle, generation):
+    """The committed clock `read` writes for `handle`, a clock event or a domain clock."""
+    period, skew = ctypes.c_uint64(), ctypes.c_uint64()
+    origin, anchor, rate = ctypes.c_int64(), ctypes.c_int64(), ctypes.c_double()
+    check(
+        read(
+            handle, ctypes.byref(period), ctypes.byref(skew), ctypes.byref(origin),
+            ctypes.byref(anchor), ctypes.byref(rate),
+        )
+    )
+    return {
+        "generation": generation,
+        "period": period.value,
+        "skew": skew.value,
+        "origin": origin.value,
+        "anchor": anchor.value,
+        "rate": rate.value,
+    }
+
+
+class DomainClock:
+    """One reference to the clock the session held for a followed domain when the probe read it,
+    released when the object is collected."""
+
+    def __init__(self, handle):
+        self.handle = handle
+
+    def retain(self):
+        return DomainClock(nx_domain_clock_retain(self.handle))
+
+    def __del__(self):
+        nx_domain_clock_release(self.handle)
+
+    def generation(self):
+        return nx_domain_clock_generation(self.handle)
+
+    def state(self):
+        return nx_domain_clock_state(self.handle)
+
+    def paced(self):
+        return paced_clock(nx_domain_clock_paced, self.handle, self.generation())
+
+    def tick_id(self):
+        """The id of the newest tick the read holds, or None when it holds none."""
+        tick_id = ctypes.c_uint64()
+        if not nx_domain_clock_tick(self.handle, ctypes.byref(tick_id), None, None, None):
+            return None
+        return tick_id.value
+
+    def logical_time_at(self, utc):
+        logical = ctypes.c_int64()
+        check(nx_domain_clock_logical_time_at(self.handle, utc, ctypes.byref(logical)))
+        return logical.value
+
+    def wall_duration_until(self, utc, target):
+        wait = ctypes.c_uint64()
+        check(nx_domain_clock_wall_duration_until(self.handle, utc, target, ctypes.byref(wait)))
+        return wait.value
+
+    def admission_window(self, utc):
+        has_window, earliest, latest = ctypes.c_bool(), ctypes.c_int64(), ctypes.c_int64()
+        check(
+            nx_domain_clock_admission_window(
+                self.handle, utc, ctypes.byref(has_window), ctypes.byref(earliest),
+                ctypes.byref(latest),
+            )
+        )
+        if not has_window.value:
+            return None
+        return earliest.value, latest.value
+
+    def admits(self, utc, event):
+        admitted = ctypes.c_bool()
+        check(nx_domain_clock_admits(self.handle, utc, event, ctypes.byref(admitted)))
+        return admitted.value
 
 
 class Session:
@@ -420,6 +516,14 @@ class Session:
         event = HANDLE()
         check(nx_session_next_event(self.handle, cancel.handle, ctypes.byref(event)))
         return Event(event)
+
+    def domain_clock(self, domain):
+        """The clock the session holds for `domain`, or None when it follows none."""
+        clock = HANDLE()
+        check(nx_session_domain_clock(self.handle, *text(domain), ctypes.byref(clock)))
+        if not clock:
+            return None
+        return DomainClock(clock)
 
     def next_clock_event(self, cancel, domain):
         event = HANDLE()
@@ -640,29 +744,60 @@ def check_cancellation(session):
         raise RuntimeError("a cancelled command did not report CANCELLED with its reference")
 
 
-def state_line(clock, domain):
+def paced_line(prefix, clock, domain):
+    """The report line of a paced clock, with `prefix` naming where it was read. The UTC anchor
+    depends on when the scenario's START committed, so it is read but not reported."""
     rate_bits = struct.unpack("<Q", struct.pack("<d", clock["rate"]))[0]
     return (
-        f"STATE domain={domain} generation={clock['generation']} state=paced "
+        f"{prefix} domain={domain} generation={clock['generation']} state=paced "
         f"period={clock['period']} skew={clock['skew']} origin={clock['origin']} "
         f"rate=f64:{rate_bits:016x}"
     )
 
 
-def tick_line(event, domain, clock):
-    """The report line of a tick, after holding it to the committed clock of its generation: its
-    boundary is the logical origin plus one period for every id before it, and the serving node's
-    reading never precedes the origin."""
-    tick = event.tick()
+def check_tick(clock, tick):
+    """Holds a tick to a clock: the same generation, a boundary of the logical origin plus one
+    period for every id before it, and a serving node's reading that never precedes the origin."""
     if tick["generation"] != clock["generation"]:
-        raise RuntimeError("a tick belongs to another generation than the state before it")
+        raise RuntimeError("a tick of one generation followed the state of another")
     if tick["id"] == 0 or tick["boundary"] != clock["origin"] + (tick["id"] - 1) * clock["period"]:
         raise RuntimeError(
             "a tick's boundary is not the origin plus one period for every id before it"
         )
     if tick["serving_logical"] < clock["origin"]:
         raise RuntimeError("the serving node's logical reading precedes the logical origin")
+
+
+def tick_line(clock, tick, domain):
+    """The report line of a tick a clock holds."""
+    check_tick(clock, tick)
     return f"TICK domain={domain} generation={tick['generation']} boundary=origin+(id-1)*period"
+
+
+def projection_line(clock, read, domain):
+    """The report line of the projections of `read`, which holds `clock`, at its own UTC anchor: the
+    logical time there, the wait for the next tick center, the admission window, and whether an
+    event at the skew's edge and one nanosecond past it are admitted."""
+    anchor, origin = clock["anchor"], clock["origin"]
+
+    def relative(instant):
+        return "origin" if instant == origin else str(instant)
+
+    def admission(admitted):
+        return "admitted" if admitted else "refused"
+
+    window = read.admission_window(anchor)
+    if window is None:
+        raise RuntimeError("a paced clock reports no admission window")
+    edge = origin + clock["skew"]
+    return (
+        f"PROJECTION domain={domain} generation={clock['generation']} "
+        f"anchor={relative(read.logical_time_at(anchor))} "
+        f"wait={read.wall_duration_until(anchor, origin + clock['period'])} "
+        f"window={relative(window[0])}..{relative(window[1])} "
+        f"skew={admission(read.admits(anchor, edge))} "
+        f"beyond={admission(read.admits(anchor, edge + 1))}"
+    )
 
 
 def check_clock_cancellation(session, domain):
@@ -686,50 +821,175 @@ def check_clock_cancellation(session, domain):
         raise RuntimeError("an expired clock wait did not report DEADLINE")
 
 
+class FollowedClock:
+    """What the probe has read about the domain's clock: the generation of the newest state, its
+    mapping while it is paced, and whether the session holding the attachment ended since. Every
+    event is held to what was read before it, and a read of the clock taken right after it is held
+    to be no older."""
+
+    def __init__(self, session, domain, clock):
+        self.session = session
+        self.domain = domain
+        self.generation = clock["generation"]
+        self.paced = clock
+        self.interrupted = False
+
+    def clock(self):
+        if self.paced is None:
+            raise RuntimeError("the followed clock is not paced")
+        return self.paced
+
+    def read(self):
+        read = self.session.domain_clock(self.domain)
+        if read is None:
+            raise RuntimeError("the session follows no clock of the domain after an event about it")
+        return read
+
+    def next(self, deadline):
+        """The next event about the domain, held to what the probe read before it."""
+        event = self.session.next_clock_event(deadline, self.domain)
+        kind = event.kind()
+        if kind == "STATE":
+            self.observe(event)
+        elif kind == "TICK":
+            self.check_tick(event)
+        elif kind == "INTERRUPTED":
+            self.interrupted = True
+        elif kind == "ENDED":
+            raise RuntimeError("the server ended the attachment")
+        return event
+
+    def observe(self, event):
+        generation = event.generation()
+        if generation < self.generation:
+            raise RuntimeError("a state went back to an earlier generation")
+        state = event.state()
+        paced = event.paced() if state == CLOCK_PACED else None
+        read = self.read()
+        if read.generation() < generation:
+            raise RuntimeError("a read of the clock is older than the state the probe took")
+        if read.generation() == generation:
+            if read.state() != state:
+                raise RuntimeError("a read of the clock differs from the state of its generation")
+            if paced is not None and read.paced() != paced:
+                raise RuntimeError("a read of the clock differs from the mapping of its generation")
+        self.generation = generation
+        self.paced = paced
+        self.interrupted = False
+
+    def check_tick(self, event):
+        if self.interrupted:
+            raise RuntimeError("a tick arrived before the restored attachment reported its clock")
+        tick = event.tick()
+        check_tick(self.clock(), tick)
+        read = self.read()
+        if read.generation() < tick["generation"]:
+            raise RuntimeError("a read of the clock is older than the tick the probe took")
+        held = read.tick_id()
+        if read.generation() == tick["generation"] and held is not None and held < tick["id"]:
+            raise RuntimeError("a read of the clock holds an older tick than the probe took")
+
+    def first_tick(self, deadline):
+        """The first tick of the followed generation. A state reporting that generation again is
+        taken on the way; one of another generation fails the probe."""
+        generation = self.generation
+        while True:
+            event = self.next(deadline)
+            if event.kind() == "TICK":
+                return event
+            if event.kind() != "STATE" or self.generation != generation:
+                raise RuntimeError(
+                    f"the clock reported {event.kind()} before the first tick of generation "
+                    f"{generation}"
+                )
+
+    def next_generation(self, deadline):
+        """The paced state of a generation after the followed one. The followed generation's
+        ticks and the states before the new paced one are taken on the way."""
+        previous = self.generation
+        while True:
+            event = self.next(deadline)
+            kind = event.kind()
+            if kind == "STATE" and self.generation > previous and self.paced is not None:
+                return event
+            if kind not in ("TICK", "STATE"):
+                raise RuntimeError(f"the clock reported {kind} before a generation after {previous}")
+
+    def interruption(self, deadline):
+        """Waits for the interruption of the attachment. The followed generation's ticks and
+        states are taken on the way."""
+        generation = self.generation
+        while True:
+            event = self.next(deadline)
+            kind = event.kind()
+            if kind == "INTERRUPTED":
+                return
+            if kind != "TICK" and (kind != "STATE" or self.generation != generation):
+                raise RuntimeError(f"the clock reported {kind} before the interruption")
+
+    def restored(self, deadline):
+        """The paced state the restored attachment reports. A refused restoration, which the
+        session repeats, and a clock reported uninstalled are taken on the way."""
+        while True:
+            event = self.next(deadline)
+            if event.kind() == "STATE" and self.paced is not None:
+                return event
+
+
+def report_state_and_first_tick(followed, state, deadline, domain, report):
+    """Reports the paced state a STATE event reports and the first tick after it."""
+    report(paced_line("STATE", state.paced(), domain))
+    tick = followed.first_tick(deadline)
+    report(tick_line(followed.clock(), tick.tick(), domain))
+
+
 def run_clock(session, domain, report):
-    """Attaches to the domain's clock, reads the state and the first tick of the generation the
-    scenario starts, and detaches."""
+    """Attaches to the domain's running clock and reads the clock the attach reported before its
+    first tick, then follows the generation the scenario's STOP and START begin and the attachment
+    restored after the scenario ends the session, and detaches."""
     check_clock_cancellation(session, domain)
     report(f"ATTACHED {session.execute('ATTACH DOMAIN CLOCK;').disposition()}")
 
-    deadline = Cancel(120_000)
-    while True:
-        state = session.next_clock_event(deadline, domain)
-        if state.kind() != "STATE":
-            raise RuntimeError(f"the clock reported {state.kind()} before the started state")
-        # The serving node may report the started generation uninstalled until it holds the
-        # committed mapping and an assigned clock authority.
-        if state.state() == CLOCK_PACED:
-            break
-    clock = state.paced()
-    reported_state = state_line(clock, domain)
-    report(reported_state)
+    # The clock the attach reported, read before any event about the attachment.
+    read = session.domain_clock(domain)
+    if read is None:
+        raise RuntimeError("the session follows no clock after its attach completed")
+    if read.state() != CLOCK_PACED:
+        raise RuntimeError("the attach reported a clock other than the running paced one")
+    clock = read.paced()
+    reported_clock = paced_line("CLOCK", clock, domain)
+    report(reported_clock)
+    report(projection_line(clock, read, domain))
 
-    while True:
-        tick = session.next_clock_event(deadline, domain)
-        if tick.kind() == "TICK":
-            break
-        if tick.kind() != "STATE":
-            raise RuntimeError(f"the clock reported {tick.kind()} before its first tick")
-        # The serving node reported the installation again; it is still the same generation.
-        if tick.generation() != clock["generation"]:
-            raise RuntimeError("the clock moved to another generation before its first tick")
-    reported_tick = tick_line(tick, domain, clock)
+    followed = FollowedClock(session, domain, clock)
+    tick = followed.first_tick(Cancel(120_000))
+    reported_tick = tick_line(clock, tick.tick(), domain)
     report(reported_tick)
 
-    # Keep a second reference to each event and release the first on another thread, so the
-    # events must read the same on the second alone.
-    retained_state, retained_tick = state.retain(), tick.retain()
-    firsts = [state, tick]
-    del state, tick
+    # Keep a second reference to the read and the tick and release the first ones on another
+    # thread, so both must read the same on the second alone.
+    retained_read, retained_tick = read.retain(), tick.retain()
+    firsts = [read, tick]
+    del read, tick
     releaser = threading.Thread(target=lambda: (firsts.clear(), gc.collect()))
     releaser.start()
     releaser.join()
+    clock_again = retained_read.paced()
     if (
-        state_line(retained_state.paced(), domain) != reported_state
-        or tick_line(retained_tick, domain, clock) != reported_tick
+        paced_line("CLOCK", clock_again, domain) != reported_clock
+        or tick_line(clock_again, retained_tick.tick(), domain) != reported_tick
     ):
-        raise RuntimeError("a retained clock event reads differently than it did")
+        raise RuntimeError("a retained clock or tick reads differently than it did")
+
+    # The scenario stops the domain and starts it again at another origin and rate.
+    deadline = Cancel(120_000)
+    report_state_and_first_tick(followed, followed.next_generation(deadline), deadline, domain, report)
+
+    # The scenario ends the session, and the binding attaches the clock again on the next one.
+    deadline = Cancel(120_000)
+    followed.interruption(deadline)
+    report(f"INTERRUPTED domain={domain}")
+    report_state_and_first_tick(followed, followed.restored(deadline), deadline, domain, report)
 
     report(f"DETACHED {session.execute('DETACH DOMAIN CLOCK;').disposition()}")
     report("CHECKS ok")

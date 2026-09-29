@@ -16,6 +16,12 @@ path = "src/main.rs"
 default = []
 # Exposes opaque benchmark drivers without making runtime internals part of the normal API.
 benchmarks = []
+# Selects Loom's primitives for the whole graph, so a Loom model of a server owner runs on them.
+loom = [
+  "nervix-consensus/loom",
+  "nervix-execution/loom",
+  "nervix-primitives/loom",
+]
 # Replaces synchronization primitives with scheduler-visible Shuttle implementations. The edge
 # I/O modules remain Tokio's real implementations through the wrapper crates.
 shuttle = [
@@ -410,7 +416,7 @@ base64 = "0.22"
 base64-simd = "0.8"
 bb8 = "0.9.1"
 blake3 = "1"
-bolero = "0.13"
+bolero = "=0.13.4"
 byte-unit = "5.2"
 bytes = "1.11"
 chitchat = "0.10.1"
@@ -721,6 +727,14 @@ proc-macro-error2 = { git = "https://github.com/fgardt/proc-macro-error-2.git", 
 
 [profile.release]
 panic = "unwind"
+
+[profile.fuzz]
+codegen-units = 1
+debug = 1
+debug-assertions = true
+inherits = "dev"
+opt-level = 2
+overflow-checks = true
 
 [profile.dev.package."wasmtime"]
 opt-level = 3

@@ -70,7 +70,7 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | Control plane | Session subscriptions | Creation and deletion, the generation each subscription opens with, its lifecycle, its filter and sampling, the delivery of one generation to its session, and the interest lease it holds on its relay. |
 | Data plane | Relay subscription fan-out | The subscribers of one relay, the definition they were attached under, and ending every subscriber before a batch of another definition can reach it. |
 | Edges | The Rust client, `nervix-client-core` | Connecting, TLS selection, the dispatcher that pairs replies with requests, execution identity across retries, redirect and reconnect, transaction binding and previews, desired subscriptions and their restoration, followed domain clocks, uploads, and backup downloads verified against their summary. |
-| Edges | The shared binding, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the Rust client's state machine, with borrowed frame access, bulk column copies, and retained domain clock events. |
+| Edges | The shared binding, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the Rust client's state machine, with borrowed frame access, bulk column copies, retained domain clock events, and retained reads of the clock of each followed domain with its projections. |
 | Edges | The web console and the CLI | Consumers of the same protocol with bounded buffers of their own. The console speaks it over the WebSocket; the CLI uses the Rust client. |
 
 The server is the composition root: it is the only crate that names the wire crate, the command
@@ -1153,7 +1153,9 @@ the gap as an interruption. An attach that session refuses or leaves unanswered 
 restoration failure and sent again on the same session after a growing wait, and a reply that the
 session already follows the clock moves the attachment to that session, whose frames then report
 the clock and its ticks. The shared binding exposes this event stream through
-`nx_session_next_clock_event` and a dedicated retained `nx_clock_event` handle. The web console
+`nx_session_next_clock_event` and a dedicated retained `nx_clock_event` handle, and the clock the
+client holds for each followed domain, starting with the one the attach reply carried, through
+`nx_session_domain_clock` and a retained `nx_domain_clock` handle. The web console
 attaches the selected domain clock once per session, detaches it on selection changes, and restores
 it on reconnect; its REPL sends the same typed requests for explicit attach and detach statements.
 These requests enter the console's bounded session hand-off; a local refusal is shown to the
@@ -1259,17 +1261,23 @@ ingestor, it opens a producer link to the node that does over the interconnect, 
 producer's bytes in its own budget, and relays the batches, outcomes, admission changes, and end;
 the executing node reserves the same bytes again for the batches it retains. [Cluster
 Interconnect](./interconnect.md#client-producer-links) owns the link. The client sees the same
-protocol either way. When the link is lost, the producer ends as `OwnerLost` and its unresolved
-batches have an `OutcomeUnknown` with cause `OwnerLost`.
+protocol either way. The executing node admits a forwarded batch only after the serving node cleared
+it, so when the link is lost, whether the executing node crashed or stopped answering, the serving
+node still knows which batches may have entered the graph. Every batch it never cleared is answered
+`NotAdmitted` with `ProducerEnded`, which the client may submit again on a new producer without
+duplicating its effects; every batch it cleared has an `OutcomeUnknown` with cause `OwnerLost`; and
+the producer then ends as `OwnerLost`. When the serving node itself is lost, its sessions end with
+it, as [When The Session Ends](#when-the-session-ends) describes.
 
 ### When The Session Ends
 
-When the session ends, its producers detach: the executing node stops accepting their batches,
-answers nobody, and lets admitted batches finish in the graph. Nothing about a producer survives the
-session. The Rust client reports every batch that was sent without an outcome as of unknown outcome
-with `SessionLost` and ends the producer as `SessionLost`; it does not reopen producers on its next
-session, so the application opens another one. The shared binding and the web console do not open
-producers.
+When the session ends, including because the node that serves it crashed, its producers detach:
+the executing node stops accepting their batches, drops the ones it held queued or awaiting their
+clearance without admitting them, answers nobody, and lets admitted batches finish in the graph.
+Nothing about a producer survives the session. The Rust client reports every batch that was sent
+without an outcome as of unknown outcome with `SessionLost` and ends the producer as `SessionLost`;
+it does not reopen producers on its next session, so the application opens another one. The shared
+binding and the web console do not open producers.
 
 ## Resource Uploads
 
@@ -1531,6 +1539,14 @@ The binding's lifecycle follows from that choice:
   generation, state, paced mapping, tick and end-reason accessors expose the fields each event
   carries. An accessor for a field its event lacks returns `NX_ERROR_TYPE`. Retain and release
   preserve the event and its borrowed domain name across threads until the last reference ends.
+- **Attached clocks.** `nx_session_domain_clock` reads, without blocking, the clock the Rust client
+  holds for a followed domain, or NULL for a domain it does not follow. After an attach completes
+  it is the clock the attach reply carried, so a host reads the generation and committed mapping of
+  a running clock before its first tick, and every later observation and tick replaces it in the
+  order the session received them, so it is never older than an event the host has taken. Its
+  accessors expose the domain, generation, state, paced mapping and newest tick, and its
+  projections answer logical time, physical waits and admission with the Rust client's arithmetic.
+  A read never changes; retain and release share it across threads.
 - **Typed failures.** A failing call returns an `nx_error` whose kind separates an invalid argument,
   a failed connection, a failed session, an uncertain outcome that carries the execution reference,
   a server refusal, a deadline, a cancellation, a protocol violation, a type mismatch, and a session
@@ -1538,13 +1554,14 @@ The binding's lifecycle follows from that choice:
 
 The binding connects with the Rust client's default options. It exposes no seeds, timeouts, or
 certificate authority, so it reaches a node over plaintext and connects to it directly. It exposes
-commands, completion, subscriptions and their events, domain clock events, and bulk row access,
-but not the typed transaction status, inspection, choice lookups, notices, or leadership. A host
-can execute `ATTACH DOMAIN CLOCK;`; the Rust client restores the attachment after reconnect and
-the host reads later observations and ticks through the clock-event wait. The binding does not
-expose the initial clock carried by the attach reply as a typed outcome. Its column accessors
-cover scalar, string, and bytes fields; a list field reports whether it is fixed-length or
-variable, and its values are read from the borrowed frame with generated code.
+commands, completion, subscriptions and their events, domain clock events and attached clocks,
+and bulk row access, but not the typed transaction status, inspection, choice lookups, notices, or
+leadership. A host executes `ATTACH DOMAIN CLOCK;`, reads the clock the reply carried with
+`nx_session_domain_clock`, and reads later observations and ticks through the clock-event wait; the
+Rust client restores the attachment after reconnect. An attach reports a refusal as a failed
+disposition carrying the server's reason, not as a typed refusal. Its column accessors cover
+scalar, string, and bytes fields; a list field reports whether it is fixed-length or variable, and
+its values are read from the borrowed frame with generated code.
 
 Independent implementations exist as qualification clients rather than supported SDKs. The Go client
 speaks native gRPC with `flatc --go` output and `google.golang.org/grpc`, and the TypeScript client

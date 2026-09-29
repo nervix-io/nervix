@@ -68,6 +68,7 @@ impl RowExtremes {
         run: &WindowRowRun<'_>,
     ) {
         let arguments = run.arguments.demand(demand);
+        self.prune_numeric_candidates(demand, rows, run, arguments);
         for positioned in run.positioned_rows() {
             if !self.contributes(arguments, positioned.row) {
                 continue;
@@ -94,6 +95,49 @@ impl RowExtremes {
                     sequence,
                     Ordering::Less,
                 );
+            }
+        }
+    }
+
+    /// A numeric run's masked minimum or maximum already proves which older candidates it will
+    /// beat. Drop those before walking its rows; ties remain with the earlier retained row.
+    fn prune_numeric_candidates<R: RetainedWindowRows>(
+        &mut self,
+        demand: usize,
+        rows: &R,
+        run: &WindowRowRun<'_>,
+        arguments: &WindowArguments<ArgumentColumn>,
+    ) {
+        if self.order != ExtremeOrder::Value {
+            return;
+        }
+        let Some((smallest_row, largest_row)) =
+            arguments.first().numeric_extreme_rows(run.rows.clone())
+        else {
+            return;
+        };
+        let smallest_position = run.first_position + smallest_row - run.rows.start;
+        let largest_position = run.first_position + largest_row - run.rows.start;
+        if let Some(candidates) = self.smallest.as_mut() {
+            while let Some(back) = candidates.back().copied() {
+                let position = Self::position_of(rows, back);
+                if Self::compare(self.order, demand, rows, position, smallest_position)
+                    != Ordering::Greater
+                {
+                    break;
+                }
+                candidates.pop_back();
+            }
+        }
+        if let Some(candidates) = self.largest.as_mut() {
+            while let Some(back) = candidates.back().copied() {
+                let position = Self::position_of(rows, back);
+                if Self::compare(self.order, demand, rows, position, largest_position)
+                    != Ordering::Less
+                {
+                    break;
+                }
+                candidates.pop_back();
             }
         }
     }
