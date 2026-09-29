@@ -226,7 +226,9 @@ A new leader resumes a `COMMITTING` transaction from its recorded applying step 
 Completed effects are not repeated. If an owner timed out, inspection can show `UNCERTAIN` rather
 than falsely declaring that no gate engaged. Recovery may have to rebuild a whole domain after an
 entity swap cannot complete; the actual history then appends a `DOMAIN_PAUSE` attempt and recovery
-rebuild effects beside the original entity plan. The actual aggregate rises accordingly. Node
+rebuild effects beside the original entity plan. The runtime retries the same complete typed
+schedule revision during that rebuild, and reports its wider node scope to the transaction. The
+actual aggregate rises accordingly. Node
 shutdown and restart use their own intake, drain, and former-owner fences, described in
 [Shutdown And Recovery](./shutdown.md); the transaction report does not redefine them.
 

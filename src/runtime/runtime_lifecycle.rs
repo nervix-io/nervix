@@ -97,6 +97,8 @@ impl Runtime {
                 compiled_domain_udfs: DashMap::default(),
                 compiled_wasm_modules: DashMap::default(),
                 schedule_application: Mutex::new(ScheduleApplication::default()),
+                #[cfg(test)]
+                test_applied_schedule: ArcSwapOption::empty(),
                 applied_recovery_expansions: ArcSwapOption::empty(),
                 domain_instantiation_errors: DashMap::default(),
                 domains: DashMap::default(),
@@ -113,7 +115,6 @@ impl Runtime {
                 ownership_handoff_freeze_changed: Arc::new(Notify::new()),
                 active_domain_alters: Arc::new(DashMap::default()),
                 state_identities: DashMap::default(),
-                domain_graphs: DashMap::default(),
                 endpoint_bindings: DashMap::default(),
                 routed_endpoints: DashMap::default(),
                 relay_boundary_fanouts: DashMap::default(),
@@ -511,7 +512,6 @@ impl Runtime {
             execution.routing.deactivate();
             self.stop_domain_execution(domain, execution).await;
         }
-        self.clear_domain_graph_handle(domain).await;
     }
 
     pub(in crate::runtime) async fn stop_domain_ingestors(&self, domain: &DomainName) {

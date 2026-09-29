@@ -4002,6 +4002,47 @@ async fn then_cli_clock_state_follows_interruption(
     .await;
 }
 
+#[then(
+    expr = "within {string} the CLI clock output shows the clock it attached to again after an \
+            interruption of domain {string}"
+)]
+async fn then_cli_clock_shows_attached_clock_after_interruption(
+    world: &mut ScenarioWorld,
+    duration: String,
+    domain: String,
+) {
+    let duration = humantime::parse_duration(&duration).assured("the scenario declares a duration");
+    let domain = expand_placeholders(world, &domain);
+    let attached = format!("attached to the clock of domain '{domain}': ");
+    let interrupted =
+        format!("[events] domain clock [{domain}] notice: the session was interrupted;");
+    let observed = format!("[events] domain clock [{domain}]: ");
+    wait_for_cli_clock_output(
+        world,
+        duration,
+        "the attached clock again after an interruption",
+        |lines| {
+            // The attach reply is the first line the command prints.
+            let Some(first_line) = lines.front() else {
+                return false;
+            };
+            let Some(attached_clock) = first_line.strip_prefix(&attached) else {
+                return false;
+            };
+            let Some(interruption_index) =
+                lines.iter().position(|line| line.starts_with(&interrupted))
+            else {
+                return false;
+            };
+            lines
+                .iter()
+                .skip(interruption_index + 1)
+                .any(|line| line.strip_prefix(&observed) == Some(attached_clock))
+        },
+    )
+    .await;
+}
+
 #[when(expr = "the CLI clock process receives Ctrl-C")]
 fn when_cli_clock_receives_ctrl_c(world: &mut ScenarioWorld) {
     let process = world

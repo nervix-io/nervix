@@ -879,43 +879,15 @@ fn inferencer_materialization_requires_an_input_and_schema() {
 }
 
 #[test]
-fn relay_template_resolution_classifies_each_missing_owner() {
+fn relay_template_resolution_classifies_missing_runtime_surfaces() {
     let node = named::<ModelName>("orders_junction");
     let relay = named::<RelayName>("orders");
     let relay_ids = || std::iter::once(relay.clone()).collect();
 
-    let missing_model = resolve_branch_relay_templates(
-        ModelKind::Junction,
-        &node,
-        relay_ids(),
-        &ModelIndex::default(),
-        &HashMap::default(),
-        &HashMap::default(),
-    )
-    .expect_err("an unconfigured relay must fail planning");
-    assert!(matches!(
-        missing_model.current_context(),
-        PlanningError::MissingRelayModel {
-            kind: ModelKind::Junction,
-            node: error_node,
-            route,
-        } if error_node == &node && route == &relay
-    ));
-
-    let model_index = [Model::Relay(CreateRelay {
-        name: relay.clone(),
-        schema: named("orders_schema"),
-        buffer: nonzero!(1usize),
-        branching: RelayBranching::unbranched(),
-        materialized_state: None,
-    })]
-    .into_iter()
-    .collect::<ModelIndex>();
     let missing_registry = resolve_branch_relay_templates(
         ModelKind::Junction,
         &node,
         relay_ids(),
-        &model_index,
         &HashMap::default(),
         &HashMap::default(),
     )
@@ -936,7 +908,6 @@ fn relay_template_resolution_classifies_each_missing_owner() {
         ModelKind::Junction,
         &node,
         relay_ids(),
-        &model_index,
         &relay_registries,
         &HashMap::default(),
     )
@@ -976,7 +947,6 @@ fn processor_instance_materialization_requires_an_input_relay() {
     };
     let error = materialize_processor_instance_template(
         &node,
-        &ModelIndex::default(),
         &HashMap::default(),
         &HashMap::default(),
         &HashMap::default(),

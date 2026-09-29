@@ -1149,8 +1149,8 @@ mod tests {
     use crate::{
         application::{ClockDeliveryOrder, NextClockFrame},
         runtime::{
-            RuntimeValue, domain, named, paced_domain_state, test_domain_clock,
-            test_domain_clock_authority, unpaced_domain_state,
+            RecordMetadataColumns, RuntimeValue, domain, named, paced_domain_state,
+            test_domain_clock, test_domain_clock_authority, unpaced_domain_state,
         },
         runtime_schema::test_runtime_row,
     };
@@ -1644,13 +1644,16 @@ mod tests {
             "occurred_at".to_string(),
             RuntimeValue::Datetime(Timestamp::from_unix_nanos(0).into_datetime().fixed_offset()),
         )]);
-        let admission = time.select(
+        let admission = time.select_column(
             Some(&IngestTimestampSource::At(named("occurred_at"))),
-            &record,
+            &record.one_row_batch(),
+            &RecordMetadataColumns::from_rows([record.metadata().clone()]),
         );
 
         assert!(
-            admission.is_ok(),
+            admission
+                .as_ref()
+                .is_ok_and(|column| time.admit_column(column).value(0)),
             "logical origin was rejected: {admission:?}"
         );
     }
@@ -2928,5 +2931,34 @@ mod shuttle_lifecycle_tests {
             reached.snapshot().now(),
             reached.due_at()
         );
+    }
+
+    /// Invariant: an attach's wait for this node's first installation of the committed domains
+    /// releases only once every domain that installation holds is observable, so a node that is
+    /// still starting never refuses a domain the cluster has as missing. The installer and the
+    /// runtime are the production owners; the attach is reduced to its wait and its lookup.
+    #[test]
+    fn shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains() {
+        check_random_and_pct(race_an_attach_lookup_with_the_first_installation);
+    }
+
+    fn race_an_attach_lookup_with_the_first_installation() {
+        let runtime = Runtime::new();
+        let installing = runtime.clone();
+        let installer = thread::spawn(move || {
+            let name = domain(MODEL_DOMAIN);
+            let domains = BTreeMap::from([(name.clone(), running_generation(1, ORIGIN))]);
+            let authorities = BTreeMap::from([(name, test_domain_clock_authority())]);
+            installing.sync_committed_domains(&domains, &authorities);
+        });
+        shuttle::future::block_on(runtime.committed_domains_installed());
+        let Some(observer) = runtime.observe_domain_clock(&domain(MODEL_DOMAIN)) else {
+            panic!("the installation that released the wait holds the domain the attach looks up");
+        };
+        assert!(
+            observer.current().is_some(),
+            "the domain the attach looks up holds the clock its installation synchronized"
+        );
+        installer.join().assured(PANICS_END_THE_SCHEDULE);
     }
 }

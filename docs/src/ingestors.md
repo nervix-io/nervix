@@ -82,6 +82,11 @@ and high watermarks initially equal the selected event time, so source event tim
 from delivery and observation time throughout the graph. The 5 ms source-idle close and the
 `FLUSH IMMEDIATE` 100 µs minimum are physical monotonic waits. `FLUSH EACH` and paced admission use
 domain-logical time. See [Domains And Time](domains-and-time.md#ingestion-timestamps).
+For a decoded group, timestamp selection and paced admission operate on Arrow columns. The group
+keeps admitted rows together; each rejected or missing event timestamp follows the ingestor route's
+`ON MESSAGE ERROR` policy with code `validation` and operation `admit`, preserving that row's ACK
+and source metadata. A batch containing both kinds can therefore deliver its accepted rows while
+its rejected rows reach the configured error route.
 
 ## Altering Ingestors
 

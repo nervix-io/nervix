@@ -1,5 +1,5 @@
 use error_stack::ResultExt as _;
-use nervix_models::{CreateRelay, ModelIndex, ModelName};
+use nervix_models::ModelName;
 #[cfg(test)]
 use nervix_models::{ProcessorInputWhere, ProcessorInputs};
 
@@ -74,12 +74,6 @@ pub(in crate::runtime) enum PlanningError {
     InferencerInputCompilation { node: ModelName, relay: RelayName },
     #[error("{kind:?} '{node}' has an invalid branch TTL")]
     InvalidBranchTtl { kind: ModelKind, node: ModelName },
-    #[error("{kind:?} '{node}' output route '{route}' has no configured relay")]
-    MissingRelayModel {
-        kind: ModelKind,
-        node: ModelName,
-        route: RelayName,
-    },
     #[error("{kind:?} '{node}' output route '{route}' has no relay registry")]
     MissingRelayRegistry {
         kind: ModelKind,
@@ -552,19 +546,11 @@ fn resolve_branch_relay_templates(
     kind: ModelKind,
     node: &ModelName,
     branch_relay_ids: HashSet<RelayName>,
-    model_index: &ModelIndex,
     relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
 ) -> error_stack::Result<HashMap<RelayName, RelayProcessorRelayTemplate>, PlanningError> {
     let mut templates = HashMap::with_capacity(branch_relay_ids.len());
     for relay in branch_relay_ids {
-        if model_index.configured::<CreateRelay>(&relay).is_none() {
-            return Err(Report::new(PlanningError::MissingRelayModel {
-                kind,
-                node: node.clone(),
-                route: relay,
-            }));
-        }
         let Some(registry) = relay_registries.get(&relay).cloned() else {
             return Err(Report::new(PlanningError::MissingRelayRegistry {
                 kind,
@@ -643,7 +629,6 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
 
 pub(in crate::runtime) fn materialize_processor_instance_template(
     node: &BranchedProcessorNodeSpec,
-    model_index: &ModelIndex,
     relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
     relay_registries: &HashMap<RelayName, RelayRegistry>,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
@@ -660,7 +645,6 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
         spec.kind,
         &spec.processor,
         spec.output_relays(),
-        model_index,
         relay_registries,
         relay_services,
     )?;
@@ -1105,7 +1089,6 @@ fn bind_transforming_output_programs<'a>(
 pub(in crate::runtime) struct ProcessorPlanBindingContext<'a> {
     pub runtime: &'a Runtime,
     pub domain: &'a DomainName,
-    pub model_index: &'a ModelIndex,
     pub relay_schemas: &'a HashMap<RelayName, Arc<CompiledSchema>>,
     pub relay_registries: &'a HashMap<RelayName, RelayRegistry>,
     pub relay_services: &'a HashMap<RelayName, Arc<RelayBoundaryServices>>,
@@ -1126,7 +1109,6 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
     let ProcessorPlanBindingContext {
         runtime,
         domain,
-        model_index,
         relay_schemas,
         relay_registries,
         relay_services,
@@ -1149,7 +1131,6 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
 
         let mut template = materialize_processor_instance_template(
             spec,
-            model_index,
             relay_schemas,
             relay_registries,
             relay_services,

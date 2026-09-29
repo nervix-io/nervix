@@ -13,25 +13,22 @@ impl Runtime {
     pub(in crate::runtime) async fn bind_installed_processor_plans(
         &self,
         domain: &DomainName,
-        schedule: &DomainSchedule,
+        revision: &ExecutionRevision,
     ) -> error_stack::Result<HashMap<NodeRef, StdArc<PublishedProcessorPlan>>, RuntimeError> {
         let dispatcher = self.inner.remote_dispatcher.load_full();
         let local_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
-        let specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes)
+        let specs = revision
             .processors
-            .into_iter()
+            .processors
+            .iter()
             .filter(|spec| {
-                schedule
+                revision
                     .nodes
                     .get(&NodeRef::new(spec.spec.kind, spec.spec.processor.clone()))
                     .is_some_and(|node| Self::scheduled_node_executes_locally(node, local_node_id))
             })
+            .cloned()
             .collect::<Vec<_>>();
-        let model_index = schedule
-            .nodes
-            .values()
-            .map(|node| (*node.config).clone())
-            .collect::<ModelIndex>();
         let routing = {
             let Some(execution) = self.inner.executions.get(domain) else {
                 return Err(Report::new(RuntimeError::BuildDomainExecution {
@@ -47,7 +44,6 @@ impl Runtime {
             ProcessorPlanBindingContext {
                 runtime: self,
                 domain,
-                model_index: &model_index,
                 relay_schemas: &routing.relay_schemas,
                 relay_registries: &routing.relay_registries,
                 relay_services: &routing.relay_services,
@@ -69,7 +65,6 @@ impl Runtime {
         &self,
         domain: &DomainName,
         spec: &BranchedProcessorNodeSpec,
-        model_index: &ModelIndex,
     ) -> error_stack::Result<StdArc<PublishedProcessorPlan>, RuntimeError> {
         let routing = {
             let Some(execution) = self.inner.executions.get(domain) else {
@@ -86,7 +81,6 @@ impl Runtime {
             ProcessorPlanBindingContext {
                 runtime: self,
                 domain,
-                model_index,
                 relay_schemas: &routing.relay_schemas,
                 relay_registries: &routing.relay_registries,
                 relay_services: &routing.relay_services,

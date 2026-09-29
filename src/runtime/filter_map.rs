@@ -18,7 +18,7 @@ pub(super) async fn execute_filter_map_on_record(
     execution_now: Timestamp,
 ) -> PlannedGeneralResult<Option<RuntimeRow>> {
     let keys = vec![branch_key.cloned()];
-    let metadata = vec![record.metadata().clone()];
+    let metadata = RecordMetadataColumns::from_rows([record.metadata().clone()]);
     let carrier = record.one_row_batch();
     let outcome = evaluate_filter_map_on_batch(
         "subscription",
@@ -58,7 +58,7 @@ pub(super) async fn execute_filter_map_on_record(
 /// outcome came from, so a group never has to be evaluated a row at a time.
 pub(super) struct FilterMapOutcomeInputs<'a> {
     pub(super) carrier: &'a RuntimeRecordBatch,
-    pub(super) record_metadata: &'a [RuntimeRecordMetadata],
+    pub(super) record_metadata: &'a RecordMetadataColumns,
     pub(super) keys: &'a [Option<BranchKey>],
     pub(super) filter_map_metadata: Option<&'a IngestFilterMapMetadata>,
     pub(super) side_inputs: &'a HashMap<String, RuntimeValue>,
@@ -151,7 +151,7 @@ pub(super) async fn evaluate_filter_map_on_batch(
     for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
         // The metadata entry is read only to prove the selected row is inside the input; the
         // outcome slot is what this loop writes.
-        let (Some(slot), Some(_)) = (outcomes.get_mut(input_row), record_metadata.get(input_row))
+        let (Some(slot), Some(_)) = (outcomes.get_mut(input_row), record_metadata.row(input_row))
         else {
             return Err(Report::new(PlannedGeneralError {
                 acks: Vec::new(),
@@ -196,7 +196,9 @@ pub(super) async fn evaluate_filter_map_on_batch(
                 RuntimeRow::new(
                     output_batch.clone(),
                     output_row,
-                    record_metadata[input_row].clone(),
+                    record_metadata
+                        .row(input_row)
+                        .verified("selected input rows were checked against metadata above"),
                 )
                 .map_err(|error| {
                     Report::new(PlannedGeneralError {
@@ -1537,7 +1539,8 @@ mod tests {
         let empty_carrier = carrier
             .slice(0, 0)
             .verified("a zero-length slice starts within the one-row batch");
-        let metadata = [row.metadata().clone()];
+        let metadata = RecordMetadataColumns::from_rows([row.metadata().clone()]);
+        let empty_metadata = RecordMetadataColumns::from_rows([]);
         let keys = [None];
         let side_inputs = HashMap::default();
         let outcomes = evaluate_filter_map_on_batch(
@@ -1546,7 +1549,7 @@ mod tests {
             &program,
             FilterMapOutcomeInputs {
                 carrier: &empty_carrier,
-                record_metadata: &[],
+                record_metadata: &empty_metadata,
                 keys: &[],
                 filter_map_metadata: None,
                 side_inputs: &side_inputs,
@@ -1563,7 +1566,7 @@ mod tests {
             &program,
             FilterMapOutcomeInputs {
                 carrier: &carrier,
-                record_metadata: &[],
+                record_metadata: &empty_metadata,
                 keys: &keys,
                 filter_map_metadata: None,
                 side_inputs: &side_inputs,

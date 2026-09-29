@@ -1,5 +1,6 @@
 //! The ingestion watermarks of a batch's rows, carried as Arrow buffers of Unix nanoseconds.
 
+use arrow_array::TimestampNanosecondArray;
 use arrow_buffer::ScalarBuffer;
 use nervix_models::{RemoteRuntimeRecordMetadata, Timestamp};
 use nervix_simd_kernels::latest_instant;
@@ -43,10 +44,28 @@ impl RecordMetadataColumns {
         Self::from_nanos(low, high)
     }
 
-    fn from_nanos(low: Vec<i64>, high: Vec<i64>) -> Self {
+    pub(crate) fn from_nanos(low: Vec<i64>, high: Vec<i64>) -> Self {
         Self {
             low: ScalarBuffer::from(low),
             high: ScalarBuffer::from(high),
+        }
+    }
+
+    /// Ingest rows begin with the same selected instant in both watermark columns.
+    pub(crate) fn from_ingestion_nanos(instants: Vec<i64>) -> Self {
+        let instants = ScalarBuffer::from(instants);
+        Self {
+            low: instants.clone(),
+            high: instants,
+        }
+    }
+
+    /// Uses a selected timestamp column as both initial watermarks without copying its values.
+    pub(crate) fn from_timestamp_column(instants: &TimestampNanosecondArray) -> Self {
+        let values = instants.values().clone();
+        Self {
+            low: values.clone(),
+            high: values,
         }
     }
 
@@ -99,6 +118,11 @@ impl RecordMetadataColumns {
     /// Every row's high watermark in Unix nanoseconds.
     pub(crate) fn high_watermarks(&self) -> &[i64] {
         &self.high
+    }
+
+    /// The low-watermark values as an Arrow timestamp column, sharing the existing buffer.
+    pub(crate) fn low_timestamp_column(&self) -> TimestampNanosecondArray {
+        TimestampNanosecondArray::new(self.low.clone(), None)
     }
 
     /// The latest high watermark of any row, or `None` for no rows.

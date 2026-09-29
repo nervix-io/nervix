@@ -1,5 +1,67 @@
 Feature: Logical ingestion time and admission
   @logical_ingestion_time
+  Scenario Outline: One decoded batch admits each timestamp against the reached clock window
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 1h SKEW 100ms;
+      CREATE SCHEMA event ( sequence I64, occurred_at DATETIME );
+      CREATE SCHEMA admission_error ( sequence I64, error_code STRING );
+      CREATE CODEC event_batch_codec FROM JSON TO SCHEMA event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE RELAY admission_errors SCHEMA admission_error UNBRANCHED;
+      CREATE VHOST edge batch-clock-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_batch_codec
+        TIMESTAMP AT occurred_at
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+          ON MESSAGE ERROR SEND TO admission_errors
+            SET sequence = input.sequence, error_code = error.code
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION observations TO events;
+      CREATE SUBSCRIPTION error_observations TO admission_errors;
+      """
+    And domain clock for domain "{{domain}}" starts with its complete retained admission history for period "1h"
+    And domain clock progress for domain "{{domain}}" is paused before delivery
+    When these NSPL commands are executed on the leader node
+      """
+      START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
+      """
+    Then within "5s" domain clock progress for domain "{{domain}}" reaches the delivery pause
+    When http payload is posted to host "batch-clock-{{test_id}}.example.com" path "/events"
+      """
+      [
+        {"sequence":1,"occurred_at":"2000-01-01T00:59:59.900000000Z"},
+        {"sequence":2,"occurred_at":"2000-01-01T00:59:59.899999999Z"},
+        {"sequence":3,"occurred_at":"2000-01-01T02:00:00Z"},
+        {"sequence":4,"occurred_at":"2000-01-01T02:00:00.100000001Z"},
+        {"sequence":5,"occurred_at":"2000-01-11T16:00:00Z"},
+        {"sequence":6,"occurred_at":"2000-01-11T16:00:00.100000000Z"},
+        {"sequence":7,"occurred_at":"2000-01-11T16:00:00.100000001Z"},
+        {"sequence":8,"occurred_at":"2000-01-11T17:00:00Z"}
+      ]
+      """
+    Then within "5s" the relay subscription receives payloads containing all fragments
+      """
+      "sequence":1 | "occurred_at":"2000-01-01T00:59:59.900+00:00"
+      "sequence":3 | "occurred_at":"2000-01-01T02:00:00+00:00"
+      "sequence":5 | "occurred_at":"2000-01-11T16:00:00+00:00"
+      "sequence":6 | "occurred_at":"2000-01-11T16:00:00.100+00:00"
+      "sequence":2 | "error_code":"validation"
+      "sequence":4 | "error_code":"validation"
+      "sequence":7 | "error_code":"validation"
+      "sequence":8 | "error_code":"validation"
+      """
+    When domain clock progress for domain "{{domain}}" resumes
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @logical_ingestion_time
   Scenario Outline: Admission uses inclusive logical skew and excludes unreached future centers
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands

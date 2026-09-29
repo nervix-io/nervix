@@ -188,6 +188,11 @@ the connector continues lending immutable payload bytes, and the host reuses its
 group closes. Compiled field keys direct borrowed JSON values into typed columns without a serde
 tree or an intermediate row representation. A rejected payload abandons only the partial Arrow row
 it started, preserving the accepted rows and transport positions around it.
+At group execution, the host resolves event timestamps into one Arrow column and tests paced-domain
+admission with one bitmap. It selects the accepted batch and its ACK and metadata sidecars together.
+Each timestamp rejection retains the source row's ACK for its route-local message-error delivery;
+accepted neighbors continue into the graph. A source position is acknowledged only after every
+message it unfolded into has completed its own route or error delivery.
 
 The host runs three source loop families, with a listener using the broker loop:
 
@@ -226,11 +231,13 @@ sequenceDiagram
 
 ## Sink boundary
 
-Each domain revision decides one typed emitter execution plan per scheduled emitter before
-publishing the domain execution. The plan resolves its sink clients and codec, retains its ordered
-source relay edges and lowered source predicates, and lowers its route, HTTP request fields, SQS
-ordering group and the mappings of row and row request sinks. It also converts OTEL resource
-literals and the Iceberg commit cadence and size into connector values. Initial startup,
+Each committed domain schedule becomes one complete typed execution revision before it reaches the
+host. That revision carries placement, entrypoint and emitter plans, and the exact ownership-handoff
+fingerprint of the committed schedule. It decides one typed emitter execution plan per scheduled
+emitter before publishing the domain execution. The plan resolves its sink clients and codec,
+retains its ordered source relay edges and lowered source predicates, and lowers its route, HTTP
+request fields, SQS ordering group and the mappings of row and row request sinks. It also converts
+OTEL resource literals and the Iceberg commit cadence and size into connector values. Initial startup,
 reassignment and an entity swap use that same plan. A swap publishes new source and remote
 consumer edges from the new plan; it does not reconstruct the emitter from a Model in the host.
 The host resolves resource mounts and binds the lowered VM programs to installed schemas and UDFs

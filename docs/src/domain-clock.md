@@ -288,14 +288,21 @@ frame first. A tick's control-lane slot can be replaced until transport takes it
 including while the lane is full. Each attached domain therefore has at most one pending tick and
 slow clients see the newest accepted id instead of a backlog.
 
-Attach and detach run on the session's ordered lane, in order with its commands. Detach stops the
-delivery task and waits for it to end before queueing its reply, so no frame about the domain follows
-that reply. When the observer reports the domain missing, the task marks the attachment ending,
-queues the end frame with reason `DomainRemoved`, and ends. Because the mark precedes the frame, a
-request the client sends after reading the frame finds the attachment ending: an attach replaces it
-and a detach reports it not attached. The end of the session stops every delivery task without a
-frame. See [Domain Clock Attachment](./sessions.md#domain-clock-attachment) for the public contract
-and [Client Session Protocol](./client-session-protocol.md#domain-clock-attachment) for how the
+Attach and detach run on the session's ordered lane, in order with its commands. An attach first
+waits until the node has installed the committed domains since it started, or until the session
+ends. Before that installation every domain is missing from the node's runtime, so the node cannot
+tell a domain the cluster lacks from one it has not installed yet; waiting keeps a node that is
+still starting, as after a restart, from refusing a committed domain as not found. The runtime
+counts its installations through a watch and advances the count only after an installation has put
+every domain in place, so the lookup that follows the wait finds each domain that installation
+holds. Detach stops the delivery task and waits for it to end before queueing its reply, so no frame
+about the domain follows that reply. When the observer reports the domain missing, the task marks
+the attachment ending, queues the end frame with reason `DomainRemoved`, and ends. Because the mark
+precedes the frame, a request the client sends after reading the frame finds the attachment ending:
+an attach replaces it and a detach reports it not attached. The end of the session stops every
+delivery task without a frame. See [Domain Clock Attachment](./sessions.md#domain-clock-attachment)
+for the public contract and
+[Client Session Protocol](./client-session-protocol.md#domain-clock-attachment) for how the
 attachment travels in the protocol.
 
 The Rust client keeps the attach reply's state as its latest followed clock. The shared C binding
@@ -370,6 +377,14 @@ the latest center cannot make a future center eligible. `TIMESTAMP NOW` uses the
 created the window. `TIMESTAMP AT <field>` preserves the decoded event timestamp before testing it
 against that window.
 
+An ingest group resolves its event timestamp column once. Admission compares signed nanosecond
+values against the first and last reached centers in lanes, then tests the exact period remainder
+for values between them. The period reduction is prepared once for that window. A bitmap selects
+accepted Arrow rows and their timestamp and ACK sidecars together. Rejected rows retain their own
+ACKs and follow each output route's message-error policy with code `validation` and operation
+`admit`; a rejected timestamp cannot discard another row of the group. A missing declared timestamp
+is also rejected for that row. The single-timestamp admission check has the same inclusive bounds.
+
 Unpaced ingestion has no admission window. Its clock snapshot still supplies delivery time, while
 an explicit event timestamp or connector-owned source timestamp remains preserved source time.
 
@@ -443,6 +458,7 @@ This produces the following failure behavior:
 | Leader transfer | The committed mapping and authority remain unchanged unless the effective candidate set also requires reconciliation |
 | Authority loss or restart | Consensus advances the authority revision and assigns another live voter incarnation; the mapping and lifecycle generation stay fixed |
 | Node join or reconnect | The node installs the committed generation before execution and receives the newest retained progress after readiness |
+| Session attach before a restarted node installs | The attach waits for the node's first installation of the committed domains, so it never reports a committed domain as missing |
 | Delayed old progress | Generation, revision, identity, and authenticated-peer checks discard it |
 | `STOP` followed by `START` | Stop revokes the authority; start increments the generation and commits a new mapping and fence |
 | Mapping or tick arithmetic overflow | Projection, deadline conversion, boundary, and tick-id operations report typed clock errors instead of wrapping or changing anchors |

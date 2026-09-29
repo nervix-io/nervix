@@ -69,10 +69,10 @@ pub(super) enum PlacedNodeState {
 impl PlacedNodeState {
     /// The state the placement of `node` replicates, as the plans decided from its schedule
     /// describe it.
-    pub(super) fn of(node: &ScheduledNode, plans: ScheduledDomainPlans<'_>) -> Option<Self> {
+    pub(super) fn of(node: &ExecutionNode, revision: &ExecutionRevision) -> Option<Self> {
         match node.kind() {
             ModelKind::Relay => {
-                let relay = plans
+                let relay = revision
                     .activation
                     .relays
                     .get(&RelayName::from(&node.identifier))
@@ -84,7 +84,7 @@ impl PlacedNodeState {
                 }
             }
             ModelKind::Ingestor => {
-                let plan = plans
+                let plan = revision
                     .entrypoints
                     .ingestor(&IngestorName::from(&node.identifier))
                     .assured(
@@ -99,13 +99,6 @@ impl PlacedNodeState {
             _ => None,
         }
     }
-}
-
-/// The decisions of one scheduled domain revision that its node-local runtime is built from.
-#[derive(Clone, Copy)]
-pub(super) struct ScheduledDomainPlans<'a> {
-    pub(super) activation: &'a DomainActivationPlan,
-    pub(super) entrypoints: &'a EntrypointPlans,
 }
 
 /// Everything a scheduled node's assignment gives it on one cluster node: the replicated states it
@@ -205,7 +198,7 @@ mod tests {
     use nervix_models::{
         ConsumerGroupName, CreateClientKafka, CreateIngestor, FlushPolicy, GeneralErrorPolicy,
         IngestQuiesceMode, IngestSource, KafkaIngestMode, KafkaOffsetMode, Model, OutputBranch,
-        ParseAsType, ProcessorOutputs, SchemaFingerprint,
+        ParseAsType, ProcessorOutputs,
     };
     use nonzero_ext::nonzero;
 
@@ -258,47 +251,41 @@ mod tests {
                 ),
             ],
         );
-        plans
-            .activation
-            .relays
-            .get_mut(&named::<RelayName>("state"))
-            .assured("the fixture plans every relay it declares")
-            .materialized = true;
-        let node =
-            |model: Model| ScheduledNode::new(model, SchemaFingerprint::from_digest([1; 32]));
-        let relay = |name: &str| {
-            scheduled_model(Model::Relay(CreateRelay {
-                name: named(name),
-                schema: named("entrypoint_payload"),
-                buffer: nonzero_capacity(2),
-                branching: nervix_models::RelayBranching::unbranched(),
-                materialized_state: None,
-            }))
+        let state_relay = plans
+            .nodes
+            .get_mut(&NodeRef::new(ModelKind::Relay, named::<ModelName>("state")))
+            .assured("the fixture schedules its state relay");
+        let Model::Relay(state_relay) = state_relay.config.as_mut() else {
+            panic!("the fixture state node is a relay");
+        };
+        state_relay.materialized_state =
+            Some(nervix_models::MaterializedRelayState::LastByTimestamp);
+        let revision = ExecutionRevision::from_schedule(&DomainSchedule::new(
+            domain,
+            plans.nodes.into_values().collect::<Vec<_>>(),
+            Vec::new(),
+        ))
+        .assured("the fixture schedule produces a complete typed revision");
+        let placed = |kind, name: &str| {
+            revision
+                .nodes
+                .get(&NodeRef::new(kind, named::<ModelName>(name)))
+                .assured("the fixture schedules each node under test")
         };
 
         assert!(matches!(
-            PlacedNodeState::of(
-                &node(kafka_ingestor("domain_offsets", KafkaOffsetMode::Domain)),
-                plans.scheduled(),
-            ),
+            PlacedNodeState::of(placed(ModelKind::Ingestor, "domain_offsets"), &revision),
             Some(PlacedNodeState::KafkaDomainOffsets)
         ));
         assert!(
-            PlacedNodeState::of(
-                &node(kafka_ingestor(
-                    "group_offsets",
-                    KafkaOffsetMode::ConsumerGroup(named::<ConsumerGroupName>("group")),
-                )),
-                plans.scheduled(),
-            )
-            .is_none()
+            PlacedNodeState::of(placed(ModelKind::Ingestor, "group_offsets"), &revision).is_none()
         );
         assert!(matches!(
-            PlacedNodeState::of(&relay("state"), plans.scheduled()),
+            PlacedNodeState::of(placed(ModelKind::Relay, "state"), &revision),
             Some(PlacedNodeState::MaterializedRelay(schema))
                 if schema == fixture.relay_schema().arrow_schema()
         ));
-        assert!(PlacedNodeState::of(&relay("events"), plans.scheduled()).is_none());
-        assert!(PlacedNodeState::of(&node(kafka_client()), plans.scheduled()).is_none());
+        assert!(PlacedNodeState::of(placed(ModelKind::Relay, "events"), &revision).is_none());
+        assert!(PlacedNodeState::of(placed(ModelKind::Client, "kafka"), &revision).is_none());
     }
 }

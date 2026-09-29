@@ -349,6 +349,8 @@ Choose checks relevant to the configured graph:
   paced domain's committed origin, UTC anchor, and rate, then reports each state change and newest
   accepted tick until `DETACH DOMAIN CLOCK;`. Use it when paced ingestion rejects `TIMESTAMP AT`
   values: the mapping and tick frontier show which logical centers the admission window has reached.
+  A node that is still starting answers it once it has installed the committed domains, so a
+  `does not exist` refusal means the cluster has no such domain, not that the node restarted.
 - `nervix-cli --domain <domain> domain-clock` follows that clock from a shell until Ctrl-C,
   printing the attach reply, state changes, and tick lines.
 - A host using the shared C binding executes attach and detach through `nx_session_execute` and

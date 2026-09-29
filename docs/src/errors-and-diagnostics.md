@@ -296,8 +296,11 @@ transaction is the subscription's failure, shown inline without opening a tab.
 Domain activation has typed failures for a relay or codec missing its schema, a codec missing its
 wire definition, a relay missing its branch or carrying an invalid branch TTL, and an endpoint
 missing its VHOST or signaling protocol. The report identifies the owning relay, codec, or
-endpoint and the missing reference. Runtime installation adds domain context to that report; it
-does not select a fallback configuration.
+endpoint and the missing reference. The control plane builds activation, resources, entrypoints,
+emitters, processors, message-error routes, placement and the ownership fingerprint as one typed
+revision before runtime installation. A planning failure leaves the previously applied schedule as
+the predecessor for a retry; runtime installation adds domain context and never selects a fallback
+configuration.
 
 Ingestor and reingestor planning has typed failures for an ingestor whose source is missing or
 resolves to another kind or name, a missing codec, a route or input relay missing from the domain,
@@ -337,6 +340,12 @@ names the work that failed. This record is the route-policy view of the failure,
 of the internal report. The route may inspect the eligible original input, its captured
 materialized-state snapshot, and an all-optional `partial_output` of construction completed before
 failure. An error handler whose own construction fails does not recursively invoke itself.
+
+Paced ingest admission reports a rejected event timestamp as a message error with code
+`validation` and operation `admit`. A null declared timestamp has the same classification and
+names its field. The host keeps the rejected row's source metadata and ACK attached while each
+output route applies its message-error policy. Accepted rows from the same decoded group continue
+through their normal routes.
 
 Before a domain execution or replacement becomes active, the registry selects each DLQ route and
 resolves its source, partial-output and destination schemas, branch declarations and flush
@@ -491,10 +500,12 @@ describes impact inspection.
 A domain clock attachment answers with its own typed disposition rather than a command disposition,
 and every refusal names the domain it concerns. An attach is `Attached` with the observed clock,
 `AlreadyAttached` when the session already follows that domain's clock, `DomainNotFound` when the
-serving node has no such domain, or `Failed` when the request could not run; a detach is
-`Detached`, `NotAttached` when the session does not follow that clock, or `Failed`. While the
-session holds a transaction, both fail with the session-local refusal that other session-scoped
-statements receive. The server ends an attachment with a frame whose typed reason is
+committed domains the serving node installed hold no such domain, or `Failed` when the request could
+not run; a detach is `Detached`, `NotAttached` when the session does not follow that clock, or
+`Failed`. A node that is still starting answers an attach only once it has installed the committed
+domains, so `DomainNotFound` never reflects a restart. While the session holds a transaction, both
+fail with the session-local refusal that other session-scoped statements receive. The server ends
+an attachment with a frame whose typed reason is
 `DomainRemoved`, and the Rust client reports a lost session as an interruption of each clock it
 follows before it attaches again. An attach the new session refuses or leaves unanswered is not an
 error of any call: the Rust client reports it as a typed restoration failure carrying the refusal's

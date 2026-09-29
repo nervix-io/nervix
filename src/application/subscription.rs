@@ -83,7 +83,7 @@ use crate::{
     runtime::{
         BranchKey, CompiledSubscriptionPredicate, RelayRecordBatch, RelaySubscriptionDefinition,
         Runtime, RuntimeError, SubscriptionPredicateCompileContext, compile_subscription_predicate,
-        execute_subscription_predicate_on_record, scheduled_relay_owner_nodes,
+        execute_subscription_predicate_on_record,
     },
     runtime_schema,
     subscription_row::{SubscriptionBranchSchema, SubscriptionRowOpening, subscription_row_schema},
@@ -1022,7 +1022,12 @@ impl SessionServiceImpl {
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Vec::new();
         };
-        scheduled_relay_owner_nodes(domain_schedule, relay)
+        domain_schedule
+            .scheduled::<CreateRelay>(relay.clone())
+            .and_then(|scheduled| scheduled.node.execution_node())
+            .cloned()
+            .into_iter()
+            .collect()
     }
 
     async fn process_pending_session_commands(
