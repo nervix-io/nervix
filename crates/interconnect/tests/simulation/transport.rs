@@ -635,7 +635,7 @@ fn exchange_with_multiple_peers(run: ScenarioRun) -> Result<(), SimulationError>
                         Err(error) => error,
                     };
                     assert!(
-                        matches!(error, TransportError::Io(ref io_error) if io_error.kind() == io::ErrorKind::InvalidData),
+                        matches!(error.current_context(), TransportError::Io(io_error) if io_error.kind() == io::ErrorKind::InvalidData),
                         "{error:?}"
                     );
                     trace.record("client", "certificate rejected an unrelated DNS identity");

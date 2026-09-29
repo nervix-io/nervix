@@ -239,6 +239,27 @@ fn associated() -> Result<(), Self::Error> {
 
             self.assertEqual(count(root, "bare_error_signatures"), 1)
 
+    def test_bare_error_signatures_cover_nested_stream_callbacks(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(
+                root,
+                {
+                    "src/lib.rs": """
+pub struct StreamHandlerError;
+
+type StreamFuture = Pin<Box<dyn Future<Output = Result<(), StreamHandlerError>>>>;
+type ByteStream = Pin<Box<dyn Stream<Item = Result<(), StreamHandlerError>>>>;
+
+fn register<F>() where F: Future<Output = Result<(), StreamHandlerError>> {}
+fn register_reported<F>() where F: Future<Output = Result<(), Report<StreamHandlerError>>> {}
+fn stream_reported<S>() where S: Stream<Item = Result<(), Report<StreamHandlerError>>> {}
+""",
+                },
+            )
+
+            self.assertEqual(count(root, "bare_error_signatures"), 3)
+
     def test_string_node_ids_cover_fields_parameters_and_aliases(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

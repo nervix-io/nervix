@@ -861,6 +861,10 @@ instrumented server and CLI build. The `tests` job runs at the same time on anot
 `scenarios` job's `timeout-minutes` is 60, and the suite budget is derived from it so that the job
 ends on its own.
 
+For focused local coverage, `just coverage-scenarios <lcov-path> <scenario-options>` starts a
+fresh measurement. `just coverage-scenarios-append <lcov-path> <scenario-options>` retains the
+current profiles and reuses unchanged instrumented artifacts for another scenario selection.
+
 | Part of the job | Budget | Basis |
 | --- | --- | --- |
 | Work before the scenario binary starts | 14 minutes | The first cold kache 0.28.0 split-job run took 11m37s from job start to the binary, and the next took 10m08s; the ceiling adds 2m23s beyond the slower measurement |
