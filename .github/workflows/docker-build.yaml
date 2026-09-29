@@ -191,6 +191,11 @@ jobs:
             libcurl4-openssl-dev \
             protobuf-compiler
 
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
       - name: Configure kache daemon remote
         env:
           KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}

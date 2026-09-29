@@ -1638,7 +1638,7 @@ impl HubPlan {
                     let produced = stream::iter(0..count).map(move |_| {
                         executor
                             .try_charge_owned(MemoryClass::Bulk, vec![7_u8; STREAM_CHUNK_BYTES])
-                            .map_err(|error| StreamHandlerError::new(error.to_string()))
+                            .map_err(StreamHandlerError::with_cause)
                     });
                     Ok(StreamingResponse::new(STREAM_BYTES, produced))
                 }

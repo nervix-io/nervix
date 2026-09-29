@@ -1,6 +1,8 @@
 //! Preparing Export requests from mapped rows, and sending prepared requests unchanged over both
 //! OTLP transports.
 
+use std::collections::VecDeque;
+
 use super::*;
 
 fn config(entries: &[(&str, &str)]) -> Vec<ClientConfigEntry> {
@@ -49,7 +51,7 @@ async fn logs_sink(
     endpoint: &str,
     protocol: &str,
     compression: Option<&str>,
-    batch: Option<OtelBatchLimits>,
+    batch: Option<EmitterBatchPolicy>,
 ) -> OtelSink {
     let mut entries = vec![("endpoint", endpoint), ("protocol", protocol)];
     if let Some(compression) = compression {
@@ -111,27 +113,30 @@ fn mapped_logs(bodies: &[Option<&str>]) -> RecordBatch {
     .assured("both test columns carry one value per row")
 }
 
-fn batch_limits(max_messages: u32, max_size: u64) -> OtelBatchLimits {
-    OtelBatchLimits {
-        max_messages: NonZeroU32::new(max_messages).assured("the test limit is positive"),
-        max_size: NonZeroU64::new(max_size).assured("the test limit is positive"),
+fn batch_limits(max_messages: u32, max_size: u64) -> EmitterBatchPolicy {
+    EmitterBatchPolicy {
+        max_messages: nervix_models::BatchMessageLimit::try_from(max_messages)
+            .assured("every test limit is within the declared range"),
+        max_size: format!("{max_size}B")
+            .parse()
+            .assured("every test size is a positive byte limit"),
     }
 }
 
-/// Prepares every row of `batch` as batch 3 of the host's buffer.
+/// Prepares every row of `batch` as batch 3 of the host's buffer, the one carrier the host hands a
+/// preparation.
 async fn prepare_all(sink: &mut OtelSink, batch: &RecordBatch) -> RowRequestPreparation {
     let target_columns = MAPPED_COLUMNS.map(String::from);
     let selected_rows = (0..batch.num_rows()).collect::<Vec<_>>();
-    // A sink with its own batching limits receives the whole selection as one chunk.
-    let whole_selection = 0..batch.num_rows();
     sink.prepare(MappedSinkRows {
-        batch_index: 3,
-        batch,
         target_columns: &target_columns,
-        selected_rows: &selected_rows,
-        selected_row_chunks: std::slice::from_ref(&whole_selection),
-        occurred_at: Timestamp::from_unix_nanos(42),
-        acknowledgements: None,
+        carriers: vec![MappedSinkCarrier {
+            batch_index: 3,
+            batch,
+            selected_rows: &selected_rows,
+            occurred_at: Timestamp::from_unix_nanos(42),
+            acknowledgements: None,
+        }],
     })
     .await
     .unwrap_or_else(|error| panic!("preparing mapped rows succeeds: {error:?}"))
@@ -297,10 +302,18 @@ async fn preparation_halves_a_candidate_above_max_size_and_refuses_an_oversized_
     assert_eq!(refused.id, position(2));
     assert_eq!(
         refused.error.code,
-        nervix_models::MessageErrorCode::External
+        nervix_models::MessageErrorCode::Validation
     );
+    assert_eq!(
+        refused.error.operation,
+        nervix_models::MessageErrorOperation::Encode
+    );
+    let limit = pair_size - 1;
     assert!(
-        refused.error.message.contains("batch maximum"),
+        refused
+            .error
+            .message
+            .contains(&format!("above MAX SIZE {limit}B")),
         "the refusal names the limit: {}",
         refused.error.message
     );

@@ -1139,6 +1139,15 @@ impl Client {
         self.inner.events.sinks.desired.lifecycle(name)
     }
 
+    /// Waits for the next event of a subscription the client holds.
+    ///
+    /// The stream outlives the session. When the session ends, it reports
+    /// [`SubscriptionEvent::Interrupted`] for every subscription the session held, opens a new
+    /// session, and opens each of them again as a new generation. With nothing to restore it waits
+    /// for the next session the client opens, and delivers the events of the subscriptions opened
+    /// there. A failure to open a session is returned, and the next call tries again;
+    /// [`ClientError::SessionClosed`] means the session ended and the client knows no server to
+    /// open another on.
     pub async fn next_subscription(&self) -> Result<SubscriptionEvent, ClientError> {
         loop {
             tokio::task::consume_budget().await;
@@ -1150,9 +1159,9 @@ impl Client {
             let result = tokio::select! {
                 result = self.inner.events.sinks.subscriptions.next() => result,
                 changed = desired_changed.changed() => {
-                    if changed.is_err() {
-                        return Err(ClientError::SessionClosed);
-                    }
+                    changed.assured(
+                        "the client holds the sender of its own subscription notifications",
+                    );
                     continue;
                 }
             };
@@ -1178,28 +1187,64 @@ impl Client {
                     if let Some(interrupted) = self.inner.events.sinks.desired.take_interruption() {
                         return Ok(SubscriptionEvent::Interrupted(interrupted));
                     }
-                    if !self.inner.events.sinks.desired.has_acknowledged_desired() {
+                    if self.inner.events.sinks.desired.has_acknowledged_desired() {
+                        match self.recover_session(RecoveryMode::IfClosed).await? {
+                            SessionRecovery::Ready => continue,
+                            SessionRecovery::Unavailable => {
+                                return Err(ClientError::SessionClosed);
+                            }
+                        }
+                    }
+                    // Nothing waits to be restored, so the stream follows whichever session the
+                    // client opens next.
+                    if !self.can_reconnect().await {
                         return Err(ClientError::SessionClosed);
                     }
-                    match self.recover_session(RecoveryMode::IfClosed).await? {
-                        SessionRecovery::Ready => continue,
-                        SessionRecovery::Unavailable => return Err(ClientError::SessionClosed),
+                    tokio::select! {
+                        () = self.inner.events.sinks.subscriptions.resumed() => {}
+                        changed = desired_changed.changed() => {
+                            changed.assured(
+                                "the client holds the sender of its own subscription notifications",
+                            );
+                        }
                     }
                 }
             }
         }
     }
 
+    /// Waits for the next server notice.
+    ///
+    /// The stream outlives the session. Notices end with the session that delivered them,
+    /// including the ones not read yet, and the stream continues with the notices of the next
+    /// session the client opens; reading notices never opens a session itself.
+    /// [`ClientError::EventOverflow`] reports that notices arrived faster than they were read and
+    /// the ones the client held were dropped; the next call returns the notices that arrived after
+    /// that gap. [`ClientError::SessionClosed`] means the session ended and the client knows no
+    /// server to open another on.
     pub async fn next_server_event(&self) -> Result<ServerEvent, ClientError> {
-        match self.inner.events.sinks.notices.next().await {
-            Ok(event) => Ok(event),
-            Err(error) if *error.current_context() == EventQueueError::Overflow => {
-                Err(ClientError::EventOverflow {
-                    stream: EventStreamKind::ServerNotice,
-                })
+        let notices = &self.inner.events.sinks.notices;
+        loop {
+            tokio::task::consume_budget().await;
+            match notices.next().await {
+                Ok(event) => return Ok(event),
+                Err(error) if *error.current_context() == EventQueueError::Overflow => {
+                    return Err(ClientError::EventOverflow {
+                        stream: EventStreamKind::ServerNotice,
+                    });
+                }
+                Err(_) => {}
             }
-            Err(_) => Err(ClientError::SessionClosed),
+            if !self.can_reconnect().await {
+                return Err(ClientError::SessionClosed);
+            }
+            notices.resumed().await;
         }
+    }
+
+    /// Whether the client knows a server to open a new session on.
+    async fn can_reconnect(&self) -> bool {
+        self.inner.servers.lock().await.can_reconnect()
     }
 
     /// Attaches the session to the clock of `domain`, which it follows until it detaches, even
@@ -1249,6 +1294,8 @@ impl Client {
     /// Events are coalesced per domain, so a caller that reads late receives the newest state and
     /// tick, with the state first, rather than every intermediate observation. When the session
     /// holding an attachment ends, this reopens a session and attaches every followed clock again.
+    /// A failure to open one is returned while the clocks keep waiting to be restored, and the next
+    /// call tries again.
     /// A client that follows no clock waits until it attaches to one.
     pub async fn next_domain_clock_event(
         &self,

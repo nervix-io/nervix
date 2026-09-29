@@ -22,6 +22,7 @@ use nervix_models::{
     TransactionInspectionRejection, TransactionInspectionTarget,
 };
 use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
+use nervix_recovery::Discarded as _;
 use tokio::{
     net::TcpListener,
     sync::{Mutex, mpsc},
@@ -385,7 +386,12 @@ impl Drop for TestServer {
 
 impl TestServer {
     async fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0")
+        Self::start_at(SocketAddr::from(([127, 0, 0, 1], 0))).await
+    }
+
+    /// Starts a server listening on `address`, a loopback address with a free port or port 0.
+    async fn start_at(address: SocketAddr) -> Self {
+        let listener = TcpListener::bind(address)
             .await
             .assured("the loopback interface accepts a listener");
         let address = listener
@@ -432,6 +438,15 @@ impl TestServer {
         within_deadline(self.exchanges.recv())
             .await
             .assured("the server keeps handing exchanges to the test")
+    }
+
+    /// Stops serving and waits until the listener is closed, so a client connecting afterwards is
+    /// refused.
+    async fn stop(mut self) {
+        self.task.abort();
+        (&mut self.task)
+            .await
+            .discarded("the server task only ever ends by being aborted");
     }
 }
 
@@ -501,11 +516,9 @@ async fn a_closed_session_recovers_through_a_configured_seed() {
     .await
     .assured("the primary accepts the session");
     let exchange = primary.next_exchange().await;
+    let reading = client.clone();
+    let notice = tokio::spawn(async move { reading.next_server_event().await });
     drop(exchange);
-    assert!(matches!(
-        within_deadline(client.next_server_event()).await,
-        Err(ClientError::SessionClosed)
-    ));
 
     let command_client = client.clone();
     let command = tokio::spawn(async move { command_client.execute("SHOW CLUSTER STATUS;").await });
@@ -527,6 +540,22 @@ async fn a_closed_session_recovers_through_a_configured_seed() {
         .assured("the command task completes")
         .assured("the seed answers the command");
     assert!(outcome.succeeded());
+    recovered
+        .send(
+            ServerNotice {
+                level: NoticeLevel::Warning,
+                message: "relay 'orders' is behind".to_string(),
+            }
+            .encode(&limits())
+            .assured("a notice fits a frame"),
+        )
+        .await;
+    let notice = within_deadline(notice)
+        .await
+        .assured("the notice task completes")
+        .assured("the notice stream continues on the recovered session");
+    assert_eq!(notice.level, NoticeLevel::Warning);
+    assert_eq!(notice.message, "relay 'orders' is behind");
     let recovered_requests = client.inner.exchange.lock().await.requests();
     assert!(matches!(
         client
@@ -2105,5 +2134,101 @@ async fn an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_cl
             .assured("the restored clock is followed")
             .clock(),
         &stopped
+    );
+}
+
+#[tokio::test]
+async fn a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_read() {
+    let mut primary = TestServer::start().await;
+    let unused = TcpListener::bind("127.0.0.1:0")
+        .await
+        .assured("loopback accepts a test listener");
+    let seed_address = unused
+        .local_addr()
+        .assured("a bound listener has an address");
+    drop(unused);
+    let seed_url =
+        Url::parse(&format!("http://{seed_address}")).assured("the test seed is an HTTP origin");
+    let options = ConnectOptions {
+        seed_servers: vec![seed_url],
+        connect_timeout: Duration::from_millis(250),
+        retry_timeout: Duration::from_secs(1),
+        ..ConnectOptions::default()
+    };
+    let client = within_deadline(Client::connect_with_options(
+        format!("http://{}", primary.address),
+        Some(domain("tenant")),
+        options,
+    ))
+    .await
+    .assured("the primary accepts the session");
+    let mut exchange = primary.next_exchange().await;
+    let attaching = client.clone();
+    let attach = tokio::spawn(async move { attaching.attach_domain_clock(domain("tenant")).await });
+    let request = exchange.next_request().await;
+    let unpaced = clock_in(1, crate::DomainClockObservedState::Unpaced);
+    exchange
+        .reply(
+            request.request_id,
+            attach_reply(unpaced.clone(), ""),
+            &limits(),
+        )
+        .await;
+    within_deadline(attach)
+        .await
+        .assured("the attach task completes")
+        .assured("the attachment succeeds");
+
+    drop(exchange);
+    primary.stop().await;
+    assert_eq!(
+        within_deadline(client.next_domain_clock_event())
+            .await
+            .assured("the interruption is an event"),
+        crate::DomainClockEvent::Interrupted(crate::DomainClockInterruption {
+            domain: domain("tenant"),
+        })
+    );
+    let failure = within_deadline(client.next_domain_clock_event())
+        .await
+        .expect_err("no server accepts a session within the retry deadline");
+    assert!(
+        matches!(failure.current_context(), ClientError::ConnectServer(_)),
+        "the reopening fails to connect: {failure:?}"
+    );
+    assert_eq!(
+        client
+            .domain_clock(&domain("tenant"))
+            .assured("the clock is still followed")
+            .clock(),
+        &unpaced
+    );
+
+    let mut seed = TestServer::start_at(seed_address).await;
+    let reading = client.clone();
+    let next = tokio::spawn(async move { reading.next_domain_clock_event().await });
+    let mut restored = seed.next_exchange().await;
+    let request = restored.next_request().await;
+    let ClientRequest::AttachDomainClock(sent) = request.request else {
+        panic!("the first request on the reopened session attaches the followed clock again");
+    };
+    assert_eq!(sent.domain, domain("tenant"));
+    let stopped = clock_in(2, crate::DomainClockObservedState::Stopped);
+    restored
+        .reply(
+            request.request_id,
+            attach_reply(stopped.clone(), ""),
+            &limits(),
+        )
+        .await;
+    assert_eq!(
+        within_deadline(next)
+            .await
+            .assured("the event task completes")
+            .assured("the restored clock is reported"),
+        crate::DomainClockEvent::Observed(crate::DomainClockObserved {
+            domain: domain("tenant"),
+            clock: stopped,
+        })
     );
 }

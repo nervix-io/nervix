@@ -739,6 +739,10 @@ def count_string_node_ids(files: Sequence[RustFile]) -> list[Site]:
 
 _ERROR_DECLARATION = re.compile(r"\b(?:enum|struct)\s+([A-Za-z_][A-Za-z0-9_]*Error)\b")
 _RESULT_RETURN = re.compile(r"->\s*((?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)Result\s*<")
+_NESTED_RESULT_RETURN = re.compile(
+    r"\b(?:Future|Stream)\s*<\s*(?:Output|Item)\s*=\s*"
+    r"((?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)Result\s*<"
+)
 _PLAIN_TYPE = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*([A-Za-z_][A-Za-z0-9_]*)$")
 
 
@@ -752,15 +756,16 @@ def count_bare_error_signatures(files: Sequence[RustFile]) -> list[Site]:
     }
     sites: list[Site] = []
     for file in product_files(files):
-        for match in _RESULT_RETURN.finditer(file.product):
-            if match.group(1).replace(" ", "") == "error_stack::":
-                continue
-            arguments = generic_arguments(file.product, match.end() - 1)
-            if not arguments or len(arguments) < 2:
-                continue
-            error = _PLAIN_TYPE.match(arguments[-1].strip())
-            if error and error.group(1) in declared:
-                sites.append(file.site(match.start(), file.source_line(match.start())))
+        for pattern in (_RESULT_RETURN, _NESTED_RESULT_RETURN):
+            for match in pattern.finditer(file.product):
+                if match.group(1).replace(" ", "") == "error_stack::":
+                    continue
+                arguments = generic_arguments(file.product, match.end() - 1)
+                if not arguments or len(arguments) < 2:
+                    continue
+                error = _PLAIN_TYPE.match(arguments[-1].strip())
+                if error and error.group(1) in declared:
+                    sites.append(file.site(match.start(), file.source_line(match.start())))
     return sites
 
 

@@ -587,6 +587,7 @@ test-coverage-clients: tests-deps
     for feature in \
         tests/features/web-console/connection_status.feature \
         tests/features/web-console/nspl_repl.feature \
+        tests/features/web-console/domain_clock.feature \
         tests/features/tools/cli_session.feature; do
         cargo llvm-cov --no-report --features testing --package nervix-server \
             --test scenarios -- --input "${feature}" --concurrency 1
@@ -596,6 +597,12 @@ test-coverage-clients: tests-deps
 coverage-clients-report:
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
+
+# Refresh the native console's coverage after a focused change without rebuilding the server
+# browser scenario harness; its recorded browser and CLI coverage remains in the same target.
+coverage-web-console-unit:
+    cargo llvm-cov --no-report --bins --package nervix-web-console
+    just coverage-clients-report
 
 # Build the standalone CLI with the same coverage flags as its binary unit tests. Cargo's
 # all-targets test pass alone leaves only the test executable, which public scenarios do not run.
@@ -649,6 +656,13 @@ coverage-scenarios output *args: tests-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
+# Add selected scenarios to the current coverage profiles without rebuilding unchanged artifacts.
+coverage-scenarios-append output *args: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov --no-clean --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 # Collect the changed DNS client units and their public one-/three-node paths into one LCOV
 # profile so patch coverage can be checked before opening the PR.
@@ -728,7 +742,8 @@ coverage-shuttle output: build-web-console wasm-processor-guests download-onnxru
 coverage-bins output *args:
     cargo llvm-cov --bins --lcov --output-path {{ output }} {{ args }}
 
-# Exercise the CLI binary through the public transaction and clock scenarios with LLVM coverage.
+# Exercise the CLI binary through the public transaction, clock, and REPL reconnect scenarios with
+# LLVM coverage.
 coverage-cli-process output="target/cli-process.lcov":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -743,6 +758,9 @@ coverage-cli-process output="target/cli-process.lcov":
     LLVM_PROFILE_FILE="$coverage_dir/cli-%p-%m.profraw" \
         NERVIX_TEST_CLI_PATH="$coverage_dir/debug/nervix-cli" \
         just test-scenarios --input tests/features/tools/cli_session.feature --name clock
+    LLVM_PROFILE_FILE="$coverage_dir/cli-%p-%m.profraw" \
+        NERVIX_TEST_CLI_PATH="$coverage_dir/debug/nervix-cli" \
+        just test-scenarios --input tests/features/tools/cli_session.feature --name keeps.printing
     llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | awk '/^host:/{print $2}')/bin"
     "$llvm_bin/llvm-profdata" merge -sparse "$coverage_dir"/*.profraw -o "$coverage_dir/merged.profdata"
     "$llvm_bin/llvm-cov" export "$coverage_dir/debug/nervix-cli" \
@@ -844,13 +862,18 @@ bench-vm-alloc *args:
 # Build the reusable harness and forward its CLI arguments. This is enough for container subjects
 # such as Vector; local Nervix has a dedicated recipe below because it also builds the server.
 benchmark *args:
-    just build_mode=release build-server
     cargo build --release --package nervix-benchmark --bins
-    "{{ cargo_target_dir }}/release/nervix-benchmark" {{ args }} --server-binary={{ cargo_target_dir }}/server/release/nervix-server
+    "{{ cargo_target_dir }}/release/nervix-benchmark" {{ args }}
 
 # Focused validation for the benchmark framework without building product binaries.
 test-benchmark-framework *args:
     cargo test --package nervix-benchmark {{ args }}
+
+# Build the pinned Flink image with its matching Kafka SQL connector.
+benchmark-flink-image:
+    docker build --file "{{ justfile_directory() }}/benches/flink/Dockerfile" \
+        --tag nervix-benchmark-flink:2.0.1 \
+        "{{ justfile_directory() }}/benches/flink"
 
 # Build and benchmark the current local Nervix checkout.
 benchmark-nervix-local benchmark_name="kafka-filter-map" *args: build-web-console
@@ -868,7 +891,7 @@ benchmark-nervix-image image benchmark_name="kafka-filter-map" *args:
         --implementation nervix --nervix-mode image --nervix-image {{ quote(image) }} {{ args }}
 
 # Build once, then run every declared workload implementation sequentially with local Nervix.
-benchmark-all-local *args: build-web-console
+benchmark-all-local *args: build-web-console benchmark-flink-image
     cargo build --release \
         --package nervix-server --bin nervix-server \
         --package nervix-benchmark --bins
@@ -916,7 +939,7 @@ benchmark-ab baseline_ref runs="3" benchmark_name="kafka-filter-map" *args: buil
 
 # Build only the benchmark harness, then run it against an already-built Nervix image. The harness
 # configures the server directly through client-core and never rebuilds a product binary.
-benchmark-ci nervix_image artifacts_root *args:
+benchmark-ci nervix_image artifacts_root *args: benchmark-flink-image
     #!/usr/bin/env bash
     set -euo pipefail
     test -S /var/run/docker.sock

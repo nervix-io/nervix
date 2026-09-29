@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 arch-into = { workspace = true }
+error-stack = { workspace = true }
 meticulous = { workspace = true }
 nervix-client-core = { workspace = true, features = ["autocomplete"] }
 nervix-models = { workspace = true }
@@ -22,5 +23,7 @@ tokio-util = { workspace = true }
 triomphe = { workspace = true }
 
 [dev-dependencies]
-error-stack = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
+tokio-stream = { workspace = true, features = ["net"] }
+tonic = { workspace = true }

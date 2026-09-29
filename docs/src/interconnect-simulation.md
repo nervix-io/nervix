@@ -542,6 +542,10 @@ a typed request carrying an Arrow batch and the same batch as a relay payload, a
 it with the production codec and checks the values without printing them. The three-host case adds a
 second peer and a rejected dial whose DNS name the certificate does not carry, so authentication
 failure is proven over the same connection path that succeeds.
+The rejection assertions inspect the `TransportError` at the report's current context; relay
+timeout, cancellation, and indeterminate-delivery assertions do the same. This keeps the simulated
+failure class independent of the report's diagnostic text while production transport and wire
+causes remain available underneath it.
 
 The certificate-clock checks, beside the transport, prove that time-dependent authentication follows
 the simulated clock on both peers: not-yet-valid and expired boundaries of the local and the peer

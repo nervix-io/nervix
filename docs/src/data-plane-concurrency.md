@@ -106,6 +106,16 @@ in the same step that releases the payload, while a rejected payload's members r
 until their message errors are delivered, so an attempt its stop deadline cuts short leaves every
 member either resolved or still owned by the buffer.
 
+Terminal teardown races the whole emitter task against its domain shutdown signal. It can cancel
+an in-flight connector await after the graph drain budget expires, dropping the task's volatile
+payloads and ACK guards together. That cancellation cannot resolve a member as delivered; an
+acknowledged source retains its own redelivery boundary. Entity-pause swaps do not use this
+terminal cancellation: the old task must complete its deadline-bounded stop before the new task
+starts.
+The Shuttle check over the emitter's prepared payload and ACK owner races a connector await with
+the terminal shutdown signal and asserts that dropping an unanswered request leaves its attached
+source unacknowledged.
+
 ### Branch processor state
 
 Each concrete branch has one dispatch lane and one mutable processor runtime. The lane admits one

@@ -3,8 +3,8 @@
 //! Outside the layer order: a test harness. Product code must not name it.
 //!
 //! - **Owns.** Starting a probe of one client runtime against a node, the environment a probe
-//!   reads its target from, collecting the report a probe prints, and holding that report to the
-//!   report a scenario expects.
+//!   reads its target and exercise from, collecting the report a probe prints, and holding that
+//!   report to the report a scenario expects.
 //! - **Depends on.** The probe programs under `tests/client_conformance`, the artifacts
 //!   `just test-client-conformance` builds for them, and the shared Rust binding, which the
 //!   in-process probe drives through its C ABI.
@@ -46,6 +46,9 @@ pub(crate) fn corpus_report() -> io::Result<String> {
 
 /// The line a probe prints once its subscription is open, before any row reaches it.
 pub(crate) const SUBSCRIBED_LINE: &str = "SUBSCRIBED";
+
+/// The line a probe prints once it follows the domain's clock, before the scenario starts it.
+pub(crate) const ATTACHED_LINE: &str = "ATTACHED completed";
 
 /// The directory `just test-client-conformance` builds the probe artifacts into.
 const ARTIFACTS_ENV: &str = "NERVIX_CLIENT_CONFORMANCE_DIR";
@@ -174,9 +177,20 @@ impl ProbeRuntime {
             Self::CAbiInProcess | Self::Go | Self::Node | Self::Bun => false,
         }
     }
+
+    /// Whether the probe drives the shared Rust binding, in process or loaded, and so reads the
+    /// domain clock events the binding exposes.
+    fn drives_binding(self) -> bool {
+        match self {
+            Self::CAbiInProcess | Self::C | Self::Cpp | Self::Python | Self::Java | Self::Ruby => {
+                true
+            }
+            Self::Go | Self::Node | Self::Bun => false,
+        }
+    }
 }
 
-/// Where a probe connects and what it subscribes to.
+/// Where a probe connects and what it exercises there.
 #[derive(Debug, Clone)]
 pub(crate) struct ProbeTarget {
     /// The gRPC session URI of the node the probe starts on.
@@ -186,25 +200,47 @@ pub(crate) struct ProbeTarget {
     pub(crate) username: String,
     pub(crate) password: String,
     pub(crate) domain: String,
-    pub(crate) relay: String,
-    pub(crate) subscription: String,
-    /// How many rows the probe reads before it closes its subscription.
-    pub(crate) rows: usize,
+    pub(crate) exercise: ProbeExercise,
+}
+
+/// What a probe does in its session.
+#[derive(Debug, Clone)]
+pub(crate) enum ProbeExercise {
+    /// Runs an operation and a failing command, then reads `rows` rows through a subscription to
+    /// `relay` named `subscription` and closes it.
+    Subscription {
+        relay: String,
+        subscription: String,
+        rows: usize,
+    },
+    /// Attaches to the domain's clock, reads the state and the first tick of the generation the
+    /// scenario starts, and detaches.
+    DomainClock,
 }
 
 impl ProbeTarget {
     /// The environment every probe reads its target from.
     fn environment(&self) -> BTreeMap<&'static str, String> {
-        BTreeMap::from([
+        let mut environment = BTreeMap::from([
             ("NERVIX_PROBE_GRPC_URI", self.grpc_uri.clone()),
             ("NERVIX_PROBE_WEBSOCKET_URI", self.websocket_uri.clone()),
             ("NERVIX_PROBE_USERNAME", self.username.clone()),
             ("NERVIX_PROBE_PASSWORD", self.password.clone()),
             ("NERVIX_PROBE_DOMAIN", self.domain.clone()),
-            ("NERVIX_PROBE_RELAY", self.relay.clone()),
-            ("NERVIX_PROBE_SUBSCRIPTION", self.subscription.clone()),
-            ("NERVIX_PROBE_ROWS", self.rows.to_string()),
-        ])
+        ]);
+        match &self.exercise {
+            ProbeExercise::Subscription {
+                relay,
+                subscription,
+                rows,
+            } => {
+                environment.insert("NERVIX_PROBE_RELAY", relay.clone());
+                environment.insert("NERVIX_PROBE_SUBSCRIPTION", subscription.clone());
+                environment.insert("NERVIX_PROBE_ROWS", rows.to_string());
+            }
+            ProbeExercise::DomainClock => {}
+        }
+        environment
     }
 }
 
@@ -253,6 +289,13 @@ impl ClientProbe {
     }
 
     pub(crate) async fn start(runtime: ProbeRuntime, target: ProbeTarget) -> io::Result<Self> {
+        if let ProbeExercise::DomainClock = target.exercise
+            && !runtime.drives_binding()
+        {
+            return Err(io::Error::other(format!(
+                "the {runtime:?} probe implements the protocol itself and follows no domain clock"
+            )));
+        }
         let (sender, lines) = mpsc::unbounded_channel();
         let Some(mut command) = runtime.command()? else {
             let completion = Completion::InProcess(tokio::task::spawn_blocking(move || {
@@ -269,6 +312,9 @@ impl ClientProbe {
                 completion,
             });
         };
+        if let ProbeExercise::DomainClock = target.exercise {
+            command.arg("clock");
+        }
         command.envs(target.environment());
         if runtime.loads_binding() {
             command.env(LIBRARY_ENV, ProbeRuntime::library()?);

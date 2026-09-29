@@ -42,6 +42,7 @@ max_backlog_messages = 4096
 output_topic = "benchmark-output"
 partitions = 16
 subject = "nervix-local"
+subject_nodes = 1
 value_bytes = 128
 wait_timeout_seconds = 120
 warmup_seconds = 10
@@ -60,10 +61,10 @@ warmup_generation_seconds=10.000001
 warmup_parity_stability_seconds=0.500000
 generation_seconds=30.000000
 producer_flush_seconds=0.100000
-drain_seconds=1.500000
-end_to_end_seconds=30.500000
+completion_seconds=1.500000
+end_to_end_seconds=31.500000
 parity_stability_seconds=0.500000
-wire_bytes_per_message=140
+wire_bytes_per_message=164
 partitions=16
 warmup_messages=16
 max_backlog_messages=4096
@@ -72,20 +73,17 @@ input_messages=36000
 expected_output_records=36000
 output_messages=36000
 output_records=36000
+output_validation="ids-and-values"
 output_records_at_generation_end=36000
 backlog_messages_at_generation_end=0
 output_records_at_flush=36000
 backlog_messages_at_flush=0
 input_messages_per_second={:.3}
-output_records_per_second_during_generation={:.3}
 end_to_end_messages_per_second={:.3}
 input_payload_mib_per_second=0.160
 end_to_end_payload_mib_per_second=0.160
 "#,
-            fixture.peak_backlog,
-            fixture.end_to_end_rate,
-            fixture.end_to_end_rate,
-            fixture.end_to_end_rate,
+            fixture.peak_backlog, fixture.end_to_end_rate, fixture.end_to_end_rate,
         ),
     );
     write(&directory.join("status.txt"), "pass\n");
@@ -161,7 +159,7 @@ fn summarizes_per_arm_statistics_and_the_mean_delta() {
 
     assert!(markdown.starts_with("## A/B benchmark comparison — Kafka Filter Map\n"));
     assert!(markdown.contains(
-        "**Configuration:** 30 s + 10 s warm-up · 16 partitions · 128 B values (140 B wire) · \
+        "**Configuration:** 30 s + 10 s warm-up · 16 partitions · 128 B values (164 B wire) · \
          backlog cap 4,096"
     ));
     assert!(

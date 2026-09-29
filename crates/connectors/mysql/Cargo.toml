@@ -21,6 +21,7 @@ shuttle = [
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 async-trait = { workspace = true }
+base64 = { workspace = true }
 chrono = { workspace = true }
 error-stack = { workspace = true }
 meticulous = { workspace = true }

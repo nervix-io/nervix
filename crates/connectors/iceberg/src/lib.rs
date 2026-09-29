@@ -60,9 +60,10 @@ use error_stack::{Report, ResultExt as _};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
 use meticulous::OptionExt as _;
 use nervix_connector::{
-    MappedSinkRows, PerRecordOutcome, RowSink, SinkAcknowledgementServices, SinkAcknowledgements,
-    SinkCommitReport, SinkDeadline, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult,
-    SinkRecordPosition, SinkStartError, SinkStartResult, physical_time::actual_utc_now,
+    MappedSinkCarrier, MappedSinkRows, PerRecordOutcome, RowSink, SinkAcknowledgementServices,
+    SinkAcknowledgements, SinkCommitReport, SinkDeadline, SinkHost, SinkLifecycle,
+    SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
+    physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, IcebergStorageBackend, TableName, Timestamp};
@@ -467,9 +468,9 @@ impl IcebergSink {
         Ok(())
     }
 
-    /// The staged columns of one write: the rows the host selected, in this sink's exact staged
+    /// The staged columns of one carrier: the rows the host selected, in this sink's exact staged
     /// types.
-    fn staged_batch(&self, rows: &MappedSinkRows<'_>) -> SinkPublishResult<RecordBatch> {
+    fn staged_batch(&self, rows: &MappedSinkCarrier<'_>) -> SinkPublishResult<RecordBatch> {
         let row_count = rows.batch.num_rows();
         let selects_every_row = rows.selected_rows.len() == row_count;
         let mut selected = vec![false; row_count];
@@ -768,30 +769,38 @@ impl SinkLifecycle for IcebergSink {
 
 #[async_trait::async_trait]
 impl RowSink for IcebergSink {
+    /// Stages the rows of every carrier of the write, one staged file per carrier.
     async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
-        let mut outcome = PerRecordOutcome::with_capacity(rows.selected_rows.len());
-        let staged = match self.staged_batch(&rows) {
-            Ok(staged) => staged,
-            Err(error) => {
+        let mut outcome = PerRecordOutcome::with_capacity(rows.member_count());
+        for carrier in rows.carriers {
+            tokio::task::consume_budget().await;
+            if let Err(error) = self.stage(carrier, &mut outcome).await {
                 outcome.fail(error);
                 return outcome;
             }
-        };
+        }
+        outcome
+    }
+}
+
+impl IcebergSink {
+    /// Stages one carrier's selected rows as one file, retaining the acknowledgements the carrier
+    /// hands over until the commit that publishes it.
+    async fn stage(
+        &mut self,
+        carrier: MappedSinkCarrier<'_>,
+        outcome: &mut PerRecordOutcome<SinkRecordPosition>,
+    ) -> SinkPublishResult<()> {
+        let staged = self.staged_batch(&carrier)?;
         let staged_rows: u64 = staged.num_rows().arch_into();
         let path = self.next_staged_path();
-        let staged_bytes = match Self::write_ipc_batch(path.clone(), staged).await {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                outcome.fail(error);
-                return outcome;
-            }
-        };
+        let staged_bytes = Self::write_ipc_batch(path.clone(), staged).await?;
         self.staged_batches.push(IcebergStagedBatch {
             path,
             rows: staged_rows,
             bytes: staged_bytes,
-            acknowledgements: rows.acknowledgements,
-            domain_timestamp: rows.occurred_at,
+            acknowledgements: carrier.acknowledgements,
+            domain_timestamp: carrier.occurred_at,
         });
         self.staged_rows = self
             .staged_rows
@@ -802,10 +811,10 @@ impl RowSink for IcebergSink {
             .checked_add(staged_bytes)
             .assured("both counts total bytes this sink already staged on disk");
         self.commit_deadline
-            .arm(self.commit_policy, rows.occurred_at, self.staged_bytes);
-        for row in rows.selected_rows {
+            .arm(self.commit_policy, carrier.occurred_at, self.staged_bytes);
+        for row in carrier.selected_rows {
             outcome.deliver(SinkRecordPosition {
-                batch_index: rows.batch_index,
+                batch_index: carrier.batch_index,
                 row_index: *row,
             });
         }
@@ -814,7 +823,7 @@ impl RowSink for IcebergSink {
             bytes = staged_bytes,
             "emitter staged iceberg rows"
         );
-        outcome
+        Ok(())
     }
 }
 

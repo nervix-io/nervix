@@ -70,7 +70,7 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | Control plane | Session subscriptions | Creation and deletion, the generation each subscription opens with, its lifecycle, its filter and sampling, the delivery of one generation to its session, and the interest lease it holds on its relay. |
 | Data plane | Relay subscription fan-out | The subscribers of one relay, the definition they were attached under, and ending every subscriber before a batch of another definition can reach it. |
 | Edges | The Rust client, `nervix-client-core` | Connecting, TLS selection, the dispatcher that pairs replies with requests, execution identity across retries, redirect and reconnect, transaction binding and previews, desired subscriptions and their restoration, followed domain clocks, uploads, and backup downloads verified against their summary. |
-| Edges | The shared binding, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the Rust client's state machine, with borrowed frame access and bulk column copies. |
+| Edges | The shared binding, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the Rust client's state machine, with borrowed frame access, bulk column copies, and retained domain clock events. |
 | Edges | The web console and the CLI | Consumers of the same protocol with bounded buffers of their own. The console speaks it over the WebSocket; the CLI uses the Rust client. |
 
 The server is the composition root: it is the only crate that names the wire crate, the command
@@ -515,9 +515,11 @@ The leader serializes the requests that carry one reference, then consults its r
 - **Applying.** The request joins the admitted execution and waits for it. After a leader change,
   the new leader resumes every applying record on its own in its next reconciliation pass, which
   runs every 250 milliseconds, so the work completes whether or not anyone repeats it.
-- **Finished.** The request returns the retained outcome once that outcome is authoritative on every
-  live node. If that wait fails, the reply is `OutcomeUnknown` with cause `NotYetAuthoritative`, and
-  a later repetition returns the outcome.
+- **Finished.** The request returns the retained outcome once that outcome is authoritative on each
+  node in the leader's current completion participant set. The leader can retire an unreachable
+  node from that set; the node must catch up before its local reads reflect the completed effect.
+  If the wait fails, the reply is `OutcomeUnknown` with cause `NotYetAuthoritative`, and a later
+  repetition returns the outcome.
 
 The first reply is itself rebuilt from the durable record, so the reply to the original attempt and
 the reply to a repetition are identical except for their origin. The record keeps the disposition,
@@ -693,11 +695,12 @@ and a `COMMITTING` transaction continues without its client.
 
 **Read consistency.** A read, such as `SHOW`, `DESCRIBE`, or `LOOKUP`, is served by the node the
 session is on from its locally applied replicated state; it is not a linearizable read. Once a
-command completes, its effect is applied on every live node, so a read issued afterwards through any
-node observes it. Completion for a session bound to a transaction resolves against the committed
-configuration with the session's own queued statements applied, while every other session sees
-committed configuration alone. Inspecting a transaction reads it without changing its binding,
-domain, activity, or queue position.
+command completes, its effect is applied on every node in the leader's completion participant set,
+so a later read through one of those nodes observes it. A node the leader has retired can still
+serve an older local state until it catches up. Completion for a session bound to a transaction
+resolves against the committed configuration with the session's own queued statements applied,
+while every other session sees committed configuration alone. Inspecting a transaction reads it
+without changing its binding, domain, activity, or queue position.
 
 ## Leader Discovery, Redirect, And Reconnect
 
@@ -712,7 +715,10 @@ session into that domain's observations as well: a `ClusterObserved` summary and
 entities, at once and then every 500 milliseconds. A session that selects no domain receives
 neither. Server notices report runtime and control-plane errors and cluster events as text for
 display. A session that falls behind the node's notice bus skips the notices it missed; the node
-logs how many.
+logs how many. The Rust client holds at most 128 notices and 1 MiB its caller has not read. A
+notice that does not fit drops the ones held, and the caller's next read reports that gap before
+the notices that follow it. Notices end with the session that delivered them, and the client's
+notice stream continues with the next session it opens.
 
 There is no separate discovery request. A client learns where the leader is from these observations
 and from the redirects in its replies. Endpoints come from the cluster's discovery, which carries
@@ -775,6 +781,12 @@ it:
 
 Only then does it repeat outstanding commands, each under its original execution reference and, for
 an append, its original expected position.
+
+The client's event streams outlive the session. A caller reading subscription events, clock events,
+or notices keeps reading across the replacement: the interruptions of step 3 mark the gap, and
+events of the new session follow them. Reading subscription or clock events opens a new session
+while one waits to be restored; reading notices never does, and waits for the session something
+else opens. A failed attempt to open one is returned to the reader, and its next read tries again.
 
 The web console follows the same order on every connection: it selects its domain, opens again the
 subscription of every tab the server had acknowledged, and attaches its transaction before any
@@ -1009,7 +1021,9 @@ copying it, so a retained frame costs about its own size: four subscriptions eac
 4.17 MB frame kept 16.78 MB live for 16.69 MB of frames, and the receiver keeps the allocation of the
 last large frame it read as its receive buffer after that frame is released. The CLI bounds its
 terminal output to 128 lines and 1 MiB, cuts a line above 8 KiB, and reports how many lines it
-omitted. The web console keeps at most 256 lines and 256 KiB per REPL and per subscription
+omitted. It keeps reading every stream across reconnects, and when the client cannot reopen a
+session to restore subscriptions or clocks it prints why while the client keeps trying. The web
+console keeps at most 256 lines and 256 KiB per REPL and per subscription
 tab, and marks where it omitted earlier lines. It keeps the latest 256 commands and 256 KiB of its
 command history and the snapshot of the one domain it observes. It holds at most 64 requests of its
 controls waiting for a connection, carrying at most 4 MiB of text, and at most 256 held or awaiting
@@ -1065,9 +1079,13 @@ Every node serves attachments from its own installation, which it derives from t
 revision as every other node, and from progress it already accepted, so an attachment adds no
 interconnect traffic and survives nothing: it ends silently with its session. The Rust client
 attaches every clock it followed again on its next session, clears its previous tick, and reports
-the gap as an interruption. The web console does not follow domain clocks, and the shared binding
-does not expose them. Both requests are refused while the session holds a transaction, like every
-other session-local request.
+the gap as an interruption. The shared binding exposes this event stream through
+`nx_session_next_clock_event` and a dedicated retained `nx_clock_event` handle. The web console
+attaches the selected domain clock once per session, detaches it on selection changes, and restores
+it on reconnect; its REPL sends the same typed requests for explicit attach and detach statements.
+These requests enter the console's bounded session hand-off; a local refusal is shown to the
+operator and sends no request. Both requests are refused while the session holds a transaction,
+like every other session-local request.
 
 The CLI's `domain-clock` subcommand uses the Rust client's typed attach reply and clock event
 stream. It prints the reply and then the same state, tick, interruption, and end lines as its REPL,
@@ -1264,6 +1282,11 @@ The binding's lifecycle follows from that choice:
   `nx_event_cell_varlen` borrows one string or bytes value. Events are reference counted:
   `nx_event_retain` adds a reference, and the event and its frame are freed with the last
   `nx_event_release`, from any thread.
+- **Clock events.** `nx_session_next_clock_event` uses the same cancellation and deadline rules as
+  the subscription wait, but returns a separate `nx_clock_event` reference. Its kind, domain,
+  generation, state, paced mapping, tick and end-reason accessors expose the fields each event
+  carries. An accessor for a field its event lacks returns `NX_ERROR_TYPE`. Retain and release
+  preserve the event and its borrowed domain name across threads until the last reference ends.
 - **Typed failures.** A failing call returns an `nx_error` whose kind separates an invalid argument,
   a failed connection, a failed session, an uncertain outcome that carries the execution reference,
   a server refusal, a deadline, a cancellation, a protocol violation, a type mismatch, and a session
@@ -1271,12 +1294,13 @@ The binding's lifecycle follows from that choice:
 
 The binding connects with the Rust client's default options. It exposes no seeds, timeouts, or
 certificate authority, so it reaches a node over plaintext and connects to it directly. It exposes
-commands, completion, subscriptions and their events, and bulk row access, but not the typed
-transaction status, inspection, choice lookups, notices, leadership, or the followed domain clock: a
-host can execute `ATTACH DOMAIN CLOCK;`, and the library attaches again after a reconnect, but the
-host cannot read the clock or its changes. Its column accessors cover scalar, string, and bytes
-fields; a list field reports whether it is fixed-length or variable, and its values are read from
-the borrowed frame with generated code.
+commands, completion, subscriptions and their events, domain clock events, and bulk row access,
+but not the typed transaction status, inspection, choice lookups, notices, or leadership. A host
+can execute `ATTACH DOMAIN CLOCK;`; the Rust client restores the attachment after reconnect and
+the host reads later observations and ticks through the clock-event wait. The binding does not
+expose the initial clock carried by the attach reply as a typed outcome. Its column accessors
+cover scalar, string, and bytes fields; a list field reports whether it is fixed-length or
+variable, and its values are read from the borrowed frame with generated code.
 
 Independent implementations exist as qualification clients rather than supported SDKs. The Go client
 speaks native gRPC with `flatc --go` output and `google.golang.org/grpc`, and the TypeScript client

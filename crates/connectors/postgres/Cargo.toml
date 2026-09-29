@@ -22,12 +22,15 @@ ahash = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 async-trait = { workspace = true }
+base64 = { workspace = true }
 chrono = { workspace = true }
 error-stack = { workspace = true }
+faster-hex = { workspace = true }
 meticulous = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true }
+nonzero_ext = { workspace = true }
 serde_json = { workspace = true }
 shuttle-tokio = { workspace = true, features = [
   "macros",

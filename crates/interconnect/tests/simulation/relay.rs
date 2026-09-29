@@ -242,7 +242,10 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                             Ok(()) => panic!("the fenced grant must be refused"),
                             Err(error) => error,
                         };
-                        assert!(matches!(error, TransportError::RelayCancelled), "{error:?}");
+                        assert!(
+                            matches!(error.current_context(), TransportError::RelayCancelled),
+                            "{error:?}"
+                        );
                         assert_eq!(
                             client
                                 .relay_admission_status(&peer, case.delivery())
@@ -277,7 +280,7 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                         };
                         assert!(
                             matches!(
-                                error,
+                                error.current_context(),
                                 TransportError::RequestTimeout { .. }
                                     | TransportError::ProgressTimeout { .. }
                                     | TransportError::Closed(_)
@@ -343,7 +346,10 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                                 Ok(()) => panic!("the cancelled retry must be refused"),
                                 Err(error) => error,
                             };
-                            assert!(matches!(error, TransportError::RelayCancelled), "{error:?}");
+                            assert!(
+                                matches!(error.current_context(), TransportError::RelayCancelled),
+                                "{error:?}"
+                            );
                             trace.record("client", "reconciled cancellation refused the retry");
                         } else {
                             client
@@ -698,7 +704,10 @@ fn restarted_receiver_fences_unresolved_relay(
                                 Err(error) => error,
                             };
                             assert!(
-                                matches!(error, TransportError::RelayIndeterminate),
+                                matches!(
+                                    error.current_context(),
+                                    TransportError::RelayIndeterminate
+                                ),
                                 "{error:?}"
                             );
                         }
