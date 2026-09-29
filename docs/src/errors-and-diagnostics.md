@@ -13,6 +13,9 @@ Boundaries](./typed-states.md) explains how missing values and semantic states a
 [Shutdown And Recovery](./shutdown.md) owns stop and drain phases. The NSPL forms for error routes
 are in [Message Errors](./processors.md#message-errors) and [Error Routes](./quickstart-error-routes.md).
 
+[Execution Plans](./execution-plans.md) describes when planning, binding, and message-error
+delivery can fail during schedule application.
+
 ## Ownership And Propagation
 
 | Boundary | Failure meaning it owns | What its caller can decide |

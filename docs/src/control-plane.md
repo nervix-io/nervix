@@ -13,7 +13,7 @@ It is responsible for:
 
 The most important property is that control-plane state is authoritative. A runtime node only exists because the control plane says it exists.
 
-Execution graph configuration is part of this control-plane state. NSPL models, domain schedules, and lifecycle transitions are persisted with strong consistency guarantees before runtime nodes execute them.
+Execution graph configuration is part of this control-plane state. NSPL models, domain schedules, and lifecycle transitions are persisted with strong consistency guarantees before runtime nodes execute them. The committed schedule becomes an in-memory typed execution revision at the application boundary; [Execution Plans](./execution-plans.md) describes its installation and recovery.
 
 In practice, the control plane covers:
 

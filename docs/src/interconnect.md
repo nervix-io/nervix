@@ -711,9 +711,11 @@ Admission to consensus membership requires an available interconnect endpoint. A
 without one is not an admission candidate, so it is neither added as a learner nor promoted to
 voter, and it becomes eligible on the round that publishes an endpoint this node accepts. The
 client and web-console advertisements are independent of admission: a node joins, votes, and leads
-with either of them unavailable. Membership follows a replaced endpoint by refreshing the learner
-at its new address before promotion, and a node removed from membership stays out until it returns
-with a newer incarnation.
+with either of them unavailable. Membership replaces the recorded address of an existing member
+when its advertised endpoint changes. A returning voter remains a voter, while a learner still
+waits to catch up before promotion. The recorded address is a startup contact hint; live Raft
+traffic uses authenticated discovery by node identity. A node removed from membership stays out
+until it returns with a newer incarnation.
 
 A redirect to the leader names only the advertised endpoints discovery has established. A client
 redirected during an election that has not yet observed the new leader's client endpoint receives
