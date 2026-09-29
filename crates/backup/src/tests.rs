@@ -2,7 +2,6 @@
 
 use std::{io::Read as _, num::NonZeroU64};
 
-use bolero::check;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
@@ -1021,13 +1020,14 @@ fn a_visitor_that_reads_part_of_a_section_still_gets_every_section_verified() {
 
 #[test]
 fn bolero_domain_records_and_manifests_round_trip() {
-    check!()
+    bolero::check!()
+        .with_iterations(128)
+        .with_max_len(128)
         .with_type::<(u64, u64, i64, i64, u16, bool, u8)>()
         .for_each(
             |&(period, skew, wall, logical, start_version, running, placement)| {
-                let Some(period) = NonZeroU64::new(period) else {
-                    return;
-                };
+                let period =
+                    NonZeroU64::new(period.max(1)).assured("max with one is always nonzero");
                 let record = DomainRecord {
                     pace: DomainPace::Paced {
                         period: DomainClockPeriod::from_nanos(period),
