@@ -1,0 +1,45 @@
+SET 'parallelism.default' = '{{ lane_count }}';
+
+CREATE TABLE benchmark_input (
+  `key` STRING,
+  `value` STRING,
+  proc_time AS PROCTIME()
+) WITH (
+  'connector' = 'kafka',
+  'topic' = '{{ input_topic }}',
+  'properties.bootstrap.servers' = '{{ kafka_bootstrap_servers }}',
+  'properties.group.id' = '{{ consumer_group }}',
+  'scan.startup.mode' = 'earliest-offset',
+  'format' = 'json'
+);
+
+CREATE TABLE benchmark_output (
+  record_count BIGINT
+) WITH (
+  'connector' = 'kafka',
+  'topic' = '{{ output_topic }}',
+  'properties.bootstrap.servers' = '{{ kafka_bootstrap_servers }}',
+  'format' = 'json'
+);
+
+CREATE TEMPORARY VIEW benchmark_filtered AS
+SELECT `key`, `value`, proc_time
+FROM benchmark_input
+WHERE POSITION('x' IN `value`) > 0;
+
+CREATE TEMPORARY VIEW benchmark_unique AS
+SELECT `key`, `value`, proc_time
+FROM (
+  SELECT `key`, `value`, proc_time,
+         ROW_NUMBER() OVER (PARTITION BY `key` ORDER BY proc_time ASC) AS row_num
+  FROM benchmark_filtered
+)
+WHERE row_num = 1;
+
+INSERT INTO benchmark_output
+SELECT COUNT(*) AS record_count
+FROM TABLE(
+  TUMBLE(TABLE benchmark_unique, DESCRIPTOR(proc_time),
+         INTERVAL '{{ parameters.window_max_delay_seconds }}' SECOND)
+)
+GROUP BY window_start, window_end;

@@ -1,8 +1,8 @@
 # End-to-end benchmark framework
 
-The benchmark harness runs the same declared streaming workload against Nervix or a competitive
-implementation. Each run gets fresh Testcontainers dependencies, fresh Kafka topics, a unique
-consumer group, a high-rate idempotent producer, a timed steady-state warm-up, and a bounded wait
+The benchmark harness runs the same declared streaming workload against Nervix, Vector, or Flink.
+Each run gets fresh Testcontainers dependencies, fresh Kafka topics, a unique consumer group,
+a high-rate idempotent producer, a timed steady-state warm-up, and a bounded wait
 for the stable output the workload's declared load shape expects. Nothing depends on the
 repository's long-lived Docker Compose stack.
 
@@ -14,14 +14,15 @@ just benchmark list
 
 `kafka-filter-map` decodes JSON from Kafka, retains records for which `contains(value, "x")` is
 true, uppercases `value`, and publishes JSON to another topic in the same Kafka broker. Every input
-message produces one output message.
+cycle sends one retained and one filtered input, producing one output message.
 
 `kafka-dedup-window` is the stateful-processor workload: decode JSON from Kafka, retain the three
 quarters of records whose value carries the retain marker, drop the duplicate of every key,
 aggregate the survivors into tumbling windows, and publish one JSON summary per closed window. Its
 measured path is ingestor → deduplicator → window processor → emitter.
 
-Both workloads have `nervix` and `vector` implementations.
+All six Kafka workloads have `nervix`, `vector`, and `flink` implementations. The four `hot-path-*`
+workloads cover direct ingestion, a mapped processor, four-way fanout, and remote delivery.
 
 ## Running implementations
 
@@ -43,6 +44,20 @@ Run Vector 0.57.0 from its pinned official Debian image:
 ```bash
 just benchmark run kafka-filter-map --implementation vector
 ```
+
+Build Flink 2.0.1 with the matching Kafka SQL connector and run it:
+
+```bash
+just benchmark-flink-image
+just benchmark run kafka-filter-map --implementation flink
+```
+
+The local and CI `run-all` recipes build the Flink image before starting the catalog. The Flink
+container starts a local JobManager and TaskManager, submits the rendered SQL job, and signals
+readiness only after the job reaches `RUNNING`. Flink assigns Kafka partitions directly, so its
+manifests disable the consumer-group membership precheck; the output parity gate remains required.
+The benchmark image gives the TaskManager an 8 GiB process budget for the catalog's 16-lane
+stateful workloads.
 
 Build the local Nervix binaries once and run every workload implementation in catalog order:
 
@@ -67,8 +82,8 @@ The underlying image-only entry point is available for reproducing that CI path:
 just benchmark-ci nervix:runtime target/benchmarks
 ```
 
-The generic `benchmark` recipe only builds the harness. This keeps competitive runs from compiling
-the Nervix server unnecessarily.
+The generic `benchmark` recipe only builds the harness. Use `benchmark-nervix-local` when the
+current server binary also needs to be built.
 
 Override common load fields or workload parameters on any run:
 
@@ -86,8 +101,10 @@ overrides that policy for reproduction or smoke testing.
 
 Nervix consumes the flush values directly as NSPL durations and binary sizes. The runner derives
 Vector's `batch.timeout_secs`, `batch.max_bytes`, and `end_every_period_ms` from those same
-settings. Vector measures its native maximum before serialization, while Nervix limits an Arrow
-batch, so reports retain the native values and should not imply byte-for-byte equivalence.
+settings. Flink uses its native Kafka producer and SQL operators; its source and sink batching
+cannot be equated to Nervix route flushes or Vector sink batches. Reports retain each product's
+native settings. Vector measures its native maximum before serialization, while Nervix limits an
+Arrow batch, so byte caps do not imply byte-for-byte equivalence.
 
 `kafka-filter-map` also exposes `ingestor_mode`, the ingestor's whole `MODE` clause, so the same
 graph can be measured under acknowledgement instead of the `NO_ACK PARALLEL` default. The clause
@@ -99,24 +116,50 @@ just benchmark-ab main 5 kafka-filter-map \
   --parameter "'ingestor_mode=ACK PARALLEL MAX 1024 BATCH TIMEOUT 10ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s'"
 ```
 
-`kafka-dedup-window` matches its two implementations on the same drop rate and the same aggregate,
-not on identical internals. Vector's `dedupe` evicts by cache size where Nervix expires by
-`MAX TIME`, and Vector's `reduce` closes on a period where a Nervix window closes on whichever of
-its message and duration bounds is met first; the Nervix window also retains the records it
-buffered, which Vector's running sum does not. Sizing the Vector cache above the live keyspace and
-matching the period to `window_max_delay` makes both graphs produce the same record total, which is
-what parity checks.
+`kafka-dedup-window` matches the drop rate and summed record count across all three implementations.
+Vector's `dedupe` evicts by cache size; Nervix deduplication expires by `MAX TIME`. Vector's
+`reduce` closes periodically. The Nervix window closes when its message or duration bound is met
+and retains buffered records. The Vector cache is sized above the live keyspace, and its period
+matches `window_max_delay`, so both produce the record total that parity checks. Flink uses
+processing-time `ROW_NUMBER` deduplication and a tumbling SQL window of `window_max_delay`; it has
+no `window_messages` closure bound. The optional Nervix sketch and the NSPL-only
+`transform_expression` override are not comparable competitor settings; use the manifest defaults
+for three-way comparisons.
+
+The `hot-path-remote-delivery` Nervix graph places the source and destination on different nodes.
+The Vector and Flink graphs exercise the same Kafka input-to-output contract in one container but
+do not add a corresponding remote hop. Their rates are Kafka pipeline references; the comparison
+report omits relative deltas and rankings for this workload. The fanout graphs each produce four
+output records per input; Vector attaches four sinks, while Flink duplicates rows with a
+four-value cross join.
 
 ## Load shapes
 
 A workload declares in `[load.shape]` what the driver generates and what the measured path owes it
 in return. The driver produces indivisible *cycles* of input messages, each cycle written to one
 Kafka partition, and every shape states how many output records one complete cycle must yield.
-Parity is exact against that contract, so a graph that drops records has to state its drop rate
-rather than assume one output per input.
+The expected output count follows that contract, so a graph that drops records has to state its
+drop rate rather than assume one output per input.
 
-`uniform-passthrough` sends identical payloads and expects one output message per input message.
-Its output record count is Kafka's high watermark, so the driver never has to read a payload back.
+The uniform shapes send a unique `id` per cycle. `uniform-passthrough` expects one unchanged output
+per input, `uniform-uppercase` expects one uppercase output, and `uniform-fanout` expects the
+declared number of unchanged copies. `uniform-filter-map` sends one retained `x` value and one
+filtered `y` value per cycle and expects one uppercase `X` output. Kafka high watermarks drive the
+timed completion; afterward, a separate consumer verifies every expected ID, copy count, and value
+across warm-up and measured records. The audit runs after the end-to-end timer stops.
+
+`completion_seconds` starts immediately after measured input generation ends. It includes the
+producer flush, delivery acknowledgements, input topic visibility check, and wait for the full
+expected output count. `end_to_end_messages_per_second` divides measured input messages by the
+generation plus that completion time. A short completion tail means that most work finished while
+input was still being generated; it does not mean that the whole workload took that tail time.
+
+`peak_backlog_messages` is the largest sampled difference between accepted input and output work
+accounted for between send batches. The cap is a producer throttling ceiling, not a target or a
+measurement of a product's internal queue. Staying below the cap only means that the ceiling was
+not reached; backlog can still grow substantially during a short run. The reported rate is
+achieved throughput, not a measured maximum. The comparison also shows the first backlog sample
+after generation stops and the raw report keeps the samples taken after producer flush.
 
 `keyed-windowed` sends cycles of `keys_per_cycle` distinct keys, each produced `copies_per_key`
 times as one pass over the key list per copy. The first `retained_keys` keys of a cycle carry the
@@ -129,7 +172,8 @@ own value, that count holds whether the node filter runs before or after dedupli
 Window output cardinality is not a function of the input count, so `keyed-windowed` parity is the
 sum of the `count_field` the summaries carry rather than a count of output messages. The driver
 consumes the output topic from its beginning on a run-scoped assignment and accumulates that sum,
-which also drives the live backlog signal, the warm-up handshake, and the drain wait.
+which also drives the live backlog signal, the warm-up handshake, and the drain wait. This checks
+the aggregate total, not each input key's identity; the report labels that distinction.
 
 Duplicates of one key are `keys_per_cycle` messages apart on one partition. That is far enough to
 exercise a live keyspace and close enough that the deduplicator's `MAX TIME` can never expire a key
@@ -143,7 +187,7 @@ interval before it establishes the measured-phase baseline. The catalog uses ten
 network, allocator, processor, and output paths reach steady state before measurement begins.
 
 The window that is still filling when generation stops closes on its duration bound, so the
-reported `drain_seconds` for a windowed workload includes up to one `window_max_delay` of waiting
+reported `completion_seconds` for a windowed workload includes up to one `window_max_delay` of waiting
 that is not backlog.
 
 ## Making `MAX BATCH SIZE` bind
@@ -339,10 +383,15 @@ config_path = "/etc/product/config.yaml"
 command = ["--config", "/etc/product/config.yaml"]
 readiness_port = 8686
 readiness_path = "/health"
+require_consumer_group_membership = true
+# Optionally also wait for a startup marker printed after a submitted job is running.
+readiness_log = "BENCHMARK_READY"
+# Set membership to false when the source assigns Kafka partitions without joining a group.
 ```
 
 Templates receive `kafka_bootstrap_servers`, `input_topic`, `output_topic`, `consumer_group`, the
-integer `lanes` list resolved from the run's partition count, the manifest's `parameters`, and a
+integer `lanes` list and `lane_count` resolved from the run's partition count, the manifest's
+`parameters`, and a
 `dependencies` map containing every started endpoint by its Cucumber key. Container
 implementations join Kafka's run-scoped Docker network; a local Nervix process receives Kafka's
 random host port instead. A multi-node Nervix implementation receives one certificate and state
@@ -354,14 +403,14 @@ The typed dependency contract is Kafka-to-Kafka. The shared test-environment cra
 other Cucumber dependency starters, but a workload using one of them needs a corresponding typed
 benchmark dependency before it is exposed in a manifest, and a workload whose output cardinality
 none of the declared shapes describes needs a new `[load.shape]` variant with its own exact parity
-arithmetic. `uniform-passthrough` expects one output per input, `uniform-fanout` declares an
-`outputs_per_input` multiplier, and `keyed-windowed` declares its complete cycle and retained
-output count.
+arithmetic. The uniform shapes declare unchanged, uppercase, filtered, or fanout output, and
+`keyed-windowed` declares its complete cycle and retained output count.
 
 The `hot-path-ingest`, `hot-path-relay-fanout`, `hot-path-remote-delivery`, and
 `hot-path-processor` workloads use `--partitions` as the number of concurrent publishers. The
-remote-delivery workload starts two nodes and pins its ingestors and destination relay on opposite
-nodes. Run them with 1, 4, and 16 partitions to reproduce the contentionless data-plane matrix.
+remote-delivery Nervix graph starts two nodes and pins its ingestors and destination relay on
+opposite nodes. Run the Nervix cases with 1, 4, and 16 partitions to reproduce the contentionless
+data-plane matrix.
 
 ## Results
 
@@ -386,8 +435,9 @@ batches_total`, and `relay_buffer_len` p50, p90, and p99 bucket upper bounds.
 invocation; it never selects unrelated runs by timestamp. It attempts every declared workload and
 implementation even when an earlier entry fails, and records every execution in a status table
 before the completed measurements and failures. A run passes only after the output records the
-workload's shape expects have arrived and remained stable for a confirmation interval and, for
-Nervix, the metrics scrape has been parsed successfully.
+workload's shape expects have arrived and remained stable for a confirmation interval, the uniform
+output audit has passed where applicable, and, for Nervix, the metrics scrape has been parsed
+successfully.
 
 This is a single-host end-to-end benchmark. Its rate includes Kafka, the load driver, the selected
 product, and the output drain. Compare products only with identical workload inputs, and do not use

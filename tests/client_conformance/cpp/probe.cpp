@@ -2,7 +2,9 @@
 //
 // It owns every handle through std::unique_ptr with the binding's release function, so no path
 // leaks or double-releases a handle, and turns every returned error into an exception. It prints
-// the same conformance report as every other probe.
+// the same conformance report as every other probe. Run as `cpp-probe clock`, it attaches to the
+// domain's clock instead, reads the state and the first tick of the generation the scenario
+// starts, and detaches.
 
 #include <atomic>
 #include <chrono>
@@ -64,6 +66,7 @@ using Execution = std::unique_ptr<nx_execution, Releaser<nx_execution, nx_execut
 using Outcome = std::unique_ptr<nx_outcome, Releaser<nx_outcome, nx_outcome_free>>;
 using Schema = std::unique_ptr<nx_schema, Releaser<nx_schema, nx_schema_free>>;
 using Event = std::unique_ptr<nx_event, Releaser<nx_event, nx_event_release>>;
+using ClockEvent = std::unique_ptr<nx_clock_event, Releaser<nx_clock_event, nx_clock_event_release>>;
 using Cancel = std::unique_ptr<nx_cancel, Releaser<nx_cancel, nx_cancel_free>>;
 
 const uint8_t *bytes(std::string_view text) {
@@ -346,20 +349,210 @@ void check_cancellation(const Session &session) {
     }
 }
 
-void run() {
+std::string clock_kind_name(nx_clock_event_kind kind) {
+    switch (kind) {
+    case NX_CLOCK_EVENT_STATE: return "STATE";
+    case NX_CLOCK_EVENT_TICK: return "TICK";
+    case NX_CLOCK_EVENT_ENDED: return "ENDED";
+    case NX_CLOCK_EVENT_INTERRUPTED: return "INTERRUPTED";
+    }
+    throw std::runtime_error("unknown clock event kind");
+}
+
+ClockEvent next_clock_event(const Session &session, const nx_cancel *cancel,
+                            const std::string &domain) {
+    nx_clock_event *raw_event = nullptr;
+    check(nx_session_next_clock_event(session.get(), cancel, &raw_event));
+    ClockEvent event(raw_event);
+    const uint8_t *name = nullptr;
+    size_t name_len = 0;
+    nx_clock_event_domain(event.get(), &name, &name_len);
+    if (borrowed(name, name_len) != domain) {
+        throw std::runtime_error("a clock event arrived for another domain");
+    }
+    return event;
+}
+
+uint64_t generation_of(const nx_clock_event *event) {
+    uint64_t generation = 0;
+    check(nx_clock_event_generation(event, &generation));
+    return generation;
+}
+
+// The committed clock of the generation the probe follows.
+struct PacedClock {
+    uint64_t generation = 0;
+    uint64_t period = 0;
+    uint64_t skew = 0;
+    int64_t origin = 0;
+    double rate = 0.0;
+
+    static PacedClock of(const nx_clock_event *event) {
+        PacedClock clock;
+        clock.generation = generation_of(event);
+        // The UTC anchor depends on when the scenario's START committed, so it is not reported.
+        check(nx_clock_event_paced(event, &clock.period, &clock.skew, &clock.origin, nullptr,
+                                   &clock.rate));
+        return clock;
+    }
+
+    std::string state_line(const std::string &domain) const {
+        uint64_t rate_bits = 0;
+        std::memcpy(&rate_bits, &rate, sizeof rate_bits);
+        char bits[17];
+        std::snprintf(bits, sizeof bits, "%016" PRIx64, rate_bits);
+        return "STATE domain=" + domain + " generation=" + std::to_string(generation) +
+               " state=paced period=" + std::to_string(period) + " skew=" + std::to_string(skew) +
+               " origin=" + std::to_string(origin) + " rate=f64:" + bits;
+    }
+
+    // The report line of a tick, after holding it to this clock: its boundary is the logical
+    // origin plus one period for every id before it, and the serving node's reading never precedes
+    // the origin.
+    std::string tick_line(const nx_clock_event *event, const std::string &domain) const {
+        if (generation_of(event) != generation) {
+            throw std::runtime_error("a tick belongs to another generation than the state before it");
+        }
+        uint64_t id = 0;
+        int64_t boundary = 0;
+        int64_t authority_utc = 0;
+        int64_t serving_logical = 0;
+        check(nx_clock_event_tick(event, &id, &boundary, &authority_utc, &serving_logical));
+        uint64_t offset = 0;
+        int64_t expected = 0;
+        if (id == 0 || __builtin_mul_overflow(id - 1, period, &offset) ||
+            offset > static_cast<uint64_t>(INT64_MAX) ||
+            __builtin_add_overflow(origin, static_cast<int64_t>(offset), &expected) ||
+            boundary != expected) {
+            throw std::runtime_error(
+                "a tick's boundary is not the origin plus one period for every id before it");
+        }
+        if (serving_logical < origin) {
+            throw std::runtime_error("the serving node's logical reading precedes the logical origin");
+        }
+        return "TICK domain=" + domain + " generation=" + std::to_string(generation) +
+               " boundary=origin+(id-1)*period";
+    }
+};
+
+// Cancels a clock wait from another thread, then lets a deadline end another. The session follows
+// no clock yet, so nothing but its token ends either wait.
+void check_clock_cancellation(const Session &session) {
+    Cancel cancel(nx_cancel_new());
+    std::atomic<nx_error_kind> waited{};
+    std::thread waiter([&] {
+        waited = failure_kind([&] {
+            nx_clock_event *event = nullptr;
+            check(nx_session_next_clock_event(session.get(), cancel.get(), &event));
+            ClockEvent owned(event);
+        });
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    nx_cancel_trigger(cancel.get());
+    waiter.join();
+    if (waited != NX_ERROR_CANCELLED) {
+        throw std::runtime_error("a cancelled clock wait did not report CANCELLED");
+    }
+
+    Cancel deadline = with_deadline(50);
+    nx_error_kind expired = failure_kind([&] {
+        nx_clock_event *event = nullptr;
+        check(nx_session_next_clock_event(session.get(), deadline.get(), &event));
+        ClockEvent owned(event);
+    });
+    if (expired != NX_ERROR_DEADLINE) {
+        throw std::runtime_error("an expired clock wait did not report DEADLINE");
+    }
+}
+
+// Attaches to the domain's clock, reads the state and the first tick of the generation the
+// scenario starts, and detaches.
+void run_clock(const Session &session, const std::string &domain) {
+    check_clock_cancellation(session);
+    Outcome attached = execute(session, "ATTACH DOMAIN CLOCK;", nullptr);
+    std::cout << "ATTACHED " << disposition_name(nx_outcome_disposition(attached.get()))
+              << std::endl;
+
+    Cancel deadline = with_deadline(120000);
+    ClockEvent state;
+    while (!state) {
+        ClockEvent event = next_clock_event(session, deadline.get(), domain);
+        nx_clock_event_kind kind = nx_clock_event_kind_of(event.get());
+        if (kind != NX_CLOCK_EVENT_STATE) {
+            throw std::runtime_error("the clock reported " + clock_kind_name(kind) +
+                                     " before the started state");
+        }
+        // The serving node may report the started generation uninstalled until it holds the
+        // committed mapping and an assigned clock authority.
+        nx_clock_state installed = NX_CLOCK_STOPPED;
+        check(nx_clock_event_state(event.get(), &installed));
+        if (installed == NX_CLOCK_PACED) {
+            state = std::move(event);
+        }
+    }
+    PacedClock clock = PacedClock::of(state.get());
+    const std::string reported_state = clock.state_line(domain);
+    std::cout << reported_state << std::endl;
+
+    ClockEvent tick;
+    while (!tick) {
+        ClockEvent event = next_clock_event(session, deadline.get(), domain);
+        nx_clock_event_kind kind = nx_clock_event_kind_of(event.get());
+        if (kind == NX_CLOCK_EVENT_TICK) {
+            tick = std::move(event);
+        } else if (kind == NX_CLOCK_EVENT_STATE) {
+            // The serving node reported the installation again; it is still the same generation.
+            if (generation_of(event.get()) != clock.generation) {
+                throw std::runtime_error("the clock moved to another generation before its first tick");
+            }
+        } else {
+            throw std::runtime_error("the clock reported " + clock_kind_name(kind) +
+                                     " before its first tick");
+        }
+    }
+    const std::string reported_tick = clock.tick_line(tick.get(), domain);
+    std::cout << reported_tick << std::endl;
+
+    // Keep a second reference to each event and release the first on another thread, so the
+    // events must read the same on the second alone.
+    ClockEvent retained_state(nx_clock_event_retain(state.get()));
+    ClockEvent retained_tick(nx_clock_event_retain(tick.get()));
+    std::thread releaser([first_state = std::move(state), first_tick = std::move(tick)]() mutable {
+        first_state.reset();
+        first_tick.reset();
+    });
+    releaser.join();
+    if (PacedClock::of(retained_state.get()).state_line(domain) != reported_state ||
+        clock.tick_line(retained_tick.get(), domain) != reported_tick) {
+        throw std::runtime_error("a retained clock event reads differently than it did");
+    }
+
+    Outcome detached = execute(session, "DETACH DOMAIN CLOCK;", nullptr);
+    std::cout << "DETACHED " << disposition_name(nx_outcome_disposition(detached.get()))
+              << std::endl;
+    std::cout << "CHECKS ok" << std::endl;
+    std::cout << "PASS" << std::endl;
+}
+
+void run(bool clock) {
     const std::string server = env("NERVIX_PROBE_GRPC_URI");
     const std::string username = env("NERVIX_PROBE_USERNAME");
     const std::string password = env("NERVIX_PROBE_PASSWORD");
     const std::string domain = env("NERVIX_PROBE_DOMAIN");
-    const std::string relay = env("NERVIX_PROBE_RELAY");
-    const std::string subscription = env("NERVIX_PROBE_SUBSCRIPTION");
-    const size_t expected_rows = std::stoul(env("NERVIX_PROBE_ROWS"));
 
     nx_session *raw_session = nullptr;
     check(nx_session_connect(bytes(server), server.size(), bytes(domain), domain.size(),
                              bytes(username), username.size(), bytes(password), password.size(),
                              nullptr, &raw_session));
     Session session(raw_session);
+    if (clock) {
+        run_clock(session, domain);
+        return;
+    }
+
+    const std::string relay = env("NERVIX_PROBE_RELAY");
+    const std::string subscription = env("NERVIX_PROBE_SUBSCRIPTION");
+    const size_t expected_rows = std::stoul(env("NERVIX_PROBE_ROWS"));
 
     Outcome operation = execute(session, "SHOW CREATE RELAY " + relay + ";", nullptr);
     std::cout << "OPERATION " << disposition_name(nx_outcome_disposition(operation.get()))
@@ -455,9 +648,9 @@ void run() {
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
     try {
-        run();
+        run(argc > 1 && std::string_view(argv[1]) == "clock");
     } catch (const std::exception &error) {
         std::cerr << "probe failed: " << error.what() << std::endl;
         return 1;
