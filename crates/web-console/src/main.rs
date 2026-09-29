@@ -10694,13 +10694,17 @@ mod tests {
             ChoiceControl::CodecVersion
             | ChoiceControl::SignalingVersion
             | ChoiceControl::ClientVersion
-            | ChoiceControl::VhostVersion => {
+            | ChoiceControl::VhostVersion
+            | ChoiceControl::HashVersion => {
                 nervix_client_wire::ChoiceTarget::CompletedResourceVersion
             }
             ChoiceControl::ClientSignaling | ChoiceControl::EndpointSignaling => {
                 nervix_client_wire::ChoiceTarget::SignalingProtocol
             }
             ChoiceControl::EndpointVhost => nervix_client_wire::ChoiceTarget::Vhost,
+            ChoiceControl::HashResource => nervix_client_wire::ChoiceTarget::Resource,
+            ChoiceControl::HashCodec => nervix_client_wire::ChoiceTarget::Codec,
+            ChoiceControl::HashKey => nervix_client_wire::ChoiceTarget::CodecField,
         };
         ConsoleRequest::Choice {
             request: ChoiceLookupRequest::new(target, Vec::new(), String::new()),

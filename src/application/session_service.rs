@@ -797,6 +797,8 @@ impl ChoicePageBasis {
             ChoiceTarget::CompletedResourceVersion => 10,
             ChoiceTarget::Vhost => 11,
             ChoiceTarget::SignalingProtocol => 12,
+            ChoiceTarget::Codec => 13,
+            ChoiceTarget::CodecField => 14,
         }]);
         hash_choice_text(&mut hasher, request.search());
         for dependency in request.dependencies() {
@@ -1024,7 +1026,10 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         | ChoiceTarget::CompletedResourceVersion => {
             return Err(ChoiceStatus::MissingContext);
         }
-        ChoiceTarget::Vhost | ChoiceTarget::SignalingProtocol => {
+        ChoiceTarget::Vhost
+        | ChoiceTarget::SignalingProtocol
+        | ChoiceTarget::Codec
+        | ChoiceTarget::CodecField => {
             return Err(ChoiceStatus::MissingContext);
         }
     };
@@ -1246,9 +1251,10 @@ impl SessionServiceImpl {
             | ChoiceTarget::CompletedResourceVersion => {
                 self.configured_choices_for(&request, session).await
             }
-            ChoiceTarget::Vhost | ChoiceTarget::SignalingProtocol => {
-                self.configured_choices_for(&request, session).await
-            }
+            ChoiceTarget::Vhost
+            | ChoiceTarget::SignalingProtocol
+            | ChoiceTarget::Codec
+            | ChoiceTarget::CodecField => self.configured_choices_for(&request, session).await,
         };
         let (choices, content_digest) = match resolved {
             Ok(resolved) => resolved,

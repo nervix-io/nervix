@@ -13714,6 +13714,24 @@ async fn when_selector_is_filled_with(world: &mut ScenarioWorld, selector: Strin
         .expect("selector must be fillable");
 }
 
+#[when(expr = "selector {string} is filled with text")]
+async fn when_selector_is_filled_with_text(
+    world: &mut ScenarioWorld,
+    selector: String,
+    #[step] step: &Step,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector actions");
+    let selector = expand_placeholders(world, &selector);
+    let value = expand_placeholders(world, docstring(step));
+    page.locator(&selector)
+        .fill(&value, None)
+        .await
+        .expect("selector must be fillable with multiline text");
+}
+
 #[when(expr = "selector {string} is pressed with {string}")]
 async fn when_selector_is_pressed_with(world: &mut ScenarioWorld, selector: String, key: String) {
     let page = world
@@ -14621,6 +14639,38 @@ async fn then_selector_has_value(world: &mut ScenarioWorld, selector: String, ex
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+#[then(expr = "selector {string} has value containing {string}")]
+async fn then_selector_has_value_containing(
+    world: &mut ScenarioWorld,
+    selector: String,
+    expected: String,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector assertions");
+    let selector = expand_placeholders(world, &selector);
+    let expected = expand_placeholders(world, &expected);
+    let locator = page.locator(&selector);
+    locator
+        .wait_for(Some(
+            WaitForOptions::builder()
+                .state(WaitForState::Visible)
+                .timeout(10_000.0)
+                .build(),
+        ))
+        .await
+        .expect("selector must become visible");
+    let value = locator
+        .input_value(None)
+        .await
+        .expect("selector value must be readable");
+    assert!(
+        value.contains(&expected),
+        "expected selector '{selector}' value to contain '{expected}', got '{value}'"
+    );
 }
 
 #[then(expr = "selector {string} is scrolled to bottom")]

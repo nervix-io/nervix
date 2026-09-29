@@ -43,6 +43,12 @@ A syntax error names the codec, domain, and direction and rejects the transactio
 is committed. The browser keeps the draft editable so the program can be corrected and submitted
 under the same name.
 
+The visual hash-map and Roto UDF forms validate incomplete drafts before rendering canonical
+NSPL. Missing resource versions, codec output fields, argument types, or source are shown as form
+validation errors while the draft stays editable. After submission, lookup loading and Roto
+compilation or test failures retain their server diagnostics; correcting the same draft starts a
+new command without claiming the failed creation succeeded.
+
 The expression VM returns reports for compile, batch, and runtime failures. `CompileError` keeps
 its typed diagnostic code, stable code spelling, operation span, and safe message; validation adds
 the model and route context without losing that cause. Roto setup returns `UdfError` reports and
