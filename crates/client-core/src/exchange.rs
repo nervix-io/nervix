@@ -416,6 +416,12 @@ impl<T> EventQueue<T> {
         let generation = self.inner.state.lock().generation.clone();
         self.close(&generation);
     }
+
+    /// Whether the generation the queue belongs to has ended.
+    #[cfg(test)]
+    pub(crate) fn is_closed(&self) -> bool {
+        self.inner.state.lock().condition == QueueCondition::Closed
+    }
 }
 
 impl EventQueue<SubscriptionEvent> {
@@ -893,6 +899,10 @@ impl ExchangeReader {
                 if !self.subscriptions.close(&ended.subscription) {
                     return ReaderFlow::Continue;
                 }
+                // The end is applied before its event is queued, so no caller reads an end the
+                // client does not hold, and a session lost before the end is read cannot restore
+                // the generation it ended.
+                self.sinks.desired.end(&ended, &self.generation);
                 self.forward(SubscriptionEvent::Ended(ended))
             }
             wire::ServerEvent::DomainClockObserved(observed) => {

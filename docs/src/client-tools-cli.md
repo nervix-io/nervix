@@ -168,6 +168,17 @@ session refuses one, a notice line reports the server's message and when the nex
 `DELETE SUBSCRIPTION` of a subscription no open session holds, because its session ended or the new
 session refused to open it again, completes at once and frees the name.
 
+When the server ends a subscription because its relay was redefined or removed, the subscription's
+last line reads:
+
+```text
+[events] subscription [watch] notice: the subscription ended: session subscription 'watch' ended because relay 'orders' in domain 'quickstart' no longer exists
+```
+
+The CLI never opens an ended subscription again, including after a reconnect. `CREATE SUBSCRIPTION`
+under the same name opens it again under the relay's current definition, and `DELETE SUBSCRIPTION`
+of it completes at once and frees the name.
+
 If server notices arrive faster than the CLI reads them, the client drops the ones it held and
 `[events] notice: server notices were dropped because they arrived faster than they were read`
 marks the gap; the notices after it keep printing.
@@ -325,7 +336,8 @@ backpressure are covered in [Sessions](sessions.md).
 The subcommand prints server notices beside the rows, and keeps printing both across reconnects:
 the client opens the subscription again on its next session, reports the gap as an interruption
 notice, and resumes the notices of the new session, as described in [Asynchronous
-Output](#asynchronous-output).
+Output](#asynchronous-output). A subscription the server ended is not opened again: the subcommand
+prints its end and keeps printing server notices until interrupted.
 
 ## Following A Domain Clock
 

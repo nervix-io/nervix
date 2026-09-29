@@ -27,7 +27,9 @@ pub enum SubscriptionEvent {
     DeliveryLost(SubscriptionDeliveryLost),
     /// Rows were skipped; the subscription stays open.
     RowsSkipped(SubscriptionRowsSkipped),
-    /// The server closed the subscription. No further rows follow for its generation.
+    /// The server ended the subscription's generation, because its relay was redefined or removed.
+    /// It is the generation's last event, and the client never opens the generation again:
+    /// subscribing under its name opens a new one.
     Ended(SubscriptionEnded),
     /// The exchange ended, leaving a gap before any restoration on a new session.
     Interrupted(SubscriptionInterruption),

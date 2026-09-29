@@ -158,7 +158,8 @@ typedef enum nx_event_kind {
     NX_EVENT_DELIVERY_LOST = 2,
     /* Rows were skipped and the subscription stays open; `nx_event_row_count` is how many. */
     NX_EVENT_ROWS_SKIPPED = 3,
-    /* The server ended the subscription. */
+    /* The server ended the subscription's generation, because its relay was redefined or removed.
+       It is the generation's last event, and the session never opens the generation again. */
     NX_EVENT_ENDED = 4,
     /* The session was lost, leaving a gap before the subscription is restored. */
     NX_EVENT_INTERRUPTED = 5,
