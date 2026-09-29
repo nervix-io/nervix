@@ -39,6 +39,7 @@ use crate::common::port_pool::{next_port, release_test_ports};
 #[derive(Debug)]
 pub(crate) struct TcpForwarders {
     port: u16,
+    target: SocketAddr,
     forwarders: BTreeMap<IpAddr, TcpForwarder>,
 }
 
@@ -59,6 +60,7 @@ impl TcpForwarders {
         // Constructed before anything binds, so a failed bind still gives the port back.
         let mut forwarders = Self {
             port,
+            target,
             forwarders: BTreeMap::new(),
         };
         for address in addresses {
@@ -89,6 +91,21 @@ impl TcpForwarders {
         (&mut forwarder.listener).await.discarded(
             "an aborted listener ends with a cancellation, and its socket closes with it",
         );
+        Ok(())
+    }
+
+    /// Listen again on the same reserved port after `stop` closed this address. New client
+    /// connections reach the same target; the old connections stay closed.
+    pub(crate) async fn restart(&mut self, address: IpAddr) -> io::Result<()> {
+        if self.forwarders.contains_key(&address) {
+            return Err(io::Error::other(format!(
+                "a forwarder already listens at {address}"
+            )));
+        }
+        let listener = TcpListener::bind(SocketAddr::new(address, self.port)).await?;
+        self.forwarders
+            .insert(address, TcpForwarder::start(listener, self.target))
+            .discarded("the address was absent before its listener was rebound");
         Ok(())
     }
 

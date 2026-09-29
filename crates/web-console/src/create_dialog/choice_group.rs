@@ -6,14 +6,13 @@
 //! - **Depends on.** Create dialog signals and the client choice contract.
 //! - **Must not know.** Server choice resolution, browser transport, or registry internals.
 
-use futures_channel::mpsc::UnboundedSender;
 use leptos::prelude::*;
 use nervix_client_wire::ChoiceValue;
 use nervix_models::ModelKind;
 
 use super::{
-    ChoiceControl, ChoiceControlSignals, ChoiceLoad, CodecFormatDraft, ConsoleRequest,
-    CreateSignals, event_target_value, request_choices,
+    ChoiceControl, ChoiceControlSignals, ChoiceLoad, CodecFormatDraft, CreateSignals,
+    RequestSender, event_target_value, request_choices,
 };
 
 #[component]
@@ -22,7 +21,7 @@ pub(super) fn ChoiceGroup(
     label: &'static str,
     control: ChoiceControl,
     signals: CreateSignals,
-    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    request_tx: RwSignal<Option<RequestSender>>,
     session_generation: RwSignal<u64>,
     /// Shows each choice's detail beside its label, as a typed field shows its type.
     #[prop(optional)]

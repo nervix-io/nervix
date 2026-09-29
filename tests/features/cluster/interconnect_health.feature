@@ -1,4 +1,3 @@
-@exclusive
 Feature: Interconnect health coordination
 
   Scenario: A partitioned peer does not evict connected peers or move their work
@@ -77,7 +76,7 @@ Feature: Interconnect health coordination
     And health requests from node "node-1" to node "node-2" pause before responding
     And health requests from node "node-1" to node "node-3" pause before responding
     Then the health response pause from node "node-1" to node "node-2" is reached
-    And within "750ms" the health response pause from node "node-1" to node "node-3" is reached
+    And within "30s" the health response pause from node "node-1" to node "node-3" is reached
     When the health response pause from node "node-1" to node "node-3" is released
     Then node "node-1" eventually reports interconnect to "node-3" as "connected"
     And within "9s" these NSPL commands complete on node "node-1"

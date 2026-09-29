@@ -51,7 +51,7 @@ subcommand for this release.
 
 The client runs in exactly one of three modes, in this order of precedence:
 
-1. **A subcommand**, such as `subscribe`, `backup`, or `drain-node`.
+1. **A subcommand**, such as `subscribe`, `domain-clock`, `backup`, or `drain-node`.
 2. **`--command`**, which submits NSPL, prints the result, and exits.
 3. **The interactive REPL**, when neither of the above is given.
 
@@ -267,6 +267,34 @@ nervix-cli --domain quickstart subscribe sampled orders \
 
 `--dropping` and `--blocking` are mutually exclusive. Subscription semantics, sampling, and
 backpressure are covered in [Sessions](sessions.md).
+
+## Following A Domain Clock
+
+The `domain-clock` subcommand attaches to the selected domain's clock and prints its state and
+progress on stdout until interrupted:
+
+```bash
+nervix-cli --domain simulation domain-clock
+```
+
+The first line is the attach reply. Every later clock state, tick, interruption, or attachment end
+uses the same one-line format as the REPL's [Asynchronous Output](#asynchronous-output):
+
+```text
+attached to the clock of domain 'simulation': generation 1, paced: period 1s, skew 100ms, logical origin 2030-01-01T00:00:00Z, UTC anchor 2026-09-27T09:30:00.125Z, time rate 2
+[events] domain clock [simulation] tick: generation 1, id 1, boundary 2030-01-01T00:00:00Z, authority UTC 2026-09-27T09:30:00.125Z, node logical 2030-01-01T00:00:00Z
+[events] domain clock [simulation]: generation 1, stopped
+[events] domain clock [simulation]: generation 2, paced: period 1s, skew 100ms, logical origin 2026-09-27T09:31:00Z, UTC anchor 2026-09-27T09:31:00Z, time rate 1
+```
+
+The domain and generation identify each state. A paced state includes its period, skew, logical
+origin, UTC anchor, and rate. A tick includes its id, logical boundary, the authority's UTC
+observation, and the serving node's logical reading. Tick ids increase within a generation but may
+skip when the client or server coalesces progress. After a redirect or transport loss, an
+interruption line reports the gap and the client's restored attachment prints the fresh state.
+The server may end an attachment when the domain disappears; the end line is the last clock line
+and the command exits. Ctrl-C detaches the clock and exits successfully. A refused attach,
+including a missing domain, prints the typed reason on stderr and exits nonzero.
 
 ## Cluster Node Administration
 

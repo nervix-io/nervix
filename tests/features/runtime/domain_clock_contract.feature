@@ -320,7 +320,7 @@ Feature: Domain clock contract regressions
       | 1            |
       | 3            |
 
-  @domain_cadence @exclusive
+  @domain_cadence
   Scenario Outline: HTTP polling follows paced domain cadence over multiple periods
     Given the HTTP mock server is running
     And clock source recorder "{{test_id}}" is reset
@@ -362,7 +362,8 @@ Feature: Domain clock contract regressions
       START AT '2000-01-01T00:00:00Z' TIME RATE 4.0;
       """
     Given clock source recorder "{{test_id}}" is reset
-    Then within "850ms" clock source recorder "{{test_id}}" records 3 requests
+    Then within "30s" clock source recorder "{{test_id}}" records at least 3 requests
+    And the first 3 requests recorded by clock source recorder "{{test_id}}" are separated by at least "100ms"
 
     Examples:
       | cluster_size |

@@ -247,6 +247,7 @@ mod processor_template;
 mod processors;
 mod published_generation;
 mod reconnect_backoff;
+mod record_metadata;
 mod reingestor;
 mod relay_batch;
 mod relay_boundary;
@@ -468,6 +469,7 @@ use processors::{
     WindowBounds, WindowFlushContext,
 };
 pub(in crate::runtime) use reconnect_backoff::{AcknowledgementKeepalive, RuntimeReconnectBackoff};
+use record_metadata::RecordMetadataColumns;
 use reingestor::{PlannedReingestorInput, ReingestorInputConsumer, ReingestorRuntimes};
 pub(in crate::runtime) use relay_batch::RelayDispatchResult;
 use relay_batch::build_stream_record_batch_preserving_acks;

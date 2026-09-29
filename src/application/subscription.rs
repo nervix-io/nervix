@@ -1889,7 +1889,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn subscription_interest_request_preserves_the_remote_target() {
         let TestService {
             service,
