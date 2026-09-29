@@ -439,6 +439,12 @@ describing statement produced, and the summary of a backup's archive or the repo
 The disposition is the one field a client decides from; the message is for a person. Each
 disposition belongs to one phase of the command and makes one statement about its effect:
 
+Consensus proposal failures reach the session with typed leadership, conflict, storage, and
+transaction-mutation causes in local reports. The session selects its disposition from those
+causes and the command's admission phase, while the display message retains the underlying Raft
+or I/O reason. Report carriage does not change request correlation, the durable acknowledgement
+boundary, or the stored transaction response.
+
 | Disposition | Phase | What it establishes | What a client does |
 | --- | --- | --- | --- |
 | `CommandCompleted` | Finalization | The command reached its completion boundary. `already_existed` says a creating statement found its entity present and changed nothing. | Report success. |

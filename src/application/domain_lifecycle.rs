@@ -120,9 +120,9 @@ impl SessionServiceImpl {
                     .await
                 {
                     return self
-                        .consensus_error_response(
+                        .consensus_report_response(
                             &error,
-                            format!("failed to create domain '{}': {error}", state.id.as_str()),
+                            format!("failed to create domain '{}'", state.id.as_str()),
                         )
                         .await;
                 }
@@ -160,9 +160,9 @@ impl SessionServiceImpl {
             .pause_domain(domain.clone(), mutation)
             .await
         {
-            let reason = error.to_string();
+            let reason = ConsensusError::report_message(&error);
             if let (Some(impact), Some(attempt)) = (impact, attempt) {
-                if matches!(&error, ConsensusError::Conflict(_)) {
+                if matches!(error.current_context(), ConsensusError::Conflict(_)) {
                     impact.fail(
                         attempt,
                         nervix_models::ImpactDiagnosticKind::Quiescence,
@@ -176,12 +176,10 @@ impl SessionServiceImpl {
                     );
                 }
             }
-            return Err(
-                Report::new(error).change_context(DomainAlterError::PauseDomain {
-                    domain: domain.clone(),
-                    reason,
-                }),
-            );
+            return Err(error.change_context(DomainAlterError::PauseDomain {
+                domain: domain.clone(),
+                reason,
+            }));
         }
         if let (Some(impact), Some(attempt)) = (impact, attempt) {
             impact.confirm(attempt);
@@ -523,9 +521,9 @@ impl SessionServiceImpl {
                 }
             }
             Err(error) => {
-                self.consensus_error_response(
+                self.consensus_report_response(
                     &error,
-                    format!("failed to create domain '{}': {error}", create.id.as_str()),
+                    format!("failed to create domain '{}'", create.id.as_str()),
                 )
                 .await
             }
@@ -660,12 +658,9 @@ impl SessionServiceImpl {
                     .await;
             }
             return self
-                .consensus_error_response(
+                .consensus_report_response(
                     &error,
-                    format!(
-                        "failed to alter placement for domain '{}': {error}",
-                        domain.as_str()
-                    ),
+                    format!("failed to alter placement for domain '{}'", domain.as_str()),
                 )
                 .await;
         }
@@ -810,9 +805,9 @@ impl SessionServiceImpl {
                 command_ok(format!("started domain '{}'", domain_id.as_str()))
             }
             Err(error) => {
-                self.consensus_error_response(
+                self.consensus_report_response(
                     &error,
-                    format!("failed to start domain '{}': {error}", domain_id.as_str()),
+                    format!("failed to start domain '{}'", domain_id.as_str()),
                 )
                 .await
             }
@@ -849,9 +844,9 @@ impl SessionServiceImpl {
                 command_ok(format!("stopped domain '{}'", domain_id.as_str()))
             }
             Err(error) => {
-                self.consensus_error_response(
+                self.consensus_report_response(
                     &error,
-                    format!("failed to stop domain '{}': {error}", domain_id.as_str()),
+                    format!("failed to stop domain '{}'", domain_id.as_str()),
                 )
                 .await
             }

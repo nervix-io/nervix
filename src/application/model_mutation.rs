@@ -1685,7 +1685,7 @@ impl SessionServiceImpl {
                     ))
                     .await
                     {
-                        let err = error.to_string();
+                        let err = ConsensusError::report_message(&error);
                         if let Some(handoff) = ownership_handoff.take() {
                             Box::pin(self.abort_planned_ownership_handoff(
                                 &domain,
@@ -1711,7 +1711,7 @@ impl SessionServiceImpl {
                             .await
                         {
                             return Box::pin(self.consensus_error_response(
-                                &error,
+                                error.current_context(),
                                 format!(
                                     "failed to publish model alteration schedule for domain '{}': \
                                      {err}; {rollback_error}",
@@ -1730,7 +1730,9 @@ impl SessionServiceImpl {
                             error = %err,
                             "failed to publish schedule for model mutation batch"
                         );
-                        if let ConsensusError::LeadershipLost { leader_id } = &error {
+                        if let ConsensusError::LeadershipLost { leader_id } =
+                            error.current_context()
+                        {
                             return Box::pin(self.not_leader_response(query, leader_id.clone()))
                                 .await;
                         }

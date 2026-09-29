@@ -302,9 +302,9 @@ impl SessionServiceImpl {
                 )),
             },
             Err(error) => {
-                self.consensus_error_response(
+                self.consensus_report_response(
                     &error,
-                    format!("failed to create user '{}': {error}", create.name.as_str()),
+                    format!("failed to create user '{}'", create.name.as_str()),
                 )
                 .await
             }
@@ -351,9 +351,9 @@ impl SessionServiceImpl {
                 )),
             },
             Err(error) => {
-                self.consensus_error_response(
+                self.consensus_report_response(
                     &error,
-                    format!("failed to create user '{}': {error}", name.as_str()),
+                    format!("failed to create user '{}'", name.as_str()),
                 )
                 .await
             }

@@ -57,6 +57,21 @@ A storage failure marks that node's consensus store failed. Later writes return
 after the device completed the write, so a failed or disconnected request is an uncertain outcome,
 not proof that the command was absent. Recovery reads the durable state to decide.
 
+Consensus startup, proposal, and membership operations carry contextual error reports locally.
+Database open failures retain their I/O cause; Raft configuration, startup, and handler
+registration failures retain the failure beneath the startup context. A rejected proposal keeps
+its Raft cause while classifying a known redirect as leadership loss, a fatal storage failure as
+storage, and other Raft write failures separately. A state-machine refusal remains a typed
+conflict, distinct from a storage or leadership failure. These classifications determine whether
+the control plane redirects, retries, or reports an uncertain failure; it does not parse the error
+message to decide.
+
+Transaction mutation checks also create local reports. Raft's applied response retains its
+existing serialized `TransactionMutationError` outcome, so report frames are local to the state
+machine evaluation. The proposer creates a new report from the exact typed outcome received over
+Raft and adds transaction context when the control plane takes ownership. The response encoding,
+client acknowledgement boundary, and recovery rules in this chapter are unchanged.
+
 ### Applied Ranges And Client Replies
 
 Committed entries are applied in order. Entries already available together share an atomic write

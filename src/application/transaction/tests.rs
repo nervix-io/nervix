@@ -7,10 +7,12 @@
 
 use std::time::Duration;
 
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::CommandRequest;
 use nervix_consensus::{
-    ReplicatedTransaction, TransactionActivity, TransactionOutcome, TransactionState,
+    ConsensusError, ConsensusTransactionError, ReplicatedTransaction, TransactionActivity,
+    TransactionMutationError, TransactionOutcome, TransactionState,
 };
 use nervix_models::{
     CreateRelay, CreateSchema, DomainName, ExecutionStepOutcome, ModelName, Timestamp,
@@ -43,6 +45,53 @@ fn planning_error_message_includes_attached_validation_detail() {
         super::transaction_planning_error_message(&error),
         "transaction operation 1 failed external model validation: paced ingestor requires \
          TIMESTAMP NOW"
+    );
+}
+
+#[test]
+fn transaction_commit_proposal_retains_consensus_failure_for_display_and_redirect() {
+    let error = Report::new(ConsensusError::LeadershipLost { leader_id: None })
+        .change_context(ConsensusTransactionError::Consensus)
+        .change_context(super::TransactionCommitError::Proposal);
+
+    assert!(matches!(
+        error.downcast_ref::<ConsensusError>(),
+        Some(ConsensusError::LeadershipLost { leader_id: None })
+    ));
+    assert_eq!(
+        super::transaction_commit_error_message(&error),
+        "raft proposal lost leadership"
+    );
+}
+
+#[test]
+fn transaction_commit_preserves_mutation_conflict_reason() {
+    let error = Report::new(ConsensusTransactionError::Mutation(
+        TransactionMutationError::StepConflict {
+            id: "tx-conflict".to_string(),
+            reason: "schedule changed".to_string(),
+        },
+    ))
+    .change_context(super::TransactionCommitError::Proposal);
+
+    assert_eq!(
+        error.current_context().planning_input_conflict(&error),
+        Some("schedule changed")
+    );
+    assert_eq!(
+        super::transaction_commit_error_message(&error),
+        "transaction 'tx-conflict' commit step conflicted with replicated state: schedule changed"
+    );
+
+    let planning = Report::new(super::TransactionCommitError::PlanningInputsChanged {
+        id: "tx-conflict".to_string(),
+        reason: "schema changed".to_string(),
+    });
+    assert_eq!(
+        planning
+            .current_context()
+            .planning_input_conflict(&planning),
+        Some("schema changed")
     );
 }
 

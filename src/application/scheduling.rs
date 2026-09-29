@@ -346,9 +346,9 @@ impl SessionServiceImpl {
                 Ok(()) => {}
                 Err(error) => {
                     return self
-                        .consensus_error_response(
+                        .consensus_report_response(
                             &error,
-                            format!("failed to drop node '{node_id}': {error}"),
+                            format!("failed to drop node '{node_id}'"),
                         )
                         .await;
                 }
@@ -479,10 +479,7 @@ impl SessionServiceImpl {
         {
             let action = if cordoned { "cordon" } else { "uncordon" };
             return self
-                .consensus_error_response(
-                    error.current_context(),
-                    format!("failed to {action} node '{node_id}': {error}"),
-                )
+                .consensus_report_response(&error, format!("failed to {action} node '{node_id}'"))
                 .await;
         }
 
@@ -512,9 +509,9 @@ impl SessionServiceImpl {
             .await
         {
             return self
-                .consensus_error_response(
-                    error.current_context(),
-                    format!("failed to cordon node '{node_id}' before drain: {error}"),
+                .consensus_report_response(
+                    &error,
+                    format!("failed to cordon node '{node_id}' before drain"),
                 )
                 .await;
         }
@@ -568,11 +565,10 @@ impl SessionServiceImpl {
                         Ok(acquired) => acquired,
                         Err(error) => {
                             return self
-                                .consensus_error_response(
-                                    error.current_context(),
+                                .consensus_report_response(
+                                    &error,
                                     format!(
-                                        "failed to acquire drain ownership for domain '{}': \
-                                         {error}",
+                                        "failed to acquire drain ownership for domain '{}'",
                                         domain.as_str()
                                     ),
                                 )
@@ -655,13 +651,14 @@ impl SessionServiceImpl {
                         .replace_domain_schedule(inputs, Some(desired), domain_mutation.as_ref())
                         .await
                     {
-                        if let ConsensusError::LeadershipLost { .. } = &error {
+                        let message = ConsensusError::report_message(&error);
+                        if let ConsensusError::LeadershipLost { .. } = error.current_context() {
                             return self
                                 .consensus_error_response(
-                                    &error,
+                                    error.current_context(),
                                     format!(
                                         "failed to publish initial drain schedule for domain \
-                                         '{domain}': {error}"
+                                         '{domain}': {message}"
                                     ),
                                 )
                                 .await;
@@ -670,7 +667,7 @@ impl SessionServiceImpl {
                         failed_domains.insert(domain.clone());
                         outcomes.push(format!(
                             "- domain={} owner={node_id} failed: could not publish initial \
-                             schedule: {error}",
+                             schedule: {message}",
                             domain.as_str()
                         ));
                         handled_this_iteration = true;
@@ -762,17 +759,18 @@ impl SessionServiceImpl {
                     .replace_domain_schedule(inputs, Some(next), domain_mutation.as_ref())
                     .await
                 {
+                    let message = ConsensusError::report_message(&error);
                     if let Some(handoff) = handoff.take() {
                         self.abort_planned_ownership_handoff(&domain, handoff, None)
                             .await;
                     }
-                    if let ConsensusError::LeadershipLost { .. } = &error {
+                    if let ConsensusError::LeadershipLost { .. } = error.current_context() {
                         return self
                             .consensus_error_response(
-                                &error,
+                                error.current_context(),
                                 format!(
                                     "failed to commit drain schedule for domain '{domain}': \
-                                     {error}"
+                                     {message}"
                                 ),
                             )
                             .await;
@@ -781,7 +779,7 @@ impl SessionServiceImpl {
                     failed_units.insert(unit_key);
                     outcomes.extend(planned_moves.iter().map(|moved| {
                         format!(
-                            "- kind={} name={} owner={} failed: schedule commit failed: {error}",
+                            "- kind={} name={} owner={} failed: schedule commit failed: {message}",
                             moved.entity.kind.as_ref(),
                             moved.entity.identifier.as_str(),
                             moved.former_owner

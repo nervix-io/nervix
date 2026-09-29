@@ -729,12 +729,9 @@ impl SessionServiceImpl {
                 )),
             },
             Err(error) => {
-                self.consensus_error_response(
-                    error.current_context(),
-                    format!(
-                        "failed to create resource '{}': {error}",
-                        create.identifier.as_str()
-                    ),
+                self.consensus_report_response(
+                    &error,
+                    format!("failed to create resource '{}'", create.identifier.as_str()),
                 )
                 .await
             }
