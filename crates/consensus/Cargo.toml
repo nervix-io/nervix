@@ -10,6 +10,8 @@ workspace = true
 
 [features]
 default = []
+# Selects Loom's primitives for the whole graph, so a Loom model of a consensus owner runs on them.
+loom = ["nervix-execution/loom", "nervix-primitives/loom"]
 shuttle = [
   "nervix-execution/shuttle",
   "nervix-interconnect/shuttle",

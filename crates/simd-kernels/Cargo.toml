@@ -13,8 +13,14 @@ arch-into = { workspace = true }
 error-stack = { workspace = true }
 fearless_simd = { workspace = true }
 meticulous = { workspace = true }
+nervix-approx-into = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 fastrand = { workspace = true }
 hdrhistogram = { workspace = true }
+
+[[bench]]
+harness = false
+name = "window_admission"

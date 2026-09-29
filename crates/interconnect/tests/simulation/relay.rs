@@ -101,10 +101,7 @@ fn relay_payload(delivery: RelayDelivery, ack_id: u64, sender: &Transport) -> Re
         batch_ipc,
         metadata: Vec::new(),
         acks: Vec::new(),
-        admission: Some(RemoteAckRegistration {
-            ack_id,
-            reply_node_id: sender.node_id().clone(),
-        }),
+        admission: Some(fixture_registration(ack_id, sender)),
     }
 }
 
@@ -363,7 +360,7 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                             assert!(matches!(
                                 outcome.envelope,
                                 Envelope::Ack(RemoteAckResolution {
-                                    ack_id: 71,
+                                    registration: RemoteAckRegistration { ack_id: 71, .. },
                                     outcome: RemoteAckOutcome::Ack
                                 })
                             ));
