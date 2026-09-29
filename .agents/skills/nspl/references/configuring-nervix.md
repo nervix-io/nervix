@@ -194,6 +194,13 @@ relay. Do not use them to scan across branches.
   `MODE ACK` and one whose body RabbitMQ refuses as larger than its `max_message_size`. RabbitMQ
   counts the body alone, so a `MAX SIZE` no larger than `max_message_size` suffices there; see
   [Emitters](../../../docs/src/emitters.md#broker-and-message-emitters).
+  A ClickHouse, Postgres, MySQL or MongoDB emitter writes the rows of successive carriers of one
+  relay and branch as inserts or bulk writes of at most `MAX MESSAGES` rows whose measured request —
+  the `JSONEachRow` body, the statement text and bound values, or the member documents — is at most
+  `MAX SIZE`; a row that alone exceeds it follows `ON MESSAGE ERROR` as a `validation` error. MySQL
+  also caps each insert at the rows whose placeholders fit 65,535, and a MongoDB document above
+  16 MiB is rejected before its write; see
+  [Database writes](../../../docs/src/emitters.md#database-writes).
   A batching OTEL emitter bounds each export request by the number of successfully mapped source
   records and the exact uncompressed protobuf size, including resource and scope. An oversized
   candidate is divided and an oversized singleton follows `ON MESSAGE ERROR`; without the clause,
@@ -339,6 +346,9 @@ Choose checks relevant to the configured graph:
   `does not exist` refusal means the cluster has no such domain, not that the node restarted.
 - `nervix-cli --domain <domain> domain-clock` follows that clock from a shell until Ctrl-C,
   printing the attach reply, state changes, and tick lines.
+- A host using the shared C binding executes attach and detach through `nx_session_execute` and
+  reads later states and ticks with `nx_session_next_clock_event`; the binding does not expose the
+  initial state from the attach reply as a typed outcome.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.
 - `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
   expiry outcomes.

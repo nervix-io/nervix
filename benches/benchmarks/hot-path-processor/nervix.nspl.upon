@@ -1,8 +1,10 @@
 BEGIN;
 CREATE SCHEMA benchmark_record (
+  id STRING,
   value STRING
 );
 CREATE WIRE JSON SCHEMA benchmark_wire MODE STRICT (
+  id string,
   value string
 );
 CREATE CODEC benchmark_codec
@@ -41,7 +43,8 @@ CREATE JUNCTION benchmark_transform_{{ lane }}
   FROM benchmark_ingested_{{ lane }}
   UNBRANCHED
   TO benchmark_records
-    SET value = {{ parameters.transform_expression }}
+    SET id = input.id,
+        value = {{ parameters.transform_expression }}
     FLUSH IMMEDIATE
     ON MESSAGE ERROR LOG;
 {% endfor %}

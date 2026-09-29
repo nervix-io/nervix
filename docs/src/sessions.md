@@ -182,9 +182,10 @@ An attachment moves through one lifecycle:
   attachment. A request sent after that frame finds the attachment gone: an attach attaches again
   and a detach is refused as not attached.
 - **Session end.** The attachment ends with the session, and nothing is sent about it. The Rust
-  client and the CLI attach every clock they followed again on their next session, which delivers
-  the clock as it is then and the newest tick its serving node holds. That tick can repeat one the
-  client already received, or precede it when another node serves the new session.
+  client, the CLI, and every host of the shared C binding attach every clock they followed again on
+  their next session, which delivers the clock as it is then and the newest tick its serving node
+  holds. That tick can repeat one the client already received, or precede it when another node
+  serves the new session.
 
 Both statements run in order with the session's commands and are refused, with the session-local
 refusal, while the session holds a transaction. Neither is persisted or becomes transaction

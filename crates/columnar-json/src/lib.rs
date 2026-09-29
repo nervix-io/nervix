@@ -43,6 +43,18 @@ pub enum Float32Encoding {
     WidenedF64,
 }
 
+/// How a binary Arrow value is carried inside a JSON string.
+#[derive(Clone, Copy, Debug)]
+pub enum BytesEncoding {
+    /// Padded standard base64, which every JSON reader takes as text.
+    Base64,
+    /// The octets themselves, escaping only the quote, the backslash and the control octets.
+    /// Octets that are not UTF-8 are written as they are, so only a reader that stores a string's
+    /// octets without requiring UTF-8, such as ClickHouse's `JSONEachRow` input, reads the value
+    /// back.
+    Octets,
+}
+
 /// One object field, compiled once and reused for every batch encoded with that schema.
 #[derive(Clone, Debug)]
 pub struct JsonColumnSpec {
@@ -50,6 +62,7 @@ pub struct JsonColumnSpec {
     quoted_key: Vec<u8>,
     nulls: FieldNulls,
     float32_encoding: Float32Encoding,
+    bytes_encoding: BytesEncoding,
 }
 
 impl JsonColumnSpec {
@@ -61,11 +74,18 @@ impl JsonColumnSpec {
             quoted_key,
             nulls,
             float32_encoding: Float32Encoding::Native,
+            bytes_encoding: BytesEncoding::Base64,
         }
     }
 
     pub fn with_float32_encoding(mut self, encoding: Float32Encoding) -> Self {
         self.float32_encoding = encoding;
+        self
+    }
+
+    /// How this field's binary values, and the binary elements of its lists, are written.
+    pub fn with_bytes_encoding(mut self, encoding: BytesEncoding) -> Self {
+        self.bytes_encoding = encoding;
         self
     }
 }
@@ -139,7 +159,10 @@ enum JsonColumn<'a> {
         values: &'a StringArray,
         escapes: JsonEscapeClassification,
     },
-    Bytes(&'a BinaryArray),
+    Bytes {
+        values: &'a BinaryArray,
+        encoding: BytesEncoding,
+    },
     Datetime(&'a TimestampNanosecondArray),
     List {
         offsets: &'a ListArray,
@@ -173,18 +196,19 @@ impl<'a> JsonColumns<'a> {
         }
         let mut fields = Vec::with_capacity(specs.len());
         for (spec, array) in specs.iter().zip(batch.columns()) {
-            let column = JsonColumn::new(array.as_ref()).map_err(|report| {
-                let context = match report.current_context() {
-                    ColumnBuildError::Unsupported(data_type) => JsonColumnError::Unsupported {
-                        column: spec.name.clone(),
-                        data_type: data_type.clone(),
-                    },
-                    ColumnBuildError::StringOffsets => JsonColumnError::StringOffsets {
-                        column: spec.name.clone(),
-                    },
-                };
-                report.change_context(context)
-            })?;
+            let column =
+                JsonColumn::new(array.as_ref(), spec.bytes_encoding).map_err(|report| {
+                    let context = match report.current_context() {
+                        ColumnBuildError::Unsupported(data_type) => JsonColumnError::Unsupported {
+                            column: spec.name.clone(),
+                            data_type: data_type.clone(),
+                        },
+                        ColumnBuildError::StringOffsets => JsonColumnError::StringOffsets {
+                            column: spec.name.clone(),
+                        },
+                    };
+                    report.change_context(context)
+                })?;
             fields.push(JsonField { spec, column });
         }
         Ok(Self {
@@ -247,7 +271,10 @@ impl<'a> JsonColumns<'a> {
 }
 
 impl<'a> JsonColumn<'a> {
-    fn new(array: &'a dyn Array) -> error_stack::Result<Self, ColumnBuildError> {
+    fn new(
+        array: &'a dyn Array,
+        bytes_encoding: BytesEncoding,
+    ) -> error_stack::Result<Self, ColumnBuildError> {
         macro_rules! downcast {
             ($ty:ty, $variant:ident) => {
                 if let Some(values) = array.as_any().downcast_ref::<$ty>() {
@@ -266,8 +293,13 @@ impl<'a> JsonColumn<'a> {
         downcast!(Int64Array, I64);
         downcast!(Float32Array, F32);
         downcast!(Float64Array, F64);
-        downcast!(BinaryArray, Bytes);
         downcast!(TimestampNanosecondArray, Datetime);
+        if let Some(values) = array.as_any().downcast_ref::<BinaryArray>() {
+            return Ok(Self::Bytes {
+                values,
+                encoding: bytes_encoding,
+            });
+        }
         if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
             let escapes =
                 JsonEscapeClassification::new(values.value_data(), values.value_offsets())
@@ -275,14 +307,14 @@ impl<'a> JsonColumn<'a> {
             return Ok(Self::String { values, escapes });
         }
         if let Some(offsets) = array.as_any().downcast_ref::<ListArray>() {
-            let elements = Self::new(offsets.values().as_ref())?;
+            let elements = Self::new(offsets.values().as_ref(), bytes_encoding)?;
             return Ok(Self::List {
                 offsets,
                 elements: Box::new(elements),
             });
         }
         if let Some(offsets) = array.as_any().downcast_ref::<FixedSizeListArray>() {
-            let elements = Self::new(offsets.values().as_ref())?;
+            let elements = Self::new(offsets.values().as_ref(), bytes_encoding)?;
             return Ok(Self::FixedList {
                 offsets,
                 elements: Box::new(elements),
@@ -307,7 +339,7 @@ impl<'a> JsonColumn<'a> {
             Self::F32(values) => values.is_null(row),
             Self::F64(values) => values.is_null(row),
             Self::String { values, .. } => values.is_null(row),
-            Self::Bytes(values) => values.is_null(row),
+            Self::Bytes { values, .. } => values.is_null(row),
             Self::Datetime(values) => values.is_null(row),
             Self::List { offsets, .. } => offsets.is_null(row),
             Self::FixedList { offsets, .. } => offsets.is_null(row),
@@ -398,9 +430,12 @@ impl<'a> JsonColumn<'a> {
                     write_json_bytes!(output.write_all(b"\""));
                 }
             }
-            Self::Bytes(values) => {
+            Self::Bytes { values, encoding } => {
                 write_json_bytes!(output.write_all(b"\""));
-                Self::write_base64(values.value(row), output)?;
+                match encoding {
+                    BytesEncoding::Base64 => Self::write_base64(values.value(row), output)?,
+                    BytesEncoding::Octets => Self::write_octets(values.value(row), output)?,
+                }
                 write_json_bytes!(output.write_all(b"\""));
             }
             Self::Datetime(values) => {
@@ -474,6 +509,45 @@ impl<'a> JsonColumn<'a> {
                 base64_simd::STANDARD.encode_as_str(chunk, scratch[..encoded_len].as_out());
             write_json_bytes!(output.write_all(encoded.as_bytes()));
         }
+        Ok(())
+    }
+
+    /// Writes `octets` as the characters of a JSON string that read back as exactly those octets.
+    ///
+    /// The quote and the backslash are escaped with a backslash, and a control octet as `\u00XX`,
+    /// which decodes to that one octet. Every other octet is written as it is, in runs between the
+    /// escaped ones.
+    fn write_octets<W: io::Write>(
+        octets: &[u8],
+        output: &mut W,
+    ) -> error_stack::Result<(), JsonWriteError> {
+        const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut run_start = 0;
+        for (index, &octet) in octets.iter().enumerate() {
+            let control_escape;
+            let escape: &[u8] = match octet {
+                b'"' => b"\\\"",
+                b'\\' => b"\\\\",
+                0x00..=0x1f => {
+                    control_escape = [
+                        b'\\',
+                        b'u',
+                        b'0',
+                        b'0',
+                        HEX_DIGITS[usize::from(octet >> 4)],
+                        HEX_DIGITS[usize::from(octet & 0x0f)],
+                    ];
+                    &control_escape
+                }
+                _ => continue,
+            };
+            write_json_bytes!(output.write_all(&octets[run_start..index]));
+            write_json_bytes!(output.write_all(escape));
+            run_start = index
+                .checked_add(1)
+                .assured("an octet's index is below the length of the slice holding it");
+        }
+        write_json_bytes!(output.write_all(&octets[run_start..]));
         Ok(())
     }
 }
@@ -725,6 +799,37 @@ mod tests {
         assert_eq!(
             encode(&batch, &specs, 1, NestedNulls::Reject),
             br#"{"text":"inside \\","fixed":[5,6]}"#
+        );
+    }
+
+    #[test]
+    fn octet_bytes_write_each_octet_as_itself_at_the_top_level_and_in_lists() {
+        let mut elements =
+            arrow_array::builder::ListBuilder::new(arrow_array::builder::BinaryBuilder::new());
+        elements.values().append_value(b"\x80");
+        elements.values().append_null();
+        elements.append(true);
+        let batch = batch(vec![
+            (
+                "raw",
+                Arc::new(BinaryArray::from(vec![b"\xff\x00\"\\\n\x1f~ok".as_slice()])),
+            ),
+            ("nested", Arc::new(elements.finish())),
+        ]);
+        let specs = ["raw", "nested"].map(|name| {
+            JsonColumnSpec::new(name, FieldNulls::Write).with_bytes_encoding(BytesEncoding::Octets)
+        });
+        let columns = JsonColumns::new(&batch, &specs, NestedNulls::Write)
+            .assured("binary columns and lists of them are supported");
+        let mut first = Vec::new();
+        columns
+            .write_row(0, &mut first)
+            .assured("the first test row has no rejected nulls");
+
+        assert_eq!(
+            first,
+            b"{\"raw\":\"\xff\\u0000\\\"\\\\\\u000a\\u001f~ok\",\"nested\":[\"\x80\",null]}"
+                .to_vec()
         );
     }
 

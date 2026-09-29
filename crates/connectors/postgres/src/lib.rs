@@ -3,7 +3,8 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The node's shared Postgres pool and its connection options, the declared type of
-//!   each mapped column, the `unnest` insert each mapped batch becomes, its text parameters, the
+//!   each mapped column, the `unnest` insert every write becomes under the emitter's `BATCH` limits
+//!   and the size of one protocol message, its text parameters and their exact encoded size, the
 //!   `ON CONFLICT` clause of a conflict action, and SQLSTATE classification.
 //! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio
 //!   and the `sqlx` driver.
@@ -13,33 +14,56 @@
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
 
-use std::time::Duration;
+use std::{num::NonZeroU64, ops::Range, time::Duration};
 
 use ahash::HashMap;
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
-    Int64Array, ListArray, RecordBatch, StringArray, TimestampNanosecondArray, UInt8Array,
-    UInt16Array, UInt32Array, UInt64Array,
+    Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeListArray, Float32Array, Float64Array,
+    Int8Array, Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
+    TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::DateTime;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    MappedSinkRows, PerRecordOutcome, RejectedSinkRecord, RowSink, SinkHost, SinkLifecycle,
-    SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
-    client_tls_paths, optional_client_config_value,
+    MappedSinkMember, MappedSinkRows, MeasuredRequest, PerRecordOutcome, RejectedSinkRecord,
+    RowRequest, RowRequestLimits, RowSink, SinkHost, SinkLifecycle, SinkPublishError,
+    SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult, client_tls_paths,
+    optional_client_config_value,
 };
-use nervix_models::{ClientConfigEntry, ClientPoolBounds, TableName};
+use nervix_models::{ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, TableName};
+use nonzero_ext::nonzero;
 use sqlx::{
     AssertSqlSafe, Executor as _, Row as _,
     pool::PoolConnection,
     postgres::{PgConnectOptions, PgPoolOptions, PgSslMode, Postgres},
 };
-use tracing::trace;
+use tracing::{debug, trace};
 use url::Url;
 
 const POSTGRES: &str = "postgres";
+
+/// What `MAX SIZE` measures on a Postgres write, which an oversized row's rejection names.
+const MEASURED_REQUEST: &str = "Postgres insert";
+
+/// The longest protocol message the Postgres server reads, `PQ_LARGE_MESSAGE_LIMIT`: one byte
+/// below the largest allocation it makes. A Bind message above it closes the connection.
+///
+/// A write's measured size — its statement text and the arrays it binds — is never smaller than
+/// the Bind message that carries those arrays: the statement names every column several times,
+/// while the message adds a few bytes per parameter around them. Keeping the measured size within
+/// this limit therefore keeps every message within it, and every bound array within the 1 GB a
+/// single value may hold.
+const MESSAGE_LIMIT: NonZeroU64 = nonzero!(1_073_741_822_u64);
+
+/// The binary header of a one-dimensional array parameter: its dimension count, flags, element
+/// type, length and lower bound, four bytes each.
+const ARRAY_HEADER_BYTES: u64 = 20;
+
+/// The length word before every element of an array parameter, which alone encodes a NULL.
+const ELEMENT_LENGTH_BYTES: u64 = 4;
 
 /// How long a borrower waits for a connection, including pool wait, establishment,
 /// authentication and validation. Independent of how long an accepted query then runs.
@@ -68,6 +92,8 @@ pub trait PostgresConnections: Send + Sync + 'static {
 pub struct PostgresSinkConfig {
     pub table: TableName,
     pub conflict_action: PostgresConflictAction,
+    /// The emitter's `BATCH` limits, which bound the rows and the measured bytes of every insert.
+    pub batch: EmitterBatchPolicy,
 }
 
 /// What an insert does with a row the target table already holds.
@@ -83,6 +109,7 @@ pub struct PostgresSink {
     connections: Box<dyn PostgresConnections>,
     table: TableName,
     conflict_action: PostgresConflictAction,
+    limits: RowRequestLimits,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -107,9 +134,13 @@ fn sqlstate(error: &sqlx::Error) -> Option<String> {
     error.code().map(|code| code.into_owned())
 }
 
-/// A SQLSTATE the server reports for a row it will never accept.
+/// A SQLSTATE the server reports for a row, or for a set of rows, it will never accept.
+///
+/// Data exceptions and integrity violations name a row the table refuses. A cardinality violation
+/// is how `ON CONFLICT DO UPDATE` refuses one insert whose rows share a conflict key; the same rows
+/// inserted one at a time each update what the one before them wrote.
 fn is_record_sqlstate(code: &str) -> bool {
-    code.starts_with("22") || code.starts_with("23")
+    code.starts_with("21") || code.starts_with("22") || code.starts_with("23")
 }
 
 impl PostgresWriteError {
@@ -275,11 +306,13 @@ impl PostgresSink {
         let PostgresSinkConfig {
             table,
             conflict_action,
+            batch,
         } = config;
         Ok(Self {
             connections,
             table,
             conflict_action,
+            limits: RowRequestLimits::from(batch).with_native_bytes(MESSAGE_LIMIT),
         })
     }
 
@@ -328,47 +361,49 @@ impl PostgresSink {
             .collect()
     }
 
-    /// One bounded insert, on a connection borrowed for that insert and returned after it, so a
-    /// flush of several chunks lets other local emitters through between them.
-    async fn publish_rows(
-        &self,
-        columns: &MappedTextColumns<'_>,
-        column_types: &[String],
-        rows: &[usize],
-    ) -> Result<u64, PostgresWriteError> {
-        if rows.is_empty() {
-            return Ok(0);
-        }
-        let column_values = columns.text_arrays(rows);
-        let param_refs = (1..=columns.names.len())
+    /// The one statement every insert of a write executes: it binds one text array per mapped
+    /// column, however many rows the insert carries, and casts each to the column's declared type.
+    fn insert_sql(&self, columns: &[String], column_types: &[String]) -> SinkPublishResult<String> {
+        let param_refs = (1..=columns.len())
             .map(|index| format!("${index}::text[]"))
             .collect::<Vec<_>>()
             .join(", ");
         let unnest_columns = columns
-            .names
             .iter()
             .map(|column| Self::quote_ident(column))
             .collect::<Vec<_>>()
             .join(", ");
         let select_columns = columns
-            .names
             .iter()
             .zip(column_types.iter())
             .map(|(column, ty)| format!("t.{}::{}", Self::quote_ident(column), ty))
             .collect::<Vec<_>>()
             .join(", ");
         let insert_columns = unnest_columns.clone();
-        let conflict_clause = Self::conflict_clause(columns.names, &self.conflict_action)?;
-        let sql = format!(
+        let conflict_clause = Self::conflict_clause(columns, &self.conflict_action)
+            .map_err(PostgresWriteError::into_report)?;
+        Ok(format!(
             "INSERT INTO {} ({insert_columns}) SELECT {select_columns} FROM unnest({param_refs}) \
              AS t({unnest_columns}){conflict_clause}",
             Self::quote_ident(self.table.as_str()),
-        );
+        ))
+    }
+
+    /// One insert of `members`, on a connection borrowed for that insert and returned after it, so
+    /// a write of several inserts lets other local emitters through between them.
+    async fn insert(
+        &self,
+        inserts: &UnnestInserts,
+        members: Range<usize>,
+    ) -> Result<u64, PostgresWriteError> {
         // Every value is a bound parameter and every identifier went through `quote_ident`, so the
         // only thing interpolated into this statement is a quoted name or a positional placeholder.
-        let mut query = sqlx::query(AssertSqlSafe(sql));
-        for values in column_values {
-            query = query.bind(values);
+        let mut query = sqlx::query(AssertSqlSafe(inserts.sql.as_str()));
+        for column in &inserts.columns {
+            let texts = column
+                .get(members.clone())
+                .assured("an insert carries rows of the write whose texts were bound");
+            query = query.bind(texts);
         }
         let mut connection = self
             .connections
@@ -448,18 +483,24 @@ impl SinkLifecycle for PostgresSink {}
 
 #[async_trait]
 impl RowSink for PostgresSink {
+    /// Writes the rows of every carrier in `unnest` inserts of at most `MAX MESSAGES` rows whose
+    /// statement and bound arrays measure at most `MAX SIZE` bytes.
     async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
-        let mut outcome = PerRecordOutcome::with_capacity(rows.selected_rows.len());
-        let columns = match MappedTextColumns::new(rows.batch, rows.target_columns) {
-            Ok(columns) => columns,
-            Err(error) => {
-                outcome.fail(
-                    Report::new(SinkPublishError::Publish { sink: POSTGRES })
-                        .attach_printable(error.to_string()),
-                );
-                return outcome;
+        let members = rows.members();
+        let mut outcome = PerRecordOutcome::with_capacity(members.len());
+        let mut carriers = Vec::with_capacity(rows.carriers.len());
+        for carrier in &rows.carriers {
+            match MappedTextColumns::new(carrier.batch, rows.target_columns) {
+                Ok(columns) => carriers.push(columns),
+                Err(error) => {
+                    outcome.fail(
+                        Report::new(SinkPublishError::Publish { sink: POSTGRES })
+                            .attach_printable(error.to_string()),
+                    );
+                    return outcome;
+                }
             }
-        };
+        }
         let column_types = match self.column_types(rows.target_columns).await {
             Ok(column_types) => column_types,
             Err(error) => {
@@ -467,41 +508,65 @@ impl RowSink for PostgresSink {
                 return outcome;
             }
         };
-        for chunk in rows.selected_row_chunks {
-            tokio::task::consume_budget().await;
-            let Some(chunk_rows) = rows.selected_rows.get(chunk.clone()) else {
-                outcome.fail(
-                    Report::new(SinkPublishError::Publish { sink: POSTGRES }).attach_printable(
-                        format!(
-                            "Postgres chunk {chunk:?} is outside its {} selected rows",
-                            rows.selected_rows.len()
-                        ),
-                    ),
-                );
+        let sql = match self.insert_sql(rows.target_columns, &column_types) {
+            Ok(sql) => sql,
+            Err(error) => {
+                outcome.fail(error);
                 return outcome;
+            }
+        };
+        let inserts = UnnestInserts::bind(sql, &carriers, &members, rows.target_columns.len());
+        let requests = self
+            .limits
+            .divide(members.len(), |candidate| MeasuredRequest {
+                size: inserts.measure(candidate),
+                request: (),
+            });
+        if requests.subdivisions > 0 {
+            debug!(
+                table = self.table.as_str(),
+                subdivisions = requests.subdivisions,
+                "halved Postgres inserts that exceeded their byte limit"
+            );
+        }
+        for request in requests.requests {
+            tokio::task::consume_budget().await;
+            let written = match request {
+                RowRequest::Write {
+                    members: written, ..
+                } => written,
+                RowRequest::Oversize { member, oversize } => {
+                    let member = members[member];
+                    outcome.reject(oversize.rejected(
+                        rows.position(member),
+                        rows.occurred_at(member),
+                        MEASURED_REQUEST,
+                    ));
+                    continue;
+                }
             };
-            match self.publish_rows(&columns, &column_types, chunk_rows).await {
+            match self.insert(&inserts, written.clone()).await {
                 Ok(_) => {
-                    for row in chunk_rows {
-                        outcome.deliver(SinkRecordPosition {
-                            batch_index: rows.batch_index,
-                            row_index: *row,
-                        });
+                    for index in written {
+                        outcome.deliver(rows.position(members[index]));
                     }
                 }
-                Err(error) if error.is_record_error() && chunk_rows.len() > 1 => {
-                    for row in chunk_rows {
+                // A record-specific failure of a multi-row insert is isolated by inserting each of
+                // its rows alone, so healthy rows land and only the rejected ones follow the error
+                // policy.
+                Err(error) if error.is_record_error() && written.len() > 1 => {
+                    for index in written {
                         tokio::task::consume_budget().await;
-                        let position = SinkRecordPosition {
-                            batch_index: rows.batch_index,
-                            row_index: *row,
-                        };
-                        match self.publish_rows(&columns, &column_types, &[*row]).await {
-                            Ok(_) => outcome.deliver(position),
+                        let member = members[index];
+                        let alone = index
+                            .checked_add(1)
+                            .assured("a row of the write is followed by at most its end");
+                        match self.insert(&inserts, index..alone).await {
+                            Ok(_) => outcome.deliver(rows.position(member)),
                             Err(error) if error.is_record_error() => {
                                 outcome.reject(RejectedSinkRecord::external(
-                                    position,
-                                    rows.occurred_at,
+                                    rows.position(member),
+                                    rows.occurred_at(member),
                                     error.record_reason(),
                                 ));
                             }
@@ -513,16 +578,12 @@ impl RowSink for PostgresSink {
                     }
                 }
                 Err(error) if error.is_record_error() => {
-                    if let Some(row) = chunk_rows.first() {
-                        outcome.reject(RejectedSinkRecord::external(
-                            SinkRecordPosition {
-                                batch_index: rows.batch_index,
-                                row_index: *row,
-                            },
-                            rows.occurred_at,
-                            error.record_reason(),
-                        ));
-                    }
+                    let member = members[written.start];
+                    outcome.reject(RejectedSinkRecord::external(
+                        rows.position(member),
+                        rows.occurred_at(member),
+                        error.record_reason(),
+                    ));
                 }
                 Err(error) => {
                     outcome.fail(error.into_report());
@@ -532,10 +593,104 @@ impl RowSink for PostgresSink {
         }
         trace!(
             table = self.table.as_str(),
-            rows = rows.selected_rows.len(),
+            rows = members.len(),
             "emitter published postgres rows"
         );
         outcome
+    }
+}
+
+/// The inserts of one write: the one `unnest` statement they all execute, the text every mapped
+/// column binds for each of the write's rows, and the size those texts add to an insert.
+struct UnnestInserts {
+    sql: String,
+    /// One text per row for each mapped column, in the order the write carries its rows.
+    columns: Vec<Vec<Option<String>>>,
+    /// The bytes the elements of the first `n + 1` rows add to the arrays an insert binds, for
+    /// each `n`.
+    element_ends: Vec<u64>,
+}
+
+impl UnnestInserts {
+    fn bind(
+        sql: String,
+        carriers: &[MappedTextColumns<'_>],
+        members: &[MappedSinkMember],
+        column_count: usize,
+    ) -> Self {
+        let mut columns = Vec::with_capacity(column_count);
+        for _ in 0..column_count {
+            columns.push(Vec::with_capacity(members.len()));
+        }
+        let mut element_ends = Vec::with_capacity(members.len());
+        let mut elements = 0_u64;
+        for member in members {
+            let mapped = carriers
+                .get(member.carrier)
+                .assured("every carrier of the write was mapped before its rows were bound");
+            for (column, values) in columns.iter_mut().zip(&mapped.values) {
+                let text = values.text(member.row);
+                elements = elements
+                    .checked_add(Self::element_bytes(text.as_deref()))
+                    .assured("the texts one write binds are held in memory");
+                column.push(text);
+            }
+            element_ends.push(elements);
+        }
+        Self {
+            sql,
+            columns,
+            element_ends,
+        }
+    }
+
+    /// The bytes one element adds to a text array as the extended-query protocol encodes it: a
+    /// length word, then the text, or the length word alone for a NULL.
+    fn element_bytes(text: Option<&str>) -> u64 {
+        let text_bytes = match text {
+            Some(text) => u64::try_from(text.len())
+                .assured("Nervix builds for 64-bit targets only, where u64 holds usize"),
+            None => 0,
+        };
+        ELEMENT_LENGTH_BYTES
+            .checked_add(text_bytes)
+            .assured("one text this node holds in memory")
+    }
+
+    /// The exact size an insert of `members` is measured at: its statement text and every array
+    /// it binds, each as the extended-query protocol encodes it. The protocol messages around
+    /// them, such as each parameter's own length word, are framing outside the measure.
+    fn measure(&self, members: Range<usize>) -> u64 {
+        let start = match members.start.checked_sub(1) {
+            Some(previous) => *self
+                .element_ends
+                .get(previous)
+                .assured("an insert starts at a row the write bound"),
+            None => 0,
+        };
+        let last = members
+            .end
+            .checked_sub(1)
+            .assured("an insert carries at least one row");
+        let end = *self
+            .element_ends
+            .get(last)
+            .assured("an insert ends at a row the write bound");
+        let elements = end
+            .checked_sub(start)
+            .assured("the running size of later rows is at least that of earlier ones");
+        let arrays = u64::try_from(self.columns.len())
+            .assured("Nervix builds for 64-bit targets only, where u64 holds usize")
+            .checked_mul(ARRAY_HEADER_BYTES)
+            .assured("an insert binds one array per mapped column");
+        let statement = u64::try_from(self.sql.len())
+            .assured("Nervix builds for 64-bit targets only, where u64 holds usize");
+        let framed = statement
+            .checked_add(arrays)
+            .assured("the statement and array headers of one insert are held in memory");
+        framed
+            .checked_add(elements)
+            .assured("every term measures bytes this node holds in memory")
     }
 }
 
@@ -549,14 +704,13 @@ struct UnsupportedMappedColumn {
 
 /// The mapped columns of one batch, downcast once so every row binds from the column that holds it.
 struct MappedTextColumns<'a> {
-    names: &'a [String],
     values: Vec<MappedTextColumn<'a>>,
 }
 
 impl<'a> MappedTextColumns<'a> {
     fn new(
         batch: &'a RecordBatch,
-        target_columns: &'a [String],
+        target_columns: &[String],
     ) -> Result<Self, UnsupportedMappedColumn> {
         let mut values = Vec::with_capacity(target_columns.len());
         for (index, column) in target_columns.iter().enumerate() {
@@ -567,18 +721,7 @@ impl<'a> MappedTextColumns<'a> {
             })?;
             values.push(mapped);
         }
-        Ok(Self {
-            names: target_columns,
-            values,
-        })
-    }
-
-    /// One text array per mapped column, in the row order the insert unnests them in.
-    fn text_arrays(&self, rows: &[usize]) -> Vec<Vec<Option<String>>> {
-        self.values
-            .iter()
-            .map(|column| rows.iter().map(|row| column.text(*row)).collect())
-            .collect()
+        Ok(Self { values })
     }
 }
 
@@ -596,9 +739,16 @@ enum MappedTextColumn<'a> {
     F32(&'a Float32Array),
     F64(&'a Float64Array),
     String(&'a StringArray),
+    /// Octets, bound in the hex format a `bytea` column reads back as those octets.
+    Bytes(&'a BinaryArray),
     Datetime(&'a TimestampNanosecondArray),
     List {
         offsets: &'a ListArray,
+        elements: Box<MappedTextColumn<'a>>,
+    },
+    /// A fixed-size array, such as an array literal, whose rows all hold the same element count.
+    FixedList {
+        list: &'a FixedSizeListArray,
         elements: Box<MappedTextColumn<'a>>,
     },
 }
@@ -642,8 +792,18 @@ impl<'a> MappedTextColumn<'a> {
         if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
             return Some(Self::String(values));
         }
+        if let Some(values) = array.as_any().downcast_ref::<BinaryArray>() {
+            return Some(Self::Bytes(values));
+        }
         if let Some(values) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
             return Some(Self::Datetime(values));
+        }
+        if let Some(list) = array.as_any().downcast_ref::<FixedSizeListArray>() {
+            let elements = Self::new(list.values())?;
+            return Some(Self::FixedList {
+                list,
+                elements: Box::new(elements),
+            });
         }
         let values = array.as_any().downcast_ref::<ListArray>()?;
         let elements = Self::new(values.values())?;
@@ -673,11 +833,12 @@ impl<'a> MappedTextColumn<'a> {
             Self::F32(values) => return float_text(f64::from(values.value(row))),
             Self::F64(values) => return float_text(values.value(row)),
             Self::String(values) => values.value(row).to_string(),
+            Self::Bytes(values) => format!("\\x{}", faster_hex::hex_string(values.value(row))),
             Self::Datetime(values) => DateTime::from_timestamp_nanos(values.value(row))
                 .fixed_offset()
                 .to_rfc3339(),
             // A list binds as the JSON text of its elements, which is what a JSON column reads.
-            Self::List { .. } => self.json_value(row).to_string(),
+            Self::List { .. } | Self::FixedList { .. } => self.json_value(row).to_string(),
         };
         Some(text)
     }
@@ -699,6 +860,9 @@ impl<'a> MappedTextColumn<'a> {
             Self::F32(values) => serde_json::Value::from(values.value(row)),
             Self::F64(values) => serde_json::Value::from(values.value(row)),
             Self::String(values) => serde_json::Value::from(values.value(row)),
+            // Inside JSON, octets are the canonical padded base64 text every Nervix JSON value
+            // carries them as.
+            Self::Bytes(values) => serde_json::Value::from(BASE64.encode(values.value(row))),
             Self::Datetime(values) => serde_json::Value::from(
                 DateTime::from_timestamp_nanos(values.value(row))
                     .fixed_offset()
@@ -715,15 +879,28 @@ impl<'a> MappedTextColumn<'a> {
                     )],
                 )
                 .assured(non_negative);
-                let mut items = Vec::with_capacity(end.checked_sub(start).assured(
-                    "Arrow list offsets increase, so a row ends no earlier than it starts",
-                ));
-                for element in start..end {
-                    items.push(elements.json_value(element));
-                }
-                serde_json::Value::Array(items)
+                elements.json_array(start..end)
+            }
+            Self::FixedList { list, elements } => {
+                let non_negative = "Arrow builds fixed-size list offsets and widths as \
+                                    non-negative element counts";
+                let start = usize::try_from(list.value_offset(row)).assured(non_negative);
+                let width = usize::try_from(list.value_length()).assured(non_negative);
+                let end = start
+                    .checked_add(width)
+                    .assured("a fixed-size list row ends inside its element array");
+                elements.json_array(start..end)
             }
         }
+    }
+
+    /// The elements `elements` of this column as one JSON array.
+    fn json_array(&self, elements: Range<usize>) -> serde_json::Value {
+        let mut items = Vec::with_capacity(elements.len());
+        for element in elements {
+            items.push(self.json_value(element));
+        }
+        serde_json::Value::Array(items)
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -740,8 +917,10 @@ impl<'a> MappedTextColumn<'a> {
             Self::F32(values) => values.is_null(row),
             Self::F64(values) => values.is_null(row),
             Self::String(values) => values.is_null(row),
+            Self::Bytes(values) => values.is_null(row),
             Self::Datetime(values) => values.is_null(row),
             Self::List { offsets, .. } => offsets.is_null(row),
+            Self::FixedList { list, .. } => list.is_null(row),
         }
     }
 }
@@ -756,6 +935,7 @@ fn float_text(value: f64) -> Option<String> {
 mod tests {
     use std::sync::Arc as StdArc;
 
+    use arrow_array::builder::{BinaryBuilder, ListBuilder};
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
 
     use super::*;
@@ -799,9 +979,18 @@ mod tests {
         let names = ["id".to_string(), "score".to_string(), "at".to_string()];
 
         let columns = MappedTextColumns::new(&batch, &names).expect("columns should be mapped");
+        let inserts = UnnestInserts::bind(
+            String::new(),
+            &[columns],
+            &[
+                MappedSinkMember { carrier: 0, row: 0 },
+                MappedSinkMember { carrier: 0, row: 2 },
+            ],
+            names.len(),
+        );
 
         assert_eq!(
-            columns.text_arrays(&[0, 2]),
+            inserts.columns,
             vec![
                 vec![Some("7".to_string()), None],
                 vec![Some("1.5".to_string()), Some("2.0".to_string())],
@@ -811,5 +1000,122 @@ mod tests {
                 ],
             ]
         );
+    }
+
+    #[test]
+    fn binds_bytes_as_bytea_hex_and_arrays_as_json_text() {
+        let pairs = FixedSizeListArray::try_new(
+            StdArc::new(Field::new("item", DataType::Int64, false)),
+            2,
+            StdArc::new(Int64Array::from(vec![1, 10])),
+            None,
+        )
+        .expect("one row of two elements builds");
+        let mut blobs = ListBuilder::new(BinaryBuilder::new());
+        blobs.values().append_value(b"\x00\xff");
+        blobs.values().append_value(b"");
+        blobs.append(true);
+        let blobs = blobs.finish();
+        let raw = BinaryArray::from(vec![b"\x00\xff\\".as_slice()]);
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("pair", pairs.data_type().clone(), true),
+            Field::new("blobs", blobs.data_type().clone(), true),
+            Field::new("raw", DataType::Binary, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![StdArc::new(pairs), StdArc::new(blobs), StdArc::new(raw)],
+        )
+        .expect("the mapped batch should build");
+        let names = ["pair".to_string(), "blobs".to_string(), "raw".to_string()];
+
+        let columns = MappedTextColumns::new(&batch, &names).expect("columns should be mapped");
+
+        let texts = columns
+            .values
+            .iter()
+            .map(|column| column.text(0))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts,
+            vec![
+                Some("[1,10]".to_string()),
+                Some(r#"["AP8=",""]"#.to_string()),
+                Some(r"\x00ff5c".to_string()),
+            ]
+        );
+    }
+
+    /// The measured size is the statement text and every array exactly as the driver encodes
+    /// it, so a scenario's `MAX SIZE` can be written to the byte.
+    #[test]
+    fn measures_the_statement_and_the_arrays_the_driver_encodes() {
+        let sink = PostgresSink {
+            connections: Box::new(NoConnections),
+            table: TableName::parse("limit_a_t0192a1b2c3d4e5f60718293a4b5c6d7e")
+                .expect("the test table name is valid"),
+            conflict_action: PostgresConflictAction::None,
+            limits: RowRequestLimits::from(EmitterBatchPolicy {
+                max_messages: nervix_models::BatchMessageLimit::try_from(3_u32)
+                    .expect("three is a valid message limit"),
+                max_size: "1KiB".parse().expect("1KiB is a valid size"),
+            }),
+        };
+        let names = ["seq".to_string(), "note".to_string()];
+        let sql = sink
+            .insert_sql(&names, &["bigint".to_string(), "text".to_string()])
+            .expect("the insert statement builds");
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("seq", DataType::Int64, true),
+            Field::new("note", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                StdArc::new(Int64Array::from(vec![Some(1), Some(2), Some(3)])),
+                StdArc::new(StringArray::from(vec![Some("abc"), None, Some("abc")])),
+            ],
+        )
+        .expect("the mapped batch should build");
+        let columns = MappedTextColumns::new(&batch, &names).expect("columns should be mapped");
+        let members = [0, 1, 2].map(|row| MappedSinkMember { carrier: 0, row });
+
+        let inserts = UnnestInserts::bind(sql, &[columns], &members, names.len());
+
+        assert_eq!(inserts.sql.len(), 166);
+        for range in [0..1, 0..3, 1..3, 2..3] {
+            let mut encoded = 0;
+            for column in &inserts.columns {
+                let mut buffer = sqlx::postgres::PgArgumentBuffer::default();
+                let texts = &column[range.clone()];
+                let written = <&[Option<String>] as sqlx::Encode<'_, Postgres>>::encode_by_ref(
+                    &texts,
+                    &mut buffer,
+                )
+                .expect("a text array encodes");
+                assert!(matches!(written, sqlx::encode::IsNull::No));
+                encoded += buffer.len();
+            }
+            let expected =
+                u64::try_from(inserts.sql.len() + encoded).expect("a test insert fits u64");
+            assert_eq!(inserts.measure(range), expected);
+        }
+    }
+
+    /// Stands in for the pool where a test never opens a connection.
+    struct NoConnections;
+
+    #[async_trait]
+    impl PostgresConnections for NoConnections {
+        async fn connection(&self) -> SinkPublishResult<PostgresConnection> {
+            Err(Report::new(SinkPublishError::NotInitialized {
+                sink: POSTGRES,
+            }))
+        }
+    }
+
+    #[test]
+    fn a_repeated_conflict_key_in_one_insert_is_isolated_row_by_row() {
+        assert!(is_record_sqlstate("21000"));
     }
 }

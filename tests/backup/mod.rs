@@ -8,8 +8,6 @@
 //!   format's reader, and the language layer to parse an archive's NSPL.
 //! - **Must not know.** How the server assembles, retains or streams an archive.
 
-use std::io::Read as _;
-
 use cucumber::{given, then, when};
 use nervix_backup::{SectionContent, SectionEntry, SectionReader, SectionVisitor, read_archive};
 use nervix_models::{

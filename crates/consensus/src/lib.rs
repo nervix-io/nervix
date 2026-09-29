@@ -2140,16 +2140,14 @@ impl Consensus {
                     let receiver = receiver.clone();
                     async move {
                         receiver.inner.connectivity.check().map_err(|error| {
-                            nervix_interconnect::StreamHandlerError::new(error.to_string())
+                            nervix_interconnect::StreamHandlerError::with_cause(Report::new(error))
                         })?;
                         validate_protocol_origin(
                             context.peer_node_id(),
                             &request.leader_node_id,
                             "an append stream",
                         )
-                        .map_err(|error| {
-                            nervix_interconnect::StreamHandlerError::new(error.to_string())
-                        })?;
+                        .map_err(nervix_interconnect::StreamHandlerError::with_cause)?;
                         let answers =
                             receiver.answer_append_stream(context.peer_node_id().clone(), items);
                         Ok(nervix_interconnect::DuplexResponses::new(answers.map(Ok)))

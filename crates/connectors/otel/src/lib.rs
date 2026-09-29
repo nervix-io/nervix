@@ -15,13 +15,7 @@
 extern crate shuttle_tokio as tokio;
 
 use std::{
-    collections::VecDeque,
-    io::Write,
-    num::{NonZeroU32, NonZeroU64},
-    ops::Range,
-    str::FromStr,
-    sync::Arc as StdArc,
-    time::Duration,
+    io::Write, num::NonZeroU64, ops::Range, str::FromStr, sync::Arc as StdArc, time::Duration,
 };
 
 use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
@@ -37,13 +31,13 @@ use flate2::{Compression as GzipLevel, write::GzEncoder};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_connector::{
-    HttpClientConfig, MappedSinkRows, PerRecordOutcome, PreparedRowRequest, RejectedSinkRecord,
-    RowRequestPreparation, RowRequestSink, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkPublishResult, SinkRecordId, SinkRecordPosition, SinkRetryDelay, SinkRowRequest,
-    SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
-    optional_client_config_value, read_tls_file,
+    HttpClientConfig, MappedSinkCarrier, MappedSinkRows, MeasuredRequest, PerRecordOutcome,
+    PreparedRowRequest, RejectedSinkRecord, RowRequest, RowRequestLimits, RowRequestPreparation,
+    RowRequestSink, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecordId,
+    SinkRecordPosition, SinkRetryDelay, SinkRowRequest, SinkStartError, SinkStartResult,
+    client_config_value, client_tls_paths, optional_client_config_value, read_tls_file,
 };
-use nervix_models::{ClientConfigEntry, FieldPath, Timestamp};
+use nervix_models::{ClientConfigEntry, EmitterBatchPolicy, FieldPath, Timestamp};
 use opentelemetry_proto::tonic::{
     collector::{
         logs::v1::{ExportLogsPartialSuccess, ExportLogsServiceRequest, ExportLogsServiceResponse},
@@ -81,7 +75,7 @@ use reqwest::{
     header::{CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER},
 };
 use thiserror::Error;
-use tracing::warn;
+use tracing::{debug, warn};
 
 const OTEL: &str = "otel";
 
@@ -93,7 +87,8 @@ pub struct OtelSink {
     signal: OtelSignal,
     /// Where the signal's Export requests go, and the response each is answered with.
     service: OtelExportService,
-    batch: Option<OtelBatchLimits>,
+    /// The limits each export request keeps to, when the emitter declares `BATCH`.
+    batch: Option<RowRequestLimits>,
     /// Where each signal key sits among the mapped columns, resolved once at start.
     value_columns: HashMap<String, usize>,
     /// The attribute keys, in the order their columns follow the signal's own.
@@ -109,8 +104,9 @@ pub struct OtelSinkConfig {
     pub config: Vec<ClientConfigEntry>,
     pub dns: nervix_dns::DnsResolver,
     pub signal: OtelSignal,
-    /// The optional count and exact protobuf request-size limits.
-    pub batch: Option<OtelBatchLimits>,
+    /// The emitter's `BATCH` limits, which bound the records and the exact protobuf size of
+    /// every export request when it declares them.
+    pub batch: Option<EmitterBatchPolicy>,
     /// The signal keys this emitter maps, in the order of its mapped columns.
     pub values: Vec<String>,
     /// The attribute keys this emitter maps, whose columns follow the signal's own.
@@ -120,13 +116,6 @@ pub struct OtelSinkConfig {
     /// The mapped columns the host projects, whose exact types this sink validates before it
     /// accepts its first batch.
     pub mapped_schema: StdArc<arrow_schema::Schema>,
-}
-
-/// The validated request bounds handed to the OTEL connector by its host.
-#[derive(Clone, Copy)]
-pub struct OtelBatchLimits {
-    pub max_messages: NonZeroU32,
-    pub max_size: NonZeroU64,
 }
 
 /// The OTLP signal one emitter exports.
@@ -648,7 +637,7 @@ impl OtelSink {
             client,
             service: OtelExportService::from(&signal),
             signal,
-            batch,
+            batch: batch.map(RowRequestLimits::from),
             attribute_offset: values.len(),
             value_columns,
             attributes,
@@ -917,158 +906,26 @@ impl SinkLifecycle for OtelSink {}
 
 #[async_trait]
 impl RowRequestSink for OtelSink {
-    /// Converts every selected row once and divides the converted records, in source order, into
-    /// Export requests of one resource and one scope, encoding each request exactly once.
+    /// Converts every selected row once and divides the converted records of each carrier, in
+    /// source order, into Export requests of one resource and one scope, encoding each request
+    /// exactly once.
     ///
     /// Every log record carries the observed time this call samples, so a request sent again after
-    /// an unknown outcome carries the time of its first attempt. With `BATCH`, a request holds at
-    /// most `MAX MESSAGES` records and at most `MAX SIZE` encoded bytes: a candidate larger than that
-    /// is halved, and a record that alone exceeds it is refused.
+    /// an unknown outcome carries the time of its first attempt. Without `BATCH`, one request
+    /// carries every converted record of a carrier. With it, a request holds at most `MAX MESSAGES`
+    /// records and at most `MAX SIZE` encoded bytes: a candidate larger than that is halved, and a
+    /// record that alone exceeds it is refused.
     async fn prepare(
         &mut self,
         rows: MappedSinkRows<'_>,
     ) -> SinkPublishResult<RowRequestPreparation> {
         let mut preparation = RowRequestPreparation::default();
-        let mapped = OtelMappedBatch {
-            batch: rows.batch,
-            value_columns: &self.value_columns,
-            attributes: &self.attributes,
-            attribute_offset: self.attribute_offset,
-        };
         let observed_time = OtelSink::observation_time_unix_nano()
             .map_err(|error| publish_failure(error.reason))?;
-        let position = |row: usize| SinkRecordPosition {
-            batch_index: rows.batch_index,
-            row_index: row,
-        };
-        let mut positions = Vec::with_capacity(rows.selected_rows.len());
-        let request = match &self.signal {
-            OtelSignal::Logs => {
-                let mut records = Vec::with_capacity(rows.selected_rows.len());
-                for row in rows.selected_rows {
-                    tokio::task::consume_budget().await;
-                    match mapped.log_record(*row, observed_time) {
-                        Ok(record) => {
-                            records.push(record);
-                            positions.push(position(*row));
-                        }
-                        Err(error) => preparation
-                            .rejected
-                            .push(error.rejected(position(*row), rows.occurred_at)),
-                    }
-                }
-                OtelExportRequest::Logs(ExportLogsServiceRequest {
-                    resource_logs: vec![ResourceLogs {
-                        resource: Some(self.resource.clone()),
-                        scope_logs: vec![ScopeLogs {
-                            scope: self.scope.clone(),
-                            log_records: records,
-                            schema_url: String::new(),
-                        }],
-                        schema_url: String::new(),
-                    }],
-                })
-            }
-            OtelSignal::Traces => {
-                let mut spans = Vec::with_capacity(rows.selected_rows.len());
-                for row in rows.selected_rows {
-                    tokio::task::consume_budget().await;
-                    match mapped.span(*row) {
-                        Ok(span) => {
-                            spans.push(span);
-                            positions.push(position(*row));
-                        }
-                        Err(error) => preparation
-                            .rejected
-                            .push(error.rejected(position(*row), rows.occurred_at)),
-                    }
-                }
-                OtelExportRequest::Traces(ExportTraceServiceRequest {
-                    resource_spans: vec![ResourceSpans {
-                        resource: Some(self.resource.clone()),
-                        scope_spans: vec![ScopeSpans {
-                            scope: self.scope.clone(),
-                            spans,
-                            schema_url: String::new(),
-                        }],
-                        schema_url: String::new(),
-                    }],
-                })
-            }
-            OtelSignal::Metric(metric) => {
-                let metric = mapped
-                    .metric(
-                        metric,
-                        rows.selected_rows,
-                        rows.batch_index,
-                        rows.occurred_at,
-                        &mut positions,
-                        &mut preparation.rejected,
-                    )
-                    .await;
-                OtelExportRequest::Metrics(ExportMetricsServiceRequest {
-                    resource_metrics: vec![ResourceMetrics {
-                        resource: Some(self.resource.clone()),
-                        scope_metrics: vec![ScopeMetrics {
-                            scope: self.scope.clone(),
-                            metrics: vec![metric],
-                            schema_url: String::new(),
-                        }],
-                        schema_url: String::new(),
-                    }],
-                })
-            }
-        };
-        if positions.is_empty() {
-            return Ok(preparation);
-        }
-
-        let max_messages = match self.batch {
-            Some(policy) => usize::try_from(policy.max_messages.get())
-                .assured("Nervix runs on 64-bit targets, so usize holds every u32"),
-            None => positions.len(),
-        };
-        let mut pending = VecDeque::new();
-        let mut start = 0;
-        while start < positions.len() {
-            let end = start
-                .checked_add(max_messages)
-                .assured("a chunk starts inside the already bounded selection")
-                .min(positions.len());
-            pending.push_back(start..end);
-            start = end;
-        }
-        while let Some(range) = pending.pop_front() {
+        for carrier in &rows.carriers {
             tokio::task::consume_budget().await;
-            let export = request.members(range.clone());
-            if let Some(policy) = self.batch {
-                let size = u64::try_from(export.encoded_len())
-                    .assured("Nervix runs on 64-bit targets, so u64 holds a protobuf length");
-                if size > policy.max_size.get() {
-                    if range.len() > 1 {
-                        let middle = range
-                            .start
-                            .checked_add(range.len() / 2)
-                            .assured("the midpoint is inside the selected request range");
-                        pending.push_front(middle..range.end);
-                        pending.push_front(range.start..middle);
-                    } else {
-                        preparation.rejected.push(RejectedSinkRecord::external(
-                            positions[range.start],
-                            rows.occurred_at,
-                            format!(
-                                "encoded OTEL export request is {size} bytes; batch maximum is {}",
-                                policy.max_size
-                            ),
-                        ));
-                    }
-                    continue;
-                }
-            }
-            preparation.requests.push(PreparedRowRequest {
-                members: positions[range].to_vec(),
-                body: export.encode_to_vec(),
-            });
+            self.prepare_carrier(carrier, observed_time, &mut preparation)
+                .await;
         }
         Ok(preparation)
     }
@@ -1111,6 +968,155 @@ impl RowRequestSink for OtelSink {
             }
         }
         outcome
+    }
+}
+
+impl OtelSink {
+    /// Prepares the Export requests that carry the rows of one carrier: one request without
+    /// `BATCH`, and with it requests of at most `MAX MESSAGES` records whose protobuf encoding is at
+    /// most `MAX SIZE` bytes.
+    async fn prepare_carrier(
+        &self,
+        carrier: &MappedSinkCarrier<'_>,
+        observed_time: u64,
+        preparation: &mut RowRequestPreparation,
+    ) {
+        let mapped = OtelMappedBatch {
+            batch: carrier.batch,
+            value_columns: &self.value_columns,
+            attributes: &self.attributes,
+            attribute_offset: self.attribute_offset,
+        };
+        let position = |row: usize| SinkRecordPosition {
+            batch_index: carrier.batch_index,
+            row_index: row,
+        };
+        let mut positions = Vec::with_capacity(carrier.selected_rows.len());
+        let request = match &self.signal {
+            OtelSignal::Logs => {
+                let mut records = Vec::with_capacity(carrier.selected_rows.len());
+                for row in carrier.selected_rows {
+                    tokio::task::consume_budget().await;
+                    match mapped.log_record(*row, observed_time) {
+                        Ok(record) => {
+                            records.push(record);
+                            positions.push(position(*row));
+                        }
+                        Err(error) => preparation
+                            .rejected
+                            .push(error.rejected(position(*row), carrier.occurred_at)),
+                    }
+                }
+                OtelExportRequest::Logs(ExportLogsServiceRequest {
+                    resource_logs: vec![ResourceLogs {
+                        resource: Some(self.resource.clone()),
+                        scope_logs: vec![ScopeLogs {
+                            scope: self.scope.clone(),
+                            log_records: records,
+                            schema_url: String::new(),
+                        }],
+                        schema_url: String::new(),
+                    }],
+                })
+            }
+            OtelSignal::Traces => {
+                let mut spans = Vec::with_capacity(carrier.selected_rows.len());
+                for row in carrier.selected_rows {
+                    tokio::task::consume_budget().await;
+                    match mapped.span(*row) {
+                        Ok(span) => {
+                            spans.push(span);
+                            positions.push(position(*row));
+                        }
+                        Err(error) => preparation
+                            .rejected
+                            .push(error.rejected(position(*row), carrier.occurred_at)),
+                    }
+                }
+                OtelExportRequest::Traces(ExportTraceServiceRequest {
+                    resource_spans: vec![ResourceSpans {
+                        resource: Some(self.resource.clone()),
+                        scope_spans: vec![ScopeSpans {
+                            scope: self.scope.clone(),
+                            spans,
+                            schema_url: String::new(),
+                        }],
+                        schema_url: String::new(),
+                    }],
+                })
+            }
+            OtelSignal::Metric(metric) => {
+                let metric = mapped
+                    .metric(
+                        metric,
+                        carrier.selected_rows,
+                        carrier.batch_index,
+                        carrier.occurred_at,
+                        &mut positions,
+                        &mut preparation.rejected,
+                    )
+                    .await;
+                OtelExportRequest::Metrics(ExportMetricsServiceRequest {
+                    resource_metrics: vec![ResourceMetrics {
+                        resource: Some(self.resource.clone()),
+                        scope_metrics: vec![ScopeMetrics {
+                            scope: self.scope.clone(),
+                            metrics: vec![metric],
+                            schema_url: String::new(),
+                        }],
+                        schema_url: String::new(),
+                    }],
+                })
+            }
+        };
+        if positions.is_empty() {
+            return;
+        }
+
+        let Some(limits) = self.batch else {
+            preparation.requests.push(PreparedRowRequest {
+                members: positions,
+                body: request.encode_to_vec(),
+            });
+            return;
+        };
+        let requests = limits.divide(positions.len(), |candidate| {
+            let export = request.members(candidate);
+            let size = u64::try_from(export.encoded_len())
+                .assured("Nervix runs on 64-bit targets, so u64 holds a protobuf length");
+            MeasuredRequest {
+                size,
+                request: export,
+            }
+        });
+        if requests.subdivisions > 0 {
+            debug!(
+                subdivisions = requests.subdivisions,
+                "halved OTEL export requests that exceeded MAX SIZE"
+            );
+        }
+        for request in requests.requests {
+            match request {
+                RowRequest::Write {
+                    members, request, ..
+                } => {
+                    let carried = positions
+                        .get(members)
+                        .assured("a request carries records of the carrier it divided");
+                    preparation.requests.push(PreparedRowRequest {
+                        members: carried.to_vec(),
+                        body: request.encode_to_vec(),
+                    });
+                }
+                RowRequest::Oversize { member, oversize } => {
+                    preparation.rejected.push(oversize.rejected(
+                        positions[member],
+                        carrier.occurred_at,
+                        "OTEL export request",
+                    ));
+                }
+            }
+        }
     }
 }
 
