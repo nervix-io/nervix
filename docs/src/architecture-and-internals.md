@@ -9,6 +9,7 @@ Use it for:
 - [typed failure ownership, propagation, recovery, and public diagnostics](./errors-and-diagnostics.md)
 - [typed absence, semantic states, validation boundaries, state identity, and boundary encodings](./typed-states.md)
 - [connector crate ownership, the shared source and sink contract, and host execution](./connector-contract.md)
+- [HTTP emitter request preparation, delivery, lifecycle, and qualification](./http-emitter-architecture.md)
 - domain-clock mapping, authority, lifecycle, progress, and execution-time semantics
 - cluster interconnect security, traffic isolation, and delivery semantics
 - [client-to-node communication: the FlatBuffers session protocol, request correlation and

@@ -72,10 +72,10 @@ not retried until the selection or connection changes.
 
 The top bar's **Create** menu opens keyboard-accessible forms for domains, users, resource
 catalogs, schemas, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps, Roto UDFs,
-relays, branches, ingestors, and subscriptions. The resource group in the sidebar also provides a
-contextual create action. A form keeps its unfinished draft when it closes, restores focus to the
-action that opened it, reports validation and server failures inline, and shows the canonical NSPL statement
-before submission.
+relays, branches, ingestors, junctions, reingestors, and subscriptions. The resource group in the
+sidebar also provides a contextual create action. A form keeps its unfinished draft when it closes,
+restores focus to the action that opened it, reports validation and server failures inline, and
+shows the canonical NSPL statement before submission.
 The domain form supports paced and unpaced clocks, period and skew for a paced clock, placement
 policy, and `IF NOT EXISTS`. User and resource forms support their corresponding names and the
 same creation modifier.
@@ -218,6 +218,20 @@ route selects an unbranched relay and its own field assignments. The node-wide g
 policy is also required. The draft retains incomplete values and shows the canonical NSPL preview
 only when every required choice and expression is valid. It submits through the usual durable
 command path, including attached transactions and reconnect recovery.
+
+A junction form chooses its exact unbranched or named branch before its input relays. A reingestor
+chooses inputs first and gives each output route an independent branch action: preserve the input
+branch, become unbranched, or construct a named branch from ordered key assignments. Additional
+inputs are offered only when their declared schema and branch match the first input exactly.
+Both forms keep input predicates, optional collection bounds, materialized dependencies, and
+output routes in visible order. A materialized dependency resolves against the incoming branch and
+requires `REQUIRED SKIP`, `REQUIRED WAIT`, or `DEFAULT` with ordered assignments. Each transforming
+route has ordered inheritance, output assignments, and invocations, an optional predicate, an
+explicit flush policy, and a route-local message error policy. Server-backed choices restrict
+output and error relays to the required branch and offer only materialized relays for state. A
+changed domain or dependent reference keeps the draft visible and requires the affected choice to
+be selected again. The preview and durable submission use the completed semantic Model; registry
+validation reports any remaining schema, branch, sensitivity, or graph error inline.
 
 ## The Execution Graph
 
