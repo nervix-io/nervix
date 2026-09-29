@@ -11,8 +11,8 @@ use nervix_models::{
     CreateDeduplicator, CreateInferencer, CreateJunction, CreateSchema, CreateWasmProcessor,
     CreateWindowProcessor, EmitSink, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-    InferencerTensorSchema, ParseAsType, ProcessorOutputs, RelayBranching, SchemaField,
-    WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound, ZeroMqIngestMode,
+    InferencerTensorSchema, ParseAsType, ProcessorOutput, ProcessorOutputs, RelayBranching,
+    SchemaField, WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound, ZeroMqIngestMode,
 };
 use nonzero_ext::nonzero;
 use triomphe::Arc;

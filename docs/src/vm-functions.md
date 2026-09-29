@@ -346,7 +346,7 @@ against runtime schemas:
 | Window aggregate argument and output programs, inferencer `INPUTS`, and inferencer output routes | Once when the installed typed processor revision is bound, then shared by every concrete branch |
 | Generator routes | Lowered into typed ordered route plans from the committed schedule, then compiled once when the domain's execution is built or the generator is swapped; each concrete branch task retains those compiled programs and the exact materialized source branch. |
 | Materialized-state `DEFAULT` | Compiled and executed in one step when the default binds |
-| `ON MESSAGE ERROR SEND TO ... SET` | Once for each error record it builds |
+| `ON MESSAGE ERROR SEND TO ... SET` | The registry lowers the ordered assignments before installation. The domain execution or its replacement binds the lowered program once. It reads the original eligible input, the exact captured state, the optional partial output and structured error fields for each failed record. A route update installs a new prepared program; delivery never compiles one. |
 | Subscription `WHERE` | When the subscription is created |
 
 An HTTP emitter's route compiles without its `write_header` invocations, which are request fields.
@@ -418,12 +418,14 @@ All paths are relative to the repository root.
 | `crates/nervix-roto/src/lib.rs` | The UDF injector and its watchdog |
 | `src/registry/validation/` | Apply-time compilation, including `window_route.rs` and the sketch budget in `processor/sketch.rs` |
 | `src/registry/entrypoint_plan.rs` | Lowering ingestor and reingestor filters, routes, and branch constructions before a node binds them |
+| `src/registry/message_error_plan.rs` | Resolving the schemas, branch contracts and flush policies of DLQ routes and lowering their ordered assignments from scheduled Models |
 | `src/runtime/entrypoint_routes.rs` | Binding lowered ingestor and reingestor programs to a node's schemas, state, lookups, and UDFs |
+| `src/runtime/message_error_plan.rs` | Binding each error-route VM program once to installed relay services and node-local capabilities |
 | `src/runtime/vm_compile.rs` | Runtime compilation and message-error sites |
 | `src/runtime/vm_input.rs` | Input projection and lookup key execution |
 | `src/runtime/filter_map.rs` | Program execution and result handling for routes and filters |
 | `src/runtime/ingest_metadata.rs`, `lookup_hash_map.rs` | The header injector and hash-map lookup calls |
-| `src/runtime/message_error.rs` | Structured message errors and error-record programs |
+| `src/runtime/message_error.rs` | Structured message errors and execution of prepared error-record programs |
 | `src/runtime/window_processor.rs`, `window_accumulator/`, `window_state.rs` | Branch-local windows, their aggregate structures, and their snapshots |
 | `src/runtime/subscription_predicate.rs` | Session subscription filters |
 

@@ -2,10 +2,11 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The record, mapped-row and HTTP request sink traits, their lifecycle hooks, typed
-//!   start and publish failures, the identities a sink answers for — a record the host assigned, or
-//!   a mapped row's source position — the outcome it answers with, and the opaque handles through
-//!   which a sink reports to its host or keeps host-owned acknowledgements alive.
+//! - **Owns.** The record, mapped-row, row request and HTTP request sink traits, their lifecycle
+//!   hooks, typed start and publish failures, the identities a sink answers for — a record or
+//!   request the host assigned, or a mapped row's source position — the requests a row request sink
+//!   prepares from mapped rows, the outcome it answers with, and the opaque handles through which a
+//!   sink reports to its host or keeps host-owned acknowledgements alive.
 //! - **Depends on.** Arrow batches, vocabulary values, `error-stack`, Tokio's monotonic instant,
 //!   and trait-object support.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, error-policy
@@ -50,12 +51,13 @@ pub struct SinkRecordPosition {
     pub row_index: usize,
 }
 
-/// The identity of one record in a record sink write, which the connector answers for.
+/// The identity of one record or prepared request in a write, which the connector answers for.
 ///
 /// One record is one external payload: one source record, or with the emitter's `BATCH` clause
 /// every member of one batch. The host assigns the identity and keeps which source rows the record
 /// carries, so a connector answers for the record and never learns its members or their
-/// acknowledgements. Identities order the way the host hands records over.
+/// acknowledgements. A prepared HTTP or row request is handed over under an identity the same way.
+/// Identities order the way the host hands records over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SinkRecordId(usize);
 
@@ -141,6 +143,51 @@ impl SinkHttpRequest {
     }
 }
 
+/// One request a row request sink prepared from mapped rows, handed back to it on every attempt
+/// until it answers for the request.
+///
+/// The host retains the bytes and the source rows the request carries from the moment the sink
+/// prepared it, so every attempt, through whichever connector the emitter holds by then, sends the
+/// bytes the first attempt sent. A request carries no runtime acknowledgement: the host retains the
+/// acknowledgements of the source rows the request carries.
+#[derive(Debug)]
+pub struct SinkRowRequest {
+    pub id: SinkRecordId,
+    /// Exactly the bytes the sink prepared.
+    pub body: Vec<u8>,
+    /// When the host evaluated the mapping the request was prepared from, which a rejection of the
+    /// request is reported with.
+    pub occurred_at: Timestamp,
+}
+
+impl SinkRowRequest {
+    pub fn rejected(&self, message: String) -> RejectedSinkRecord<SinkRecordId> {
+        RejectedSinkRecord::external(self.id, self.occurred_at, message)
+    }
+}
+
+/// One request a row request sink prepared, and the source rows it carries.
+#[derive(Debug)]
+pub struct PreparedRowRequest {
+    /// The source rows the request carries, in the order it carries them.
+    pub members: Vec<SinkRecordPosition>,
+    /// Exactly the bytes every attempt sends.
+    pub body: Vec<u8>,
+}
+
+/// What a row request sink prepared from one batch of mapped rows.
+///
+/// Every selected row is a member of exactly one request or refused, and every member of a request
+/// follows the members of the requests before it in source order. The host checks both before it
+/// retains a request.
+#[derive(Debug, Default)]
+pub struct RowRequestPreparation {
+    /// The requests that carry the rows the sink accepted, in the order it sends them.
+    pub requests: Vec<PreparedRowRequest>,
+    /// The rows the sink refused, each with the message error the host delivers for it.
+    pub rejected: Vec<RejectedSinkRecord<SinkRecordPosition>>,
+}
+
 /// One record the connector definitively rejected, with the message error the host must deliver.
 ///
 /// `Id` is what the connector answers for: a [`SinkRecordId`] from a record sink, or a
@@ -193,10 +240,11 @@ impl<Id> RejectedSinkRecord<Id> {
 
 /// The result of one connector write, classified per record where a definitive outcome exists.
 ///
-/// `Id` is what the connector answers for: a [`SinkRecordId`] from a record sink, whose host
-/// applies the answer to every source row the record carries, or a [`SinkRecordPosition`] from a
-/// row sink, which answers for each mapped row. A record the connector neither delivered nor
-/// rejected stays unresolved, and only an infrastructure failure explains why the write left it so.
+/// `Id` is what the connector answers for: a [`SinkRecordId`] from a record or request sink, whose
+/// host applies the answer to every source row the record or request carries, or a
+/// [`SinkRecordPosition`] from a row sink, which answers for each mapped row. A record the connector
+/// neither delivered nor rejected stays unresolved, and only an infrastructure failure explains why
+/// the write left it so.
 pub struct PerRecordOutcome<Id> {
     delivered: Vec<Id>,
     rejected: Vec<RejectedSinkRecord<Id>>,
@@ -250,7 +298,8 @@ impl<Id> PerRecordOutcome<Id> {
     }
 }
 
-/// A host-projected Arrow batch and the rows one row sink must write from it.
+/// A host-projected Arrow batch and the rows one row sink writes, or one row request sink prepares
+/// requests, from it.
 ///
 /// `batch.column(i)` holds the values mapped to `target_columns[i]`, so a sink reads its columns by
 /// position and never resolves a name a mapping may have used twice.
@@ -404,6 +453,27 @@ pub trait HttpRequestSink: SinkLifecycle {
 pub trait RowSink: SinkLifecycle {
     /// Writes the selected rows and answers for each of them by its source position.
     async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition>;
+}
+
+/// A connector that prepares requests from host-projected Arrow columns once, and sends each of them
+/// unchanged until it answers for it.
+///
+/// The host retains every prepared request with the source rows it carries, beside the batches they
+/// came from, so an attempt that follows an unknown outcome, such as a lost response or a timeout,
+/// sends exactly what the first attempt sent, even through a connector the host reopened in between.
+#[async_trait]
+pub trait RowRequestSink: SinkLifecycle {
+    /// Prepares the requests that carry the selected rows, and refuses the rows it cannot carry. A
+    /// failure prepares nothing, and the host prepares the same rows again on its next attempt.
+    async fn prepare(
+        &mut self,
+        rows: MappedSinkRows<'_>,
+    ) -> SinkPublishResult<RowRequestPreparation>;
+
+    /// Sends `requests` in the order they are handed over and answers for each of them by its
+    /// identity. A request the connector leaves unanswered stays with the host, which hands it over
+    /// again unchanged.
+    async fn publish(&mut self, requests: Vec<SinkRowRequest>) -> PerRecordOutcome<SinkRecordId>;
 }
 
 /// Operations the host owns for acknowledgements retained by a sink.

@@ -1,5 +1,5 @@
 [package]
-description = "Client session against a Nervix server: connection, statements, transactions, subscriptions and resource upload"
+description = "Client session against a Nervix server: connection, statements, transactions, subscriptions, resource upload and backup download"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-client-core"
@@ -23,6 +23,7 @@ ahash = { workspace = true }
 arch-into = { workspace = true }
 async-tar = { workspace = true, features = ["runtime-tokio"] }
 base64 = { workspace = true }
+blake3 = { workspace = true }
 error-stack = { workspace = true }
 hyper-util = { workspace = true, features = ["client-legacy", "tokio"] }
 indexmap = { workspace = true }

@@ -3,8 +3,9 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** OTLP client and TLS configuration, the exact types each signal accepts, the OTLP
-//!   record every mapped row becomes, its resource and scope, gzip request encoding, the
-//!   export-observation timestamp, and OTLP status classification.
+//!   record every mapped row becomes, its resource and scope, the Export requests it prepares once
+//!   from those records and the observed timestamp they carry, sending a prepared request's exact
+//!   bytes over gRPC or HTTP with optional gzip, and OTLP status classification.
 //! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio
 //!   and the OpenTelemetry protocol crates.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -37,25 +38,21 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_connector::{
-    HttpClientConfig, MappedSinkRows, PerRecordOutcome, RejectedSinkRecord, RowSink, SinkHost,
-    SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkRetryDelay,
+    HttpClientConfig, MappedSinkRows, PerRecordOutcome, PreparedRowRequest, RejectedSinkRecord,
+    RowRequestPreparation, RowRequestSink, SinkHost, SinkLifecycle, SinkPublishError,
+    SinkPublishResult, SinkRecordId, SinkRecordPosition, SinkRetryDelay, SinkRowRequest,
     SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
     optional_client_config_value, read_tls_file,
 };
 use nervix_models::{ClientConfigEntry, FieldPath, Timestamp};
 use opentelemetry_proto::tonic::{
     collector::{
-        logs::v1::{
-            ExportLogsPartialSuccess, ExportLogsServiceRequest, ExportLogsServiceResponse,
-            logs_service_client::LogsServiceClient,
-        },
+        logs::v1::{ExportLogsPartialSuccess, ExportLogsServiceRequest, ExportLogsServiceResponse},
         metrics::v1::{
             ExportMetricsPartialSuccess, ExportMetricsServiceRequest, ExportMetricsServiceResponse,
-            metrics_service_client::MetricsServiceClient,
         },
         trace::v1::{
             ExportTracePartialSuccess, ExportTraceServiceRequest, ExportTraceServiceResponse,
-            trace_service_client::TraceServiceClient,
         },
     },
     common::v1::{AnyValue, ArrayValue, InstrumentationScope, KeyValue, any_value},
@@ -67,10 +64,15 @@ use opentelemetry_proto::tonic::{
     resource::v1::Resource,
     trace::v1::{ResourceSpans, ScopeSpans, Span, Status, span, status},
 };
-use otel_prost::Message as OtelMessage;
+use otel_prost::{
+    Message as OtelMessage,
+    bytes::{Buf, BufMut as _},
+};
 use otel_tonic::{
     Code as GrpcCode, Request as GrpcRequest, Status as GrpcStatus,
-    codec::CompressionEncoding,
+    client::Grpc as GrpcClient,
+    codec::{Codec, CompressionEncoding, DecodeBuf, Decoder, EncodeBuf, Encoder},
+    codegen::http::uri::PathAndQuery,
     metadata::{Ascii, MetadataKey, MetadataMap, MetadataValue},
     transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity},
 };
@@ -90,6 +92,8 @@ const OTLP_PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
 pub struct OtelSink {
     client: OtelClient,
     signal: OtelSignal,
+    /// Where the signal's Export requests go, and the response each is answered with.
+    service: OtelExportService,
     batch: Option<OtelBatchLimits>,
     /// Where each signal key sits among the mapped columns, resolved once at start.
     value_columns: HashMap<String, usize>,
@@ -264,6 +268,16 @@ impl OtelExportRequest {
             Self::Logs(request) => request.encoded_len(),
             Self::Traces(request) => request.encoded_len(),
             Self::Metrics(request) => request.encoded_len(),
+        }
+    }
+
+    /// Exactly the protobuf bytes the receiver decodes, which every attempt to send this request
+    /// writes before transport framing or gzip.
+    fn encode_to_vec(&self) -> Vec<u8> {
+        match self {
+            Self::Logs(request) => request.encode_to_vec(),
+            Self::Traces(request) => request.encode_to_vec(),
+            Self::Metrics(request) => request.encode_to_vec(),
         }
     }
 
@@ -633,6 +647,7 @@ impl OtelSink {
         });
         Ok(Self {
             client,
+            service: OtelExportService::from(&signal),
             signal,
             batch,
             attribute_offset: values.len(),
@@ -911,22 +926,27 @@ impl OtelSink {
 impl SinkLifecycle for OtelSink {}
 
 #[async_trait]
-impl RowSink for OtelSink {
-    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
-        let mut outcome = PerRecordOutcome::with_capacity(rows.selected_rows.len());
+impl RowRequestSink for OtelSink {
+    /// Converts every selected row once and divides the converted records, in source order, into
+    /// Export requests of one resource and one scope, encoding each request exactly once.
+    ///
+    /// Every log record carries the observed time this call samples, so a request sent again after
+    /// an unknown outcome carries the time of its first attempt. With `BATCH`, a request holds at
+    /// most `MAX MESSAGES` records and at most `MAX SIZE` encoded bytes: a candidate larger than that
+    /// is halved, and a record that alone exceeds it is refused.
+    async fn prepare(
+        &mut self,
+        rows: MappedSinkRows<'_>,
+    ) -> SinkPublishResult<RowRequestPreparation> {
+        let mut preparation = RowRequestPreparation::default();
         let mapped = OtelMappedBatch {
             batch: rows.batch,
             value_columns: &self.value_columns,
             attributes: &self.attributes,
             attribute_offset: self.attribute_offset,
         };
-        let observed_time = match OtelSink::observation_time_unix_nano() {
-            Ok(value) => value,
-            Err(error) => {
-                outcome.fail(publish_failure(error.reason));
-                return outcome;
-            }
-        };
+        let observed_time = OtelSink::observation_time_unix_nano()
+            .map_err(|error| publish_failure(error.reason))?;
         let position = |row: usize| SinkRecordPosition {
             batch_index: rows.batch_index,
             row_index: row,
@@ -942,9 +962,9 @@ impl RowSink for OtelSink {
                             records.push(record);
                             positions.push(position(*row));
                         }
-                        Err(error) => {
-                            outcome.reject(error.rejected(position(*row), rows.occurred_at))
-                        }
+                        Err(error) => preparation
+                            .rejected
+                            .push(error.rejected(position(*row), rows.occurred_at)),
                     }
                 }
                 OtelExportRequest::Logs(ExportLogsServiceRequest {
@@ -968,9 +988,9 @@ impl RowSink for OtelSink {
                             spans.push(span);
                             positions.push(position(*row));
                         }
-                        Err(error) => {
-                            outcome.reject(error.rejected(position(*row), rows.occurred_at))
-                        }
+                        Err(error) => preparation
+                            .rejected
+                            .push(error.rejected(position(*row), rows.occurred_at)),
                     }
                 }
                 OtelExportRequest::Traces(ExportTraceServiceRequest {
@@ -993,7 +1013,7 @@ impl RowSink for OtelSink {
                         rows.batch_index,
                         rows.occurred_at,
                         &mut positions,
-                        &mut outcome,
+                        &mut preparation.rejected,
                     )
                     .await;
                 OtelExportRequest::Metrics(ExportMetricsServiceRequest {
@@ -1010,7 +1030,7 @@ impl RowSink for OtelSink {
             }
         };
         if positions.is_empty() {
-            return outcome;
+            return Ok(preparation);
         }
 
         let max_messages = match self.batch {
@@ -1043,7 +1063,7 @@ impl RowSink for OtelSink {
                         pending.push_front(middle..range.end);
                         pending.push_front(range.start..middle);
                     } else {
-                        outcome.reject(RejectedSinkRecord::external(
+                        preparation.rejected.push(RejectedSinkRecord::external(
                             positions[range.start],
                             rows.occurred_at,
                             format!(
@@ -1055,7 +1075,29 @@ impl RowSink for OtelSink {
                     continue;
                 }
             }
-            match self.client.export(export).await {
+            preparation.requests.push(PreparedRowRequest {
+                members: positions[range].to_vec(),
+                body: export.encode_to_vec(),
+            });
+        }
+        Ok(preparation)
+    }
+
+    /// Sends each prepared request, in order, exactly as it was prepared.
+    ///
+    /// An accepted request is delivered and a request the receiver refused is rejected. The first
+    /// request whose outcome is unknown ends the write, which leaves it and every request after it
+    /// unanswered for the host to hand over again.
+    async fn publish(&mut self, requests: Vec<SinkRowRequest>) -> PerRecordOutcome<SinkRecordId> {
+        let mut outcome = PerRecordOutcome::with_capacity(requests.len());
+        for request in requests {
+            tokio::task::consume_budget().await;
+            let SinkRowRequest {
+                id,
+                body,
+                occurred_at,
+            } = request;
+            match self.client.export(self.service, body).await {
                 OtelTransportOutcome::Accepted(partial_success) => {
                     if let Some(partial) = partial_success
                         && (partial.rejected != 0 || !partial.error_message.is_empty())
@@ -1067,18 +1109,10 @@ impl RowSink for OtelSink {
                              acknowledged without retry"
                         );
                     }
-                    for position in &positions[range] {
-                        outcome.deliver(*position);
-                    }
+                    outcome.deliver(id);
                 }
                 OtelTransportOutcome::Rejected(reason) => {
-                    for position in &positions[range] {
-                        outcome.reject(RejectedSinkRecord::external(
-                            *position,
-                            rows.occurred_at,
-                            reason.clone(),
-                        ));
-                    }
+                    outcome.reject(RejectedSinkRecord::external(id, occurred_at, reason));
                 }
                 OtelTransportOutcome::Failed(error) => {
                     outcome.fail(error);
@@ -1091,25 +1125,27 @@ impl RowSink for OtelSink {
 }
 
 impl OtelClient {
-    async fn export(&self, request: OtelExportRequest) -> OtelTransportOutcome {
-        self.transport.export(request).await
+    async fn export(&self, service: OtelExportService, body: Vec<u8>) -> OtelTransportOutcome {
+        self.transport.export(service, body).await
     }
 }
 
 impl OtelTransport {
-    async fn export(&self, request: OtelExportRequest) -> OtelTransportOutcome {
+    /// Sends one prepared Export request's bytes to `service`, compressed as the client is
+    /// configured, and classifies the answer.
+    async fn export(&self, service: OtelExportService, body: Vec<u8>) -> OtelTransportOutcome {
         match self {
             Self::Grpc {
                 channel,
                 metadata,
                 compression,
-            } => Self::export_grpc(channel, metadata, *compression, request).await,
+            } => Self::export_grpc(channel, metadata, *compression, service, body).await,
             Self::HttpProtobuf {
                 client,
                 endpoint,
                 headers,
                 compression,
-            } => Self::export_http(client, endpoint, headers, *compression, request).await,
+            } => Self::export_http(client, endpoint, headers, *compression, service, body).await,
         }
     }
 
@@ -1123,78 +1159,73 @@ impl OtelTransport {
         channel: &Channel,
         metadata: &MetadataMap,
         compression: OtelCompression,
-        request: OtelExportRequest,
+        service: OtelExportService,
+        body: Vec<u8>,
     ) -> OtelTransportOutcome {
-        let response = match request {
-            OtelExportRequest::Logs(request) => {
-                let mut client = LogsServiceClient::new(channel.clone());
-                if compression == OtelCompression::Gzip {
-                    client = client.send_compressed(CompressionEncoding::Gzip);
-                }
-                match client.export(Self::grpc_request(request, metadata)).await {
-                    Ok(response) => {
-                        return OtelTransportOutcome::Accepted(
-                            response.into_inner().partial_success.map(Into::into),
-                        );
-                    }
-                    Err(status) => status,
-                }
-            }
-            OtelExportRequest::Traces(request) => {
-                let mut client = TraceServiceClient::new(channel.clone());
-                if compression == OtelCompression::Gzip {
-                    client = client.send_compressed(CompressionEncoding::Gzip);
-                }
-                match client.export(Self::grpc_request(request, metadata)).await {
-                    Ok(response) => {
-                        return OtelTransportOutcome::Accepted(
-                            response.into_inner().partial_success.map(Into::into),
-                        );
-                    }
-                    Err(status) => status,
-                }
-            }
-            OtelExportRequest::Metrics(request) => {
-                let mut client = MetricsServiceClient::new(channel.clone());
-                if compression == OtelCompression::Gzip {
-                    client = client.send_compressed(CompressionEncoding::Gzip);
-                }
-                match client.export(Self::grpc_request(request, metadata)).await {
-                    Ok(response) => {
-                        return OtelTransportOutcome::Accepted(
-                            response.into_inner().partial_success.map(Into::into),
-                        );
-                    }
-                    Err(status) => status,
-                }
-            }
-        };
-        Self::grpc_failure(response)
+        let mut client = GrpcClient::new(channel.clone());
+        if compression == OtelCompression::Gzip {
+            client = client.send_compressed(CompressionEncoding::Gzip);
+        }
+        // A channel that cannot take a request has not sent it. The failure keeps its cause, so it
+        // classifies as an export without an answer and the host retries it.
+        if let Err(error) = client.ready().await {
+            return Self::grpc_failure(GrpcStatus::from_error(error.into()));
+        }
+        let exported = client
+            .unary(
+                Self::grpc_request(body, metadata),
+                PathAndQuery::from_static(service.grpc_path()),
+                PreparedExportCodec { service },
+            )
+            .await;
+        match exported {
+            Ok(response) => OtelTransportOutcome::Accepted(response.into_inner()),
+            Err(status) => Self::grpc_failure(status),
+        }
     }
 
+    /// Classifies a gRPC export that did not succeed.
+    ///
+    /// tonic keeps the local or transport failure it reports a status for as that status's source,
+    /// and a status the receiver answered with carries none. Without an answer — the request timed
+    /// out, the connection was lost, or the response could not be read — nothing says whether the
+    /// receiver accepted the export, so it is retried. An answer is classified by its code:
+    /// `INVALID_ARGUMENT` refuses the request, `RESOURCE_EXHAUSTED` and the codes the OTLP
+    /// specification lists as retryable are retried no sooner than the receiver's `RetryInfo`, and
+    /// any other code says the endpoint cannot take this export as it is configured.
     fn grpc_failure(status: GrpcStatus) -> OtelTransportOutcome {
-        if status.code() == GrpcCode::InvalidArgument {
-            return OtelTransportOutcome::Rejected(
+        if std::error::Error::source(&status).is_some() {
+            return OtelTransportOutcome::Failed(publish_failure(format!(
+                "OTEL gRPC export ended without an answer from the receiver: {} ({})",
+                status.code(),
+                status.message()
+            )));
+        }
+        match status.code() {
+            GrpcCode::InvalidArgument => OtelTransportOutcome::Rejected(
                 "OTEL receiver rejected the request with gRPC INVALID_ARGUMENT".to_string(),
-            );
+            ),
+            GrpcCode::Cancelled
+            | GrpcCode::DeadlineExceeded
+            | GrpcCode::ResourceExhausted
+            | GrpcCode::Aborted
+            | GrpcCode::OutOfRange
+            | GrpcCode::Unavailable
+            | GrpcCode::DataLoss => {
+                let message = format!("OTEL gRPC export failed with {}", status.code());
+                let retry_delay = status
+                    .get_details_retry_info()
+                    .and_then(|info| info.retry_delay);
+                OtelTransportOutcome::Failed(match retry_delay {
+                    Some(delay) => publish_failure_after(message, delay),
+                    None => publish_failure(message),
+                })
+            }
+            _ => OtelTransportOutcome::Failed(misconfigured(format!(
+                "OTEL gRPC export failed with non-retryable {}",
+                status.code()
+            ))),
         }
-        if matches!(
-            status.code(),
-            GrpcCode::Unavailable | GrpcCode::ResourceExhausted
-        ) {
-            let message = format!("OTEL gRPC export failed with {}", status.code());
-            let retry_delay = status
-                .get_details_retry_info()
-                .and_then(|info| info.retry_delay);
-            return OtelTransportOutcome::Failed(match retry_delay {
-                Some(delay) => publish_failure_after(message, delay),
-                None => publish_failure(message),
-            });
-        }
-        OtelTransportOutcome::Failed(misconfigured(format!(
-            "OTEL gRPC export failed with non-retryable {}",
-            status.code()
-        )))
     }
 
     async fn export_http(
@@ -1202,44 +1233,16 @@ impl OtelTransport {
         endpoint: &url::Url,
         headers: &HeaderMap,
         compression: OtelCompression,
-        request: OtelExportRequest,
+        service: OtelExportService,
+        body: Vec<u8>,
     ) -> OtelTransportOutcome {
-        /// One OTLP signal encoded for HTTP export: the path segment it posts to, its protobuf
-        /// body, and the response type the receiver answers with.
-        struct EncodedSignal {
-            path: &'static str,
-            body: Vec<u8>,
-            response_kind: OtelHttpResponseKind,
-        }
-
-        let EncodedSignal {
-            path,
-            body,
-            response_kind,
-        } = match request {
-            OtelExportRequest::Logs(request) => EncodedSignal {
-                path: "logs",
-                body: request.encode_to_vec(),
-                response_kind: OtelHttpResponseKind::Logs,
-            },
-            OtelExportRequest::Traces(request) => EncodedSignal {
-                path: "traces",
-                body: request.encode_to_vec(),
-                response_kind: OtelHttpResponseKind::Traces,
-            },
-            OtelExportRequest::Metrics(request) => EncodedSignal {
-                path: "metrics",
-                body: request.encode_to_vec(),
-                response_kind: OtelHttpResponseKind::Metrics,
-            },
-        };
         let body = match Self::http_body(body, compression) {
             Ok(body) => body,
             Err(error) => return OtelTransportOutcome::Failed(error),
         };
         let mut url = endpoint.clone();
         let base_path = url.path().trim_end_matches('/');
-        url.set_path(&format!("{base_path}/v1/{path}"));
+        url.set_path(&format!("{base_path}/v1/{}", service.http_path()));
         let mut request = client
             .post(url)
             .headers(headers.clone())
@@ -1288,7 +1291,7 @@ impl OtelTransport {
                 )));
             }
         };
-        match response_kind.decode(&body) {
+        match service.decode_response(&body[..]) {
             Ok(partial) => OtelTransportOutcome::Accepted(partial),
             Err(error) => OtelTransportOutcome::Failed(publish_failure(format!(
                 "failed to decode OTEL HTTP protobuf response: {error}"
@@ -1332,19 +1335,38 @@ impl OtelTransport {
     }
 }
 
-macro_rules! declare_otel_http_response_kinds {
-    ($($Kind:ident => $Response:ident, $PartialSuccess:ident, $rejected:ident;)+) => {
-        enum OtelHttpResponseKind {
-            $($Kind,)+
+macro_rules! declare_otel_export_services {
+    ($($Service:ident => $http_path:literal, $grpc_path:literal, $Response:ident,
+        $PartialSuccess:ident, $rejected:ident;)+) => {
+        /// The OTLP export service one signal's requests are sent to, which fixes where a request
+        /// goes over either transport and which response the receiver answers it with.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum OtelExportService {
+            $($Service,)+
         }
 
-        impl OtelHttpResponseKind {
-            fn decode(
-                &self,
-                body: &[u8],
+        impl OtelExportService {
+            /// The path segment an OTLP/HTTP request is posted to under `/v1/`.
+            fn http_path(self) -> &'static str {
+                match self {
+                    $(Self::$Service => $http_path,)+
+                }
+            }
+
+            /// The method an OTLP/gRPC request calls.
+            fn grpc_path(self) -> &'static str {
+                match self {
+                    $(Self::$Service => $grpc_path,)+
+                }
+            }
+
+            /// The partial success the receiver's Export response reports, if it reports one.
+            fn decode_response(
+                self,
+                body: impl Buf,
             ) -> Result<Option<OtelPartialSuccess>, otel_prost::DecodeError> {
                 match self {
-                    $(Self::$Kind => Ok($Response::decode(body)?
+                    $(Self::$Service => Ok($Response::decode(body)?
                         .partial_success
                         .map(Into::into)),)+
                 }
@@ -1362,10 +1384,78 @@ macro_rules! declare_otel_http_response_kinds {
     };
 }
 
-declare_otel_http_response_kinds! {
-    Logs => ExportLogsServiceResponse, ExportLogsPartialSuccess, rejected_log_records;
-    Traces => ExportTraceServiceResponse, ExportTracePartialSuccess, rejected_spans;
-    Metrics => ExportMetricsServiceResponse, ExportMetricsPartialSuccess, rejected_data_points;
+declare_otel_export_services! {
+    Logs => "logs", "/opentelemetry.proto.collector.logs.v1.LogsService/Export",
+        ExportLogsServiceResponse, ExportLogsPartialSuccess, rejected_log_records;
+    Traces => "traces", "/opentelemetry.proto.collector.trace.v1.TraceService/Export",
+        ExportTraceServiceResponse, ExportTracePartialSuccess, rejected_spans;
+    Metrics => "metrics", "/opentelemetry.proto.collector.metrics.v1.MetricsService/Export",
+        ExportMetricsServiceResponse, ExportMetricsPartialSuccess, rejected_data_points;
+}
+
+impl From<&OtelSignal> for OtelExportService {
+    fn from(signal: &OtelSignal) -> Self {
+        match signal {
+            OtelSignal::Logs => Self::Logs,
+            OtelSignal::Traces => Self::Traces,
+            OtelSignal::Metric(_) => Self::Metrics,
+        }
+    }
+}
+
+/// The gRPC codec that sends a prepared Export request's bytes exactly as they were prepared and
+/// reads the receiver's response for one export service.
+struct PreparedExportCodec {
+    service: OtelExportService,
+}
+
+impl Codec for PreparedExportCodec {
+    type Encode = Vec<u8>;
+    type Decode = Option<OtelPartialSuccess>;
+    type Encoder = PreparedExportEncoder;
+    type Decoder = ExportResponseDecoder;
+
+    fn encoder(&mut self) -> Self::Encoder {
+        PreparedExportEncoder
+    }
+
+    fn decoder(&mut self) -> Self::Decoder {
+        ExportResponseDecoder {
+            service: self.service,
+        }
+    }
+}
+
+/// Writes a prepared request's bytes as the gRPC message, unchanged.
+struct PreparedExportEncoder;
+
+impl Encoder for PreparedExportEncoder {
+    type Item = Vec<u8>;
+    type Error = GrpcStatus;
+
+    fn encode(&mut self, item: Vec<u8>, dst: &mut EncodeBuf<'_>) -> Result<(), GrpcStatus> {
+        dst.put_slice(&item);
+        Ok(())
+    }
+}
+
+/// Reads the receiver's Export response for one service.
+struct ExportResponseDecoder {
+    service: OtelExportService,
+}
+
+impl Decoder for ExportResponseDecoder {
+    type Item = Option<OtelPartialSuccess>;
+    type Error = GrpcStatus;
+
+    fn decode(&mut self, src: &mut DecodeBuf<'_>) -> Result<Option<Self::Item>, GrpcStatus> {
+        match self.service.decode_response(src) {
+            Ok(partial_success) => Ok(Some(partial_success)),
+            // A response that cannot be read says nothing about whether the export was accepted,
+            // so the status keeps the decode error as its source and classifies as no answer.
+            Err(error) => Err(GrpcStatus::from_error(Box::new(error))),
+        }
+    }
 }
 
 /// The mapped columns of one batch, read by the position the host projected them in.
@@ -1570,7 +1660,7 @@ impl OtelMappedBatch<'_> {
         batch_index: usize,
         occurred_at: Timestamp,
         positions: &mut Vec<SinkRecordPosition>,
-        outcome: &mut PerRecordOutcome<SinkRecordPosition>,
+        rejected: &mut Vec<RejectedSinkRecord<SinkRecordPosition>>,
     ) -> Metric {
         let position = |row: usize| SinkRecordPosition {
             batch_index,
@@ -1593,7 +1683,7 @@ impl OtelMappedBatch<'_> {
                             points.push(point);
                             positions.push(position(*row));
                         }
-                        Err(error) => outcome.reject(error.rejected(position(*row), occurred_at)),
+                        Err(error) => rejected.push(error.rejected(position(*row), occurred_at)),
                     }
                 }
                 match &model.kind {
@@ -1623,7 +1713,7 @@ impl OtelMappedBatch<'_> {
                             points.push(point);
                             positions.push(position(*row));
                         }
-                        Err(error) => outcome.reject(error.rejected(position(*row), occurred_at)),
+                        Err(error) => rejected.push(error.rejected(position(*row), occurred_at)),
                     }
                 }
                 metric::Data::Histogram(Histogram {
@@ -2244,6 +2334,9 @@ fn any_value_at(array: &ArrayRef, row: usize) -> OtelValueResult<Option<AnyValue
 }
 
 #[cfg(test)]
+mod prepared_request_tests;
+
+#[cfg(test)]
 mod tests {
     use nervix_dns::{DnsConfiguration, NameServers};
     use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
@@ -2477,11 +2570,7 @@ mod tests {
         .unwrap_or_else(|error| {
             panic!("an unavailable endpoint must initialize for publish-time retry: {error:?}")
         });
-        let outcome = transport
-            .export(OtelExportRequest::Logs(ExportLogsServiceRequest {
-                resource_logs: Vec::new(),
-            }))
-            .await;
+        let outcome = transport.export(OtelExportService::Logs, Vec::new()).await;
         let OtelTransportOutcome::Failed(error) = outcome else {
             panic!("an unavailable endpoint must fail as infrastructure");
         };
@@ -2533,9 +2622,13 @@ mod tests {
         tokio::task::yield_now().await;
         assert_eq!(authority.questions_for(name), 0);
         let outcome = transport
-            .export(OtelExportRequest::Logs(ExportLogsServiceRequest {
-                resource_logs: Vec::new(),
-            }))
+            .export(
+                OtelExportService::Logs,
+                ExportLogsServiceRequest {
+                    resource_logs: Vec::new(),
+                }
+                .encode_to_vec(),
+            )
             .await;
         assert!(matches!(outcome, OtelTransportOutcome::Failed(_)));
         assert!(authority.questions_for(name) > 0);

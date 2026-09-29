@@ -67,7 +67,7 @@ pub(super) enum CollectionLayer {
 }
 
 impl SchemaTypeDraft {
-    fn build(&self, field: usize) -> error_stack::Result<ParseAsType, SchemaDraftError> {
+    pub(super) fn build(&self, field: usize) -> error_stack::Result<ParseAsType, SchemaDraftError> {
         let Some(mut ty) = self.scalar.clone() else {
             return Err(Report::new(SchemaDraftError::FieldTypeRequired { field }));
         };

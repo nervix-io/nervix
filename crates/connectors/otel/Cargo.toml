@@ -61,3 +61,11 @@ url = { workspace = true }
 [dev-dependencies]
 nervix-test-environment = { workspace = true }
 tempfile = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true, features = [
+  "io-util",
+  "macros",
+  "net",
+  "rt-multi-thread",
+] }
+tokio-stream = { workspace = true, features = ["net"] }

@@ -733,7 +733,79 @@ function commandLines(id: bigint, outcome: wire.CommandOutcome): string[] {
     const unknown = member(outcome.disposition(new wire.OutcomeUnknown()) as wire.OutcomeUnknown | null);
     lines.push(`UNKNOWN cause=${wire.UnknownOutcomeCause[member(unknown.cause())]}`);
   }
+  const archive = outcome.backup();
+  if (archive !== null) {
+    lines.push(...backupLines(archive));
+  }
   return lines;
+}
+
+/** Renders the archive a completed backup reports. */
+function backupLines(archive: wire.BackupArchiveSummary): string[] {
+  const digest = member(archive.digest()).bytesArray();
+  const resources = archive.resources();
+  if (archive.totalBytes() === 0n || digest === null || digest.length !== 32 || resources === null) {
+    throw new Error('a backup archive lacks its size, digest or resources');
+  }
+  const users = archive.users();
+  const lines = [
+    `BACKUP total_bytes=${archive.totalBytes()} digest=${hex(digest)} captured_at=${archive.capturedAt()} retained_until=${archive.retainedUntil()} resources=${wire.BackupResources[resources]} users=${users ?? 'none'}`,
+  ];
+  for (let index = 0; index < archive.domainsLength(); index += 1) {
+    const domain = member(archive.domains(index));
+    lines.push(
+      `BACKUP_DOMAIN domain=${domain.domain()} revision=${domain.revision()} sections=${domain.sections()} section_bytes=${domain.sectionBytes()}`,
+    );
+  }
+  return lines;
+}
+
+/** Renders the request of a backup download. */
+function downloadRequestLines(frame: Uint8Array): string[] {
+  const request = wire.BackupDownloadRequest.getRootAsBackupDownloadRequest(frameBuffer(frame, 'NXBQ'));
+  return [`REQUEST DOWNLOAD_BACKUP reference=${request.executionReference()}`];
+}
+
+/** Renders one frame of a backup download stream. */
+function downloadLines(frame: Uint8Array): string[] {
+  const message = wire.BackupDownloadMessage.getRootAsBackupDownloadMessage(frameBuffer(frame, 'NXBD'));
+  switch (message.partType()) {
+    case wire.BackupDownloadPart.BackupArchiveStart: {
+      const start = member(message.part(new wire.BackupArchiveStart()) as wire.BackupArchiveStart | null);
+      const digest = member(start.digest()).bytesArray();
+      if (start.totalBytes() === 0n || digest === null || digest.length !== 32) {
+        throw new Error('a download start lacks its size or digest');
+      }
+      return [`DOWNLOAD START total_bytes=${start.totalBytes()} digest=${hex(digest)}`];
+    }
+    case wire.BackupDownloadPart.BackupArchiveChunk: {
+      const chunk = member(message.part(new wire.BackupArchiveChunk()) as wire.BackupArchiveChunk | null);
+      const bytes = chunk.bytesArray();
+      if (bytes === null || bytes.length === 0) {
+        throw new Error('a download chunk is empty');
+      }
+      return [`DOWNLOAD CHUNK bytes=${hex(bytes)}`];
+    }
+    case wire.BackupDownloadPart.BackupArchiveComplete:
+      return ['DOWNLOAD COMPLETE'];
+    case wire.BackupDownloadPart.BackupDownloadFailed: {
+      const failed = member(message.part(new wire.BackupDownloadFailed()) as wire.BackupDownloadFailed | null);
+      return [
+        `DOWNLOAD FAILED failure=${wire.BackupDownloadFailure[member(failed.failure())]} message=${text(bytesOf((encoding) => failed.message(encoding)))}`,
+      ];
+    }
+    case wire.BackupDownloadPart.LeaderRedirect: {
+      const redirect = member(message.part(new wire.LeaderRedirect()) as wire.LeaderRedirect | null);
+      const leader = redirect.leader();
+      return [
+        leader === null
+          ? 'DOWNLOAD LEADER none'
+          : `DOWNLOAD LEADER node=${leader.node()} grpc=${leader.grpcUri() ?? 'none'} console=${leader.webConsoleUri() ?? 'none'}`,
+      ];
+    }
+    default:
+      throw new Error(`undeclared download part ${message.partType()}`);
+  }
 }
 
 /** Renders a domain clock as the serving node has it installed. */
@@ -979,14 +1051,23 @@ function clientLines(frame: Uint8Array): string[] {
 /** Decodes every frame of the checked-in corpus and prints its report. */
 function corpus(directory: string): void {
   const files = readdirSync(directory)
-    .filter((file) => file.endsWith('.nxcm') || file.endsWith('.nxsm'))
+    .filter((file) => ['.nxcm', '.nxsm', '.nxbq', '.nxbd'].some((extension) => file.endsWith(extension)))
     .sort();
   const opened = new Uint8Array(readFileSync(join(directory, 'server_subscription_opened.nxsm')));
   const openedMessage = wire.ServerMessage.getRootAsServerMessage(frameBuffer(opened, 'NXSM'));
   const schema = openedSchema(member(openedMessage.body(new wire.Reply()) as wire.Reply | null));
   for (const file of files) {
     const frame = new Uint8Array(readFileSync(join(directory, file)));
-    const lines = file.endsWith('.nxcm') ? clientLines(frame) : serverLines(frame, schema);
+    let lines: string[];
+    if (file.endsWith('.nxcm')) {
+      lines = clientLines(frame);
+    } else if (file.endsWith('.nxbq')) {
+      lines = downloadRequestLines(frame);
+    } else if (file.endsWith('.nxbd')) {
+      lines = downloadLines(frame);
+    } else {
+      lines = serverLines(frame, schema);
+    }
     report(`FRAME ${file}`);
     lines.forEach(report);
   }

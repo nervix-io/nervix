@@ -26,6 +26,7 @@ are in [Message Errors](./processors.md#message-errors) and [Error Routes](./qui
 | Materialized state and lookups | Dependency resolution, field and schema checks, defaults, lookup evaluation, snapshot opening, and state exchange | Use a declared absence policy only for unavailable state; report a genuine failed read or invalid state. |
 | Ingest grouping and relay batching | Route grouping, branch-key construction, Arrow batch assembly, relay admission, and delivery failures | Keep the affected concrete branch and fail or retry the correct in-memory attempt. |
 | Registry, placement, and planning | Invalid domain models, references, capabilities, branch relationships, flush contracts, schedules, and placements | Reject the command before activating an invalid graph or refuse a relocation plan. |
+| Backup archive format | Records that do not encode or exceed their size limit, and archives whose structure, record headers, record values, section lengths or digests do not match what the manifest declares | Refuse to write an archive, or refuse a whole archive naming the section and the check that failed. |
 | Interconnect | Authentication, framing, limits, transport, and the class and subject of a remote operation failure | Distinguish a transport failure from a peer's rejection, absence, unreadiness, or executed failure. |
 | Control plane and public edges | Transaction and lifecycle results, command dispositions, session diagnostics, and HTTP response selection | Return a recoverable command outcome or an appropriate response to a client or operator. |
 
@@ -42,6 +43,12 @@ Codec jaq transformations are compiled during registry validation for every decl
 A syntax error names the codec, domain, and direction and rejects the transaction before the model
 is committed. The browser keeps the draft editable so the program can be corrected and submitted
 under the same name.
+
+The visual hash-map and Roto UDF forms validate incomplete drafts before rendering canonical
+NSPL. Missing resource versions, codec output fields, argument types, or source are shown as form
+validation errors while the draft stays editable. After submission, lookup loading and Roto
+compilation or test failures retain their server diagnostics; correcting the same draft starts a
+new command without claiming the failed creation succeeded.
 
 The expression VM returns reports for compile, batch, and runtime failures. `CompileError` keeps
 its typed diagnostic code, stable code spelling, operation span, and safe message; validation adds
@@ -136,6 +143,31 @@ body size and the limit as typed fields and becomes a record rejection of that m
 `external` and operation `publish`, reaching every member of a batch message. Any other close, a
 lost connection, and a close whose reason never arrives fail the attempt as an infrastructure
 failure, which the emitter retries on its backoff.
+
+A backup's failures are owned where they are decided. The archive format reports an
+`ArchiveWriteError` for a record that does not encode, a record above the 64 MiB record limit, a
+section path a tar header cannot name, or bytes that differ from the manifest entry they were
+written for, and an `ArchiveReadError` for an archive whose first entry is not the manifest, a
+record with a foreign magic, kind, or format version, an invalid record value, a missing,
+misplaced, unexpected, or out-of-order section, and a section whose length or digest differs from
+the manifest. Each names the section path and the check as typed fields, and none carries section
+bytes. The control plane's backup execution reports a `BackupError`: no configuration yet, no
+selected or no existing domain, models that are not a valid graph or do not render or parse back to
+themselves, a clock mapping that cannot be projected, a resource version that is missing on the
+leader or differs from its catalog entry, a record that does not encode, and an archive the
+staging area cannot hold. The failed command's message is `backup failed:` followed by that
+error's text. A download the server does not serve is answered with a typed refusal,
+`InvalidRequest`, `NotRetained`, `Expired`, `NotOwner` or `ReadFailed`, or with a redirect to the
+leader, and a call without valid credentials ends with `UNAUTHENTICATED`. The client reports a
+`BackupDownloadError` beneath `ClientError::BackupDownload`, which carries the backup's execution
+reference: the server's refusal, a transport failure, a stalled or interrupted stream, a missing
+leader or a redirect loop, frames out of order or undecodable, an archive that differs from the
+backup's summary, or a local write failure. Only a transport failure, a stall, and an interrupted
+stream are retried, from the archive's first byte. The C binding classifies a refusal as
+`NX_ERROR_REJECTED`, a transport failure as `NX_ERROR_TRANSPORT`, a mismatched or malformed
+archive as `NX_ERROR_PROTOCOL`, and a write failure as `NX_ERROR_INVALID_ARGUMENT`, and names the
+execution reference so a host can run the backup again. No diagnostic of a backup includes archive
+contents, password hashes, or resource bytes.
 
 The vocabulary is the innermost owner, and its Model operations report the same way. An alteration
 is applied to a copy of the stored Model, which replaces the original only when every operation
@@ -288,12 +320,27 @@ of the internal report. The route may inspect the eligible original input, its c
 materialized-state snapshot, and an all-optional `partial_output` of construction completed before
 failure. An error handler whose own construction fails does not recursively invoke itself.
 
+Before a domain execution or replacement becomes active, the registry selects each DLQ route and
+resolves its source, partial-output and destination schemas, branch declarations and flush
+contract, then lowers its ordered SET assignments. The runtime binds that program, lookups, state
+and UDFs once for that installed revision. Missing inputs, codecs or relays fail planning;
+missing runtime relay services, invalid flush settings or a failed VM compilation fail binding
+with the owning node and DLQ relay. A failed record uses the installed plan and never reads the
+scheduled Model or compiles its handler. If unavailable, it reports the delivery failure and does
+not acknowledge the source record. Replacing a buffered route starts a task for the new bound plan and
+drains the earlier task, preserving the earlier task's pending acknowledgements.
+
 A batch payload's rejection becomes one message error per member, each a copy of the sink's
 structured error: the members share its reference, so an operator can see that they failed
-together, while each keeps its own occurrence time and branch. A sink answer that breaks the write
-contract, by naming a record the write did not carry or answering twice for one, is not a message
-error of any member. It fails the attempt without a retry, and the emitter's unresolved rows then
-follow `ON MESSAGE ERROR` as a failed publish.
+together, while each keeps its own occurrence time and branch. A prepared row request's rejection,
+such as an OTEL Export request the receiver refused, does the same for every row the request
+carried. A sink answer that breaks the write contract, by naming a record the write did not carry
+or answering twice for one, is not a message error of any member. Neither is a row request sink's
+preparation that breaks its contract: one that answers for a row the write did not hand over,
+answers twice for a row, prepares rows out of source order, prepares a request that carries no row,
+or leaves a handed-over row unanswered. Either fails the attempt without a retry as the typed
+emitter error that names the violation, the preparation keeps nothing, and the emitter's unresolved
+rows then follow `ON MESSAGE ERROR` as a failed publish.
 
 The Sentry sink rejects a final serialized event above its decompressed event limit before sending
 the envelope. The Syslog sink rejects a UDP datagram above its payload limit, a stream frame whose
@@ -302,7 +349,11 @@ A batching OTEL sink measures the full protobuf Export request after mapping; if
 halving still leaves one source record above `MAX SIZE`, that record receives an external publish
 message error. Other members can be sent in bounded requests. An OTLP receiver's
 `partial_success` has no member identities, so it acknowledges the entire request and emits a
-warning instead of inventing per-record rejections.
+warning instead of inventing per-record rejections. An OTLP/gRPC export the receiver never answered
+— a timeout, a lost connection, an unreadable answer — is an infrastructure failure the host
+retries, whatever code tonic reports for it. An answered status other than `INVALID_ARGUMENT`,
+`RESOURCE_EXHAUSTED` or a code the OTLP specification lists as retryable is a misconfiguration
+failure, which the host does not retry.
 
 An HTTP emitter rejects a record at the first request field that fails, in the order it evaluates
 them: `METHOD`, `PATH`, and then each header write. A failed expression keeps the `evaluation`

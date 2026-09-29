@@ -17,8 +17,9 @@ use nervix_client_wire::{
     UnsubscribeDisposition, UnsubscribeOutcome, UploadDisposition, UploadFailure, UploadReply,
 };
 use nervix_models::{
-    CommandExecutionReference, ResourceDescription, ResourceUploadIdentity, TransactionInspection,
-    TransactionOperationAdmission, TransactionPreviewIdentity, TransactionStatus,
+    BackupArchiveSummary, CommandExecutionReference, ResourceDescription, ResourceUploadIdentity,
+    TransactionInspection, TransactionOperationAdmission, TransactionPreviewIdentity,
+    TransactionStatus,
 };
 use url::Url;
 
@@ -53,6 +54,9 @@ pub struct CommandOutcome {
     /// Present when the statement opened a subscription.
     pub subscription: Option<Box<SubscriptionOpened>>,
     pub resource_upload: Option<ResourceUploadOutcome>,
+    /// The archive a completed `BACKUP` assembled, which the client downloaded to the file the
+    /// statement names.
+    pub backup: Option<Box<BackupArchiveSummary>>,
 }
 
 /// What became of a resource upload.
@@ -100,6 +104,7 @@ impl CommandOutcome {
             resource: None,
             subscription: None,
             resource_upload: None,
+            backup: None,
         }
     }
 
@@ -215,6 +220,7 @@ impl From<wire::CommandOutcome> for CommandOutcome {
             resource: outcome.resource,
             subscription: None,
             resource_upload: None,
+            backup: outcome.backup,
         }
     }
 }

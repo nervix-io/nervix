@@ -142,7 +142,7 @@ Feature: OTEL emission
     When sink client for emitter "audit_to_otel" leaves fault mode
     Then within "10s" DESCRIBE EMITTER "audit_to_otel" on the leader node contains
       """
-      transient error: OTEL gRPC export failed with The service is currently unavailable
+      transient error: OTEL gRPC export ended without an answer from the receiver
       """
     And the DNS fixture eventually receives a question for "otel-grpc.nervix.test"
     When the DNS fixture answers "otel-grpc.nervix.test" with addresses "127.0.0.1"

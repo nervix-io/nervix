@@ -184,6 +184,15 @@ pub enum ClientError {
     },
     #[error("failed to load TLS CA certificate")]
     LoadTlsCaCertificate(#[source] std::io::Error),
+    /// The backup completed, and its archive could not be downloaded. Running the same execution
+    /// handle again recovers the backup's outcome and downloads the archive again while the server
+    /// retains it.
+    #[error("failed to download the archive of backup '{reference}'")]
+    BackupDownload {
+        reference: CommandExecutionReference,
+        #[source]
+        source: crate::backup::BackupDownloadError,
+    },
 }
 
 impl ClientError {

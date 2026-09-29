@@ -960,6 +960,30 @@ pub fn string_lit<'src>()
     .boxed()
 }
 
+/// A path on the client's own filesystem, written as a quoted literal.
+///
+/// Client-local statements name the file or directory they read or write this way, and the server
+/// never interprets the path. Completion recognizes a position that expects one by this label, so
+/// every such path is parsed here rather than as a plain string literal. An empty literal names no
+/// file, so it is rejected where it is written.
+///
+/// The label goes on the literal itself, not on the checked parser, so the emptiness check keeps
+/// its explanation.
+pub fn local_path<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    select! {
+        Token::StringLiteral(value) => value,
+    }
+    .labelled("local_path")
+    .try_map(|path, span| {
+        if path.is_empty() {
+            return Err(Rich::custom(span, "local_path must not be empty"));
+        }
+        Ok(path)
+    })
+    .boxed()
+}
+
 /// A transaction named by its identity, written as a quoted literal.
 ///
 /// The server issues transaction identities, and they are not NSPL names: they are quoted exactly

@@ -5,7 +5,7 @@
 //! - **Owns.** The REPL: key bindings, the completion menu, rendered diagnostics, output formatting
 //!   and the shell-facing command surface.
 //! - **Depends on.** `nervix-client-core`, the language layer for completion and local statement
-//!   parsing, and the vocabulary.
+//!   parsing, the archive format's reader for describing a local backup, and the vocabulary.
 //! - **Must not know.** The server. It speaks the session API through the client core and nothing
 //!   else.
 
@@ -40,8 +40,7 @@ use nervix_client_core::{
 use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_models::{ClusterNodeName, InspectionFormat, Statement};
 use nervix_nspl::client_statement::{
-    ClientStatement, parse_client_statements, parse_upload_resource_query,
-    upload_resource_path_fragment, upload_resource_path_range,
+    ClientStatement, local_path_fragment, parse_client_statements, parse_upload_resource_query,
 };
 use nervix_recovery::{Discarded as _, Reported as _};
 use reedline::{
@@ -52,6 +51,10 @@ use reedline::{
 use thiserror::Error;
 use tokio::{runtime::Handle, signal, task::block_in_place};
 use triomphe::Arc;
+
+mod backup;
+
+use self::backup::{BackupRequest, CliBackupScope, CliReportFormat};
 
 const HISTORY_FILE: &str = ".nervix_client_history";
 const EVENT_BUFFER_RECORDS: usize = 128;
@@ -158,6 +161,23 @@ enum Command {
         /// Node id to drain
         node_id: ClusterNodeName,
     },
+    /// Back up configuration, users and resources into an archive file
+    Backup {
+        /// What the archive covers: `cluster` for every domain and user, `domain` for one domain
+        #[arg(value_enum)]
+        scope: CliBackupScope,
+        /// The domain a `domain` backup covers; the session's `--domain` when omitted
+        name: Option<DomainName>,
+        /// Where the archive is written; `-` writes it to standard output
+        #[arg(long, short = 'o')]
+        output: String,
+        /// Record every resource version and its digests without the version's bytes
+        #[arg(long)]
+        without_resources: bool,
+        /// How the backup's report is printed
+        #[arg(long, value_enum, default_value_t = CliReportFormat::Text)]
+        format: CliReportFormat,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -204,6 +224,14 @@ enum ClientError {
     ClockEventRead,
     #[error("failed to detach from the domain clock")]
     ClockDetachRequest,
+    #[error("invalid backup arguments: {reason}")]
+    BackupArguments { reason: &'static str },
+    #[error("the backup failed: {message}")]
+    BackupFailed { message: String },
+    #[error("the backup archive could not be written")]
+    WriteArchive,
+    #[error("the backup archive could not be described")]
+    DescribeBackup,
 }
 
 async fn collect_suggestions(
@@ -269,7 +297,7 @@ impl Completer for GrpcCompleter {
             let lookup_hint = suggestions
                 .iter()
                 .find(|suggestion| suggestion.kind == ClientSuggestionKind::LocalDirectoryLookup);
-            if let Some(local) = complete_local_upload_paths(line, pos, prefix.len(), lookup_hint) {
+            if let Some(local) = complete_local_paths(line, pos, prefix.len(), lookup_hint) {
                 return local;
             }
         }
@@ -409,9 +437,34 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             execute_and_print(&client, format!("DRAIN NODE {node_id};")).await?;
             return Ok(());
         }
+        Some(Command::Backup {
+            scope,
+            name,
+            output,
+            without_resources,
+            format,
+        }) => {
+            let connect_options = connect_options_from_args(&args)?;
+            return backup::run_backup(BackupRequest {
+                server: args.server,
+                connect_options,
+                session_domain: args.domain,
+                scope,
+                domain: name,
+                output,
+                without_resources,
+                format,
+            })
+            .await;
+        }
         None => {}
     }
 
+    if let Some(command) = args.command.as_deref()
+        && let Some(describe) = backup::describe_backup_statement(command)
+    {
+        return backup::run_describe_backup(&describe);
+    }
     if let Some(command) = args.command.as_deref()
         && is_json_inspection_command(command)
     {
@@ -431,7 +484,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             .iter()
             .find(|suggestion| suggestion.kind == ClientSuggestionKind::LocalDirectoryLookup);
         let suggestions = if let Some(hint) = local_hint {
-            complete_local_upload_paths(input, cursor, 0, Some(hint))
+            complete_local_paths(input, cursor, 0, Some(hint))
                 .unwrap_or_default()
                 .into_iter()
                 .map(|suggestion| {
@@ -646,28 +699,45 @@ fn create_line_editor(completer: GrpcCompleter) -> Result<Reedline, StackReport<
         .with_edit_mode(edit_mode))
 }
 
-fn complete_local_upload_paths(
+/// The local path being completed at `pos` and the range of `line` a completion replaces. The
+/// server's lookup hint names the path when it names one; the line itself places it otherwise, and
+/// supplies the range when the hint's range does not fall within this line.
+fn local_path_at(
+    line: &str,
+    pos: usize,
+    buffer_prefix_len: usize,
+    lookup_hint: Option<&AutocompleteSuggestion>,
+) -> Option<(String, Range<usize>)> {
+    let local = local_path_fragment(line, pos);
+    let Some(hint) = lookup_hint else {
+        let local = local?;
+        return Some((local.fragment.to_string(), local.range));
+    };
+    // An empty hint names no path of its own, so the line has to place one.
+    if hint.value.is_empty() && local.is_none() {
+        return None;
+    }
+    let range = match GrpcCompleter::local_path_range(line, pos, buffer_prefix_len, hint) {
+        Some(range) => range,
+        None => match &local {
+            Some(local) => local.range.clone(),
+            None => 0..pos,
+        },
+    };
+    Some((hint.value.clone(), range))
+}
+
+/// Completes the local file or directory path a statement expects at `pos`: an upload's resource
+/// directory, a backup's archive destination, or the archive `DESCRIBE BACKUP` reads.
+fn complete_local_paths(
     line: &str,
     pos: usize,
     buffer_prefix_len: usize,
     lookup_hint: Option<&AutocompleteSuggestion>,
 ) -> Option<Vec<Suggestion>> {
-    let hinted = match lookup_hint {
-        Some(hint) if !hint.value.is_empty() || line.get(..pos)?.contains(" VERSION '") => {
-            Some(hint.value.as_str())
-        }
-        _ => None,
-    };
-    let path_fragment = match hinted {
-        Some(path_fragment) => path_fragment,
-        None => upload_resource_path_fragment(line, pos)?,
-    };
-    let hinted_range = match lookup_hint {
-        Some(hint) => GrpcCompleter::local_path_range(line, pos, buffer_prefix_len, hint),
-        None => None,
-    };
-    let local_range = upload_resource_path_range(line, pos);
-    let replacement_range = hinted_range.or(local_range).unwrap_or(0..pos);
+    let (path_fragment, replacement_range) =
+        local_path_at(line, pos, buffer_prefix_len, lookup_hint)?;
+    let path_fragment = path_fragment.as_str();
     let path = Path::new(path_fragment);
     let (base_dir, partial_name) = if path_fragment.is_empty() {
         (PathBuf::from("."), String::new())
@@ -931,6 +1001,11 @@ fn connect_options_from_args(args: &Args) -> Result<ConnectOptions, StackReport<
 }
 
 async fn execute_and_print(client: &Client, query: String) -> Result<(), StackReport<ClientError>> {
+    if let Some(describe) = backup::describe_backup_statement(&query) {
+        backup::run_describe_backup(&describe)
+            .discarded("describing an archive already printed why it failed");
+        return Ok(());
+    }
     if let Ok(upload) = parse_upload_resource_query(&query) {
         return execute_upload_and_print(
             client,
@@ -1864,7 +1939,7 @@ mod tests {
         std::fs::create_dir_all(temp.join("proto-dir")).expect("fixture dir");
         std::fs::create_dir_all(temp.join("other-dir")).expect("fixture dir");
         let line = format!("UPLOAD RESOURCE proto VERSION '{}/pro", temp.display());
-        let suggestions = complete_local_upload_paths(
+        let suggestions = complete_local_paths(
             &line,
             line.len(),
             0,
@@ -1891,7 +1966,7 @@ mod tests {
         let source_start = "UPLOAD RESOURCE proto VERSION '".len();
         let cursor = source_start + path_prefix.len();
         let mid_line = format!("UPLOAD RESOURCE proto VERSION '{path_prefix}to';");
-        let mid_suggestions = complete_local_upload_paths(
+        let mid_suggestions = complete_local_paths(
             &mid_line,
             cursor,
             0,
@@ -1914,10 +1989,33 @@ mod tests {
     }
 
     #[test]
+    fn local_path_completion_serves_backup_destinations_and_described_archives() {
+        for line in [
+            "BACKUP CLUSTER TO 'Cargo.tml'",
+            "BACKUP DOMAIN tenant TO 'Cargo.tml' WITHOUT RESOURCES;",
+            "DESCRIBE BACKUP 'Cargo.tml' FORMAT JSON;",
+        ] {
+            let cursor = line.find("ml'").assured("the test input marks its cursor");
+            let suggestions = complete_local_paths(line, cursor, 0, None)
+                .assured("the package directory can be read for local completion");
+            let start = line.find('\'').assured("the path is quoted") + 1;
+            assert!(
+                suggestions
+                    .iter()
+                    .any(|suggestion| suggestion.value == "Cargo.toml"
+                        && suggestion.span
+                            == reedline::Span::new(start, start + "Cargo.tml".len())),
+                "{line} completes its path"
+            );
+        }
+        assert!(complete_local_paths("BACKUP CLUSTER ", 15, 0, None).is_none());
+    }
+
+    #[test]
     fn local_upload_path_completion_reads_a_bare_relative_filename() {
         let line = "UPLOAD RESOURCE bundle VERSION 'Cargo.tml'";
         let cursor = line.find("ml'").assured("the test input marks its cursor");
-        let suggestions = complete_local_upload_paths(line, cursor, 0, None)
+        let suggestions = complete_local_paths(line, cursor, 0, None)
             .assured("the package directory can be read for local completion");
         assert!(
             suggestions
@@ -1936,7 +2034,7 @@ mod tests {
             std::fs::remove_dir_all(&temp).expect("old temp dir should be removed");
         }
         std::fs::create_dir_all(temp.join("proto-dir")).expect("fixture dir");
-        let suggestions = complete_local_upload_paths(
+        let suggestions = complete_local_paths(
             "",
             0,
             0,
@@ -1974,7 +2072,7 @@ mod tests {
             .expect("basename should exist")
             .to_string_lossy()
             .to_string();
-        let suggestions = complete_local_upload_paths(
+        let suggestions = complete_local_paths(
             "",
             0,
             0,
@@ -1994,7 +2092,7 @@ mod tests {
                 .iter()
                 .any(|suggestion| suggestion.value == format!("~/{basename}/"))
         );
-        let nested_suggestions = complete_local_upload_paths(
+        let nested_suggestions = complete_local_paths(
             "",
             0,
             0,

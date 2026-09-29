@@ -57,10 +57,11 @@ domains, non-relay graph nodes, and relays across the current cluster graph.
 ## Creating Entities From Forms
 
 The top bar's **Create** menu opens keyboard-accessible forms for domains, users, resource
-catalogs, schemas, codecs, signaling protocols, clients, VHOSTs, endpoints, relays, branches, and
-subscriptions. The resource group in the sidebar also provides a contextual create action. A form keeps
-its unfinished draft when it closes, restores focus to the action that opened it, reports
-validation and server failures inline, and shows the canonical NSPL statement before submission.
+catalogs, schemas, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps, Roto UDFs,
+relays, branches, and subscriptions. The resource group in the sidebar also provides a contextual
+create action. A form keeps its unfinished draft when it closes, restores focus to the action that
+opened it, reports validation and server failures inline, and shows the canonical NSPL statement
+before submission.
 The domain form supports paced and unpaced clocks, period and skew for a paced clock, placement
 policy, and `IF NOT EXISTS`. User and resource forms support their corresponding names and the
 same creation modifier.
@@ -167,6 +168,26 @@ signaling lists are typed, searchable, paged, and scoped to the captured domain,
 attached transaction prefix. An upstream selection or domain change refreshes dependent choices;
 stale selections must be chosen again before submission. A completed VHOST or endpoint is usable
 immediately by later commands through the same session.
+
+A hash map form selects a resource, a completed version or `LATEST`, a codec, and a key field from
+that codec's output schema. It also requires the file path within the resource. Codec and key
+choices read the captured domain and the attached transaction prefix; changing the codec makes an
+earlier key selection invalid until selected again. A changed resource invalidates its version,
+and changing the captured domain invalidates all references while leaving them visible for
+correction. `LATEST` remains unresolved in the draft and canonical command; the server pins it
+when the statement applies. The form shows **Completed** only after the resource file has decoded
+and the lookup index is ready. A malformed file or unavailable version reports failure inline and
+keeps the entered path and selections for inspection. A successful hash map can be queried with
+`LOOKUP` or used by `LOOKUP_HASH_MAP` immediately.
+
+A Roto UDF form keeps arguments in declaration order, with exact scalar, vector, and fixed-array
+types and separate optional flags. The result has the same type controls. The current language is
+`ROTO_0_13`, with an explicit volatility control. The source editor preserves its complete text,
+including quotes, whitespace, the named function body, and Roto `test` blocks; canonical NSPL
+chooses a safe dollar-quote delimiter around it. The server checks the declared signature exactly
+and runs the Roto tests before **Completed** appears. Compilation, type, or test failure keeps the
+signature and source editable. A completed function is available to `udf::` calls in later
+commands under the same session and domain.
 
 ## The Execution Graph
 

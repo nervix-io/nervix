@@ -221,6 +221,29 @@ pub(super) fn selected_choice(
         (ChoiceControl::EndpointSignaling, ChoiceValue::Model(node)) => {
             signals.endpoint.get().selects_signaling(node)
         }
+        (ChoiceControl::HashResource, ChoiceValue::Resource(resource)) => signals
+            .hash_map
+            .get()
+            .pin
+            .resource
+            .as_ref()
+            .is_some_and(|selected| selected.is_current() && selected.name() == resource),
+        (ChoiceControl::HashVersion, ChoiceValue::ResourceVersion(version)) => signals
+            .hash_map
+            .get()
+            .pin
+            .version
+            .as_ref()
+            .is_some_and(|selected| selected.is_current() && selected.name() == version),
+        (ChoiceControl::HashCodec, ChoiceValue::Model(node)) => {
+            signals.hash_map.get().selects_codec(node)
+        }
+        (ChoiceControl::HashKey, ChoiceValue::Field(field)) => signals
+            .hash_map
+            .get()
+            .key_field
+            .as_ref()
+            .is_some_and(|selected| selected.is_current() && selected.name() == field),
         // A field reference is inserted into the filter rather than held as a selection.
         _ => false,
     }
@@ -323,6 +346,22 @@ pub(super) fn select_choice(signals: CreateSignals, control: ChoiceControl, valu
             signals
                 .endpoint
                 .update(|draft| draft.select_signaling(&node));
+        }
+        (ChoiceControl::HashResource, ChoiceValue::Resource(resource)) => {
+            signals
+                .hash_map
+                .update(|draft| draft.pin.select_resource(resource));
+        }
+        (ChoiceControl::HashVersion, ChoiceValue::ResourceVersion(version)) => {
+            signals
+                .hash_map
+                .update(|draft| draft.pin.select_version(version));
+        }
+        (ChoiceControl::HashCodec, ChoiceValue::Model(node)) => {
+            signals.hash_map.update(|draft| draft.select_codec(&node));
+        }
+        (ChoiceControl::HashKey, ChoiceValue::Field(field)) => {
+            signals.hash_map.update(|draft| draft.select_key(field));
         }
         _ => {}
     }
