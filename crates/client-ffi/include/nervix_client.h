@@ -245,7 +245,9 @@ void nx_execution_free(nx_execution *execution);
 nx_error *nx_session_execute(nx_session *session, const nx_execution *execution,
                              const nx_cancel *cancel, nx_outcome **out);
 
-/* Waits for the next event of any subscription the session holds. */
+/* Waits for the next event of any subscription the session holds. The wait continues across a
+   lost session: the events of subscriptions restored or opened on the next session follow, and
+   NX_ERROR_CLOSED is returned only when no server is known to open another session on. */
 nx_error *nx_session_next_event(nx_session *session, const nx_cancel *cancel, nx_event **out);
 
 /* Reads one bounded completion page for the full input at a UTF-8 byte cursor. `page_size` is

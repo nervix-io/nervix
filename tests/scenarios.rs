@@ -96,6 +96,7 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uuid::Uuid;
 
 use crate::common::{
+    cli_terminal::{CliTerminal, DisplayWaitError},
     client_conformance::{
         ATTACHED_LINE, ClientProbe, ProbeExercise, ProbeRuntime, ProbeTarget, SUBSCRIBED_LINE,
         corpus_report,
@@ -141,6 +142,7 @@ use crate::common::{
 
 mod backup;
 mod common;
+mod database_batches;
 mod domain_clock_attachment;
 mod ingestion_time;
 mod session_protocol;
@@ -305,6 +307,8 @@ struct ScenarioWorld {
     cli_subscription_lines: Option<StdArc<StdMutex<VecDeque<String>>>>,
     cli_subscription_reader: Option<AbortOnDropHandle<()>>,
     cli_clock_process: Option<CliClockProcess>,
+    /// The interactive CLI a scenario types into through a pseudo-terminal.
+    cli_terminal: Option<CliTerminal>,
     /// The whole outcome of the last command a named client ran, for assertions that read more
     /// than its message.
     last_client_outcome: Option<ClientCommandOutcome>,
@@ -4047,6 +4051,148 @@ async fn when_cli_follows_missing_domain(world: &mut ScenarioWorld, domain: Stri
     .unwrap_or_else(|_| panic!("the CLI missing-domain request did not finish"))
     .unwrap_or_else(|error| panic!("the CLI missing-domain process did not start: {error}"));
     world.last_cli_output = Some(output);
+}
+
+/// How long the interactive CLI may take to display what a step expects. A reconnect after a node
+/// restart happens inside that wait, so it is bounded generously.
+const CLI_TERMINAL_DISPLAY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a repeated post waits for the interactive CLI to display its row before posting again.
+const CLI_TERMINAL_REPOST_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long the interactive CLI may take to exit once it is asked to.
+const CLI_TERMINAL_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[when(expr = "the CLI REPL is started on node {string}")]
+async fn when_cli_repl_is_started(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    let terminal = CliTerminal::start(
+        &scenario_cli_binary(),
+        &[
+            "--server",
+            &grpc_uri,
+            "--domain",
+            &world.domain,
+            "--username",
+            TEST_AUTH_USERNAME,
+            "--password",
+            TEST_AUTH_PASSWORD,
+        ],
+    )
+    .unwrap_or_else(|error| panic!("the CLI REPL failed to start on a terminal: {error}"));
+    // The banner follows the connected session and precedes the first prompt.
+    if let Err(error) = terminal
+        .wait_for_display("nervix-cli connected to", CLI_TERMINAL_DISPLAY_TIMEOUT)
+        .await
+    {
+        panic!(
+            "the CLI REPL did not connect: {error}; it displayed:{}",
+            terminal.transcript()
+        );
+    }
+    world.cli_terminal = Some(terminal);
+}
+
+#[when(expr = "the CLI REPL runs {string}")]
+async fn when_cli_repl_runs(world: &mut ScenarioWorld, line: String) {
+    let line = expand_placeholders(world, &line);
+    let terminal = world
+        .cli_terminal
+        .as_ref()
+        .verified("a preceding step started the CLI REPL");
+    if let Err(error) = terminal.type_line(&line).await {
+        panic!(
+            "the CLI REPL cannot run {line:?}: {error}; it displayed:{}",
+            terminal.transcript()
+        );
+    }
+}
+
+#[then(expr = "the CLI REPL eventually displays {string}")]
+async fn then_cli_repl_eventually_displays(world: &mut ScenarioWorld, expected: String) {
+    let expected = expand_placeholders(world, &expected);
+    let terminal = world
+        .cli_terminal
+        .as_ref()
+        .verified("a preceding step started the CLI REPL");
+    if let Err(error) = terminal
+        .wait_for_display(&expected, CLI_TERMINAL_DISPLAY_TIMEOUT)
+        .await
+    {
+        panic!(
+            "the CLI REPL did not display {expected:?}: {error}; it displayed:{}",
+            terminal.transcript()
+        );
+    }
+}
+
+/// Rows a relay publishes while the cluster is still converging after a node restart can be lost in
+/// transit, so the payload is posted again until the interactive CLI displays the row it expects.
+#[when(
+    expr = "http payload is posted repeatedly to node {string} with host {string} path {string} \
+            until the CLI REPL displays {string}"
+)]
+async fn when_http_payload_is_posted_until_the_cli_repl_displays(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    host: String,
+    path: String,
+    expected: String,
+    #[step] step: &Step,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let expected = expand_placeholders(world, &expected);
+    let payload = expand_placeholders(world, docstring(step));
+    let terminal = world
+        .cli_terminal
+        .as_ref()
+        .verified("a preceding step started the CLI REPL");
+    let deadline = Instant::now() + CLI_TERMINAL_DISPLAY_TIMEOUT;
+    loop {
+        tokio::task::consume_budget().await;
+        world
+            .cluster()
+            .publish_http(&node_id, &host, &path, &payload)
+            .await
+            .unwrap_or_else(|error| panic!("failed to post http payload: {error}"));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let wait = remaining.min(CLI_TERMINAL_REPOST_INTERVAL);
+        match terminal.wait_for_display(&expected, wait).await {
+            Ok(()) => return,
+            Err(DisplayWaitError::Timeout { .. }) if Instant::now() < deadline => {}
+            Err(error) => panic!(
+                "the CLI REPL did not display {expected:?} from repeated posts within \
+                 {CLI_TERMINAL_DISPLAY_TIMEOUT:?}: {error}; it displayed:{}",
+                terminal.transcript()
+            ),
+        }
+    }
+}
+
+#[then("the CLI REPL ends successfully")]
+async fn then_cli_repl_ends_successfully(world: &mut ScenarioWorld) {
+    let terminal = world
+        .cli_terminal
+        .as_mut()
+        .verified("a preceding step started the CLI REPL");
+    let exited = terminal.wait_for_exit(CLI_TERMINAL_EXIT_TIMEOUT).await;
+    match exited {
+        Ok(status) if status.success() => {}
+        Ok(status) => panic!(
+            "the CLI REPL ended with {status}; it displayed:{}",
+            terminal.transcript()
+        ),
+        Err(error) => panic!(
+            "the CLI REPL did not end: {error}; it displayed:{}",
+            terminal.transcript()
+        ),
+    }
 }
 
 /// The directory holding the NSPL files a formatter scenario writes.
@@ -14527,6 +14673,71 @@ async fn then_selector_contains_text(
     }
 }
 
+async fn wait_for_selector_to_advance<T>(world: &ScenarioWorld, selector: &str, bound: Duration)
+where
+    T: std::str::FromStr + PartialOrd + Copy + fmt::Debug,
+{
+    let page = world
+        .browser_page
+        .as_ref()
+        .assured("the scenario opened the console before observing its clock");
+    let selector = expand_placeholders(world, selector);
+    let locator = page.locator(&selector);
+    let deadline = Instant::now() + bound;
+    let mut first: Option<T> = None;
+    loop {
+        tokio::task::consume_budget().await;
+        let text = locator
+            .all_inner_texts()
+            .await
+            .assured("the browser clock selector is readable")
+            .join("\n");
+        if let Ok(value) = text.trim().parse::<T>() {
+            if let Some(first_value) = &first {
+                if value > *first_value {
+                    return;
+                }
+            } else {
+                first = Some(value);
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "selector '{selector}' did not advance from {first:?} within {bound:?}; last text: \
+             '{text}'"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(expr = "selector {string} advances as a timestamp within {int} milliseconds")]
+async fn then_selector_timestamp_advances(
+    world: &mut ScenarioWorld,
+    selector: String,
+    bound_milliseconds: usize,
+) {
+    wait_for_selector_to_advance::<nervix_models::Timestamp>(
+        world,
+        &selector,
+        Duration::from_millis(bound_milliseconds.arch_into()),
+    )
+    .await;
+}
+
+#[then(expr = "selector {string} advances as a number within {int} milliseconds")]
+async fn then_selector_number_advances(
+    world: &mut ScenarioWorld,
+    selector: String,
+    bound_milliseconds: usize,
+) {
+    wait_for_selector_to_advance::<u64>(
+        world,
+        &selector,
+        Duration::from_millis(bound_milliseconds.arch_into()),
+    )
+    .await;
+}
+
 #[then(regex = r#"^selector "([^"]+)" contains$"#)]
 async fn then_selector_contains_docstring(
     world: &mut ScenarioWorld,
@@ -23344,12 +23555,22 @@ async fn then_otel_collector_receives_split_exports(
             .expect("OpenTelemetry Collector logs must be readable");
         let mut two_record_export = None;
         let mut one_record_export = None;
+        let mut observed = Vec::new();
         for (index, block) in logs.split(export_boundary.as_str()).enumerate() {
             let count = block
                 .lines()
                 .next()
                 .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
                 .and_then(|header| header[count_key].as_u64());
+            let carried = members
+                .iter()
+                .filter(|member| block.contains(**member))
+                .count();
+            if carried > 0 {
+                observed.push(format!(
+                    "export {index}: {count:?} {count_key}, {carried} named"
+                ));
+            }
             if count == Some(2)
                 && block.find(members[0]).is_some_and(|first| {
                     block.find(members[1]).is_some_and(|second| first < second)
@@ -23368,7 +23589,8 @@ async fn then_otel_collector_receives_split_exports(
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for ordered two-member and one-member {signal} exports"
+            "timed out waiting for ordered two-member and one-member {signal} exports; observed \
+             {observed:?}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -25790,6 +26012,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.cli_subscription_process = None;
                 world.cli_subscription_lines = None;
                 world.cli_clock_process = None;
+                world.cli_terminal = None;
                 world.server_process_http_load = None;
                 world.held_resource_upload = None;
                 world.server_process = None;

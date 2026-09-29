@@ -17,10 +17,11 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use parking_lot::Mutex;
 use tokio::sync::{oneshot, watch};
 
-pub(crate) const WEB_CONSOLE_FEATURE_NAMES: [&str; 3] = [
+pub(crate) const WEB_CONSOLE_FEATURE_NAMES: [&str; 4] = [
     "Web console NSPL REPL",
     "Web console execution graph",
     "Web console transaction inspector",
+    "Web console domain clock",
 ];
 pub(crate) const WASM_STATE_RESET_FEATURE_NAME: &str = "Coordinated WASM processor state reset";
 

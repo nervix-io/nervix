@@ -544,6 +544,7 @@ test-coverage-clients: tests-deps
     for feature in \
         tests/features/web-console/connection_status.feature \
         tests/features/web-console/nspl_repl.feature \
+        tests/features/web-console/domain_clock.feature \
         tests/features/tools/cli_session.feature; do
         cargo llvm-cov --no-report --features testing --package nervix-server \
             --test scenarios -- --input "${feature}" --concurrency 1
@@ -553,6 +554,12 @@ test-coverage-clients: tests-deps
 coverage-clients-report:
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
+
+# Refresh the native console's coverage after a focused change without rebuilding the server
+# browser scenario harness; its recorded browser and CLI coverage remains in the same target.
+coverage-web-console-unit:
+    cargo llvm-cov --no-report --bins --package nervix-web-console
+    just coverage-clients-report
 
 # Build the standalone CLI with the same coverage flags as its binary unit tests. Cargo's
 # all-targets test pass alone leaves only the test executable, which public scenarios do not run.
@@ -606,6 +613,13 @@ coverage-scenarios output *args: tests-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
+# Add selected scenarios to the current coverage profiles without rebuilding unchanged artifacts.
+coverage-scenarios-append output *args: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov --no-clean --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 # Collect the changed DNS client units and their public one-/three-node paths into one LCOV
 # profile so patch coverage can be checked before opening the PR.
@@ -685,7 +699,8 @@ coverage-shuttle output: build-web-console wasm-processor-guests download-onnxru
 coverage-bins output *args:
     cargo llvm-cov --bins --lcov --output-path {{ output }} {{ args }}
 
-# Exercise the CLI binary through the public transaction and clock scenarios with LLVM coverage.
+# Exercise the CLI binary through the public transaction, clock, and REPL reconnect scenarios with
+# LLVM coverage.
 coverage-cli-process output="target/cli-process.lcov":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -700,6 +715,9 @@ coverage-cli-process output="target/cli-process.lcov":
     LLVM_PROFILE_FILE="$coverage_dir/cli-%p-%m.profraw" \
         NERVIX_TEST_CLI_PATH="$coverage_dir/debug/nervix-cli" \
         just test-scenarios --input tests/features/tools/cli_session.feature --name clock
+    LLVM_PROFILE_FILE="$coverage_dir/cli-%p-%m.profraw" \
+        NERVIX_TEST_CLI_PATH="$coverage_dir/debug/nervix-cli" \
+        just test-scenarios --input tests/features/tools/cli_session.feature --name keeps.printing
     llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | awk '/^host:/{print $2}')/bin"
     "$llvm_bin/llvm-profdata" merge -sparse "$coverage_dir"/*.profraw -o "$coverage_dir/merged.profdata"
     "$llvm_bin/llvm-cov" export "$coverage_dir/debug/nervix-cli" \
