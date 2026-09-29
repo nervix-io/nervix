@@ -155,10 +155,13 @@ An attachment moves through one lifecycle:
 
 - **Attached.** The reply carries the clock as the serving node has it installed, and no frame about
   the domain precedes it. A second attach is refused as already attached, and a domain the serving
-  node does not have is refused as not found. When the reply cannot be delivered, because the
-  request was cancelled, the session ended, or the reply did not fit the session limits, the
-  attachment is abandoned before it delivers anything. If the installation has not changed and the
-  node already holds a tick of that generation, its newest tick is the first frame after the reply.
+  node does not have is refused as not found. A node that has not installed the cluster's committed
+  domains since it started, as right after a restart, answers only once it has, so it never refuses
+  a domain the cluster has as not found. That wait ends early only with the session. When the reply
+  cannot be delivered, because the request was cancelled, the session ended, or the reply did not
+  fit the session limits, the attachment is abandoned before it delivers anything. If the
+  installation has not changed and the node already holds a tick of that generation, its newest
+  tick is the first frame after the reply.
 - **Following.** Each later change of the installed clock arrives as a `DomainClockObserved` frame
   carrying the new clock: `STOP` delivers stopped, a `START` delivers its generation and mapping,
   and a paced generation left without an assigned clock authority delivers uninstalled, then its
@@ -180,7 +183,8 @@ An attachment moves through one lifecycle:
   and a detach is refused as not attached.
 - **Session end.** The attachment ends with the session, and nothing is sent about it. The Rust
   client and the CLI attach every clock they followed again on their next session, which delivers
-  the clock as it is then.
+  the clock as it is then and the newest tick its serving node holds. That tick can repeat one the
+  client already received, or precede it when another node serves the new session.
 
 Both statements run in order with the session's commands and are refused, with the session-local
 refusal, while the session holds a transaction. Neither is persisted or becomes transaction

@@ -181,7 +181,10 @@ when the session holding an attachment ended. Events are coalesced per domain: a
 arrives before a tick of its generation, while older unread ticks are replaced by the newest one.
 After a reconnect, the client attaches every followed
 clock again on the new session before any other request, and the clock that attachment reports
-follows the interruption as an `Observed` event; changes in between are not reported. Waiting for
+follows the interruption as an `Observed` event; changes in between are not reported. A new session
+that refuses the attach because the domain does not exist ends the attachment with `Ended`, as the
+server would. A node that is still starting answers that attach only once it has installed the
+cluster's committed domains, so a restart never ends an attachment. Waiting for
 the next event reopens a closed session when a followed clock waits for it. A detach, or an end,
 stops following the domain, and `domain_clock` returns `None` for it afterwards.
 

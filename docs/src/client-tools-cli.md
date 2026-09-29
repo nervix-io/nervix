@@ -131,7 +131,7 @@ independently of the prompt and are printed above it:
 [events] server ERROR: emitter 'redis_orders' publish failed
 [events] topology INFO: raft transition: node-2 became leader
 [events] domain clock [simulation]: generation 2, stopped
-[events] domain clock [simulation] tick: generation 3, id 12, boundary 2030-01-01T00:00:01.100000000Z, authority UTC 2026-09-27T00:00:00Z, node logical 2030-01-01T00:00:01.120000000Z
+[events] domain clock [simulation] tick: generation 3, id 12, boundary 2030-01-01T00:00:01.100Z, authority UTC 2026-09-27T00:00:00Z, node logical 2030-01-01T00:00:01.120Z
 ```
 
 A domain clock line follows every state change or accepted tick after the attach reply. A slow
@@ -289,12 +289,48 @@ attached to the clock of domain 'simulation': generation 1, paced: period 1s, sk
 
 The domain and generation identify each state. A paced state includes its period, skew, logical
 origin, UTC anchor, and rate. A tick includes its id, logical boundary, the authority's UTC
-observation, and the serving node's logical reading. Tick ids increase within a generation but may
-skip when the client or server coalesces progress. After a redirect or transport loss, an
-interruption line reports the gap and the client's restored attachment prints the fresh state.
-The server may end an attachment when the domain disappears; the end line is the last clock line
-and the command exits. Ctrl-C detaches the clock and exits successfully. A refused attach,
-including a missing domain, prints the typed reason on stderr and exits nonzero.
+observation, and the serving node's logical reading.
+
+Stdout carries these lines and nothing else, and their format is stable, so scripts and external
+observers can parse them. Every line has one of these forms:
+
+| Line | Printed |
+| --- | --- |
+| `attached to the clock of domain '<domain>': <clock>` | first, as the attach reply |
+| `[events] domain clock [<domain>]: <clock>` | when the serving node installs another clock, and when a new session attaches the clock again |
+| `[events] domain clock [<domain>] tick: generation <n>, id <n>, boundary <time>, authority UTC <time>, node logical <time>` | when the serving node accepts a newer tick of a paced clock |
+| `[events] domain clock [<domain>] notice: the session was interrupted; the clock is attached again on the next session` | when the session holding the attachment ends |
+| `[events] domain clock [<domain>] notice: the attachment ended because <reason>` | when the server ends the attachment, as the last line |
+
+`<clock>` is `generation <n>, ` followed by `stopped`, `uninstalled`, `unpaced`, or
+`paced: period <duration>, skew <duration>, logical origin <time>, UTC anchor <time>, time rate <rate>`.
+Within a line:
+
+- Fields are separated by `, ` and appear in the order shown. Each field is its name, one space,
+  and its value.
+- `<n>` is an unsigned decimal integer. The generation counts the domain's `START`s, and tick ids
+  number the ticks of a generation from one: a tick's boundary is the logical origin plus the id
+  minus one periods.
+- `<time>` is an RFC 3339 instant in UTC with a `Z` offset and no fractional digits, or three, six,
+  or nine of them, as the instant needs.
+- `<duration>` has unit suffixes, such as `500ms`, `1s`, or `1s 500ms`, and can contain spaces, so
+  read a field by its name rather than by splitting at spaces.
+- `<rate>` is a decimal number, such as `2` or `0.25`.
+
+Within one session, the tick ids of a generation increase and can skip, because the authority
+coalesces missed periods and a slow reader receives the newest tick rather than a backlog. When the
+session is lost, for example because its node restarts, the interruption line reports the gap, and
+the client opens a new session within its retry deadline and attaches the clock again. The output
+then shows the clock the new session reports, and its ticks continue from the newest one that
+session's node holds. Ticks accepted in between are not replayed, and the first tick after the
+interruption can repeat the last id printed before it, or precede it when another node serves the
+new session. A node that is still starting answers the attach once it has installed the cluster's
+committed domains, so a restart never ends the attachment.
+
+The server ends an attachment when the domain no longer exists on the serving node; the end line is
+the last clock line and the command exits. Ctrl-C detaches the clock and exits successfully. A
+refused attach, including a missing domain, prints the typed reason on stderr and exits nonzero, as
+does a lost session the client cannot replace within its retry deadline.
 
 ## Cluster Node Administration
 
