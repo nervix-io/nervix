@@ -420,14 +420,16 @@ mod tests {
             "Ordinary feature one",
             "Web console NSPL REPL",
             "Ordinary feature two",
+            "Web console domain clock",
             "Coordinated WASM processor state reset",
         ];
         prioritize_features(&mut names, |name| Some(name));
         assert_eq!(
-            &names[..2],
+            &names[..3],
             &[
                 "Coordinated WASM processor state reset",
-                "Web console NSPL REPL"
+                "Web console NSPL REPL",
+                "Web console domain clock",
             ]
         );
     }

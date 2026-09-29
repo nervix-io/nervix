@@ -494,6 +494,17 @@ earlier attempt left unanswered, with the bytes and members it was first written
 emitter's drain sends every Export request it prepared and did not learn the outcome of, and the
 emitter buffer counts those members as work the node still holds until they resolve.
 
+An HTTP emitter force-flushes its collected records into one request per eligible record, then
+waits for complete successful final response headers. Each attempt and retry wait remains bounded
+by the remaining physical drain deadline, even in a paced domain. A request still unanswered at
+that deadline is not marked delivered. Its prepared bytes, selected destination, headers, and
+retry state are volatile and disappear when the process ends. An attached acknowledged source can
+redeliver the record after restart; an unacknowledged endpoint source cannot. A destination that
+applied a request whose successful response was lost can receive it again after that redelivery.
+Once the graph drain budget ends, terminal teardown cancels an emitter task waiting in an HTTP
+attempt. It does not wait for that client's full attempt timeout or turn the canceled request into
+a record-specific success or rejection.
+
 Kafka is the only sink whose client-side queue shutdown drains explicitly: after its buffered
 batches are published, the emitter host calls the sink contract's finish hook with the remaining
 stop deadline. Kafka implements that hook by flushing the producer's local queue within the same

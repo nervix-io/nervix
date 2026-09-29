@@ -129,6 +129,50 @@ Feature: CLI public session dispatch
       | 1            |
       | 3            |
 
+  Scenario Outline: CLI keeps printing notices and new subscription rows after its node restarts
+    Given a <cluster_size> node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA metric ( value I32 );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
+      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
+      CREATE INGESTOR raw_metrics_source FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "cli_node"
+    When the CLI REPL is started on node "{{cli_node}}"
+    And node "{{cli_node}}" is stopped
+    And node "{{cli_node}}" is started
+    Then node "{{cli_node}}" eventually accepts http traffic for host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":0}
+      """
+    When the CLI REPL runs "LIST DOMAINS;"
+    Then the CLI REPL eventually displays "{{domain}} pace=UNPACED"
+    When the CLI REPL runs "CREATE SUBSCRIPTION watch TO raw_metrics;"
+    Then the CLI REPL eventually displays "created subscription 'watch'"
+    When http payload is posted to node "{{cli_node}}" with host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":1,"extra":true}
+      """
+    Then the CLI REPL eventually displays "[events] server ERROR: failed to decode http message for ingestor 'raw_metrics_source' in domain '{{domain}}'"
+    When http payload is posted repeatedly to node "{{cli_node}}" with host "http-{{test_id}}.example.com" path "/metrics" until the CLI REPL displays '[events] subscription [watch] from [raw_metrics]: {"value":7}'
+      """
+      {"value":7}
+      """
+    Then the CLI REPL eventually displays '[events] subscription [watch] from [raw_metrics]: {"value":7}'
+    When the CLI REPL runs "exit"
+    Then the CLI REPL ends successfully
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: CLI attaches its session to the active domain's clock
     Given a <cluster_size> node nervix cluster is started
     When these NSPL commands are executed on the leader node

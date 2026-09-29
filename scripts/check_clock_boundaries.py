@@ -76,6 +76,7 @@ def main() -> int:
         ROOT / "src/metrics.rs",
         ROOT / PHYSICAL_TIME_OWNER,
         ROOT / "src/runtime_schema/syslog.rs",
+        ROOT / "crates/web-console/src/clock_display.rs",
     }
     wall_time_needles = (
         "Timestamp::now(",
@@ -155,6 +156,7 @@ def main() -> int:
         actual_utc_owner,
         ROOT / "src/runtime/relay_interaction.rs",
         ROOT / "src/runtime_schema/syslog.rs",
+        ROOT / "crates/web-console/src/clock_display.rs",
         *actual_utc_consumers,
     }
     for path in sorted(ownership_contract_sources):
