@@ -23,7 +23,7 @@ use nervix_client_core::{
     DomainClockTicked, DomainName, PacedDomainClock, Timestamp,
     wire::{
         ClientFrame, ClientMessage, ClientRequest, EncodedFrame, Reply, ReplyBody, ReplyDelivery,
-        ServerFrame, SessionLimits, VerifiedFrame,
+        RequestId, ServerFrame, SessionLimits, VerifiedFrame,
         grpc::{EXCHANGE_PATH, SERVICE_NAME, ServerExchangeCodec},
     },
 };
@@ -493,13 +493,28 @@ impl ServerExchange {
         expected: &DomainName,
         disposition: DomainClockAttachDisposition,
     ) {
+        let request_id = self.read_attach(expected).await;
+        self.reply_to_attach(request_id, disposition).await;
+    }
+
+    /// Reads the request attaching the session to the clock of `expected`, leaving it unanswered.
+    pub(super) async fn read_attach(&mut self, expected: &DomainName) -> RequestId {
         let request = self.next_request().await;
         let ClientRequest::AttachDomainClock(attach) = request.request else {
             panic!("the session sends an attach request");
         };
         assert_eq!(&attach.domain, expected);
+        request.request_id
+    }
+
+    /// Answers the attach request `request_id` with `disposition`.
+    pub(super) async fn reply_to_attach(
+        &self,
+        request_id: RequestId,
+        disposition: DomainClockAttachDisposition,
+    ) {
         self.reply(Reply {
-            request_id: request.request_id,
+            request_id,
             body: ReplyBody::DomainClockAttach(DomainClockAttachOutcome {
                 disposition,
                 message: String::new(),

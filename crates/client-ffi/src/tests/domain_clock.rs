@@ -22,11 +22,13 @@ use super::{
     failure_kind, succeeded,
 };
 use crate::{
-    ClockEventKind, ClockState, Disposition, DomainClock, FailureKind,
-    nx_domain_clock_admission_window, nx_domain_clock_admits, nx_domain_clock_domain,
-    nx_domain_clock_generation, nx_domain_clock_logical_time_at, nx_domain_clock_paced,
-    nx_domain_clock_release, nx_domain_clock_retain, nx_domain_clock_state, nx_domain_clock_tick,
-    nx_domain_clock_wall_duration_until, nx_session_domain_clock,
+    Cancel, ClockEventKind, ClockState, Disposition, DomainClock, Execution, FailureKind,
+    nx_cancel_free, nx_cancel_new, nx_cancel_trigger, nx_domain_clock_admission_window,
+    nx_domain_clock_admits, nx_domain_clock_domain, nx_domain_clock_generation,
+    nx_domain_clock_logical_time_at, nx_domain_clock_paced, nx_domain_clock_release,
+    nx_domain_clock_retain, nx_domain_clock_state, nx_domain_clock_tick,
+    nx_domain_clock_wall_duration_until, nx_execution_free, nx_outcome_disposition,
+    nx_outcome_free, nx_session_domain_clock, nx_session_execute, nx_session_prepare,
 };
 
 /// The UTC anchor of the paced fixture clock.
@@ -214,6 +216,81 @@ impl SharedSession {
     fn followed_clock(self, name: &str) -> SharedDomainClock {
         self.domain_clock(name)
             .assured("the session follows the clock the test attached it to")
+    }
+}
+
+/// One prepared command and a token that can cancel it, shared with the threads that run it, as the
+/// binding allows.
+#[derive(Clone, Copy)]
+struct PreparedCommand {
+    session: SharedSession,
+    execution: *mut Execution,
+    cancel: *mut Cancel,
+}
+
+// SAFETY: a session may be used, an execution run and a token triggered from any thread, which is
+// what the header promises.
+unsafe impl Send for PreparedCommand {}
+
+impl PreparedCommand {
+    fn prepare(session: SharedSession, query: &str) -> Self {
+        let mut execution = ptr::null_mut();
+        // SAFETY: the session is live, the query addresses its length, and `execution` is writable.
+        succeeded(unsafe {
+            nx_session_prepare(
+                session.0,
+                query.as_ptr(),
+                query.len(),
+                ptr::null(),
+                &mut execution,
+            )
+        });
+        Self {
+            session,
+            execution,
+            cancel: nx_cancel_new(),
+        }
+    }
+
+    /// Runs the command bounded by its token, returning its disposition or its failure's kind.
+    fn run_cancellable(self) -> Result<Disposition, FailureKind> {
+        self.run(self.cancel.cast_const())
+    }
+
+    /// Runs the command without a token.
+    fn run_to_completion(self) -> Result<Disposition, FailureKind> {
+        self.run(ptr::null())
+    }
+
+    fn run(self, cancel: *const Cancel) -> Result<Disposition, FailureKind> {
+        let mut outcome = ptr::null_mut();
+        // SAFETY: the session and the execution are live, the token is live or null, and `outcome`
+        // is writable.
+        let failure =
+            unsafe { nx_session_execute(self.session.0, self.execution, cancel, &mut outcome) };
+        if !failure.is_null() {
+            return Err(failure_kind(failure));
+        }
+        // SAFETY: the outcome is live and released once, here.
+        unsafe {
+            let disposition = nx_outcome_disposition(outcome);
+            nx_outcome_free(outcome);
+            Ok(disposition)
+        }
+    }
+
+    fn trigger(self) {
+        // SAFETY: the token is live.
+        unsafe { nx_cancel_trigger(self.cancel) };
+    }
+
+    fn free(self) {
+        // SAFETY: the execution and the token are live, no call uses them any more, and each is
+        // freed once, here.
+        unsafe {
+            nx_execution_free(self.execution);
+            nx_cancel_free(self.cancel);
+        }
     }
 }
 
@@ -593,6 +670,50 @@ fn an_interrupted_attachment_reads_its_last_clock_without_a_tick_until_it_is_res
         (restored.generation(), restored.state()),
         "a read after the restored state is that state"
     );
+    session.free();
+}
+
+#[test]
+fn an_attach_cancelled_after_it_was_sent_is_resolved_by_executing_it_again() {
+    let mut server = TestServer::start();
+    let (session, mut exchange) = connected(&mut server);
+    let sim = domain("sim");
+    let attach = PreparedCommand::prepare(session, "ATTACH DOMAIN CLOCK;");
+
+    // The server holds the attach it received, so only the token ends the host's wait.
+    let waiting = thread::spawn(move || attach.run_cancellable());
+    let request = server.runtime.block_on(exchange.read_attach(&sim));
+    attach.trigger();
+    assert_eq!(
+        waiting.join().assured("the waiting thread returns"),
+        Err(FailureKind::Cancelled)
+    );
+
+    // The server admitted the attach after all, and its reply attaches the session.
+    let attached = DomainClockAttachDisposition::Attached {
+        domain: sim.clone(),
+        clock: observation(5, DomainClockObservedState::Paced(paced())),
+    };
+    server
+        .runtime
+        .block_on(exchange.reply_to_attach(request, attached));
+
+    // Executing the same execution again is answered after the earlier attempt: refused as
+    // already attached, after which the read reports the clock the earlier reply carried.
+    let again = thread::spawn(move || attach.run_to_completion());
+    let already = exchange.answer_attach(
+        &sim,
+        DomainClockAttachDisposition::AlreadyAttached(sim.clone()),
+    );
+    server.runtime.block_on(already);
+    assert_eq!(
+        again.join().assured("the executing thread returns"),
+        Ok(Disposition::Failed)
+    );
+    let clock = session.followed_clock("sim");
+    assert_eq!(clock.generation(), 5);
+    assert_eq!(clock.state(), ClockState::Paced);
+    attach.free();
     session.free();
 }
 
