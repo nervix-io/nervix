@@ -12,7 +12,7 @@ use nervix_primitives::sync::{
 use thiserror::Error;
 use triomphe::Arc;
 
-use crate::{MemoryClass, SemaphoreRef};
+use crate::{MemoryClass, executor::SemaphoreRef};
 
 /// The smallest charge an incremental writer takes. Charging every byte would put a semaphore
 /// acquisition in the middle of a serializer's inner loop; charging at least this much keeps the

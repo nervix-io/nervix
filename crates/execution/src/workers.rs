@@ -12,8 +12,8 @@ use thiserror::Error;
 use tokio::time::Instant;
 
 use crate::{
-    SemaphoreRef,
     cancellation::{ArmedCancellation, CancelOnDrop, Cancellation},
+    executor::SemaphoreRef,
     limits::WorkerClassName,
     memory::Reservation,
 };
