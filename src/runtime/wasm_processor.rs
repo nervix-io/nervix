@@ -840,7 +840,7 @@ pub(super) async fn wasm_envelope_from_relay_batch(
     let mut rows = Vec::with_capacity(batch.acks.len());
     let mut ack_map = HashMap::with_capacity(batch.acks.len());
     let input_batch = Arc::new(batch.batch.clone());
-    for (input_row, (metadata, acks)) in batch.metadata.iter().zip(batch.acks.iter()).enumerate() {
+    for (input_row, (metadata, acks)) in batch.metadata.rows().zip(batch.acks.iter()).enumerate() {
         let token = *next_ack_token;
         *next_ack_token = next_ack_token
             .checked_add(1)
@@ -853,7 +853,7 @@ pub(super) async fn wasm_envelope_from_relay_batch(
             token,
             WasmAckContext {
                 acks: acks.clone(),
-                metadata: metadata.clone(),
+                metadata,
                 input_batch: Arc::clone(&input_batch),
                 input_row,
             },
