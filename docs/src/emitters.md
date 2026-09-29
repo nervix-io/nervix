@@ -185,6 +185,9 @@ counters remain on that node across emitter restarts.
 
 ### HTTP request configuration
 
+The [HTTP Emitter Architecture](./http-emitter-architecture.md) chapter follows the validated
+request through host preparation, the connector, retry, lifecycle and qualification evidence.
+
 An HTTP emitter uses an existing `TYPE HTTP` client and declares the request method, path and body
 selection in this order:
 

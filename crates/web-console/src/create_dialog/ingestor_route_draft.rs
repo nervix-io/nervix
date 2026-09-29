@@ -32,7 +32,7 @@ impl AssignmentDraft {
         }
     }
 
-    fn build(&self) -> error_stack::Result<Assignment, IngestRouteDraftError> {
+    pub(super) fn build(&self) -> error_stack::Result<Assignment, IngestRouteDraftError> {
         let field = match &self.field {
             Some(field) => field
                 .current_name()
@@ -47,7 +47,7 @@ impl AssignmentDraft {
         })
     }
 
-    fn invalidate(&mut self) {
+    pub(super) fn invalidate(&mut self) {
         if let Some(field) = &mut self.field {
             field.invalidate();
         }
@@ -187,6 +187,7 @@ impl InheritDraft {
 pub(super) enum RouteBranchDraft {
     #[default]
     Unselected,
+    Preserve,
     Unbranched,
     Branched {
         branch: Option<SelectedReference<BranchName>>,
@@ -195,6 +196,10 @@ pub(super) enum RouteBranchDraft {
 }
 
 impl RouteBranchDraft {
+    pub(super) fn choose_preserve(&mut self) {
+        *self = Self::Preserve;
+    }
+
     pub(super) fn choose_unbranched(&mut self) {
         *self = Self::Unbranched;
     }
@@ -261,7 +266,7 @@ impl RouteBranchDraft {
 
     fn build(&self) -> error_stack::Result<OutputBranch, IngestRouteDraftError> {
         match self {
-            Self::Unselected => Err(Report::new(IngestRouteDraftError::Branching)),
+            Self::Unselected | Self::Preserve => Err(Report::new(IngestRouteDraftError::Branching)),
             Self::Unbranched => Ok(OutputBranch::Unbranched),
             Self::Branched {
                 branch,
@@ -444,6 +449,30 @@ impl IngestRouteDraft {
     }
 
     pub(super) fn build(&self) -> error_stack::Result<ProcessorOutput, IngestRouteDraftError> {
+        self.build_with_branch(Some(self.branch.build()?))
+    }
+
+    pub(super) fn build_preserving(
+        &self,
+    ) -> error_stack::Result<ProcessorOutput, IngestRouteDraftError> {
+        self.build_with_branch(None)
+    }
+
+    pub(super) fn build_reingestor(
+        &self,
+    ) -> error_stack::Result<ProcessorOutput, IngestRouteDraftError> {
+        let branch = if let RouteBranchDraft::Preserve = self.branch {
+            None
+        } else {
+            Some(self.branch.build()?)
+        };
+        self.build_with_branch(branch)
+    }
+
+    fn build_with_branch(
+        &self,
+        branch: Option<OutputBranch>,
+    ) -> error_stack::Result<ProcessorOutput, IngestRouteDraftError> {
         let relay = match &self.relay {
             Some(relay) => relay
                 .current_name()
@@ -474,7 +503,7 @@ impl IngestRouteDraft {
                 where_clause,
                 invocations,
             },
-            branch: Some(self.branch.build()?),
+            branch,
             flush_policy: Some(self.flush.build()?),
             message_error_policy: self.message_error.build()?,
         })
