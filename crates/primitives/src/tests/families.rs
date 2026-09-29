@@ -116,6 +116,16 @@ pub(super) fn a_queue_drains_in_order_after_it_closes() {
     assert!(queue.is_empty());
 }
 
+/// A bounded queue refuses a value past its capacity and takes one again once a value leaves.
+pub(super) fn a_bounded_queue_refuses_a_value_past_its_capacity() {
+    let queue = ConcurrentQueue::bounded(1);
+    assert!(queue.push(1_u8).is_ok());
+    assert_eq!(queue.push(2), Err(PushError::Full(2)));
+    assert_eq!(queue.pop(), Ok(1));
+    assert_eq!(queue.pop(), Err(PopError::Empty));
+    assert!(queue.push(3).is_ok());
+}
+
 /// A map entry inserts once and then finds what it inserted.
 pub(super) fn a_map_entry_inserts_once() {
     let map: DashMap<u8, u8> = DashMap::new();
@@ -218,6 +228,7 @@ pub(super) fn keep_their_contracts() {
     a_barrier_releases_its_participants_together();
     a_synchronous_channel_delivers_in_order_and_ends_with_its_senders();
     a_queue_drains_in_order_after_it_closes();
+    a_bounded_queue_refuses_a_value_past_its_capacity();
     a_map_entry_inserts_once();
     a_publication_serves_the_latest_value();
     a_cancellation_token_has_clone_identity_and_cancels_its_children();

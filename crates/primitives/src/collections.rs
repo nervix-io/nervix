@@ -112,6 +112,12 @@ mod scheduled {
     }
 
     impl<T> ConcurrentQueue<T> {
+        pub fn bounded(capacity: usize) -> Self {
+            Self {
+                inner: concurrent_queue::ConcurrentQueue::bounded(capacity),
+            }
+        }
+
         pub fn unbounded() -> Self {
             Self {
                 inner: concurrent_queue::ConcurrentQueue::unbounded(),
