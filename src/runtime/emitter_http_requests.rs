@@ -342,11 +342,13 @@ mod tests {
         batches: &'a mut [EmitterPublishBatch],
         requests: &'a mut PreparedPayloads<PreparedHttpRequest>,
         payloads: &'a mut PreparedPayloads<EncodedPayload>,
+        row_requests: &'a mut PreparedPayloads<RowRequestBody>,
     ) -> EmitterPublication<'a> {
         EmitterPublication {
             batches,
             payloads,
             requests,
+            row_requests,
         }
     }
 
@@ -369,7 +371,12 @@ mod tests {
         let lost = sink
             .publish_batches(
                 &context,
-                publication(&mut batches, &mut requests, &mut payloads),
+                publication(
+                    &mut batches,
+                    &mut requests,
+                    &mut payloads,
+                    &mut PreparedPayloads::default(),
+                ),
             )
             .await
             .expect_err("a lost response leaves its requests unresolved");
@@ -381,7 +388,12 @@ mod tests {
         batches.push(second);
         sink.publish_batches(
             &context,
-            publication(&mut batches, &mut requests, &mut payloads),
+            publication(
+                &mut batches,
+                &mut requests,
+                &mut payloads,
+                &mut PreparedPayloads::default(),
+            ),
         )
         .await
         .expect("the retry is delivered");
@@ -421,7 +433,12 @@ mod tests {
 
         sink.publish_batches(
             &context,
-            publication(&mut batches, &mut requests, &mut payloads),
+            publication(
+                &mut batches,
+                &mut requests,
+                &mut payloads,
+                &mut PreparedPayloads::default(),
+            ),
         )
         .await
         .expect("a rejection resolves its row and the other row is delivered");

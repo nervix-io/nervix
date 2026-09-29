@@ -334,8 +334,8 @@ use emitter_publishing::{
     sink_publish_failure,
 };
 use emitter_record_writes::{
-    EncodedPayload, PreparedHttpRequest, PreparedPayload, PreparedPayloads, PreparedWrite,
-    RowAnswers, RowRecords,
+    CheckedPreparation, EncodedPayload, PreparedHttpRequest, PreparedPayload, PreparedPayloads,
+    PreparedWrite, RowAnswers, RowPreparationViolation, RowRecords, RowRequestBody,
 };
 use emitter_retry::{
     EmitterAcknowledgements, EmitterRetryDeferral, EmitterRetrySchedule, RETRY_ACK_ALIVE_EACH,
@@ -350,7 +350,9 @@ use emitter_task::{
     EmitterRuntimeError, EmitterRuntimeResult, EmitterSinkContext, emitter_error_message,
     emitter_init_error, emitter_publish_error_is_retryable, emitter_report,
 };
-use emitter_values::{MappedRowSink, MappedValuesProjection, MappedValuesProjectionInit};
+use emitter_values::{
+    MappedRequestSink, MappedRowSink, MappedValuesProjection, MappedValuesProjectionInit,
+};
 use endpoint::{
     EndpointIngestBinding, EndpointRoute, HttpRouteKey, RoutedEndpoint, RoutedEndpointsByDomain,
 };
