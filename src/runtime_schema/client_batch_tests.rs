@@ -152,9 +152,12 @@ fn framed(message: &[u8], body: &[u8]) -> Vec<u8> {
 #[tokio::test]
 async fn one_canonical_batch_of_the_schema_is_decoded_with_its_rows() {
     let batch = batch_of(arrow_schema(), &[1, 2, 3]);
-    let decoded = decode(stream(&arrow_schema(), std::slice::from_ref(&batch)), limits())
-        .await
-        .assured("a canonical batch decodes");
+    let decoded = decode(
+        stream(&arrow_schema(), std::slice::from_ref(&batch)),
+        limits(),
+    )
+    .await
+    .assured("a canonical batch decodes");
     assert_eq!(decoded, batch);
 
     let empty = batch_of(arrow_schema(), &[]);
