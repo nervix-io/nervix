@@ -196,7 +196,13 @@ archive; see [Restore Streams](#restore-streams).
   branched relay target carries a domain followed by a branch `Model` reference. Ingestor error
   relays use the unbranched target. A branch-field lookup carries a domain followed by a branch
   `Model` reference. Decoded and relay output fields
-  use the codec-field and relay-field targets above.
+  use the codec-field and relay-field targets above. Processor compatible-input, input-branch
+  output, and materialized-relay targets each carry a domain followed by the first input relay's
+  `Model` reference. The first requires the same named schema and branch, the second the same
+  branch, and the third a relay with materialized state in that branch. A junction's first input
+  uses the ingestor relay target for its selected branch; a reingestor's first input uses the
+  ordinary relay target. Reingestor routes that construct a different branch use the ingestor
+  relay and branch-field targets.
 - **Q-2.** A client MUST use the returned `ChoiceValue`, rather than its presentation label, for
   selection. For completed resource versions it MUST handle `ResourceVersionNumber` and
   `LatestResourceVersion` as distinct values. It MUST NOT offer a version absent from the result as

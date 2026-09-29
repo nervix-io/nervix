@@ -638,7 +638,7 @@ coverage-visual-create output="target/visual-create.lcov": tests-deps
         --package nervix-models --package nervix-client-wire --package nervix-nspl
     cargo llvm-cov --no-report --bin nervix-web-console --package nervix-web-console
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
-    for feature in visual_create_schema visual_create_relay visual_create_codec visual_create_client_endpoint visual_create_lookup_udf visual_create_ingestor; do
+    for feature in visual_create_schema visual_create_relay visual_create_codec visual_create_client_endpoint visual_create_lookup_udf visual_create_ingestor visual_create_processors; do
         cargo llvm-cov --no-report --features testing --package nervix-server \
             --test scenarios -- --input "tests/features/web-console/${feature}.feature" \
             --concurrency 1 --retry 0

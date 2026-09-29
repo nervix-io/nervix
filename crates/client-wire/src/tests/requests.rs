@@ -100,6 +100,35 @@ fn a_codec_field_choice_round_trips_with_its_domain_and_codec() {
 }
 
 #[test]
+fn processor_relay_choices_round_trip_with_the_first_input_reference() {
+    for target in [
+        ChoiceTarget::ProcessorCompatibleInputRelay,
+        ChoiceTarget::ProcessorInputBranchRelay,
+        ChoiceTarget::ProcessorMaterializedRelay,
+    ] {
+        let message = ClientMessage {
+            request_id: request(3),
+            request: ClientRequest::Choice(ChoiceLookupRequest::new(
+                target,
+                vec![
+                    ChoiceSelection {
+                        value: ChoiceValue::Domain(name("tenant")),
+                    },
+                    ChoiceSelection {
+                        value: ChoiceValue::Model(nervix_models::NodeRef::new(
+                            nervix_models::ModelKind::Relay,
+                            name::<nervix_models::ModelName>("incoming"),
+                        )),
+                    },
+                ],
+                "orders".to_string(),
+            )),
+        };
+        assert_eq!(round_trip_client(&message), message);
+    }
+}
+
+#[test]
 fn request_identity_spans_its_full_range() {
     for id in [1, u64::MAX] {
         let message = ClientMessage {

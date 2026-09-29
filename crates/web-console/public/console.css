@@ -3325,6 +3325,120 @@ button {
   font-size: 12px;
 }
 
+.create-processor-mode,
+.create-processor-branching,
+.create-processor-route-branching,
+.create-processor-state-policy,
+.create-processor-inherit,
+.create-processor-flush,
+.create-processor-message-error {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.create-processor-mode legend,
+.create-processor-branching legend,
+.create-processor-route-branching legend,
+.create-processor-state-policy legend,
+.create-processor-inherit legend,
+.create-processor-flush legend,
+.create-processor-message-error legend {
+  color: var(--text-d);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.create-processor-inputs,
+.create-processor-state,
+.create-processor-routes,
+.create-processor-route,
+.create-processor-invocations,
+.create-processor-state-default,
+.create-processor-output-assignments,
+.create-processor-branch-assignments,
+.create-processor-error-assignments {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.create-processor-inputs,
+.create-processor-state,
+.create-processor-routes,
+.create-processor-route {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.create-processor-inputs h3,
+.create-processor-state h3,
+.create-processor-routes h3,
+.create-processor-invocations h4 {
+  margin: 0;
+  color: var(--text-c);
+  font-size: 11px;
+}
+
+.create-processor-input-list,
+.create-processor-input-actions,
+.create-processor-state-list,
+.create-processor-state-actions,
+.create-processor-route-list,
+.create-processor-route-actions,
+.create-processor-assignment-row,
+.create-processor-inherited-field,
+.create-processor-invocation,
+.create-processor-invocation-argument-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.create-processor-inputs button,
+.create-processor-state button,
+.create-processor-routes button,
+.create-processor-mode button {
+  min-height: 29px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-hi);
+  color: var(--text-c);
+  font: inherit;
+  font-size: 10px;
+}
+
+.create-processor-inputs button.active,
+.create-processor-state button.active,
+.create-processor-routes button.active,
+.create-processor-mode button.active {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  background: color-mix(in srgb, var(--cyan) 13%, var(--surface));
+}
+
+.create-processor-assignment-row input,
+.create-processor-invocation input {
+  flex: 1 1 150px;
+  min-width: 0;
+  height: 35px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
 .create-choice-state,
 .create-validation,
 .create-error,

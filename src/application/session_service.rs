@@ -833,6 +833,9 @@ impl ChoicePageBasis {
             ChoiceTarget::IngestUnbranchedRelay => 29,
             ChoiceTarget::IngestBranchedRelay => 30,
             ChoiceTarget::BranchField => 31,
+            ChoiceTarget::ProcessorCompatibleInputRelay => 32,
+            ChoiceTarget::ProcessorInputBranchRelay => 33,
+            ChoiceTarget::ProcessorMaterializedRelay => 34,
         }]);
         hash_choice_text(&mut hasher, request.search());
         for dependency in request.dependencies() {
@@ -1080,7 +1083,10 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         | ChoiceTarget::IngestCodec
         | ChoiceTarget::IngestUnbranchedRelay
         | ChoiceTarget::IngestBranchedRelay
-        | ChoiceTarget::BranchField => {
+        | ChoiceTarget::BranchField
+        | ChoiceTarget::ProcessorCompatibleInputRelay
+        | ChoiceTarget::ProcessorInputBranchRelay
+        | ChoiceTarget::ProcessorMaterializedRelay => {
             return Err(ChoiceStatus::MissingContext);
         }
     };
@@ -1322,7 +1328,12 @@ impl SessionServiceImpl {
             | ChoiceTarget::IngestCodec
             | ChoiceTarget::IngestUnbranchedRelay
             | ChoiceTarget::IngestBranchedRelay
-            | ChoiceTarget::BranchField => self.configured_choices_for(&request, session).await,
+            | ChoiceTarget::BranchField
+            | ChoiceTarget::ProcessorCompatibleInputRelay
+            | ChoiceTarget::ProcessorInputBranchRelay
+            | ChoiceTarget::ProcessorMaterializedRelay => {
+                self.configured_choices_for(&request, session).await
+            }
         };
         let (choices, content_digest) = match resolved {
             Ok(resolved) => resolved,
