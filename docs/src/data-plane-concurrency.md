@@ -254,14 +254,15 @@ refused. The endpoint task awaits each admitted batch's acknowledgement itself, 
 and before further ones once it resolves, so an ending endpoint leaves no task behind, and a
 resolution for an attachment that already ended finds nothing to answer.
 
-A batch that another node forwards reaches the worker in two steps. When the batch's turn comes, the
-endpoint takes a slot of the window for it, moves it among the producer's batches awaiting
-clearance, and asks the serving node over the producer's own clearance channel; asking does not wait
-for the worker. The clearance returns as a command, and clearances arrive in the order they were
-requested, so the one that arrives names the oldest batch awaiting it, or a batch the endpoint has
-already refused, which it ignores. A cleared batch already holds its slot, so it takes the worker
-before any queued batch. A refusal, a close, an end, or a detach answers or drops the batches still
-awaiting clearance or the worker, which never reached it, and releases their slots in the same
+A producer's turn gives its next queued batch a slot of the window whether or not the worker is
+free, so a busy worker never passes a producer over. A local producer's batch is then ready for the
+worker. A batch that another node forwards first waits among the producer's batches awaiting
+clearance while the endpoint asks the serving node over the producer's own clearance channel. The
+clearance returns as a command, and clearances arrive in the order they were requested, so the one
+that arrives names the oldest batch awaiting it, or a batch the endpoint has already refused, which
+it ignores; the cleared batch is then ready for the worker too. A free worker takes a ready batch,
+which already holds its slot. A refusal, a close, an end, or a detach answers or drops the batches
+still awaiting clearance or the worker, which never reached it, and releases their slots in the same
 command, so a lost serving node never leaks a slot of the window.
 
 After each command the task publishes its producer, outstanding, and window counts into plain

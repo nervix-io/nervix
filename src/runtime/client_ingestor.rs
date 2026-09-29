@@ -458,9 +458,9 @@ struct Attachment {
     /// Batches of a forwarded producer whose turn came, each holding a slot of the window, while
     /// their serving node clears them, in the order the clearances were requested.
     clearing: VecDeque<QueuedSubmission>,
-    /// Batches of a forwarded producer that their serving node cleared, each holding a slot of the
-    /// window, until the worker is free to take them.
-    cleared: VecDeque<QueuedSubmission>,
+    /// Batches that hold a slot of the window and wait for the worker: a local producer's batch
+    /// whose turn came, or a forwarded producer's batch its serving node cleared.
+    ready: VecDeque<QueuedSubmission>,
     /// Batches admitted or handed to the worker, not yet answered, with their payload bytes.
     outstanding: HashMap<ClientSubmissionId, u64>,
     /// Payload bytes of every batch the attachment holds.
@@ -486,11 +486,11 @@ impl Attachment {
     }
 
     /// Batches that hold a slot of the window without having reached the worker: those being
-    /// cleared and those cleared.
+    /// cleared and those ready for the worker.
     fn slotted_batches(&self) -> usize {
         self.clearing
             .len()
-            .checked_add(self.cleared.len())
+            .checked_add(self.ready.len())
             .assured("both counts are bounded by the attachment's granted batches")
     }
 
@@ -536,15 +536,15 @@ impl Attachment {
     }
 
     /// Refuses every batch that has not reached the worker, in the order the producer sent them.
-    /// Those cleared or being cleared held slots of the window, which the caller releases.
+    /// Those ready or being cleared held slots of the window, which the caller releases.
     fn refuse_unadmitted(
         &mut self,
         series: &ClientIngestorSeries,
         refusal: ClientSubmissionRefusal,
     ) {
-        // Oldest first: a cleared batch was asked about before any batch still being cleared,
-        // and both left the queue before the batches still in it.
-        let mut unadmitted = std::mem::take(&mut self.cleared);
+        // Oldest first: a ready batch took its turn, or was cleared, before any batch still being
+        // cleared, and both left the queue before the batches still in it.
+        let mut unadmitted = std::mem::take(&mut self.ready);
         unadmitted.append(&mut self.clearing);
         unadmitted.append(&mut self.queue);
         for batch in unadmitted {
@@ -1103,7 +1103,7 @@ impl Endpoint {
                 grant,
                 queue: VecDeque::new(),
                 clearing: VecDeque::new(),
-                cleared: VecDeque::new(),
+                ready: VecDeque::new(),
                 outstanding: HashMap::new(),
                 held_bytes: 0,
                 events,
@@ -1178,9 +1178,9 @@ impl Endpoint {
         entry.queue.push_back(QueuedSubmission { submission, body });
     }
 
-    /// Moves a batch its serving node cleared to the batches awaiting the worker. Clearances arrive
-    /// in the order the endpoint asked for them, so a clearance names the oldest batch still being
-    /// cleared, or a batch the endpoint already refused, which it ignores.
+    /// Moves a batch its serving node cleared to the batches ready for the worker. Clearances
+    /// arrive in the order the endpoint asked for them, so a clearance names the oldest batch still
+    /// being cleared, or a batch the endpoint already refused, which it ignores.
     fn clear(&mut self, attachment: ClientAttachmentId, submission: ClientSubmissionId) {
         let Some(entry) = self.attachments.get_mut(&attachment) else {
             // The producer ended or detached, and every batch it held with it.
@@ -1196,7 +1196,7 @@ impl Endpoint {
             .clearing
             .pop_front()
             .verified("the oldest batch being cleared was found above");
-        entry.cleared.push_back(cleared);
+        entry.ready.push_back(cleared);
     }
 
     fn close(&mut self, attachment: ClientAttachmentId) {
@@ -1213,10 +1213,9 @@ impl Endpoint {
 
     /// Returns the slots of the window that batches held without reaching the worker.
     fn release_window_slots(&mut self, slots: usize) {
-        self.window_used = self
-            .window_used
-            .checked_sub(slots)
-            .verified("every batch being cleared or cleared holds one slot of the window");
+        self.window_used = self.window_used.checked_sub(slots).verified(
+            "every batch being cleared or ready for the worker holds one slot of the window",
+        );
     }
 
     /// Releases a closing attachment once every batch it admitted has its outcome. Dropping it
@@ -1430,11 +1429,12 @@ impl Endpoint {
         self.acknowledgements.push(Box::pin(resolution));
     }
 
-    /// Hands out every batch the execution can take now, while it admits. A batch its serving node
-    /// cleared already holds a slot of the window, so it takes a free worker first. While the
-    /// window has room, the attachments then take their turns: a local producer's next batch goes
-    /// to a free worker, and a forwarded producer's next batch holds a slot while its serving node
-    /// clears it, which needs no worker.
+    /// Hands out every batch the execution can take now, while it admits. While the window has
+    /// room, the attachments take their turns, and each turn gives the attachment's next queued
+    /// batch a slot of the window whether or not the worker is free, so a busy worker never passes
+    /// a producer over: a local producer's batch is then ready for the worker, and a forwarded
+    /// producer's batch waits for its serving node to clear it first. A free worker takes a ready
+    /// batch.
     fn pump(&mut self) {
         let Some(execution) = self.execution.clone() else {
             return;
@@ -1449,13 +1449,13 @@ impl Endpoint {
 
     /// Hands out one batch, or returns `false` when nothing can be handed out now.
     fn hand_out_one(&mut self, execution: &ClientExecution) -> bool {
-        if self.in_worker.is_none() && self.hand_cleared_batch(execution) {
+        if self.in_worker.is_none() && self.hand_ready_batch(execution) {
             return true;
         }
         if self.window_used >= execution.window.get() {
             return false;
         }
-        self.take_next_turn(execution)
+        self.take_next_turn()
     }
 
     /// The attachment `step` places after the one whose turn is next, among `count` of them.
@@ -1467,19 +1467,19 @@ impl Endpoint {
         position % count
     }
 
-    /// Hands the free worker the oldest cleared batch of the first attachment in turn that holds
+    /// Hands the free worker the oldest ready batch of the first attachment in turn that holds
     /// one.
-    fn hand_cleared_batch(&mut self, execution: &ClientExecution) -> bool {
+    fn hand_ready_batch(&mut self, execution: &ClientExecution) -> bool {
         let count = self.attachments.len();
         for step in 0..count {
             let index = self.turn_index(step, count);
             let Some((id, entry)) = self.attachments.get_index_mut(index) else {
                 continue;
             };
-            let Some(cleared) = entry.cleared.pop_front() else {
+            let Some(ready) = entry.ready.pop_front() else {
                 continue;
             };
-            let job = entry.outstanding_job(*id, cleared);
+            let job = entry.outstanding_job(*id, ready);
             self.dispatch(execution, job);
             return true;
         }
@@ -1487,40 +1487,31 @@ impl Endpoint {
     }
 
     /// Gives the next attachment in turn that queued a batch a slot of the window for it. A local
-    /// producer's batch needs the worker as well, so a local producer is passed over while the
-    /// worker is busy; a forwarded producer's batch is sent to be cleared instead.
-    fn take_next_turn(&mut self, execution: &ClientExecution) -> bool {
-        let worker_free = self.in_worker.is_none();
+    /// producer's batch is then ready for the worker; a forwarded producer's batch is sent to be
+    /// cleared first.
+    fn take_next_turn(&mut self) -> bool {
         let count = self.attachments.len();
         for step in 0..count {
             let index = self.turn_index(step, count);
-            let Some((id, entry)) = self.attachments.get_index_mut(index) else {
+            let Some((_, entry)) = self.attachments.get_index_mut(index) else {
                 continue;
             };
-            let forwarded = entry.is_forwarded();
-            if entry.queue.is_empty() || (!forwarded && !worker_free) {
+            let Some(queued) = entry.queue.pop_front() else {
                 continue;
+            };
+            match &entry.serving {
+                ProducerServing::Local => entry.ready.push_back(queued),
+                ProducerServing::Forwarded {
+                    clearance_requests, ..
+                } => {
+                    // A serving node that is gone detaches the producer, which returns the slot.
+                    clearance_requests
+                        .send(queued.submission)
+                        .means_peer_left("forwarded client producer");
+                    entry.clearing.push_back(queued);
+                }
             }
-            let attachment = *id;
-            let queued = entry
-                .queue
-                .pop_front()
-                .verified("the attachment's queue was found holding a batch above");
-            if let ProducerServing::Forwarded {
-                clearance_requests, ..
-            } = &entry.serving
-            {
-                // A serving node that is gone detaches the producer, which returns the slot.
-                clearance_requests
-                    .send(queued.submission)
-                    .means_peer_left("forwarded client producer");
-                entry.clearing.push_back(queued);
-                self.take_window_slot(index);
-                return true;
-            }
-            let job = entry.outstanding_job(attachment, queued);
             self.take_window_slot(index);
-            self.dispatch(execution, job);
             return true;
         }
         false

@@ -900,3 +900,42 @@ async fn ending_the_endpoint_refuses_a_cleared_batch_that_never_reached_the_work
         ))
     );
 }
+
+#[tokio::test]
+async fn a_local_producer_takes_its_turn_while_the_worker_is_busy_with_a_forwarded_batch() {
+    let mut fixture = Fixture::start();
+    fixture.install(2, 1, 1, WAIT);
+    let local = fixture
+        .attach(fields(&["id"]), limits(4, 4096))
+        .await
+        .assured("an open with the right schema attaches");
+    let (forwarded, mut clearances) = fixture.attach_forwarded(limits(4, 4096)).await;
+    local.submit(1);
+    let first = fixture.next_job().await;
+    assert_eq!(first.submission, submission(1));
+    forwarded.submit(2);
+    assert_eq!(next_clearance(&mut clearances).await, 2);
+    // The window is full, so both producers queue their next batch.
+    local.submit(3);
+    forwarded.submit(4);
+    forwarded.clear(2);
+    let first_root = fixture.admit(&first, WAIT);
+    let second = fixture.next_job().await;
+    assert_eq!(second.submission, submission(2));
+    // The first batch's slot frees while the worker holds the second: the local producer's turn
+    // comes next, and a busy worker does not pass it over for the forwarded producer.
+    first_root.ack_success();
+    let refused_turn = timeout(Duration::from_millis(200), clearances.recv()).await;
+    assert!(
+        refused_turn.is_err(),
+        "the freed slot went to the forwarded producer out of turn"
+    );
+    fixture.admit(&second, WAIT).ack_success();
+    let third = fixture.next_job().await;
+    assert_eq!(
+        third.submission,
+        submission(3),
+        "the local batch took its turn while the worker was busy"
+    );
+    assert_eq!(next_clearance(&mut clearances).await, 4);
+}
