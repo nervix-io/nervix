@@ -177,13 +177,14 @@ in any request field or body require explicit leakage. Branch fields and source-
 reads are unavailable. A literal invalid method, target or header rejects configuration; the same
 rules are checked per record for computed values before publication.
 
-Methods are ASCII HTTP tokens of at most 64 bytes. `CONNECT` and `TRACE` are unavailable, and
-`GET` and `HEAD` require `WITHOUT BODY`. `PATH` begins with exactly one `/` and is parsed against
-the client origin. It cannot include a fragment, backslash, invalid percent escape, whitespace or
-control character; normalization must keep it on that origin and must not produce a leading `//`.
-The normalized target is limited to 8 KiB. `write_header` accepts valid HTTP field names and
-UTF-8 values without control characters or leading/trailing whitespace in a nonempty value.
-Transport-owned headers cannot be written. After case-insensitive replacement, at most 128
+Methods are ASCII HTTP tokens of at most 64 bytes. `CONNECT` and `TRACE` are unavailable, and `GET`
+and `HEAD` require `WITHOUT BODY`; both rules apply to every ASCII case variant, while any other
+method is sent with exactly the spelling it evaluated to. `PATH` begins with exactly one `/` and is
+parsed against the client origin. It cannot include a fragment, backslash, invalid percent escape,
+whitespace or control character; normalization must keep it on that origin and must not produce a
+leading `//`. The normalized target is limited to 8 KiB. `write_header` accepts valid HTTP field
+names and UTF-8 values without control characters or leading/trailing whitespace in a nonempty
+value. Transport-owned headers cannot be written. After case-insensitive replacement, at most 128
 application headers and 32 KiB of name/value bytes are allowed.
 
 `ENCODE USING` permits the ordinary transforming construction clauses. `WITHOUT BODY` selects an

@@ -1124,8 +1124,10 @@ async fn given_http_receiver_answers_unscripted_requests_with(
 
 /// Gives every request for one exact target, its path and query, its own answer, which it takes
 /// instead of the script. Requests of independent branches or source relays have no order between
-/// them, so a scenario answers each of them by its target rather than by its position.
+/// them, so a scenario answers each of them by its target rather than by its position. Given again
+/// later, the answer replaces the earlier one, so an endpoint that kept failing a target recovers.
 #[given(expr = "HTTP receiver {string} answers requests for {string} with {string}")]
+#[when(expr = "HTTP receiver {string} answers requests for {string} with {string}")]
 async fn given_http_receiver_answers_requests_for_target(
     world: &mut ScenarioWorld,
     name: String,
@@ -1213,7 +1215,31 @@ impl ExpectedHttpRequest {
     /// Whether `request` has this request line, which is how a step finds the one captured request
     /// a docstring describes when the order requests arrive in is not part of the contract.
     fn has_request_line_of(&self, request: &CapturedRequest) -> bool {
-        self.request_line == format!("{} {}", request.method, request.target)
+        self.request_line == request.request_line()
+    }
+
+    /// Asserts that exactly one of the `captured` requests has this request line, and that it is
+    /// the request this docstring describes.
+    fn assert_one_captured(&self, receiver: &str, captured: &[CapturedRequest]) {
+        let mut matching = Vec::new();
+        for request in captured {
+            if self.has_request_line_of(request) {
+                matching.push(request);
+            }
+        }
+        let [request] = matching.as_slice() else {
+            panic!(
+                "HTTP receiver '{receiver}' captured {} request(s) with the request line '{}', \
+                 not exactly one, among {} captured request(s)",
+                matching.len(),
+                self.request_line,
+                captured.len()
+            );
+        };
+        self.assert_matches(
+            &format!("HTTP receiver '{receiver}' request '{}'", self.request_line),
+            request,
+        );
     }
 
     /// Asserts that `request`, which `described` names in a failure, is the request this
@@ -1283,29 +1309,70 @@ async fn then_http_receiver_captured_one_request_that_is(
 ) {
     let expected = ExpectedHttpRequest::from_step(world, step);
     let captured = http_receiver(world, &name).captured();
-    let mut matching = Vec::new();
-    for request in &captured {
-        if expected.has_request_line_of(request) {
-            matching.push(request);
-        }
-    }
-    let [request] = matching.as_slice() else {
-        panic!(
-            "HTTP receiver '{name}' captured {} request(s) with the request line '{}', not \
-             exactly one, among {} captured request(s)",
-            matching.len(),
-            expected.request_line,
-            captured.len()
-        );
+    expected.assert_one_captured(&name, &captured);
+}
+
+/// Waits until the receiver captures a request with the docstring's request line, then compares
+/// the one such request with the request the docstring describes. A scenario uses it for a request
+/// that follows others whose number it cannot name, such as the attempts of a retried request.
+#[then(expr = "HTTP receiver {string} eventually captures one request that is")]
+async fn then_http_receiver_eventually_captures_one_request_that_is(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let expected = ExpectedHttpRequest::from_step(world, step);
+    let waited = http_receiver(world, &name)
+        .wait_for_request_line(&expected.request_line, HTTP_RECEIVER_WAIT)
+        .await;
+    let captured = match waited {
+        Ok(captured) => captured,
+        Err(error) => panic!("HTTP receiver '{name}': {error}"),
     };
-    expected.assert_matches(
-        &format!("HTTP receiver '{name}' request '{}'", expected.request_line),
-        request,
+    expected.assert_one_captured(&name, &captured);
+}
+
+/// Asserts the most requests the receiver ever held awaiting their final head at once. A request
+/// awaits from its capture until the receiver begins writing its final head, or until its
+/// connection ends without one, so a sender that waits for each final head never has two.
+#[then(expr = "HTTP receiver {string} never had more than {int} request(s) awaiting a response")]
+async fn then_http_receiver_never_had_more_awaiting_responses(
+    world: &mut ScenarioWorld,
+    name: String,
+    most: usize,
+) {
+    let observed = http_receiver(world, &name).most_awaiting_responses();
+    assert!(
+        observed <= most,
+        "HTTP receiver '{name}' held {observed} requests awaiting a response at once, more than \
+         {most}"
     );
 }
 
+/// Waits until clients have abandoned at least `expected` responses the receiver had not finished:
+/// a held response, a body it was still writing or had stalled, closed from the client's side. A
+/// stop of the receiver itself abandons nothing.
+#[then(
+    expr = "HTTP receiver {string} eventually sees the client abandon at least {int} unfinished \
+            response(s)"
+)]
+async fn then_http_receiver_sees_abandoned_responses(
+    world: &mut ScenarioWorld,
+    name: String,
+    expected: usize,
+) {
+    let waited = http_receiver(world, &name)
+        .wait_for_abandoned_responses(expected, HTTP_RECEIVER_WAIT)
+        .await;
+    if let Err(error) = waited {
+        panic!("HTTP receiver '{name}': {error}");
+    }
+}
+
 /// Asserts that no captured request has `request_line`. A scenario uses it for a request that must
-/// never be sent at all, once later requests that it would have preceded have arrived.
+/// never be sent at all, once later requests that it would have preceded have arrived, or for one
+/// that cannot have been sent yet because the request ahead of it keeps failing and holds back all
+/// later work of its emitter.
 #[then(expr = "HTTP receiver {string} captured no request with request line {string}")]
 async fn then_http_receiver_captured_no_request_with_request_line(
     world: &mut ScenarioWorld,
@@ -1315,7 +1382,7 @@ async fn then_http_receiver_captured_no_request_with_request_line(
     let request_line = expand_placeholders(world, &request_line);
     let captured = http_receiver(world, &name).captured();
     for request in &captured {
-        let captured_line = format!("{} {}", request.method, request.target);
+        let captured_line = request.request_line();
         assert_ne!(
             captured_line, request_line,
             "HTTP receiver '{name}' captured a request that must never be sent:\n{request}"
