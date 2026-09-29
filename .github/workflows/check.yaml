@@ -5,7 +5,8 @@ on:
     types: [opened, synchronize, reopened]
 
 env:
-  KACHE_VERSION: "0.19.0"
+  KACHE_VERSION: "0.28.0"
+  KACHE_REMOTE_KEY_LISTING: "false"
   TINYGO_VERSION: "0.41.1"
 
 permissions:
@@ -35,7 +36,7 @@ jobs:
   checks:
     name: checks
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.98
@@ -114,6 +115,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       # Runs before the build: the counts are a text scan, so a change that raises one is named in
       # seconds rather than after the toolchain has warmed up.
@@ -136,9 +139,13 @@ jobs:
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
           s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-prefix: "artifacts"
           s3-region: ${{ vars.KACHE_S3_REGION }}
           s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -148,28 +155,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Kache stats
-        continue-on-error: true
+      - name: Publish kache report
         if: always()
-        run: kache stats
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
 
   tests:
     name: tests
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    # The emergency guard outside the scenario suite's own budget, not the mechanism that ends a
-    # wedged run: a job this cancels is killed mid-scenario, and the logs it uploads end without the
-    # suite's own diagnostic. The suite bounds itself well inside this limit and leaves the reserve
-    # the upload below needs. Keep it in step with WORKFLOW_JOB_LIMIT in
-    # tests/common/suite_watchdog.rs, which derives that budget from this number.
-    timeout-minutes: 75
+    timeout-minutes: 60
     permissions:
       contents: read
-      id-token: write
     env:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
-      NERVIX_TEST_CONCURRENCY_FACTOR: "2"
     steps:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.98
@@ -179,7 +186,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just,toml-cli,cargo-llvm-cov,trunk,cargo-crap,wild-linker
+          tool: just,toml-cli,cargo-llvm-cov,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -254,16 +261,307 @@ jobs:
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
           s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-prefix: "artifacts"
           s3-region: ${{ vars.KACHE_S3_REGION }}
           s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      - name: Tests Coverage
+      - name: Start runner load recorder
         run: |
-            just test-coverage
+          python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
+
+      - name: Tests coverage
+        run: just test-coverage
+
+      - name: Upload tests coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-tests
+          path: |
+            lcov-workspace.info
+            lcov.info
+          if-no-files-found: warn
+
+      - name: Publish runner load
+        if: always()
+        run: |
+          if [[ -f "${RUNNER_TEMP}/runner-load.pid" ]]; then
+            kill -TERM "$(cat "${RUNNER_TEMP}/runner-load.pid")" || true
+            for attempt in {1..10}; do
+              [[ -f "${RUNNER_TEMP}/runner-load.md" ]] && break
+              sleep 1
+            done
+          fi
+          if [[ -f "${RUNNER_TEMP}/runner-load.md" ]]; then
+            cat "${RUNNER_TEMP}/runner-load.md" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload runner load
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-load-${{ github.job }}
+          path: |
+            ${{ runner.temp }}/runner-load.csv
+            ${{ runner.temp }}/runner-load.md
+            ${{ runner.temp }}/runner-load.log
+          if-no-files-found: warn
+
+      - name: Publish kache report
+        if: always()
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: tests/logs
+          if-no-files-found: ignore
+
+  scenarios:
+    name: scenarios
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    # The harness watchdog derives its budget from this limit and leaves time for logs and reports.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      NO_COLOR: "1"
+      CARGO_TERM_COLOR: never
+      RUST_LOG_STYLE: never
+      NERVIX_TEST_CONCURRENCY_FACTOR: "2"
+    steps:
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.98
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,toml-cli,cargo-llvm-cov,trunk,wild-linker
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "clang-23"
+          rustflags = ["-Clink-arg=--ld-path=wild"]
+          EOF
+
+      - name: Setup Go environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install TinyGo
+        run: |
+          set -euo pipefail
+          arch="$(dpkg --print-architecture)"
+          case "${arch}" in
+            amd64|arm64) ;;
+            *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
+          esac
+          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          sudo dpkg -i /tmp/tinygo.deb
+          tinygo version
+
+      - name: Install dockerfmt
+        run: |
+          go install github.com/reteps/dockerfmt@latest
+
+      - name: Install playwright
+        run: |
+          npm install -g playwright
+
+      - name: Install apt deps
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libcurl4-openssl-dev \
+            protobuf-compiler
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Configure kache daemon remote
+        env:
+          KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_S3_REGION }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
+          bash scripts/configure_kache_remote.sh "${config}"
+          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
+          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          pr-comment: "false"
+          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-prefix: "artifacts"
+          s3-region: ${{ vars.KACHE_S3_REGION }}
+          s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Start runner load recorder
+        run: |
+          python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
+
+      - name: Scenario coverage
+        run: just test-scenarios-coverage
+
+      - name: Upload scenarios coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-scenarios
+          overwrite: true
+          path: |
+            lcov-workspace.info
+            lcov.info
+          if-no-files-found: warn
+
+      - name: Publish runner load
+        if: always()
+        run: |
+          if [[ -f "${RUNNER_TEMP}/runner-load.pid" ]]; then
+            kill -TERM "$(cat "${RUNNER_TEMP}/runner-load.pid")" || true
+            for attempt in {1..10}; do
+              [[ -f "${RUNNER_TEMP}/runner-load.md" ]] && break
+              sleep 1
+            done
+          fi
+          if [[ -f "${RUNNER_TEMP}/runner-load.md" ]]; then
+            cat "${RUNNER_TEMP}/runner-load.md" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload runner load
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-load-${{ github.job }}
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/runner-load.csv
+            ${{ runner.temp }}/runner-load.md
+            ${{ runner.temp }}/runner-load.log
+          if-no-files-found: warn
+
+      - name: Publish suite summary
+        if: always()
+        run: |
+          if [[ -f tests/logs/suite-summary.md ]]; then
+            cat tests/logs/suite-summary.md >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Publish kache report
+        if: always()
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          overwrite: true
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
+
+      - name: Upload scenario logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scenario-logs
+          overwrite: true
+          path: tests/logs
+          if-no-files-found: ignore
+
+  coverage:
+    name: coverage
+    needs: [tests, scenarios]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.98
+
+      - name: Install CRAP and LCOV
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-crap
+
+      - name: Install LCOV
+        run: sudo apt-get update && sudo apt-get install -y lcov
+
+      - name: Download tests coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-tests
+          path: coverage-inputs/tests
+
+      - name: Download scenarios coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-scenarios
+          path: coverage-inputs/scenarios
+
+      - name: Merge coverage and check CRAP
+        run: |
+          lcov --add-tracefile coverage-inputs/tests/lcov-workspace.info \
+            --add-tracefile coverage-inputs/scenarios/lcov-workspace.info \
+            --output-file lcov-workspace.info
+          lcov --add-tracefile coverage-inputs/tests/lcov.info \
+            --add-tracefile coverage-inputs/scenarios/lcov.info \
+            --output-file lcov.info
+          cargo crap --lcov lcov-workspace.info --min 30 --threshold 30
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -273,18 +571,15 @@ jobs:
           files: ./lcov.info
           use_oidc: true
 
-      - name: Kache stats
-        continue-on-error: true
-        if: always()
-        run: kache stats
-
-      - name: Upload test logs
+      - name: Upload merged coverage
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-logs
-          path: tests/logs
-          if-no-files-found: ignore
+          name: coverage-merged
+          path: |
+            lcov-workspace.info
+            lcov.info
+          if-no-files-found: warn
 
   # The cross-language client probes: C, C++, Python, Java and Ruby over the shared Rust binding,
   # and independent Go and TypeScript implementations on Node.js and Bun. They need toolchains the
@@ -304,7 +599,7 @@ jobs:
       RUST_LOG_STYLE: never
       NERVIX_TEST_CONCURRENCY_FACTOR: "2"
       # Nineteen scenarios finish in a few minutes. A short budget leaves the builds before them
-      # up to 40 minutes of the job limit instead of the suite job's 18.
+      # up to 40 minutes of the job limit instead of the suite job's 25.
       NERVIX_TEST_SUITE_BUDGET: "15m"
     steps:
       - name: Setup Rust
@@ -402,9 +697,13 @@ jobs:
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
           s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-prefix: "artifacts"
           s3-region: ${{ vars.KACHE_S3_REGION }}
           s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -412,10 +711,17 @@ jobs:
       - name: Client conformance
         run: just test-client-conformance
 
-      - name: Kache stats
-        continue-on-error: true
+      - name: Publish kache report
         if: always()
-        run: kache stats
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
 
       - name: Upload test logs
         if: always()
@@ -527,12 +833,19 @@ jobs:
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
           s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-prefix: "artifacts"
           s3-region: ${{ vars.KACHE_S3_REGION }}
           s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Runtime state capability checks
+        run: just test-runtime-state-capabilities
 
       # Cheapest first, so a workspace that does not build at all is named in seconds rather than
       # after the heavier compilations have run.
@@ -555,10 +868,17 @@ jobs:
       - name: NSPL completion walk
         run: just nspl-completion-walk
 
-      - name: Kache stats
-        continue-on-error: true
+      - name: Publish kache report
         if: always()
-        run: kache stats
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
 
       # A modeled concurrency failure is only reproducible from the schedule that produced it, and
       # this job is the only witness of that schedule.
@@ -638,9 +958,13 @@ jobs:
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
           manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
           s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-prefix: "artifacts"
           s3-region: ${{ vars.KACHE_S3_REGION }}
           s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -651,10 +975,17 @@ jobs:
       - name: Turmoil failure replay
         run: just test-turmoil-replay-check
 
-      - name: Kache stats
-        continue-on-error: true
+      - name: Publish kache report
         if: always()
-        run: kache stats
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
 
       # A failed scenario is reproducible only from its record: the seed and every other input,
       # the build it ran on, and its semantic trace up to the failure. This job is the only

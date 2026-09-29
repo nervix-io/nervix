@@ -383,7 +383,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       - domain={{domain}} kind=junction name=moving_route owner=node-2
       """
 
-  @ownership-state-handoff @shutdown_qualification @exclusive
+  @ownership-state-handoff @shutdown_qualification
   Scenario: A lost prepare response is reconciled before a later relocation
     Given runtime replication is configured with replica count 0 and snapshot interval "1h"
     And entity gate deadline is configured as "1s"
@@ -478,7 +478,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       - domain={{domain}} kind=junction name=moving_route owner=node-2
       """
 
-  @ownership-state-handoff @shutdown_qualification @exclusive
+  @ownership-state-handoff @shutdown_qualification
   Scenario: A new leader reconciles preparation left before schedule commit
     Given runtime replication is configured with replica count 0 and snapshot interval "1h"
     And entity gate deadline is configured as "1s"

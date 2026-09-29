@@ -6,7 +6,6 @@
 //! - **Depends on.** Browser draft Models and presentation components.
 //! - **Must not know.** Connector execution or cluster placement.
 
-use futures_channel::mpsc::unbounded;
 use leptos::prelude::{GetUntracked as _, Owner, RenderHtml as _, RwSignal, Set as _, Update as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
@@ -20,7 +19,7 @@ use nervix_models::{
 };
 
 use super::{
-    super::ConsoleRequest,
+    super::{ConsoleRequest, request_handoff::request_handoff},
     ChoiceControl, ChoiceGroup, ChoiceGroupProps, ChoiceLoad, ChoiceRequestContext, CreateDialog,
     CreateDialogProps, CreateDispatch, CreateDraftError, CreateKind, CreateMenu, CreateMenuProps,
     CreateProgress, CreateSignals, CreateSubmission, DomainDraft, ResourceDraft, SelectedReference,
@@ -473,11 +472,11 @@ fn choice_requests_preserve_control_context_and_report_unavailable_channels() {
         signals.open(CreateKind::Domain, None, "trigger");
         let pace = signals.choices.domain_pace;
         pace.search.set("wall".to_string());
-        let (sender, mut receiver) = unbounded();
+        let (sender, mut receiver) = request_handoff();
         let request_tx = RwSignal::new(Some(sender));
         request_choices(signals, ChoiceControl::DomainPace, request_tx, 8, false);
         let ConsoleRequest::Choice { request, context } = receiver
-            .try_recv()
+            .try_take()
             .assured("the choice channel remains open")
         else {
             panic!("the create dialog sends a typed choice request");
@@ -494,7 +493,7 @@ fn choice_requests_preserve_control_context_and_report_unavailable_channels() {
         });
         request_choices(signals, ChoiceControl::DomainPace, request_tx, 8, true);
         let ConsoleRequest::Choice { request, context } = receiver
-            .try_recv()
+            .try_take()
             .assured("the choice channel remains open")
         else {
             panic!("the create dialog sends a typed choice request");
@@ -510,7 +509,7 @@ fn choice_requests_preserve_control_context_and_report_unavailable_channels() {
             false,
         );
         let ConsoleRequest::Choice { request, .. } = receiver
-            .try_recv()
+            .try_take()
             .assured("the choice channel remains open")
         else {
             panic!("the create dialog sends a typed choice request");
@@ -524,7 +523,7 @@ fn choice_requests_preserve_control_context_and_report_unavailable_channels() {
             ChoiceLoad::Failed("The session is not available".to_string())
         );
 
-        let (closed_sender, closed_receiver) = unbounded();
+        let (closed_sender, closed_receiver) = request_handoff();
         drop(closed_receiver);
         request_choices(
             signals,
@@ -535,12 +534,12 @@ fn choice_requests_preserve_control_context_and_report_unavailable_channels() {
         );
         assert_eq!(
             pace.load.get_untracked(),
-            ChoiceLoad::Failed("The session channel is closed".to_string())
+            ChoiceLoad::Failed("websocket command channel is closed".to_string())
         );
 
         pace.load.set(ChoiceLoad::Empty);
         request_choices(signals, ChoiceControl::DomainPace, request_tx, 8, true);
-        assert!(receiver.try_recv().is_err());
+        assert!(receiver.try_take().is_none());
     });
 }
 
@@ -720,7 +719,7 @@ fn branch_schema_requests_bind_the_captured_domain_and_page_cursor() {
     Owner::new().with(|| {
         let signals = CreateSignals::new();
         let branch_schema = signals.choices.branch_schema;
-        let (sender, mut receiver) = unbounded();
+        let (sender, mut receiver) = request_handoff();
         let request_tx = RwSignal::new(Some(sender));
         signals.open(CreateKind::Branch, None, "trigger");
         request_choices(signals, ChoiceControl::BranchSchema, request_tx, 9, false);
@@ -728,14 +727,14 @@ fn branch_schema_requests_bind_the_captured_domain_and_page_cursor() {
             branch_schema.load.get_untracked(),
             ChoiceLoad::MissingPrerequisite("Select a domain before choosing a schema")
         );
-        assert!(receiver.try_recv().is_err());
+        assert!(receiver.try_take().is_none());
 
         let scope = domain("orders");
         signals.change_scope(Some(scope.clone()));
         branch_schema.search.set("tenant".to_string());
         request_choices(signals, ChoiceControl::BranchSchema, request_tx, 9, false);
         let ConsoleRequest::Choice { request, context } = receiver
-            .try_recv()
+            .try_take()
             .assured("the schema picker requests a typed page")
         else {
             panic!("the schema picker must send a choice request");
@@ -752,7 +751,7 @@ fn branch_schema_requests_bind_the_captured_domain_and_page_cursor() {
         });
         request_choices(signals, ChoiceControl::BranchSchema, request_tx, 9, true);
         let ConsoleRequest::Choice { request, context } = receiver
-            .try_recv()
+            .try_take()
             .assured("a page cursor requests the next schema page")
         else {
             panic!("the schema picker must send a choice request");
@@ -762,7 +761,7 @@ fn branch_schema_requests_bind_the_captured_domain_and_page_cursor() {
 
         branch_schema.load.set(ChoiceLoad::Empty);
         request_choices(signals, ChoiceControl::BranchSchema, request_tx, 9, true);
-        assert!(receiver.try_recv().is_err());
+        assert!(receiver.try_take().is_none());
     });
 }
 
@@ -770,11 +769,11 @@ fn branch_schema_requests_bind_the_captured_domain_and_page_cursor() {
 fn relay_and_subscription_controls_ask_typed_questions_of_the_captured_domain() {
     Owner::new().with(|| {
         let signals = CreateSignals::new();
-        let (sender, mut receiver) = unbounded();
+        let (sender, mut receiver) = request_handoff();
         let request_tx = RwSignal::new(Some(sender));
         let mut next_request = || {
             let ConsoleRequest::Choice { request, context } = receiver
-                .try_recv()
+                .try_take()
                 .assured("the control sends a typed choice request")
             else {
                 panic!("a control sends a choice request");

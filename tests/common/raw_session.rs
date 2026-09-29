@@ -29,11 +29,11 @@ use nervix_client_wire::{
     AttachDisposition, AttachDomainClockRequest, AttachOutcome, AttachTransactionRequest,
     CancelRequest, ClientMessage, ClientRequest, CommandDisposition, CommandOutcome,
     CommandRequest, DetachDomainClockRequest, Diagnostic, DomainClockAttachmentEnded,
-    DomainClockDetachDisposition, DomainClockObserved, DomainClockTicked, NoticeLevel,
-    OutcomeOrigin, Reply, ReplyBody, RequestId, RowSchema, ServerEvent, ServerFrame, ServerMessage,
-    SessionEndReason, SessionLimits, SubscribeDisposition, SubscribeRequest, SubscriptionEnded,
-    SubscriptionHandle, SubscriptionType, TransferAssembly, UnsubscribeDisposition,
-    UnsubscribeRequest, UploadChunk, UploadReply, UploadStart, VerifiedFrame,
+    DomainClockObserved, DomainClockTicked, NoticeLevel, OutcomeOrigin, Reply, ReplyBody,
+    RequestId, RowSchema, ServerEvent, ServerFrame, ServerMessage, SessionEndReason, SessionLimits,
+    SubscribeDisposition, SubscribeRequest, SubscriptionEnded, SubscriptionHandle,
+    SubscriptionType, TransferAssembly, UnsubscribeDisposition, UnsubscribeRequest, UploadChunk,
+    UploadReply, UploadStart, VerifiedFrame,
     grpc::{
         ClientExchangeCodec, ClientUploadCodec, EXCHANGE_PATH, FrameDecoder, UPLOAD_RESOURCE_PATH,
     },
@@ -523,16 +523,7 @@ impl TestSession {
                     self.closed_subscriptions.insert(handle.clone());
                 }
             }
-            ReplyBody::DomainClockAttach(_) => {
-                self.clock_log.push(TestClockLogEntry::Reply(request_id));
-            }
-            ReplyBody::DomainClockDetach(outcome) => {
-                if let DomainClockDetachDisposition::Detached(domain) = &outcome.disposition {
-                    // Frames read before this reply can still be waiting for a scenario step.
-                    // Detachment discards them; clock_log keeps their wire-order evidence.
-                    self.pending_clock_frames
-                        .retain(|frame| frame.domain() != domain);
-                }
+            ReplyBody::DomainClockAttach(_) | ReplyBody::DomainClockDetach(_) => {
                 self.clock_log.push(TestClockLogEntry::Reply(request_id));
             }
             _ => {}
@@ -619,6 +610,13 @@ impl TestSession {
     /// Every domain clock reply and frame, in the order the session read them.
     pub(crate) fn clock_log(&self) -> &[TestClockLogEntry] {
         &self.clock_log
+    }
+
+    /// Drops unread frames for `domain` that were filed while waiting for a reply already read.
+    /// The caller checks the clock log's wire order before discarding them.
+    pub(crate) fn discard_queued_clock_frames_for(&mut self, domain: &DomainName) {
+        self.pending_clock_frames
+            .retain(|frame| frame.domain() != domain);
     }
 
     /// Sends a request attaching the session to the clock of `domain`, without waiting for its

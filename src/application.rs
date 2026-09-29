@@ -1689,10 +1689,10 @@ impl Application {
                 }))
                 .buffer_unordered(MAX_CONCURRENT_HEALTH_PROBES);
                 tokio::pin!(probe_results);
-                // Gossip revisions can arrive faster than a silent peer's probe deadline.
-                // Finish the round so those revisions cannot suppress failure observations.
-                // Results are fenced against the current identity and endpoint when published;
-                // a pending topology update starts the next round without the cadence wait.
+                // Let each bounded probe finish even when gossip publishes another update.
+                // Cancelling the round on every update can indefinitely hide an unreachable
+                // peer's one-second timeout. Publication checks the current incarnation and
+                // endpoint, so a result superseded by discovery is still discarded.
                 loop {
                     tokio::task::consume_budget().await;
                     tokio::select! {

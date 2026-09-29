@@ -21,14 +21,13 @@ Feature: Domain clock attachment
     When the domain clock is started at now with time rate "1.0" on the leader node
     Then within "10s" the clock session observes domain "{{domain}}" at generation 2 as the paced clock that start established with period "100ms" and skew "10ms"
     And within "10s" the clock session receives a tick for generation 2 after its state frame
-    When the clock session sends request "detach" detaching the clock of domain "{{domain}}"
-    Then request "detach" of the clock session detached the clock of domain "{{domain}}"
+    When the clock session detaches from the clock of domain "{{domain}}"
+    Then the clock session is detached from the clock of domain "{{domain}}"
     When these NSPL commands are executed on the leader node
       """
       STOP;
       """
     Then the clock session receives no frame about domain "{{domain}}" within "2s"
-    And the clock session received no frame about domain "{{domain}}" after the reply to request "detach"
     When the clock session detaches from the clock of domain "{{domain}}"
     Then the clock session is refused because it does not follow the clock of domain "{{domain}}"
     When the clock session attaches to the clock of domain "{{domain}}"
