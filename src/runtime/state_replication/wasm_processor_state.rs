@@ -41,7 +41,7 @@ impl Runtime {
                     })
                 })?;
             let node = execution
-                .schedule
+                .revision
                 .nodes
                 .get(&NodeRef::new(placement.kind, placement.identifier.clone()))
                 .ok_or_else(|| {
@@ -100,74 +100,106 @@ impl Runtime {
     pub(super) async fn prepare_ownership_handoff_wasm_guests(
         &self,
         domain: &DomainName,
-        scheduled: &ScheduledNode,
+        scheduled: &ExecutionNode,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> OwnershipHandoffResult<()> {
-        let Some(processor) = scheduled.wasm_processor() else {
+        if scheduled.kind() != ModelKind::WasmProcessor {
             return Ok(());
-        };
-        let input_relay = processor.from.first().ok_or_else(|| {
-            OwnershipHandoffError::state(format!(
-                "wasm processor '{}' has no input relay while preparing ownership handoff",
-                processor.name.as_str()
-            ))
-        })?;
-        let (input_schema, output_schemas) = {
+        }
+        let (processor, input_relay, input_schema, output_schemas) = {
             let execution = self.inner.executions.get(domain).ok_or_else(|| {
                 OwnershipHandoffError::state(format!(
                     "domain '{}' has no execution while preparing wasm ownership handoff",
                     domain.as_str()
                 ))
             })?;
+            let processor = execution
+                .revision
+                .processors
+                .processor(ModelKind::WasmProcessor, &scheduled.identifier)
+                .cloned()
+                .ok_or_else(|| {
+                    OwnershipHandoffError::state(format!(
+                        "wasm processor '{}' has no installed plan",
+                        scheduled.identifier.as_str()
+                    ))
+                })?;
+            let input_relay = processor
+                .spec
+                .input_relays
+                .first()
+                .cloned()
+                .ok_or_else(|| {
+                    OwnershipHandoffError::state(format!(
+                        "wasm processor '{}' has no input relay while preparing ownership handoff",
+                        scheduled.identifier.as_str()
+                    ))
+                })?;
             let input_schema = execution
                 .relay_schemas
-                .get(input_relay)
+                .get(&input_relay)
                 .cloned()
                 .ok_or_else(|| {
                     OwnershipHandoffError::state(format!(
                         "wasm processor '{}' input relay '{}' has no runtime schema",
-                        processor.name.as_str(),
+                        scheduled.identifier.as_str(),
                         input_relay.as_str()
                     ))
                 })?;
-            let output_schemas = processor
-                .output_routes
+            let BranchedProcessorOperationSpec::WasmProcessor { output_routes, .. } =
+                &processor.spec.operation
+            else {
+                return Err(OwnershipHandoffError::state(format!(
+                    "wasm processor '{}' has a different installed operation",
+                    scheduled.identifier.as_str()
+                )));
+            };
+            let output_schemas = output_routes
                 .outputs()
                 .map(|output| {
                     let schema = execution.relay_schemas.get(&output.relay).cloned();
                     let Some(schema) = schema else {
                         return Err(OwnershipHandoffError::state(format!(
                             "wasm processor '{}' output relay '{}' has no runtime schema",
-                            processor.name.as_str(),
+                            scheduled.identifier.as_str(),
                             output.relay.as_str()
                         )));
                     };
                     Ok((output.relay.clone(), schema))
                 })
                 .collect::<OwnershipHandoffResult<Vec<_>>>()?;
-            (input_schema, output_schemas)
+            (processor, input_relay, input_schema, output_schemas)
+        };
+        let BranchedProcessorOperationSpec::WasmProcessor {
+            resource,
+            resource_version,
+            file,
+            limits,
+            ..
+        } = &processor.spec.operation
+        else {
+            return Err(OwnershipHandoffError::state(format!(
+                "wasm processor '{}' has a different installed operation",
+                scheduled.identifier.as_str()
+            )));
         };
         let restore = || OwnershipHandoffError::WasmRestore {
-            processor: processor.name.clone().into(),
+            processor: scheduled.identifier.clone(),
         };
         let compiled = self
             .compile_wasm_processor_module(
                 domain,
-                &processor.name,
-                &processor.resource,
-                processor.resource_version,
-                &processor.file,
+                scheduled.identifier.clone(),
+                resource,
+                *resource_version,
+                file,
             )
             .await
             .change_context_lazy(restore)?;
         let domain_clock = self
             .bind_domain_clock(domain)
             .change_context_lazy(restore)?;
-        let pinned = ResourceId::new(
-            domain.clone(),
-            processor.resource.clone(),
-            processor.resource_version,
-        );
+        let pinned = ResourceId::new(domain.clone(), resource.clone(), *resource_version);
         for (placement, snapshot) in checkpoints {
             tokio::task::consume_budget().await;
             if placement.state.kind() != RuntimeStateKind::WasmProcessor {
@@ -188,14 +220,14 @@ impl Runtime {
             };
             let execution_now = domain_clock.snapshot().change_context_lazy(restore)?.now();
             let module = WasmBranchModule {
-                processor: processor.name.clone().into(),
+                processor: scheduled.identifier.clone(),
                 branch: placement.branch_key.clone(),
                 resource: pinned.clone(),
-                file: processor.file.clone(),
+                file: file.clone(),
             };
             let saved = RestorableGuestState::of_snapshot(snapshot);
             compiled
-                .instantiate_branch(module, processor.limits, init, execution_now, saved)
+                .instantiate_branch(module, *limits, init, execution_now, saved)
                 .await
                 .change_context_lazy(restore)?;
         }
@@ -231,7 +263,7 @@ impl Runtime {
             return Err(superseded());
         };
         let node = NodeRef::new(placement.kind, placement.identifier.clone());
-        let Some(scheduled) = execution.schedule.nodes.get(&node) else {
+        let Some(scheduled) = execution.revision.nodes.get(&node) else {
             return Err(superseded());
         };
         if !scheduled.executes_on(dispatcher.local_node_id()) {

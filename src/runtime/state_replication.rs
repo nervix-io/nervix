@@ -124,7 +124,7 @@ impl Runtime {
         let valid_assignment = if let Some(execution) = self.inner.executions.get(&placement.domain)
         {
             if let Some(node) = execution
-                .schedule
+                .revision
                 .nodes
                 .get(&NodeRef::new(placement.kind, placement.identifier.clone()))
             {
@@ -307,7 +307,7 @@ impl Runtime {
             return false;
         };
         let Some(node) = execution
-            .schedule
+            .revision
             .nodes
             .get(&NodeRef::new(placement.kind, placement.identifier.clone()))
         else {
@@ -638,7 +638,7 @@ impl Runtime {
             let replica_nodes =
                 if let Some(execution) = self.inner.executions.get(&placement.domain) {
                     if let Some(node) = execution
-                        .schedule
+                        .revision
                         .nodes
                         .get(&NodeRef::new(placement.kind, placement.identifier.clone()))
                     {
@@ -1261,7 +1261,7 @@ impl Runtime {
     }
 
     fn global_recovery_state_components(
-        scheduled: &ScheduledNode,
+        scheduled: &ExecutionNode,
     ) -> Vec<(OwnershipStateComponent, RuntimeStateKind)> {
         let mut components = Vec::new();
         for component in scheduled.ownership_state_components() {
@@ -1284,7 +1284,7 @@ impl Runtime {
     }
 
     fn branch_recovery_state_component(
-        scheduled: &ScheduledNode,
+        scheduled: &ExecutionNode,
     ) -> Option<(OwnershipStateComponent, RuntimeStateKind)> {
         Self::branch_recovery_state_component_kind(scheduled.kind())
     }
@@ -1540,7 +1540,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         entity: &NodeRef,
-    ) -> OwnershipHandoffResult<ScheduledNode> {
+    ) -> OwnershipHandoffResult<ExecutionNode> {
         let Some(execution) = self.inner.executions.get(domain) else {
             return Err(OwnershipHandoffError::schedule(format!(
                 "{} '{}' is absent from the local schedule for domain '{}'",
@@ -1550,7 +1550,7 @@ impl Runtime {
             )));
         };
         execution
-            .schedule
+            .revision
             .nodes
             .get(entity)
             .cloned()
@@ -1575,7 +1575,7 @@ impl Runtime {
                 domain.as_str()
             ))
         })?;
-        let actual = Self::ownership_handoff_schedule_fingerprint(&execution.schedule)?;
+        let actual = execution.revision.ownership_handoff_fingerprint;
         if actual != expected {
             return Err(OwnershipHandoffError::schedule(format!(
                 "domain '{}' schedule changed during ownership handoff",
@@ -1592,7 +1592,7 @@ impl Runtime {
     fn expected_ownership_handoff_placements(
         &self,
         domain: &DomainName,
-        node: &ScheduledNode,
+        node: &ExecutionNode,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> OwnershipHandoffResult<HashSet<RuntimeStatePlacement>> {
         let unplaceable = || OwnershipHandoffError::StatePlacement {
@@ -1919,7 +1919,7 @@ impl Runtime {
     pub(super) fn activate_prepared_ownership_handoff_state(
         &self,
         domain: &DomainName,
-        node: &ScheduledNode,
+        node: &ExecutionNode,
         local_node_id: &ClusterNodeName,
         schedule_fingerprint: [u8; 32],
         instantiate_now: bool,
@@ -2016,7 +2016,7 @@ impl Runtime {
     pub(super) fn activate_prepared_forced_ownership_recovery_state(
         &self,
         domain: &DomainName,
-        node: &ScheduledNode,
+        node: &ExecutionNode,
         local_node_id: &ClusterNodeName,
         schedule_fingerprint: [u8; 32],
         instantiate_now: bool,
@@ -2228,7 +2228,7 @@ impl Runtime {
         &self,
         local_node_id: &ClusterNodeName,
         request: &nervix_interconnect::ActivateOwnershipHandoffStateRequest,
-        schedule: DomainSchedule,
+        revision: Arc<ExecutionRevision>,
     ) -> OwnershipHandoffResult<()> {
         let mut activation = {
             let _apply = self.inner.schedule_application.lock().await;
@@ -2247,10 +2247,10 @@ impl Runtime {
             let requires_reapply = prepared.activation_authorization.authorize();
             drop(prepared);
             if requires_reapply {
-                self.rebuild_domain_from_schedule(
+                self.rebuild_domain_from_revision(
                     local_node_id,
                     &request.domain,
-                    Some(schedule),
+                    Some(revision),
                     true,
                 )
                 .await
@@ -2499,7 +2499,7 @@ impl Runtime {
             return false;
         };
         let Some(node) = execution
-            .schedule
+            .revision
             .nodes
             .get(&NodeRef::new(placement.kind, placement.identifier.clone()))
         else {
@@ -2947,7 +2947,6 @@ impl Runtime {
 }
 
 mod lifecycle;
-mod ownership_handoff_fingerprint;
 mod tasks;
 mod wasm_processor_state;
 

@@ -713,20 +713,24 @@ impl Runtime {
         Ok(())
     }
 
-    /// Keep the compiled modules of the WASM processors `schedule` assigns to `local_node_id`, as
+    /// Keep the compiled modules of the WASM processors the revision assigns to `local_node_id`, as
     /// their owner or as a replica that may have to restore their guests, and drop every other
     /// module this node compiled, such as those it only compiled to validate a domain.
     pub(super) fn retain_assigned_wasm_modules(
         &self,
         local_node_id: &ClusterNodeName,
-        schedule: &ClusterSchedule,
+        revision_plan: &PlannedClusterRevision,
     ) {
         let mut assigned = HashSet::default();
-        for module in WasmModulePlan::assigned_in_cluster(schedule, local_node_id) {
-            assigned.insert(WasmModuleFile {
-                resource: module.resource,
-                file: module.file,
-            });
+        for change in revision_plan.domains.values() {
+            for wasm in change.revision.resources.wasm.values() {
+                if wasm.assignment.is_assigned_to(local_node_id) {
+                    assigned.insert(WasmModuleFile {
+                        resource: wasm.module.resource.clone(),
+                        file: wasm.module.file.clone(),
+                    });
+                }
+            }
         }
         self.inner
             .compiled_wasm_modules
@@ -1360,19 +1364,52 @@ mod tests {
         );
         scheduled.primary_node = Some(local_node.clone());
         scheduled.assigned_nodes = vec![local_node.clone()];
+        let schema = nervix_models::SchemaName::parse("session_event").expect("valid schema name");
+        let schema_node =
+            scheduled_model(nervix_models::Model::Schema(nervix_models::CreateSchema {
+                name: schema.clone(),
+                fields: vec![nervix_models::SchemaField {
+                    name: FieldName::parse("value").expect("valid field name"),
+                    ty: ParseAsType::I64,
+                    optional: false,
+                    sensitive: false,
+                }],
+            }));
+        let relay_node = |name: &str| {
+            scheduled_model(nervix_models::Model::Relay(nervix_models::CreateRelay {
+                name: RelayName::parse(name).expect("valid relay name"),
+                schema: schema.clone(),
+                buffer: nonzero!(2usize),
+                branching: nervix_models::RelayBranching::unbranched(),
+                materialized_state: None,
+            }))
+        };
         let mut assigned = ClusterSchedule::default();
         assigned.domains.insert(
             domain.clone(),
-            DomainSchedule::new(domain.clone(), [scheduled], Vec::new()),
+            DomainSchedule::new(
+                domain.clone(),
+                [
+                    schema_node,
+                    relay_node("events"),
+                    relay_node("sessions"),
+                    scheduled,
+                ],
+                Vec::new(),
+            ),
         );
-        runtime.retain_assigned_wasm_modules(&local_node, &assigned);
+        let assigned_revision = PlannedClusterRevision::between(None, &assigned)
+            .assured("the WASM fixture has a complete assigned revision");
+        runtime.retain_assigned_wasm_modules(&local_node, &assigned_revision);
         let kept = compile().await.expect("the kept module is handed out");
         assert!(
             Arc::ptr_eq(&first.compiled, &kept.compiled),
             "the module of a processor assigned to the node must be kept"
         );
 
-        runtime.retain_assigned_wasm_modules(&local_node, &ClusterSchedule::default());
+        let empty_revision = PlannedClusterRevision::between(None, &ClusterSchedule::default())
+            .assured("an empty cluster schedule has a complete revision");
+        runtime.retain_assigned_wasm_modules(&local_node, &empty_revision);
         let recompiled = compile().await.expect("the module compiles again");
         assert!(
             !Arc::ptr_eq(&first.compiled, &recompiled.compiled),

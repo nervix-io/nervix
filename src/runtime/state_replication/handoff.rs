@@ -124,7 +124,7 @@ impl PreparedRuntimeStateHandoff {
 
     pub(super) fn belongs_to_committed_transition(
         &self,
-        node: &ScheduledNode,
+        node: &ExecutionNode,
         schedule_fingerprint: [u8; 32],
     ) -> bool {
         if self.target_schedule_fingerprint != schedule_fingerprint
@@ -176,7 +176,7 @@ impl Runtime {
     pub(crate) fn reconcile_prepared_ownership_handoffs(
         &self,
         authority: &CoordinationIdentity,
-        schedule: &ClusterSchedule,
+        revision_plan: &PlannedClusterRevision,
         node_incarnations: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
     ) -> OwnershipHandoffResult<usize> {
         let preparations = self
@@ -187,11 +187,11 @@ impl Runtime {
             .collect::<Vec<_>>();
         let mut discarded = 0_usize;
         for (entity, prepared) in preparations {
-            let committed_or_active = if let Some(domain_schedule) = schedule.domain(&entity.domain)
+            let committed_or_active = if let Some(change) =
+                revision_plan.domains.get(&entity.domain)
             {
-                let schedule_fingerprint =
-                    Self::ownership_handoff_schedule_fingerprint(domain_schedule)?;
-                let scheduled = domain_schedule.nodes.get(&entity.node);
+                let schedule_fingerprint = change.revision.ownership_handoff_fingerprint;
+                let scheduled = change.revision.nodes.get(&entity.node);
                 let committed = scheduled.is_some_and(|scheduled| {
                     prepared.belongs_to_committed_transition(scheduled, schedule_fingerprint)
                 });
@@ -204,7 +204,7 @@ impl Runtime {
                         == Some(&prepared.source_incarnation)
                         && destination_incarnation == Some(&prepared.destination_incarnation);
                     let source_still_owns_entity =
-                        scheduled.and_then(ScheduledNode::primary_node) == Some(&prepared.source);
+                        scheduled.and_then(ExecutionNode::primary_node) == Some(&prepared.source);
                     prepared.coordination.same_process_as(authority)
                         && participants_match
                         && prepared.base_schedule_fingerprint == schedule_fingerprint

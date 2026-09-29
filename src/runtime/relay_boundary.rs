@@ -1601,20 +1601,6 @@ impl RelayBoundaryBuilder {
     }
 }
 
-pub(crate) fn scheduled_relay_owner_nodes(
-    schedule: &DomainSchedule,
-    relay: &RelayName,
-) -> Vec<ClusterNodeName> {
-    let owner = schedule
-        .nodes
-        .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
-        .and_then(ScheduledNode::execution_node);
-    match owner {
-        Some(owner) => vec![owner.clone()],
-        None => Vec::new(),
-    }
-}
-
 impl Runtime {
     pub(in crate::runtime) fn current_stream_expiration_time(
         &self,

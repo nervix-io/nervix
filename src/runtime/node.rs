@@ -2,14 +2,11 @@
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** The `Runtime` handle, the single `Arc` of node state behind it, and the graph each
-//!   domain currently runs.
+//! - **Owns.** The `Runtime` handle and the single `Arc` of node state behind it.
 //! - **Depends on.** Every subsystem whose state the node holds.
 //! - **Must not know.** How any of that state is used; the subsystems own their own behaviour.
 
 use super::{schedule_apply::AppliedRuntimeRecoveryExpansions, *};
-
-pub(in crate::runtime) type SharedActiveGraph = StdArc<ArcSwapOption<ActiveGraph>>;
 
 pub const DEFAULT_TEMP_DIR: &str = "/tmp";
 
@@ -69,6 +66,8 @@ pub(in crate::runtime) struct RuntimeInner {
     /// starts and persisted ownership-handoff activation take the same lock so they observe a
     /// schedule that is not half applied.
     pub(in crate::runtime) schedule_application: Mutex<ScheduleApplication>,
+    #[cfg(test)]
+    pub(in crate::runtime) test_applied_schedule: ArcSwapOption<ClusterSchedule>,
     /// The recovery expansion observed by the schedule application owner, published for
     /// transaction reporting without adding another acquisition of the execution-policy lock.
     pub(in crate::runtime) applied_recovery_expansions:
@@ -107,7 +106,6 @@ pub(in crate::runtime) struct RuntimeInner {
         Arc<DashMap<DomainName, ActiveDomainAlter, RandomState>>,
     pub(in crate::runtime) state_identities:
         DashMap<DomainNodeRef, ScheduledStateIdentity, RandomState>,
-    pub(in crate::runtime) domain_graphs: DashMap<DomainName, SharedActiveGraph, RandomState>,
     pub(in crate::runtime) endpoint_bindings:
         DashMap<HttpRouteKey, Vec<EndpointIngestBinding>, RandomState>,
     /// Instantiated endpoint routes keyed by the host and path an inbound request carries, so

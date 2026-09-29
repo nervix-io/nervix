@@ -38,7 +38,10 @@ use super::{
     transaction::TransactionStepImpactRecorder,
 };
 use crate::{
-    registry::{EntityGatePlan, ownership_handoff_relays_for_schedule},
+    registry::{
+        EntityGatePlan, ExecutionRevision, PlannedClusterRevision,
+        ownership_handoff_relays_for_schedule,
+    },
     runtime::{OwnershipHandoffError, OwnershipHandoffResult, Runtime},
 };
 
@@ -46,6 +49,13 @@ pub(in crate::application) const FORCED_OWNERSHIP_RECOVERY_BUDGET: Duration =
     Duration::from_secs(5);
 pub(in crate::application) const OWNERSHIP_HANDOFF_RECONCILIATION_POLL_INTERVAL: Duration =
     Duration::from_millis(250);
+
+fn ownership_handoff_schedule_fingerprint(
+    schedule: &nervix_models::DomainSchedule,
+) -> OwnershipHandoffResult<[u8; 32]> {
+    ExecutionRevision::ownership_fingerprint(schedule)
+        .map_err(|error| OwnershipHandoffError::schedule(format!("{error:#}")))
+}
 
 pub(in crate::application) struct PlannedOwnershipHandoff {
     operation_id: String,
@@ -223,8 +233,7 @@ impl PlannedOwnershipMove {
         operation_id: &str,
         target_schedule_fingerprint: [u8; 32],
     ) -> OwnershipHandoffResult<bool> {
-        if Runtime::ownership_handoff_schedule_fingerprint(schedule)? != target_schedule_fingerprint
-        {
+        if ownership_handoff_schedule_fingerprint(schedule)? != target_schedule_fingerprint {
             return Ok(false);
         }
         let Some(node) = schedule.nodes.get(&self.entity) else {
@@ -322,40 +331,30 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
         current: &nervix_models::DomainSchedule,
         target: &mut nervix_models::DomainSchedule,
     ) {
-        let base_schedule_fingerprint =
-            match Runtime::ownership_handoff_schedule_fingerprint(current) {
-                Ok(fingerprint) => fingerprint,
-                Err(reason) => {
-                    self.reset_every_move(
-                        current,
-                        target,
-                        OwnershipStateResetCause::InvalidCheckpoint,
-                    );
-                    warn!(
-                        domain = current.domain.as_str(),
-                        error = %reason,
-                        "forced ownership recovery could not fingerprint the committed schedule"
-                    );
-                    return;
-                }
-            };
-        let target_schedule_fingerprint =
-            match Runtime::ownership_handoff_schedule_fingerprint(target) {
-                Ok(fingerprint) => fingerprint,
-                Err(reason) => {
-                    self.reset_every_move(
-                        current,
-                        target,
-                        OwnershipStateResetCause::InvalidCheckpoint,
-                    );
-                    warn!(
-                        domain = current.domain.as_str(),
-                        error = %reason,
-                        "forced ownership recovery could not fingerprint the target schedule"
-                    );
-                    return;
-                }
-            };
+        let base_schedule_fingerprint = match ownership_handoff_schedule_fingerprint(current) {
+            Ok(fingerprint) => fingerprint,
+            Err(reason) => {
+                self.reset_every_move(current, target, OwnershipStateResetCause::InvalidCheckpoint);
+                warn!(
+                    domain = current.domain.as_str(),
+                    error = %reason,
+                    "forced ownership recovery could not fingerprint the committed schedule"
+                );
+                return;
+            }
+        };
+        let target_schedule_fingerprint = match ownership_handoff_schedule_fingerprint(target) {
+            Ok(fingerprint) => fingerprint,
+            Err(reason) => {
+                self.reset_every_move(current, target, OwnershipStateResetCause::InvalidCheckpoint);
+                warn!(
+                    domain = current.domain.as_str(),
+                    error = %reason,
+                    "forced ownership recovery could not fingerprint the target schedule"
+                );
+                return;
+            }
+        };
         struct PreparedForcedMove {
             moved: PlannedOwnershipMove,
             transition_id: String,
@@ -799,16 +798,16 @@ impl SessionServiceImpl {
             .verified("an ownership move can only be derived from a current domain schedule");
         let planned = planned
             .verified("an ownership move can only be derived from a planned domain schedule");
-        let base_schedule_fingerprint = Runtime::ownership_handoff_schedule_fingerprint(current)
-            .map_err(|reason| {
+        let base_schedule_fingerprint =
+            ownership_handoff_schedule_fingerprint(current).map_err(|reason| {
                 Report::new(DomainAlterError::EntityGate {
                     domain: domain.clone(),
                     operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
                     reason: reason.to_string(),
                 })
             })?;
-        let target_schedule_fingerprint = Runtime::ownership_handoff_schedule_fingerprint(planned)
-            .map_err(|reason| {
+        let target_schedule_fingerprint =
+            ownership_handoff_schedule_fingerprint(planned).map_err(|reason| {
                 Report::new(DomainAlterError::EntityGate {
                     domain: domain.clone(),
                     operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
@@ -1394,8 +1393,7 @@ impl SessionServiceImpl {
                     request.domain.as_str()
                 ))
             })?;
-            if Runtime::ownership_handoff_schedule_fingerprint(current)?
-                != request.base_schedule_fingerprint
+            if ownership_handoff_schedule_fingerprint(current)? != request.base_schedule_fingerprint
             {
                 return Err(OwnershipHandoffError::schedule(format!(
                     "domain '{}' changed schedule before ownership handoff publication",
@@ -1659,10 +1657,12 @@ impl SessionServiceImpl {
         self.verify_ownership_handoff_coordinator(&request.coordination)
             .await?;
         let schedule = self.inner.consensus.current_schedule().await;
+        let revision_plan = PlannedClusterRevision::between(None, &schedule)
+            .map_err(|error| OwnershipHandoffError::schedule(format!("{error:#}")))?;
         let node_incarnations = self.available_node_incarnations().await;
         let discarded = self.inner.runtime.reconcile_prepared_ownership_handoffs(
             &request.coordination,
-            &schedule,
+            &revision_plan,
             &node_incarnations,
         )?;
         Ok(u64::try_from(discarded)
@@ -1970,7 +1970,7 @@ impl SessionServiceImpl {
                         request.domain.as_str()
                     ))
                 })?;
-                let fingerprint = Runtime::ownership_handoff_schedule_fingerprint(current)?;
+                let fingerprint = ownership_handoff_schedule_fingerprint(current)?;
                 if fingerprint == request.target_schedule_fingerprint {
                     let node = current.nodes.get(&request.entity).ok_or_else(|| {
                         OwnershipHandoffError::schedule(format!(
@@ -2007,7 +2007,8 @@ impl SessionServiceImpl {
                 .activate_persisted_ownership_handoff(
                     self.inner.consensus.local_node_id(),
                     request,
-                    target_schedule,
+                    ExecutionRevision::from_schedule(&target_schedule)
+                        .map_err(|error| OwnershipHandoffError::schedule(format!("{error:#}")))?,
                 )
                 .await
         };

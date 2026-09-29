@@ -924,7 +924,19 @@ impl Application {
             }
         };
         for changes in startup_runtime_changes {
-            if let Err(error) = startup.runtime.apply_changes(changes).await {
+            let revision = match changes.execution_revision() {
+                Ok(revision) => revision,
+                Err(error) => {
+                    let error = Report::new(AppError::ApplyStartupRuntime(format!("{error:#}")));
+                    startup.terminate().await;
+                    return Err(error);
+                }
+            };
+            if let Err(error) = startup
+                .runtime
+                .apply_changes(&changes.domain, revision)
+                .await
+            {
                 error!(error = %error, "failed to apply startup runtime changes");
                 let error = Report::new(AppError::ApplyStartupRuntime(error.to_string()));
                 startup.terminate().await;
