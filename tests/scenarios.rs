@@ -309,6 +309,9 @@ struct ScenarioWorld {
     /// The reply to the last upload stream a scenario shaped itself.
     last_upload_reply: Option<nervix_client_wire::UploadReply>,
     last_subscription_payload: Option<String>,
+    /// The metric values each named subscription passed from sampling, recorded once every value
+    /// that was sampled had been drawn for.
+    sampled_metric_values: BTreeMap<String, Vec<i64>>,
     /// When the message a delivery-delay assertion is about was published. Load moves this
     /// instant and the arrival together, which is what makes such an assertion hold on a
     /// busy machine where a fixed wall-clock window does not.
@@ -22851,6 +22854,127 @@ async fn then_within_duration_the_stream_subscription_receives_payloads(
             }
         }
     }
+}
+
+#[then(
+    expr = "within {string} subscriptions {string} and {string} each pass between {int} and {int} \
+            of the metric values up to {int}"
+)]
+async fn then_subscriptions_each_sample_metric_values(
+    world: &mut ScenarioWorld,
+    duration: String,
+    first: String,
+    second: String,
+    fewest: usize,
+    most: usize,
+    sampled_up_to: i64,
+) {
+    /// What one subscription delivered while this step read it.
+    #[derive(Default)]
+    struct SubscriptionSample {
+        /// The values up to the sampled bound, in the order they arrived.
+        passed: Vec<i64>,
+        /// The last value of any kind that arrived.
+        last: Option<i64>,
+        /// Whether a value above the bound arrived. Rows arrive in the order they were
+        /// published, so every value up to the bound has been drawn for by then.
+        drawn: bool,
+    }
+
+    let duration = humantime::parse_duration(&duration)
+        .assured("the scenario sampling deadline is a valid duration");
+    let session = world
+        .active_session
+        .as_mut()
+        .expect("an active session with the sampled subscriptions must exist");
+    let mut samples = BTreeMap::new();
+    samples.insert(first.clone(), SubscriptionSample::default());
+    samples.insert(second.clone(), SubscriptionSample::default());
+    let deadline = Instant::now() + duration;
+    loop {
+        tokio::task::consume_budget().await;
+        let mut all_drawn = true;
+        for sample in samples.values() {
+            if !sample.drawn {
+                all_drawn = false;
+            }
+        }
+        if all_drawn {
+            break;
+        }
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out before '{first}' and '{second}' drew for every metric value up to \
+             {sampled_up_to}"
+        );
+        let event = session
+            .try_next_subscription(deadline.saturating_duration_since(now))
+            .await
+            .expect("failed while waiting for sampled subscription rows")
+            .unwrap_or_else(|| {
+                panic!(
+                    "timed out before '{first}' and '{second}' drew for every metric value up to \
+                     {sampled_up_to}"
+                )
+            });
+        let payload = serde_json::from_str::<serde_json::Value>(&event.payload)
+            .unwrap_or_else(|error| panic!("subscription payload is not valid JSON: {error}"));
+        let Some(value) = payload.get("value").and_then(serde_json::Value::as_i64) else {
+            panic!("subscription payload {payload} has no integer 'value'");
+        };
+        let subscription = event.subscription.as_str();
+        let Some(sample) = samples.get_mut(subscription) else {
+            panic!("subscription '{subscription}' delivered a row this step does not sample");
+        };
+        if let Some(last) = sample.last {
+            assert!(
+                value > last,
+                "subscription '{subscription}' delivered {value} after {last}, out of the order \
+                 the values were published in"
+            );
+        }
+        sample.last = Some(value);
+        if value > sampled_up_to {
+            sample.drawn = true;
+        } else {
+            sample.passed.push(value);
+        }
+    }
+
+    let mut sampled = BTreeMap::new();
+    for (subscription, sample) in samples {
+        let passed = sample.passed.len();
+        assert!(
+            (fewest..=most).contains(&passed),
+            "subscription '{subscription}' passed {passed} of the metric values up to \
+             {sampled_up_to}, not between {fewest} and {most}: {:?}",
+            sample.passed
+        );
+        sampled.insert(subscription, sample.passed);
+    }
+    world.sampled_metric_values = sampled;
+}
+
+#[then(expr = "subscriptions {string} and {string} passed different metric values")]
+async fn then_subscriptions_passed_different_metric_values(
+    world: &mut ScenarioWorld,
+    first: String,
+    second: String,
+) {
+    let first_values = world
+        .sampled_metric_values
+        .get(&first)
+        .unwrap_or_else(|| panic!("no earlier step recorded the values '{first}' passed"));
+    let second_values = world
+        .sampled_metric_values
+        .get(&second)
+        .unwrap_or_else(|| panic!("no earlier step recorded the values '{second}' passed"));
+    assert_ne!(
+        first_values, second_values,
+        "subscriptions on one node take their draws from one sequence, so '{first}' and \
+         '{second}' must not pass the same values"
+    );
 }
 
 #[then(expr = "within {string} {int} relay subscription payloads share field {string}")]

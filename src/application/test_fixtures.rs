@@ -24,7 +24,7 @@ use nervix_models::{
     PlacementGroupSchedule, ProcessorInputs, ProcessorOutputs, ScheduledNode, SchemaFingerprint,
     TransactionLifecycle, TransactionPosition, WasmProcessorLimits,
 };
-use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
+use nervix_primitives::unmodeled::sync::atomic::{AtomicU64, Ordering};
 use nonzero_ext::nonzero;
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
@@ -41,7 +41,7 @@ use super::{
     command_result::{CommandResponse, CommandResult},
     session::admission::RequestAdmission,
     session_service::{SessionEvents, SessionServiceImpl, SessionServiceInner},
-    subscription::{SessionSubscriptions, SubscriptionInterests},
+    subscription::{SessionSubscriptions, SubscriptionInterests, SubscriptionSampler},
     tls::HttpsListenerCertificates,
     transaction::{
         DEFAULT_TRANSACTION_IDLE_TIMEOUT, DEFAULT_TRANSACTION_MAX_OPEN,
@@ -54,6 +54,9 @@ use crate::{
     runtime::Runtime, runtime_schema,
 };
 
+/// The next identity of a test database and the port block of a test node. The unit tests of one
+/// process run in parallel and each needs its own, so the identities belong to the process rather
+/// than to any test or model.
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A fresh execution reference, as a client generates one for each command it sends.
@@ -278,6 +281,7 @@ fn test_session_service(
             drain_support_shutdown: CancellationToken::new(),
             events: SessionEvents::new(16),
             subscription_interests,
+            subscription_sampler: SubscriptionSampler::default(),
             client_producers,
             interconnect,
             service_tasks: super::service_tasks::ServiceTasks::default(),

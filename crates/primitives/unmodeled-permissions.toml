@@ -43,6 +43,13 @@ path = "src/runtime/client_ingestor_shuttle_tests.rs"
 reason = "Each record must change in the same scheduling step as the reservation or drain it records, so recording adds no scheduling point."
 
 [[permission]]
+items = ["AtomicU64", "Ordering"]
+limit = "Fixture bookkeeping that no invariant reads; no model builds these fixtures."
+owner = "The application unit-test fixtures."
+path = "src/application/test_fixtures.rs"
+reason = "Test databases and node ports must differ across every unit test the process runs in parallel, so their identities outlive each test and each model execution."
+
+[[permission]]
 items = ["AtomicUsize", "Ordering"]
 limit = "Runner bookkeeping that no model reads."
 owner = "The Loom runner of nervix-model-harness."

@@ -470,14 +470,29 @@ owner, why a real atomic is required, and what that leaves unverified:
 | The Shuttle runners of execution, the interconnect, the server and the Rust client, and the Loom runner | Their statistics span every model execution they start and are read after the last one | Nothing a check claims; they are runner bookkeeping |
 | The WASM runtime's epoch driver | Its stop flag is read by an operating-system thread no model runs | When the epoch thread observes shutdown |
 | The VM benchmarks' allocation probe | A global allocator counts allocations made on every thread | Nothing; the benchmark claims nothing about synchronization |
+| The application unit-test fixtures | Test databases and node ports must differ across every unit test the process runs in parallel, so their identities outlive each test | Nothing a check claims; no model builds the fixtures |
 | The records of the relay gate and fan-out, entity gate, emitter record-write, durability barrier, WASM checkpoint, source host-loop, stream-slot, retained-archive and client ingestor Shuttle checks | A record changes in the same scheduling step as the operation it records, so recording adds no scheduling point | Nothing the owner does: records observe and never synchronize, and the owners' own atomics are modeled |
 
 A real atomic never carries the protocol under test, chooses its branches, supplies its wakeups or
-establishes an ordering an assertion relies on. `just validate-primitive-boundary` rejects every
-other path to a backend's atomics however it is spelled, an unmodeled use without its permission,
-and a permission nothing uses. `just validate-loom-dependencies` keeps Loom out of every ordinary
-dependency graph, and `just validate-execution-mode-conflicts` requires the combined-mode
-diagnostic.
+establishes an ordering an assertion relies on.
+
+A selected atomic belongs to the model execution that constructs it, so it never lives in a
+`static`. A static is constructed once per process and would carry its state from one execution into
+the next, and Loom's atomics have no const constructor, so a crate that declares one does not build
+with Loom at all. Process-wide state lives on the owner whose lifetime it has instead: a node's
+session service owns the draws its subscriptions sample with, and a node's Raft network owns the
+identities of the snapshot transfers it sends. A count a unit test reads is kept per thread, and
+state that must outlive every test and model is a real atomic under a permission, which may live in
+a `static`.
+
+`just validate-primitive-boundary` rejects every other path to a backend's atomics however it is
+spelled, an unmodeled use without its permission, and a permission nothing uses. It also rejects a
+`static`, including one a `thread_local!` declares, whose declared type names a selected atomic,
+directly or through a wrapper, an array, a reference, a module path or a local type alias, and a
+`static` or `const` initializer, `const fn` or `const` block that constructs one. It reads declared
+types and constructions, so a struct holding an atomic that a static builds lazily is left to review.
+`just validate-loom-dependencies` keeps Loom out of every ordinary dependency graph, and
+`just validate-execution-mode-conflicts` requires the combined-mode diagnostic.
 
 The other primitive families still reach their libraries through their current access paths. Each
 joins the boundary as one complete move, with every consumer migrated and its enforcement extended,
@@ -612,6 +627,12 @@ threads with Loom's atomics, both selected through the primitive boundary by the
 feature. When a protocol is embedded in asynchronous orchestration, the synchronous protocol is
 made independently testable and the runtime uses that same owner; a copied algorithm, a witness
 that a join or an extra lock publishes, or a real atomic does not make a model.
+
+The execution, consensus and server crates own a `loom` feature, and each forwards it to the
+primitive crate and to every dependency that owns one, so the whole library graph of each builds
+with Loom's primitives. `just cargo-clippy-loom`, which `just lint` runs, lints every Loom build:
+the models and their harness, the primitive boundary, and the server and consensus libraries both
+as they ship and in test mode, where models of their owners are compiled.
 
 Each model names its invariant with an `InvariantId` and runs through
 `nervix_model_harness::loom::explore`, which explores it to exhaustion: no preemption bound, no
