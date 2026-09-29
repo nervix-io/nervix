@@ -732,7 +732,14 @@ impl Runtime {
         let Some(execution) = self.inner.executions.get(domain) else {
             return Vec::new();
         };
-        crate::registry::entity_pause_relays_for_schedule(&execution.schedule, affected_entities)
+        let mut relays = affected_entities
+            .iter()
+            .filter_map(|entity| execution.revision.nodes.get(entity))
+            .flat_map(|node| node.gate_relays.iter().cloned())
+            .collect::<Vec<_>>();
+        relays.sort();
+        relays.dedup();
+        relays
     }
 
     pub(in crate::runtime) fn engage_entity_gates(
@@ -1462,6 +1469,7 @@ mod tests {
     use triomphe::Arc;
 
     use super::*;
+    use crate::emitter_execution_plan::EmitterExecutionPlans;
 
     fn coordination(coordinator: &str, process_epoch: u64, sequence: u64) -> CoordinationIdentity {
         CoordinationIdentity::new(named(coordinator), process_epoch, sequence)
@@ -2187,10 +2195,10 @@ mod tests {
         );
         assert!(planned.inputs[0].from_where.is_some());
         assert!(planned.inputs[1].from_where.is_none());
-        let remote_consumers = Runtime::remote_runtime_consumers_for_schedule(
-            &schedule,
-            &EntrypointPlans::default(),
-            &emitter_plans,
+        let revision = ExecutionRevision::from_schedule(&schedule)
+            .assured("the emitter fixture produces a complete revision");
+        let remote_consumers = Runtime::remote_runtime_consumers_for_revision(
+            &revision,
             &ClusterNodeName::parse("node-1").expect("valid name"),
         );
         assert_eq!(remote_consumers.len(), 2);

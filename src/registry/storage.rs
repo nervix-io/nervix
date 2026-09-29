@@ -75,6 +75,18 @@ pub(crate) struct RuntimeChanges {
     pub(crate) graph: Option<ActiveGraph>,
 }
 
+impl RuntimeChanges {
+    pub(crate) fn execution_revision(
+        &self,
+    ) -> error_stack::Result<Option<Arc<super::ExecutionRevision>>, super::ExecutionRevisionError>
+    {
+        match &self.graph {
+            Some(graph) => super::ExecutionRevision::from_graph(&self.domain, graph).map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
 impl Registry {
     #[cfg(test)]
     pub(in crate::registry) fn open(path: impl AsRef<Path>) -> Result<Self, Report<RegistryError>> {

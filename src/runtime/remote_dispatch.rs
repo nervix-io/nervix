@@ -1262,23 +1262,20 @@ impl Runtime {
         });
     }
 
-    pub(in crate::runtime) fn remote_runtime_consumers_for_schedule(
-        schedule: &DomainSchedule,
-        entrypoints: &EntrypointPlans,
-        emitter_plans: &EmitterExecutionPlans,
+    pub(in crate::runtime) fn remote_runtime_consumers_for_revision(
+        revision: &ExecutionRevision,
         local_node_id: &ClusterNodeName,
     ) -> HashMap<RelayName, Vec<RemoteRuntimeConsumer>> {
         let mut consumers = HashMap::<RelayName, Vec<RemoteRuntimeConsumer>>::new();
-        let owned_relays = schedule
+        let owned_relays = revision
             .nodes
             .values()
             .filter(|node| node.execution_node() == Some(local_node_id))
             .filter(|node| node.kind() == ModelKind::Relay)
             .map(|node| RelayName::from(&node.identifier))
             .collect::<HashSet<_>>();
-        let processor_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
-        for spec in processor_specs.processors {
-            let Some(node) = schedule
+        for spec in &revision.processors.processors {
+            let Some(node) = revision
                 .nodes
                 .get(&NodeRef::new(spec.spec.kind, spec.spec.processor.clone()))
             else {
@@ -1299,8 +1296,8 @@ impl Runtime {
                 );
             }
         }
-        for emitter in emitter_plans.emitters() {
-            let node = schedule
+        for emitter in revision.emitters.emitters() {
+            let node = revision
                 .nodes
                 .get(&NodeRef::new(
                     ModelKind::Emitter,
@@ -1322,9 +1319,9 @@ impl Runtime {
                 );
             }
         }
-        for plan in entrypoints.reingestors() {
+        for plan in revision.entrypoints.reingestors() {
             let identity = NodeRef::new(ModelKind::Reingestor, ModelName::from(&plan.name));
-            let node = schedule
+            let node = revision
                 .nodes
                 .get(&identity)
                 .assured("every caller passes the entrypoint plans decided from this schedule");
@@ -1396,43 +1393,27 @@ mod tests {
             materialized_state: Vec::new(),
             filter_where: None,
         };
-        let plans = fixture.plan(
+        let plans = fixture.plans(
             &domain,
             vec![nervix_models::Model::Reingestor(reingestor.clone())],
         );
         let owner = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");
         let executor = ClusterNodeName::parse("node-2").assured("the fixture node name is valid");
-        let placed = |model: nervix_models::Model, node: &ClusterNodeName| {
-            let mut scheduled = scheduled_model(model);
-            scheduled.primary_node = Some(node.clone());
-            scheduled.assigned_nodes = vec![node.clone()];
-            scheduled
-        };
-        let relay = |name: &str| {
-            nervix_models::Model::Relay(CreateRelay {
-                name: named(name),
-                schema: named("entrypoint_payload"),
-                buffer: nonzero_capacity(2),
-                branching: nervix_models::RelayBranching::unbranched(),
-                materialized_state: None,
-            })
-        };
-        let schedule = DomainSchedule::new(
-            domain.clone(),
-            vec![
-                placed(relay("incoming"), &owner),
-                placed(relay("outgoing"), &owner),
-                placed(nervix_models::Model::Reingestor(reingestor), &executor),
-            ],
-            Vec::new(),
-        );
+        let mut nodes = plans.nodes.into_values().collect::<Vec<_>>();
+        for node in &mut nodes {
+            let placement = if node.kind() == ModelKind::Reingestor {
+                &executor
+            } else {
+                &owner
+            };
+            node.primary_node = Some(placement.clone());
+            node.assigned_nodes = vec![placement.clone()];
+        }
+        let schedule = DomainSchedule::new(domain.clone(), nodes, Vec::new());
+        let revision = ExecutionRevision::from_schedule(&schedule)
+            .assured("the fixture schedule resolves its complete execution plans");
 
-        let owned = Runtime::remote_runtime_consumers_for_schedule(
-            &schedule,
-            &plans,
-            &EmitterExecutionPlans::default(),
-            &owner,
-        );
+        let owned = Runtime::remote_runtime_consumers_for_revision(&revision, &owner);
         let consumers = owned
             .get(&named::<RelayName>("incoming"))
             .assured("the remote reingestor reads the relay this node owns");
@@ -1441,12 +1422,7 @@ mod tests {
         assert_eq!(consumers[0].mode, AckMode::Detached);
         assert!(!owned.contains_key(&named::<RelayName>("outgoing")));
 
-        let executing = Runtime::remote_runtime_consumers_for_schedule(
-            &schedule,
-            &plans,
-            &EmitterExecutionPlans::default(),
-            &executor,
-        );
+        let executing = Runtime::remote_runtime_consumers_for_revision(&revision, &executor);
         assert!(executing.is_empty());
     }
 

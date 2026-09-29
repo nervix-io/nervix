@@ -58,7 +58,7 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
         let last_start = domain_state.last_start.clone();
         drop(domain_state);
         let schedule = if let Some(execution) = self.runtime.inner.executions.get(&self.domain)
-            && let Some(node) = execution.schedule.nodes.get(&NodeRef::new(
+            && let Some(node) = execution.revision.nodes.get(&NodeRef::new(
                 ModelKind::Ingestor,
                 ModelName::from(&self.ingestor),
             )) {

@@ -363,7 +363,7 @@ impl Runtime {
         &self,
         shutdown_tx: &watch::Sender<bool>,
         domain: &DomainName,
-        node: &ScheduledNode,
+        node: &ExecutionNode,
     ) -> error_stack::Result<Option<JoinHandle<()>>, StateIdentityError> {
         let state_kind = match node.kind() {
             ModelKind::Deduplicator => Some(RuntimeStateKind::Deduplicator),
@@ -665,18 +665,23 @@ impl Runtime {
     /// scheduled node has no identity, and a placement resolved in that window cannot address the
     /// state the node owns. Relocation rebuilds these while the relocating node's own state task is
     /// still reading them, which is exactly when that window is observed.
-    pub(in crate::runtime) fn install_state_identities(&self, schedule: &DomainSchedule) {
-        let start_version = match self.inner.domains.get(&schedule.domain) {
+    pub(in crate::runtime) fn install_state_identities(&self, revision: &ExecutionRevision) {
+        self.install_state_identities_from_nodes(&revision.domain, revision.nodes.values());
+    }
+
+    fn install_state_identities_from_nodes<'a>(
+        &self,
+        domain: &DomainName,
+        nodes: impl Iterator<Item = &'a ExecutionNode>,
+    ) {
+        let start_version = match self.inner.domains.get(domain) {
             Some(state) => state.start_version,
             None => 0,
         };
         let mut scheduled = HashSet::default();
-        for node in schedule.nodes.values() {
-            let node_ref = DomainNodeRef::node_in(
-                schedule.domain.clone(),
-                node.kind(),
-                node.identifier.clone(),
-            );
+        for node in nodes {
+            let node_ref =
+                DomainNodeRef::node_in(domain.clone(), node.kind(), node.identifier.clone());
             self.inner.state_identities.insert(
                 node_ref.clone(),
                 ScheduledStateIdentity {
@@ -686,18 +691,33 @@ impl Runtime {
             );
             scheduled.insert(node_ref);
         }
-        self.retain_state_identities(&schedule.domain, &scheduled);
+        self.retain_state_identities(domain, &scheduled);
     }
 
-    /// The graph-driven form of [`Self::install_state_identities`], written the same way and for
-    /// the same reason: a node the graph still carries never loses its identity. `nodes` are the
-    /// graph's unplaced schedule entries, and each schema-bound state is keyed exactly as a schedule
-    /// of the same graph keys it. A graph carries no schedule, so it publishes no WASM guest-state
-    /// generation; a node that already has one keeps it.
-    pub(in crate::runtime) fn install_state_identities_from_graph(
+    #[cfg(test)]
+    pub(in crate::runtime) fn install_schedule_state_identities(&self, schedule: &DomainSchedule) {
+        let nodes = schedule
+            .nodes
+            .values()
+            .map(|node| ExecutionNode::from_scheduled(node, schedule))
+            .collect::<Vec<_>>();
+        self.install_state_identities_from_nodes(&schedule.domain, nodes.iter());
+    }
+
+    /// Before cluster assignment, preserve an existing guest-state generation while installing
+    /// the schema identities of the unplaced revision.
+    pub(in crate::runtime) fn install_state_identities_from_unplaced_revision(
         &self,
         domain: &DomainName,
-        nodes: &[ScheduledNode],
+        revision: &ExecutionRevision,
+    ) {
+        self.install_state_identities_from_unplaced_nodes(domain, revision.nodes.values());
+    }
+
+    fn install_state_identities_from_unplaced_nodes<'a>(
+        &self,
+        domain: &DomainName,
+        nodes: impl Iterator<Item = &'a ExecutionNode>,
     ) {
         let start_version = match self.inner.domains.get(domain) {
             Some(state) => state.start_version,
@@ -724,16 +744,28 @@ impl Runtime {
         self.retain_state_identities(domain, &active);
     }
 
+    #[cfg(test)]
+    pub(in crate::runtime) fn install_state_identities_from_graph(
+        &self,
+        domain: &DomainName,
+        nodes: &[ScheduledNode],
+    ) {
+        let schedule = DomainSchedule::new(domain.clone(), nodes.to_vec(), Vec::new());
+        let nodes = schedule
+            .nodes
+            .values()
+            .map(|node| ExecutionNode::from_scheduled(node, &schedule))
+            .collect::<Vec<_>>();
+        self.install_state_identities_from_unplaced_nodes(domain, nodes.iter());
+    }
+
     /// The fingerprint every schema-bound runtime state of `node` is keyed by in a domain started
     /// `start_version` times.
     ///
     /// Materialized relay state also belongs to the domain start that began it, so a START resets
     /// it: its fingerprint covers the start version beside the node's schemas.
-    fn state_schema_fingerprint(node: &ScheduledNode, start_version: u64) -> SchemaFingerprint {
-        let Model::Relay(relay) = node.config.as_ref() else {
-            return node.schema_fingerprint;
-        };
-        if relay.materialized_state.is_none() {
+    fn state_schema_fingerprint(node: &ExecutionNode, start_version: u64) -> SchemaFingerprint {
+        if !node.materialized_relay {
             return node.schema_fingerprint;
         }
         let mut hasher = blake3::Hasher::new();

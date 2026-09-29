@@ -34,6 +34,11 @@ use crate::{
     runtime_schema::{RuntimeValue, test_runtime_row},
 };
 
+fn execution_node(domain: &DomainName, node: &ScheduledNode) -> ExecutionNode {
+    let schedule = DomainSchedule::new(domain.clone(), vec![node.clone()], Vec::new());
+    ExecutionNode::from_scheduled(node, &schedule)
+}
+
 struct EmptyRelayHandoffFixture {
     domain: DomainName,
     source: ClusterNodeName,
@@ -88,11 +93,10 @@ impl EmptyRelayHandoffFixture {
         });
         let target_schedule =
             DomainSchedule::new(domain.clone(), vec![schema_node, moved], Vec::new());
-        let base_schedule_fingerprint =
-            Runtime::ownership_handoff_schedule_fingerprint(&base_schedule)
-                .expect("base schedule should have a fingerprint");
+        let base_schedule_fingerprint = ExecutionRevision::ownership_fingerprint(&base_schedule)
+            .expect("base schedule should have a fingerprint");
         let target_schedule_fingerprint =
-            Runtime::ownership_handoff_schedule_fingerprint(&target_schedule)
+            ExecutionRevision::ownership_fingerprint(&target_schedule)
                 .expect("target schedule should have a fingerprint");
         Self {
             domain,
@@ -269,19 +273,29 @@ async fn surviving_authority_reconciles_a_dead_coordinators_preparation() {
 
     let surviving_authority = CoordinationIdentity::new(named("coordinator-b"), 12, 1);
     let schedule = ClusterSchedule::from_iter([fixture.base_schedule.clone()]);
+    let revision_plan = PlannedClusterRevision::between(None, &schedule)
+        .assured("the handoff fixture has a complete cluster revision");
     let incarnations = BTreeMap::from([
         (fixture.source.clone(), source_incarnation),
         (fixture.destination.clone(), destination_incarnation),
     ]);
     assert_eq!(
         runtime
-            .reconcile_prepared_ownership_handoffs(&surviving_authority, &schedule, &incarnations,)
+            .reconcile_prepared_ownership_handoffs(
+                &surviving_authority,
+                &revision_plan,
+                &incarnations,
+            )
             .expect("the surviving authority should reconcile the abandoned operation"),
         1
     );
     assert_eq!(
         runtime
-            .reconcile_prepared_ownership_handoffs(&surviving_authority, &schedule, &incarnations,)
+            .reconcile_prepared_ownership_handoffs(
+                &surviving_authority,
+                &revision_plan,
+                &incarnations,
+            )
             .expect("duplicate reconciliation should be idempotent"),
         0
     );
@@ -348,6 +362,8 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
     let restarted_destination_incarnation =
         attach_loopback_cluster(&runtime, &fixture.destination).await;
     let committed_schedule = ClusterSchedule::from_iter([fixture.target_schedule.clone()]);
+    let committed_revision = PlannedClusterRevision::between(None, &committed_schedule)
+        .assured("the committed handoff fixture has a complete cluster revision");
     let incarnations = BTreeMap::from([
         (fixture.source.clone(), source_incarnation),
         (
@@ -360,7 +376,7 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
         runtime
             .reconcile_prepared_ownership_handoffs(
                 &surviving_authority,
-                &committed_schedule,
+                &committed_revision,
                 &incarnations,
             )
             .expect("committed preparation should survive reconciliation"),
@@ -407,7 +423,8 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
                 target_schedule_fingerprint: fixture.target_schedule_fingerprint,
                 activation_budget: Duration::from_secs(1),
             },
-            fixture.target_schedule.clone(),
+            ExecutionRevision::from_schedule(&fixture.target_schedule)
+                .assured("the committed handoff schedule has a complete execution revision"),
         )
         .await
         .expect("duplicate activation should be idempotent");
@@ -415,7 +432,7 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
         runtime
             .reconcile_prepared_ownership_handoffs(
                 &surviving_authority,
-                &committed_schedule,
+                &committed_revision,
                 &incarnations,
             )
             .expect("reconciliation reordered after activation should be idempotent"),
@@ -504,7 +521,7 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
         vec![schema_node.clone(), scheduled.clone()],
         Vec::new(),
     );
-    let initial_fingerprint = Runtime::ownership_handoff_schedule_fingerprint(&initial_schedule)
+    let initial_fingerprint = ExecutionRevision::ownership_fingerprint(&initial_schedule)
         .expect("initial schedule should have a recovery fingerprint");
     let entity = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, identifier.clone());
 
@@ -575,9 +592,8 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
             vec![schema_node, scheduled, unrelated_schema],
             Vec::new(),
         );
-        let rebuilt_fingerprint =
-            Runtime::ownership_handoff_schedule_fingerprint(&rebuilt_schedule)
-                .expect("rebuilt schedule should have a recovery fingerprint");
+        let rebuilt_fingerprint = ExecutionRevision::ownership_fingerprint(&rebuilt_schedule)
+            .expect("rebuilt schedule should have a recovery fingerprint");
         assert_ne!(initial_fingerprint, rebuilt_fingerprint);
         runtime
             .rebuild_domain_from_schedule(
@@ -659,7 +675,7 @@ async fn forced_recovery_recreates_state_only_for_a_complete_reset_decision() {
     let incomplete = runtime
         .activate_prepared_forced_ownership_recovery_state(
             &domain,
-            &scheduled,
+            &execution_node(&domain, &scheduled),
             &destination,
             [9; 32],
             false,
@@ -690,7 +706,7 @@ async fn forced_recovery_recreates_state_only_for_a_complete_reset_decision() {
     runtime
         .activate_prepared_forced_ownership_recovery_state(
             &domain,
-            &scheduled,
+            &execution_node(&domain, &scheduled),
             &destination,
             [9; 32],
             false,
@@ -2034,7 +2050,7 @@ fn reinstalling_schema_fingerprints_never_exposes_a_node_without_one() {
             None,
         )
     };
-    runtime.install_state_identities(&schedule);
+    runtime.install_schedule_state_identities(&schedule);
     let installed = resolve().expect("the installed schedule publishes the relay's fingerprint");
 
     let reads_stopped = AtomicBool::new(false);
@@ -2049,7 +2065,7 @@ fn reinstalling_schema_fingerprints_never_exposes_a_node_without_one() {
             }
         });
         for _ in 0..2_000 {
-            runtime.install_state_identities(&schedule);
+            runtime.install_schedule_state_identities(&schedule);
         }
         reads_stopped.store(true, Ordering::Release);
     });
@@ -2073,7 +2089,7 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
         )
     };
 
-    runtime.install_state_identities(&schedule(SchemaFingerprint::from_digest([1; 32])));
+    runtime.install_schedule_state_identities(&schedule(SchemaFingerprint::from_digest([1; 32])));
     let original_placement = runtime
         .state_placement(
             &domain,
@@ -2087,7 +2103,7 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
         .replicated_deduplicator_state(original_placement.clone())
         .expect("state should initialize");
 
-    runtime.install_state_identities(&schedule(SchemaFingerprint::from_digest([1; 32])));
+    runtime.install_schedule_state_identities(&schedule(SchemaFingerprint::from_digest([1; 32])));
     let unchanged = runtime
         .replicated_deduplicator_state(
             runtime
@@ -2103,7 +2119,7 @@ fn schema_fingerprints_reuse_unaffected_state_and_isolate_changed_state() {
         .expect("unchanged state should initialize");
     assert!(Arc::ptr_eq(&original, &unchanged));
 
-    runtime.install_state_identities(&schedule(SchemaFingerprint::from_digest([2; 32])));
+    runtime.install_schedule_state_identities(&schedule(SchemaFingerprint::from_digest([2; 32])));
     let changed = runtime
         .replicated_deduplicator_state(
             runtime
@@ -2184,7 +2200,7 @@ fn graph_and_schedule_key_materialized_relay_state_alike() {
 
     runtime.install_state_identities_from_graph(&domain, &nodes);
     let from_graph = placement();
-    runtime.install_state_identities(&schedule);
+    runtime.install_schedule_state_identities(&schedule);
     let from_schedule = placement();
 
     assert_eq!(from_graph, from_schedule);
@@ -2243,7 +2259,7 @@ fn schema_bound_state_is_placed_only_under_a_published_identity() {
         StateIdentityError::GenerationUnpublished { .. }
     ));
 
-    runtime.install_state_identities(&DomainSchedule::new(
+    runtime.install_schedule_state_identities(&DomainSchedule::new(
         domain.clone(),
         vec![node.clone()],
         Vec::new(),
@@ -2287,12 +2303,12 @@ fn a_schema_change_leaves_only_schema_bound_checkpoints_stale() {
     };
     let acme = string_branch_key("tenant", "acme");
 
-    runtime.install_state_identities(&schedule(SchemaFingerprint::from_digest([1; 32])));
+    runtime.install_schedule_state_identities(&schedule(SchemaFingerprint::from_digest([1; 32])));
     let replaced = place(RuntimeStateKind::Deduplicator, acme.clone());
     let metrics = place(RuntimeStateKind::BranchAggregated, None);
     assert!(runtime.runtime_state_placement_is_current(&replaced));
 
-    runtime.install_state_identities(&schedule(SchemaFingerprint::from_digest([2; 32])));
+    runtime.install_schedule_state_identities(&schedule(SchemaFingerprint::from_digest([2; 32])));
     let current = place(RuntimeStateKind::Deduplicator, acme);
 
     assert_ne!(current, replaced);
@@ -2379,7 +2395,7 @@ fn only_the_committed_generation_of_each_branch_is_current() {
     let beta = string_branch_key("tenant", "beta");
     let mut node = wasm_processor_node();
     let install = |node: &ScheduledNode| {
-        runtime.install_state_identities(&DomainSchedule::new(
+        runtime.install_schedule_state_identities(&DomainSchedule::new(
             domain.clone(),
             vec![node.clone()],
             Vec::new(),
@@ -2428,7 +2444,7 @@ fn a_checkpoint_of_a_replaced_generation_is_refused_before_it_is_published() {
     let runtime = Runtime::default();
     let domain = domain("default");
     let mut node = wasm_processor_node();
-    runtime.install_state_identities(&DomainSchedule::new(
+    runtime.install_schedule_state_identities(&DomainSchedule::new(
         domain.clone(),
         vec![node.clone()],
         Vec::new(),
@@ -2445,7 +2461,7 @@ fn a_checkpoint_of_a_replaced_generation_is_refused_before_it_is_published() {
     );
 
     node.begin_wasm_state_generation();
-    runtime.install_state_identities(&DomainSchedule::new(domain, vec![node], Vec::new()));
+    runtime.install_schedule_state_identities(&DomainSchedule::new(domain, vec![node], Vec::new()));
 
     let refused = runtime
         .wasm_checkpoint_boundary(&state)
@@ -2472,7 +2488,7 @@ async fn forced_recovery_never_selects_a_checkpoint_of_a_replaced_generation() {
     let domain = domain("default");
     let acme = string_branch_key("tenant", "acme");
     let mut node = wasm_processor_node();
-    runtime.install_state_identities(&DomainSchedule::new(
+    runtime.install_schedule_state_identities(&DomainSchedule::new(
         domain.clone(),
         vec![node.clone()],
         Vec::new(),
@@ -2487,7 +2503,11 @@ async fn forced_recovery_never_selects_a_checkpoint_of_a_replaced_generation() {
         .expect("the replaced generation's guest state should persist");
 
     node.begin_wasm_state_generation();
-    runtime.install_state_identities(&DomainSchedule::new(domain.clone(), vec![node], Vec::new()));
+    runtime.install_schedule_state_identities(&DomainSchedule::new(
+        domain.clone(),
+        vec![node],
+        Vec::new(),
+    ));
     let current = guest_state_placement(&runtime, &domain, acme);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 

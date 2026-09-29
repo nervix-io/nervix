@@ -148,9 +148,10 @@ can discard state after a failed restore.
 Every checkpoint is stored, served, replicated, transferred, and restored under a placement: the
 domain, the processor, the concrete branch or the unbranched instance, the fingerprint of the
 schemas the processor's records are laid out by, and the branch's guest-state generation. A node
-places guest state only under the identity the committed schedule it applied publishes for the
-processor, and acts on a placement only while that placement is current. A replica acknowledgement
-counts only toward the placement it names. See [Checkpoint
+places guest state only under the identity derived from the committed schedule in its applied typed
+execution revision, and acts on a placement only while that placement is current. The same revision
+carries the processor's reset and pinned module plans through a rebuild or owner change. A replica
+acknowledgement counts only toward the placement it names. See [Checkpoint
 Identity](./shutdown.md#checkpoint-identity) and [Membership, Consensus, And Bulk
 Transfer](./interconnect.md#membership-consensus-and-bulk-transfer).
 

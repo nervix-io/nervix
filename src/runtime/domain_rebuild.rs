@@ -36,6 +36,46 @@ pub(super) fn branch_relays_from_plans(
 }
 
 impl Runtime {
+    #[cfg(test)]
+    pub(in crate::runtime) async fn rebuild_domain_from_schedule(
+        &self,
+        local_node_id: &ClusterNodeName,
+        domain: &DomainName,
+        schedule: Option<DomainSchedule>,
+        start_ingestors: bool,
+    ) -> error_stack::Result<(), RuntimeError> {
+        let revision = schedule
+            .as_ref()
+            .map(ExecutionRevision::from_schedule)
+            .transpose()
+            .map_err(|error| {
+                Report::new(RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("{error:#}"),
+                })
+            })?;
+        self.rebuild_domain_from_revision(local_node_id, domain, revision, start_ingestors)
+            .await
+            .map_err(Report::new)
+    }
+
+    #[cfg(test)]
+    pub(in crate::runtime) async fn build_passive_execution_from_schedule(
+        &self,
+        domain: &DomainName,
+        schedule: &DomainSchedule,
+    ) -> error_stack::Result<DomainExecution, RuntimeError> {
+        let revision = ExecutionRevision::from_schedule(schedule).map_err(|error| {
+            Report::new(RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!("{error:#}"),
+            })
+        })?;
+        self.build_passive_execution_from_revision(domain, revision)
+            .await
+            .map_err(Report::new)
+    }
+
     /// Bind pinned resources and compile the codec and endpoint surfaces selected by one pure
     /// domain decision. Both running and passive builds use this exact installation path.
     pub(super) async fn activate_domain_surfaces(
@@ -143,28 +183,6 @@ impl Runtime {
         }
     }
 
-    pub(in crate::runtime) async fn domain_graph_handle(
-        &self,
-        domain: &DomainName,
-    ) -> SharedActiveGraph {
-        self.inner
-            .domain_graphs
-            .entry(domain.clone())
-            .or_insert_with(|| StdArc::new(ArcSwapOption::from(None)))
-            .clone()
-    }
-
-    pub(in crate::runtime) async fn clear_domain_graph_handle(&self, domain: &DomainName) {
-        let handle = self
-            .inner
-            .domain_graphs
-            .get(domain)
-            .map(|entry| entry.clone());
-        if let Some(handle) = handle {
-            handle.store(None);
-        }
-    }
-
     /// Starts the branched entrypoint runtime every route of one ingestor or reingestor feeds, and
     /// returns them with their senders keyed by the relay each route writes.
     pub(in crate::runtime) fn start_branched_entrypoint_runtimes(
@@ -267,11 +285,11 @@ impl Runtime {
         }
     }
 
-    pub(in crate::runtime) async fn rebuild_domain_from_schedule(
+    pub(in crate::runtime) async fn rebuild_domain_from_revision(
         &self,
         local_node_id: &ClusterNodeName,
         domain: &DomainName,
-        schedule: Option<DomainSchedule>,
+        revision: Option<Arc<ExecutionRevision>>,
         start_ingestors: bool,
     ) -> Result<(), RuntimeError> {
         // Domain teardown, compilation, restoration, and startup are separate rebuild phases.
@@ -287,27 +305,22 @@ impl Runtime {
             Box::pin(self.stop_domain_execution(domain, existing)).await;
         }
 
-        let Some(schedule) = schedule else {
+        let Some(revision) = revision else {
             self.withdraw_undeclared_relay_subscriptions(domain, |_| false);
             self.clear_domain_ingestor_quiescence(domain);
             self.inner.compiled_domain_udfs.remove(domain);
             self.clear_state_identities(domain);
-            Box::pin(self.clear_domain_graph_handle(domain)).await;
             self.clear_expiring_stream_states_for_domain(domain);
             return Ok(());
         };
-        self.install_state_identities(&schedule);
+        self.install_state_identities(&revision);
         let stopped = self
             .inner
             .domains
             .get(domain)
             .is_some_and(|state| matches!(state.status, nervix_models::DomainStatus::Stopped));
-        let schedule_fingerprint = Self::ownership_handoff_schedule_fingerprint(&schedule)
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: reason.to_string(),
-            })?;
-        for node in schedule.nodes.values() {
+        let schedule_fingerprint = revision.ownership_handoff_fingerprint;
+        for node in revision.nodes.values() {
             self.activate_prepared_forced_ownership_recovery_state(
                 domain,
                 node,
@@ -343,9 +356,8 @@ impl Runtime {
             self.clear_domain_ingestor_quiescence(domain);
             self.clear_expiring_stream_states_for_domain(domain);
             let execution =
-                Box::pin(self.build_passive_execution_from_schedule(domain, &schedule)).await?;
+                Box::pin(self.build_passive_execution_from_revision(domain, revision)).await?;
             self.install_domain_execution(domain, execution);
-            Box::pin(self.clear_domain_graph_handle(domain)).await;
             return Ok(());
         }
         let domain_clock =
@@ -354,8 +366,6 @@ impl Runtime {
                     domain: domain.as_str().to_string(),
                     reason: error.to_string(),
                 })?;
-        let domain_graph = Box::pin(self.domain_graph_handle(domain)).await;
-        domain_graph.store(None);
         let (shutdown_tx, _) = watch::channel(false);
         let mut relay_builders = HashMap::new();
         let mut relay_branchings = HashMap::new();
@@ -371,30 +381,10 @@ impl Runtime {
         let mut emitter_tasks = HashMap::new();
         let mut generator_tasks = HashMap::new();
         let remote_dispatcher = self.inner.remote_dispatcher.load_full();
-        let model_index = schedule
-            .nodes
-            .values()
-            .map(|node| (*node.config).clone())
-            .collect::<ModelIndex>();
-        let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
-            .map_err(|report| RuntimeError::activation_plan(domain, report))?;
-        let resource_plans =
-            ResourceExecutionPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
-                .map_err(|report| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("failed to plan domain resources: {report:#}"),
-                })?;
-        let entrypoints = Arc::new(
-            EntrypointPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
-                .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
-        );
-        let emitter_plans = Arc::new(
-            EmitterExecutionPlans::from_scheduled_nodes(&schedule.nodes, &activation_plan)
-                .map_err(|report| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("failed to plan emitters: {report:#}"),
-                })?,
-        );
+        let activation_plan = &revision.activation;
+        let resource_plans = &revision.resources;
+        let entrypoints = &revision.entrypoints;
+        let emitter_plans = &revision.emitters;
         for plan in entrypoints.ingestors() {
             if let Err(error) = Self::parse_ingest_acknowledgement(
                 domain,
@@ -423,17 +413,17 @@ impl Runtime {
                 domain: domain.as_str().to_string(),
                 report: error,
             })?;
-        let all_branched_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
-        let branch_relays = branch_relays_from_plans(&all_branched_specs, &entrypoints);
+        let all_branched_specs = &revision.processors;
+        let branch_relays = branch_relays_from_plans(all_branched_specs, entrypoints);
 
         let ActivatedDomainSurfaces {
             codecs,
             signaling_protocols,
             endpoint_routes,
-        } = Box::pin(self.activate_domain_surfaces(domain, &activation_plan)).await?;
+        } = Box::pin(self.activate_domain_surfaces(domain, activation_plan)).await?;
 
         for relay in activation_plan.relays.values() {
-            let node = schedule
+            let node = revision
                 .nodes
                 .get(&NodeRef::new(
                     ModelKind::Relay,
@@ -491,15 +481,9 @@ impl Runtime {
         let mut placement_tasks = HashMap::<NodeRef, Vec<JoinHandle<()>>>::new();
         let mut kafka_offset_states = HashMap::new();
         let mut materialized_states = HashMap::new();
-        for node in schedule.nodes.values() {
+        for node in revision.nodes.values() {
             tokio::task::consume_budget().await;
-            let state = PlacedNodeState::of(
-                node,
-                ScheduledDomainPlans {
-                    activation: &activation_plan,
-                    entrypoints: &entrypoints,
-                },
-            );
+            let state = PlacedNodeState::of(node, &revision);
             if let Some(PlacedNodeState::MaterializedRelay(schema)) = state.as_ref() {
                 let state_placement = self
                     .state_placement(
@@ -538,7 +522,7 @@ impl Runtime {
             }
         }
 
-        for node in schedule.nodes.values() {
+        for node in revision.nodes.values() {
             if node.kind() == ModelKind::Relay {
                 let relay_name = RelayName::from(&node.identifier);
                 let planned = activation_plan
@@ -613,7 +597,7 @@ impl Runtime {
         }
         for plan in entrypoints.reingestors() {
             let identity = NodeRef::new(ModelKind::Reingestor, ModelName::from(&plan.name));
-            let node = schedule
+            let node = revision
                 .nodes
                 .get(&identity)
                 .assured("the entrypoint plans were decided from this same schedule");
@@ -636,7 +620,7 @@ impl Runtime {
         }
         for plan in entrypoints.ingestors() {
             let identity = NodeRef::new(ModelKind::Ingestor, ModelName::from(&plan.ingestor.name));
-            let node = schedule
+            let node = revision
                 .nodes
                 .get(&identity)
                 .assured("the entrypoint plans were decided from this same schedule");
@@ -647,7 +631,7 @@ impl Runtime {
 
         let mut processor_input_specs = Vec::new();
         for node_spec in &all_branched_specs.processors {
-            let Some(node) = schedule.nodes.get(&NodeRef::new(
+            let Some(node) = revision.nodes.get(&NodeRef::new(
                 node_spec.spec.kind,
                 node_spec.spec.processor.clone(),
             )) else {
@@ -681,12 +665,8 @@ impl Runtime {
 
         // Remote delivery targets follow only from the published schedule, so the same derivation
         // seeds a freshly built domain and re-points the relays of an incrementally moved node.
-        let remote_runtime_consumers = Self::remote_runtime_consumers_for_schedule(
-            &schedule,
-            &entrypoints,
-            &emitter_plans,
-            local_node_id,
-        );
+        let remote_runtime_consumers =
+            Self::remote_runtime_consumers_for_revision(&revision, local_node_id);
         for (relay, builder) in relay_builders.iter_mut() {
             builder.remote_runtime_consumers = remote_runtime_consumers
                 .get(relay)
@@ -699,7 +679,7 @@ impl Runtime {
             .map(|(identifier, relay)| (identifier.clone(), relay.registry.clone()))
             .collect::<HashMap<_, _>>();
         for relay in relay_registries.keys() {
-            if !schedule
+            if !revision
                 .nodes
                 .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
                 .is_some_and(|node| node.executes_on(local_node_id))
@@ -726,7 +706,7 @@ impl Runtime {
             })
             .collect::<HashMap<_, _>>();
         for (relay, services) in &relay_services {
-            let owner_node = if let Some(node) = schedule
+            let owner_node = if let Some(node) = revision
                 .nodes
                 .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
                 && let Some(owner) = node.execution_node()
@@ -738,7 +718,7 @@ impl Runtime {
             services.replace_owner_node(owner_node);
         }
         let mut relay_owner_tasks = HashMap::new();
-        for node in schedule.nodes.values() {
+        for node in revision.nodes.values() {
             if node.kind() != ModelKind::Relay || !node.executes_on(local_node_id) {
                 continue;
             }
@@ -781,7 +761,6 @@ impl Runtime {
             ProcessorPlanBindingContext {
                 runtime: self,
                 domain,
-                model_index: &model_index,
                 relay_schemas: &relay_schemas,
                 relay_registries: &relay_registries,
                 relay_services: &relay_services,
@@ -797,15 +776,9 @@ impl Runtime {
             domain: domain.as_str().to_string(),
             reason: format!("{reason:#}"),
         })?;
-        let error_specs =
-            MessageErrorRouteSpecs::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
-                .map_err(|reason| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("failed to plan message-error routes: {reason:#}"),
-                })?;
         let message_error_plans = Arc::new(
             BoundMessageErrorRoutes::bind(
-                error_specs,
+                revision.message_errors.clone(),
                 MessageErrorRouteBindingContext {
                     relay_registries: &relay_registries,
                     relay_services: &relay_services,
@@ -919,7 +892,7 @@ impl Runtime {
         self.install_domain_execution(
             domain,
             DomainExecution {
-                schedule: schedule.clone(),
+                revision: revision.clone(),
                 start_version: desired_start_version,
                 domain_clock,
                 shutdown: shutdown_tx,
@@ -940,7 +913,6 @@ impl Runtime {
                         processor_plans,
                     },
                 ),
-                entrypoints,
                 message_error_plans,
                 branched_entrypoints,
                 endpoint_routes,
@@ -951,7 +923,6 @@ impl Runtime {
                 placement_tasks,
                 relay_state_tasks,
                 relay_owner_tasks,
-                emitter_plans,
                 tasks: Vec::new(),
             },
         );
@@ -979,10 +950,10 @@ impl Runtime {
         Ok(())
     }
 
-    pub(in crate::runtime) async fn build_passive_execution_from_schedule(
+    pub(in crate::runtime) async fn build_passive_execution_from_revision(
         &self,
         domain: &DomainName,
-        schedule: &DomainSchedule,
+        revision: Arc<ExecutionRevision>,
     ) -> Result<DomainExecution, RuntimeError> {
         let domain_clock = self.bind_passive_domain_clock(domain).map_err(|error| {
             RuntimeError::BuildDomainExecution {
@@ -991,14 +962,8 @@ impl Runtime {
             }
         })?;
         let mut lookups = HashMap::new();
-        let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
-            .map_err(|report| RuntimeError::activation_plan(domain, report))?;
-        let resource_plans =
-            ResourceExecutionPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
-                .map_err(|report| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("failed to plan domain resources: {report:#}"),
-                })?;
+        let activation_plan = &revision.activation;
+        let resource_plans = &revision.resources;
         let udf_executor = self
             .compile_domain_udfs(domain, resource_plans.udfs.clone())
             .await
@@ -1006,22 +971,11 @@ impl Runtime {
                 domain: domain.as_str().to_string(),
                 report: error,
             })?;
-        let entrypoints = Arc::new(
-            EntrypointPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
-                .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
-        );
-        let emitter_plans = Arc::new(
-            EmitterExecutionPlans::from_scheduled_nodes(&schedule.nodes, &activation_plan)
-                .map_err(|report| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("failed to plan emitters: {report:#}"),
-                })?,
-        );
         let ActivatedDomainSurfaces {
             codecs,
             signaling_protocols,
             endpoint_routes,
-        } = Box::pin(self.activate_domain_surfaces(domain, &activation_plan)).await?;
+        } = Box::pin(self.activate_domain_surfaces(domain, activation_plan)).await?;
         let mut relay_builders = HashMap::new();
         let mut relay_branchings = HashMap::new();
         let mut relay_schemas = HashMap::new();
@@ -1058,7 +1012,7 @@ impl Runtime {
                         relay.branching.clone(),
                     ),
                 );
-                let node = schedule
+                let node = revision
                     .nodes
                     .get(&NodeRef::new(
                         ModelKind::Relay,
@@ -1087,8 +1041,6 @@ impl Runtime {
             lookups.insert(lookup.name.clone(), Arc::new(runtime));
         }
 
-        let graph = self.domain_graph_handle(domain).await;
-        graph.store(None);
         let (shutdown, _) = watch::channel(false);
         let relay_registries = relay_builders
             .iter()
@@ -1109,15 +1061,9 @@ impl Runtime {
                 )
             })
             .collect::<HashMap<_, _>>();
-        let error_specs =
-            MessageErrorRouteSpecs::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
-                .map_err(|reason| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("failed to plan message-error routes: {reason:#}"),
-                })?;
         let message_error_plans = Arc::new(
             BoundMessageErrorRoutes::bind(
-                error_specs,
+                revision.message_errors.clone(),
                 MessageErrorRouteBindingContext {
                     relay_registries: &relay_registries,
                     relay_services: &relay_services,
@@ -1136,7 +1082,7 @@ impl Runtime {
             None => 0,
         };
         Ok(DomainExecution {
-            schedule: schedule.clone(),
+            revision,
             start_version,
             domain_clock,
             shutdown,
@@ -1157,7 +1103,6 @@ impl Runtime {
                     processor_plans: HashMap::default(),
                 },
             ),
-            entrypoints,
             message_error_plans,
             branched_entrypoints: HashMap::default(),
             endpoint_routes,
@@ -1168,7 +1113,6 @@ impl Runtime {
             placement_tasks: HashMap::default(),
             relay_state_tasks: HashMap::default(),
             relay_owner_tasks: HashMap::default(),
-            emitter_plans,
             tasks: Vec::new(),
         })
     }

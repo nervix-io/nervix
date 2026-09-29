@@ -725,17 +725,8 @@ pub(super) fn planned_entrypoints_for_test(
 /// are given and unbranched otherwise.
 /// The decisions a domain build makes for one [`EntrypointTestDomain`].
 pub(super) struct EntrypointTestPlans {
-    pub(super) activation: DomainActivationPlan,
     pub(super) entrypoints: EntrypointPlans,
-}
-
-impl EntrypointTestPlans {
-    pub(super) fn scheduled(&self) -> ScheduledDomainPlans<'_> {
-        ScheduledDomainPlans {
-            activation: &self.activation,
-            entrypoints: &self.entrypoints,
-        }
-    }
+    pub(super) nodes: ScheduledNodes,
 }
 
 pub(super) struct EntrypointTestDomain<'a> {
@@ -879,10 +870,7 @@ impl EntrypointTestDomain<'_> {
             .assured("the fixture surfaces resolve");
         let entrypoints = EntrypointPlans::from_scheduled_nodes(domain, &nodes, &activation)
             .assured("the fixture entrypoints plan");
-        EntrypointTestPlans {
-            activation,
-            entrypoints,
-        }
+        EntrypointTestPlans { entrypoints, nodes }
     }
 
     /// Plans `reingestor` in this domain.
@@ -993,15 +981,15 @@ pub(super) fn install_test_domain_execution(
     routing: DomainRoutingSnapshot,
 ) {
     let (shutdown, _) = watch::channel(false);
+    let revision = test_execution_revision(domain, nodes);
     runtime.install_domain_execution(
         domain,
         DomainExecution {
-            schedule: DomainSchedule::new(domain.clone(), nodes, Vec::new()),
+            revision,
             start_version: 0,
             domain_clock: test_domain_clock(domain),
             shutdown,
             routing: runtime.stage_domain_routing(domain, routing),
-            entrypoints: Arc::default(),
             message_error_plans: Arc::default(),
             branched_entrypoints: HashMap::default(),
             endpoint_routes: HashMap::default(),
@@ -1012,10 +1000,17 @@ pub(super) fn install_test_domain_execution(
             placement_tasks: HashMap::default(),
             relay_state_tasks: HashMap::default(),
             relay_owner_tasks: HashMap::default(),
-            emitter_plans: Arc::new(EmitterExecutionPlans::default()),
             tasks: Vec::new(),
         },
     );
+}
+
+pub(super) fn test_execution_revision(
+    domain: &DomainName,
+    nodes: Vec<ScheduledNode>,
+) -> Arc<ExecutionRevision> {
+    ExecutionRevision::from_schedule(&DomainSchedule::new(domain.clone(), nodes, Vec::new()))
+        .assured("the test fixture schedules a complete domain revision")
 }
 
 pub(super) fn junction_branch_template(

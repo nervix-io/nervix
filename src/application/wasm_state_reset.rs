@@ -1061,15 +1061,12 @@ impl SessionServiceImpl {
     ) -> error_stack::Result<(), crate::runtime::RuntimeError> {
         let state = self.inner.consensus.current_runtime_state().await;
         self.inner
-            .runtime
-            .apply_cluster_state(
+            .runtime_admission
+            .apply_planned_cluster_state(
+                &self.inner.runtime,
                 self.inner.consensus.local_node_id(),
-                state.revision,
-                &state.domains,
-                &state.domain_clock_authorities,
-                &state.schedule,
+                &state,
             )
             .await
-            .map_err(Report::new)
     }
 }

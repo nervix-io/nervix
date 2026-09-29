@@ -792,7 +792,10 @@ names, so an acknowledgement for a replaced generation never satisfies the repli
 current one.
 The schedule fingerprint an ownership handoff or forced recovery is bound to covers those schema
 fingerprints and generations, so a preparation staged against an earlier schema or generation cannot
-activate after a later one is committed.
+activate after a later one is committed. The control plane computes the exact fingerprint of the
+committed schedule before runtime installation and carries it in the complete typed execution
+revision used for activation and reconciliation; a node does not reconstruct it from a second
+schedule view.
 Window state also binds to its current window model. A model replacement with unchanged schemas
 therefore addresses a different checkpoint and cannot install rows accumulated under the preceding
 window definition.

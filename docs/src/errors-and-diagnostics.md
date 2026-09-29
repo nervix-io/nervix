@@ -267,8 +267,11 @@ transaction is the subscription's failure, shown inline without opening a tab.
 Domain activation has typed failures for a relay or codec missing its schema, a codec missing its
 wire definition, a relay missing its branch or carrying an invalid branch TTL, and an endpoint
 missing its VHOST or signaling protocol. The report identifies the owning relay, codec, or
-endpoint and the missing reference. Runtime installation adds domain context to that report; it
-does not select a fallback configuration.
+endpoint and the missing reference. The control plane builds activation, resources, entrypoints,
+emitters, processors, message-error routes, placement and the ownership fingerprint as one typed
+revision before runtime installation. A planning failure leaves the previously applied schedule as
+the predecessor for a retry; runtime installation adds domain context and never selects a fallback
+configuration.
 
 Ingestor and reingestor planning has typed failures for an ingestor whose source is missing or
 resolves to another kind or name, a missing codec, a route or input relay missing from the domain,

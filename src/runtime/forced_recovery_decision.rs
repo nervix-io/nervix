@@ -9,7 +9,7 @@ use super::*;
 
 impl ForcedRuntimeStateRecoveryAuthorization {
     pub(super) fn for_scheduled_node(
-        node: &ScheduledNode,
+        node: &ExecutionNode,
         transition: &nervix_models::OwnershipTransition,
     ) -> Result<Option<Self>, Report<RuntimePersistenceError>> {
         let expected = node

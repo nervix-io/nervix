@@ -248,14 +248,8 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             if let Err(error) = registry.synchronize_cluster_schedule(&state.schedule) {
                 warn!(error = %error, "failed to synchronize registry from admitted cluster schedule");
             }
-            let runtime_application = runtime
-                .apply_cluster_state(
-                    local_node_id,
-                    state.revision,
-                    &state.domains,
-                    &state.domain_clock_authorities,
-                    &state.schedule,
-                )
+            let runtime_application = admission
+                .apply_planned_cluster_state(runtime, local_node_id, &state)
                 .await;
             // The listener presents the certificates of the same revision before this node reports
             // it prepared. A failed installation keeps the certificates already presented and is
@@ -271,7 +265,12 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                     "failed to install the HTTPS listener TLS configuration"
                 );
             }
-            runtime_application?;
+            runtime_application.map_err(|error| {
+                crate::runtime::RuntimeError::BuildDomainExecution {
+                    domain: "cluster".to_string(),
+                    reason: format!("{error:#}"),
+                }
+            })?;
             cluster
                 .set_local_runtime_revision_prepared(state.revision)
                 .await;
