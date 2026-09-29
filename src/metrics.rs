@@ -16,7 +16,8 @@
 use std::{
     cmp::Ordering,
     collections::VecDeque,
-    sync::atomic::{AtomicI64, AtomicU64, Ordering as AtomicOrdering},
+    num::NonZeroU64,
+    sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering as AtomicOrdering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -32,6 +33,7 @@ use nervix_models::{
     Timestamp,
 };
 use nervix_recovery::Discarded as _;
+use nervix_simd_kernels::{ElapsedHistogram, ElapsedLayout, elapsed_nanos};
 use parking_lot::Mutex;
 use prometheus::{
     Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
@@ -123,6 +125,7 @@ const WALL_HISTOGRAM_15M_STEP: Duration = Duration::from_secs(60);
 const DOMAIN_HISTOGRAM_1M_STEP: Duration = Duration::from_secs(10);
 const DOMAIN_HISTOGRAM_15M_STEP: Duration = Duration::from_secs(60);
 const HISTOGRAM_VALUE_SCALE: f64 = 1_000.0;
+const NANOS_PER_SECOND: f64 = 1_000_000_000.0;
 const HISTOGRAM_DISPLAY_DECIMAL_SCALE: f64 = 10.0;
 const HDR_HISTOGRAM_SIGFIG: u8 = 2;
 
@@ -624,6 +627,70 @@ impl HistogramConfig {
                  the 0..=5 hdrhistogram accepts",
             )
     }
+
+    /// How a batch of delivery latencies folds into these histograms' buckets: elapsed nanoseconds
+    /// rounded to the recorded unit, clamped at the same maximum, at the same precision.
+    fn delivery_latency_layout(self) -> ElapsedLayout {
+        let unit_nanos: u64 = (NANOS_PER_SECOND / HISTOGRAM_VALUE_SCALE)
+            .checked_approx_into()
+            .assured("a second divides into the recorded units as a whole number of nanoseconds");
+        let unit_nanos = NonZeroU64::new(unit_nanos)
+            .assured("a recorded unit is a thousandth of a second, which is not zero nanoseconds");
+        ElapsedLayout::new(
+            unit_nanos,
+            self.highest_trackable_value,
+            self.significant_figures,
+        )
+        .assured(
+            "the latency ladder tops out at 30 s, far inside the range the kernel rounds exactly, \
+             for_buckets raises the maximum to at least 2, and HDR_HISTOGRAM_SIGFIG is within \
+             0..=5",
+        )
+    }
+}
+
+/// What one recording adds to a histogram series.
+#[derive(Debug, Clone, Copy)]
+enum HistogramSamples<'a> {
+    /// One observation, in recorded units.
+    One(u64),
+    /// Every delivery latency of one batch, already folded into recorded-unit buckets.
+    Elapsed(&'a ElapsedHistogram),
+}
+
+impl HistogramSamples<'_> {
+    /// One observation in recorded units, or `None` for one that has none: a negative sample, or
+    /// one whose recorded magnitude leaves the `u64` range. Neither belongs in a histogram.
+    fn one(value: f64) -> Option<Self> {
+        if value < 0.0 {
+            return None;
+        }
+        let units = scaled_histogram_value(value)?;
+        Some(Self::One(units))
+    }
+
+    fn record_into(self, histogram: &mut HdrHistogram<u64>) {
+        // The configured maximum is the top of this metric's bucket ladder, so a sample above it
+        // belongs in the top bucket exactly as one past the last explicit boundary does. Clamping
+        // here is what puts it there; letting `record` reject it instead would drop the sample and
+        // pull every percentile below the truth, which is the one outcome a latency histogram must
+        // not produce. The kernel already clamps a batch at the same maximum.
+        let highest = histogram.high();
+        match self {
+            Self::One(units) => {
+                histogram
+                    .record(units.min(highest))
+                    .assured("the value was just clamped to the histogram's own maximum");
+            }
+            Self::Elapsed(latencies) => {
+                for bucket in latencies.buckets() {
+                    histogram
+                        .record_n(bucket.lowest_units.min(highest), bucket.count)
+                        .assured("the value was just clamped to the histogram's own maximum");
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -668,27 +735,21 @@ impl TimeRollingHistogram {
         }
     }
 
-    fn observe_at(&mut self, value: f64, now_nanos: i64) {
-        if !value.is_finite() || value < 0.0 {
-            return;
-        }
+    /// Records `samples` in the bucket of the window step that holds `now_nanos`.
+    ///
+    /// A step the window has already moved past keeps samples only while its bucket still exists;
+    /// an older step is never reopened, so its samples are not recorded.
+    fn record_at(&mut self, samples: HistogramSamples<'_>, now_nanos: i64) {
         let current_start = bucket_start(now_nanos, self.step);
         self.ensure_current_bucket(current_start);
-        if let Some(bucket) = self
+        // Buckets are ordered by start, and the current step is normally the newest.
+        let current = self
             .buckets
             .iter_mut()
-            .find(|bucket| bucket.start_at_nanos == current_start)
-            && let Some(scaled) = scaled_histogram_value(value)
-        {
-            // The configured maximum is the top of this metric's bucket ladder, so an
-            // observation above it belongs in the top bucket exactly as one past the last
-            // explicit boundary does. Clamping here is what puts it there; letting `record`
-            // reject it instead would drop the sample and pull every percentile below the truth,
-            // which is the one outcome a latency histogram must not produce.
-            bucket
-                .histogram
-                .record(scaled.min(bucket.histogram.high()))
-                .assured("the value was just clamped to the histogram's own maximum");
+            .rev()
+            .find(|bucket| bucket.start_at_nanos == current_start);
+        if let Some(bucket) = current {
+            samples.record_into(&mut bucket.histogram);
         }
     }
 
@@ -796,10 +857,8 @@ impl WallRollingHistogram {
         }
     }
 
-    fn observe(&mut self, value: f64) {
-        if let Some(now_nanos) = current_wall_unix_nanos() {
-            self.inner.observe_at(value, now_nanos);
-        }
+    fn record(&mut self, samples: HistogramSamples<'_>, now_nanos: i64) {
+        self.inner.record_at(samples, now_nanos);
     }
 
     fn summary(&self) -> HistogramPercentileSummary {
@@ -839,8 +898,8 @@ impl DomainRollingHistogram {
         }
     }
 
-    fn observe(&mut self, value: f64, now: Timestamp) {
-        self.inner.observe_at(value, now.unix_nanos());
+    fn record(&mut self, samples: HistogramSamples<'_>, domain_now_nanos: i64) {
+        self.inner.record_at(samples, domain_now_nanos);
     }
 
     fn summary(&self, now: Option<Timestamp>) -> Option<HistogramPercentileSummary> {
@@ -864,7 +923,6 @@ struct RollingHistogramsSnapshot {
 
 #[derive(Debug)]
 struct RollingHistograms {
-    observed: bool,
     wall_1m: WallRollingHistogram,
     wall_15m: WallRollingHistogram,
     domain_1m: DomainRollingHistogram,
@@ -874,7 +932,6 @@ struct RollingHistograms {
 impl RollingHistograms {
     fn new(buckets: &'static [f64]) -> Self {
         Self {
-            observed: false,
             wall_1m: WallRollingHistogram::new(ONE_MINUTE, WALL_HISTOGRAM_1M_STEP, buckets),
             wall_15m: WallRollingHistogram::new(FIFTEEN_MINUTES, WALL_HISTOGRAM_15M_STEP, buckets),
             domain_1m: DomainRollingHistogram::new(ONE_MINUTE, DOMAIN_HISTOGRAM_1M_STEP, buckets),
@@ -895,7 +952,6 @@ impl RollingHistograms {
             return Self::new(buckets);
         };
         Self {
-            observed: true,
             wall_1m: WallRollingHistogram::from_snapshot(
                 &snapshot.wall_1m,
                 ONE_MINUTE,
@@ -923,13 +979,22 @@ impl RollingHistograms {
         }
     }
 
-    fn observe(&mut self, value: f64, domain_timestamp: Option<Timestamp>) {
-        self.observed = true;
-        self.wall_1m.observe(value);
-        self.wall_15m.observe(value);
-        if let Some(domain_timestamp) = domain_timestamp {
-            self.domain_1m.observe(value, domain_timestamp);
-            self.domain_15m.observe(value, domain_timestamp);
+    /// Records `samples` in every window: the wall windows at `wall_now_nanos` when the wall clock
+    /// has a nanosecond reading, the domain windows at `domain_now_nanos` when the samples carry
+    /// domain time.
+    fn record(
+        &mut self,
+        samples: HistogramSamples<'_>,
+        wall_now_nanos: Option<i64>,
+        domain_now_nanos: Option<i64>,
+    ) {
+        if let Some(wall_now_nanos) = wall_now_nanos {
+            self.wall_1m.record(samples, wall_now_nanos);
+            self.wall_15m.record(samples, wall_now_nanos);
+        }
+        if let Some(domain_now_nanos) = domain_now_nanos {
+            self.domain_1m.record(samples, domain_now_nanos);
+            self.domain_15m.record(samples, domain_now_nanos);
         }
     }
 
@@ -949,10 +1014,6 @@ impl RollingHistograms {
             domain_1m: self.domain_1m.to_snapshot(),
             domain_15m: self.domain_15m.to_snapshot(),
         }
-    }
-
-    fn was_observed(&self) -> bool {
-        self.observed
     }
 }
 
@@ -1149,6 +1210,9 @@ struct HistogramSeries {
     domain_started_at_nanos: AtomicI64,
     domain_last_at_nanos: AtomicI64,
     capacity: AtomicU64,
+    /// Whether anything was ever recorded. It is set while the rolling histograms are locked for
+    /// the recording, so a reader that sees it and then locks them also sees that recording.
+    observed: AtomicBool,
     rolling_histograms: Mutex<RollingHistograms>,
 }
 
@@ -1159,32 +1223,37 @@ impl HistogramSeries {
             domain_started_at_nanos: AtomicI64::new(NO_DOMAIN_TIMESTAMP),
             domain_last_at_nanos: AtomicI64::new(NO_DOMAIN_TIMESTAMP),
             capacity: AtomicU64::new(NO_HISTOGRAM_CAPACITY),
+            observed: AtomicBool::new(false),
             rolling_histograms: Mutex::new(RollingHistograms::new(buckets)),
         }
     }
 
-    fn observe_with_capacity(
+    /// Records one observation or one batch: it reads the wall clock once and locks the rolling
+    /// histograms once, however many samples a batch holds.
+    fn record(
         &self,
-        value: f64,
+        samples: HistogramSamples<'_>,
         capacity: Option<u64>,
         domain_timestamp: Option<Timestamp>,
     ) {
-        if !value.is_finite() {
-            return;
-        }
         if let Some(capacity) = capacity {
             self.capacity.store(capacity, AtomicOrdering::Relaxed);
         }
-        if let Some(domain_timestamp) = domain_timestamp {
-            observe_domain_timestamp(
-                &self.domain_started_at_nanos,
-                &self.domain_last_at_nanos,
-                domain_timestamp,
-            );
-        }
-        self.rolling_histograms
-            .lock()
-            .observe(value, domain_timestamp);
+        let domain_now_nanos = match domain_timestamp {
+            Some(domain_timestamp) => {
+                observe_domain_timestamp(
+                    &self.domain_started_at_nanos,
+                    &self.domain_last_at_nanos,
+                    domain_timestamp,
+                );
+                Some(domain_timestamp.unix_nanos())
+            }
+            None => None,
+        };
+        let wall_now_nanos = current_wall_unix_nanos();
+        let mut rolling_histograms = self.rolling_histograms.lock();
+        rolling_histograms.record(samples, wall_now_nanos, domain_now_nanos);
+        self.observed.store(true, AtomicOrdering::Relaxed);
     }
 
     fn from_snapshot(snapshot: &MetricHistogramSnapshot) -> Self {
@@ -1207,6 +1276,7 @@ impl HistogramSeries {
                 snapshot.domain_last_at_nanos.unwrap_or(NO_DOMAIN_TIMESTAMP),
             ),
             capacity: AtomicU64::new(NO_HISTOGRAM_CAPACITY),
+            observed: AtomicBool::new(snapshot.rolling_histograms.is_some()),
             rolling_histograms: Mutex::new(RollingHistograms::from_snapshot(
                 snapshot.rolling_histograms.as_ref(),
                 started_at,
@@ -1240,7 +1310,7 @@ impl HistogramSeries {
     }
 
     fn was_observed(&self) -> bool {
-        self.rolling_histograms.lock().was_observed()
+        self.observed.load(AtomicOrdering::Relaxed)
     }
 }
 
@@ -2120,11 +2190,30 @@ impl HistogramRecorder {
         if !value.is_finite() {
             return;
         }
-        self.series
-            .observe_with_capacity(value, capacity, domain_timestamp);
+        if let Some(samples) = HistogramSamples::one(value) {
+            self.series.record(samples, capacity, domain_timestamp);
+        }
         if let Some(prometheus) = &self.prometheus {
             prometheus.observe(value);
         }
+    }
+
+    fn observe_delivery_latencies(&self, latencies: &DeliveryLatencies<'_>) {
+        self.series.record(
+            HistogramSamples::Elapsed(&latencies.buckets),
+            None,
+            latencies.domain_timestamp,
+        );
+        let Some(prometheus) = &self.prometheus else {
+            return;
+        };
+        // The Prometheus client takes one sample per call. Its local histogram folds the batch
+        // without touching the shared child, which then takes the whole batch in one flush.
+        let local = prometheus.local();
+        for elapsed in elapsed_nanos(latencies.delivered_at_nanos, latencies.ingested_at) {
+            local.observe(Duration::from_nanos(elapsed).as_secs_f64());
+        }
+        local.flush();
     }
 }
 
@@ -2141,6 +2230,35 @@ impl HistogramRecorders {
             secondary.observe(value, capacity, domain_timestamp);
         }
     }
+
+    fn observe_delivery_latencies(&self, latencies: &DeliveryLatencies<'_>) {
+        self.primary.observe_delivery_latencies(latencies);
+        if let Some(secondary) = &self.secondary {
+            secondary.observe_delivery_latencies(latencies);
+        }
+    }
+}
+
+/// One batch as a node input accepts it.
+pub(crate) struct DeliveryObservation<'a> {
+    pub(crate) messages: u64,
+    pub(crate) bytes: u64,
+    /// The instant the input accepted the batch, which every row's delivery latency is measured
+    /// to.
+    pub(crate) delivered_at: Timestamp,
+    /// Every row's ingestion high watermark in Unix nanoseconds, the instant its delivery latency
+    /// is measured from.
+    pub(crate) ingested_at: &'a [i64],
+}
+
+/// The delivery latencies of one batch, as every latency series of a node input records them.
+struct DeliveryLatencies<'a> {
+    /// The kernel's fold of every latency, which the rolling histograms merge bucket by bucket.
+    buckets: ElapsedHistogram,
+    delivered_at_nanos: i64,
+    ingested_at: &'a [i64],
+    /// The batch's latest ingestion watermark, which places it in the domain-time windows.
+    domain_timestamp: Option<Timestamp>,
 }
 
 #[derive(Debug)]
@@ -2194,6 +2312,8 @@ impl MessageMetricsHandle {
 struct NodeInputMetricRecorders {
     batch: BatchMetricRecorders,
     delivery_latency: HistogramRecorders,
+    /// How one batch's delivery latencies fold into the latency histograms' buckets.
+    delivery_latency_layout: ElapsedLayout,
 }
 
 /// A task-local handle for one node input edge, including delivery latency.
@@ -2203,12 +2323,34 @@ pub(crate) struct NodeInputMetricsHandle {
 }
 
 impl NodeInputMetricsHandle {
-    pub(crate) fn observe_batch(
-        &self,
-        messages: u64,
-        bytes: u64,
-        domain_timestamp: Option<Timestamp>,
-    ) {
+    /// Records one delivered batch.
+    ///
+    /// The batch's traffic is stamped with its latest ingestion watermark. Every row ingested at or
+    /// before the delivery instant adds its delivery latency: one kernel pass folds them all into
+    /// buckets, and each latency series merges those buckets in one recording.
+    pub(crate) fn observe_delivery(&self, delivery: &DeliveryObservation<'_>) {
+        let delivered_at_nanos = delivery.delivered_at.unix_nanos();
+        let buckets = ElapsedHistogram::new(
+            &self.inner.delivery_latency_layout,
+            delivered_at_nanos,
+            delivery.ingested_at,
+        );
+        let domain_timestamp = buckets.latest().map(Timestamp::from_unix_nanos);
+        self.observe_batch(delivery.messages, delivery.bytes, domain_timestamp);
+        if buckets.total() == 0 {
+            return;
+        }
+        self.inner
+            .delivery_latency
+            .observe_delivery_latencies(&DeliveryLatencies {
+                buckets,
+                delivered_at_nanos,
+                ingested_at: delivery.ingested_at,
+                domain_timestamp,
+            });
+    }
+
+    fn observe_batch(&self, messages: u64, bytes: u64, domain_timestamp: Option<Timestamp>) {
         self.inner
             .batch
             .messages
@@ -2219,16 +2361,6 @@ impl NodeInputMetricsHandle {
             .batch
             .messages_per_batch
             .observe(messages.approx_into(), None, domain_timestamp);
-    }
-
-    pub(crate) fn observe_delivery_latency(
-        &self,
-        seconds: f64,
-        domain_timestamp: Option<Timestamp>,
-    ) {
-        self.inner
-            .delivery_latency
-            .observe(seconds, None, domain_timestamp);
     }
 }
 
@@ -2388,6 +2520,9 @@ impl RuntimeMetrics {
             "received",
             MESSAGES_TOTAL,
         );
+        let delivery_latency_layout =
+            HistogramConfig::for_buckets(internal_buckets_for_metric(DELIVERY_LATENCY_SECONDS))
+                .delivery_latency_layout();
         NodeInputMetricsHandle {
             inner: Arc::new(NodeInputMetricRecorders {
                 batch: self.resolve_batch_metric_recorders(messages_key.clone(), scope),
@@ -2395,6 +2530,7 @@ impl RuntimeMetrics {
                     with_metric(&messages_key, DELIVERY_LATENCY_SECONDS),
                     scope,
                 ),
+                delivery_latency_layout,
             }),
         }
     }
@@ -4389,6 +4525,12 @@ impl ClientIngestorSeries {
 mod tests {
     use super::*;
 
+    fn record_value_at(histogram: &mut TimeRollingHistogram, value: f64, now_nanos: i64) {
+        let samples = HistogramSamples::one(value)
+            .expect("a finite, non-negative test value has recorded units");
+        histogram.record_at(samples, now_nanos);
+    }
+
     fn assert_histogram_percentile_near(actual: Option<f64>, expected: f64) {
         let Some(actual) = actual else {
             panic!("expected histogram percentile near {expected}, got None");
@@ -4446,8 +4588,12 @@ mod tests {
             Some(&physical_node),
             None,
         );
-        input_metrics.observe_batch(3, 128, Some(Timestamp::from_unix_nanos(1_000_000_000)));
-        input_metrics.observe_delivery_latency(0.25, None);
+        input_metrics.observe_delivery(&DeliveryObservation {
+            messages: 3,
+            bytes: 128,
+            delivered_at: Timestamp::from_unix_nanos(1_250_000_000),
+            ingested_at: &[1_000_000_000; 3],
+        });
 
         let rendered = metrics.describe_global_target(&domain, "DEDUPLICATOR", &node);
         assert!(rendered.iter().any(|line| line.contains("metrics:")));
@@ -4638,7 +4784,7 @@ mod tests {
             Duration::from_secs(10),
             INTERNAL_MESSAGE_BATCH_BUCKETS,
         );
-        histogram.observe_at(65_536.0, 0);
+        record_value_at(&mut histogram, 65_536.0, 0);
 
         let summary = histogram.summary_at(1_000_000_000);
         assert_histogram_percentile_near(summary.p50, 65_536.0);
@@ -4693,8 +4839,8 @@ mod tests {
             Duration::from_secs(10),
             MESSAGE_BATCH_BUCKETS,
         );
-        histogram.observe_at(10.0, 0);
-        histogram.observe_at(20.0, 0);
+        record_value_at(&mut histogram, 10.0, 0);
+        record_value_at(&mut histogram, 20.0, 0);
 
         let present = histogram.summary_at(59 * 1_000_000_000);
         assert_histogram_percentile_near(present.p50, 10.0);
@@ -4714,9 +4860,9 @@ mod tests {
             MESSAGE_BATCH_BUCKETS,
         );
         for _ in 0..100 {
-            histogram.observe_at(2.0, 0);
+            record_value_at(&mut histogram, 2.0, 0);
         }
-        histogram.observe_at(500.0, 0);
+        record_value_at(&mut histogram, 500.0, 0);
 
         let summary = histogram.summary_at(1_000_000_000);
         assert_histogram_percentile_near(summary.p50, 2.0);
@@ -4735,10 +4881,10 @@ mod tests {
             LATENCY_BUCKETS,
         );
         for _ in 0..90 {
-            histogram.observe_at(0.001, 0);
+            record_value_at(&mut histogram, 0.001, 0);
         }
         for _ in 0..10 {
-            histogram.observe_at(3_600.0, 0);
+            record_value_at(&mut histogram, 3_600.0, 0);
         }
 
         let summary = histogram.summary_at(1_000_000_000);
@@ -4770,9 +4916,9 @@ mod tests {
         let old = now_wall - 2 * 60 * 1_000_000_000;
         {
             let mut rolling = histogram.rolling_histograms.lock();
-            rolling.observed = true;
-            rolling.wall_1m.inner.observe_at(10.0, old);
-            rolling.wall_15m.inner.observe_at(10.0, old);
+            record_value_at(&mut rolling.wall_1m.inner, 10.0, old);
+            record_value_at(&mut rolling.wall_15m.inner, 10.0, old);
+            histogram.observed.store(true, AtomicOrdering::Relaxed);
         }
         metrics.series.histograms.insert(key, Arc::new(histogram));
 
@@ -5282,5 +5428,204 @@ mod tests {
                 .iter()
                 .any(|counter| { counter.key.metric == MESSAGES_TOTAL && counter.value == 9 })
         );
+    }
+
+    fn recorded_values(histogram: &HdrHistogram<u64>) -> Vec<(u64, u64)> {
+        histogram
+            .iter_recorded()
+            .map(|value| (value.value_iterated_to(), value.count_at_value()))
+            .collect()
+    }
+
+    fn deduplicator_input(
+        metrics: &RuntimeMetrics,
+        branch_key: Option<&str>,
+    ) -> NodeInputMetricsHandle {
+        metrics.resolve_node_input_metrics(
+            &DomainName::parse("main").expect("valid domain"),
+            ModelKind::Deduplicator,
+            &ModelName::parse("dedupe").expect("valid identifier"),
+            &RelayName::parse("events").expect("valid identifier"),
+            Some(&ClusterNodeName::parse("node-1").expect("valid name")),
+            branch_key,
+        )
+    }
+
+    fn delivery_latency_line(metrics: &RuntimeMetrics) -> Option<String> {
+        metrics
+            .describe_global_target(
+                &DomainName::parse("main").expect("valid domain"),
+                "DEDUPLICATOR",
+                ModelName::parse("dedupe").expect("valid identifier"),
+            )
+            .into_iter()
+            .find(|line| line.contains("delivery_latency_seconds received relay=events"))
+    }
+
+    fn prometheus_sample(rendered: &str, series: &str, fragment: &str) -> Option<f64> {
+        rendered
+            .lines()
+            .find(|line| line.starts_with(series) && line.contains(fragment))
+            .and_then(|line| line.rsplit(' ').next())
+            .and_then(|value| value.parse().ok())
+    }
+
+    #[test]
+    fn a_batch_of_latencies_fills_the_buckets_recording_each_latency_would() {
+        let config =
+            HistogramConfig::for_buckets(internal_buckets_for_metric(DELIVERY_LATENCY_SECONDS));
+        let layout = config.delivery_latency_layout();
+        let now = 0_i64;
+        let mut instants = vec![i64::MIN, -i64::MAX, 1];
+        for millis in 0..=31_000_i64 {
+            for remainder in [0, 1, 499_999, 500_001, 999_999] {
+                instants.push(now - (millis * 1_000_000 + remainder));
+            }
+        }
+
+        let mut one_at_a_time = config.new_histogram();
+        for elapsed in elapsed_nanos(now, &instants) {
+            let seconds = Duration::from_nanos(elapsed).as_secs_f64();
+            HistogramSamples::one(seconds)
+                .expect("an elapsed time has recorded units")
+                .record_into(&mut one_at_a_time);
+        }
+        let mut per_batch = config.new_histogram();
+        let batch = ElapsedHistogram::new(&layout, now, &instants);
+        HistogramSamples::Elapsed(&batch).record_into(&mut per_batch);
+
+        assert_eq!(batch.total(), one_at_a_time.len());
+        assert_eq!(recorded_values(&per_batch), recorded_values(&one_at_a_time));
+    }
+
+    #[test]
+    fn a_delivered_batch_records_each_series_once_with_its_latest_watermark() {
+        let metrics = RuntimeMetrics::default();
+        let input = deduplicator_input(&metrics, Some(r#"{"tenant":"acme"}"#));
+
+        input.observe_delivery(&DeliveryObservation {
+            messages: 4,
+            bytes: 64,
+            delivered_at: Timestamp::from_unix_nanos(10_000_000_000),
+            ingested_at: &[9_900_000_000, 7_500_000_000, 10_500_000_000, 10_000_000_000],
+        });
+
+        let line = delivery_latency_line(&metrics).expect("delivery latency should be rendered");
+        assert!(line.contains(" p50_1m=0.1 "), "{line}");
+        assert!(line.contains(" p90_1m=2.5 "), "{line}");
+        assert!(line.contains(" domain_p50_1m=0.1 "), "{line}");
+        assert!(line.contains(" domain_p99_15m=2.5"), "{line}");
+
+        let rendered = metrics.prometheus_text();
+        let count = prometheus_sample(&rendered, "nervix_delivery_latency_seconds_count", "dedupe");
+        assert_eq!(count, Some(3.0), "{rendered}");
+        let zero = prometheus_sample(
+            &rendered,
+            "nervix_delivery_latency_seconds_bucket",
+            "le=\"0.001\"",
+        );
+        assert_eq!(zero, Some(1.0), "{rendered}");
+        let tenth = prometheus_sample(
+            &rendered,
+            "nervix_delivery_latency_seconds_bucket",
+            "le=\"0.1\"",
+        );
+        assert_eq!(tenth, Some(2.0), "{rendered}");
+        let five = prometheus_sample(
+            &rendered,
+            "nervix_delivery_latency_seconds_bucket",
+            "le=\"5\"",
+        );
+        assert_eq!(five, Some(3.0), "{rendered}");
+        let sum = prometheus_sample(&rendered, "nervix_delivery_latency_seconds_sum", "dedupe")
+            .expect("the latency sum is exported");
+        assert!((sum - 2.6).abs() < 1e-9, "{rendered}");
+
+        let node_id = ClusterNodeName::parse("node-1").expect("valid name");
+        let domain = DomainName::parse("main").expect("valid domain");
+        let node = ModelName::parse("dedupe").expect("valid identifier");
+        let branch = metrics.snapshot_branch_target(
+            r#"{"tenant":"acme"}"#,
+            &domain,
+            ModelKind::Deduplicator,
+            &node,
+            &node_id,
+        );
+        let global =
+            metrics.snapshot_global_target(&domain, ModelKind::Deduplicator, &node, &node_id);
+        for snapshot in [branch, global] {
+            let latency = snapshot
+                .histograms
+                .iter()
+                .find(|histogram| histogram.key.metric == DELIVERY_LATENCY_SECONDS)
+                .expect("each latency series records the batch");
+            assert_eq!(latency.domain_started_at_nanos, Some(10_500_000_000));
+            assert_eq!(latency.domain_last_at_nanos, Some(10_500_000_000));
+            let messages = snapshot
+                .counters
+                .iter()
+                .find(|counter| counter.key.metric == MESSAGES_TOTAL)
+                .expect("each traffic series records the batch");
+            assert_eq!(messages.value, 4);
+            assert_eq!(messages.domain_last_at_nanos, Some(10_500_000_000));
+        }
+    }
+
+    #[test]
+    fn a_batch_ingested_after_its_delivery_records_traffic_but_no_latency() {
+        let metrics = RuntimeMetrics::default();
+        let input = deduplicator_input(&metrics, None);
+
+        input.observe_delivery(&DeliveryObservation {
+            messages: 2,
+            bytes: 32,
+            delivered_at: Timestamp::from_unix_nanos(1_000),
+            ingested_at: &[1_001, 2_000],
+        });
+
+        assert_eq!(delivery_latency_line(&metrics), None);
+        let rendered = metrics.prometheus_text();
+        assert!(
+            !rendered.contains("nervix_delivery_latency_seconds_count"),
+            "{rendered}"
+        );
+        let messages = prometheus_sample(&rendered, "nervix_messages_total", "dedupe");
+        assert_eq!(messages, Some(2.0), "{rendered}");
+    }
+
+    #[test]
+    fn an_older_batch_leaves_the_latency_domain_time_at_the_latest_watermark() {
+        let metrics = RuntimeMetrics::default();
+        let input = deduplicator_input(&metrics, None);
+
+        input.observe_delivery(&DeliveryObservation {
+            messages: 1,
+            bytes: 16,
+            delivered_at: Timestamp::from_unix_nanos(60_000_000_000),
+            ingested_at: &[59_900_000_000],
+        });
+        input.observe_delivery(&DeliveryObservation {
+            messages: 1,
+            bytes: 16,
+            delivered_at: Timestamp::from_unix_nanos(60_000_000_000),
+            ingested_at: &[15_000_000_000],
+        });
+
+        let snapshot = metrics.snapshot_global_target(
+            &DomainName::parse("main").expect("valid domain"),
+            ModelKind::Deduplicator,
+            &ModelName::parse("dedupe").expect("valid identifier"),
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+        );
+        let latency = snapshot
+            .histograms
+            .iter()
+            .find(|histogram| histogram.key.metric == DELIVERY_LATENCY_SECONDS)
+            .expect("the latency series records both batches");
+        assert_eq!(latency.domain_started_at_nanos, Some(15_000_000_000));
+        assert_eq!(latency.domain_last_at_nanos, Some(59_900_000_000));
+        let line = delivery_latency_line(&metrics).expect("delivery latency should be rendered");
+        assert!(line.contains(" p99_1m=30.1 "), "{line}");
+        assert!(line.contains(" domain_p99_1m=0.1 "), "{line}");
     }
 }

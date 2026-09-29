@@ -888,7 +888,7 @@ pub(super) type BranchedEntrypointInput = RelayRecordBatch;
 
 pub(super) struct BranchedEntrypointBatch {
     pub(super) batch: RuntimeRecordBatch,
-    pub(super) metadata: Vec<RuntimeRecordMetadata>,
+    pub(super) metadata: RecordMetadataColumns,
     pub(super) keys: Vec<Option<BranchKey>>,
     pub(super) acks: Vec<AckSet>,
 }
@@ -910,17 +910,18 @@ impl BranchedEntrypointBatch {
             ));
         }
         let mut batches = Vec::<Arc<RuntimeRecordBatch>>::new();
-        let mut metadata = Vec::<RuntimeRecordMetadata>::new();
+        let mut metadata_parts = Vec::<RecordMetadataColumns>::new();
         let mut keys = Vec::<Option<BranchKey>>::new();
         let mut acks = Vec::<AckSet>::new();
 
         for input in inputs {
             let parts = input.into_unkeyed_parts();
             batches.push(parts.batch);
-            metadata.extend(parts.metadata);
+            metadata_parts.push(parts.metadata);
             keys.extend(parts.keys);
             acks.extend(parts.acks);
         }
+        let metadata = RecordMetadataColumns::concat(&metadata_parts);
         let batch_refs = batches.iter().map(Arc::as_ref).collect::<Vec<_>>();
         let batch = match RuntimeRecordBatch::concat(&batch_refs) {
             Ok(batch) => batch,
@@ -1010,10 +1011,12 @@ impl BranchedEntrypointBatch {
                 ));
             }
         };
-        let mut metadata = Vec::with_capacity(selected_rows.len());
+        let metadata = self.metadata.take(&selected_rows).verified(
+            "the selection predicate spans this batch's rows, and its metadata has one entry for \
+             every row",
+        );
         let mut acks = Vec::with_capacity(selected_rows.len());
         for row in selected_rows {
-            metadata.push(self.metadata[row].clone());
             acks.push(match ack_boundary {
                 BranchInstanceAckBoundary::Preserve => self.acks[row].clone(),
                 BranchInstanceAckBoundary::Reingestor(AckMode::Attached) => {

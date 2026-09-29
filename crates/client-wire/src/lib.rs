@@ -77,7 +77,7 @@ pub use frame::{
     ClientFrame, EncodedFrame, FrameError, FrameRoot, FrameViolation, ServerFrame, UploadFrame,
     UploadReplyFrame, VerifiedFrame,
 };
-pub use limits::{LimitsError, SessionLimitSettings, SessionLimits};
+pub use limits::{LimitsError, MAX_IN_FLIGHT_REQUESTS, SessionLimitSettings, SessionLimits};
 pub use producer::{
     CloseIngestorDisposition, CloseIngestorOutcome, CloseIngestorRequest, OpenIngestorDisposition,
     OpenIngestorOutcome, OpenIngestorRequest, ProducerAdmissionChanged, ProducerEnded, ProducerId,

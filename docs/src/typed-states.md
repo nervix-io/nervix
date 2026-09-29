@@ -138,6 +138,11 @@ raw on the wire, while callers see the state the format describes. Arrow batches
 data-plane payload throughout this conversion; codecs use typed builders and column values, and a
 single addressed message is a view into a batch.
 
+A relay batch carries its rows' ingestion watermarks the same way, in two Arrow buffers of
+Unix-nanosecond timestamps beside the payload. A kernel reads them as `i64` lanes; a row addressed
+on its own, the interconnect wire, and a materialized-state snapshot receive typed timestamps,
+converted once where the row leaves the batch.
+
 A conversion failure never becomes another valid payload value. The MongoDB sink returns a typed
 per-record failure if a value cannot be represented in BSON, including an unsigned value above
 BSON's signed range. It does not publish that record with a replacement BSON null or a changed

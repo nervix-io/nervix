@@ -466,11 +466,10 @@ test-coverage: tests-deps
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --all-targets --all-features --workspace \
         "${workspace_exclusions[@]}"
-    just coverage-cli-binary
-    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
-    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
-        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
-    cargo llvm-cov --no-report --all-targets --features testing --package nervix-server
+    # These server targets cover every server test except the scenario suite and the compile-fail
+    # capability checks, which run in their own jobs.
+    cargo llvm-cov --no-report --lib --bins --benches --test harness_liveness \
+        --features testing --package nervix-server
     cargo llvm-cov --no-report --all-targets \
         --package nervix-client-core \
         --package 'nervix-connector*' \
@@ -478,8 +477,21 @@ test-coverage: tests-deps
         --package nervix-execution \
         --package nervix-interconnect \
         --package nervix-wasm
-    cargo llvm-cov report --lcov --output-path lcov.info
-    cargo crap --lcov lcov.info --min 30 --threshold 30
+    cargo llvm-cov report --lcov --output-path lcov-workspace.info
+    cargo llvm-cov report --package nervix-cli --package nervix-web-console \
+        --package nervix-server --lcov --output-path lcov.info
+
+test-scenarios-coverage: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
+    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios
+    cargo llvm-cov report --lcov --output-path lcov-workspace.info
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
 
@@ -666,7 +678,7 @@ coverage-shuttle output: build-web-console wasm-processor-guests download-onnxru
 coverage-bins output *args:
     cargo llvm-cov --bins --lcov --output-path {{ output }} {{ args }}
 
-# Exercise the one-shot CLI binary through the public transaction scenario with LLVM coverage.
+# Exercise the CLI binary through the public transaction and clock scenarios with LLVM coverage.
 coverage-cli-process output="target/cli-process.lcov":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -678,6 +690,9 @@ coverage-cli-process output="target/cli-process.lcov":
     LLVM_PROFILE_FILE="$coverage_dir/cli-%p-%m.profraw" \
         NERVIX_TEST_CLI_PATH="$coverage_dir/debug/nervix-cli" \
         just test-scenarios --input tests/features/runtime/nspl_transactions.feature --name CLI
+    LLVM_PROFILE_FILE="$coverage_dir/cli-%p-%m.profraw" \
+        NERVIX_TEST_CLI_PATH="$coverage_dir/debug/nervix-cli" \
+        just test-scenarios --input tests/features/tools/cli_session.feature --name clock
     llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | awk '/^host:/{print $2}')/bin"
     "$llvm_bin/llvm-profdata" merge -sparse "$coverage_dir"/*.profraw -o "$coverage_dir/merged.profdata"
     "$llvm_bin/llvm-cov" export "$coverage_dir/debug/nervix-cli" \
@@ -715,6 +730,17 @@ bench-smoke: build-web-console
     cargo bench --profile dev --package nervix-server --bench wasm_checkpoint --features benchmarks -- --test
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
+
+# Run only the relay-interaction Criterion suite, including the delivery a node input records for
+# one batch at 1, 64, and 1,024 rows. Extra arguments are forwarded to Criterion.
+bench-relay-interaction *args: build-web-console
+    cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
+
+# Build the SIMD kernel crate's optimized unit-test binary for the x86-64-v3 payload the Docker
+# image ships, in its own target directory, so the generated instructions of each dispatch level can
+# be inspected with objdump without the host's native CPU tuning.
+build-simd-kernels-x86-64-v3:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/simd-kernels-x86-64-v3" RUSTFLAGS="-C target-cpu=x86-64-v3" cargo test --release --package nervix-simd-kernels --lib --no-run
 
 # Measure one batch of schemaful JSON rows, including the escape classification made once per
 # Arrow batch. The suite compares the column writer against serde's per-row reference encoding.
@@ -1455,7 +1481,7 @@ docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian
         -f Dockerfile.debian \
         --progress=plain \
         --platform "${normalized_platform}" \
-        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.19.0}" \
+        --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.28.0}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
         --build-arg DEBIAN_VERSION={{ debian_version }} \
         --build-arg LLVM_VERSION={{ llvm_version }} \

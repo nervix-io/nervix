@@ -311,6 +311,9 @@ and after topology at stable positions, then offers **Before**, **Changes**, and
 parallel relations, shared gates, ownership moves, rebuilds, and state resets. A domain-wide pause
 gets an explicit domain outline; a force flush outside the pictured subgraph remains visible in
 the domain summary. An incomplete or stale preview is marked, and a refresh obtains a new basis.
+The console reads a report again only when the inspector opens or changes its target, when the
+attached transaction's position, state, or applied count changes, or when the operator refreshes;
+a delivered report never requests itself again.
 Historical retained topology is drawn from the report rather than a live graph snapshot. Selecting
 one operation still sends the whole-transaction preview identity on commit. See
 [Web Console](./client-tools-web-console.md#inspecting-a-transaction) for the controls.

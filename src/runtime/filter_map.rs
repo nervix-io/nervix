@@ -558,10 +558,9 @@ pub(super) async fn plan_filter_map_messages(
                         error
                     ),
                 })?;
-        let output_metadata = success_input_rows
-            .iter()
-            .map(|input_row| metadata[*input_row].clone())
-            .collect::<Vec<_>>();
+        let output_metadata = metadata.take(&success_input_rows).verified(
+            "the program selects rows of this batch, whose metadata has one entry for every row",
+        );
         let output_acks = success_input_rows
             .iter()
             .map(|input_row| std::mem::take(&mut acks[*input_row]))
@@ -774,10 +773,9 @@ pub(super) async fn plan_emitter_filter_map_batch(
                 emitter.as_str()
             ),
         })?;
-        let metadata = successful_input_rows
-            .iter()
-            .map(|input_row| input.metadata[*input_row].clone())
-            .collect::<Vec<_>>();
+        let metadata = input.metadata.take(&successful_input_rows).verified(
+            "the program selects rows of this batch, whose metadata has one entry for every row",
+        );
         let output_acks = successful_input_rows
             .iter()
             .map(|input_row| std::mem::take(&mut acks[*input_row]))

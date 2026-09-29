@@ -138,6 +138,10 @@ node incarnation causes the leader to select and commit another eligible incarna
 eligible, the authority becomes unassigned and the paced clock is unavailable for execution until
 an owner is committed again; the mapping itself remains replicated.
 
+Application-health probes finish their bounded attempts despite concurrent gossip updates. This
+allows continuous failures to exclude a stopped authority even after its advertised endpoint has
+changed; a stale healthy observation must not leave it indefinitely eligible for clock production.
+
 On each node, a producer task exists only when all of these values agree with committed runtime
 state:
 

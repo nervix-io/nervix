@@ -139,6 +139,7 @@ nervix-models = { workspace = true, features = ["arrow"] }
 nervix-nspl = { workspace = true }
 nervix-recovery = { workspace = true }
 nervix-roto = { workspace = true }
+nervix-simd-kernels = { workspace = true }
 nervix-vm = { workspace = true }
 nervix-wasm = { workspace = true }
 nonzero_ext = { workspace = true }

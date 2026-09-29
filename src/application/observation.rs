@@ -2416,7 +2416,7 @@ mod tests {
         *,
     };
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn remote_observation_errors_retain_request_and_decode_causes() {
         let TestService {
             service,

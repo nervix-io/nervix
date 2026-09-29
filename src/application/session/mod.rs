@@ -52,7 +52,8 @@ use nervix_client_wire::{
     CommandRequest, DetachDomainClockRequest, DomainClockAttachDisposition,
     DomainClockAttachOutcome, DomainClockDetachDisposition, DomainClockDetachOutcome, DomainList,
     DomainSelection, EncodedFrame, InspectTransactionRequest, InspectionOutcome,
-    OpenIngestorRequest, Reply, ReplyBody, ReplyDelivery, RequestCancelled, RequestId,
+    MAX_IN_FLIGHT_REQUESTS, OpenIngestorRequest, Reply, ReplyBody, ReplyDelivery,
+    RequestCancelled, RequestId,
     RequestRejected, RequestRejection, SelectDomainRequest, ServerFrame, SessionEndReason,
     SessionEnding, SessionLimits, SubscribeDisposition, SubscribeOutcome, SubscribeRequest,
     SubscriptionType, SuggestRequest, UnsubscribeDisposition, UnsubscribeOutcome,
@@ -87,11 +88,6 @@ use super::{
     subscription::{OpenedSubscription, SessionDelivery, SessionSubscriptions, SessionView},
     transaction::TransactionInspectionOutcome,
 };
-
-/// How many requests one session may have in flight. A request beyond it is refused rather than
-/// queued, so a client flooding one session cannot grow what the server holds for it. It is also
-/// what bounds the queue of ordered requests waiting for the lane.
-const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 
 /// The transport a session arrived on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

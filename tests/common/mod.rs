@@ -14,6 +14,7 @@ pub(crate) mod producer_session;
 pub(crate) mod raw_session;
 pub(crate) mod redis_client;
 pub(crate) mod scenario_phase;
+pub(crate) mod scenario_schedule;
 pub(crate) mod server_process;
 pub(crate) mod server_process_cluster;
 pub(crate) mod status_request;
