@@ -8681,6 +8681,143 @@ mod tests {
     }
 
     #[test]
+    fn typed_clock_replies_update_the_selected_clock_and_event_log() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let domain = domain_name("tenant");
+            let mut requests = SessionRequests::new();
+            let attach = requests.issue(ConsoleRequest::DomainClockAttach {
+                request: AttachDomainClockRequest {
+                    domain: domain.clone(),
+                },
+                connection_generation: 1,
+                origin: ClockRequestOrigin::Automatic,
+            });
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: attach,
+                    body: ReplyBody::DomainClockAttach(DomainClockAttachOutcome {
+                        disposition: DomainClockAttachDisposition::Attached {
+                            domain: domain.clone(),
+                            clock: DomainClockObservation {
+                                generation: 3,
+                                state: DomainClockObservedState::Stopped,
+                            },
+                        },
+                        message: "following".to_string(),
+                    }),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert!(matches!(
+                signals.clock_display.get_untracked(),
+                ClockDisplay::Following { clock, .. } if clock.generation == 3
+            ));
+
+            let detach = requests.issue(ConsoleRequest::DomainClockDetach {
+                request: DetachDomainClockRequest {
+                    domain: domain.clone(),
+                },
+                connection_generation: 1,
+                origin: ClockRequestOrigin::Repl,
+            });
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: detach,
+                    body: ReplyBody::DomainClockDetach(DomainClockDetachOutcome {
+                        disposition: DomainClockDetachDisposition::Detached(domain.clone()),
+                        message: "detached".to_string(),
+                    }),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert_eq!(
+                signals.clock_display.get_untracked(),
+                ClockDisplay::Detached(domain)
+            );
+            let lines = signals.terminal_lines.get_untracked().into_lines();
+            assert!(lines[0].line.text.contains("attached: following"));
+            assert!(lines[1].line.text.contains("detached: detached"));
+        });
+    }
+
+    #[test]
+    fn rejected_clock_requests_report_failure_and_refuse_automatic_following() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let domain = domain_name("tenant");
+            let mut requests = SessionRequests::new();
+            let attach = requests.issue(ConsoleRequest::DomainClockAttach {
+                request: AttachDomainClockRequest {
+                    domain: domain.clone(),
+                },
+                connection_generation: 1,
+                origin: ClockRequestOrigin::Automatic,
+            });
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: attach,
+                    body: ReplyBody::Rejected(nervix_client_wire::RequestRejected {
+                        rejection: nervix_client_wire::RequestRejection::InvalidRequest,
+                        field: None,
+                        message: "attachment refused".to_string(),
+                    }),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert!(matches!(
+                signals.clock_display.get_untracked(),
+                ClockDisplay::Refused { domain: selected, reason }
+                    if selected == domain && reason == "attachment refused"
+            ));
+
+            let detach = requests.issue(ConsoleRequest::DomainClockDetach {
+                request: DetachDomainClockRequest {
+                    domain: domain.clone(),
+                },
+                connection_generation: 1,
+                origin: ClockRequestOrigin::Automatic,
+            });
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: detach,
+                    body: ReplyBody::Rejected(nervix_client_wire::RequestRejected {
+                        rejection: nervix_client_wire::RequestRejection::InvalidRequest,
+                        field: None,
+                        message: "detachment refused".to_string(),
+                    }),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert!(matches!(
+                signals.clock_display.get_untracked(),
+                ClockDisplay::Refused { .. }
+            ));
+            let lines = signals.terminal_lines.get_untracked().into_lines();
+            assert!(
+                lines[0]
+                    .line
+                    .text
+                    .contains("attach failed: attachment refused")
+            );
+            assert!(
+                lines[1]
+                    .line
+                    .text
+                    .contains("detach failed: detachment refused")
+            );
+        });
+    }
+
+    #[test]
     fn automatic_clock_transition_orders_requests_and_reports_a_closed_queue() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
