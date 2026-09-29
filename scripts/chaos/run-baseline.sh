@@ -7,6 +7,8 @@ fixture_file="${script_dir}/fixtures/baseline.nspl"
 fixture_generator="${script_dir}/fixtures/generate-baseline.jq"
 # shellcheck source=tool-images.sh
 source "${script_dir}/tool-images.sh"
+# shellcheck source=docker-event-recording.sh
+source "${script_dir}/docker-event-recording.sh"
 
 usage() {
     cat <<EOF
@@ -261,6 +263,10 @@ image_id=""
 image_digest=""
 signal_name=""
 failure_category="controller"
+# The live recording is the run's complete Docker event evidence and is never trimmed; a recording
+# that outgrows this bound fails the run instead.
+docker_event_bytes_limit=67108864
+run_event_recording_covered=false
 
 export CHAOS_RUN_ID="${run_id}"
 export CHAOS_CLUSTER_ID="${cluster_id}"
@@ -301,6 +307,7 @@ jq -n \
     --argjson records "${record_count}" \
     --argjson timeout_seconds "${overall_timeout}" \
     --argjson outage_seconds "${outage_seconds}" \
+    --argjson docker_event_bytes "${docker_event_bytes_limit}" \
     '{
       run_id: $run_id,
       compose_project: $project,
@@ -315,7 +322,7 @@ jq -n \
       artifact_limits: {
         fixture_records: 1000,
         compose_log_bytes: 2097152,
-        docker_event_bytes: 2097152,
+        docker_event_bytes: $docker_event_bytes,
         metrics_bytes_per_node: 1048576,
         restart_log_bytes: 2097152,
         observer_log_bytes_per_restart: 1048576,
@@ -471,15 +478,11 @@ capture_diagnostics() {
         trim_file "${artifact_dir}/diagnostics/compose.log" 2097152
     fi
 
-    local events_since
-    events_since="$(jq -r '.started_at' "${artifact_dir}/manifest.json")"
-    timeout --foreground --kill-after=5s 20s docker events \
-        --since "${events_since}" \
-        --until "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        --filter "label=io.nervix.chaos.run=${run_id}" \
-        --format '{{json .}}' \
-        >"${artifact_dir}/diagnostics/docker-events.ndjson" 2>&1
-    trim_file "${artifact_dir}/diagnostics/docker-events.ndjson" 2097152
+    # The recording is closed only after every heal, so it holds the run's own recovery actions.
+    if docker_event_recording_finish diagnostics/docker-events.recording.json \
+        "${docker_event_bytes_limit}"; then
+        run_event_recording_covered=true
+    fi
 
     mapfile -t owned_containers < <(
         docker container ls --all --quiet \
@@ -530,14 +533,6 @@ finish() {
         fi
     fi
     if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links ]]; then
-        if [[ -n "${partition_event_recorder_pid:-}" ]]; then
-            kill "${partition_event_recorder_pid}" 2>/dev/null
-            wait "${partition_event_recorder_pid}" 2>/dev/null
-        fi
-        if [[ -n "${degradation_event_recorder_pid:-}" ]]; then
-            kill "${degradation_event_recorder_pid}" 2>/dev/null
-            wait "${degradation_event_recorder_pid}" 2>/dev/null
-        fi
         local heal_prefix=network
         if [[ "${scenario}" == partition-recovery ]]; then
             heal_prefix=partition
@@ -566,6 +561,19 @@ finish() {
         fi
     fi
     capture_diagnostics
+    # A run that otherwise passed still fails when its Docker event evidence is incomplete. A run
+    # that already failed keeps its own classification, with the recording's bounds as evidence.
+    if [[ "${status}" -eq 0 && "${run_event_recording_covered}" != true ]]; then
+        status=1
+        failure_category=controller
+        current_phase='Docker event recording'
+        if [[ -s "${artifact_dir}/diagnostics/docker-events.recording.json" ]]; then
+            printf 'controller failure: %s; bounds in diagnostics/docker-events.recording.json\n' \
+                "$(jq -r '.reason' "${artifact_dir}/diagnostics/docker-events.recording.json")" >&2
+        else
+            printf '%s\n' 'controller failure: the run has no live Docker event recording' >&2
+        fi
+    fi
 
     if [[ "${status}" -ne 0 && ( "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links ) ]]; then
         local reproducer_image="${image_id:-${image_ref}}"
@@ -591,9 +599,11 @@ finish() {
         local evidence_path
         local evidence_paths=()
         for evidence_path in \
-            diagnostics/docker-events.ndjson diagnostics/containers.json \
+            diagnostics/docker-events.ndjson diagnostics/docker-events.stderr \
+            diagnostics/containers.json \
             diagnostics/compose.log crash/fault-command.json crash/pumba.txt \
-            crash/kill-events.ndjson crash/killed.json crash/held.json \
+            crash/kill-events.ndjson crash/all-node-events.ndjson \
+            crash/killed.json crash/held.json \
             crash/started.json crash/final.json crash/before-all-nodes.json \
             crash/status-nervix-1.attempt.txt \
             crash/status-nervix-2.attempt.txt crash/status-nervix-3.attempt.txt \
@@ -606,12 +616,17 @@ finish() {
                 evidence_paths+=("${evidence_path}")
             fi
         done
+        # Every Docker-event window records the bounds of the recording it was read from.
+        while IFS= read -r evidence_path; do
+            evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
+        done < <(find "${artifact_dir}" -type f -name '*.recording.json' -size +0c 2>/dev/null | sort)
         if [[ "${scenario}" == pause-resume ]]; then
             while IFS= read -r evidence_path; do
                 evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
             done < <(find "${artifact_dir}/pauses" -type f \
                 \( -name 'result.json' -o -name 'duration.json' -o -name 'pause-events.ndjson' \
-                -o -name 'pumba.txt' -o -name 'fault-command.json' -o -name 'observer.log' \) \
+                -o -name 'all-node-events.ndjson' -o -name 'pumba.txt' \
+                -o -name 'fault-command.json' -o -name 'observer.log' \) \
                 -size +0c 2>/dev/null)
         fi
         if [[ "${scenario}" == partition-recovery ]]; then
@@ -628,13 +643,14 @@ finish() {
                 -o -name 'links-*.json' -o -name '*-netem.json' -o -name '*-iptables.json' \
                 -o -name '*-netem.log' -o -name '*-iptables.log' -o -name 'control-*.json' \
                 -o -name 'consumer-group-*.json' -o -name 'node-events.ndjson' \
+                -o -name 'kill-events.ndjson' \
                 -o -name 'isolation-boundary.json' -o -name 'observer.log' \) \
                 -size +0c 2>/dev/null | sort)
         fi
         if [[ "${scenario}" == degraded-links ]]; then
             for evidence_path in results/degraded-progress.json results/degraded-links.json \
                 degraded/samples.ndjson degraded/actions.ndjson \
-                degraded/findings.ndjson degraded/docker-events.ndjson \
+                degraded/findings.ndjson \
                 degraded/baseline.json diagnostics/network-heal.txt; do
                 if [[ -s "${artifact_dir}/${evidence_path}" ]]; then
                     evidence_paths+=("${evidence_path}")
@@ -732,6 +748,33 @@ ensure_tool_image() {
     fi
     printf 'pulling required tool image %s\n' "${tool_image}"
     run_bounded 180 docker pull "${tool_image}"
+}
+
+# Starts the run's live Docker event recording before the run creates its first container, so the
+# recording holds every event of every run-owned container.
+start_run_event_recording() {
+    local owned
+    owned="$(run_bounded 20 docker container ls --all --quiet \
+        --filter "label=io.nervix.chaos.run=${run_id}")" \
+        || setup_error 'could not list run-owned containers before recording Docker events'
+    [[ -z "${owned}" ]] \
+        || setup_error "containers labeled for run ${run_id} already exist; remove them with just chaos cleanup --run-id ${run_id}"
+    local start_status=0
+    docker_event_recording_start "${artifact_dir}" diagnostics/docker-events.ndjson "${run_id}" \
+        "${CHAOS_PROBE_IMAGE}" "$((overall_timeout + 900))" || start_status=$?
+    if ((start_status == 3)); then
+        setup_error 'the Docker daemon stamps events outside the time this controller measures around them; run chaos against the local Docker daemon'
+    fi
+    if ((start_status != 0)); then
+        failure_category=controller
+        printf '%s\n' 'the Docker event subscriber never recorded its start marker; see diagnostics/docker-events.stderr' >&2
+        exit 1
+    fi
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.docker_event_recording = {recording: "diagnostics/docker-events.ndjson", bounds: "diagnostics/docker-events.recording.json", subscriber_filter: $filter, covered_from_ns: $started}' \
+        --arg filter "label=io.nervix.chaos.run=${run_id}" \
+        --argjson started "${docker_event_recording_started_ns}"
 }
 
 # Chooses this run's network away from every Docker network and host route, then fixes the node
@@ -983,6 +1026,7 @@ run_bounded 30 docker run --rm --entrypoint /bin/sh "${image_id}" -eu -c \
 ensure_tool_image "${CHAOS_KAFKA_IMAGE}"
 ensure_tool_image "${CHAOS_KCAT_IMAGE}"
 ensure_tool_image "${CHAOS_PROBE_IMAGE}"
+start_run_event_recording
 if [[ "${scenario}" != "baseline" ]]; then
     [[ -S /var/run/docker.sock ]] \
         || setup_error "${scenario} requires a local /var/run/docker.sock for Pumba"
