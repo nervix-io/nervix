@@ -808,13 +808,18 @@ bench-vm-alloc *args:
 # Build the reusable harness and forward its CLI arguments. This is enough for container subjects
 # such as Vector; local Nervix has a dedicated recipe below because it also builds the server.
 benchmark *args:
-    just build_mode=release build-server
     cargo build --release --package nervix-benchmark --bins
-    "{{ cargo_target_dir }}/release/nervix-benchmark" {{ args }} --server-binary={{ cargo_target_dir }}/server/release/nervix-server
+    "{{ cargo_target_dir }}/release/nervix-benchmark" {{ args }}
 
 # Focused validation for the benchmark framework without building product binaries.
 test-benchmark-framework *args:
     cargo test --package nervix-benchmark {{ args }}
+
+# Build the pinned Flink image with its matching Kafka SQL connector.
+benchmark-flink-image:
+    docker build --file "{{ justfile_directory() }}/benches/flink/Dockerfile" \
+        --tag nervix-benchmark-flink:2.0.1 \
+        "{{ justfile_directory() }}/benches/flink"
 
 # Build and benchmark the current local Nervix checkout.
 benchmark-nervix-local benchmark_name="kafka-filter-map" *args: build-web-console
@@ -832,7 +837,7 @@ benchmark-nervix-image image benchmark_name="kafka-filter-map" *args:
         --implementation nervix --nervix-mode image --nervix-image {{ quote(image) }} {{ args }}
 
 # Build once, then run every declared workload implementation sequentially with local Nervix.
-benchmark-all-local *args: build-web-console
+benchmark-all-local *args: build-web-console benchmark-flink-image
     cargo build --release \
         --package nervix-server --bin nervix-server \
         --package nervix-benchmark --bins
@@ -880,7 +885,7 @@ benchmark-ab baseline_ref runs="3" benchmark_name="kafka-filter-map" *args: buil
 
 # Build only the benchmark harness, then run it against an already-built Nervix image. The harness
 # configures the server directly through client-core and never rebuilds a product binary.
-benchmark-ci nervix_image artifacts_root *args:
+benchmark-ci nervix_image artifacts_root *args: benchmark-flink-image
     #!/usr/bin/env bash
     set -euo pipefail
     test -S /var/run/docker.sock
