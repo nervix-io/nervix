@@ -601,24 +601,6 @@ impl ConsoleRequest {
         }
     }
 
-    /// Whether the request was issued in the session's transaction: a command that expects the
-    /// transaction's accepted position. It cannot be served once that transaction is gone.
-    fn belongs_to_transaction(&self) -> bool {
-        match self {
-            Self::Command { request, .. } => request.expected_transaction_position.is_some(),
-            Self::ListDomains
-            | Self::SubscriptionStart { .. }
-            | Self::SubscriptionStop { .. }
-            | Self::DomainClockAttach { .. }
-            | Self::DomainClockDetach { .. }
-            | Self::SelectDomain(_)
-            | Self::Suggest(_)
-            | Self::Choice { .. }
-            | Self::AttachTransaction(_)
-            | Self::InspectTransaction(_) => false,
-        }
-    }
-
     /// The bytes of free text the request carries: a command's source, a subscription's
     /// statement, the input a completion is asked for, or the search of a choice. Names and
     /// identities are short by their own validation, so the bounds on outstanding requests count
@@ -949,15 +931,6 @@ impl SessionRequests {
     /// Drops every held request, because the session they were issued for is over.
     fn clear_held(&mut self) {
         self.held.clear();
-    }
-
-    /// Drops the held commands issued in the session's transaction, which cannot be served once
-    /// that transaction is gone. Everything else held, such as a subscription start or deletion, a
-    /// domain listing, an inspection, or a command issued outside the transaction, does not depend
-    /// on it and keeps its place until the session is ready.
-    fn drop_transaction_commands(&mut self) {
-        self.held
-            .retain(|_, request| !request.belongs_to_transaction());
     }
 
     /// Pairs a server message with the request it answers. An event answers no request.
@@ -2300,7 +2273,7 @@ async fn serve_connection(
                     Admission::Held => {}
                     Admission::Refused(refused) => {
                         let RefusedRequest { request, refusal } = *refused;
-                        fail_request(signals, requests, request, refusal.to_string());
+                        fail_request(signals, request, refusal.to_string());
                     }
                 }
                 SessionStep::Continue
@@ -2433,7 +2406,7 @@ async fn send_message(
         Err(error) => {
             if let Some(unsent) = requests.answer(message.request_id) {
                 let reason = format!("the request cannot be sent: {}", error.current_context());
-                fail_request(signals, requests, unsent.request, reason);
+                fail_request(signals, unsent.request, reason);
             }
             return true;
         }
@@ -2471,7 +2444,7 @@ fn receive_frame(
                 None => None,
             };
             match answered {
-                Some(unread) => fail_request(signals, requests, unread.request, reason),
+                Some(unread) => fail_request(signals, unread.request, reason),
                 None => {
                     signals
                         .terminal_lines
@@ -2486,7 +2459,7 @@ fn receive_frame(
         Routed::Reply(answered) => apply_reply(signals, requests, *answered),
         Routed::Unreadable(unreadable) => {
             let UnreadableReply { request, reason } = *unreadable;
-            fail_request(signals, requests, request.request, reason);
+            fail_request(signals, request.request, reason);
             SessionStep::Continue
         }
         Routed::Untracked | Routed::Pending => SessionStep::Continue,
@@ -2762,11 +2735,11 @@ fn apply_reply(
     let IssuedRequest { order, request } = request;
     match (request, body) {
         (request, ReplyBody::Rejected(rejected)) => {
-            fail_request(signals, requests, request, rejected.message);
+            fail_request(signals, request, rejected.message);
             SessionStep::Continue
         }
         (request, ReplyBody::Cancelled(cancelled)) => {
-            fail_request(signals, requests, request, cancellation_reason(cancelled));
+            fail_request(signals, request, cancellation_reason(cancelled));
             SessionStep::Continue
         }
         (ConsoleRequest::Command { request, purpose }, ReplyBody::Command(outcome)) => {
@@ -2844,7 +2817,7 @@ fn apply_reply(
             SessionStep::Continue
         }
         (ConsoleRequest::AttachTransaction(_), ReplyBody::Attach(outcome)) => {
-            apply_attach_outcome(signals, requests, outcome)
+            apply_attach_outcome(signals, outcome)
         }
         (ConsoleRequest::InspectTransaction(request), ReplyBody::Inspection(outcome)) => {
             match outcome {
@@ -2891,7 +2864,7 @@ fn apply_reply(
             SessionStep::Continue
         }
         (request, _) => {
-            fail_request(signals, requests, request, UNEXPECTED_REPLY.to_string());
+            fail_request(signals, request, UNEXPECTED_REPLY.to_string());
             SessionStep::Continue
         }
     }
@@ -3082,15 +3055,10 @@ fn show_command_outcome(
 
 /// Applies the outcome of attaching the session's transaction.
 ///
-/// Once the transaction is attached, the requests held for it are released. A transaction that
-/// already finished, or that could not be attached, ends the commands issued in it; the other
-/// held requests, such as the start of a new subscription tab, go out once the session is
-/// ready.
-fn apply_attach_outcome(
-    signals: WebConsoleSignals,
-    requests: &mut SessionRequests,
-    outcome: AttachOutcome,
-) -> SessionStep {
+/// Once the attach ends, every held command keeps its issue order and execution reference. The
+/// server recovers a recorded outcome even when the transaction finished, or returns a failure for
+/// a command it never admitted. The other held requests also go out once the session is ready.
+fn apply_attach_outcome(signals: WebConsoleSignals, outcome: AttachOutcome) -> SessionStep {
     let AttachOutcome {
         disposition,
         message,
@@ -3103,7 +3071,6 @@ fn apply_attach_outcome(
             let active = status.lifecycle().is_active();
             adopt_transaction(signals, status);
             if !active {
-                requests.drop_transaction_commands();
                 let lines = completed_lines(message);
                 signals
                     .terminal_lines
@@ -3113,7 +3080,6 @@ fn apply_attach_outcome(
         }
         AttachDisposition::AlreadyFinished(status) => {
             adopt_transaction(signals, status);
-            requests.drop_transaction_commands();
             let lines = failed_lines(message, diagnostics, query);
             signals
                 .terminal_lines
@@ -3122,7 +3088,6 @@ fn apply_attach_outcome(
         }
         AttachDisposition::Failed => {
             signals.transaction_status.set(None);
-            requests.drop_transaction_commands();
             let lines = failed_lines(message, diagnostics, query);
             signals
                 .terminal_lines
@@ -3283,12 +3248,7 @@ fn apply_unsubscribe_outcome(
 
 /// Ends a request that gets no usable reply, showing `reason` where its reply would have been
 /// shown.
-fn fail_request(
-    signals: WebConsoleSignals,
-    requests: &mut SessionRequests,
-    request: ConsoleRequest,
-    reason: String,
-) {
+fn fail_request(signals: WebConsoleSignals, request: ConsoleRequest, reason: String) {
     match request {
         ConsoleRequest::Command {
             purpose: CommandPurpose::Repl,
@@ -3370,10 +3330,9 @@ fn fail_request(
         }
         ConsoleRequest::InspectTransaction(_) => signals.inspector.error.set(Some(reason)),
         ConsoleRequest::AttachTransaction(_) => {
-            // Without its transaction attached, the session cannot serve the commands issued in
-            // it. The other held requests do not depend on it.
+            // Held commands keep their references so the server can recover a recorded outcome
+            // or report that a command was never admitted.
             signals.transaction_status.set(None);
-            requests.drop_transaction_commands();
             signals
                 .terminal_lines
                 .update(|lines| lines.push(TermLine::error(reason)));
@@ -9707,23 +9666,29 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_or_failed_attach_ends_only_the_commands_issued_in_its_transaction() {
+    fn a_finished_or_failed_attach_releases_commands_under_their_original_references() {
         let attach_endings: [fn(WebConsoleSignals, &mut SessionRequests); 4] = [
             |signals, requests| {
-                apply_attach_outcome(
+                let attach = requests
+                    .answer(request_id(1))
+                    .verified("the attach was dispatched above");
+                let step = apply_reply(
                     signals,
                     requests,
-                    AttachOutcome {
-                        disposition: AttachDisposition::AlreadyFinished(reverted_transaction()),
-                        message: "transaction already finished".to_string(),
-                        diagnostics: Vec::new(),
+                    AnsweredRequest {
+                        request: attach,
+                        body: ReplyBody::Attach(AttachOutcome {
+                            disposition: AttachDisposition::AlreadyFinished(reverted_transaction()),
+                            message: "transaction already finished".to_string(),
+                            diagnostics: Vec::new(),
+                        }),
                     },
                 );
+                assert!(matches!(step, SessionStep::Continue));
             },
-            |signals, requests| {
+            |signals, _requests| {
                 apply_attach_outcome(
                     signals,
-                    requests,
                     AttachOutcome {
                         disposition: AttachDisposition::Attached(reverted_transaction()),
                         message: "transaction reverted".to_string(),
@@ -9731,10 +9696,9 @@ mod tests {
                     },
                 );
             },
-            |signals, requests| {
+            |signals, _requests| {
                 apply_attach_outcome(
                     signals,
-                    requests,
                     AttachOutcome {
                         disposition: AttachDisposition::Failed,
                         message: "transaction is not retained".to_string(),
@@ -9742,16 +9706,11 @@ mod tests {
                     },
                 );
             },
-            |signals, requests| {
+            |signals, _requests| {
                 let attach = ConsoleRequest::AttachTransaction(AttachTransactionRequest {
                     transaction_id: "transaction".to_string(),
                 });
-                fail_request(
-                    signals,
-                    requests,
-                    attach,
-                    "the attach was rejected".to_string(),
-                );
+                fail_request(signals, attach, "the attach was rejected".to_string());
             },
         ];
         for end_attach in attach_endings {
@@ -9786,6 +9745,10 @@ mod tests {
                 });
                 assert!(matches!(requests.accept(new_tab), Admission::Held));
                 let in_transaction = requests.issue(transaction_command("REVERT;"));
+                let ConsoleRequest::Command { request, .. } = &in_transaction.request else {
+                    panic!("the test issued a transaction command");
+                };
+                let reference = request.execution_reference.clone();
                 assert!(matches!(requests.accept(in_transaction), Admission::Held));
                 let outside = requests.issue(resource_description("bundle"));
                 assert!(matches!(requests.accept(outside), Admission::Held));
@@ -9793,13 +9756,18 @@ mod tests {
                 end_attach(signals, &mut requests);
                 requests.answer(request_id(1));
                 let released = requests.release_held();
-                assert_eq!(released.len(), 2, "only the command issued in it ended");
+                assert_eq!(released.len(), 3);
                 let ClientRequest::Subscribe(start) = &released[0].request else {
                     panic!("the tab's start goes out first, in its place");
                 };
                 assert_eq!(start.statement, "CREATE SUBSCRIPTION live TO orders;");
+                assert_eq!(sent_queries(&released[1..2]), vec!["REVERT;"]);
                 assert_eq!(
-                    sent_queries(&released[1..]),
+                    sent_commands(&released[1..2])[0].execution_reference,
+                    reference
+                );
+                assert_eq!(
+                    sent_queries(&released[2..]),
                     vec!["DESCRIBE RESOURCE bundle;"]
                 );
             });
@@ -9829,7 +9797,7 @@ mod tests {
                 }
             );
             let RefusedRequest { request, refusal } = *refused;
-            fail_request(signals, &mut requests, request, refusal.to_string());
+            fail_request(signals, request, refusal.to_string());
             assert_eq!(
                 signals.terminal_lines.get_untracked().into_lines()[0]
                     .line
@@ -9843,7 +9811,7 @@ mod tests {
                 panic!("a completion request past the outstanding bound is refused");
             };
             let RefusedRequest { request, refusal } = *refused;
-            fail_request(signals, &mut requests, request, refusal.to_string());
+            fail_request(signals, request, refusal.to_string());
             assert!(signals.suggestions.get_untracked().is_empty());
             assert_eq!(
                 signals.suggestion_status.get_untracked(),
@@ -11737,55 +11705,71 @@ mod tests {
     }
 
     #[test]
-    fn failed_create_and_choice_requests_update_their_own_surface() {
+    fn cancelled_create_and_wrong_command_replies_report_terminal_failures() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
             let mut requests = SessionRequests::new();
             signals.create.open(CreateKind::User, None, "trigger");
             let (attempt, revision) = signals.create.begin_submission(true);
-            fail_request(
+            let create = requests.issue(ConsoleRequest::Command {
+                request: CommandRequest {
+                    query: "CREATE USER operator WITH PASSWORD 'secret';".to_string(),
+                    domain: None,
+                    execution_reference: command_execution_reference(),
+                    expected_transaction_position: None,
+                    expected_preview: None,
+                },
+                purpose: CommandPurpose::Create(CreateCommandContext {
+                    attempt,
+                    draft_revision: revision,
+                    kind: CreateKind::User,
+                    presentation: "CREATE USER operator WITH PASSWORD '********';".to_string(),
+                    domain: None,
+                    resource: None,
+                    created_domain: None,
+                }),
+            });
+            let step = apply_reply(
                 signals,
                 &mut requests,
-                ConsoleRequest::Command {
-                    request: CommandRequest {
-                        query: "CREATE USER operator WITH PASSWORD 'secret';".to_string(),
-                        domain: None,
-                        execution_reference: command_execution_reference(),
-                        expected_transaction_position: None,
-                        expected_preview: None,
-                    },
-                    purpose: CommandPurpose::Create(CreateCommandContext {
-                        attempt,
-                        draft_revision: revision,
-                        kind: CreateKind::User,
-                        presentation: "CREATE USER operator WITH PASSWORD '********';".to_string(),
-                        domain: None,
-                        resource: None,
-                        created_domain: None,
+                AnsweredRequest {
+                    request: create,
+                    body: ReplyBody::Cancelled(RequestCancelled {
+                        stage: CancellationStage::BeforeAdmission,
                     }),
                 },
-                "request rejected".to_string(),
             );
+            assert!(matches!(step, SessionStep::Continue));
             assert!(
                 signals
                     .terminal_lines
                     .get_untracked()
                     .into_lines()
                     .iter()
-                    .any(|entry| entry.line.text.contains("request rejected"))
+                    .any(|entry| entry.line.text.contains("cancelled before it was admitted"))
             );
 
-            signals.create.open(CreateKind::Domain, None, "trigger");
-            fail_request(
+            let command = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
+            let step = apply_reply(
                 signals,
                 &mut requests,
-                choice_request(
-                    ChoiceControl::DomainPace,
-                    revision
-                        .checked_add(1)
-                        .assured("opening the domain form advances the draft revision once"),
-                ),
-                "choice transport ended".to_string(),
+                AnsweredRequest {
+                    request: command,
+                    body: ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                        status: SuggestionStatus::Ready,
+                        continuation: None,
+                        suggestions: Vec::new(),
+                    }),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert!(
+                signals
+                    .terminal_lines
+                    .get_untracked()
+                    .into_lines()
+                    .iter()
+                    .any(|entry| entry.line.text.contains(UNEXPECTED_REPLY))
             );
         });
     }
