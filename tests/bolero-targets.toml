@@ -356,3 +356,17 @@ random_iterations = 256
 source = "crates/simd-kernels/src/checked.rs"
 test = "checked::tests::bolero_checked_lanes_match_overflowing_arithmetic_at_every_level"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/checkpoint-replication/src/__fuzz__/replication__tests__bolero_replica_progress_keeps_the_monotonic_quorum_contract/corpus"
+domain_version = 1
+features = []
+id = "replica-progress"
+invariant = "Every replica's progress is the highest revision it reported, a count of replicas holding a revision never falls, and an offered revision keeps exactly one announcer until every assigned replica holds it or the replicated state is gone."
+max_input_bytes = 256
+package = "nervix-checkpoint-replication"
+random_iterations = 256
+source = "crates/checkpoint-replication/src/replication_tests.rs"
+test = "replication::tests::bolero_replica_progress_keeps_the_monotonic_quorum_contract"
+test_target = "lib"
