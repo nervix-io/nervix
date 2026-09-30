@@ -43,11 +43,12 @@ jobs:
         with:
           version: "25.12.19"
 
-      - name: Install LLVM 23
+      - name: Install native build tools
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
+          sudo apt-get install --yes --no-install-recommends protobuf-compiler
 
       - name: Configure cargo
         run: |
@@ -121,11 +122,12 @@ jobs:
       - name: Setup uv for runner coverage
         uses: astral-sh/setup-uv@v6
 
-      - name: Install LLVM 23
+      - name: Install native build tools
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
+          sudo apt-get install --yes --no-install-recommends protobuf-compiler
 
       - name: Configure cargo
         run: |

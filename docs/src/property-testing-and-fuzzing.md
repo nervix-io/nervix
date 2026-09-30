@@ -34,10 +34,10 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `nspl-expression` | `nervix-nspl` expression render and statement-embedded reparse equality | NSPL expressions of every form, v2 | 256 | 512 bytes |
 | `nspl-model` | `nervix-nspl` canonical `CREATE` render and client and server reparse equality | NSPL Models of every family, client emitters included, v3 | 256 | 2048 bytes |
 | `nspl-archive-model` | `nervix-nspl` archive document and reparse equality | ordered NSPL Models, client emitters included, v3 | 64 | 4096 bytes |
-| `nspl-statement` | `nervix-nspl` canonical statement render and client and server reparse equality | NSPL statements of every form, session-only forms included, v1 | 256 | 2048 bytes |
-| `nspl-statement-text` | `nervix-nspl` edited statement text is rejected with located diagnostics or reads as canonical statements | edited canonical text, v1 | 256 | 2048 bytes |
-| `nspl-format-document` | `nervix-nspl-format` keeps statements and comments and is idempotent | documents with gaps, comments and either line ending, v1 | 256 | 4096 bytes |
-| `nspl-format-text` | `nervix-nspl-format` refuses unparseable text or formats it keeping its statements | edited documents, v1 | 256 | 4096 bytes |
+| `nspl-statement` | `nervix-nspl` canonical statement render and client and server reparse equality | NSPL statements of every form, session-only forms included, v2 | 256 | 2048 bytes |
+| `nspl-statement-text` | `nervix-nspl` edited statement text is rejected with located diagnostics or reads as canonical statements | edited canonical text, v2 | 256 | 2048 bytes |
+| `nspl-format-document` | `nervix-nspl-format` keeps statements and comments and is idempotent | documents with gaps, comments and either line ending, v2 | 256 | 4096 bytes |
+| `nspl-format-text` | `nervix-nspl-format` refuses unparseable text or formats it keeping its statements | edited documents, v2 | 256 | 4096 bytes |
 | `models-names` | `nervix-models` name text, conversion, JSON, archive and Model-name widening equality | every name type, v1 | 256 | 256 bytes |
 | `models-name-validation` | `nervix-models` name parsing matches the name rule; decoders accept only canonical text | arbitrary text, v1 | 256 | 256 bytes |
 | `models-timestamps` | `nervix-models` integer, RFC 3339, JSON, archive and chrono equality | every signed Unix nanosecond, v1 | 256 | 64 bytes |
@@ -50,8 +50,12 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `models-batch-limit-validation` | `nervix-models` limit input reads in range or fails typed; decoders refuse out-of-range limits | arbitrary limits, v1 | 256 | 64 bytes |
 | `models-identities` | `nervix-models` execution reference, upload identity, endpoint and pool-bound equality | valid identities, v1 | 256 | 512 bytes |
 | `models-identity-validation` | `nervix-models` identity parsers and decoders accept exactly their rule | arbitrary identity text and bounds, v1 | 256 | 512 bytes |
-| `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, v1 | 256 | 4096 bytes |
+| `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, v2 | 256 | 4096 bytes |
 | `backup-record-manifest` | `nervix-backup` record and manifest encode/decode equality | current domain record and manifest, v1 | 256 | 128 bytes |
+| `backup-runtime-state-records` | `nervix-backup` complete runtime state record equality | guest descriptors, source offsets and branch lifecycle, v1 | 256 | 128 bytes |
+| `restore-installation-wire` | `nervix-interconnect` complete installation request wire equality | all actions, authority, placement, payload and inventory, v1 | 256 | 128 bytes |
+| `restore-installation-storage` | `nervix-server` complete staged checkpoint and publication record equality | authority, placement, revision, payload and inventory, v1 | 256 | 128 bytes |
+| `simd-checked-lanes` | `nervix-simd-kernels` checked integer arithmetic equals scalar overflowing arithmetic at every SIMD level | all integer widths, runs and shared operands, v1 | 256 | 128 bytes |
 | `branch-membership` | `nervix-branch-instances` owner steps against the specified visible-set contract: each claim, admission, eviction, expiry and release publishes exactly the current owner lifetime's membership, and a step that changes none publishes nothing | bounded claim, admit, expire and release sequences over six branch keys, v1 | 256 | 256 bytes |
 
 The inventory also records exact full test names, required features, corpus paths, case timeouts
@@ -122,7 +126,9 @@ recorded boundary, not a claim:
 
 ## Commands And Enforcement
 
-Install the dated sanitizer nightly named in the inventory and the pinned CLI:
+Install the dated sanitizer nightly named in the inventory and the pinned CLI. Server properties
+also require the native server build dependencies, including `protoc` for the Pulsar driver;
+both ordinary and sanitizer CI jobs install the Protocol Buffers compiler.
 
 ```bash
 rustup toolchain install nightly-2026-09-17 --profile minimal
