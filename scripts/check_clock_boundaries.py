@@ -19,11 +19,12 @@ PHYSICAL_DEADLINE_CONSTRUCTION = "PhysicalDeadlineCapability::operational"
 ACTUAL_UTC_READ = "actual_utc_now"
 
 # The data plane the physical-time rules govern: the server's runtime, the branch instance lifetimes
-# its tasks own, the connector contract crate, and every integration crate under
-# `crates/connectors`.
+# its tasks own, the checkpoint replication its replicated states own, the connector contract crate,
+# and every integration crate under `crates/connectors`.
 PHYSICAL_TIME_ROOTS = (
     "src/runtime",
     "crates/branch-instances/src",
+    "crates/checkpoint-replication/src",
     "crates/connector/src",
     "crates/connectors/*/src",
 )

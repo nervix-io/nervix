@@ -51,8 +51,10 @@ drains the domain across live nodes, asks state owners to publish and stage thei
 and reads the configuration while the cut is held. The leader resumes the domain and releases its
 lease before copying staged state into the final archive. Other domains continue independently.
 Each owner asks its active ingestor, reingestor, and processor supervisors to checkpoint their
-current branch lifecycle, including branches created since the periodic snapshot. It seals those
-checkpoints and the current Kafka offsets durably before opening one database snapshot that also
+current branch lifecycle, including branches created since the periodic snapshot. Capture retains
+the immutable checkpoint published by each entity's replication handle; a handle awaiting its first
+checkpoint contributes no lifecycle state. It seals those checkpoints and the current Kafka offsets
+durably before opening one database snapshot that also
 contains the already durable WASM guest saves. A stopped domain reads its stored checkpoints
 without active task requests.
 The drain uses the shutdown admitted-work view: active intake and generators, active source ACK

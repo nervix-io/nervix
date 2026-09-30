@@ -247,15 +247,19 @@ impl Runtime {
                 .publish_sealed_snapshot(placement, snapshot.lsm, &snapshot.payload)
                 .change_context(BackupStateCaptureError::Storage)?;
         }
-        for state in self.inner.replicated_branch_lru_snapshots.iter() {
+        for state in self.inner.replicated_branch_lifecycles.iter() {
             let placement = state.key();
             if &placement.domain != domain
                 || !self.runtime_state_placement_is_assigned_locally(placement)
             {
                 continue;
             }
+            let Some(checkpoint) = state.value().latest() else {
+                continue;
+            };
+            let snapshot = checkpoint.snapshot();
             store
-                .publish_sealed_snapshot(placement, state.value().lsm, &state.value().payload)
+                .publish_sealed_snapshot(placement, snapshot.lsm, &snapshot.payload)
                 .change_context(BackupStateCaptureError::Storage)?;
         }
         let stored_snapshots = store

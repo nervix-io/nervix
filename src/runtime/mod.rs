@@ -52,6 +52,9 @@ use nervix_branch_instances::{
     BranchInstanceRegistry, BranchInstanceSnapshotEntry, BranchPresence, GetOrCreateBranchInstance,
     OwnedBranches,
 };
+use nervix_checkpoint_replication::{
+    Announcer, AnnouncerStep, CheckpointReplication, ReplicaProgress,
+};
 use nervix_dns::DnsResolver;
 use nervix_execution::{ChargedBytes, Executor};
 use nervix_interconnect::{
@@ -195,6 +198,7 @@ mod backup_state;
 mod branch_aggregated_state;
 mod branch_buffering;
 mod branch_key;
+mod branch_lifecycle_state;
 mod branch_lru_state;
 mod branch_runtime;
 mod client_emitter;
@@ -301,6 +305,7 @@ use branch_buffering::{
     wait_for_branch_buffer_deadlines,
 };
 use branch_key::branch_key_display;
+use branch_lifecycle_state::{BranchLifecycleCheckpoint, ReplicatedBranchLifecycle};
 use branch_lru_state::{
     BranchLruSnapshotError, decode_branch_lru_snapshot, encode_branch_lru_snapshot,
 };
@@ -430,7 +435,7 @@ use ingestor_quiesce::{
 use ingestor_start::IngestorRuntime;
 use kafka_offset_state::{
     KafkaOffsetSnapshotInstaller, KafkaOffsetStateAssignment, KafkaOffsetStateOriginator,
-    KafkaOffsetStatePersistence, KafkaOffsetStateRead, ReplicatedKafkaOffsetState,
+    KafkaOffsetStatePersistence, ReplicatedKafkaOffsetState,
 };
 use local_drain::LocalIntake;
 use lookup_hash_map::{
@@ -528,9 +533,8 @@ pub(crate) use snapshot_staging::{
 };
 use state_replication::{
     ActivatedRuntimeStateHandoff, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
-    DEFAULT_STATE_SNAPSHOT_INTERVAL, PendingStateCheckpointAnnouncement, PendingStateReplicaSync,
-    PreparedForcedRuntimeStateRecovery, PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot,
-    PublishedBranchState,
+    DEFAULT_STATE_SNAPSHOT_INTERVAL, PendingStateReplicaSync, PreparedForcedRuntimeStateRecovery,
+    PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot, PublishedBranchState,
 };
 pub(in crate::runtime) use state_store::{
     ForcedRuntimeStateRecoveryAuthorization, ForcedRuntimeStateRecoveryIdentity,
@@ -630,6 +634,9 @@ mod wasm_checkpoint;
 #[cfg(feature = "benchmarks")]
 #[doc(hidden)]
 pub mod wasm_checkpoint_benchmark;
+#[cfg(feature = "benchmarks")]
+#[doc(hidden)]
+pub use state_replication::benchmark::StateReplicationBenchmark;
 mod wasm_guest_state_reset;
 mod wasm_output;
 mod wasm_processor;

@@ -54,6 +54,7 @@ class InventoryTests(unittest.TestCase):
             "models-identity-validation",
             "models-archived-models",
             "simd-checked-lanes",
+            "replica-progress",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",
@@ -65,6 +66,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-interconnect",
             "nervix-server",
             "nervix-simd-kernels",
+            "nervix-checkpoint-replication",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())

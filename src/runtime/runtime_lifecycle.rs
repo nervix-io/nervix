@@ -129,13 +129,11 @@ impl Runtime {
                 remote_dispatch: Arc::new(RemoteDispatchRegistry::new()),
                 remote_ack_watcher_shutdown: CancellationToken::new(),
                 remote_ack_watcher_tasks: TaskTracker::new(),
-                state_checkpoint_notifications: DashMap::default(),
                 pending_state_replica_syncs: DashMap::default(),
-                pending_state_checkpoint_announcements: DashMap::default(),
                 state_replication_tasks: TaskTracker::new(),
                 passive_runtime_state_snapshots: DashMap::default(),
-                replicated_branch_lru_snapshots: DashMap::default(),
                 backup_capture_fences: ArcSwap::from_pointee(HashMap::default()),
+                replicated_branch_lifecycles: DashMap::default(),
                 prepared_runtime_state_handoffs,
                 activated_runtime_state_handoffs: DashMap::default(),
                 prepared_forced_runtime_state_recoveries: DashMap::default(),
@@ -597,7 +595,6 @@ impl Runtime {
         self.inner.remote_ack_watcher_tasks.close();
         self.inner.remote_ack_watcher_tasks.wait().await;
         self.inner.pending_state_replica_syncs.clear();
-        self.inner.pending_state_checkpoint_announcements.clear();
         self.inner.state_replication_tasks.close();
         self.inner.state_replication_tasks.wait().await;
         self.inner.relay_branch_presences.clear();

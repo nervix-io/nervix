@@ -1775,8 +1775,6 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
         placement.clone(),
         Some(ClusterNodeName::parse("node-1").expect("valid name")),
         ClusterNodeName::parse("node-1").expect("valid name"),
-        Vec::new(),
-        0,
         &metrics,
         None,
     )
@@ -1803,8 +1801,6 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
         placement.clone(),
         Some(ClusterNodeName::parse("node-1").expect("valid name")),
         ClusterNodeName::parse("node-1").expect("valid name"),
-        Vec::new(),
-        0,
         &restored_metrics,
         Some(snapshot),
     )
