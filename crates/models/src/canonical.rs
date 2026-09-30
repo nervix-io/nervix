@@ -3851,8 +3851,9 @@ fn dollar_quote(value: &str, tag: &str) -> String {
 ///
 /// Single quotes are preferred, double quotes carry an embedded apostrophe, and anything the quoted
 /// forms cannot express verbatim -- a newline, or both quote styles at once -- falls back to
-/// dollar-quoting. Every string is therefore representable.
-fn string_literal(value: &str) -> String {
+/// dollar-quoting. Every string is therefore representable, and NSPL reads a string literal
+/// verbatim wherever it appears, so the result reads back as exactly `value`.
+pub fn string_literal(value: &str) -> String {
     let has_single = value.contains('\'');
     let has_double = value.contains('"');
     let has_newline = value.contains('\n') || value.contains('\r');

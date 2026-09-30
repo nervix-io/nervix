@@ -58,7 +58,7 @@ pub use backup::{
 pub use canonical::{
     CanonicalNsplError, NSPL_LANGUAGE_VERSION, alter_avro_wire_schema_to_canonical_nspl,
     alter_cbor_wire_schema_to_canonical_nspl, alter_json_wire_schema_to_canonical_nspl,
-    canonical_nspl_document, expression_to_nspl, ingest_quiesce_to_nspl,
+    canonical_nspl_document, expression_to_nspl, ingest_quiesce_to_nspl, string_literal,
 };
 pub use client_consumer::{
     CLIENT_CONSUMER_NODE_BYTES, CLIENT_CONSUMER_SESSION_BYTES, ClientConsumerLimits,

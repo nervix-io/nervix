@@ -67,7 +67,7 @@ impl HttpRequestBody {
                         rejected.push(RejectedEmitterRecord {
                             position,
                             reason: format!(
-                                "emitter '{}' failed to encode record: {error}",
+                                "emitter '{}' failed to encode record: {error:#}",
                                 context.emitter.as_str()
                             ),
                             structured_error: None,

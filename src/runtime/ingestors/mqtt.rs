@@ -11,10 +11,12 @@
 //! - **Must not know.** The MQTT driver, session lifecycle, NSPL parsing, registry validation, or
 //!   placement computation.
 
+use error_stack::ResultExt as _;
 use nervix_connector_mqtt::{MqttSource, MqttSourcePlan, MqttSourceSettings};
 
 use super::{
     super::*,
+    IngestorStartError, SourceStartError,
     source::{BrokerSourceStart, SourceStart},
 };
 
@@ -23,7 +25,7 @@ impl MqttIngestorStartPlan {
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> Result<SourceStart, RuntimeError> {
+    ) -> error_stack::Result<SourceStart, IngestorStartError> {
         let MqttIngestorStartPlan {
             client,
             topic,
@@ -40,16 +42,14 @@ impl MqttIngestorStartPlan {
                     &client.config,
                     instance_index,
                 )
-                .map_err(|error| ingestor.start_failure(error.to_string()))?;
+                .change_context_lazy(|| ingestor.initialize_failure())?;
             instance_configs.push(resolved.entries);
             if let Some(mounts) = resolved.mounts {
                 client_mounts.push(mounts);
             }
         }
         let Some(dns) = runtime.dns() else {
-            return Err(
-                ingestor.start_failure("the node DNS resolver is not installed".to_string())
-            );
+            return Err(ingestor.source_start_failure(SourceStartError::NodeDnsUnavailable));
         };
         let connector = MqttSourcePlan::new(MqttSourceSettings {
             instances: instance_configs,

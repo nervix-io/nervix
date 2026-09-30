@@ -19,22 +19,50 @@ use strum::IntoEnumIterator as _;
 
 use crate::{
     client_statement::{ClientStatement, parse_client_statement, parse_client_statements},
-    parse_expression,
-    parser_support::render_expression_tokens,
-    schema::ParseFromSourceError,
+    parse_expression, parse_expression_list, parse_route_construction,
     statement::parse_statement,
 };
 
-/// Reads expression text the way a statement reads an expression it embeds: the statement lexer
-/// tokenizes it, taking every string literal verbatim, and the expression grammar parses those
-/// tokens as the statement hands them over.
-fn read_embedded_expression(text: &str) -> error_stack::Result<Expression, ParseFromSourceError> {
-    let spanned = crate::lex(text).unwrap_or_else(|errors| panic!("{text} must lex: {errors:?}"));
-    let tokens = spanned
-        .into_iter()
-        .map(|spanned| spanned.token)
-        .collect::<Vec<_>>();
-    parse_expression(&render_expression_tokens(&tokens))
+/// Asserts that `text` reads as `expression` through every entry point that builds an expression
+/// from NSPL: a statement that embeds it, and the standalone readers of an expression, an
+/// expression list and a route construction, which the web console's forms, `nervix-cli subscribe
+/// --where` and the client library call.
+fn assert_every_entry_point_reads(text: &str, expression: &Expression) {
+    let statement = format!("CREATE SUBSCRIPTION literal TO events WHERE {text};");
+    let embedded = match parse_client_statement(&statement) {
+        Ok(ClientStatement::CreateSubscription(subscription)) => subscription.where_clause,
+        Ok(other) => panic!("{statement}\nread as another statement: {other:?}"),
+        Err(error) => panic!("{statement}\nmust reparse: {error:?}"),
+    };
+    assert_eq!(
+        embedded.as_ref(),
+        Some(expression),
+        "{text} changed when a statement read it"
+    );
+
+    let standalone =
+        parse_expression(text).unwrap_or_else(|error| panic!("{text} must reparse: {error:?}"));
+    assert_eq!(
+        &standalone, expression,
+        "{text} changed when it was read alone"
+    );
+
+    let listed = parse_expression_list(text)
+        .unwrap_or_else(|error| panic!("{text} must reparse as a list: {error:?}"));
+    assert_eq!(
+        listed,
+        std::slice::from_ref(expression),
+        "{text} changed when it was read as a list"
+    );
+
+    let route = format!("WHERE {text}");
+    let construction = parse_route_construction(&route)
+        .unwrap_or_else(|error| panic!("{route} must reparse: {error:?}"));
+    assert_eq!(
+        construction.where_clause.as_ref(),
+        Some(expression),
+        "{text} changed when a route construction read it"
+    );
 }
 
 /// The session-only statement forms, which the client grammar reads beside every server statement.
@@ -141,12 +169,7 @@ fn bolero_expression_roundtrip_minimal_parentheses() {
             let expression = arbitrary.expression();
             let rendered = nervix_models::expression_to_nspl(&expression)
                 .unwrap_or_else(|error| panic!("{expression:?} must render: {error:?}"));
-            let reparsed = read_embedded_expression(&rendered)
-                .unwrap_or_else(|error| panic!("{rendered} must reparse: {error:?}"));
-            assert_eq!(
-                expression, reparsed,
-                "{rendered} changed when it was reparsed"
-            );
+            assert_every_entry_point_reads(&rendered, &expression);
         });
 }
 

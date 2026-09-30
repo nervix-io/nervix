@@ -2001,6 +2001,22 @@ mod tests {
     }
 
     #[test]
+    fn subscribe_query_reads_a_backslash_in_a_string_literal_as_a_typed_statement_does() {
+        assert_eq!(
+            subscribe_request(
+                "live_myss",
+                "myss",
+                SubscriptionDeliveryBehavior::Blocking,
+                None,
+                Some(r#"input.tenant = 'a\nb' OR input.tenant = "c\'d""#)
+            )
+            .expect("subscription request should build")
+            .to_query(),
+            r#"CREATE SUBSCRIPTION live_myss TO myss WHERE input.tenant = 'a\nb' OR input.tenant = "c\'d";"#
+        );
+    }
+
+    #[test]
     fn subscribe_request_rejects_an_unparsable_where_clause() {
         let error = subscribe_request(
             "live_myss",

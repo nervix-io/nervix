@@ -433,20 +433,15 @@ fn ws<'src>() -> impl Parser<'src, &'src str, (), extra::Err<LexError<'src>>> + 
     choice((spaces, line_comment)).repeated().ignored()
 }
 
-fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexError<'src>>> + Clone {
-    let word = text::ascii::ident().map(|raw: &str| Token::Word(classify_word(raw)));
-
-    let number = text::int(10)
-        .then(just('.').then(text::digits(10)).or_not())
-        .then(
-            one_of("eE")
-                .then(one_of("+-").or_not())
-                .then(text::digits(10))
-                .or_not(),
-        )
-        .to_slice()
-        .map(|n: &str| Token::NumberLiteral(n.to_string()));
-
+/// A string literal, read verbatim: `'text'`, `"text"`, or dollar-quoted `$$text$$` and
+/// `$tag$text$tag$`, whose tag is letters, digits and underscores. A quoted string holds anything
+/// but its own quote and a line break, and a dollar-quoted string anything but its closing
+/// delimiter. No escape sequence is interpreted, so a backslash is an ordinary character.
+///
+/// This is the one reading of a string literal: a statement lexes its literals with it, and so does
+/// the expression lexer that reads a standalone expression.
+pub(crate) fn string_literal<'src>()
+-> impl Parser<'src, &'src str, String, extra::Err<LexError<'src>>> + Clone {
     let single_string = just('\'')
         .ignore_then(
             any()
@@ -501,8 +496,9 @@ fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexErr
             match input.next() {
                 Some(ch) => {
                     value.push(ch);
-                    if value.ends_with(&delimiter) {
-                        value.truncate(value.len() - delimiter.len());
+                    if let Some(body) = value.strip_suffix(delimiter.as_str()) {
+                        let body_length = body.len();
+                        value.truncate(body_length);
                         return Ok(value);
                     }
                 }
@@ -516,11 +512,27 @@ fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexErr
         }
     });
 
-    let string = choice((
+    choice((
         dollar_string,
         choice((single_string, double_string)).map(str::to_string),
     ))
-    .map(Token::StringLiteral);
+}
+
+fn token<'src>() -> impl Parser<'src, &'src str, SpannedToken, extra::Err<LexError<'src>>> + Clone {
+    let word = text::ascii::ident().map(|raw: &str| Token::Word(classify_word(raw)));
+
+    let number = text::int(10)
+        .then(just('.').then(text::digits(10)).or_not())
+        .then(
+            one_of("eE")
+                .then(one_of("+-").or_not())
+                .then(text::digits(10))
+                .or_not(),
+        )
+        .to_slice()
+        .map(|n: &str| Token::NumberLiteral(n.to_string()));
+
+    let string = string_literal().map(Token::StringLiteral);
 
     let punctuation = choice((
         just("!=").to(Token::NotEq),
