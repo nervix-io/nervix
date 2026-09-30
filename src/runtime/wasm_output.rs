@@ -888,6 +888,7 @@ pub(super) async fn dispatch_wasm_output_route(
             .collect(),
     };
     let lookup_columns = match compute_lookup_hash_map_columns(
+        context.branch.runtime.executor(),
         program,
         &FilterMapBatchInputs {
             carrier: &decoded.batch.batch,
@@ -958,6 +959,7 @@ pub(super) async fn dispatch_wasm_output_route(
         }
     };
     let executed = match execute_program_with_selection_in_context(
+        context.branch.runtime.executor(),
         &program.compiled,
         &vm_input,
         &VmExecutionContext {

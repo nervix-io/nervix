@@ -6,6 +6,20 @@ impl Runtime {
             .verified("the None persistence path has no fallible step")
     }
 
+    /// A runtime without persistence whose admitted work goes through `executor`.
+    #[cfg(test)]
+    pub(crate) fn with_executor(executor: Executor) -> Self {
+        Self::with_persistence_and_temp_dir(
+            executor,
+            None,
+            None,
+            DEFAULT_STATE_SNAPSHOT_INTERVAL,
+            ConfiguredFaultInjection::default(),
+            PathBuf::from(DEFAULT_TEMP_DIR),
+        )
+        .verified("the None persistence path has no fallible step")
+    }
+
     pub(in crate::runtime) fn with_persistence(
         db: Option<Database>,
         state_snapshot_interval: Duration,

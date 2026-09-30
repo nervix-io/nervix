@@ -12,7 +12,8 @@
 //!   the emitter flushes.
 //!
 //! Packing is synchronous so that it runs wherever the codec's own execution policy requires: a
-//! codec with jaq transformations is driven off the reactor, and packing runs inside that same job.
+//! codec with jaq transformations is packed on the node's extension workers, inside the same job
+//! that runs its transformations.
 
 use std::num::NonZeroUsize;
 

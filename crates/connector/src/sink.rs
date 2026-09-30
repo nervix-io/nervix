@@ -19,6 +19,7 @@ use arrow_array::RecordBatch;
 use async_trait::async_trait;
 use error_stack::Report;
 use meticulous::OptionExt as _;
+use nervix_execution::Executor;
 use nervix_models::{
     FieldPath, HttpApplicationHeaders, HttpMethod, HttpTarget, MessageErrorCode,
     MessageErrorOperation, StructuredMessageError, Timestamp,
@@ -620,12 +621,19 @@ pub trait SinkGeneralErrorHandler: Send + Sync + 'static {
     fn handle_general_error(&self, acks: &SinkAcknowledgements, reason: String);
 }
 
+/// The node's bounded executor, through which a connector admits the synchronous filesystem work
+/// it does itself, such as writing and reading the files it stages.
+pub trait SinkBoundedExecution: Send + Sync + 'static {
+    fn executor(&self) -> Executor;
+}
+
 /// Every service exposed through one sink host handle.
 pub trait SinkHostServices:
     SinkTransientErrorStatus
     + SinkEventReporter
     + SinkStagingDirectory
     + SinkGeneralErrorHandler
+    + SinkBoundedExecution
     + Send
     + Sync
     + 'static
@@ -637,6 +645,7 @@ impl<T> SinkHostServices for T where
         + SinkEventReporter
         + SinkStagingDirectory
         + SinkGeneralErrorHandler
+        + SinkBoundedExecution
         + Send
         + Sync
         + 'static
@@ -678,6 +687,12 @@ impl SinkHost {
 
     pub fn staging_directory(&self) -> PathBuf {
         self.inner.services.staging_directory()
+    }
+
+    /// The node's bounded executor. A connector keeps the handle it is given for as long as it
+    /// stages work through it.
+    pub fn executor(&self) -> Executor {
+        self.inner.services.executor()
     }
 
     pub fn handle_general_error(&self, acks: &SinkAcknowledgements, reason: String) {

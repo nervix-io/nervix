@@ -52,7 +52,10 @@ use tracing::warn;
 
 use super::{
     AppError,
-    authentication::{credentials_from_web_console_request, unauthorized_basic_response},
+    authentication::{
+        CredentialRejection, busy_authentication_response, credentials_from_web_console_request,
+        unauthorized_basic_response,
+    },
     http_endpoint::{is_websocket_upgrade_request, response_with_bytes, text_response},
     session::websocket::console_websocket_config,
     session_service::SessionServiceImpl,
@@ -116,22 +119,25 @@ async fn handle_web_console_request(
                 "authentication failed",
             ));
         };
-        let Some(_) = service.authenticate_basic_credentials(&credentials).await else {
-            return Ok(text_response(
-                StatusCode::UNAUTHORIZED,
-                "authentication failed",
-            ));
-        };
-        return Ok(text_response(StatusCode::NO_CONTENT, ""));
+        return Ok(
+            match service.authenticate_basic_credentials(&credentials).await {
+                Ok(_) => text_response(StatusCode::NO_CONTENT, ""),
+                Err(CredentialRejection::Failed) => {
+                    text_response(StatusCode::UNAUTHORIZED, "authentication failed")
+                }
+                Err(CredentialRejection::Busy) => busy_authentication_response(),
+            },
+        );
     }
 
     if request.method() == Method::GET && request.uri().path() == WEB_CONSOLE_WS_PATH {
         let Some(credentials) = credentials_from_web_console_request(&request) else {
             return Ok(unauthorized_basic_response());
         };
-        let Some(authenticated_user) = service.authenticate_basic_credentials(&credentials).await
-        else {
-            return Ok(unauthorized_basic_response());
+        let authenticated_user = match service.authenticate_basic_credentials(&credentials).await {
+            Ok(user) => user,
+            Err(CredentialRejection::Failed) => return Ok(unauthorized_basic_response()),
+            Err(CredentialRejection::Busy) => return Ok(busy_authentication_response()),
         };
 
         if !is_websocket_upgrade_request(&request) {
@@ -211,9 +217,10 @@ async fn handle_web_console_request(
         let Some(credentials) = credentials_from_web_console_request(&request) else {
             return Ok(unauthorized_basic_response());
         };
-        let Some(authenticated_user) = service.authenticate_basic_credentials(&credentials).await
-        else {
-            return Ok(unauthorized_basic_response());
+        let authenticated_user = match service.authenticate_basic_credentials(&credentials).await {
+            Ok(user) => user,
+            Err(CredentialRejection::Failed) => return Ok(unauthorized_basic_response()),
+            Err(CredentialRejection::Busy) => return Ok(busy_authentication_response()),
         };
 
         return Ok(service

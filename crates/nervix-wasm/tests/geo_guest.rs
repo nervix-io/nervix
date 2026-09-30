@@ -164,7 +164,10 @@ async fn the_geo_guest_enriches_every_declared_route() {
     })
     .expect("runtime must initialize");
     let compiled = runtime
-        .compile_processor(&std::fs::read(GUEST).expect("build the guest first"))
+        .compile_processor(
+            &nervix_execution::Executor::default(),
+            &std::fs::read(GUEST).expect("build the guest first"),
+        )
         .await
         .expect("geo guest must compile");
     let mut branch = compiled
@@ -299,7 +302,10 @@ async fn the_geo_guest_rejects_a_destination_schema_it_cannot_fill() {
     })
     .expect("runtime must initialize");
     let compiled = runtime
-        .compile_processor(&std::fs::read(GUEST).expect("build the guest first"))
+        .compile_processor(
+            &nervix_execution::Executor::default(),
+            &std::fs::read(GUEST).expect("build the guest first"),
+        )
         .await
         .expect("geo guest must compile");
 

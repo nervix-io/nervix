@@ -653,9 +653,14 @@ async fn select_subscription_rows(
         nervix_primitives::task::consume_budget().await;
         if let (Some(predicate), Some(now)) = (predicate, now) {
             let passed = match batch.runtime_row(row) {
-                Ok(record) => execute_subscription_predicate_on_record(predicate, &record, now)
-                    .await
-                    .map_err(|error| error.to_string()),
+                Ok(record) => execute_subscription_predicate_on_record(
+                    runtime.executor(),
+                    predicate,
+                    &record,
+                    now,
+                )
+                .await
+                .map_err(|error| error.to_string()),
                 Err(error) => Err(error.to_string()),
             };
             match passed {

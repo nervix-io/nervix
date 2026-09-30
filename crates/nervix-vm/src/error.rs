@@ -713,8 +713,12 @@ pub enum RuntimeError {
     },
     #[error("unsupported column type {data_type:?}")]
     UnsupportedColumnType { data_type: DataType },
-    #[error("blocking execution task failed: {message}")]
-    BlockingExecutionFailed { message: String },
+    #[error("the node's bounded execution did not admit the program")]
+    ExecutionNotAdmitted,
+    #[error("the program panicked on an executor worker")]
+    ExecutionPanicked,
+    #[error("the caller stopped waiting for the program between two of its instructions")]
+    ExecutionCancelled,
     #[error("function '{function}' requires caller-supplied values")]
     MissingFunctionInjector { function: String },
     #[error(

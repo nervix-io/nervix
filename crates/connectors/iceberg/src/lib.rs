@@ -6,8 +6,9 @@
 //!   through, the local Arrow IPC staging of every mapped batch, the `COMMIT EACH` cadence and
 //!   maximum commit size that release the staged files, the Parquet data files one commit writes,
 //!   and the acknowledgements it retains until that commit succeeds.
-//! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio,
-//!   `nervix-dns`, Reqwest, OpenDAL, and the `iceberg` crates.
+//! - **Depends on.** The connector contract, the bounded executor its host hands it, vocabulary
+//!   values, Arrow arrays, `error-stack`, Tokio, `nervix-dns`, Reqwest, OpenDAL, and the `iceberg`
+//!   crates.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 //!
@@ -63,6 +64,7 @@ use nervix_connector::{
     physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
+use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_models::{ClientConfigEntry, IcebergStorageBackend, TableName, Timestamp};
 use nervix_primitives::sync::StdArc;
 use parquet::file::properties::WriterProperties;
@@ -103,6 +105,11 @@ pub struct IcebergSinkConfig {
     pub writer: String,
 }
 
+/// What one staged write or read is charged. The staged batch is already in memory and a read
+/// holds at most the emitter's declared maximum commit size, so the charge only admits the job onto
+/// the filesystem workers.
+const STAGING_RESERVATION_BYTES: u64 = 1;
+
 /// The Iceberg sink, which stages each mapped batch as a local Arrow IPC file and appends every
 /// staged file to its table in one catalog commit.
 pub struct IcebergSink {
@@ -113,6 +120,8 @@ pub struct IcebergSink {
     staged_schema: StdArc<arrow_schema::Schema>,
     commit_policy: IcebergCommitPolicy,
     staging_dir: TempDir,
+    /// The node's bounded executor, whose filesystem workers write and read the staged files.
+    executor: Executor,
     staged_sequence: u64,
     staged_batches: Vec<IcebergStagedBatch>,
     staged_rows: u64,
@@ -322,6 +331,7 @@ impl IcebergSink {
         } = config;
         let staged_schema = Self::staged_arrow_schema(&mapped_schema)?;
         let staging_dir = Self::create_staging_dir(&host)?;
+        let executor = host.executor();
         Self::validate_blob_location(backend, "table", &location)?;
         let properties = IcebergObjectStoreProperties::from_entries(backend, &storage_config);
         let catalog = StdArc::new(
@@ -367,6 +377,7 @@ impl IcebergSink {
             staged_schema,
             commit_policy: commit,
             staging_dir,
+            executor,
             staged_sequence: 0,
             staged_batches: Vec::new(),
             staged_rows: 0,
@@ -545,33 +556,53 @@ impl IcebergSink {
             .join(format!("batch-{}.arrow", self.staged_sequence))
     }
 
-    async fn write_ipc_batch(path: PathBuf, batch: RecordBatch) -> SinkPublishResult<u64> {
+    /// Write one staged file on the node's filesystem workers. The batch is already in memory and
+    /// the writer streams it to the file, so the charge only admits the write.
+    async fn write_ipc_batch(
+        executor: &Executor,
+        path: PathBuf,
+        batch: RecordBatch,
+    ) -> SinkPublishResult<u64> {
         let staged = |error: &dyn std::fmt::Display, path: &PathBuf| {
             Report::new(SinkPublishError::Publish { sink: ICEBERG }).attach_printable(format!(
                 "failed to write Iceberg staged Arrow IPC '{}': {error}",
                 path.display()
             ))
         };
-        nervix_primitives::task::spawn_blocking(move || {
-            let file = File::create(&path).map_err(|error| staged(&error, &path))?;
-            let mut writer = StreamWriter::try_new(file, batch.schema().as_ref())
-                .map_err(|error| staged(&error, &path))?;
-            writer
-                .write(&batch)
-                .map_err(|error| staged(&error, &path))?;
-            writer.finish().map_err(|error| staged(&error, &path))?;
-            std::fs::metadata(&path)
-                .map(|metadata| metadata.len())
-                .map_err(|error| staged(&error, &path))
-        })
-        .await
-        .map_err(|error| {
-            Report::new(SinkPublishError::Publish { sink: ICEBERG })
-                .attach_printable(format!("Iceberg staging task failed: {error}"))
-        })?
+        let reservation = executor
+            .reserve(MemoryClass::Bulk, STAGING_RESERVATION_BYTES)
+            .await
+            .change_context(SinkPublishError::Publish { sink: ICEBERG })?;
+        executor
+            .run_storage(
+                StorageClass::Filesystem,
+                reservation,
+                move |_charge, cancellation| {
+                    cancellation
+                        .check()
+                        .change_context(SinkPublishError::Publish { sink: ICEBERG })?;
+                    let file = File::create(&path).map_err(|error| staged(&error, &path))?;
+                    let mut writer = StreamWriter::try_new(file, batch.schema().as_ref())
+                        .map_err(|error| staged(&error, &path))?;
+                    writer
+                        .write(&batch)
+                        .map_err(|error| staged(&error, &path))?;
+                    writer.finish().map_err(|error| staged(&error, &path))?;
+                    std::fs::metadata(&path)
+                        .map(|metadata| metadata.len())
+                        .map_err(|error| staged(&error, &path))
+                },
+            )
+            .await
+            .change_context(SinkPublishError::Publish { sink: ICEBERG })?
     }
 
+    /// Read every staged file back as one batch on the node's filesystem workers, checking before
+    /// each file whether the commit stopped waiting. What the read holds is bounded by the
+    /// emitter's declared maximum commit size, not by a transient budget, so the charge only
+    /// admits the read.
     async fn read_ipc_batches(
+        executor: &Executor,
         schema: StdArc<arrow_schema::Schema>,
         paths: &[PathBuf],
     ) -> SinkPublishResult<RecordBatch> {
@@ -582,27 +613,37 @@ impl IcebergSink {
                 path.display()
             ))
         };
-        nervix_primitives::task::spawn_blocking(move || {
-            let mut batches = Vec::new();
-            for path in paths {
-                let file = File::open(&path).map_err(|error| staged(error.to_string(), &path))?;
-                let reader = StreamReader::try_new(file, None)
-                    .map_err(|error| staged(error.to_string(), &path))?;
-                if reader.schema().as_ref() != schema.as_ref() {
-                    return Err(staged("schema does not match".to_string(), &path));
-                }
-                let path_batches = reader
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|error| staged(error.to_string(), &path))?;
-                batches.extend(path_batches);
-            }
-            Self::concat_arrow_batches(schema, batches)
-        })
-        .await
-        .map_err(|error| {
-            Report::new(SinkPublishError::Commit { sink: ICEBERG })
-                .attach_printable(format!("Iceberg staged read task failed: {error}"))
-        })?
+        let reservation = executor
+            .reserve(MemoryClass::Bulk, STAGING_RESERVATION_BYTES)
+            .await
+            .change_context(SinkPublishError::Commit { sink: ICEBERG })?;
+        executor
+            .run_storage(
+                StorageClass::Filesystem,
+                reservation,
+                move |_charge, cancellation| {
+                    let mut batches = Vec::new();
+                    for path in paths {
+                        cancellation
+                            .check()
+                            .change_context(SinkPublishError::Commit { sink: ICEBERG })?;
+                        let file =
+                            File::open(&path).map_err(|error| staged(error.to_string(), &path))?;
+                        let reader = StreamReader::try_new(file, None)
+                            .map_err(|error| staged(error.to_string(), &path))?;
+                        if reader.schema().as_ref() != schema.as_ref() {
+                            return Err(staged("schema does not match".to_string(), &path));
+                        }
+                        let path_batches = reader
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|error| staged(error.to_string(), &path))?;
+                        batches.extend(path_batches);
+                    }
+                    Self::concat_arrow_batches(schema, batches)
+                },
+            )
+            .await
+            .change_context(SinkPublishError::Commit { sink: ICEBERG })?
     }
 
     fn concat_arrow_batches(
@@ -713,7 +754,8 @@ impl SinkLifecycle for IcebergSink {
                 .iter()
                 .map(|batch| batch.path.clone())
                 .collect::<Vec<_>>();
-            let batch = Self::read_ipc_batches(self.staged_schema.clone(), &paths).await?;
+            let batch =
+                Self::read_ipc_batches(&self.executor, self.staged_schema.clone(), &paths).await?;
             let prepared = self.client.prepare_batch(batch).await?;
             self.commit_state.store(prepared);
         }
@@ -792,7 +834,7 @@ impl IcebergSink {
         let staged = self.staged_batch(&carrier)?;
         let staged_rows: u64 = staged.num_rows().arch_into();
         let path = self.next_staged_path();
-        let staged_bytes = Self::write_ipc_batch(path.clone(), staged).await?;
+        let staged_bytes = Self::write_ipc_batch(&self.executor, path.clone(), staged).await?;
         self.staged_batches.push(IcebergStagedBatch {
             path,
             rows: staged_rows,
@@ -1524,5 +1566,36 @@ mod tests {
             assert_eq!(recorded.acknowledged.load(Ordering::Acquire), 1);
             assert_eq!(recorded.rejected.load(Ordering::Acquire), 1);
         }
+    }
+
+    #[nervix_primitives::test]
+    async fn staged_files_are_written_and_read_on_the_filesystem_workers() {
+        let executor = Executor::default();
+        let directory = tempfile::tempdir().assured("the staging directory is created");
+        let path = directory.path().join("batch-1.arrow");
+        let schema = StdArc::new(arrow_schema::Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            StdArc::clone(&schema),
+            vec![StdArc::new(arrow_array::Int64Array::from(vec![1, 2, 3]))],
+        )
+        .assured("the column matches the schema");
+
+        let written = IcebergSink::write_ipc_batch(&executor, path.clone(), batch.clone())
+            .await
+            .assured("the filesystem workers write the staged file");
+        let read = IcebergSink::read_ipc_batches(&executor, schema, &[path])
+            .await
+            .assured("the filesystem workers read the staged file back");
+
+        assert!(written > 0);
+        assert_eq!(read, batch);
+        let snapshot = executor.snapshot();
+        assert_eq!(snapshot.filesystem_storage.admitted, 2);
+        assert_eq!(snapshot.filesystem_storage.completed, 2);
+        assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
     }
 }

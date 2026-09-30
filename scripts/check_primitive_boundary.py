@@ -29,7 +29,12 @@ Resolving a name through the operating system, with `tokio::net::lookup_host` or
 `ToSocketAddrs` trait, goes around the node's resolver, so those paths are rejected too, naming the
 resolver instead. The boundary's CPU-job mechanism, `nervix_primitives::task::spawn_cpu`, belongs to
 the bounded executor, which admits, charges and cancels every job it runs; any other file that names
-it is rejected, so the mechanism gives no caller a way around admission.
+it is rejected, so the mechanism gives no caller a way around admission. The runtime's blocking
+pool, `nervix_primitives::task::spawn_blocking`, belongs to the executor too, which runs its storage
+jobs there. Work a node runs off its async workers goes through the executor instead, so any other
+file that names the pool needs a permission in `crates/primitives/blocking-permissions.toml` naming
+the file, its owner, why that owner stays outside the executor, and what bounds its work instead. A
+use without a permission and a permission nothing uses both fail.
 
 An execution mode is a feature of the boundary and never a global cfg, which every crate of a build
 reads, Tokio's included. A bare `loom`, `shuttle` or `turmoil` in a `cfg` predicate is rejected, and
@@ -92,6 +97,8 @@ RULE = "primitive boundary"
 OWNER = "nervix-primitives"
 OWNER_SOURCES = "crates/primitives/"
 PERMISSIONS = PurePosixPath("crates/primitives/unmodeled-permissions.toml")
+BLOCKING_PERMISSIONS = PurePosixPath("crates/primitives/blocking-permissions.toml")
+BLOCKING_PERMISSION_FIELDS = ("path", "owner", "reason", "bound")
 HARNESS = "nervix-model-harness"
 MODES = ("loom", "shuttle", "turmoil")
 SELECTED = ("nervix_primitives", "sync", "atomic")
@@ -302,11 +309,29 @@ LOOM_REAL_ITEMS = frozenset(
 # `Instant` is governed and whose `Duration` is a value. A file that imports one of them reaches its
 # governed items through the name it binds.
 PARTLY_GOVERNED_MODULES = (("std", "time"), ("std", "net"), ("std", "os", "unix"))
-# Items of the boundary only their owners may name, each with the files that own it and what it is.
+@dataclass(frozen=True)
+class Confinement:
+    """A boundary item only its owners may name: the files that own it, what it is, and the
+    permission file that may declare another owner, if any may."""
+
+    owners: frozenset[str]
+    meaning: str
+    declared_in: PurePosixPath | None
+
+
+EXECUTOR_WORKERS = "crates/execution/src/workers.rs"
+BLOCKING_POOL = ("nervix_primitives", "task", "spawn_blocking")
+# Items of the boundary only their owners may name.
 CONFINED = {
-    ("nervix_primitives", "task", "spawn_cpu"): (
-        frozenset({"crates/execution/src/workers.rs"}),
-        "the bounded executor's mechanism for an admitted CPU job",
+    ("nervix_primitives", "task", "spawn_cpu"): Confinement(
+        owners=frozenset({EXECUTOR_WORKERS}),
+        meaning="the bounded executor's mechanism for an admitted CPU job",
+        declared_in=None,
+    ),
+    BLOCKING_POOL: Confinement(
+        owners=frozenset({EXECUTOR_WORKERS}),
+        meaning="the runtime's blocking pool, which the bounded executor runs its storage jobs on",
+        declared_in=BLOCKING_PERMISSIONS,
     ),
 }
 # A cfg passed to every crate of a build: a `--cfg` flag, in any of the spellings a recipe, Cargo
@@ -793,9 +818,11 @@ def check_statics(file: RustFile, names: AtomicNames) -> list[Site]:
 
 @dataclass
 class FileUses:
-    """What one file takes from the boundary's unmodeled path, and where."""
+    """What one file takes from the boundary's unmodeled path, and the confined items it names that
+    a permission may declare it an owner of, each with the first line naming it."""
 
     items: dict[str, int] = field(default_factory=dict)
+    declared: dict[tuple[str, ...], int] = field(default_factory=dict)
 
 
 class CfgError(ValueError):
@@ -993,11 +1020,12 @@ def _check_loom_block(file: RustFile, start: int, end: int, violations: list[Sit
 
 
 def check_source(file: RustFile, loom_only_file: bool = False) -> tuple[list[Site], FileUses]:
-    """Return the file's boundary violations and the unmodeled items it uses. `loom_only_file` says
-    a `mod` declaration compiled only for Loom brought the whole file in."""
+    """Return the file's boundary violations, the unmodeled items it uses, and the confined items it
+    names that a permission may declare it an owner of. `loom_only_file` says a `mod` declaration
+    compiled only for Loom brought the whole file in."""
 
     violations: list[Site] = []
-    unmodeled = FileUses()
+    uses = FileUses()
     names = AtomicNames()
     code = file.code
     use_spans: list[tuple[int, int]] = []
@@ -1008,14 +1036,18 @@ def check_source(file: RustFile, loom_only_file: bool = False) -> tuple[list[Sit
     confining_aliases: dict[str, tuple[str, ...]] = {}
 
     def confine(offset: int, item: tuple[str, ...]) -> None:
-        owners, meaning = CONFINED[item]
-        if file.path in owners:
+        confinement = CONFINED[item]
+        if file.path in confinement.owners:
+            return
+        if confinement.declared_in is not None:
+            # Whether a permission declares this file an owner is decided once every file is read.
+            uses.declared.setdefault(item, file.line_of(offset))
             return
         violations.append(
             file.site(
                 offset,
-                f"{RULE}: `{'::'.join(item)}` is {meaning}; only "
-                f"{', '.join(sorted(owners))} may name it",
+                f"{RULE}: `{'::'.join(item)}` is {confinement.meaning}; only "
+                f"{', '.join(sorted(confinement.owners))} may name it",
             )
         )
 
@@ -1058,7 +1090,7 @@ def check_source(file: RustFile, loom_only_file: bool = False) -> tuple[list[Sit
                             )
                         )
                         continue
-                    unmodeled.items.setdefault("::".join(rest), file.line_of(match.start()))
+                    uses.items.setdefault("::".join(rest), file.line_of(match.start()))
                 elif len(path) == 1 and leaf.alias is not None:
                     violations.append(
                         file.site(
@@ -1250,11 +1282,11 @@ def check_source(file: RustFile, loom_only_file: bool = False) -> tuple[list[Sit
                 )
             )
             continue
-        unmodeled.items.setdefault("::".join(item), file.line_of(match.start()))
+        uses.items.setdefault("::".join(item), file.line_of(match.start()))
     violations.extend(check_statics(file, names))
     violations.extend(check_loom_models(file, loom_only_file))
     violations.extend(check_mode_cfgs(file))
-    return violations, unmodeled
+    return violations, uses
 
 
 def _end_of_group(code: str, start: int) -> int:
@@ -1461,6 +1493,75 @@ def check_permissions(
         for item in sorted(permission.items - used_items):
             problems.append(
                 f"{PERMISSIONS}: stale permission: {permission.path} does not use unmodeled "
+                f"`{item}`"
+            )
+    return problems
+
+
+@dataclass(frozen=True)
+class BlockingPermission:
+    """A file that runs work on the runtime's blocking pool itself: who owns that work, why it stays
+    outside the bounded executor, and what bounds it there instead."""
+
+    path: str
+    owner: str
+    reason: str
+    bound: str
+
+
+def parse_blocking_permissions(text: str) -> list[BlockingPermission]:
+    document = tomllib.loads(text)
+    permissions: list[BlockingPermission] = []
+    seen: set[str] = set()
+    for index, table in enumerate(document.get("permission", [])):
+        context = f"{BLOCKING_PERMISSIONS} permission #{index + 1}"
+        for key in BLOCKING_PERMISSION_FIELDS:
+            if not isinstance(table.get(key), str) or not table[key].strip():
+                raise ValueError(f"{context} needs a non-empty `{key}`")
+        unknown = sorted(set(table) - set(BLOCKING_PERMISSION_FIELDS))
+        if unknown:
+            raise ValueError(f"{context} has unknown keys: {', '.join(unknown)}")
+        if table["path"] in seen:
+            raise ValueError(f"{context} repeats {table['path']}")
+        seen.add(table["path"])
+        permissions.append(
+            BlockingPermission(
+                path=table["path"],
+                owner=table["owner"],
+                reason=table["reason"],
+                bound=table["bound"],
+            )
+        )
+    unknown = sorted(set(document) - {"permission"})
+    if unknown:
+        raise ValueError(f"{BLOCKING_PERMISSIONS} has unknown tables: {', '.join(unknown)}")
+    return permissions
+
+
+def check_blocking_permissions(
+    uses: Mapping[str, FileUses], permissions: Sequence[BlockingPermission]
+) -> list[str]:
+    """Match every file that names the blocking pool outside the executor against a permission, and
+    every permission against such a file."""
+
+    problems: list[str] = []
+    item = "::".join(BLOCKING_POOL)
+    meaning = CONFINED[BLOCKING_POOL].meaning
+    declared = {permission.path for permission in permissions}
+    for path, file_uses in sorted(uses.items()):
+        line = file_uses.declared.get(BLOCKING_POOL)
+        if line is None or path in declared:
+            continue
+        problems.append(
+            f"{path}:{line}: {RULE}: `{item}` is {meaning}; admit this work through the bounded "
+            f"executor in nervix-execution, or declare its owner, reason and bound in "
+            f"{BLOCKING_PERMISSIONS}"
+        )
+    for permission in permissions:
+        used = uses.get(permission.path)
+        if used is None or BLOCKING_POOL not in used.declared:
+            problems.append(
+                f"{BLOCKING_PERMISSIONS}: stale permission: {permission.path} does not name "
                 f"`{item}`"
             )
     return problems
@@ -1858,6 +1959,12 @@ def check(root: Path) -> list[str]:
     except (OSError, ValueError, tomllib.TOMLDecodeError) as error:
         return [*problems, f"{PERMISSIONS}: {RULE}: {error}"]
     problems.extend(check_permissions(uses, permissions))
+    blocking_file = root / BLOCKING_PERMISSIONS
+    try:
+        blocking = parse_blocking_permissions(blocking_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, tomllib.TOMLDecodeError) as error:
+        return [*problems, f"{BLOCKING_PERMISSIONS}: {RULE}: {error}"]
+    problems.extend(check_blocking_permissions(uses, blocking))
     problems.extend(check_manifests(packages))
     problems.extend(check_global_cfgs(root, files))
     problems.extend(check_release_binaries(root, packages, files))
@@ -1883,7 +1990,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"{len(problems)} {RULE} violation(s). Every governed primitive comes from {OWNER}, and "
             "no selected atomic lives in a static; a real primitive outside every model comes from "
-            f"{'::'.join(UNMODELED_ROOT)} with a permission in {PERMISSIONS}.",
+            f"{'::'.join(UNMODELED_ROOT)} with a permission in {PERMISSIONS}, and work outside the "
+            f"bounded executor reaches the blocking pool only with a permission in "
+            f"{BLOCKING_PERMISSIONS}.",
             file=sys.stderr,
         )
         return 1

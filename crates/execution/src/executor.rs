@@ -25,7 +25,9 @@ pub struct Executor {
 struct ExecutorInner {
     limits: OperationLimits,
     control_cpu: WorkerPool,
+    credentials_cpu: WorkerPool,
     data_cpu: WorkerPool,
+    extension_cpu: WorkerPool,
     bulk_cpu: WorkerPool,
     consensus_storage: WorkerPool,
     filesystem_storage: WorkerPool,
@@ -33,6 +35,7 @@ struct ExecutorInner {
     commands_memory: MemoryBudget,
     relay_memory: MemoryBudget,
     bulk_memory: MemoryBudget,
+    credentials_memory: MemoryBudget,
 }
 
 /// Everything one class of the executor is currently doing, for metrics and for tests that need a
@@ -40,7 +43,9 @@ struct ExecutorInner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecutorSnapshot {
     pub control_cpu: WorkerClassSnapshot,
+    pub credentials_cpu: WorkerClassSnapshot,
     pub data_cpu: WorkerClassSnapshot,
+    pub extension_cpu: WorkerClassSnapshot,
     pub bulk_cpu: WorkerClassSnapshot,
     pub consensus_storage: WorkerClassSnapshot,
     pub filesystem_storage: WorkerClassSnapshot,
@@ -48,6 +53,20 @@ pub struct ExecutorSnapshot {
     pub commands_memory: MemoryBudgetSnapshot,
     pub relay_memory: MemoryBudgetSnapshot,
     pub bulk_memory: MemoryBudgetSnapshot,
+    pub credentials_memory: MemoryBudgetSnapshot,
+}
+
+impl ExecutorSnapshot {
+    /// What one CPU class is doing.
+    pub fn cpu_class(&self, class: CpuClass) -> WorkerClassSnapshot {
+        match class {
+            CpuClass::Control => self.control_cpu,
+            CpuClass::Credentials => self.credentials_cpu,
+            CpuClass::Data => self.data_cpu,
+            CpuClass::Extension => self.extension_cpu,
+            CpuClass::Bulk => self.bulk_cpu,
+        }
+    }
 }
 
 impl Default for Executor {
@@ -72,9 +91,19 @@ impl Executor {
                     validated.workers.control_cpu,
                     validated.workers.pending_jobs,
                 ),
+                credentials_cpu: WorkerPool::new(
+                    CpuClass::Credentials.into(),
+                    validated.workers.credentials_cpu,
+                    validated.workers.pending_jobs,
+                ),
                 data_cpu: WorkerPool::new(
                     CpuClass::Data.into(),
                     validated.workers.data_cpu,
+                    validated.workers.pending_jobs,
+                ),
+                extension_cpu: WorkerPool::new(
+                    CpuClass::Extension.into(),
+                    validated.workers.extension_cpu,
                     validated.workers.pending_jobs,
                 ),
                 bulk_cpu: WorkerPool::new(
@@ -102,6 +131,10 @@ impl Executor {
                 ),
                 relay_memory: MemoryBudget::new(MemoryClass::Relay, validated.budgets.relay),
                 bulk_memory: MemoryBudget::new(MemoryClass::Bulk, validated.budgets.bulk),
+                credentials_memory: MemoryBudget::new(
+                    MemoryClass::Credentials,
+                    validated.budgets.credentials,
+                ),
                 limits: validated.limits,
             }),
         })
@@ -202,7 +235,9 @@ impl Executor {
     pub fn snapshot(&self) -> ExecutorSnapshot {
         ExecutorSnapshot {
             control_cpu: self.inner.control_cpu.snapshot(),
+            credentials_cpu: self.inner.credentials_cpu.snapshot(),
             data_cpu: self.inner.data_cpu.snapshot(),
+            extension_cpu: self.inner.extension_cpu.snapshot(),
             bulk_cpu: self.inner.bulk_cpu.snapshot(),
             consensus_storage: self.inner.consensus_storage.snapshot(),
             filesystem_storage: self.inner.filesystem_storage.snapshot(),
@@ -210,6 +245,7 @@ impl Executor {
             commands_memory: self.inner.commands_memory.snapshot(),
             relay_memory: self.inner.relay_memory.snapshot(),
             bulk_memory: self.inner.bulk_memory.snapshot(),
+            credentials_memory: self.inner.credentials_memory.snapshot(),
         }
     }
 
@@ -219,13 +255,16 @@ impl Executor {
             MemoryClass::Commands => &self.inner.commands_memory,
             MemoryClass::Relay => &self.inner.relay_memory,
             MemoryClass::Bulk => &self.inner.bulk_memory,
+            MemoryClass::Credentials => &self.inner.credentials_memory,
         }
     }
 
     fn cpu_pool(&self, class: CpuClass) -> &WorkerPool {
         match class {
             CpuClass::Control => &self.inner.control_cpu,
+            CpuClass::Credentials => &self.inner.credentials_cpu,
             CpuClass::Data => &self.inner.data_cpu,
+            CpuClass::Extension => &self.inner.extension_cpu,
             CpuClass::Bulk => &self.inner.bulk_cpu,
         }
     }

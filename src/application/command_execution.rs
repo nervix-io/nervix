@@ -541,15 +541,29 @@ impl SessionServiceImpl {
                     ..
                 },
             ) = (existing.password_hash(), &request.body)
-                && !verify_password_hash(password_hash.to_string(), create.body.password.clone())
-                    .await
             {
-                // The password is left out of the request digest, so a retry that changed it is
-                // a different command under the same reference.
-                return Err(Box::new(conflicting_reference(
-                    &reference,
-                    CommandExecutionRequestConflict::Content,
-                )));
+                let verified = verify_password_hash(
+                    self.inner.runtime.executor(),
+                    password_hash.to_string(),
+                    create.body.password.clone(),
+                )
+                .await;
+                let matched = match verified {
+                    Ok(matched) => matched,
+                    Err(error) => {
+                        return Err(Box::new(command_error(format!(
+                            "could not compare the retried password with the admitted one: {error}"
+                        ))));
+                    }
+                };
+                if !matched {
+                    // The password is left out of the request digest, so a retry that changed it
+                    // is a different command under the same reference.
+                    return Err(Box::new(conflicting_reference(
+                        &reference,
+                        CommandExecutionRequestConflict::Content,
+                    )));
+                }
             }
             return Ok(CommandAdmission::Existing(existing));
         }
@@ -591,9 +605,13 @@ impl SessionServiceImpl {
                 source: _,
                 statement: Statement::CreateUser(create),
             } => {
-                let user = user_credentials(create.body.name.clone(), create.body.password.clone())
-                    .await
-                    .map_err(|error| Box::new(command_error(error.to_string())))?;
+                let user = user_credentials(
+                    self.inner.runtime.executor(),
+                    create.body.name.clone(),
+                    create.body.password.clone(),
+                )
+                .await
+                .map_err(|error| Box::new(command_error(error.to_string())))?;
                 CommandExecutionEffect::CreateUser {
                     if_not_exists: create.if_not_exists,
                     name: user.name,

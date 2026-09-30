@@ -80,6 +80,7 @@ impl EmitterSink for MappedRowSink {
                 let projected = self
                     .projection
                     .project(
+                        context.runtime.executor(),
                         batch_index,
                         batch.relay_batch(),
                         batch.execution_now(),
@@ -240,6 +241,7 @@ impl EmitterSink for MappedRequestSink {
                 }
                 self.projection
                     .project(
+                        context.runtime.executor(),
                         batch_index,
                         batch.relay_batch(),
                         batch.execution_now(),
@@ -538,12 +540,13 @@ impl MappedValuesProjection {
     /// with the structured message error its expression produced and never reaches the sink.
     pub(in crate::runtime) async fn project(
         &self,
+        executor: &Executor,
         batch_index: usize,
         batch: &RelayRecordBatch,
         execution_now: Timestamp,
         pending_rows: &[usize],
     ) -> EmitterRuntimeResult<ProjectedValueRows> {
-        let output = self.execute(batch, execution_now).await?;
+        let output = self.execute(executor, batch, execution_now).await?;
         let mut selected_rows = Vec::with_capacity(pending_rows.len());
         let mut rejected = Vec::new();
         for row in pending_rows {
@@ -595,6 +598,7 @@ impl MappedValuesProjection {
     /// Runs the compiled mapping over one batch, producing one output column per mapped value.
     async fn execute(
         &self,
+        executor: &Executor,
         batch: &RelayRecordBatch,
         execution_now: Timestamp,
     ) -> EmitterRuntimeResult<VmTypedBatch> {
@@ -623,6 +627,7 @@ impl MappedValuesProjection {
                 ))
         })?;
         let result = execute_program_with_selection_in_context(
+            executor,
             &self.program.program,
             &input,
             &VmExecutionContext {
@@ -868,7 +873,13 @@ mod tests {
         let batch = test_batch(3);
 
         let projected = projection
-            .project(4, &batch, Timestamp::from_unix_nanos(7), &[0, 2])
+            .project(
+                &Executor::default(),
+                4,
+                &batch,
+                Timestamp::from_unix_nanos(7),
+                &[0, 2],
+            )
             .await
             .expect("the mapping should project");
 
@@ -909,7 +920,13 @@ mod tests {
         let batch = test_batch(3);
 
         let mut projected = projection
-            .project(0, &batch, Timestamp::from_unix_nanos(7), &[0, 1, 2])
+            .project(
+                &Executor::default(),
+                0,
+                &batch,
+                Timestamp::from_unix_nanos(7),
+                &[0, 1, 2],
+            )
             .await
             .expect("the mapping should project");
 
@@ -943,7 +960,7 @@ mod tests {
         )
         .expect("the unrelated relay batch still has a valid schema");
         let report = projection
-            .execute(&batch, Timestamp::from_unix_nanos(7))
+            .execute(&Executor::default(), &batch, Timestamp::from_unix_nanos(7))
             .await
             .expect_err("the VALUES program requires fields the relay batch lacks");
         assert!(matches!(
@@ -967,7 +984,13 @@ mod tests {
         // The first projection resolves the lazily built parts of the program, so both counted
         // projections measure steady-state work.
         projection
-            .project(0, &narrow, execution_now, &narrow_rows)
+            .project(
+                &Executor::default(),
+                0,
+                &narrow,
+                execution_now,
+                &narrow_rows,
+            )
             .await
             .expect("the warm-up projection should succeed");
 
@@ -976,13 +999,19 @@ mod tests {
         nervix_primitives::task::yield_now().await;
         let (narrow_allocations, narrow_projected) = alloc_count::alloc_count!({
             projection
-                .project(0, &narrow, execution_now, &narrow_rows)
+                .project(
+                    &Executor::default(),
+                    0,
+                    &narrow,
+                    execution_now,
+                    &narrow_rows,
+                )
                 .now_or_never()
         });
         nervix_primitives::task::yield_now().await;
         let (wide_allocations, wide_projected) = alloc_count::alloc_count!({
             projection
-                .project(0, &wide, execution_now, &wide_rows)
+                .project(&Executor::default(), 0, &wide, execution_now, &wide_rows)
                 .now_or_never()
         });
 

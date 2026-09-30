@@ -1149,3 +1149,86 @@ pub(super) fn sink_context() -> EmitterSinkContext {
         udfs: None,
     }
 }
+
+/// An executor with one worker and one waiting place in every class, so a test can fill a class.
+pub(crate) fn single_worker_executor() -> Executor {
+    let one = NonZeroUsize::MIN;
+    Executor::new(nervix_execution::ExecutionConfig {
+        workers: nervix_execution::WorkerCounts {
+            control_cpu: one,
+            credentials_cpu: one,
+            data_cpu: one,
+            extension_cpu: one,
+            bulk_cpu: one,
+            consensus_storage: one,
+            filesystem_storage: one,
+            pending_jobs: one,
+        },
+        ..nervix_execution::ExecutionConfig::default()
+    })
+    .expect("the default budgets hold the default operation limits")
+}
+
+/// The only worker and the only waiting place of one CPU class of a
+/// [`single_worker_executor`], held so that the class refuses the next job submitted to it.
+pub(crate) struct FilledCpuClass {
+    executor: Executor,
+    class: nervix_execution::CpuClass,
+    release: nervix_primitives::sync::blocking::mpsc::Sender<()>,
+}
+
+impl FilledCpuClass {
+    /// Fill `class` of `executor`: one job holds its worker until the fill is released, and a
+    /// second waits behind it.
+    pub(crate) async fn fill(executor: &Executor, class: nervix_execution::CpuClass) -> Self {
+        let (release, held) = nervix_primitives::sync::blocking::mpsc::channel::<()>();
+        let holder = executor.clone();
+        nervix_primitives::task::spawn(async move {
+            let reservation = holder
+                .try_reserve(nervix_execution::MemoryClass::Relay, 0)
+                .expect("a zero charge is always admitted");
+            holder
+                .run_cpu(class, reservation, move |_charge, _cancellation| {
+                    // Releasing the fill disconnects the channel, which is the release.
+                    match held.recv() {
+                        Ok(()) | Err(nervix_primitives::sync::blocking::mpsc::RecvError) => {}
+                    }
+                })
+                .await
+                .expect("the holding job runs once the class has a worker");
+        });
+        while executor.snapshot().cpu_class(class).running == 0 {
+            nervix_primitives::task::yield_now().await;
+        }
+        let waiter = executor.clone();
+        nervix_primitives::task::spawn(async move {
+            let reservation = waiter
+                .try_reserve(nervix_execution::MemoryClass::Relay, 0)
+                .expect("a zero charge is always admitted");
+            waiter
+                .run_cpu(class, reservation, |_charge, _cancellation| ())
+                .await
+                .expect("the waiting job runs once the holder leaves");
+        });
+        while executor.snapshot().cpu_class(class).pending == 0 {
+            nervix_primitives::task::yield_now().await;
+        }
+        Self {
+            executor: executor.clone(),
+            class,
+            release,
+        }
+    }
+
+    /// Let the held jobs finish, and return once the class is idle again.
+    pub(crate) async fn release(self) {
+        drop(self.release);
+        loop {
+            let state = self.executor.snapshot().cpu_class(self.class);
+            if state.running == 0 && state.pending == 0 {
+                return;
+            }
+            nervix_primitives::task::yield_now().await;
+        }
+    }
+}

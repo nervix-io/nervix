@@ -93,7 +93,7 @@ struct FaultInjectionState {
     /// Consensus storage failures armed as each named node builds its storage, before it answers
     /// any Raft traffic.
     startup_consensus_faults: DashMap<ClusterNodeName, StartupConsensusFault, RandomState>,
-    bulk_executions: DashMap<ClusterNodeName, NodeBulkExecution, RandomState>,
+    executions: DashMap<ClusterNodeName, NodeExecution, RandomState>,
     failed_health_responders: DashMap<ClusterNodeName, (), RandomState>,
     failed_health_links: DashMap<HealthResponsePauseKey, (), RandomState>,
     /// A blocked peer drops gossip requests until the scenario restores its links.
@@ -198,7 +198,7 @@ impl std::fmt::Debug for ConsensusProbe {
 }
 
 #[derive(Debug)]
-struct NodeBulkExecution {
+struct NodeExecution {
     executor: Executor,
     /// Occupying jobs outlive the map guard while they run, so their release senders are shared.
     holders: Arc<Mutex<Vec<nervix_primitives::sync::blocking::mpsc::Sender<()>>>>,
@@ -338,7 +338,7 @@ impl Default for FaultInjection {
                 failed_https_listener_installations: DashMap::default(),
                 consensus_probes: DashMap::default(),
                 startup_consensus_faults: DashMap::default(),
-                bulk_executions: DashMap::default(),
+                executions: DashMap::default(),
                 failed_health_responders: DashMap::default(),
                 failed_health_links: DashMap::default(),
                 blocked_gossip_nodes: DashMap::default(),
@@ -748,17 +748,17 @@ impl FaultInjection {
             .insert(node_id, ());
     }
 
-    /// Fill every bulk worker on `node_id` and return once every occupying job is running.
-    pub async fn occupy_bulk_execution(&self, node_id: &ClusterNodeName) {
+    /// Fill every worker of `class` on `node_id` and return once every occupying job is running.
+    pub async fn occupy_execution(&self, node_id: &ClusterNodeName, class: CpuClass) {
         let node = self
             .inner
-            .bulk_executions
+            .executions
             .get(node_id)
             .unwrap_or_else(|| panic!("node '{node_id}' has not registered its executor"));
         let executor = node.executor.clone();
         let holders = node.holders.clone();
         drop(node);
-        let workers = executor.snapshot().bulk_cpu.workers;
+        let workers = executor.snapshot().cpu_class(class).workers;
         let started = Arc::new(AtomicUsize::new(0));
         for _ in 0..workers {
             let reservation = executor
@@ -772,19 +772,15 @@ impl FaultInjection {
             let started = started.clone();
             nervix_primitives::task::spawn(async move {
                 executor
-                    .run_cpu(
-                        CpuClass::Bulk,
-                        reservation,
-                        move |_charge, _cancellation| {
-                            started.fetch_add(1, Ordering::AcqRel);
-                            // Park until the scenario drops the holder so occupancy consumes no
-                            // CPU. Nothing is ever sent, so the disconnect is the wake-up rather
-                            // than a failure.
-                            held.recv().discarded(
-                                "dropping the holder is how the scenario releases this worker",
-                            );
-                        },
-                    )
+                    .run_cpu(class, reservation, move |_charge, _cancellation| {
+                        started.fetch_add(1, Ordering::AcqRel);
+                        // Park until the scenario drops the holder so occupancy consumes no
+                        // CPU. Nothing is ever sent, so the disconnect is the wake-up rather
+                        // than a failure.
+                        held.recv().discarded(
+                            "dropping the holder is how the scenario releases this worker",
+                        );
+                    })
                     .await
                     .discarded(
                         "this job exists to hold a worker until the scenario releases it; its \
@@ -798,9 +794,46 @@ impl FaultInjection {
         }
     }
 
-    pub fn release_bulk_execution(&self, node_id: &ClusterNodeName) {
+    /// Fill every worker of `class` on `node_id`, then every place in its wait queue, and return
+    /// once the class refuses the next job it is handed.
+    pub async fn saturate_execution(&self, node_id: &ClusterNodeName, class: CpuClass) {
+        self.occupy_execution(node_id, class).await;
+        let executor = self
+            .inner
+            .executions
+            .get(node_id)
+            .unwrap_or_else(|| panic!("node '{node_id}' has not registered its executor"))
+            .executor
+            .clone();
+        let capacity = executor.snapshot().cpu_class(class).queue_capacity;
+        for _ in 0..capacity {
+            let reservation = executor
+                .try_reserve(MemoryClass::Bulk, 0)
+                .unwrap_or_else(|error| {
+                    panic!("bulk admission must accept a zero charge: {error}")
+                });
+            let waiter = executor.clone();
+            nervix_primitives::task::spawn(async move {
+                waiter
+                    .run_cpu(class, reservation, |_charge, _cancellation| ())
+                    .await
+                    .discarded(
+                        "this job exists to hold a place in the wait queue; once the scenario \
+                         releases the workers it runs empty",
+                    );
+            });
+        }
+        while executor.snapshot().cpu_class(class).pending < capacity {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::task::yield_now().await;
+        }
+    }
+
+    /// Release every worker a scenario occupied on `node_id`, of every class. The jobs that waited
+    /// behind them then run empty.
+    pub fn release_execution(&self, node_id: &ClusterNodeName) {
         self.inner
-            .bulk_executions
+            .executions
             .get(node_id)
             .unwrap_or_else(|| panic!("node '{node_id}' has not registered its executor"))
             .holders
@@ -1665,11 +1698,11 @@ impl FaultInjection {
             .is_some()
     }
 
-    /// Record the executor whose bulk workers a scenario may fill.
-    pub(crate) fn register_bulk_executor(&self, node_id: ClusterNodeName, executor: Executor) {
-        self.inner.bulk_executions.insert(
+    /// Record the executor whose workers a scenario may fill.
+    pub(crate) fn register_executor(&self, node_id: ClusterNodeName, executor: Executor) {
+        self.inner.executions.insert(
             node_id,
-            NodeBulkExecution {
+            NodeExecution {
                 executor,
                 holders: Arc::default(),
             },

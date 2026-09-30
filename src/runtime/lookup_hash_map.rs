@@ -776,12 +776,15 @@ mod tests {
         .expect("batch should build");
 
         let plan = plan_filter_map_messages(
+            ProgramRun {
+                executor: &Executor::default(),
+                now: Timestamp::now(),
+            },
             "deduplicator",
             &named::<ModelName>("project_titles"),
             MessageErrorOperation::Set,
             &program,
             batch,
-            Timestamp::now(),
             &HashMap::default(),
         )
         .await

@@ -498,6 +498,7 @@ async fn read_only_predicates_select_rows_with_the_new_tests() {
     .expect("the batch must build");
 
     let result = execute_predicate_in_context(
+        &nervix_execution::Executor::default(),
         &compiled,
         &batch,
         &ExecutionContext::new(Timestamp::from_unix_nanos(0)),

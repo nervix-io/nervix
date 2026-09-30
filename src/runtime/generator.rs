@@ -314,11 +314,13 @@ pub(super) enum GeneratorProgramOutcome {
 }
 
 pub(super) async fn execute_generator_program_on_context(
+    executor: &Executor,
     program: &CompiledProgramWithMaterializedInterest,
     input: &VmTypedBatch,
     execution_now: Timestamp,
 ) -> error_stack::Result<GeneratorProgramOutcome, GeneratorError> {
     let result = execute_program_with_selection_in_context(
+        executor,
         &program.compiled,
         input,
         &VmExecutionContext {
@@ -779,6 +781,7 @@ impl Runtime {
                                         }
                                     };
                                     match execute_generator_program_on_context(
+                                        runtime.executor(),
                                         &route.program,
                                         &input,
                                         execution_now,
@@ -1246,10 +1249,14 @@ mod tests {
             &input_samples,
         ));
 
-        let output =
-            execute_generator_program_on_context(&program, &input, Timestamp::from_unix_nanos(1))
-                .await
-                .expect("generator program must execute");
+        let output = execute_generator_program_on_context(
+            &Executor::default(),
+            &program,
+            &input,
+            Timestamp::from_unix_nanos(1),
+        )
+        .await
+        .expect("generator program must execute");
         let GeneratorProgramOutcome::Output(output) = output else {
             panic!("generator program must emit one row");
         };

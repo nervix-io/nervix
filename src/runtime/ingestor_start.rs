@@ -38,6 +38,8 @@ pub(in crate::runtime) enum LookupRuntimeError {
     ReadFile { lookup: LookupName, path: PathBuf },
     #[error("failed to decode lookup '{lookup}' line {line}")]
     DecodeLine { lookup: LookupName, line: usize },
+    #[error("the node's bounded execution did not unfold lookup '{lookup}' line {line}")]
+    UnfoldLine { lookup: LookupName, line: usize },
     #[error("failed to build lookup '{lookup}' record batch")]
     BuildBatch { lookup: LookupName },
     #[error("failed to read lookup '{lookup}' key field '{key}' at line {line}")]
@@ -364,13 +366,29 @@ impl Runtime {
             if line.trim().is_empty() {
                 continue;
             }
-            let messages =
-                decode_ingested_payload(&codec, line.as_bytes(), &mut decoder, &mut builder)
-                    .await
-                    .change_context_lazy(|| LookupRuntimeError::DecodeLine {
+            let decoded = decode_ingested_payload(
+                self.executor(),
+                &codec,
+                line.as_bytes(),
+                &mut decoder,
+                &mut builder,
+            )
+            .await;
+            let messages = match decoded {
+                Ok(messages) => messages,
+                Err(PayloadDecodeFailure::Codec(report)) => {
+                    return Err(report.change_context(LookupRuntimeError::DecodeLine {
                         lookup: lookup.name.clone(),
                         line: line_number,
-                    })?;
+                    }));
+                }
+                Err(PayloadDecodeFailure::NotAdmitted(report)) => {
+                    return Err(report.change_context(LookupRuntimeError::UnfoldLine {
+                        lookup: lookup.name.clone(),
+                        line: line_number,
+                    }));
+                }
+            };
             row_lines.extend(std::iter::repeat_n(line_number, messages));
         }
 

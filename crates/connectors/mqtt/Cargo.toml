@@ -31,6 +31,8 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+# The test hosts hand a sink the node's executor, as the server's host does.
+nervix-execution = { workspace = true }
 nervix-test-environment = { workspace = true }
 nonzero_ext = { workspace = true }
 tempfile = { workspace = true }

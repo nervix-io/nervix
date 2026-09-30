@@ -1543,6 +1543,7 @@ pub(in crate::runtime) fn compile_key_projection_program(
 }
 
 pub(super) async fn evaluate_constant_expression_vm(
+    executor: &Executor,
     expression: &nervix_models::Expression,
     udfs: Option<&UdfExecutor>,
     execution_now: Timestamp,
@@ -1615,6 +1616,7 @@ pub(super) async fn evaluate_constant_expression_vm(
     )
     .change_context(RuntimeVmCompileError::BuildConstantInput)?;
     let result = execute_program_with_selection_in_context(
+        executor,
         &compiled,
         &input,
         &VmExecutionContext {

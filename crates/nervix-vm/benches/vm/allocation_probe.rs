@@ -61,7 +61,7 @@ unsafe impl GlobalAlloc for MeteredAllocator {
 }
 
 pub(super) fn measure(
-    runtime: &nervix_primitives::runtime::Runtime,
+    runtime: &BenchmarkRuntime,
     name: &str,
     shape: &str,
     program: &Arc<CompiledProgram>,
@@ -71,7 +71,7 @@ pub(super) fn measure(
     BYTES.store(0, Ordering::Relaxed);
     ACTIVE.store(true, Ordering::Release);
     let output = runtime
-        .block_on(execute_benchmark_program(program, batch))
+        .execute(program, batch)
         .assured("the validated benchmark fixture executes successfully");
     ACTIVE.store(false, Ordering::Release);
 

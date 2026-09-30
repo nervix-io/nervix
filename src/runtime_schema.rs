@@ -554,10 +554,10 @@ pub(crate) enum CodecContractError {
         found: String,
         expected: String,
     },
-    /// The task that unfolded a payload off the reactor did not return; its join failure is the
-    /// cause beneath.
-    #[error("blocking decode task failed")]
-    DecodeTask,
+    /// The job that unfolded a payload on an extension worker panicked; the executor's report of it
+    /// is the cause beneath.
+    #[error("the payload's unfolding panicked on an extension worker")]
+    UnfoldingPanicked,
     #[error("SYSLOG codecs do not support ENCODE field rules")]
     SyslogEncodingRules,
     #[error("SYSLOG schema field '{field}' is outside the fixed field contract")]
@@ -893,18 +893,18 @@ impl CompiledCodec {
         Report::new(issue).change_context(self.parse_field(field))
     }
 
-    /// The task that unfolded a payload through this codec off the reactor failing to return,
-    /// with the failure of `join` beneath it.
-    pub(crate) fn decode_task_failure(
+    /// The job that unfolded a payload through this codec on the node's extension workers
+    /// panicking, with the executor's report of it beneath.
+    pub(crate) fn unfolding_panicked<C: error_stack::Context>(
         &self,
-        join: impl error_stack::Context,
+        panic: Report<C>,
     ) -> Report<CodecError> {
-        Report::new(join)
-            .change_context(CodecContractError::DecodeTask)
+        panic
+            .change_context(CodecContractError::UnfoldingPanicked)
             .change_context(self.invalid())
     }
 
-    pub fn requires_blocking_decode(&self) -> bool {
+    pub fn transforms_on_ingestion(&self) -> bool {
         match &self.wire_schema {
             CompiledWireSchema::JaqNative(native) => native.transformations.on_ingestion.is_some(),
             CompiledWireSchema::Protobuf(protobuf) => {
@@ -943,7 +943,7 @@ impl CompiledCodec {
         }))
     }
 
-    pub(crate) fn requires_blocking_encode(&self) -> bool {
+    pub(crate) fn transforms_on_emitting(&self) -> bool {
         match &self.wire_schema {
             CompiledWireSchema::JaqNative(native) => native.transformations.on_emitting.is_some(),
             CompiledWireSchema::Protobuf(protobuf) => {
@@ -6569,10 +6569,10 @@ mod tests {
     }
 
     #[test]
-    fn a_decode_task_that_does_not_return_keeps_its_failure_beneath_the_codec() {
+    fn an_unfolding_that_panicked_keeps_its_failure_beneath_the_codec() {
         let codec = compiled_syslog_codec();
 
-        let report = codec.decode_task_failure(io::Error::other("the worker stopped"));
+        let report = codec.unfolding_panicked(Report::new(io::Error::other("the worker stopped")));
 
         assert!(matches!(
             report.current_context(),
@@ -6580,11 +6580,12 @@ mod tests {
         ));
         assert!(matches!(
             report.downcast_ref::<CodecContractError>(),
-            Some(CodecContractError::DecodeTask)
+            Some(CodecContractError::UnfoldingPanicked)
         ));
         assert_eq!(
             format!("{report:#}"),
-            "codec 'syslog_codec' is incompatible: blocking decode task failed: the worker stopped"
+            "codec 'syslog_codec' is incompatible: the payload's unfolding panicked on an \
+             extension worker: the worker stopped"
         );
     }
 
@@ -8939,8 +8940,8 @@ mod tests {
             }),
         )
         .expect("codec should compile");
-        assert!(compiled_codec.requires_blocking_decode());
-        assert!(!compiled_codec.requires_blocking_encode());
+        assert!(compiled_codec.transforms_on_ingestion());
+        assert!(!compiled_codec.transforms_on_emitting());
 
         let payload = [
             0x08, 42, 0x12, 4, b'a', b'c', b'm', b'e', 0x1a, 5, b'h', b'e', b'l', b'l', b'o',
@@ -9016,8 +9017,8 @@ mod tests {
             }),
         )
         .expect("codec should compile");
-        assert!(!compiled_codec.requires_blocking_decode());
-        assert!(compiled_codec.requires_blocking_encode());
+        assert!(!compiled_codec.transforms_on_ingestion());
+        assert!(compiled_codec.transforms_on_emitting());
 
         let record = test_runtime_row([
             ("user_id".to_string(), RuntimeValue::U32(42)),

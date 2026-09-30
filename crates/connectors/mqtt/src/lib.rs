@@ -925,6 +925,12 @@ mod tests {
         }
     }
 
+    impl nervix_connector::SinkBoundedExecution for SilentHost {
+        fn executor(&self) -> nervix_execution::Executor {
+            nervix_execution::Executor::default()
+        }
+    }
+
     impl nervix_connector::SinkGeneralErrorHandler for SilentHost {
         fn handle_general_error(
             &self,
@@ -954,6 +960,12 @@ mod tests {
     impl nervix_connector::SinkStagingDirectory for RecordingHost {
         fn staging_directory(&self) -> std::path::PathBuf {
             std::env::temp_dir()
+        }
+    }
+
+    impl nervix_connector::SinkBoundedExecution for RecordingHost {
+        fn executor(&self) -> nervix_execution::Executor {
+            nervix_execution::Executor::default()
         }
     }
 

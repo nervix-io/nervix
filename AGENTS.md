@@ -346,6 +346,18 @@ choose a backend.
   as one task of the simulated host's scheduler under Turmoil; only the executor's worker pools may
   name it. Pausing, advancing and resuming a runtime's clock needs the `test-util` capability,
   which only tests of elapsed-time behavior enable.
+- Work a node runs off its async workers goes through the bounded executor in `nervix-execution`:
+  it takes the CPU or storage class of its work, charges the memory class it allocates in, and
+  checks its `Cancellation` between bounded units. Operator-supplied code the node cannot bound,
+  such as a UDF call or a JAQ transformation, takes the extension class, and password hashing
+  takes the credentials class. A refusal from the
+  executor is a typed error the caller maps to its own outcome, and a refusal that judged nothing
+  stays retryable rather than becoming a decode, encode or authentication failure.
+  `nervix_primitives::task::spawn_blocking` belongs to the executor's storage workers; any other
+  file that names it needs a permission in `crates/primitives/blocking-permissions.toml` stating
+  its owner, why that owner stays outside the executor, and what bounds its work instead, such as
+  a client tool that is not a node or an external driver that waits on the network. A use without
+  a permission and a permission nothing uses both fail.
 - An execution mode is a feature, never a global cfg: a bare `loom`, `shuttle` or `turmoil` in a
   `cfg` predicate, and `--cfg loom`, `--cfg shuttle` or `--cfg turmoil` in any recipe, Cargo
   configuration, workflow or build script, are rejected, because every crate of a build, Tokio's
