@@ -21,9 +21,9 @@ use nervix_backup::DescribedRuntimeState;
 use nervix_consensus::{CommandExecution, ConsensusError, RestoreStepEffect};
 use nervix_interconnect::{RuntimeState, StatePlacementEnvelope, backup::RestoreStateInventory};
 use nervix_models::{
-    ClusterNodeName, CoordinationIdentity, DomainName, ModelKind, NodeRef, ResourceId,
-    ResourceUploadIdentity, ResourceUploadKey, RestoreState, RestoreStateAuthority, RestoreStep,
-    UserName,
+    BranchKeyFingerprint, ClusterNodeName, CoordinationIdentity, DomainName, ModelKind, NodeRef,
+    RemoteRuntimeField, ResourceId, ResourceUploadIdentity, ResourceUploadKey, RestoreState,
+    RestoreStateAuthority, RestoreStep, SchemaFingerprint, UserName,
 };
 
 use super::{
@@ -161,6 +161,16 @@ impl SessionServiceImpl {
         archive: &VerifiedArchive,
         state: RestoreState,
     ) -> Result<RestoreStateAuthority, StepFailure> {
+        struct RestoredStateSection {
+            reference: NodeRef,
+            schema: SchemaFingerprint,
+            branch_fingerprint: Option<BranchKeyFingerprint>,
+            branch_key: Option<Vec<RemoteRuntimeField>>,
+            runtime_state: RuntimeState,
+            revision: u64,
+            payload: Vec<u8>,
+        }
+
         let authority = match self
             .inner
             .consensus
@@ -191,16 +201,15 @@ impl SessionServiceImpl {
                 if is_lifecycle != first_lifecycle {
                     continue;
                 }
-                let (
-                    kind,
-                    entity,
+                let RestoredStateSection {
+                    reference,
                     schema,
                     branch_fingerprint,
                     branch_key,
                     runtime_state,
                     revision,
                     payload,
-                ) = match archived {
+                } = match archived {
                     DescribedRuntimeState::BranchLifecycle { lifecycle, .. } => {
                         let payload = encode_restored_branch_lifecycle(
                             lifecycle
@@ -220,18 +229,17 @@ impl SessionServiceImpl {
                             &lifecycle.entity,
                         )
                         .map_err(|error| StepFailure::Failed(error.to_string()))?;
-                        (
-                            lifecycle.owner_kind,
-                            lifecycle.entity.clone(),
-                            Some(lifecycle.schema),
-                            None,
-                            None,
-                            RuntimeState::BranchLru {
+                        RestoredStateSection {
+                            reference: NodeRef::new(lifecycle.owner_kind, lifecycle.entity.clone()),
+                            schema: lifecycle.schema,
+                            branch_fingerprint: None,
+                            branch_key: None,
+                            runtime_state: RuntimeState::BranchLru {
                                 schema: lifecycle.schema,
                             },
-                            lifecycle.revision,
+                            revision: lifecycle.revision,
                             payload,
-                        )
+                        }
                     }
                     DescribedRuntimeState::KafkaOffsets { offsets, .. } => {
                         if state == RestoreState::WithoutSourceOffsets {
@@ -247,16 +255,15 @@ impl SessionServiceImpl {
                                 .collect(),
                         )
                         .map_err(|error| StepFailure::Failed(error.to_string()))?;
-                        (
-                            ModelKind::Ingestor,
-                            offsets.entity.clone(),
-                            Some(offsets.schema),
-                            None,
-                            None,
-                            RuntimeState::KafkaOffset,
-                            offsets.revision,
+                        RestoredStateSection {
+                            reference: NodeRef::new(ModelKind::Ingestor, offsets.entity.clone()),
+                            schema: offsets.schema,
+                            branch_fingerprint: None,
+                            branch_key: None,
+                            runtime_state: RuntimeState::KafkaOffset,
+                            revision: offsets.revision,
                             payload,
-                        )
+                        }
                     }
                     DescribedRuntimeState::Wasm {
                         descriptor, guest, ..
@@ -265,42 +272,43 @@ impl SessionServiceImpl {
                             .read_guest_blob(&self.inner.runtime, guest)
                             .await
                             .map_err(|error| StepFailure::Failed(error.to_string()))?;
-                        (
-                            ModelKind::WasmProcessor,
-                            descriptor.entity.clone(),
-                            Some(descriptor.schema),
-                            descriptor.branch_fingerprint,
-                            descriptor.branch.clone().map(|fields| {
+                        RestoredStateSection {
+                            reference: NodeRef::new(
+                                ModelKind::WasmProcessor,
+                                descriptor.entity.clone(),
+                            ),
+                            schema: descriptor.schema,
+                            branch_fingerprint: descriptor.branch_fingerprint,
+                            branch_key: descriptor.branch.clone().map(|fields| {
                                 fields
                                     .into_iter()
                                     .map(|field| field.into_remote())
                                     .collect()
                             }),
-                            RuntimeState::WasmProcessor {
+                            runtime_state: RuntimeState::WasmProcessor {
                                 schema: descriptor.schema,
                                 generation: descriptor.generation,
                             },
-                            descriptor.revision,
+                            revision: descriptor.revision,
                             payload,
-                        )
+                        }
                     }
                 };
-                let Some(node) = scheduled
-                    .and_then(|scheduled| scheduled.nodes.get(&NodeRef::new(kind, entity.clone())))
+                let Some(node) = scheduled.and_then(|scheduled| scheduled.nodes.get(&reference))
                 else {
-                    tracing::warn!(domain = %domain.target, entity = %entity, "skipped state for an entity absent from the restored schedule");
+                    tracing::warn!(domain = %domain.target, entity = %reference.identifier, "skipped state for an entity absent from the restored schedule");
                     continue;
                 };
-                if schema.is_some_and(|schema| schema != node.schema_fingerprint) {
-                    tracing::warn!(domain = %domain.target, entity = %entity, "skipped state with a mismatched schema fingerprint");
+                if schema != node.schema_fingerprint {
+                    tracing::warn!(domain = %domain.target, entity = %reference.identifier, "skipped state with a mismatched schema fingerprint");
                     continue;
                 }
                 let runtime_state = match runtime_state {
                     RuntimeState::WasmProcessor { schema, .. } => {
                         let Some(generations) = node.wasm_state_generations() else {
                             return Err(StepFailure::Failed(format!(
-                                "restored WASM processor '{entity}' has no published state \
-                                 generation"
+                                "restored WASM processor '{}' has no published state generation",
+                                reference.identifier
                             )));
                         };
                         RuntimeState::WasmProcessor {
@@ -314,8 +322,8 @@ impl SessionServiceImpl {
                     placement: StatePlacementEnvelope {
                         domain: domain.target.clone(),
                         state: runtime_state,
-                        kind,
-                        identifier: entity.clone(),
+                        kind: reference.kind,
+                        identifier: reference.identifier,
                         branch_key,
                     },
                     branch_fingerprint,

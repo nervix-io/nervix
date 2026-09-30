@@ -68,6 +68,22 @@ coverage-bolero duration="2":
     "${coverage[@]}" lcov -o target/bolero/python.lcov
     "${coverage[@]}" report --fail-under=80
 
+# Qualify the restore installation properties while measuring the runner during focused iteration.
+coverage-bolero-restore duration="30":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" erase
+    "${coverage[@]}" run --branch --source=scripts.bolero -m unittest scripts.tests.test_bolero
+    "${coverage[@]}" run --branch -a scripts/bolero.py test restore-installation
+    for target in restore-installation-wire restore-installation-storage; do
+        "${coverage[@]}" run --branch -a scripts/bolero.py fuzz "${target}" {{ quote(duration) }}
+    done
+    "${coverage[@]}" run --branch -a scripts/bolero.py qualify
+    mkdir -p target/bolero
+    "${coverage[@]}" lcov -o target/bolero/python.lcov
+    "${coverage[@]}" report --fail-under=80
+
 build-deps: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests
 
 tests-deps: build-deps build-nspl-format build-test-cli
@@ -201,6 +217,11 @@ check-package-lib package *args:
 # Run the unit tests of one workspace package whose tests need no server test dependencies.
 test-package-lib package *args:
     cargo test --package {{ package }} --lib -- {{ args }}
+
+# Run one integration test target of one workspace package whose tests need no server test
+# dependencies, such as the vocabulary's representation properties.
+test-package-test package test *args:
+    cargo test --package {{ package }} --test {{ test }} -- {{ args }}
 
 # Run the unit tests in the binary targets of one workspace package, such as the web console's
 # view logic in its `main.rs`.

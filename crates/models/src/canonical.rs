@@ -40,13 +40,12 @@ use crate::{
     MembershipOperator, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction,
     MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NatsIngestMode, OtelMetricKind,
     OtelSignal, OutputBranch, ParseAsType, PlacementPolicy, PostgresConflictAction,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, PulsarIngestMode, QueueName,
-    RabbitMqIngestMode, RangeOperator, RedisPubSubIngestMode, RelayBranching, RelayName, Restore,
-    RestoreMode, RestoreScope, RestoreState, RetryPolicy, RouteConstruction, SchemaField,
-    SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup,
-    SqsIngestMode, Statement, SubscriptionLiteral, TopicName, TransactionInspectionTarget,
-    UnaryOperator, WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField,
-    ZeroMqIngestMode,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode,
+    RangeOperator, RedisPubSubIngestMode, RelayBranching, RelayName, Restore, RestoreMode,
+    RestoreScope, RestoreState, RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName,
+    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement,
+    SubscriptionLiteral, TopicName, TransactionInspectionTarget, UnaryOperator,
+    WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
 };
 
 /// The NSPL release canonical rendering writes.
@@ -685,8 +684,8 @@ impl Statement {
                     DomainPace::Paced { period, skew } => format!(
                         "PACED DOMAIN {} WITH PERIOD {} SKEW {}",
                         create.body.id.as_str(),
-                        period,
-                        skew
+                        duration_literal(period.as_nanos()),
+                        duration_literal(skew.as_nanos())
                     ),
                     DomainPace::Unpaced => {
                         format!("UNPACED DOMAIN {}", create.body.id.as_str())
@@ -940,7 +939,7 @@ impl Backup {
             BackupCapture::Quiesced { timeout: None } => String::new(),
             BackupCapture::Quiesced {
                 timeout: Some(timeout),
-            } => format!(" TIMEOUT {}", humantime::format_duration(timeout)),
+            } => format!(" TIMEOUT {}", duration_literal(timeout.as_nanos())),
             BackupCapture::Live => " WITHOUT PAUSE".to_string(),
             BackupCapture::ConfigurationOnly => " WITHOUT STATE".to_string(),
         };
@@ -1387,15 +1386,8 @@ macro_rules! impl_standard_client_canonical_nspl {
         $(
             impl<Version: Display> $Client<Version> {
                 pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
-                    let config = self
-                        .config
-                        .iter()
-                        .map(ClientConfigEntry::to_canonical_nspl)
-                        .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
-                        .join(", ");
-
                     let mut clauses = client_head_clauses!(self, $type_label, $pooling);
-                    clauses.push(Clause::braced("CONFIG", split_config_entries(&config)));
+                    clauses.push(Clause::braced("CONFIG", config_entry_items(&self.config)?));
 
                     Ok(clause_statement(
                         format!("CREATE CLIENT {}", self.name.as_str()),
@@ -1432,12 +1424,7 @@ impl_standard_client_canonical_nspl! {
 
 impl<Version: Display> CreateClientS3<Version> {
     pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(ClientConfigEntry::to_canonical_nspl)
-            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
+        let config = config_entry_items(&self.config)?.join(", ");
 
         Ok(format!(
             "CREATE CLIENT {} TYPE S3{} CONFIG {{{}}};",
@@ -1450,13 +1437,6 @@ impl<Version: Display> CreateClientS3<Version> {
 
 impl<Version: Display> CreateClientWebsockets<Version> {
     pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
-        let config = self
-            .config
-            .iter()
-            .map(ClientConfigEntry::to_canonical_nspl)
-            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
-            .join(", ");
-
         Ok(clause_statement(
             format!("CREATE CLIENT {}", self.name.as_str()),
             vec![
@@ -1465,7 +1445,7 @@ impl<Version: Display> CreateClientWebsockets<Version> {
                     signaling_protocol_clause(self.signaling_protocol.as_ref()),
                     client_mount_clause(self.mount.as_ref()),
                 )),
-                Clause::braced("CONFIG", split_config_entries(&config)),
+                Clause::braced("CONFIG", config_entry_items(&self.config)?),
             ],
         ))
     }
@@ -1561,12 +1541,7 @@ impl<Version: Display> SignalingWireFormat<Version> {
         let Self::Protobuf(config) = self else {
             return Ok(self.as_ref().to_string());
         };
-        let protobuf_config = config
-            .config
-            .iter()
-            .map(ClientConfigEntry::to_canonical_nspl)
-            .collect::<Result<Vec<_>, _>>()?
-            .join(", ");
+        let protobuf_config = config_entry_items(&config.config)?.join(", ");
         Ok(format!(
             "PROTOBUF USING RESOURCE {} VERSION {} CONFIG {{{}}} SEND MESSAGE {} WAIT MESSAGE {}",
             config.resource.as_str(),
@@ -1606,56 +1581,65 @@ fn jaq_program_list_to_nspl(programs: &[String]) -> String {
 
 impl<Version: Display> CreateCodec<Version> {
     pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
-        let (wire, transformations) = match &self.wire_format {
-            CodecWireFormat::Json { wire_schema } => (
-                format!("WIRE JSON SCHEMA {}", wire_schema.as_str()),
-                String::new(),
-            ),
-            CodecWireFormat::Cbor { wire_schema } => (
-                format!("WIRE CBOR SCHEMA {}", wire_schema.as_str()),
-                String::new(),
-            ),
-            CodecWireFormat::Avro { wire_schema } => (
-                format!("WIRE AVRO SCHEMA {}", wire_schema.as_str()),
-                String::new(),
-            ),
+        let mut clauses = Vec::new();
+        let transformations = match &self.wire_format {
+            CodecWireFormat::Json { wire_schema } => {
+                clauses.push(Clause::line(format!(
+                    "FROM WIRE JSON SCHEMA {}",
+                    wire_schema.as_str()
+                )));
+                String::new()
+            }
+            CodecWireFormat::Cbor { wire_schema } => {
+                clauses.push(Clause::line(format!(
+                    "FROM WIRE CBOR SCHEMA {}",
+                    wire_schema.as_str()
+                )));
+                String::new()
+            }
+            CodecWireFormat::Avro { wire_schema } => {
+                clauses.push(Clause::line(format!(
+                    "FROM WIRE AVRO SCHEMA {}",
+                    wire_schema.as_str()
+                )));
+                String::new()
+            }
             CodecWireFormat::Syslog => {
                 if !self.encoding_rules.is_empty() {
                     return Err(Report::new(CanonicalNsplError::SyslogEncodingRules {
                         codec: self.name.clone(),
                     }));
                 }
-                ("SYSLOG".to_string(), String::new())
+                clauses.push(Clause::line("FROM SYSLOG"));
+                String::new()
             }
             CodecWireFormat::JaqNative {
                 format,
                 transformations,
-            } => (
-                format.as_ref().to_string(),
-                codec_jaq_transformations_to_nspl(&self.name, transformations)?,
-            ),
+            } => {
+                clauses.push(Clause::line(format!("FROM {}", format.as_ref())));
+                codec_jaq_transformations_to_nspl(&self.name, transformations)?
+            }
             CodecWireFormat::Protobuf(config) => {
-                let protobuf_config = config
-                    .config
-                    .iter()
-                    .map(ClientConfigEntry::to_canonical_nspl)
-                    .collect::<Result<Vec<_>, _>>()?
-                    .join(", ");
+                // The configuration map is a block of its own; the messages follow it on one line.
+                clauses.push(Clause::line(format!(
+                    "FROM PROTOBUF USING RESOURCE {} VERSION {}",
+                    config.resource.as_str(),
+                    config.resource_version,
+                )));
+                clauses.push(Clause::braced(
+                    "CONFIG",
+                    config_entry_items(&config.config)?,
+                ));
                 let batch_message = match &config.batch_message {
                     Some(message) => format!(" BATCH MESSAGE {}", string_literal(message)),
                     None => String::new(),
                 };
-                (
-                    format!(
-                        "PROTOBUF USING RESOURCE {} VERSION {} CONFIG {{{}}} MESSAGE \
-                         {}{batch_message}",
-                        config.resource.as_str(),
-                        config.resource_version,
-                        protobuf_config,
-                        string_literal(&config.message)
-                    ),
-                    codec_jaq_transformations_to_nspl(&self.name, &config.transformations)?,
-                )
+                clauses.push(Clause::line(format!(
+                    "MESSAGE {}{batch_message}",
+                    string_literal(&config.message)
+                )));
+                codec_jaq_transformations_to_nspl(&self.name, &config.transformations)?
             }
         };
         let encoding_rules = if self.encoding_rules.is_empty() {
@@ -1670,22 +1654,6 @@ impl<Version: Display> CreateCodec<Version> {
                     .join(", ")
             )
         };
-        let mut clauses = Vec::new();
-        // The wire description may itself carry a CONFIG map, which becomes a block of its own.
-        match wire.split_once(" CONFIG {") {
-            Some((before, rest)) => {
-                let (entries, after) = rest.rsplit_once('}').verified(
-                    "the split above found an opening CONFIG brace, which this renderer always \
-                     closes",
-                );
-                clauses.push(Clause::line(format!("FROM {before}")));
-                clauses.push(Clause::braced("CONFIG", split_config_entries(entries)));
-                if !after.trim().is_empty() {
-                    clauses.push(Clause::line(after.trim().to_string()));
-                }
-            }
-            None => clauses.push(Clause::line(format!("FROM {wire}"))),
-        }
         clauses.push(Clause::line(format!("TO SCHEMA {}", self.schema.as_str())));
         if !transformations.is_empty() {
             clauses.push(Clause::line(transformations.trim().to_string()));
@@ -1701,38 +1669,14 @@ impl<Version: Display> CreateCodec<Version> {
     }
 }
 
-/// Splits a rendered `CONFIG` map body back into its entries.
-///
-/// Entry values are quoted, so a comma inside one never separates entries; splitting tracks the
-/// quote state rather than scanning for commas blindly.
-fn split_config_entries(entries: &str) -> Vec<String> {
-    let mut items = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-
-    for ch in entries.chars() {
-        match quote {
-            Some(open) => {
-                if ch == open {
-                    quote = None;
-                }
-                current.push(ch);
-            }
-            None if ch == '\'' || ch == '"' => {
-                quote = Some(ch);
-                current.push(ch);
-            }
-            None if ch == ',' => {
-                items.push(current.trim().to_string());
-                current.clear();
-            }
-            None => current.push(ch),
-        }
-    }
-    if !current.trim().is_empty() {
-        items.push(current.trim().to_string());
-    }
-    items
+/// Renders configuration entries as the items of a `CONFIG` block, in declaration order.
+fn config_entry_items(
+    entries: &[ClientConfigEntry],
+) -> error_stack::Result<Vec<String>, CanonicalNsplError> {
+    entries
+        .iter()
+        .map(ClientConfigEntry::to_canonical_nspl)
+        .collect()
 }
 
 /// Renders the JAQ programs a codec runs; `codec` names the codec a refusal reports.
@@ -1844,7 +1788,7 @@ impl CreateGenerator {
                 "USING MATERIALIZED STATE {}",
                 self.materialized_relay.as_str()
             )),
-            Clause::line(format!("EACH {}", self.each)),
+            Clause::line(format!("EACH {}", duration_literal(self.each.as_nanos()))),
             Clause::line(branch_selection_to_nspl(&self.branched_by)),
         ];
         clauses.extend(processor_outputs_clauses(&self.output_routes)?);
@@ -2567,7 +2511,9 @@ fn alter_generator_operation_to_nspl(
         AlterGeneratorOperation::SetMaterializedState { relay } => {
             Ok(format!("SET MATERIALIZED STATE {}", relay.as_str()))
         }
-        AlterGeneratorOperation::SetEach { each } => Ok(format!("SET EACH {each}")),
+        AlterGeneratorOperation::SetEach { each } => {
+            Ok(format!("SET EACH {}", duration_literal(each.as_nanos())))
+        }
         AlterGeneratorOperation::SetBranching { branching } => {
             Ok(format!("SET {}", branch_selection_to_nspl(branching)))
         }
@@ -2966,7 +2912,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
         } => format!(
             "HTTP {} EVERY {} ON QUIESCE {}",
             client.as_str(),
-            every,
+            duration_literal(every.as_nanos()),
             ingest_quiesce_to_nspl(quiesce)
         ),
         IngestSource::Kafka {
@@ -3085,7 +3031,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             "PROMETHEUS {} QUERY {} EVERY {} ON QUIESCE {}",
             client.as_str(),
             string_literal(query),
-            every,
+            duration_literal(every.as_nanos()),
             ingest_quiesce_to_nspl(quiesce)
         ),
         IngestSource::ZeroMq {
@@ -3224,12 +3170,32 @@ fn mqtt_delivery_to_nspl(session: MqttSession, qos: MqttQos) -> String {
     }
 }
 
+/// Renders an MQTT topic filter bare only when a bare word reads back as the same filter.
+///
+/// A bare word is read as a topic name, which is one identifier and is lower-cased, while MQTT
+/// topics are case-sensitive and routinely hold `/`, `.`, `+` or `#`. Any other filter is written
+/// as a string literal, which keeps its exact spelling.
 fn mqtt_topic_to_nspl(topic: &str) -> String {
-    if TopicName::parse(topic).is_ok() {
+    let reads_back_bare = is_lowercase_identifier(topic)
+        && TopicName::parse(topic).is_ok_and(|name| name.as_str() == topic);
+    if reads_back_bare {
         topic.to_string()
     } else {
         string_literal(topic)
     }
+}
+
+/// Whether `text` is one lower-case identifier the NSPL lexer reads as a single word.
+fn is_lowercase_identifier(text: &str) -> bool {
+    let mut characters = text.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    let starts_well = first.is_ascii_lowercase() || first == '_';
+    starts_well
+        && characters.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        })
 }
 
 fn nats_mode_to_nspl(mode: &NatsIngestMode) -> String {
@@ -3523,11 +3489,9 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> error_stack::Result<String, CanonicalNs
             queue,
             fifo_group,
         } => {
-            let queue = if QueueName::parse(queue.as_str()).is_ok() {
-                queue.clone()
-            } else {
-                string_literal(queue)
-            };
+            // A queue is written bare, whatever its length: the grammar reads it as words and
+            // whole numbers joined by hyphens, with an optional `.fifo` suffix, and has no quoted
+            // form a longer or unusual name could fall back to.
             let fifo_group = match fifo_group {
                 Some(SqsFifoGroup::FromBranch) => " FIFO GROUP FROM BRANCH".to_string(),
                 Some(SqsFifoGroup::Expression(expression)) => {
@@ -3812,6 +3776,33 @@ fn float_literal(literal: Float64Literal) -> error_stack::Result<String, Canonic
     }
 }
 
+/// Renders a duration as one whole number of the largest unit that divides it
+/// exactly, the only form an NSPL duration literal reads.
+///
+/// A duration's `Display` spells every component, as in `1s 500ms`, which a duration literal cannot
+/// hold, so `1500ms` would otherwise render as text that no longer parses. Zero is written in seconds.
+fn duration_literal(nanos: impl Into<u128>) -> String {
+    let nanos = nanos.into();
+    const UNITS: [(u128, &str); 6] = [
+        (86_400_000_000_000, "d"),
+        (3_600_000_000_000, "h"),
+        (60_000_000_000, "m"),
+        (1_000_000_000, "s"),
+        (1_000_000, "ms"),
+        (1_000, "us"),
+    ];
+
+    if nanos == 0 {
+        return "0s".to_string();
+    }
+    for (scale, unit) in UNITS {
+        if nanos.is_multiple_of(scale) {
+            return format!("{}{unit}", nanos / scale);
+        }
+    }
+    format!("{nanos}ns")
+}
+
 /// Renders a stored byte count using the largest binary prefix that divides it exactly.
 ///
 /// Byte sizes elsewhere in NSPL keep the author's spelling, but WASM memory limits are stored as a
@@ -3835,17 +3826,22 @@ fn byte_size_literal(bytes: NonZeroU64) -> String {
     format!("{bytes}B")
 }
 
-/// Wraps `value` in a dollar-quoted delimiter that does not occur inside it.
+/// Wraps `value` in a dollar-quoted delimiter that first occurs where the closing delimiter
+/// starts.
 ///
 /// NSPL dollar-quoting is verbatim: the body needs no escaping, so this represents any string,
-/// including one spanning several lines or mixing quote styles. The tag escalates until it is
-/// absent from the body.
+/// including one spanning several lines or mixing quote styles. A lexer ends the body at the first
+/// delimiter it reads, so the tag escalates until neither the body nor the body running into the
+/// closing delimiter completes one early: a body ending in `$s` would otherwise close on the `$s$`
+/// that its end and the closing `s$` form.
 fn dollar_quote(value: &str, tag: &str) -> String {
     let mut delimiter = format!("${tag}$");
     let mut suffix = 1_u64;
-    while value.contains(&delimiter) {
+    while format!("{value}{delimiter}").find(&delimiter) != Some(value.len()) {
         delimiter = format!("${tag}_{suffix}$");
-        suffix += 1;
+        suffix = suffix
+            .checked_add(1)
+            .assured("a tag escalates at most once per byte of the body it quotes");
     }
 
     format!("{delimiter}{value}{delimiter}")
@@ -5627,6 +5623,15 @@ mod tests {
         assert_eq!(
             super::string_literal("holds $s$ and\na newline"),
             "$s_1$holds $s$ and\na newline$s_1$"
+        );
+    }
+
+    #[test]
+    fn dollar_quoted_literals_escalate_past_a_tag_the_body_ends_with() {
+        assert_eq!(super::string_literal("line\n$s"), "$s_1$line\n$s$s_1$");
+        assert_eq!(
+            super::string_literal("both ' and \"$"),
+            "$s$both ' and \"$$s$"
         );
     }
 

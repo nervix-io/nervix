@@ -35,7 +35,9 @@ impl Gap {
     pub fn parse(gap: &str) -> Self {
         let mut segments = gap.split('\n');
         let same_line = segments.next().unwrap_or_default();
-        let trailing_comment = comment_of(same_line).map(str::to_string);
+        // Trailing whitespace, a stray carriage return included, is dropped from a trailing comment
+        // exactly as from a comment line, so formatting the output again changes nothing.
+        let trailing_comment = comment_of(same_line).map(|comment| comment.trim_end().to_string());
 
         let mut lines: Vec<&str> = segments.collect();
         // The final segment is the indentation preceding the next statement, not a line.

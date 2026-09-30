@@ -221,13 +221,14 @@ pub(crate) fn describe_backup_tail(describe: &DescribeBackup, tokens: &[Token]) 
 #[cfg(test)]
 mod tests {
     use meticulous::ResultExt as _;
+    use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::{DomainName, Statement};
     use rstest::rstest;
 
     use super::*;
     use crate::{
         client_statement::{ClientStatement, parse_client_statement, suggest_client_statement},
-        statement::{parse_statement, suggest_statement, tests::gen_model},
+        statement::{parse_statement, suggest_statement},
     };
 
     fn domain(name: &str) -> DomainName {
@@ -356,6 +357,11 @@ mod tests {
     #[case::without_state("BACKUP CLUSTER TO '/tmp/c.nvxb' WITHOUT STATE;")]
     #[case::without_pause("BACKUP CLUSTER TO '/tmp/c.nvxb' WITHOUT PAUSE;")]
     #[case::timeout("BACKUP CLUSTER TO '/tmp/c.nvxb' TIMEOUT 5s;")]
+    #[case::fractional_second_timeout("BACKUP CLUSTER TO '/tmp/c.nvxb' TIMEOUT 1500ms;")]
+    #[case::mixed_hour_timeout("BACKUP CLUSTER TO '/tmp/c.nvxb' TIMEOUT 90m;")]
+    #[case::nanosecond_timeout_boundary(
+        "BACKUP CLUSTER TO '/tmp/c.nvxb' TIMEOUT 18446744073709551615ns;"
+    )]
     #[case::named_domain("BACKUP DOMAIN prod TO '/tmp/p.nvxb';")]
     #[case::session_domain("BACKUP DOMAIN TO '/tmp/p.nvxb' WITHOUT RESOURCES;")]
     #[case::quote_in_path("BACKUP DOMAIN prod TO \"it's.nvxb\";")]
@@ -762,20 +768,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_generated_backup_model_with_keyword_spelling_reparses() {
-        let model = gen_model(&[0x19, 0x29, 0x08, 0xc3, 0xec]);
-        let document = nervix_models::canonical_nspl_document(std::slice::from_ref(&model))
-            .expect("generator output must be renderable");
-        let exported = archived_models_document(&document);
-        let statements = crate::client_statement::parse_client_statements(&exported)
-            .expect("the exported model must reparse");
-        let expected = ClientStatement::Server(Statement::Create(
-            nervix_models::CreateStatement::new(Box::new(model), false),
-        ));
-        assert_eq!(statements, [expected]);
-    }
-
     /// Every generated Model exported the way a backup exports a domain — one canonical document,
     /// held as a section of an archive and read back from the archive stream — reparses to itself,
     /// statement for statement and in order.
@@ -783,9 +775,14 @@ mod tests {
     fn bolero_models_exported_through_an_archive_reparse_to_themselves() {
         bolero::check!()
             .with_iterations(64)
-            .with_max_len(128)
+            .with_max_len(4096)
             .for_each(|bytes: &[u8]| {
-                let models = bytes.chunks(32).map(gen_model).collect::<Vec<_>>();
+                let mut arbitrary = Arbitrary::new(bytes, Domain::Nspl);
+                let count = arbitrary.entropy().count(4);
+                let mut models = Vec::with_capacity(count);
+                for _ in 0..count {
+                    models.push(arbitrary.model());
+                }
                 let document = nervix_models::canonical_nspl_document(&models)
                     .expect("generator output must be renderable");
                 let exported = archived_models_document(&document);

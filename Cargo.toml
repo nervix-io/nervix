@@ -283,6 +283,7 @@ required-features = ["benchmarks"]
 members = [
   ".",
   "crates/approx-into",
+  "crates/arbitrary",
   "crates/backup",
   "crates/benchmark",
   "crates/bounded-write",
@@ -497,6 +498,7 @@ mongodb = { version = "3.6.0", default-features = false, features = [
 multer = "3"
 mysql_async = "0.36.2"
 nervix-approx-into = { package = "nervix-approx-into", path = "crates/approx-into" }
+nervix-arbitrary = { package = "nervix-arbitrary", path = "crates/arbitrary" }
 nervix-backup = { package = "nervix-backup", path = "crates/backup" }
 nervix-bounded-write = { package = "nervix-bounded-write", path = "crates/bounded-write" }
 nervix-branch-instances = { package = "nervix-branch-instances", path = "crates/branch-instances" }

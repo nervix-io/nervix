@@ -1,0 +1,15 @@
+[package]
+description = "Bounded, valid vocabulary values and semantic Models built from fuzzer bytes for property tests"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-arbitrary"
+publish = false
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+meticulous = { workspace = true }
+nervix-models = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
