@@ -181,7 +181,7 @@ pub use shutdown::{
     ShutdownRequest, ShutdownRequestOutcome,
 };
 use tonic::transport::Server;
-use tracing::{debug, error, info, warn};
+use tracing::{Instrument as _, debug, error, info, warn};
 use triomphe::Arc;
 use typed_builder::TypedBuilder;
 
@@ -674,6 +674,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 pub async fn run_cli(
     args: Args,
     termination_signals: TerminationSignals,
+    tracing: &TracingGuard,
 ) -> Result<(), Report<AppError>> {
     if let Some(Command::Completions { shell }) = args.subcommand.clone() {
         print_completions(shell);
@@ -682,11 +683,18 @@ pub async fn run_cli(
 
     let application = Application::try_from(args)?;
     termination_signals.supervise(application.shutdown.clone())?;
-    application.run().await
+    application.run_with_tracing(Some(tracing)).await
 }
 
 impl Application {
     pub async fn run(self) -> Result<(), Report<AppError>> {
+        self.run_with_tracing(None).await
+    }
+
+    async fn run_with_tracing(
+        self,
+        tracing: Option<&TracingGuard>,
+    ) -> Result<(), Report<AppError>> {
         let addr = self.addr;
         let grpc_mode = self.grpc_mode;
         let grpc_listen_addr = match grpc_mode {
@@ -834,8 +842,12 @@ impl Application {
             .change_context(AppError::LoadInterconnectTls)?;
         let dns_configuration = self.dns.clone();
         let dns = DnsResolver::load(dns_configuration.clone())
+            .instrument(tracing::info_span!("load_dns_configuration", node_id = %node_id))
             .await
             .change_context(AppError::LoadDnsConfiguration)?;
+        if let Some(tracing) = tracing {
+            tracing.install_dns(&dns);
+        }
         info!(
             resolver_configuration = %dns_configuration.resolver_configuration.display(),
             hosts_file = %dns_configuration.hosts_file.display(),

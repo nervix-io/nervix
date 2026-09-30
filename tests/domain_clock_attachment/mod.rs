@@ -812,7 +812,7 @@ async fn then_client_reports_clock_interruption(
     duration: String,
     name: String,
 ) {
-    let duration = parse_duration_text(&duration).expect("step durations are valid");
+    let duration = parse_duration_text(&duration).assured("step durations are valid");
     let client = world
         .transaction_clients
         .get(&name)

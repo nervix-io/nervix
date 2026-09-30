@@ -72,10 +72,11 @@ or hosts file takes effect when the node next starts.
 Clones of the resolver share its configuration, hosts snapshot, answer cache and concurrency bound.
 The node hands one clone to the runtime, which passes it into the typed plan of every source and
 sink that resolves through it, one to the interconnect, and one to each client session the node
-opens to the leader's session service while it shuts down. Nothing about the resolver is
-process-wide: it lives in no static, its name-server connections and background tasks run on the
-runtime that built it, and they end when its last clone is dropped. A runtime that shuts down with a
-lookup in flight is not held open by that lookup.
+opens to the leader's session service while it shuts down, and one to its own OTLP trace
+exporter when enabled. Nothing about the resolver is process-wide: it lives in no static, its
+name-server connections and background tasks run on the runtime that built it, and they end when
+its last clone is dropped. A runtime that shuts down with a lookup in flight is not held open by
+that lookup.
 
 A runtime built without a resolver exists only in unit tests that start no external connector. A
 source or sink that needs the resolver fails to start there with the reason
@@ -86,6 +87,32 @@ host's files or from the configuration its caller names, and reuses it for the f
 seeds, redirects and reconnects. An owner that already holds a resolver, such as a node opening a
 session to the leader, hands its own over instead, and the CLI passes its DNS options through. The
 shared C binding always loads the host's `/etc/resolv.conf` and `/etc/hosts`.
+
+## Node Trace Export
+
+With `--otel-enabled`, the process installs its subscriber and batch span exporter before node
+startup. The lazy Tonic 0.14 connector waits for startup to publish the node's resolver. Creating
+the channel performs no lookup or dial. Startup loads DNS at its usual point, after TLS material
+and before runtime state, then publishes a clone to this service. Early spans remain in the batch
+exporter's existing bounded queue. No second resolver is constructed, and a DNS configuration
+failure remains a node startup failure.
+
+Every new collector connection uses the node's configuration, hosts snapshot, cache and concurrency
+bound. The endpoint retains its hostname and authority. Waiting for resolver installation stays
+outside the connection timeout so slow startup retains its early spans. Once installed, the OTLP
+export timeout bounds DNS and TCP address attempts together; the request uses the same timeout.
+It defaults to ten seconds; `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` overrides
+`OTEL_EXPORTER_OTLP_TIMEOUT`, both in milliseconds, with invalid values ignored as the exporter
+defines. Compression and metadata environment settings remain interpreted by `opentelemetry-otlp`.
+
+The node's exporter configures no Tonic TLS roots or identity. An `https` collector therefore fails
+at export time with Tonic's TLS-required error even though the connector dependencies enable TLS
+support. The OTEL sink's explicit TLS configuration is a separate contract.
+
+Export failures belong to the telemetry SDK. They neither stop a running node nor enter connector
+retry or acknowledgement paths. If startup ends before installing DNS, dropping the tracing guard
+closes the resolver publication so a pending connection fails without waiting for a resolver that
+will never arrive. The guard flushes the provider while the node's Tokio runtime still exists.
 
 ## Configuration
 
@@ -254,6 +281,7 @@ name again for every new connection it opens.
 | WebSocket `ws` and `wss` client sources | The connector resolves and dials each connection and resume | Thirty seconds shared with the attempts, TLS and the upgrade | [Integration-specific boundaries](./connector-contract.md#integration-specific-boundaries) |
 | ClickHouse sinks, with and without TLS entries | Hyper's resolver service on `hyper-util`'s `HttpConnector` | The insert's `timeout_ms` when it is set, otherwise the thirty-second hook budget | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
 | SQS sources and sinks, with and without a custom CA | Smithy's `ResolveDns`, installed with `build_with_resolver` | The SDK's 3.1-second connect timeout, which encloses the lookup, and a sink's `timeout_ms` as its attempt and operation timeouts | [DNS for ClickHouse and SQS](./connector-contract.md#dns-for-clickhouse-and-sqs) |
+| The node's own OTLP trace export | Tonic 0.14's lazy custom connector, which waits for the node resolver installed during startup | The OTLP export timeout, ten seconds by default, enclosing DNS and TCP attempts after resolver installation; the same timeout bounds the request | [Node Trace Export](#node-trace-export) |
 | OTEL gRPC sinks | Tonic 0.14's lazy channel over `hyper-util`'s `HttpConnector` with Hyper's resolver service | `timeout_ms` when it is set, as the connection and request timeout; otherwise the thirty-second hook budget alone | [DNS for OTEL gRPC](./connector-contract.md#dns-for-otel-grpc) |
 | Redis command pools | Redis's `AsyncConnectionConfig::set_dns_resolver`, installed for every new physical `bb8` connection | The thirty-second hook budget, inside the thirty-second connection timeout the pool sets on the driver | [DNS for Redis](./connector-contract.md#dns-for-redis) |
 | Redis Pub/Sub sources | The connector resolves and dials a dedicated stream, then hands it to Redis's `PubSub::new` | Thirty seconds shared with the attempts, TLS, Redis setup and `SUBSCRIBE` | [DNS for Redis](./connector-contract.md#dns-for-redis) |
@@ -357,10 +385,10 @@ Nervix selects each library's resolver deliberately. The locked versions and sel
 | Reqwest | 0.13.5 | `hickory-dns` is selected. Every client Nervix builds replaces Reqwest's own Hickory adapter with the node's resolver before its first request, so that adapter never reads the host's configuration; left to itself it would fall back to Google's public name servers when it could not |
 | Reqwest, for Iceberg REST | 0.12.28, with Hickory 0.25.2 | Required by `iceberg-catalog-rest` 0.10.1. `hickory-dns` is selected and the client installs the node's resolver the same way; its TLS stays on AWS-LC with bundled roots |
 | OpenDAL | 0.57.0 | Iceberg object storage receives a Reqwest 0.13 client through `HttpClientLayer`, which also serves OpenDAL's credential providers. OpenDAL's standalone S3 `detect_region` helper builds its own client, and Nervix never calls it |
-| `hyper-util` | 0.1.21 | `HttpConnector::new_with_resolver` with the node's resolver as its resolver service, for ClickHouse, OTEL gRPC and native sessions |
+| `hyper-util` | 0.1.21 | `HttpConnector::new_with_resolver` with the node's resolver as its resolver service, for ClickHouse, OTEL gRPC sinks, native sessions and the node's own trace exporter |
 | Smithy's HTTP client | 1.4.2 | `build_with_resolver` with the node's resolver as its `ResolveDns`, for SQS |
 | Tonic | 0.13.1 | `connect_with_connector` over that `HttpConnector`, for native sessions |
-| Tonic, for OpenTelemetry | 0.14.6 | `connect_with_connector_lazy` over that `HttpConnector`, for OTEL gRPC sinks. The node's own trace exporter uses Tonic's default connector; see [Residual Resolution](#residual-resolution) |
+| Tonic, for OpenTelemetry | 0.14.6 | `connect_with_connector_lazy` over that `HttpConnector`, for OTEL gRPC sinks and the node's own trace exporter |
 | Lapin and `async-rs` | 4.12.0 and 0.8.12 | `hickory-dns` deliberately off: it resolves through one process-wide resolver built on first use from `/etc/resolv.conf`, which ignores the node's configuration and bounds and keeps name-server connections of the first Tokio runtime that used it. The connector hands Lapin an established transport through `Connection::connector` instead |
 | Redis | 1.7.1 | `AsyncConnectionConfig::set_dns_resolver` for pooled command connections; the Pub/Sub source hands `PubSub::new` a stream it dialled itself |
 | `rumqttc-next` | 0.34.0 | `MqttOptions::set_socket_connector` in place of the driver's `lookup_host` connector; its proxy and WebSocket transports are not selected |
@@ -407,12 +435,11 @@ is assumed to be covered:
 | Pulsar sources and sinks, `pulsar` 6.9.0 | The driver resolves broker and proxy URLs with `Url::socket_addrs` on a blocking worker, then dials the addresses | No resolver hook |
 | Kafka sources and sinks, `rdkafka` 0.39.0 with librdkafka 2.12.1 | librdkafka resolves bootstrap and broker hosts in its own native threads | librdkafka's resolver callback is not exposed by the Rust binding |
 | ZeroMQ sources and sinks, `zeromq` 0.4.1 | The driver's TCP transport connects with Tokio's `TcpStream::connect((host, port))` | No socket hook |
-| The node's own OTLP trace export, `opentelemetry-otlp` 0.31.1 on Tonic 0.14.6 | Enabled with `--otel-enabled`; the exporter's channel dials `--otel-otlp-endpoint` through Tonic's default `HttpConnector`, whose resolver is the C library | The exporter is created when the process starts, before the node loads its resolver, and uses the channel Tonic builds by default |
 | The web console | The browser resolves the page's origin and its WebSocket and fetch requests | The browser owns resolution |
 
-Tokio's `lookup_host` and `TcpStream::connect` with a host name, `Url::socket_addrs`, and Tonic's
-default connector all resolve through the C library on a thread of Tokio's blocking pool, and
-librdkafka calls it on its own threads. Such a lookup follows the host's `nsswitch.conf`, NSS
+Tokio's `lookup_host` and `TcpStream::connect` with a host name, and `Url::socket_addrs`, resolve
+through the C library on a thread of Tokio's blocking pool, and librdkafka calls it on its own
+threads. Such a lookup follows the host's `nsswitch.conf`, NSS
 modules and multicast DNS where the host provides them, the node's `--dns-*` options do not apply to
 it, and only the driver's own connection timeout bounds it. A thread stays occupied until the C
 library returns.
