@@ -123,6 +123,7 @@ def load_inventory(path: pathlib.Path = INVENTORY) -> Inventory:
             "max_input_bytes",
             "case_timeout_seconds",
             "invariant",
+            "manifest",
         }
         if set(item) != expected:
             raise BoleroError(f"target {item.get('id')} has missing or unknown fields")
@@ -167,6 +168,7 @@ def load_inventory(path: pathlib.Path = INVENTORY) -> Inventory:
                     item["case_timeout_seconds"], "case_timeout_seconds"
                 ),
                 invariant=item["invariant"],
+                manifest=repo_path(item["manifest"], "manifest"),
             )
         )
     if not targets:
@@ -195,7 +197,13 @@ def load_inventory(path: pathlib.Path = INVENTORY) -> Inventory:
 
 def package_manifests() -> dict[str, pathlib.Path]:
     with (ROOT / "Cargo.toml").open("rb") as file:
-        members = tomllib.load(file)["workspace"]["members"]
+        workspace = tomllib.load(file)["workspace"]
+    members = list(workspace["members"])
+    for tooling in workspace.get("metadata", {}).get("tooling", {}).get("workspaces", []):
+        path = repo_path(tooling, "tooling workspace")
+        with (path / "Cargo.toml").open("rb") as file:
+            isolated = tomllib.load(file)["workspace"]["members"]
+        members.extend(str((path / member).relative_to(ROOT)) for member in isolated)
     result = {}
     for member in members:
         path = ROOT / member / "Cargo.toml"
@@ -331,7 +339,8 @@ def cargo_target_args(test_target: str) -> list[str]:
 
 
 def listed_tests(
-    package: str, test_target: str, *, ignored: bool, features: tuple[str, ...]
+    package: str, test_target: str, *, ignored: bool, features: tuple[str, ...],
+    manifest: pathlib.Path | None = None,
 ) -> list[str]:
     args = [
         "cargo",
@@ -342,6 +351,8 @@ def listed_tests(
     ]
     if features:
         args.extend(["--features", ",".join(features)])
+    if manifest:
+        args.extend(["--manifest-path", str(manifest)])
     args.extend(["bolero_", "--"])
     if ignored:
         args.append("--ignored")
@@ -350,7 +361,8 @@ def listed_tests(
 
 
 def compiled_targets(
-    package: str, test_target: str, *, features: tuple[str, ...]
+    package: str, test_target: str, *, features: tuple[str, ...],
+    manifest: pathlib.Path | None = None,
 ) -> list[dict[str, Any]]:
     args = [
         "cargo",
@@ -361,6 +373,8 @@ def compiled_targets(
     ]
     if features:
         args.extend(["--features", ",".join(features)])
+    if manifest:
+        args.extend(["--manifest-path", str(manifest)])
     args.extend(["bolero_", "--", "--nocapture"])
     result = command(args, env={"CARGO_BOLERO_SELECT": "all"})
     found = []
@@ -408,11 +422,11 @@ def discover(inventory: Inventory) -> None:
                 if target.package == package and target.test_target == test_target
                 for feature in target.features
             }))
-            names = listed_tests(package, test_target, ignored=False, features=features)
-            ignored = listed_tests(package, test_target, ignored=True, features=features)
+            names = listed_tests(package, test_target, ignored=False, features=features, manifest=manifest)
+            ignored = listed_tests(package, test_target, ignored=True, features=features, manifest=manifest)
             if ignored:
                 raise BoleroError(f"{package}: ignored Bolero targets: {ignored}")
-            targets = compiled_targets(package, test_target, features=features)
+            targets = compiled_targets(package, test_target, features=features, manifest=manifest)
             if Counter(names) != Counter(item["test_name"] for item in targets):
                 raise BoleroError(
                     f"{package}: listed Bolero tests {names} differ from compiled targets "
@@ -481,7 +495,7 @@ def metadata(
                 saved_inputs.append(input_file)
     replay_commands = []
     for input_file in saved_inputs:
-        if target.manifest:
+        if target.manifest == QUALIFICATION:
             replay_commands.append("just qualify-bolero")
         else:
             replay_commands.append(
@@ -623,6 +637,40 @@ def scoped_build_env(target: Target, path: pathlib.Path) -> dict[str, str]:
     return {"PATH": str(directory) + os.pathsep + os.environ["PATH"]}
 
 
+def resolved_test_target(target: Target) -> tuple[pathlib.Path, pathlib.Path, str]:
+    """Read Cargo's current target identity and source root for binary selection."""
+    manifest = target.manifest or package_manifests()[target.package]
+    result = command([
+        "cargo", "metadata", "--no-deps", "--format-version", "1",
+        "--manifest-path", str(manifest),
+    ])
+    packages = [
+        package for package in json.loads(result.stdout)["packages"]
+        if package["name"] == target.package
+    ]
+    if len(packages) != 1:
+        raise BoleroError(f"{target.id}: expected one Cargo package {target.package}")
+    package = packages[0]
+    library_kinds = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
+    targets = [
+        item for item in package["targets"]
+        if (
+            target.test_target == "lib" and library_kinds.intersection(item["kind"])
+        ) or (
+            target.test_target != "lib" and "test" in item["kind"]
+            and item["name"] == target.test_target.removeprefix("test:")
+        )
+    ]
+    if len(targets) != 1:
+        raise BoleroError(f"{target.id}: expected one Cargo {target.test_target} target")
+    selected = targets[0]
+    return (
+        pathlib.Path(package["manifest_path"]).parent,
+        pathlib.Path(selected["src_path"]).resolve(),
+        selected["name"].replace("-", "_") + "-",
+    )
+
+
 def build_instrumented(
     inventory: Inventory, target: Target, path: pathlib.Path, *, timeout: int | None = None
 ) -> pathlib.Path:
@@ -636,6 +684,7 @@ def build_instrumented(
     empty_crashes = path / "build-crashes"
     empty_corpus.mkdir()
     empty_crashes.mkdir()
+    package_root, source, prefix = resolved_test_target(target)
     args = bolero_args(inventory, target) + [
         "--runs",
         "0",
@@ -650,18 +699,13 @@ def build_instrumented(
         args, env=scoped_build_env(target, path), timeout=build_timeout, log=path / "build.log"
     )
     executables = EXECUTABLE.findall(build.stdout)
-    matches = []
-    if target.test_target == "lib":
-        # Cargo identifies the scoped library harness by its declared source root.
-        library = f"unittests {library_root(target)}"
-        for description, executable in executables:
-            if description == library:
-                matches.append(ROOT / executable)
-    else:
-        prefix = target.test_target.removeprefix("test:") + "-"
-        for _, executable in executables:
-            if pathlib.Path(executable).name.startswith(prefix):
-                matches.append(ROOT / executable)
+    matches = [
+        ROOT / executable
+        for label, executable in executables
+        if label.startswith("unittests ") == (target.test_target == "lib")
+        if (package_root / label.removeprefix("unittests ").strip()).resolve() == source
+        if pathlib.Path(executable).name.startswith(prefix)
+    ]
     if len(matches) != 1 or not matches[0].is_file():
         raise BoleroError(f"{target.id}: expected one instrumented {target.test_target} binary")
     return matches[0]
@@ -680,14 +724,6 @@ def prepare_target(inventory: Inventory, target: Target) -> None:
         raise
     metadata(path, target, args, "prepared build", time.monotonic() - started)
     print(f"{target.id}: build prepared; run just fuzz {target.id}; artifacts: {path}")
-
-
-def library_root(target: Target) -> str:
-    """The library root of a target's package, relative to the package, as cargo reports it."""
-    manifest_path = target.manifest or package_manifests()[target.package]
-    with manifest_path.open("rb") as file:
-        manifest = tomllib.load(file)
-    return manifest.get("lib", {}).get("path", "src/lib.rs")
 
 
 def run_instrumented(
