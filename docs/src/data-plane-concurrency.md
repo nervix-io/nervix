@@ -317,7 +317,9 @@ stable storage, and offers the placement's newest checkpoint to the replicas tha
 yet. On a replica, it carries the owner's announcements to the task that keeps the replica's copy
 current. It lives and ends with the state it replicates, so a WASM checkpoint or a Kafka offset
 commit offers its revision through the state it already holds, and no checkpoint, commit,
-announcement or acknowledgement enters a node-wide map.
+offer enters a node-wide announcement or progress map. Incoming frames still resolve their
+placement in the existing state registry, and announcer steps still resolve the execution's
+replicas; those recurring lookups are debt owned by Typed Ratchet 15.
 
 A replica's progress only rises. Acknowledgements travel independently, and a replica acknowledges
 what it holds again whenever it is offered a checkpoint, so an acknowledgement of an older revision
@@ -672,17 +674,66 @@ not discard batches already queued.
 ## Ratchet And Review
 
 `just ratchet` keeps the synchronization debt from growing. The
-`data_plane_lock_acquisitions` count scans the runtime, connector, interconnect, ACK, and metrics
-owners for `.lock()`, `.read()`, `.write()`, and `.entry()` calls outside tests. Its checked-in
+`data_plane_lock_acquisitions` count uses the pinned compiler's resolved definitions and normalized
+receivers for Mutex, RwLock and DashMap acquisitions. Its checked-in
 value in `debt-baseline.json` is a ceiling: the count may fall and may never rise. When it falls,
 `just ratchet --update` records the lower baseline in the same change.
 
-The count is deliberately textual and broad. It includes lifecycle synchronization, cold
-registration, task-local collection `entry()` calls, and I/O methods named `read` or `write`, and it
-cannot see a shared map's borrowed `get`, `contains_key` or iteration, or its `insert`, `remove`
-and `retain`. Passing the ratchet therefore proves only that the total did not increase. Review
-classifies every new site on its own, even when another deletion hides it in the net count, and the
-concurrent map inventory accounts for the accesses the count cannot see.
+The compiler inventories every recognized acquisition, including borrowed reads, mutating and try
+operations, iteration, aliases, re-exports, dereference adjustments and UFCS. Trait calls resolve
+their selected implementation. Ordinary collection entries, held-guard entries and I/O operations
+are not acquisitions. Borrowed DashMap iteration acquires lazily; consuming iteration owns its
+storage. A custom method with the same spelling does not acquire a known lock.
+
+Every authored site has a reviewed scope naming its source fingerprint, all compiler owner variants,
+frequency and rationale. Lifecycle, observer, retained-state and bounded-protocol acquisitions
+remain visible separately from debt. A bounded protocol also names its key and bound. The reviewed
+inventory below is the basis of those decisions; filenames and sharing traits infer no policy.
+Helpers and callbacks are compiled and require their own scopes. Missing, stale, duplicated or
+unobserved scopes fail, even if the aggregate count could otherwise pass. A reviewed new recurring
+acquisition remains a defect even if another deletion keeps the total below its ceiling.
+
+`review-context.json` also binds the frequency review to the wider product source and declarations.
+Changing a caller invalidates that context even when its helper's acquisition body is unchanged.
+Review the affected call chains and scopes before refreshing the context; the gate lists the changed
+inputs and supplies no automatic classification or review-refresh command.
+
+The isolated tooling workspace uses `nightly-2026-09-17`; stable product builds use their existing
+toolchain. The declared matrix analyzes ordinary workspace libraries and binaries, the server's
+testing capability, server/interconnect/primitives under Shuttle, server/consensus/primitives under
+Loom, and interconnect/primitives under Turmoil. Turmoil's runtime cfg comes only from its just
+recipe. These are compilation checks; they do not execute concurrency protocols. Test targets,
+browser configurations and undeclared feature combinations are not claimed. The mandatory source
+primitive validator still checks import provenance, inactive cfg and authored macro bodies.
+
+Reports preserve every compiled configuration and expansion instance while counting an authored
+source site once. Authored tokens passed through external macros remain visible. Resolved sites
+in generated target files or external source files are counted as exclusions, not reviewed sites.
+Calls dynamically dispatched through an unknown API and synchronization internal to external
+libraries are outside this catalog's claim.
+
+Complete Cargo target artifacts, compiler side reports and declared roots must agree before any
+count is accepted, including zero. Completion fingerprints cover the compiler, driver, validator,
+catalog, configuration, sources, dependency locks, Cargo configuration and relevant build flags.
+The reviewed policy is checked and fingerprinted on every invocation. The workspace wrapper nests
+under configured kache; a missing side report triggers a separate supported key-salt namespace
+and recompile of isolated authored artifacts. The gate never clears `RUSTC_WRAPPER`.
+
+Cutover calibration and validation evidence belong on the corresponding
+[Typed Ratchet task](https://app.clickup.com/t/86bc9eqhf) in ClickUp. The repository retains the
+operative catalog, per-site scopes, reviewed caller context, declared configuration matrix and
+debt ceiling. Generated inventories, qualification results and execution logs are task artifacts.
+Each remaining debt site names its owning epic delivery.
+
+Task handles remove recurring status, freeze, metric and checkpoint lookups;
+ingest tracker and clock binders now run at construction, and force-flush claims acquire only for an
+available obligation. Remote relay root tracking remains debt. The executor-saturation lookup belongs
+to explicit testing fault control.
+Placement-local progress and announcement transitions have an explicit
+bounded-protocol scope. Borrowed state-registry reads on replication frames remain debt, as do
+per-branch catch-up lookups: Typed Ratchet 14 owns the polling repair and Typed Ratchet 15 owns
+retained frame routing. A helper reached by both installation and recurring callers carries its
+hottest frequency; it cannot inherit installation's lifecycle disposition.
 
 Use the site listing while reviewing:
 
@@ -690,7 +741,7 @@ Use the site listing while reviewing:
 just ratchet --show data_plane_lock_acquisitions
 ```
 
-For every new or moved site, and for every shared-map access the count cannot see, the reviewer
+For every new or moved site and every shared-map access, the reviewer
 establishes all of the following:
 
 1. **Frequency.** Trace its callers and decide whether it can run per record, row, batch, remote

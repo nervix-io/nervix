@@ -62,6 +62,27 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `task-status-transitions` | `nervix-server` task status publishes the complete healthy or failed status, preserving retry on error-only changes | 64 transition bytes over current status and retry values, v1 | 256 | 64 bytes |
 | `entity-freeze-transitions` | `nervix-server` freeze publications contain exactly the coordination owners whose holds remain active | 64 insert/remove bytes over eight coordination identities, v1 | 256 | 64 bytes |
 | `replica-progress` | `nervix-checkpoint-replication` replica reports, offers and announcer steps against the monotonic quorum contract: each replica's progress is the highest revision it reported, a count of replicas holding a revision never falls, and an offered revision keeps exactly one announcer until every assigned replica holds it or the replicated state is gone | bounded report, offer, step, cancel and retire sequences over four replicas and sixteen revisions, v1 | 256 | 256 bytes |
+| `typed-report` | `nervix-lint-report` complete compiler-report serialization equality | bounded current findings, spans, expansions and completion metadata, v1 | 256 | 32 bytes |
+| `typed-catalog-scope` | `nervix-lint-report` complete catalog/scope parsing equality | resolved identities and all reviewed disposition variants, v1 | 256 | 32 bytes |
+| `typed-site-union` | `nervix-lint-report` authored-site deduplication preserves every configuration and review | repeated ordinary/modeled findings over bounded current sites, v1 | 256 | 32 bytes |
+
+Each target declares its Cargo manifest. Product targets use the root workspace; the synchronization
+properties use `tools/nervix-lint/Cargo.toml`. The shared runner discovers declared tooling workspaces
+from root metadata and uses the selected manifest in ordinary, sanitizer, replay and qualification
+commands. Compiler executions are fixture checks, not work done in each fuzz iteration.
+
+Before instrumenting a target, the runner reads Cargo metadata to resolve its package, target kind,
+name and source root. It selects the emitted executable by that identity, including integration
+tests in folders and explicitly configured library or test paths. A missing or ambiguous Cargo
+target or executable fails the run before the campaign starts.
+
+The CI sanitizer job budgets cold ordinary and instrumented builds separately from each target's
+bounded campaign. Its overall limit is two hours; per-build, per-case and per-campaign deadlines
+remain enforced by the shared runner. Validation uses a 16-CPU runner and the same overall limit
+to complete Clippy, compiled discovery and the declared compiler synchronization matrix from a
+cold cache.
+The native extra-checks job retains its 8-CPU allocation and the same two-hour limit for ordinary
+instrumentation and the full modeled suite.
 
 The inventory also records exact full test names, required features, corpus paths, case timeouts
 and each invariant. Its corpus path is Bolero's source-adjacent

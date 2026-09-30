@@ -1,0 +1,17 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "nervix-lint-report"
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+error-stack.workspace = true
+indexmap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+bolero.workspace = true
+meticulous.workspace = true

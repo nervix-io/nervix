@@ -749,6 +749,14 @@ defines the available metrics and their aggregation.
 
 ## Recovery, Panics, And Enforcement
 
+The compiler synchronization gate has its own typed tooling failures for malformed catalogs and
+scopes, conflicting reports, incomplete compiler passes, and missing, stale or unobserved reviewed
+sites. Reports preserve those classifications with source location, resolved receiver/operation,
+owner and compiled configuration context. Its CLI prints the error-stack attachments and fails;
+missing analysis never becomes a zero debt count. These are repository validation errors and do
+not add runtime failure variants. [Data-Plane Concurrency](data-plane-concurrency.md) owns the gate's
+coverage and synchronization policy.
+
 Some outcomes are intentionally not propagated. `discarded` records why an already handled or
 irrelevant result owes no further action. `reported` is used when the recovering call is the only
 witness; it logs the failed operation at `debug`. A channel send with no receiver means shutdown
