@@ -922,6 +922,18 @@ build and the existing tests, and nothing in it changes behavior.
   registered weakening. Required CI runs Shuttle, Loom and its qualification, and Turmoil
   independently of the ordinary tests. `just cargo-clippy-loom`, part of `just lint`, keeps every
   Loom build compiling, including the server and consensus libraries as they ship and in test mode.
+- `just coverage-native-extras [producer ...]` runs the extra checks that execute Nervix code
+  natively in ordinary mode, `bench-smoke`, `test-primitives` and `nspl-completion-walk`, exactly as
+  their recipes do but under LLVM source instrumentation, and CI's extra-tests job runs them only
+  that way. Each run writes `lcov.info`, `completion.json`, `executions.jsonl` and `export.log` to a
+  fresh `target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`. A report counts only
+  beside a `complete` completion record; a failed, interrupted or incomplete collection never is
+  one, and it keeps its evidence. Prerequisites build outside the instrumentation, and the parts
+  of a check that compile, target the browser or run a model checker stay uninstrumented, as do
+  Miri, mutation testing and the Loom weakening qualification. An extra check that starts
+  executing Nervix code natively joins the producer inventory in `scripts/native_coverage.py`, with
+  its justfile recipe composed as prepare, instrumented and finish parts. `just test-native-coverage`
+  tests the collector.
 - Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
   user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
   accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.

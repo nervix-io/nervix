@@ -283,6 +283,9 @@ mode provides:
 just test-primitives
 ```
 
+It runs `just test-primitives-ordinary`, the checks in ordinary native execution, then
+`just test-primitives-modeled`, the checks under each model checker's backend, then
+`just test-primitives-compile`, the checks that compile rather than run; each also runs alone.
 [Data-Plane Concurrency](./data-plane-concurrency.md) defines the primitive boundary, what each
 mode observes, and every model's claim.
 
@@ -313,6 +316,83 @@ just test-turmoil-replay target/turmoil-failures/<test>/<case>-seed-<seed>.json
 committed seeds, and `just test-turmoil-replay-check` proves the record and replay path end to end.
 [Deterministic Interconnect Simulation](./interconnect-simulation.md) defines what the simulation
 controls, its fault model and limits, the scenario matrix, and how to investigate a failure.
+
+### Source coverage of the native extra checks
+
+The extra checks that execute Nervix code natively in ordinary mode, the benchmark bodies, the
+primitive boundary's ordinary conformance and the NSPL completion walk, also measure which source
+lines they execute. Run them the way CI does:
+
+```bash
+just coverage-native-extras
+```
+
+Name producers to run only those, one or more of `bench-smoke`, `test-primitives` and
+`nspl-completion-walk`:
+
+```bash
+just coverage-native-extras nspl-completion-walk
+```
+
+A producer runs its check exactly as `just <producer>` does and fails when the check fails. What the
+check needs first, such as the web console the server benches link, is built normally. The recipe
+that executes Nervix code then runs in the environment `cargo llvm-cov show-env --sh
+--no-rustc-wrapper` describes: every crate is compiled with source coverage instrumentation into
+`target/native-coverage-build`, and the configured kache wrapper stays in place. The parts of a
+check that only compile, target the browser or run under a model checker stay uninstrumented, and
+Miri, mutation testing and the Loom weakening qualification never run under this command.
+
+Every run collects into a directory of its own,
+`target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`. The attempt is the GitHub
+Actions run and attempt in CI, and the time and process locally. No run reuses, reads or cleans
+another run's directory, so no run can count another's counters. The directory holds:
+
+| Entry | Content |
+| --- | --- |
+| `lcov.info` | The LCOV report of the repository's sources, with the absolute paths `llvm-cov` writes |
+| `completion.json` | The completion record: the verdict and everything it covers |
+| `executions.jsonl` | Every executable Cargo ran, with its arguments and build ID |
+| `export.log` | The diagnostics of `llvm-profdata` and `llvm-cov`, each bounded |
+| `profiles/` and `merged.profdata` | The raw counters and their merge; they stay on the machine |
+
+Cargo runs each instrumented executable through the collector as its runner, which records the
+execution and points the counters of the executable, and of every process it starts, at `profiles/`,
+one file per process and module. Build scripts and procedural macros execute only when a crate is
+compiled rather than served from the cache, so their counters are discarded, and a fresh build and a
+cached one select the same executions. The report is exported with the toolchain's own
+`llvm-profdata` and `llvm-cov` from exactly the executables that ran and the children they started.
+It keeps the files inside the repository and leaves out dependencies, harness code below a `tests`,
+`examples` or `benches` directory, and code generated below a Cargo target directory.
+
+`completion.json` names the producer and mode, the tested commit and whether the working tree was
+modified, the CI run and attempt, the compiler and its LLVM version, the instrumentation flags, the
+recipes that make up the check, the executions and child executables selected, the profile files
+with the binary IDs they name, the warnings `llvm-cov` printed, and the executable and covered lines
+of each package. Its `verdict` reads `running` from the moment the directory exists. It becomes
+`complete` only once the whole check passed and the report was written, and `failed` or
+`interrupted` otherwise, with a `failure` naming the stage, `prepare`, `instrument`, `run`, `export`
+or `finish`, and what went wrong. A collection fails when the recipe ran no executable, when an
+executable it ran is gone or was rebuilt before the export, when one wrote no profile, or when a
+profile is unreadable or names an executable that is no longer there. Every attempt keeps its
+profiles, so a failed one keeps its evidence; remove `target/native-coverage` when the collections
+are no longer needed.
+
+Every profile is matched to the executable that wrote it before the export, so a warning from
+`llvm-cov` never means a stale profile. When several executables share a function that only some of
+them run, such as an inlined dependency function, the copies that never ran can carry a different
+hash, and `llvm-cov` warns that they have mismatched data and reads the function from the
+executables that ran it.
+
+CI's extra-tests job runs the three checks only through this command and uploads the `lcov.info`,
+`completion.json`, `executions.jsonl` and `export.log` of every collection as the
+`coverage-native-extras` artifact, whatever the verdict. The benchmark bodies run instrumented, so
+their Criterion test mode shows that each body executes and measures nothing. The collector itself,
+including real instrumented runs of a fixture crate and its refusal of every incomplete collection,
+is tested with:
+
+```bash
+just test-native-coverage
+```
 
 ### The scenario suite's execution budget
 
