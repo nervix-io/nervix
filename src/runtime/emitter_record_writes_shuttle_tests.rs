@@ -20,13 +20,11 @@
 use std::sync::Arc as StdArc;
 
 use futures_util::FutureExt as _;
-use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::SinkPublishError;
 use nervix_primitives::{
     sync::atomic as selected,
     unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use nervix_recovery::NoReceiver as _;
 
 use super::*;
 use crate::{

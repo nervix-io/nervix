@@ -739,17 +739,267 @@ jobs:
           path: tests/logs
           if-no-files-found: ignore
 
+  # Every package's Shuttle checks over their production owners, each package then again under
+  # Shuttle's uncontrolled-nondeterminism detector. A job of its own: its build enables the `shuttle`
+  # feature and so shares no compilation with the extra checks, and it no longer holds them back.
+  shuttle:
+    name: shuttle
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    # A cold build of the server's test target can double a warm run; the bound leaves it room.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      NO_COLOR: "1"
+      CARGO_TERM_COLOR: never
+      RUST_LOG_STYLE: never
+    steps:
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.98
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,toml-cli,trunk,wild-linker
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      # The same toolchain and flags the other jobs build with, so their compilations are
+      # interchangeable in the shared cache rather than a second set of artifacts.
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "clang-23"
+          rustflags = ["-Clink-arg=--ld-path=wild"]
+          EOF
+
+      - name: Setup Go environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install TinyGo
+        run: |
+          set -euo pipefail
+          arch="$(dpkg --print-architecture)"
+          case "${arch}" in
+            amd64|arm64) ;;
+            *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
+          esac
+          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          sudo dpkg -i /tmp/tinygo.deb
+          tinygo version
+
+      - name: Install apt deps
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libcurl4-openssl-dev \
+            protobuf-compiler
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Configure kache daemon remote
+        env:
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: |
+          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
+          bash scripts/configure_kache_remote.sh "${config}"
+          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
+          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          pr-comment: "false"
+          s3-bucket: ${{ vars.KACHE_BUCKET }}
+          s3-prefix: "artifacts"
+          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
+          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Shuttle concurrency checks
+        run: just test-shuttle
+
+      - name: Publish kache report
+        if: always()
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
+
+      # A modeled concurrency failure is only reproducible from the schedule that produced it, and
+      # this job is the only witness of that schedule.
+      - name: Upload Shuttle failure traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shuttle-failures
+          path: target/shuttle-failures
+          if-no-files-found: ignore
+
+  # The compile-time boundaries of authoritative runtime-state and clock operations: each forbidden
+  # call must fail to compile against the server built with `testing`. A job of its own: nothing in
+  # the extra checks builds that configuration, so it shares no compilation with them.
+  runtime-capabilities:
+    name: runtime-capabilities
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    # A cold build of the server's test target can double a warm run; the bound leaves it room.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      NO_COLOR: "1"
+      CARGO_TERM_COLOR: never
+      RUST_LOG_STYLE: never
+    steps:
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.98
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,toml-cli,trunk,wild-linker
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      # The same toolchain and flags the other jobs build with, so their compilations are
+      # interchangeable in the shared cache rather than a second set of artifacts.
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "clang-23"
+          rustflags = ["-Clink-arg=--ld-path=wild"]
+          EOF
+
+      - name: Setup Go environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install TinyGo
+        run: |
+          set -euo pipefail
+          arch="$(dpkg --print-architecture)"
+          case "${arch}" in
+            amd64|arm64) ;;
+            *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
+          esac
+          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          sudo dpkg -i /tmp/tinygo.deb
+          tinygo version
+
+      - name: Install apt deps
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libcurl4-openssl-dev \
+            protobuf-compiler
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Configure kache daemon remote
+        env:
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: |
+          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
+          bash scripts/configure_kache_remote.sh "${config}"
+          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
+          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          pr-comment: "false"
+          s3-bucket: ${{ vars.KACHE_BUCKET }}
+          s3-prefix: "artifacts"
+          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
+          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Runtime state capability checks
+        run: just test-runtime-state-capabilities
+
+      - name: Publish kache report
+        if: always()
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
+
   # The checks that answer for the workspace rather than for the scenario suite: undefined
-  # behaviour, mutation coverage, benchmark bodies, modeled concurrency and completion
+  # behaviour, mutation coverage, benchmark bodies, primitive conformance, Loom models and completion
   # reachability. None of them reads the suite's result, so they run beside it instead of queueing
   # behind it, and a slow one no longer pushes the suite's job toward its own timeout. The checks
   # that execute Nervix code natively in ordinary mode run instrumented and publish their source
-  # coverage from that same run.
+  # coverage from that same run. The Shuttle checks and the runtime capability checks run in the
+  # jobs above.
   extra-tests:
     name: extra-tests
-    # Half the suite job's cores on purpose. The smaller runner saves capacity, but cold
-    # compilation and the full modeled suite can outlast the scenario job. A 45-minute bound
-    # cancelled Shuttle checks before primitive, Loom, and completion checks could start.
+    # Half the suite job's cores on purpose. The smaller runner saves capacity, and cold
+    # instrumented compilation still needs the generous bound.
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 75
     permissions:
@@ -854,9 +1104,6 @@ jobs:
           s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
-      - name: Runtime state capability checks
-        run: just test-runtime-state-capabilities
-
       # Cheapest first, so a workspace that does not build at all is named in seconds rather than
       # after the heavier compilations have run.
       - name: Expiry map Miri
@@ -875,9 +1122,6 @@ jobs:
       # instrumented for source coverage, so its timings are not a measurement either.
       - name: Benchmark smoke tests
         run: just coverage-native-extras bench-smoke
-
-      - name: Shuttle concurrency checks
-        run: just test-shuttle
 
       # The primitive boundary's conformance in every execution mode, the ordinary one collected
       # for coverage, then every registered Loom model of a production owner explored to
@@ -923,16 +1167,6 @@ jobs:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
-
-      # A modeled concurrency failure is only reproducible from the schedule that produced it, and
-      # this job is the only witness of that schedule.
-      - name: Upload Shuttle failure traces
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: shuttle-failures
-          path: target/shuttle-failures
-          if-no-files-found: ignore
 
       # A failed Loom model is only reproducible from the checkpoint of the execution that failed,
       # and a failed qualification from its weakened run; this job is the only witness of either.

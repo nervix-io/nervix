@@ -4,6 +4,8 @@ build_mode := "debug"
 release_flag := if build_mode == "release" { "--release" } else { "" }
 cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
 turmoil_failures := cargo_target_dir + "/turmoil-failures"
+# The packages whose `shuttle_` checks `test-shuttle` explores and `cargo-clippy-shuttle` lints.
+shuttle_packages := "nervix-execution nervix-interconnect nervix-client-core nervix-server"
 
 # Show the documented recipes, including the Bolero property and fuzz commands.
 help:
@@ -294,7 +296,7 @@ test-primitives-compile:
 test-shuttle filter="": build-web-console wasm-processor-guests download-onnxruntime
     #!/usr/bin/env bash
     set -euo pipefail
-    shuttle_packages=(nervix-execution nervix-interconnect nervix-client-core nervix-server)
+    shuttle_packages=({{ shuttle_packages }})
     for shuttle_package in "${shuttle_packages[@]}"; do
         just test-shuttle-package "${shuttle_package}" {{ quote(filter) }}
         SHUTTLE_CHECK_NONDETERMINISM=1 \
@@ -1362,8 +1364,20 @@ cargo-clippy-web-console:
 cargo-clippy-client-wire-wasm:
     CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-client-wire-wasm" RUSTFLAGS="-Dwarnings {{ rustflags }}" cargo clippy -p nervix-client-wire --target wasm32-unknown-unknown -q
 
+# Lint the Shuttle build of every package `test-shuttle` explores in test mode, where its checks are
+# compiled, exactly as the runner builds it. The library lint in `cargo-clippy-all` never compiles
+# them, so a warning in a check would otherwise pass validation and the Shuttle job alike.
+cargo-clippy-shuttle:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export CARGO_TARGET_DIR="{{ cargo_target_dir }}/clippy-all"
+    export RUSTFLAGS="-Dwarnings {{ rustflags }}"
+    for package in {{ shuttle_packages }}; do
+        cargo clippy --lib --profile test --features shuttle --package "${package}"
+    done
+
 [parallel]
-cargo-clippy: cargo-clippy-all cargo-clippy-loom cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console cargo-clippy-client-wire-wasm
+cargo-clippy: cargo-clippy-all cargo-clippy-loom cargo-clippy-shuttle cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console cargo-clippy-client-wire-wasm
 
 [parallel]
 lint-inner: cargo-clippy
@@ -1474,7 +1488,9 @@ validate-dns-dependencies:
         exit 1
     fi
 
-validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies validate-bolero
+# `just validate` without formatting fixes and without `validate-bolero`: its compiled discovery builds
+# every Bolero target, and CI's `bolero-random` job runs the same discovery before the properties.
+validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-shuttle-dependencies validate-turmoil-dependencies validate-loom-dependencies validate-execution-mode-conflicts validate-dns-dependencies
 
 # Hold every atomic to nervix-primitives and every mode feature to its owner. The check rejects a
 # direct, renamed, grouped, qualified, glob, alias or macro path to another backend's atomics, a

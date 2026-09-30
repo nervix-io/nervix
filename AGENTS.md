@@ -999,6 +999,9 @@ build and the existing tests, and nothing in it changes behavior.
   registered weakening. Required CI runs Shuttle, Loom and its qualification, and Turmoil
   independently of the ordinary tests. `just cargo-clippy-loom`, part of `just lint`, keeps every
   Loom build compiling, including the server and consensus libraries as they ship and in test mode.
+  `just cargo-clippy-shuttle`, also part of `just lint`, lints every Shuttle build that
+  `just test-shuttle` runs in test mode with warnings denied, so a warning in a check fails
+  validation.
 - `just coverage-native-extras [producer ...]` runs the extra checks that execute Nervix code
   natively in ordinary mode, `bench-smoke`, `test-primitives` and `nspl-completion-walk`, exactly as
   their recipes do but under LLVM source instrumentation, and CI's extra-tests job runs them only
