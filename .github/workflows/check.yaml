@@ -868,6 +868,9 @@ jobs:
       - name: Compiler synchronization qualification
         run: just coverage-native-extras test-typed-ratchet
 
+      - name: Setup uv for compiler runner coverage
+        uses: astral-sh/setup-uv@v6
+
       - name: Compiler cache and runner qualification
         run: |
           just qualify-typed-ratchet-cache

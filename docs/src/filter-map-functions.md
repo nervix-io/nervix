@@ -281,6 +281,17 @@ These words are reserved in expressions, including after a field scope such as `
 `CASE`, `WHEN`, `THEN`, `ELSE`, `END`, `IN`, `BETWEEN`, `IS`, `DISTINCT`, `FROM`, and `UDF`. A schema
 may declare one of these field names, but an NSPL expression cannot reference it.
 
+### Expressions Inside Statements
+
+A statement reads an expression it embeds up to the keyword that begins its next clause, such as
+`TO`, `MAX TIME`, or a correlator's `RIGHT FROM`, so an expression needs no parentheses to end. A
+builtin or a field scope whose name is also such a keyword belongs to the expression wherever it is
+written: followed by `(` it is a call, and followed by `.` it is the scope of a field, never the
+start of a clause. In `DEDUPLICATE ON max(input.readings) MAX TIME 10m` the first `max` is a call
+and the second begins the next clause, a correlator's left input can test `right(left.name, 2)`
+before its `RIGHT FROM`, and an `ALTER` operation can call `replace(...)` after a comma inside its
+expression.
+
 ## Logical Operators
 
 `AND`, `OR`, and `NOT` take `BOOL` operands and return `BOOL`. They follow three-valued logic, in

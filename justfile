@@ -980,6 +980,7 @@ bench *args: build-web-console
     cargo bench --package nervix-branch-instances --bench owned_branches -- {{ args }}
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
     cargo bench --package nervix-server --bench wasm_checkpoint --features benchmarks -- {{ args }}
+    cargo bench --package nervix-server --bench state_replication --features benchmarks -- {{ args }}
     cargo bench --package nervix-columnar-json --bench json_encode -- {{ args }}
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
@@ -993,6 +994,7 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-branch-instances --bench owned_branches -- --test
     cargo bench --profile dev --package nervix-server --bench subscription_row_encoding --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench wasm_checkpoint --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-server --bench state_replication --features benchmarks -- --test
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
 
@@ -1045,6 +1047,12 @@ client-wire-binding-host-cost output_dir="target/client-wire-binding-host":
 # Compare the same native command workload over plaintext and TLS with one-node test clusters.
 client-wire-tls-cost output_dir="target/client-wire-tls-cost":
     NERVIX_CLIENT_WIRE_TLS_OUTPUT_DIR={{ quote(output_dir) }} just test-scenarios --input tests/features/runtime/client_wire_tls_cost.feature --tags @client_wire_tls_cost --concurrency 1 --retry 0
+
+# Measure runtime-state replication on the owner and on a replica: a Kafka offset commit its one
+# replica acknowledges, and the branch lifecycle check a replica makes before it installs each
+# branch checkpoint, for lifecycles of 16, 128 and 1,024 branches.
+bench-state-replication *args:
+    cargo bench --package nervix-server --bench state_replication --features benchmarks -- {{ args }}
 
 # Measure durable WASM guest-state checkpoints against unsynchronized writes of the same states. The
 # store lives under the crate target directory, so the synchronization cost is that of its storage.

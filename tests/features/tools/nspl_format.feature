@@ -404,3 +404,66 @@ Feature: NSPL file formatting
       """
       COMMIT; // done\n
       """
+
+  Scenario: Clause keywords written as calls and field scopes stay in their expressions
+    Given an NSPL file "pipeline.nspl" containing
+      """
+      create junction peaks from sensors where (max(input.readings) > 10) filter where (output.total > 0)
+        unbranched to alerts inherit all flush immediate on message error log;
+      create deduplicator distinct_peaks from sensors deduplicate on max(input.readings), input.id
+        max time 10m unbranched to distinct_readings inherit all flush immediate on message error log;
+      create reorderer peaks_in_order from sensors by max(input.readings) max time 10s unbranched
+        to ordered_readings inherit all flush immediate on message error log;
+      create correlator suffix_matches left from sensors where right(left.name, 2) = right.suffix
+        right from labels where output.id > 0 correlate where left.id = right.id match earliest
+        max time 5s on correlation timeout drop, drop unbranched to matched set id = left.id
+        flush immediate on message error log;
+      alter junction peaks set filter where concat(input.name, replace(input.name, 'a', 'b')) != '',
+        set detached;
+      """
+    When nervix-nspl-format formats the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "pipeline.nspl" contains
+      """
+      CREATE ATTACHED JUNCTION peaks
+        FROM sensors WHERE max(input.readings) > 10
+        FILTER WHERE output.total > 0
+        UNBRANCHED
+        TO alerts
+          INHERIT ALL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE ATTACHED DEDUPLICATOR distinct_peaks
+        FROM sensors
+        DEDUPLICATE ON max(input.readings), input.id
+        MAX TIME 10m
+        UNBRANCHED
+        TO distinct_readings
+          INHERIT ALL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE ATTACHED REORDERER peaks_in_order
+        FROM sensors
+        BY max(input.readings)
+        MAX TIME 10s
+        UNBRANCHED
+        TO ordered_readings
+          INHERIT ALL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE ATTACHED CORRELATOR suffix_matches
+        LEFT FROM sensors WHERE right(left.name, 2) = right.suffix
+        RIGHT FROM labels WHERE output.id > 0
+        CORRELATE WHERE left.id = right.id
+        MATCH EARLIEST
+        MAX TIME 5s
+        ON CORRELATION TIMEOUT DROP, DROP
+        UNBRANCHED
+        TO matched
+          SET id = left.id
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      ALTER JUNCTION peaks SET FILTER WHERE concat(input.name, replace(input.name, 'a', 'b')) != '', SET DETACHED;
+      """
+    When nervix-nspl-format checks the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0

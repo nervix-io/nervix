@@ -51,12 +51,13 @@ PARSER_EDGES = (
 )
 
 # The data plane executes plans. It is the server's runtime together with the crates the runtime
-# drives: the branch instance lifetimes its tasks own, the connector contract crate and every
-# integration crate. Code that moves out of the runtime stays inside these prefixes, so a move
-# carries its sites along and lowers no count.
+# drives: the branch instance lifetimes its tasks own, the checkpoint replication its replicated
+# states own, the connector contract crate and every integration crate. Code that moves out of the
+# runtime stays inside these prefixes, so a move carries its sites along and lowers no count.
 DATA_PLANE = (
     "src/runtime/",
     "crates/branch-instances/src/",
+    "crates/checkpoint-replication/src/",
     "crates/connector/src/",
     "crates/connectors/",
 )
