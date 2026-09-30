@@ -364,3 +364,7 @@ impl Runtime {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "replica_catch_up_tests.rs"]
+mod tests;

@@ -9,7 +9,7 @@ use std::{sync::Arc as StdArc, time::Duration};
 
 use fjall::Database;
 use futures_util::FutureExt as _;
-use nervix_models::{ClusterNodeName, ModelKind, ModelName, SchemaFingerprint, Timestamp};
+use nervix_models::{ClusterNodeName, ModelKind, ModelName, SchemaFingerprint};
 use nervix_primitives::time::Instant;
 use tempfile::tempdir;
 
@@ -48,23 +48,6 @@ fn acknowledge(runtime: &Runtime, replica: &ClusterNodeName, placement: &Runtime
             lsm: REVISION,
         },
     );
-}
-
-/// A branch lifecycle checkpoint at `lsm` naming `branches`.
-fn lifecycle_snapshot(lsm: u64, branches: &[Option<BranchKey>]) -> PersistedRuntimeStateEntry {
-    let mut entries = Vec::new();
-    for key in branches {
-        entries.push(BranchInstanceSnapshotEntry {
-            key: key.clone(),
-            last_ingestion: Timestamp::from_unix_nanos(1),
-            incarnation: 1,
-        });
-    }
-    PersistedRuntimeStateEntry {
-        lsm,
-        payload: encode_branch_lru_snapshot(&entries)
-            .expect("a current branch lifecycle checkpoint encodes"),
-    }
 }
 
 #[test]
@@ -479,7 +462,7 @@ fn a_replica_decodes_each_branch_lifecycle_once_and_prunes_the_branches_it_drops
         .install_replica_branch_lru_snapshot(
             &branch_lru,
             &lifecycle,
-            lifecycle_snapshot(1, &[acme.clone(), beta.clone()]),
+            branch_lifecycle_snapshot(1, &[acme.clone(), beta.clone()]),
         )
         .expect("a lifecycle naming both branches installs");
     assert!(
@@ -506,7 +489,7 @@ fn a_replica_decodes_each_branch_lifecycle_once_and_prunes_the_branches_it_drops
         .install_replica_branch_lru_snapshot(
             &branch_lru,
             &lifecycle,
-            lifecycle_snapshot(2, std::slice::from_ref(&acme)),
+            branch_lifecycle_snapshot(2, std::slice::from_ref(&acme)),
         )
         .expect("a newer lifecycle without beta installs");
     assert!(
@@ -532,7 +515,7 @@ fn a_replica_decodes_each_branch_lifecycle_once_and_prunes_the_branches_it_drops
         .install_replica_branch_lru_snapshot(
             &branch_lru,
             &lifecycle,
-            lifecycle_snapshot(1, &[acme, beta.clone()]),
+            branch_lifecycle_snapshot(1, &[acme, beta.clone()]),
         )
         .expect("an older lifecycle arriving late decodes");
     let held = lifecycle.latest().expect("the replica holds a lifecycle");
@@ -574,7 +557,7 @@ async fn a_replica_task_restores_the_stored_branch_lifecycle_only_while_it_holds
         )
         .expect("the published identity places the branch lifecycle");
     let acme = string_branch_key("tenant", "acme");
-    let stored = lifecycle_snapshot(4, std::slice::from_ref(&acme));
+    let stored = branch_lifecycle_snapshot(4, std::slice::from_ref(&acme));
     runtime
         .inner
         .state_store
@@ -597,7 +580,7 @@ async fn a_replica_task_restores_the_stored_branch_lifecycle_only_while_it_holds
     );
 
     lifecycle.install(StdArc::new(BranchLifecycleCheckpoint::new(
-        lifecycle_snapshot(6, &[]),
+        branch_lifecycle_snapshot(6, &[]),
     )));
     runtime
         .restore_replica_branch_lifecycle(&branch_lru, &lifecycle)
