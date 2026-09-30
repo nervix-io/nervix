@@ -3,6 +3,8 @@ use error_stack::{Report, ResultExt as _};
 use nervix_primitives::runtime::Builder;
 use nervix_server::application::{AppError, Args, TerminationSignals, init_tracing, run_cli};
 
+nervix_primitives::product_binary!("nervix-server");
+
 fn main() -> Result<(), Report<AppError>> {
     let args = Args::parse();
     // Registered before any other thread exists, so neither SIGINT nor SIGTERM can end the process

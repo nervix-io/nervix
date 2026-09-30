@@ -1424,5 +1424,74 @@ class PermissionScopeTests(CheckTestCase):
         )
 
 
+class ReleaseBinaryTests(CheckTestCase):
+    """Every binary the release image builds refuses a build that selects an execution mode."""
+
+    DOCKERFILE = (
+        "FROM rust AS builder\n"
+        "RUN cargo build --release --package nervix-engine \\\n"
+        "    && cargo auditable build --release --target x86_64 --package nervix-engine\n"
+        "RUN cargo test --package nervix-vocabulary\n"
+    )
+
+    def test_a_released_binary_that_declares_the_guard_passes(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/main.rs": (
+                    'nervix_primitives::product_binary!("nervix-engine");\nfn main() {}\n'
+                ),
+                "crates/engine/src/bin/probe.rs": (
+                    'nervix_primitives::product_binary!("probe");\nfn main() {}\n'
+                ),
+            },
+            manifests={"Dockerfile.debian": self.DOCKERFILE},
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_a_released_binary_without_the_guard_fails(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/main.rs": (
+                    'nervix_primitives::product_binary!("nervix-engine");\nfn main() {}\n'
+                ),
+                "crates/engine/src/bin/probe.rs": "fn main() {}\n",
+            },
+            manifests={"Dockerfile.debian": self.DOCKERFILE},
+        )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "crates/engine/src/bin/probe.rs: primitive boundary: the release image ships `probe`, "
+            'so its crate root declares `nervix_primitives::product_binary!("probe")`',
+            report,
+        )
+        self.assertNotIn("crates/engine/src/main.rs", report)
+
+    def test_a_declared_binary_names_itself(self) -> None:
+        status, report = self.check(
+            {"crates/engine/src/serve.rs": 'nervix_primitives::product_binary!("other");\n'},
+            manifests={
+                "Dockerfile.debian": self.DOCKERFILE,
+                "crates/engine/Cargo.toml": ENGINE
+                + '\n[[bin]]\nname = "serve"\npath = "src/serve.rs"\n',
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("the release image ships `serve`", report)
+
+    def test_an_unknown_released_package_fails(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "Dockerfile.debian": "RUN cargo build --release --package nervix-missing\n"
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "Dockerfile.debian:1: primitive boundary: the release build names package "
+            "`nervix-missing`, which no manifest declares",
+            report,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

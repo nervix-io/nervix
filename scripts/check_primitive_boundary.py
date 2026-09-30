@@ -317,6 +317,12 @@ _GLOBAL_CFG = re.compile(
     r"|rustc-cfg=(?P<emitted>[A-Za-z_][A-Za-z0-9_]*)"
 )
 TOKIO_UNSTABLE = "tokio_unstable"
+# The build of the release image, and the packages it builds for release.
+RELEASE_BUILD = "Dockerfile.debian"
+_RELEASE_PACKAGE = re.compile(r"(?<![A-Za-z0-9_-])--package\s+(?P<package>[A-Za-z0-9_-]+)")
+_PRODUCT_BINARY = re.compile(
+    r"nervix_primitives\s*::\s*product_binary\s*!\s*\(\s*\"(?P<name>[^\"]*)\"\s*\)"
+)
 JUSTFILE = "justfile"
 CONFIGURATION_GLOBS = (".cargo/config.toml", ".cargo/config", ".github/workflows/*.yaml", ".github/workflows/*.yml")
 # A recipe header starts at the first column and ends its name and parameters with a colon that does
@@ -1382,6 +1388,8 @@ class Package:
     every_kind: Mapping[str, Mapping[str, object]]
     dependencies: tuple[Dependency, ...]
     crate_types: frozenset[str]
+    # The binaries the manifest declares, each with its crate root when the manifest names one.
+    declared_binaries: tuple[tuple[str, str | None], ...]
 
 
 def _dependency_tables(document: Mapping[str, object]) -> Iterator[tuple[str, Mapping[str, object]]]:
@@ -1459,6 +1467,13 @@ def load_packages(root: Path, files: Sequence[str]) -> list[Package]:
                     normal.add(package)
         library = document.get("lib", {})
         crate_types = library.get("crate-type", []) if isinstance(library, dict) else []
+        declared_binaries: list[tuple[str, str | None]] = []
+        for binary in document.get("bin", []):
+            if isinstance(binary, dict) and isinstance(binary.get("name"), str):
+                binary_path = binary.get("path")
+                declared_binaries.append(
+                    (binary["name"], binary_path if isinstance(binary_path, str) else None)
+                )
         parent = str(manifest_path.parent)
         packages.append(
             Package(
@@ -1470,9 +1485,76 @@ def load_packages(root: Path, files: Sequence[str]) -> list[Package]:
                 every_kind=every_kind,
                 dependencies=tuple(dependencies),
                 crate_types=frozenset(crate_types),
+                declared_binaries=tuple(declared_binaries),
             )
         )
     return packages
+
+
+def binary_roots(package: Package, files: frozenset[str]) -> dict[str, str]:
+    """Every binary of `package`, by name, with the crate root Cargo builds it from: the ones its
+    manifest declares, `src/main.rs`, and each file in `src/bin`."""
+
+    roots: dict[str, str] = {}
+    for name, path in package.declared_binaries:
+        if path is not None:
+            roots[name] = package.directory + path
+        elif package.directory + f"src/bin/{name}.rs" in files:
+            roots[name] = package.directory + f"src/bin/{name}.rs"
+        else:
+            roots[name] = package.directory + "src/main.rs"
+    claimed = set(roots.values())
+    main = package.directory + "src/main.rs"
+    if main in files and main not in claimed:
+        roots.setdefault(package.name, main)
+    for path in sorted(files):
+        candidate = PurePosixPath(path)
+        if path.startswith(package.directory + "src/bin/") and candidate.suffix == ".rs":
+            if path not in claimed and candidate.parent == PurePosixPath(package.directory + "src/bin"):
+                roots.setdefault(candidate.stem, path)
+    return roots
+
+
+def check_release_binaries(
+    root: Path, packages: Sequence[Package], files: Sequence[str]
+) -> list[str]:
+    """Hold every binary the release image builds to ordinary execution.
+
+    A build that selects an execution mode is a test artifact, so every binary the release build
+    compiles declares itself a product binary with `nervix_primitives::product_binary!`, which
+    fails to compile in a modeled build.
+    """
+
+    release = root / RELEASE_BUILD
+    if not release.is_file():
+        return []
+    released: dict[str, int] = {}
+    for number, line in enumerate(release.read_text(encoding="utf-8").splitlines(), start=1):
+        if "cargo" not in line or " build " not in f" {line} " or "--release" not in line:
+            continue
+        for match in _RELEASE_PACKAGE.finditer(line):
+            released.setdefault(match.group("package"), number)
+    problems: list[str] = []
+    by_name = {package.name: package for package in packages}
+    sources = frozenset(files)
+    for name, number in sorted(released.items()):
+        package = by_name.get(name)
+        if package is None:
+            problems.append(
+                f"{RELEASE_BUILD}:{number}: {RULE}: the release build names package `{name}`, "
+                "which no manifest declares"
+            )
+            continue
+        for binary, path in sorted(binary_roots(package, sources).items()):
+            text = (root / path).read_text(encoding="utf-8") if path in sources else ""
+            declared = {match.group("name") for match in _PRODUCT_BINARY.finditer(text)}
+            if binary not in declared:
+                problems.append(
+                    f"{path}: {RULE}: the release image ships `{binary}`, so its crate root "
+                    f'declares `nervix_primitives::product_binary!("{binary}")`, which refuses a '
+                    "build that selects an execution mode"
+                )
+    return problems
 
 
 def guest_directories(packages: Sequence[Package]) -> tuple[str, ...]:
@@ -1678,6 +1760,7 @@ def check(root: Path) -> list[str]:
     problems.extend(check_permissions(uses, permissions))
     problems.extend(check_manifests(packages))
     problems.extend(check_global_cfgs(root, files))
+    problems.extend(check_release_binaries(root, packages, files))
     return problems
 
 

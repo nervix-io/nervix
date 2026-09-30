@@ -65,6 +65,8 @@ use self::{
     restore::{CliExistingUsers, CliRestoreScope, RestoreRequest},
 };
 
+nervix_primitives::product_binary!("nervix-cli");
+
 const HISTORY_FILE: &str = ".nervix_client_history";
 const EVENT_BUFFER_RECORDS: usize = 128;
 const EVENT_LINE_BYTES: usize = 8 * 1024;

@@ -14,6 +14,8 @@ use nervix_nspl::schema::ParseFromSourceError;
 use nervix_nspl_format::{FormatError, diagnostics, format_source};
 use nervix_recovery::{Discarded as _, Reported as _};
 
+nervix_primitives::product_binary!("nervix-nspl-format");
+
 /// The name standard input reports as, in both listings and diagnostics.
 const STDIN_ORIGIN: &str = "<stdin>";
 

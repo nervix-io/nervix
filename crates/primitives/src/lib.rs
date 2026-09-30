@@ -38,7 +38,9 @@
 //! library item, with no wrapper, allocation, dispatch or scheduling point. A modeled primitive
 //! exists only inside a run of its model, and using one outside that run is a test configuration
 //! failure that the backend reports; there is no fallback to a real primitive. A real primitive
-//! that must stay outside every model is reached through [`unmodeled`] and nowhere else.
+//! that must stay outside every model is reached through [`unmodeled`] and nowhere else. A build
+//! that selects a mode is therefore a test artifact, and every binary Nervix ships declares itself
+//! with [`product_binary!`], which fails to compile in such a build.
 //!
 //! Shared ownership is real in every mode: no model checker counts references, so a reference count
 //! establishes no ordering a check claims.
@@ -93,6 +95,54 @@ compile_error!(
     "nervix-primitives: the `loom`, `shuttle` and `turmoil` execution modes run on native targets \
      only."
 );
+
+/// Declare the calling crate a product binary, which builds only for ordinary execution.
+///
+/// A build that selects an execution mode is a test artifact: its modeled primitives exist only
+/// inside a run of their model, so a server or client built that way could not run as a product and
+/// must never be published. Every binary Nervix ships invokes this once in its crate root with its
+/// name, and a build that selects a mode fails to compile there, naming the binary and the mode.
+#[cfg(not(any(feature = "loom", feature = "shuttle", feature = "turmoil")))]
+#[macro_export]
+macro_rules! product_binary {
+    ($binary:literal) => {};
+}
+
+#[cfg(feature = "loom")]
+#[macro_export]
+macro_rules! product_binary {
+    ($binary:literal) => {
+        ::core::compile_error!(::core::concat!(
+            $binary,
+            " is a product binary and builds only for ordinary execution; a build that selects \
+             the `loom` execution mode is a test artifact"
+        ));
+    };
+}
+
+#[cfg(all(feature = "shuttle", not(feature = "loom")))]
+#[macro_export]
+macro_rules! product_binary {
+    ($binary:literal) => {
+        ::core::compile_error!(::core::concat!(
+            $binary,
+            " is a product binary and builds only for ordinary execution; a build that selects \
+             the `shuttle` execution mode is a test artifact"
+        ));
+    };
+}
+
+#[cfg(all(feature = "turmoil", not(any(feature = "loom", feature = "shuttle"))))]
+#[macro_export]
+macro_rules! product_binary {
+    ($binary:literal) => {
+        ::core::compile_error!(::core::concat!(
+            $binary,
+            " is a product binary and builds only for ordinary execution; a build that selects \
+             the `turmoil` execution mode is a test artifact"
+        ));
+    };
+}
 
 // The runtime attributes name the boundary by its crate name, including in this crate's own tests.
 #[cfg(feature = "native")]
