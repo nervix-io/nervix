@@ -100,7 +100,8 @@ jobs:
   bolero-fuzz:
     name: bolero-fuzz
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    timeout-minutes: 60
+    # Cold sanitizer builds precede the full per-target campaign and qualification.
+    timeout-minutes: 90
     permissions:
       contents: read
       id-token: write
