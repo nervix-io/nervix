@@ -241,11 +241,23 @@ path = "src/runtime/test_fixtures.rs"
 reason = "The compiled schema is built once per test process and shared by every test in it, including every model execution."
 
 [[permission]]
-items = ["sync::Once"]
+items = [
+  "futures::AbortHandle",
+  "futures::Abortable",
+  "futures::select",
+  "sync::Once",
+]
 limit = "The browser console runs in no execution mode, so nothing it does is modeled."
-owner = "The browser console's executor installation."
+owner = "The browser console: its executor installation, its session loop's waits and its cancellable uploads."
 path = "crates/web-console/src/main.rs"
-reason = "The console installs its task executor once per page, and a browser build has no native capability to select a modeled primitive from."
+reason = "The console installs its task executor once per page, and its tasks wait on and cancel futures on the browser's event loop, which no execution mode runs and where the boundary's native families do not exist: a browser build has no native capability to select a modeled primitive from."
+
+[[permission]]
+items = ["futures::mpsc"]
+limit = "The browser console runs in no execution mode, so nothing it does is modeled."
+owner = "The browser console's request hand-off."
+path = "crates/web-console/src/request_handoff.rs"
+reason = "The console's controls hand requests to its session loop on the browser's event loop, which no execution mode runs and where the boundary's native channels do not exist."
 
 [[permission]]
 items = ["time::Instant"]

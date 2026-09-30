@@ -16,13 +16,12 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures_util::task::AtomicWaker;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
     collections::{ConcurrentQueue, PopError, PushError},
     publication::{ArcSwap, Guard},
     sync::{
-        Arc, Notify,
+        Arc, AtomicWaker, Notify,
         atomic::{AtomicBool, AtomicUsize, Ordering},
         blocking::Mutex,
     },

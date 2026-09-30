@@ -7723,7 +7723,6 @@ dependencies = [
  "bytes",
  "console_error_panic_hook",
  "error-stack",
- "futures-channel",
  "futures-util",
  "gloo-net 0.7.0",
  "js-sys",
