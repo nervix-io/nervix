@@ -593,6 +593,40 @@ def verify_tool(inventory: Inventory) -> None:
     command(["rustup", "run", inventory.nightly, "rustc", "--version"])
 
 
+def resolved_test_target(target: Target) -> tuple[pathlib.Path, pathlib.Path, str]:
+    """Read Cargo's current target identity and source root for binary selection."""
+    manifest = target.manifest or package_manifests()[target.package]
+    result = command([
+        "cargo", "metadata", "--no-deps", "--format-version", "1",
+        "--manifest-path", str(manifest),
+    ])
+    packages = [
+        package for package in json.loads(result.stdout)["packages"]
+        if package["name"] == target.package
+    ]
+    if len(packages) != 1:
+        raise BoleroError(f"{target.id}: expected one Cargo package {target.package}")
+    package = packages[0]
+    library_kinds = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
+    targets = [
+        item for item in package["targets"]
+        if (
+            target.test_target == "lib" and library_kinds.intersection(item["kind"])
+        ) or (
+            target.test_target != "lib" and "test" in item["kind"]
+            and item["name"] == target.test_target.removeprefix("test:")
+        )
+    ]
+    if len(targets) != 1:
+        raise BoleroError(f"{target.id}: expected one Cargo {target.test_target} target")
+    selected = targets[0]
+    return (
+        pathlib.Path(package["manifest_path"]).parent,
+        pathlib.Path(selected["src_path"]).resolve(),
+        selected["name"].replace("-", "_") + "-",
+    )
+
+
 def build_instrumented(
     inventory: Inventory, target: Target, path: pathlib.Path
 ) -> pathlib.Path:
@@ -606,6 +640,7 @@ def build_instrumented(
     empty_crashes = path / "build-crashes"
     empty_corpus.mkdir()
     empty_crashes.mkdir()
+    package_root, source, prefix = resolved_test_target(target)
     args = bolero_args(inventory, target) + [
         "--runs",
         "0",
@@ -618,22 +653,11 @@ def build_instrumented(
     print(f"{target.id}: instrumented build deadline {build_timeout}s", flush=True)
     build = command(args, timeout=build_timeout, log=path / "build.log")
     executables = EXECUTABLE.findall(build.stdout)
-    manifest_path = QUALIFICATION if target.manifest == QUALIFICATION else package_manifests()[target.package]
-    with manifest_path.open("rb") as file:
-        manifest = tomllib.load(file)
-    if target.test_target == "lib":
-        declaration = manifest.get("lib", {})
-        source = declaration.get("path", "src/lib.rs")
-        prefix = declaration.get("name", target.package.replace("-", "_")) + "-"
-    else:
-        name = target.test_target.removeprefix("test:")
-        declaration = next((item for item in manifest.get("test", []) if item["name"] == name), {})
-        source = declaration.get("path", f"tests/{name}.rs")
-        prefix = name + "-"
     matches = [
         ROOT / executable
         for label, executable in executables
-        if label.removeprefix("unittests ").strip() == source
+        if label.startswith("unittests ") == (target.test_target == "lib")
+        if (package_root / label.removeprefix("unittests ").strip()).resolve() == source
         if pathlib.Path(executable).name.startswith(prefix)
     ]
     if len(matches) != 1 or not matches[0].is_file():

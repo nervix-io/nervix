@@ -91,7 +91,7 @@ def source_inputs(root: pathlib.Path) -> dict[str, str]:
     for name in sorted(set(tracked.split("\0"))):
         path = root / name
         # The reviewed policy is validated on every invocation and fingerprinted separately.
-        if name in {"debt-baseline.json", str(TOOLING / "scopes.json"), str(TOOLING / "calibration.json"), str(TOOLING / "review-context.json")}:
+        if name in {"debt-baseline.json", str(TOOLING / "scopes.json"), str(TOOLING / "review-context.json")}:
             continue
         if name and path.is_file() and path.suffix in {".rs", ".toml", ".lock", ".fbs", ".proto", ".json"}:
             inputs[name] = digest(path)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import contextlib
 import io
+import json
 import os
 import pathlib
 import subprocess
@@ -302,6 +303,119 @@ class ExecutionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.inventory = bolero.load_inventory()
         self.target = self.inventory.targets[0]
+        self.cargo_metadata = {"packages": []}
+        for package, manifest in bolero.package_manifests().items():
+            targets = [{
+                "name": package.replace("-", "_"), "kind": ["lib"],
+                "src_path": str(manifest.parent / "src/lib.rs"),
+            }]
+            if package in {"nervix-server", "nervix-nspl-format"}:
+                targets.append({
+                    "name": package.replace("-", "_"), "kind": ["bin"],
+                    "src_path": str(manifest.parent / "src/main.rs"),
+                })
+            if package == "nervix-models":
+                targets.append({
+                    "name": "representations", "kind": ["test"],
+                    "src_path": str(manifest.parent / "tests/representations/main.rs"),
+                })
+            if package == "nervix-nspl-format":
+                targets.append({
+                    "name": "repository_files", "kind": ["test"],
+                    "src_path": str(manifest.parent / "tests/repository_files.rs"),
+                })
+            self.cargo_metadata["packages"].append({
+                "name": package, "manifest_path": str(manifest), "targets": targets,
+            })
+
+    def command_with_build(self, build: subprocess.CompletedProcess[str]):
+        def execute(args: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+            if args[:2] == ["cargo", "metadata"]:
+                self.assertIn("--no-deps", args)
+                self.assertIn("--manifest-path", args)
+                return subprocess.CompletedProcess(args, 0, json.dumps(self.cargo_metadata), "")
+            return build
+        return execute
+
+    def test_models_directory_integration_executable_is_selected(self) -> None:
+        target = next(item for item in self.inventory.targets if item.id == "models-names")
+        with tempfile.TemporaryDirectory() as directory:
+            run = pathlib.Path(directory)
+            library = run / "nervix_models-1111"
+            integration = run / "representations-2222"
+            library.touch()
+            integration.touch()
+            build = subprocess.CompletedProcess([], 0,
+                f"Executable unittests src/lib.rs ({library})\n"
+                f"Executable tests/representations/main.rs ({integration})\n", "")
+            with mock.patch.object(bolero, "command", side_effect=self.command_with_build(build)):
+                self.assertEqual(bolero.build_instrumented(self.inventory, target, run), integration)
+
+    def test_cargo_library_name_types_and_explicit_root_select_the_binary(self) -> None:
+        package = next(item for item in self.cargo_metadata["packages"]
+                       if item["name"] == self.target.package)
+        package_root = pathlib.Path(package["manifest_path"]).parent
+        package["targets"] = [{
+            "name": "custom-owner", "kind": ["rlib", "cdylib"],
+            "src_path": str(package_root / "fixtures/owner.rs"),
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            run = pathlib.Path(directory)
+            library = run / "custom_owner-1111"
+            unrelated = run / "custom_owner-2222"
+            library.touch()
+            unrelated.touch()
+            build = subprocess.CompletedProcess([], 0,
+                f"Executable unittests fixtures/owner.rs ({library})\n"
+                f"Executable unittests src/main.rs ({unrelated})\n", "")
+            with mock.patch.object(bolero, "command", side_effect=self.command_with_build(build)):
+                self.assertEqual(bolero.build_instrumented(self.inventory, self.target, run), library)
+
+    def test_library_and_integration_using_one_root_keep_their_target_identity(self) -> None:
+        target = next(item for item in self.inventory.targets if item.id == "models-names")
+        package = next(item for item in self.cargo_metadata["packages"]
+                       if item["name"] == target.package)
+        integration_target = next(item for item in package["targets"] if item["kind"] == ["test"])
+        package["targets"][0] = {**integration_target, "kind": ["lib"]}
+        with tempfile.TemporaryDirectory() as directory:
+            run = pathlib.Path(directory)
+            library = run / "representations-1111"
+            integration = run / "representations-2222"
+            library.touch()
+            integration.touch()
+            build = subprocess.CompletedProcess([], 0,
+                f"Executable unittests tests/representations/main.rs ({library})\n"
+                f"Executable tests/representations/main.rs ({integration})\n", "")
+            with mock.patch.object(bolero, "command", side_effect=self.command_with_build(build)):
+                self.assertEqual(bolero.build_instrumented(self.inventory, target, run), integration)
+                second = run / "library"
+                second.mkdir()
+                self.assertEqual(
+                    bolero.build_instrumented(self.inventory, dataclasses.replace(target, test_target="lib"), second),
+                    library,
+                )
+
+    def test_cargo_package_and_target_must_be_present_and_unambiguous(self) -> None:
+        target = next(item for item in self.inventory.targets if item.id == "models-names")
+        original = json.dumps(self.cargo_metadata)
+        for case in ("missing-package", "ambiguous-package", "missing-target", "ambiguous-target"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                self.cargo_metadata = json.loads(original)
+                packages = self.cargo_metadata["packages"]
+                package = next(item for item in packages if item["name"] == target.package)
+                if case == "missing-package":
+                    packages.remove(package)
+                elif case == "ambiguous-package":
+                    packages.append(package)
+                elif case == "missing-target":
+                    package["targets"] = [item for item in package["targets"] if item["kind"] != ["test"]]
+                else:
+                    package["targets"].append(next(item for item in package["targets"] if item["kind"] == ["test"]))
+                build = subprocess.CompletedProcess([], 0, "", "")
+                with mock.patch.object(bolero, "command", side_effect=self.command_with_build(build)) as calls:
+                    with self.assertRaisesRegex(bolero.BoleroError, "expected one Cargo"):
+                        bolero.build_instrumented(self.inventory, target, pathlib.Path(directory))
+                    self.assertEqual(calls.call_count, 1)
 
     def test_server_library_executable_is_selected_among_package_targets(self) -> None:
         target = dataclasses.replace(self.target, package="nervix-server")
@@ -316,7 +430,7 @@ class ExecutionTests(unittest.TestCase):
                 f"  Executable unittests src/main.rs ({binary})\n"
             )
             build = subprocess.CompletedProcess([], 0, output, "")
-            with mock.patch.object(bolero, "command", return_value=build):
+            with mock.patch.object(bolero, "command", side_effect=self.command_with_build(build)):
                 self.assertEqual(bolero.build_instrumented(self.inventory, target, run), library)
 
     def test_command_propagates_engine_exit_and_timeout(self) -> None:
@@ -366,7 +480,7 @@ class ExecutionTests(unittest.TestCase):
                 bolero.verify_tool(self.inventory)
         with tempfile.TemporaryDirectory() as directory:
             build = subprocess.CompletedProcess([], 0, "no executable", "")
-            with mock.patch.object(bolero, "command", return_value=build):
+            with mock.patch.object(bolero, "command", side_effect=self.command_with_build(build)):
                 with self.assertRaisesRegex(bolero.BoleroError, "expected one instrumented"):
                     bolero.build_instrumented(self.inventory, self.target,
                                               pathlib.Path(directory))
@@ -386,7 +500,7 @@ class ExecutionTests(unittest.TestCase):
                 f"  Executable tests/repository_files.rs ({integration})\n"
             )
             build = subprocess.CompletedProcess([], 0, output, "")
-            with mock.patch.object(bolero, "command", return_value=build):
+            with mock.patch.object(bolero, "command", side_effect=self.command_with_build(build)):
                 self.assertEqual(bolero.build_instrumented(self.inventory, target, run), library)
                 integration_target = dataclasses.replace(
                     target, test_target="test:repository_files"
@@ -407,7 +521,7 @@ class ExecutionTests(unittest.TestCase):
             output = f"  Executable unittests src/lib.rs ({library})\n"
             result = subprocess.CompletedProcess([], 0, output, "")
             with mock.patch.dict(os.environ, {"BOLERO_BUILD_TIMEOUT_SECONDS": "7200"}), \
-                    mock.patch.object(bolero, "command", return_value=result) as build:
+                    mock.patch.object(bolero, "command", side_effect=self.command_with_build(result)) as build:
                 self.assertEqual(bolero.build_instrumented(self.inventory, target, run), library)
                 args = build.call_args.args[0]
                 self.assertEqual(build.call_args.kwargs["timeout"], 7200)
@@ -441,7 +555,7 @@ class ExecutionTests(unittest.TestCase):
             build = subprocess.CompletedProcess([], 0,
                 f"Executable unittests src/lib.rs ({library})\n"
                 f"Executable unittests src/main.rs ({binary})\n", "")
-            with mock.patch.object(bolero, "command", return_value=build):
+            with mock.patch.object(bolero, "command", side_effect=self.command_with_build(build)):
                 self.assertEqual(bolero.build_instrumented(self.inventory, target, temporary), library)
 
     def test_fuzz_build_failure_records_metadata(self) -> None:

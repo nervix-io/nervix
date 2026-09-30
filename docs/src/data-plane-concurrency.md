@@ -714,17 +714,13 @@ The reviewed policy is checked and fingerprinted on every invocation. The worksp
 under configured kache; a missing side report triggers a separate supported key-salt namespace
 and recompile of isolated authored artifacts. The gate never clears `RUSTC_WRAPPER`.
 
-The same-revision cutover evidence in `tools/nervix-lint/calibration.json` records 161 textual sites,
-1,117 resolved authored sites and 132 debt sites. Forty-nine textual sites have no resolved
-acquisition; 117 of the debt sites were exposed by the resolved analysis. The explicit scopes retain
-393 lifecycle, 86 observer, 64 bounded-protocol and one retained-state acquisition; 441 acquisitions
-belong to other layers, testing capabilities or modeled primitive implementations. No product repair
-or higher ceiling was needed to activate this gate. Each remaining debt site names its owning epic
-delivery. The calibration is evidence at its recorded source revision, not the live baseline.
+Cutover calibration and validation evidence belong on the corresponding
+[Typed Ratchet task](https://app.clickup.com/t/86bc9eqhf) in ClickUp. The repository retains the
+operative catalog, per-site scopes, reviewed caller context, declared configuration matrix and
+debt ceiling. Generated inventories, qualification results and execution logs are task artifacts.
+Each remaining debt site names its owning epic delivery.
 
-After the checkpoint replication repair, native client reconnect, endpoint-route publication,
-bounded-executor admission and retained task handles, the complete matrix inventories 1,103 authored
-sites and 96 debt sites. Task handles remove recurring status, freeze, metric and checkpoint lookups;
+Task handles remove recurring status, freeze, metric and checkpoint lookups;
 ingest tracker and clock binders now run at construction, and force-flush claims acquire only for an
 available obligation. Remote relay root tracking remains debt. The executor-saturation lookup belongs
 to explicit testing fault control.

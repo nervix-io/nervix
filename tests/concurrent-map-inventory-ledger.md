@@ -15,13 +15,11 @@ covers the runtime, the connector contract and connector crates, the interconnec
 authored primitive wrappers, and the application, consensus and client maps next to them.
 
 The compiler synchronization gate consumes these owner/frequency decisions through explicit
-per-acquisition scopes in `tools/nervix-lint/scopes.json`. Its same-source calibration at revision
-`881c9097` inventories 1,117 authored sites across the declared native configuration matrix, with
-132 debt sites. `tools/nervix-lint/calibration.json` records the comparison and owning deliveries;
+per-acquisition scopes in `tools/nervix-lint/scopes.json`. Its generated calibration, configuration
+inventories and validation evidence are delivered to
+[Typed Ratchet 02](https://app.clickup.com/t/86bc9eqhf) in ClickUp;
 [Data-Plane Concurrency](../docs/src/data-plane-concurrency.md#ratchet-and-review) states the gate's
-current contract. After the checkpoint replication repair, native client reconnect, endpoint-route
-publication and bounded-executor admission update, the complete matrix inventories 1,115 authored
-sites and 125 debt sites. The extra executor-saturation lookup is testing fault control.
+current contract. The executor-saturation lookup is testing fault control.
 Typed Ratchet 14 owns recurring branch catch-up lookups and
 Typed Ratchet 15 owns the remaining state-replication frame and announcer reads. Their scopes
 include helpers reached by both lifecycle and recurring callers and the primary's synchronization

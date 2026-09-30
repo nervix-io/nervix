@@ -67,6 +67,11 @@ properties use `tools/nervix-lint/Cargo.toml`. The shared runner discovers decla
 from root metadata and uses the selected manifest in ordinary, sanitizer, replay and qualification
 commands. Compiler executions are fixture checks, not work done in each fuzz iteration.
 
+Before instrumenting a target, the runner reads Cargo metadata to resolve its package, target kind,
+name and source root. It selects the emitted executable by that identity, including integration
+tests in folders and explicitly configured library or test paths. A missing or ambiguous Cargo
+target or executable fails the run before the campaign starts.
+
 The inventory also records exact full test names, required features, corpus paths, case timeouts
 and each invariant. Its corpus path is Bolero's source-adjacent
 `__fuzz__/<test-name>/corpus` directory. Ordinary tests replay those files before
