@@ -131,8 +131,9 @@ answered each request by probing the deduplicator, Kafka offset, window, WASM an
 registries in turn, and a window or WASM branch with nothing newer fell through to
 `replicated_branch_lifecycles` and a storage read. A replica also spawned one reconcile task per
 announced placement, keyed in `pending_state_replica_syncs`, which read the held revision and, to
-install a branch checkpoint, `state_identities` and `replicated_branch_lifecycles` again. A
-1,024-branch entity cost each replica 1,025 requests every second with no branch changing.
+install a branch checkpoint, `state_identities` and `replicated_branch_lifecycles` again. With no
+branch changing, a replica's catch-up cost grew with the number of branches, not with the rate of
+change.
 
 Now one replica task per entity owns everything it learns of the entity's branch checkpoints and
 retains the entity's lifecycle handle. The owner catalogues the newest replicable revision of every
