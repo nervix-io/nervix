@@ -300,6 +300,7 @@ pub(super) fn test_relay_boundary_services() -> Arc<super::RelayBoundaryServices
         0,
         Vec::new(),
         None,
+        triomphe::Arc::new(super::BranchPresence::new()),
     ))
 }
 

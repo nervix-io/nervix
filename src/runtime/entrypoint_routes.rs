@@ -467,11 +467,9 @@ impl ExecutionBuildDeps<'_> {
     }
 }
 
-/// The relay registries and services of one domain execution, through which branched entrypoints
-/// publish.
+/// The relay services of one domain execution, through which branched entrypoints publish.
 #[derive(Clone, Copy)]
 pub(super) struct RelayRuntimeHandles<'a> {
-    pub(super) registries: &'a HashMap<RelayName, RelayRegistry>,
     pub(super) services: &'a HashMap<RelayName, Arc<RelayBoundaryServices>>,
 }
 
@@ -487,18 +485,13 @@ impl RelayRuntimeHandles<'_> {
     {
         let mut templates = HashMap::default();
         for route in routes {
-            let template = materialize_ingestor_route_template(
-                kind,
-                identifier,
-                route,
-                self.registries,
-                self.services,
-            )
-            .change_context(EntrypointBindingError::PrepareRoute {
-                kind,
-                node: identifier.clone(),
-                relay: route.relay.clone(),
-            })?;
+            let template =
+                materialize_ingestor_route_template(kind, identifier, route, self.services)
+                    .change_context(EntrypointBindingError::PrepareRoute {
+                        kind,
+                        node: identifier.clone(),
+                        relay: route.relay.clone(),
+                    })?;
             templates.insert(route.relay.clone(), template);
         }
         Ok(templates)
@@ -818,29 +811,22 @@ mod tests {
         ));
     }
 
-    /// The relay registries and services of the repartitioning domain's relays.
+    /// The relay services of the repartitioning domain's relays.
     struct RepartitioningRelays {
-        registries: HashMap<RelayName, RelayRegistry>,
         services: HashMap<RelayName, Arc<RelayBoundaryServices>>,
     }
 
     impl RepartitioningRelays {
         fn new() -> Self {
-            let mut registries = HashMap::default();
             let mut services = HashMap::default();
             for relay in ["incoming", "outgoing"] {
-                registries.insert(named::<RelayName>(relay), RelayRegistry::new());
                 services.insert(named::<RelayName>(relay), test_relay_boundary_services());
             }
-            Self {
-                registries,
-                services,
-            }
+            Self { services }
         }
 
         fn handles(&self) -> RelayRuntimeHandles<'_> {
             RelayRuntimeHandles {
-                registries: &self.registries,
                 services: &self.services,
             }
         }
@@ -912,7 +898,7 @@ mod tests {
         let (shutdown_tx, _) = watch::channel(false);
 
         let mut relays = RepartitioningRelays::new();
-        relays.registries.remove(&named::<RelayName>("outgoing"));
+        relays.services.remove(&named::<RelayName>("outgoing"));
         let plan = fixture.plan_reingestor(&domain, filtering_reingestor("100ms", "25ms"));
         let error = runtime
             .start_reingestor_runtimes(
@@ -922,7 +908,7 @@ mod tests {
                 vec![relays.deferred_input(&plan)],
             )
             .err()
-            .assured("an entrypoint without its relay registry must not start");
+            .assured("an entrypoint without its relay services must not start");
         assert!(matches!(
             error.current_context(),
             EntrypointBindingError::PrepareRoute { relay, .. }
@@ -930,7 +916,7 @@ mod tests {
         ));
         assert!(matches!(
             error.downcast_ref::<PlanningError>(),
-            Some(PlanningError::MissingRelayRegistry { .. })
+            Some(PlanningError::MissingRelayServices { .. })
         ));
         assert_eq!(relays.incoming_consumers(), 0);
 

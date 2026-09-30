@@ -488,15 +488,15 @@ impl Runtime {
         if scheduled {
             return true;
         }
-        // Expiring branches are tracked for the whole relay, in the same lifetime as the state.
-        let expiring_placement = RuntimeStatePlacement {
+        // Branch presence is kept for the whole relay, in the same lifetime as the state.
+        let presence_placement = RuntimeStatePlacement {
             branch_key: None,
             ..placement.clone()
         };
-        self.inner
-            .expiring_stream_states
-            .get(&expiring_placement)
-            .is_none_or(|state| state.registry.contains_key(key))
+        let Some(presence) = self.inner.relay_branch_presences.get(&presence_placement) else {
+            return true;
+        };
+        presence.contains(key.as_ref())
     }
 
     /// Every materialized record one relay holds on another node, reported the same way as the
@@ -1126,7 +1126,7 @@ mod tests {
                 )
             })
             .collect();
-        let relay_registries = [(named("input"), RelayRegistry::new())]
+        let relay_services = [(named("input"), test_relay_boundary_services())]
             .into_iter()
             .collect();
         runtime.install_domain_execution(
@@ -1139,7 +1139,7 @@ mod tests {
                 routing: runtime.stage_domain_routing(
                     &domain,
                     DomainRoutingSnapshot {
-                        relay_registries,
+                        relay_services,
                         materialized_stream_specs,
                         ..DomainRoutingSnapshot::default()
                     },
@@ -1339,7 +1339,7 @@ mod tests {
                 timeout(Duration::from_millis(50), &mut resolution)
                     .await
                     .is_err(),
-                "an empty non-owner relay registry must not evict retained branch work"
+                "an empty non-owner relay presence must not evict retained branch work"
             );
             shutdown_tx.send_replace(true);
             assert!(

@@ -156,7 +156,9 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   chapter current in the same change. Its scope includes the contentionless rule, published and
   pre-resolved state, mutable execution state, bounded synchronization, review classification for
   new lock sites, the primitive surface with its per-mode visibility and permitted real primitives,
-  deterministic checks of data-plane concurrency protocols, and memory-ordering models.
+  deterministic checks of data-plane concurrency protocols, and memory-ordering models. A change
+  that adds a concurrent map, or changes how often one is reached or what disposes of it, updates
+  the concurrent map inventory in `tests/concurrent-map-inventory-ledger.md` in the same change.
 - [VM Functions](docs/src/vm-functions.md) is the authoritative architecture reference for the
   expression VM and its function catalog. Any change to expression lowering, the semantic catalog
   and function registration, type or sensitivity checking, constant folding or expression sharing,
@@ -505,6 +507,20 @@ build and the existing tests, and nothing in it changes behavior.
 - In async code, a loop whose body performs async work must call
   `nervix_primitives::task::consume_budget().await` once per iteration near the top of the loop
   body.
+- State that changes for every record, row, batch, remote frame or acknowledgement has exactly one
+  mutable owner: a task, a concrete branch, a delivery channel or a source attempt. The owner keeps
+  it in ordinary collections and uses their `entry` API freely; exclusive ownership does not pin the
+  task to an operating-system thread. When other tasks must observe that state, the owner publishes
+  an immutable value of it when it changes, and observers read the publication, never the owner's
+  collection.
+- A recurring record, batch, remote-frame, acknowledgement or steady-poll path does not reach a
+  shared concurrent map, whether through `entry` or through a borrowed `get`, `contains_key` or
+  iteration: a borrowed DashMap read takes a shard lock too. It retains the handle resolved when its
+  task, branch, channel or attempt was created. Registration, first installation, replacement,
+  teardown and observer reads are cold paths and are classified separately. Hot-path
+  synchronization that remains is an ordering fence or bounded protocol named in
+  [Data-Plane Concurrency](docs/src/data-plane-concurrency.md), with the key that scopes it and the
+  capacity or deadline that bounds its wait.
 
 ### Domains and external systems
 
@@ -674,8 +690,10 @@ build and the existing tests, and nothing in it changes behavior.
   survives must state the bound that makes it correct.
 - Take synchronous locks from `nervix_primitives::sync::blocking`, which has `parking_lot`'s
   interface; never `std::sync` lock types.
-- Prefer `nervix_primitives::collections::DashMap` over `Arc<Mutex<HashMap<...>>>` for shared
-  concurrent maps.
+- Prefer `nervix_primitives::collections::DashMap` over `Arc<Mutex<HashMap<...>>>` for a map that
+  is justifiably shared: several owners register into it, or observers read it across owners, and
+  its accesses stay off recurring data-plane paths. State one owner mutates stays in an ordinary
+  collection that owner holds.
 - `triomphe::Arc` is the default shared-ownership type for Nervix-owned state. Use
   `std::sync::Arc` only when weak references or an external API require it. In modules that need
   both, import the standard type as `StdArc` and confine it to that boundary.

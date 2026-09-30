@@ -12,7 +12,6 @@ use super::{message_error::MessageErrorHandlingError, *};
 
 #[derive(Clone)]
 pub(super) struct MessageErrorRouteTarget {
-    pub(super) registry: RelayRegistry,
     pub(super) services: Arc<RelayBoundaryServices>,
 }
 
@@ -173,7 +172,6 @@ impl MessageErrorRouteTask {
             self.runtime.ingest_stream_boundary_message(
                 &self.route.domain,
                 &self.route.error_relay,
-                &self.target.registry,
                 &self.target.services,
                 &batch,
             ),
@@ -571,8 +569,14 @@ mod tests {
                 error_relay: named("emitter_errors"),
             },
             target: MessageErrorRouteTarget {
-                registry: RelayRegistry::new(),
-                services: Arc::new(RelayBoundaryServices::new(fanout, 0, 0, Vec::new(), None)),
+                services: Arc::new(RelayBoundaryServices::new(
+                    fanout,
+                    0,
+                    0,
+                    Vec::new(),
+                    None,
+                    Arc::new(BranchPresence::new()),
+                )),
             },
             flush_policy,
             pending: HashMap::default(),
@@ -580,7 +584,6 @@ mod tests {
         let owner_task = task.runtime.spawn_relay_owner_task(
             &task.route.domain,
             &task.route.error_relay,
-            task.target.registry.clone(),
             task.target.services.clone(),
             RelayRetention::default(),
         );
@@ -649,7 +652,6 @@ mod tests {
             error_relay: named("route_errors"),
         };
         let target = MessageErrorRouteTarget {
-            registry: RelayRegistry::new(),
             services: Arc::new(RelayBoundaryServices::new(
                 RelayBoundaryFanout::direct_with_capacity(
                     NonZeroUsize::new(1).expect("non-zero test capacity"),
@@ -658,12 +660,12 @@ mod tests {
                 0,
                 Vec::new(),
                 None,
+                Arc::new(BranchPresence::new()),
             )),
         };
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,
             &route.error_relay,
-            target.registry.clone(),
             target.services.clone(),
             RelayRetention::default(),
         );
@@ -713,7 +715,6 @@ mod tests {
             error_relay: named("route_errors"),
         };
         let target = MessageErrorRouteTarget {
-            registry: RelayRegistry::new(),
             services: Arc::new(RelayBoundaryServices::new(
                 RelayBoundaryFanout::direct_with_capacity(
                     NonZeroUsize::new(2).expect("non-zero test capacity"),
@@ -722,12 +723,12 @@ mod tests {
                 0,
                 Vec::new(),
                 None,
+                Arc::new(BranchPresence::new()),
             )),
         };
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,
             &route.error_relay,
-            target.registry.clone(),
             target.services.clone(),
             RelayRetention::default(),
         );
@@ -838,7 +839,6 @@ mod tests {
             error_relay: named("route_errors"),
         };
         let target = MessageErrorRouteTarget {
-            registry: RelayRegistry::new(),
             services: Arc::new(RelayBoundaryServices::new(
                 RelayBoundaryFanout::direct_with_capacity(
                     NonZeroUsize::new(1).expect("non-zero test capacity"),
@@ -847,6 +847,7 @@ mod tests {
                 0,
                 Vec::new(),
                 None,
+                Arc::new(BranchPresence::new()),
             )),
         };
         let plan = test_plan(route.clone(), target, RuntimeFlushPolicy::Immediate);

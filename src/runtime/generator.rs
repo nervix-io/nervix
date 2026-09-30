@@ -62,23 +62,16 @@ impl GeneratorTaskSpec {
     pub(super) fn bind(
         domain: &DomainName,
         plan: &GeneratorExecutionPlan,
-        registries: &HashMap<RelayName, RelayRegistry>,
         services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
         udfs: &UdfExecutor,
     ) -> error_stack::Result<Self, RuntimeError> {
         let source_branch_schema = RuntimeVmSchema::from_branching(&plan.source_branching);
         let mut routes = Vec::with_capacity(plan.routes.len());
         for route in &plan.routes {
-            let Some(output_registry) = registries.get(&route.relay).cloned() else {
-                return Err(Report::new(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("missing generator output relay '{}'", route.relay),
-                }));
-            };
             let Some(output_services) = services.get(&route.relay).cloned() else {
                 return Err(Report::new(RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),
-                    reason: format!("missing generator output relay services '{}'", route.relay),
+                    reason: format!("missing generator output relay '{}'", route.relay),
                 }));
             };
             let program = compile_generator_set_program(
@@ -100,12 +93,7 @@ impl GeneratorTaskSpec {
                 Some(udfs),
             )
             .map_err(Report::new)?;
-            routes.push(GeneratorTaskRouteSpec::new(
-                route,
-                program,
-                output_registry,
-                output_services,
-            ));
+            routes.push(GeneratorTaskRouteSpec::new(route, program, output_services));
         }
         Ok(Self::new(plan, routes))
     }
@@ -205,7 +193,6 @@ pub(super) struct GeneratorTaskRouteSpec {
     pub(super) program: CompiledProgramWithMaterializedInterest,
     pub(super) input_projection: GeneratorRouteInputProjection,
     pub(super) output_schema: Arc<CompiledSchema>,
-    pub(super) output_registry: RelayRegistry,
     pub(super) output_services: Arc<RelayBoundaryServices>,
 }
 
@@ -213,7 +200,6 @@ impl GeneratorTaskRouteSpec {
     pub(super) fn new(
         route: &GeneratorRoutePlan,
         program: CompiledProgramWithMaterializedInterest,
-        output_registry: RelayRegistry,
         output_services: Arc<RelayBoundaryServices>,
     ) -> Self {
         let input_projection = GeneratorRouteInputProjection::new(&program.compiled.input_schema);
@@ -224,7 +210,6 @@ impl GeneratorTaskRouteSpec {
             program,
             input_projection,
             output_schema: route.output_schema.clone(),
-            output_registry,
             output_services,
         }
     }
@@ -384,7 +369,6 @@ pub(super) struct GeneratorFlushContext<'a> {
     pub(super) generator: &'a GeneratorName,
     pub(super) output_relay: &'a RelayName,
     pub(super) output_schema: &'a Arc<CompiledSchema>,
-    pub(super) output_registry: &'a RelayRegistry,
     pub(super) output_services: &'a Arc<RelayBoundaryServices>,
     pub(super) task_events: &'a RuntimeEvents,
 }
@@ -399,7 +383,6 @@ pub(super) async fn flush_generator_groups(
         generator,
         output_relay,
         output_schema,
-        output_registry,
         output_services,
         task_events,
     } = context;
@@ -417,13 +400,7 @@ pub(super) async fn flush_generator_groups(
             }
         };
         if let Err(error) = runtime
-            .ingest_stream_boundary_message(
-                domain,
-                output_relay,
-                output_registry,
-                output_services,
-                &batch,
-            )
+            .ingest_stream_boundary_message(domain, output_relay, output_services, &batch)
             .await
         {
             task_events.report_error(format!(
@@ -477,7 +454,6 @@ impl Runtime {
                     generator,
                     output_relay: &route.relay,
                     output_schema: &route.output_schema,
-                    output_registry: &route.output_registry,
                     output_services: &route.output_services,
                     task_events,
                 },
@@ -867,7 +843,6 @@ impl Runtime {
                                                         generator: &task_generator,
                                                         output_relay: &route.relay,
                                                         output_schema: &route.output_schema,
-                                                        output_registry: &route.output_registry,
                                                         output_services: &route.output_services,
                                                         task_events: &task_events,
                                                     },
@@ -1001,7 +976,6 @@ impl Runtime {
                                     generator: &task_generator,
                                     output_relay: &route.relay,
                                     output_schema: &route.output_schema,
-                                    output_registry: &route.output_registry,
                                     output_services: &route.output_services,
                                     task_events: &task_events,
                                 },
