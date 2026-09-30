@@ -217,20 +217,27 @@ async fn hash_password(
 ) -> error_stack::Result<String, PasswordHashError> {
     let argon2 = password_argon2();
     let reservation = executor
-        .reserve(MemoryClass::Credentials, argon2_working_bytes(argon2.params()))
+        .reserve(
+            MemoryClass::Credentials,
+            argon2_working_bytes(argon2.params()),
+        )
         .await
         .map_err(PasswordHashError::from_admission)?;
     let hashed = executor
-        .run_cpu(CpuClass::Credentials, reservation, move |_charge, cancellation| {
-            cancellation
-                .check()
-                .change_context(PasswordHashError::Cancelled)?;
-            let salt = SaltString::generate(&mut OsRng);
-            match argon2.hash_password(password.as_bytes(), &salt) {
-                Ok(hash) => Ok(hash.to_string()),
-                Err(_) => Err(Report::new(PasswordHashError::Compute)),
-            }
-        })
+        .run_cpu(
+            CpuClass::Credentials,
+            reservation,
+            move |_charge, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(PasswordHashError::Cancelled)?;
+                let salt = SaltString::generate(&mut OsRng);
+                match argon2.hash_password(password.as_bytes(), &salt) {
+                    Ok(hash) => Ok(hash.to_string()),
+                    Err(_) => Err(Report::new(PasswordHashError::Compute)),
+                }
+            },
+        )
         .await;
     match hashed {
         Ok(hashed) => hashed,
@@ -258,17 +265,21 @@ pub(in crate::application) async fn verify_password_hash(
         .await
         .map_err(PasswordHashError::from_admission)?;
     let verified = executor
-        .run_cpu(CpuClass::Credentials, reservation, move |_charge, cancellation| {
-            cancellation
-                .check()
-                .change_context(PasswordHashError::Cancelled)?;
-            let parsed_hash = PasswordHash::new(&password_hash)
-                .verified("the same hash parsed before its verification was admitted");
-            let matched = password_argon2()
-                .verify_password(password.as_bytes(), &parsed_hash)
-                .is_ok();
-            Ok(matched)
-        })
+        .run_cpu(
+            CpuClass::Credentials,
+            reservation,
+            move |_charge, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(PasswordHashError::Cancelled)?;
+                let parsed_hash = PasswordHash::new(&password_hash)
+                    .verified("the same hash parsed before its verification was admitted");
+                let matched = password_argon2()
+                    .verify_password(password.as_bytes(), &parsed_hash)
+                    .is_ok();
+                Ok(matched)
+            },
+        )
         .await;
     match verified {
         Ok(verified) => verified,

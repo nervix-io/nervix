@@ -6585,8 +6585,8 @@ mod tests {
         ));
         assert_eq!(
             format!("{report:#}"),
-            "codec 'syslog_codec' is incompatible: the payload's unfolding panicked on an extension \
-             worker: the worker stopped"
+            "codec 'syslog_codec' is incompatible: the payload's unfolding panicked on an \
+             extension worker: the worker stopped"
         );
     }
 

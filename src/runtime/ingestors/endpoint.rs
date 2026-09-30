@@ -175,11 +175,11 @@ mod tests {
     use nervix_execution::CpuClass;
     use nervix_models::{
         ClusterNodeName, ClusterSchedule, CodecJaqFormat, CodecJaqTransformations, CodecName,
-        CodecWireFormat, CreateCodec, CreateEndpoint,
-        CreateJsonWireSchema, CreateRelay, CreateSchema, CreateVhost, DomainConfig, DomainPace,
-        DomainState, DomainStatus, EndpointIngestMode, EndpointName, JsonType, OutputBranch,
-        ParseAsType, ProcessorOutputs, RelayBranching, RelayName, SchemaField, SchemaName,
-        VhostName, WireSchemaField, WireSchemaName,
+        CodecWireFormat, CreateCodec, CreateEndpoint, CreateJsonWireSchema, CreateRelay,
+        CreateSchema, CreateVhost, DomainConfig, DomainPace, DomainState, DomainStatus,
+        EndpointIngestMode, EndpointName, JsonType, OutputBranch, ParseAsType, ProcessorOutputs,
+        RelayBranching, RelayName, SchemaField, SchemaName, VhostName, WireSchemaField,
+        WireSchemaName,
     };
     use nonzero_ext::nonzero;
 
