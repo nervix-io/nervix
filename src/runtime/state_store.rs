@@ -13,15 +13,12 @@ use nervix_models::{
 };
 use nervix_primitives::{
     publication::{ArcSwap, Guard},
-    sync::{
-        Arc, StdArc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-    },
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use thiserror::Error;
 
-use super::{BranchKey, WasmGuestState};
+use super::{Arc, BranchKey, StdArc, WasmGuestState};
 
 mod durability;
 
