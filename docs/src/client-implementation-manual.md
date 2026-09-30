@@ -823,6 +823,13 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | B-11 | `a_clock_attached_after_start_is_read_before_its_first_tick`, `every_state_reports_only_the_fields_and_projections_it_carries`, `a_refused_attach_leaves_the_session_following_what_it_followed`, `an_attach_cancelled_after_it_was_sent_is_resolved_by_executing_it_again`, `several_domains_are_read_apart_until_a_detach_or_an_end_withdraws_one`, `an_interrupted_attachment_reads_its_last_clock_without_a_tick_until_it_is_restored`, and `a_domain_clock_outlives_references_released_on_another_thread_and_its_session` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for the C ABI in process, C, C++, Python, Java, and Ruby |
 | P-1 to P-5, B-10 | Every scenario of `restore.feature`, including `An interrupted restore upload is sent again under its execution reference`, `A restore repeated under its execution reference joins it or returns its recorded outcome`, and `A leader change while a restore applies resumes it on the new leader`; `a_restore_start_round_trips`, `every_restore_chunk_round_trips_and_an_empty_one_is_refused`, and `every_restore_reply_round_trips` in `nervix-client-wire`; the `restore_*` conformance frames; `a_restore_outcome_reports_its_steps` in `nervix-client-ffi` |
 
+The [client representation properties](https://github.com/nervix-io/nervix/blob/main/tests/client-representation-coverage.md)
+add complete generated-value evidence for F-1 to F-7, R-1 to R-5 and B-1 to B-7. They preserve
+integer widths, float bits, nanosecond timestamps, schema metadata, cell validity, nested lists,
+branch and subscription identities, and retained bytes. Opaque JSON and connector payloads are
+compared as exact text or bytes. The malformed-request scenario also checks both completion page
+bounds and then sends a valid completion and command on the same session.
+
 ### Executable Examples
 
 The conformance probes are complete, runnable clients, and each prints the same report as every
