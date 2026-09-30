@@ -109,6 +109,64 @@ fn parse_and_text_encoding_helpers_roundtrip() {
     assert!(parse_human_bytes("oops").is_err());
 }
 
+/// Every option the node reads as a duration.
+const DURATION_OPTIONS: [&str; 12] = [
+    "--node-unavailability-timeout",
+    "--raft-heartbeat-interval",
+    "--raft-election-timeout-min",
+    "--raft-election-timeout-max",
+    "--transaction-idle-timeout",
+    "--transaction-tombstone-retention",
+    "--command-retry-validity",
+    "--state-snapshot-interval",
+    "--memory-pressure-check-interval",
+    "--memory-pressure-resume-jitter",
+    "--drain-timeout",
+    "--shutdown-timeout",
+];
+
+#[test]
+fn server_args_refuse_duration_text_longer_than_a_duration() {
+    // Spans that add up to the last second a duration holds, with fractions of exactly one more
+    // second, used to make the duration library panic while the command line was read.
+    for value in [
+        "18446744073709551615.5s500000000ns",
+        "18446744073709551615s 1000000000ns",
+    ] {
+        for option in DURATION_OPTIONS {
+            let error = try_test_args(&[option, value])
+                .expect_err("the value is longer than a duration can be");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{option} {value}"
+            );
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains(&format!("invalid value '{value}' for '{option}")),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains("invalid duration: it is longer than a duration can be"),
+                "{rendered}"
+            );
+        }
+    }
+}
+
+#[test]
+fn server_args_report_why_duration_text_is_malformed() {
+    for option in DURATION_OPTIONS {
+        let error = try_test_args(&[option, "oops"]).expect_err("the value is not a duration");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("invalid duration: expected number at 0"),
+            "{rendered}"
+        );
+    }
+}
+
 #[test]
 fn server_args_parse_memory_pressure_options() {
     let args = test_args(&[

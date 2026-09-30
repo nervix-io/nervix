@@ -214,7 +214,7 @@ async fn then_server_process_cluster_describes_ingestor_with(
     ingestor: String,
     #[step] step: &Step,
 ) {
-    let within = humantime::parse_duration(&within).expect("the step names a valid duration");
+    let within = parse_duration_text(&within).expect("the step names a valid duration");
     let expected = expand_placeholders(world, docstring(step));
     let ingestor = expand_placeholders(world, &ingestor);
     let command = format!("DESCRIBE INGESTOR {ingestor};");

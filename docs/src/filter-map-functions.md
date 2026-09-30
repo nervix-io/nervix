@@ -1884,8 +1884,10 @@ and `min` and `max` numeric literals with `min` below `max`. A negative number i
 unary minus, which is not a literal, so `min` and `max` are zero or above. `delay` is a duration
 literal such as `'2s'`: a row that stepping removes from the window stays counted until the
 watermark or the domain clock passes its removal time plus `delay`, and `'0s'` removes it at once.
-An invalid delay is rejected with `invalid PERCENTILE_LINEAR_HISTOGRAM delay duration`. Each branch
-holds eight bytes per bucket for each histogram, which `MAX STATE SIZE` does not count.
+A delay that names no duration, or whose spans could add up to 18446744073709551615 seconds, is
+rejected when the window processor is created, with
+`invalid PERCENTILE_LINEAR_HISTOGRAM delay duration '<delay>': <reason>`. Each branch holds eight
+bytes per bucket for each histogram, which `MAX STATE SIZE` does not count.
 
 ### Approximate Sketches
 

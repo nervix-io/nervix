@@ -1047,7 +1047,12 @@ pub fn duration_lit<'src>()
             .try_map(|raw, span| {
                 nervix_models::parse_duration_text(&raw)
                     .map(|_| raw.clone())
-                    .map_err(|report| Rich::custom(span, report.current_context().to_string()))
+                    .map_err(|report| {
+                        Rich::custom(
+                            span,
+                            format!("invalid duration '{raw}': {}", report.current_context()),
+                        )
+                    })
             }),
         unknown_word(),
     ))

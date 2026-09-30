@@ -44,6 +44,8 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `models-timestamp-text` | `nervix-models` RFC 3339 text reads as its reference instant or a typed error | generated RFC 3339 text, v1 | 256 | 64 bytes |
 | `models-domain-clock` | `nervix-models` period, skew and rate value and bit equality | every period, skew and positive finite rate, v1 | 256 | 64 bytes |
 | `models-domain-clock-validation` | `nervix-models` clock text and numbers read in range or fail typed; decoders refuse invalid values | arbitrary text and numbers, v1 | 256 | 64 bytes |
+| `models-durations` | `nervix-models` a duration reads back from the text `humantime` writes for it; only one within one of each unit of the longest duration may be refused as too long | every duration, v1 | 256 | 16 bytes |
+| `models-duration-text` | `nervix-models` duration text reads as `humantime` reads it or fails typed, and never panics | arbitrary duration text, v1 | 256 | 64 bytes |
 | `models-json-paths` | `nervix-models` path text, JSON and archive equality | paths up to the step limit, v1 | 256 | 1024 bytes |
 | `models-json-path-validation` | `nervix-models` path text reaches a fixed point or fails typed; decoders admit the constructor's step counts | arbitrary path text, v1 | 256 | 512 bytes |
 | `models-batch-limits` | `nervix-models` message and size limit text, JSON and archive equality | every limit and unit, v1 | 256 | 64 bytes |
