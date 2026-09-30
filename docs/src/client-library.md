@@ -398,7 +398,10 @@ admitted now and `Producer::end()` how the producer ended: `Closed`, `Ended` wit
 reason, or `ReopenRequired`. The same handle restores an attachment after reconnect only when the
 domain generation, endpoint contract, schema, policy and credit grant still match. `connection()`
 reports active, interrupted, restoring, reopen required or closed. A changed or removed endpoint
-requires the application to open another producer. Dropping a producer closes it without waiting.
+requires the application to open another producer. `close` takes the producer by reference and
+releases its attachment from a task of its own, so a caller that stops waiting still releases it;
+a second close, or a close while the producer waits to be restored, returns at once. Dropping a
+producer closes it without waiting.
 
 ## Emitter Consumers
 
@@ -442,7 +445,59 @@ returns `ClientError::ConsumerReopenRequired` and needs an explicit new open. An
 ACK through the new attachment; its reference expires,
 and a settlement whose answer was lost returns `ClientError::SettlementUnknown`. The Rust client's
 exchange reader continues to route producer outcomes and command or clock replies while
-application processing awaits ACK.
+application processing awaits ACK. A `next_batch` future dropped before its reply leaves the read
+with the consumer, and the next `next_batch` of the same attachment receives that reply without
+asking for another batch, so abandoning a wait never strands an attempt until its ACK timeout.
+`close` releases the attachment the way a producer's does.
+
+### Through The Shared C Binding
+
+The shared C binding exposes the same producers and consumers to C, C++, Python, JVM and Ruby
+hosts, through `crates/client-ffi/include/nervix_client.h`. Every call forwards to the Rust handles
+above, so credit, retries of temporary refusals, restoration, outcomes and settlements behave
+exactly as described; the binding keeps no acknowledgement or reconnect state of its own.
+
+- **Opening.** A host describes the fields it expects with `nx_fields`: `nx_fields_add` starts a
+  field with its name, outermost type, nullability and sensitivity, and `nx_fields_element` adds
+  the element of each list around it, so `ARRAY<I16, 2, 2>` is a `FIXED_LIST` of 2, a `FIXED_LIST`
+  of 2, then `I16`. `nx_session_open_ingestor` and `nx_session_subscribe_emitter` open a producer
+  or a consumer on a domain named explicitly, with the credit the host asks for, and copy the
+  fields. A refusal is `NX_ERROR_REJECTED`, and `nx_error_open_refusal` reads its
+  `nx_open_refusal`, such as `NX_OPEN_SCHEMA_MISMATCH`.
+- **Description.** `nx_producer_schema`, `nx_consumer_schema`, `*_generation`, `*_contract`,
+  `*_grant` and `*_policy` read what the open established: the schema with every field's
+  nullability, sensitivity and type levels, the `START` generation, the contract digest, the
+  granted credit and batch limits, and the acknowledgement window, ACK timeout and backoff.
+  `nx_producer_state` and `nx_consumer_state` read the connection, `nx_producer_admission` the
+  admission, and `*_reopen_reason` why a handle needs a new open.
+- **Submitting.** A host builds a batch from its own buffers with `nx_batch_builder_new` for the
+  producer's schema: one `nx_batch_builder_states` call per nullable column, one
+  `nx_batch_builder_offsets` call per variable-length list level, and one `nx_batch_builder_fixed`
+  or `nx_batch_builder_varlen` call for the innermost values. Every call copies its buffers before
+  it returns, and nothing is converted. `nx_producer_submit` waits for credit, checks the batch
+  against the producer's schema and row limit, and returns the submission's identity;
+  `nx_producer_rejoin` waits for its outcome and takes it, and `nx_submission_outcome_*` read its
+  class, typed cause and message. `nx_producer_pending` lists what the producer holds and
+  `nx_producer_release` lets a submission go. A host that writes canonical Arrow IPC itself submits
+  it with `nx_producer_submit_ipc`, which copies it and leaves its checking to the server.
+- **Consuming.** `nx_consumer_next` returns a reference-counted `nx_delivery`: its identity,
+  reference, source relay, branch fingerprint, member count and execution time, its stream,
+  borrowed with `nx_delivery_ipc`, and its batch, decoded once with `nx_delivery_batch`. A batch
+  is read one level of a column at a time: `nx_batch_states` for the rows, `nx_batch_offsets` for
+  each variable-length list level, and `nx_batch_fixed` or `nx_batch_varlen` for the values, each
+  in one call. `nx_delivery_ack`, `nx_delivery_retry` and `nx_delivery_reject` settle the attempt
+  and return the server's `nx_settlement`. Releasing a delivery settles nothing.
+- **Interruption.** After a session ends, the next `nx_consumer_next` returns
+  `NX_ERROR_INTERRUPTED` once, a delivery read before the gap fails to settle with
+  `NX_ERROR_REJECTED`, a submission sent before it is `NX_UNCERTAINTY_SESSION_LOST`, and a
+  settlement whose answer the session lost is `NX_ERROR_UNCERTAIN`. The next calls restore the
+  handles on a new session while their contract holds. A handle closed while it waits to be
+  restored returns at once and is never restored.
+- **Ownership.** Producers, consumers, deliveries and batches may be used from several threads at
+  once, and deliveries and batches are released on any thread; a field list and a builder are used
+  from one thread at a time. A producer, a consumer and a delivery keep their session running until
+  they are released, and a borrowed stream or value stays valid until the reference it was read from
+  is released.
 
 ## Transaction Handles And Attach
 

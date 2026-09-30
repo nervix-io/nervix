@@ -15,27 +15,43 @@
  *   caller owns and releases with `nx_error_free`. Out-parameters are written only on success.
  *   Every object a function hands out through an out-parameter is owned by the caller and has
  *   exactly one release function. A borrowed pointer an accessor writes stays valid until the
- *   object it was read from is released, and never longer.
+ *   object it was read from is released, and never longer. A producer, a consumer and a delivery
+ *   keep the session they came from running: `nx_session_free` releases the host's session, and
+ *   the session ends once every producer, consumer and delivery of it is released as well, in any
+ *   order.
  *
  * Threads
  *   The library calls no host code: it has no callbacks, so no host function ever runs on a thread
  *   the library owns. Every blocking call runs on the calling thread until it completes, fails,
- *   or is cancelled. A session may be used from several threads at once. Releasing an object while
- *   another thread still uses it is the caller's error; releasing an event, a clock event or a
- *   domain clock while another thread holds a retained reference to it is not.
+ *   or is cancelled. A session, a producer, a consumer, a delivery and a batch may be used from
+ *   several threads at once; a field list and a batch builder are used from one thread at a time.
+ *   Releasing an object while another thread still uses it is the caller's error; releasing an
+ *   event, a clock event, a domain clock, a delivery or a batch while another thread holds a
+ *   retained reference to it is not.
  *
  * Cancellation and deadlines
  *   Every blocking call accepts an optional `nx_cancel`. Triggering it, from any thread, makes the
  *   call return NX_ERROR_CANCELLED; a token created with a deadline makes the call return
  *   NX_ERROR_DEADLINE once the deadline passes. Cancelling a wait never rolls back work the server
  *   already admitted: a cancelled command keeps its execution reference, and executing the same
- *   `nx_execution` again recovers its outcome.
+ *   `nx_execution` again recovers its outcome; a cancelled submission wait leaves the batch with
+ *   its producer; a cancelled read leaves the read with its consumer; a cancelled settlement may
+ *   still have settled its delivery.
  *
  * Bulk data
  *   Row events keep the verified frame they were decoded from. `nx_event_frame` borrows those
  *   bytes without copying them. Column accessors copy one whole column into caller-provided
  *   memory in a single call, so reading a batch costs one call per column rather than one per
  *   value. `nx_event_cell_varlen` borrows one string or bytes value without copying it.
+ *
+ *   Producers and consumers exchange typed Arrow batches, each one canonical Arrow IPC stream: its
+ *   schema message, one record batch and the end-of-stream marker, uncompressed, without
+ *   dictionaries, with exactly the endpoint's fields and no metadata. A host builds a batch column
+ *   by column with `nx_batch_builder`, which copies every buffer it is given before the call
+ *   returns, and reads a delivered one column by column from `nx_batch`, one call per level of a
+ *   column's type. A host with Arrow tooling of its own may instead submit a stream it wrote with
+ *   `nx_producer_submit_ipc`, which copies it, and borrow the stream a delivery carried with
+ *   `nx_delivery_ipc`, without a copy.
  */
 
 #ifndef NERVIX_CLIENT_H
@@ -59,6 +75,13 @@ typedef struct nx_domain_clock nx_domain_clock;
 typedef struct nx_cancel nx_cancel;
 typedef struct nx_error nx_error;
 typedef struct nx_suggestions nx_suggestions;
+typedef struct nx_fields nx_fields;
+typedef struct nx_producer nx_producer;
+typedef struct nx_submission_outcome nx_submission_outcome;
+typedef struct nx_consumer nx_consumer;
+typedef struct nx_delivery nx_delivery;
+typedef struct nx_batch nx_batch;
+typedef struct nx_batch_builder nx_batch_builder;
 
 /* What kind of failure an `nx_error` reports. */
 typedef enum nx_error_kind {
@@ -68,8 +91,10 @@ typedef enum nx_error_kind {
     NX_ERROR_CONNECT = 2,
     /* The session failed after it was opened. */
     NX_ERROR_TRANSPORT = 3,
-    /* Admitted work may have taken effect, and its outcome is not known. The error carries the
-       execution reference; executing the same `nx_execution` again recovers the outcome. */
+    /* Admitted work may have taken effect, and its outcome is not known. For a command the error
+       carries the execution reference, and executing the same `nx_execution` again recovers the
+       outcome. For a settlement the session was lost before the server's answer: the delivery
+       may be settled, or delivered again with a new reference. */
     NX_ERROR_UNCERTAIN = 4,
     /* The server refused to serve the request. Nothing was admitted. */
     NX_ERROR_REJECTED = 5,
@@ -84,8 +109,16 @@ typedef enum nx_error_kind {
     /* A column or field was read as a type it does not hold, or a domain clock was read for what
        its state does not carry. */
     NX_ERROR_TYPE = 10,
-    /* The session ended and cannot be recovered. */
-    NX_ERROR_CLOSED = 11
+    /* The session ended and cannot be recovered, or the producer or consumer was closed. */
+    NX_ERROR_CLOSED = 11,
+    /* The consumer's attachment ended with its session, or when its endpoint moved. The next read
+       continues on a restored attachment; no delivery read before the gap can be settled, and the
+       server delivers what they carried again. */
+    NX_ERROR_INTERRUPTED = 12,
+    /* The endpoint no longer has the START generation, schema or contract the handle was opened
+       with, or it stopped or was removed: the handle cannot continue, and the host opens a new
+       one. nx_producer_reopen_reason and nx_consumer_reopen_reason say why. */
+    NX_ERROR_REOPEN_REQUIRED = 13
 } nx_error_kind;
 
 /* What became of a command. */
@@ -113,8 +146,10 @@ typedef enum nx_completion_kind {
     NX_COMPLETION_LOCAL_DIRECTORY_LOOKUP = 2
 } nx_completion_kind;
 
-/* The type of a schema field. List fields report their shape; their values are read from the
-   frame with a FlatBuffers reader. */
+/* The type of a schema field, or of one level of it. A LIST or FIXED_LIST level holds lists whose
+   elements are the next level; nx_schema_field_level reads every level of a field. A subscription's
+   list values are read from its frame with a FlatBuffers reader, and an endpoint batch's one level
+   at a time. */
 typedef enum nx_type {
     NX_TYPE_U8 = 1,
     NX_TYPE_I8 = 2,
@@ -211,6 +246,150 @@ typedef enum nx_clock_end_reason {
     NX_CLOCK_END_DOMAIN_REMOVED = 1
 } nx_clock_end_reason;
 
+/* Why the server refused to open a producer or a consumer. Nothing is left attached. */
+typedef enum nx_open_refusal {
+    NX_OPEN_DOMAIN_NOT_FOUND = 1,
+    /* The domain exists and is not running. */
+    NX_OPEN_DOMAIN_STOPPED = 2,
+    /* The domain has no ingestor or emitter of that name. */
+    NX_OPEN_ENDPOINT_NOT_FOUND = 3,
+    /* The ingestor or emitter is not a CLIENT endpoint. */
+    NX_OPEN_NOT_CLIENT_ENDPOINT = 4,
+    /* The endpoint is not running on the node that owns it right now; opening again later may
+       succeed. */
+    NX_OPEN_ENDPOINT_UNAVAILABLE = 5,
+    /* The expected fields differ from the endpoint's in a field, its position, its exact type,
+       its nullability or its sensitivity. */
+    NX_OPEN_SCHEMA_MISMATCH = 6,
+    /* The session already holds as many producers, or consumers, as it may. */
+    NX_OPEN_TOO_MANY_ENDPOINTS = 7,
+    /* The session's byte budget cannot hold the credit asked for. */
+    NX_OPEN_SESSION_CAPACITY_EXHAUSTED = 8,
+    /* The byte budget of the serving or owning node cannot hold the credit asked for. */
+    NX_OPEN_NODE_CAPACITY_EXHAUSTED = 9,
+    /* The credit asked for is larger than one producer or consumer may ask for. */
+    NX_OPEN_INVALID_LIMITS = 10,
+    /* The session holds a transaction. */
+    NX_OPEN_IN_TRANSACTION = 11
+} nx_open_refusal;
+
+/* Whether a producer or a consumer is attached. */
+typedef enum nx_endpoint_state {
+    NX_ENDPOINT_ACTIVE = 1,
+    /* The session holding the attachment ended. The next call that needs the attachment opens a
+       session and restores it. */
+    NX_ENDPOINT_INTERRUPTED = 2,
+    /* A new session is opening the endpoint again. */
+    NX_ENDPOINT_RESTORING = 3,
+    /* The handle cannot continue; the host opens a new one. */
+    NX_ENDPOINT_REOPEN_REQUIRED = 4,
+    /* The host closed the handle. */
+    NX_ENDPOINT_CLOSED = 5
+} nx_endpoint_state;
+
+/* Why a handle has to be opened again. */
+typedef enum nx_reopen_reason {
+    /* The domain stopped, or its START generation ended. */
+    NX_REOPEN_DOMAIN_STOPPED = 1,
+    NX_REOPEN_ENDPOINT_REMOVED = 2,
+    NX_REOPEN_SCHEMA_CHANGED = 3,
+    /* The endpoint's contract, acknowledgement policy or granted credit changed. */
+    NX_REOPEN_CONTRACT_CHANGED = 4,
+    /* The domain was started again since the handle was opened. */
+    NX_REOPEN_GENERATION_CHANGED = 5,
+    /* The server broke the protocol, or the producer exceeded its credit. */
+    NX_REOPEN_PROTOCOL_VIOLATED = 6,
+    /* The server refused to restore the endpoint for good; the refusal says why. */
+    NX_REOPEN_REFUSED = 7
+} nx_reopen_reason;
+
+/* How many acknowledgements of an endpoint may be outstanding at once. */
+typedef enum nx_ack_window {
+    /* One at a time: ACK SEQUENTIAL. */
+    NX_ACK_SEQUENTIAL = 1,
+    /* Up to a maximum: ACK PARALLEL MAX. */
+    NX_ACK_PARALLEL = 2
+} nx_ack_window;
+
+/* Whether a producer's batches are admitted. */
+typedef enum nx_admission {
+    NX_ADMISSION_OPEN = 1,
+    /* The ingestor is quiesced or shedding load: the producer keeps its batches and sends them
+       once admission opens. */
+    NX_ADMISSION_SUSPENDED = 2
+} nx_admission;
+
+/* What became of a submitted batch. */
+typedef enum nx_submission_result {
+    /* No row of the batch entered the graph. */
+    NX_SUBMISSION_NOT_ADMITTED = 1,
+    /* The batch's source acknowledgement resolved successfully under the graph's policies. */
+    NX_SUBMISSION_COMPLETED = 2,
+    /* The batch was admitted and its acknowledgement failed; some of its effects may have
+       happened. */
+    NX_SUBMISSION_PROCESSING_FAILED = 3,
+    /* The batch may have been admitted and processed; replaying it may duplicate its effects. */
+    NX_SUBMISSION_OUTCOME_UNKNOWN = 4
+} nx_submission_result;
+
+/* Why a batch was not admitted. A suspended or busy refusal is sent again by the library, after
+   the ingestor's backoff, before any of them is reported. */
+typedef enum nx_submission_refusal {
+    /* The batch is not a canonical Arrow IPC batch of the producer's schema within its limits;
+       nx_submission_outcome_defect says how. */
+    NX_REFUSAL_INVALID_BATCH = 1,
+    NX_REFUSAL_SUSPENDED = 2,
+    NX_REFUSAL_BUSY = 3,
+    /* The ingestor is stopping or moving; the producer's attachment ends. */
+    NX_REFUSAL_DRAINING = 4,
+    /* The producer was closed, or its attachment ended, before the batch was admitted. */
+    NX_REFUSAL_PRODUCER_ENDED = 5,
+    /* The batch exceeded the producer's credit. */
+    NX_REFUSAL_CREDIT_EXCEEDED = 6
+} nx_submission_refusal;
+
+/* What made a refused batch invalid. */
+typedef enum nx_batch_defect {
+    NX_DEFECT_MALFORMED = 1,
+    NX_DEFECT_UNEXPECTED_MESSAGE = 2,
+    NX_DEFECT_COMPRESSED = 3,
+    NX_DEFECT_SCHEMA_MISMATCH = 4,
+    NX_DEFECT_NOT_ONE_BATCH = 5,
+    NX_DEFECT_TOO_MANY_ROWS = 6,
+    NX_DEFECT_TOO_LARGE = 7,
+    NX_DEFECT_INVALID_DATA = 8
+} nx_batch_defect;
+
+/* Why an admitted batch's acknowledgement failed. */
+typedef enum nx_processing_failure {
+    /* No progress within the ingestor's ACK TIMEOUT; the admitted work may still complete. */
+    NX_FAILURE_ACK_TIMED_OUT = 1,
+    /* A route, a policy, a downstream node or a consumer's rejection failed the batch. */
+    NX_FAILURE_REJECTED = 2
+} nx_processing_failure;
+
+/* Why no outcome could be established for a batch. */
+typedef enum nx_submission_uncertainty {
+    /* The ingestor's execution stopped, or the producer's attachment ended, while the batch was
+       unresolved. */
+    NX_UNCERTAINTY_INTERRUPTED = 1,
+    /* The node executing the ingestor, or the connection to it, was lost. */
+    NX_UNCERTAINTY_OWNER_LOST = 2,
+    /* The session that carried the batch ended before its outcome arrived. */
+    NX_UNCERTAINTY_SESSION_LOST = 3
+} nx_submission_uncertainty;
+
+/* What the server did with a settlement. */
+typedef enum nx_settlement {
+    NX_SETTLEMENT_CONFIRMED = 1,
+    /* The reference is not the delivery's current attempt: it was retried, timed out or revoked. */
+    NX_SETTLEMENT_STALE_REFERENCE = 2,
+    NX_SETTLEMENT_WRONG_CONSUMER = 3,
+    NX_SETTLEMENT_INVALID_REASON = 4,
+    /* The consumer that received the delivery has ended. */
+    NX_SETTLEMENT_CONSUMER_ENDED = 5
+} nx_settlement;
+
 /* ---- Errors ------------------------------------------------------------------------------- */
 
 nx_error_kind nx_error_kind_of(const nx_error *error);
@@ -221,6 +400,9 @@ void nx_error_message(const nx_error *error, const uint8_t **message, size_t *me
    which running the same execution again downloads while the server retains it. */
 bool nx_error_execution_reference(const nx_error *error, const uint8_t **reference,
                                   size_t *reference_len);
+/* Whether the error is the server's refusal to open a producer or a consumer, which is an
+   NX_ERROR_REJECTED, and the refusal when it is. */
+bool nx_error_open_refusal(const nx_error *error, nx_open_refusal *refusal);
 void nx_error_free(nx_error *error);
 
 /* ---- Cancellation ------------------------------------------------------------------------- */
@@ -240,7 +422,8 @@ nx_error *nx_session_connect(const uint8_t *server, size_t server_len, const uin
                              size_t domain_len, const uint8_t *username, size_t username_len,
                              const uint8_t *password, size_t password_len,
                              const nx_cancel *cancel, nx_session **out);
-/* Ends the session. Events and outcomes read from it stay valid. */
+/* Releases the host's session, which ends once every producer, consumer and delivery of it is
+   released too. Events, outcomes and batches read from it stay valid. */
 void nx_session_free(nx_session *session);
 
 /* Captures one command and its durable execution identity before anything is sent. */
@@ -315,7 +498,18 @@ nx_error *nx_schema_field_count(const nx_schema *schema, int32_t part, size_t *c
 nx_error *nx_schema_field(const nx_schema *schema, int32_t part, size_t index,
                           const uint8_t **name, size_t *name_len, nx_type *type, bool *nullable,
                           bool *sensitive);
-/* Whether the relay is branched, and the branch's name when it is. */
+/* How many levels the type of a field has: one for a scalar, and one more for every LIST or
+   FIXED_LIST around its innermost element. */
+nx_error *nx_schema_field_levels(const nx_schema *schema, int32_t part, size_t index,
+                                 size_t *levels);
+/* The type at one level of a field: level 0 is the type nx_schema_field reads, and every deeper
+   level is the element of the list above it. `length` receives a FIXED_LIST level's element
+   count and zero for every other level. A level past the field's innermost element fails with
+   NX_ERROR_INVALID_ARGUMENT. */
+nx_error *nx_schema_field_level(const nx_schema *schema, int32_t part, size_t index, size_t level,
+                                nx_type *type, uint32_t *length);
+/* Whether the relay is branched, and the branch's name when it is. An endpoint's schema is never
+   branched. */
 bool nx_schema_branch(const nx_schema *schema, const uint8_t **name, size_t *name_len);
 void nx_schema_free(nx_schema *schema);
 
@@ -485,6 +679,292 @@ nx_error *nx_domain_clock_admits(const nx_domain_clock *clock, int64_t utc, int6
    released once with nx_domain_clock_release; the clock is freed with the last one. */
 nx_domain_clock *nx_domain_clock_retain(nx_domain_clock *clock);
 void nx_domain_clock_release(nx_domain_clock *clock);
+
+/* ---- Expected fields ---------------------------------------------------------------------- */
+
+/* The fields a host expects an endpoint to have, exactly: every name, its position, its type at
+   every level, its nullability and its sensitivity. An open whose fields differ is refused with
+   NX_OPEN_SCHEMA_MISMATCH. A field list is used from one thread at a time. */
+nx_fields *nx_fields_new(void);
+/* Adds a field whose type starts with `type`, an nx_type. A scalar type completes the field; a
+   LIST or FIXED_LIST needs its element next, from nx_fields_element. `length` is a FIXED_LIST's
+   element count, from 1 to INT32_MAX, and zero for every other type. Adding a field while the
+   last one lacks its element fails with NX_ERROR_INVALID_ARGUMENT. */
+nx_error *nx_fields_add(nx_fields *fields, const uint8_t *name, size_t name_len, int32_t type,
+                        uint32_t length, bool nullable, bool sensitive);
+/* Adds the element of the innermost list of the last field, with nx_fields_add's `type` and
+   `length`. A field nests at most 32 lists. */
+nx_error *nx_fields_element(nx_fields *fields, int32_t type, uint32_t length);
+void nx_fields_free(nx_fields *fields);
+
+/* ---- Producers ---------------------------------------------------------------------------- */
+
+/* Opens a producer on the client ingestor `ingestor` of `domain`, which is named explicitly: the
+   session's selected domain is not used, and a later USE does not move the producer. `batches`
+   and `bytes` are the credit it asks for: how many batches, and bytes of their streams, may be
+   outstanding at once, from a submission until the host takes its outcome. The library copies
+   `fields`. A refusal fails with NX_ERROR_REJECTED, and nx_error_open_refusal reads why; nothing
+   is left attached. A cancelled open that the server answers anyway releases what it opened.
+
+   A producer follows its endpoint across sessions: after a session ends, the next call that needs
+   the attachment opens a session and attaches again, but only while the endpoint keeps the START
+   generation, schema, contract, policy and credit of this open. Otherwise the producer needs a
+   new open, and its calls fail with NX_ERROR_REOPEN_REQUIRED. */
+nx_error *nx_session_open_ingestor(const nx_session *session, const uint8_t *domain,
+                                   size_t domain_len, const uint8_t *ingestor,
+                                   size_t ingestor_len, const nx_fields *fields, uint32_t batches,
+                                   uint64_t bytes, const nx_cancel *cancel, nx_producer **out);
+
+/* What the open established, which the producer keeps across sessions: the schema of its
+   batches; the domain's START generation; the 32-byte digest of the endpoint contract; the
+   granted credit and the rows and bytes one batch may carry; and the ingestor's acknowledgement
+   window, how many acknowledgements it lets be outstanding, its ACK TIMEOUT and the backoff the
+   library applies before sending a temporarily refused batch again, in nanoseconds. Any
+   out-parameter may be NULL. */
+nx_error *nx_producer_schema(const nx_producer *producer, nx_schema **out);
+uint64_t nx_producer_generation(const nx_producer *producer);
+void nx_producer_contract(const nx_producer *producer, const uint8_t **digest,
+                          size_t *digest_len);
+void nx_producer_grant(const nx_producer *producer, uint32_t *batches, uint64_t *bytes,
+                       uint32_t *max_batch_rows, uint64_t *max_batch_bytes);
+void nx_producer_policy(const nx_producer *producer, nx_ack_window *window,
+                        uint64_t *outstanding, uint64_t *ack_timeout_nanos,
+                        uint64_t *retry_backoff_nanos, uint64_t *retry_max_backoff_nanos);
+/* Whether the producer's batches are admitted right now. A producer without an attachment reads
+   NX_ADMISSION_SUSPENDED. */
+nx_admission nx_producer_admission(const nx_producer *producer);
+nx_endpoint_state nx_producer_state(const nx_producer *producer);
+/* Whether the producer needs a new open, and why when it does. `refusal` is written only for
+   NX_REOPEN_REFUSED. */
+bool nx_producer_reopen_reason(const nx_producer *producer, nx_reopen_reason *reason,
+                               nx_open_refusal *refusal);
+
+/* Waits for credit and submits `batch`, which must have exactly the producer's schema and at most
+   its rows per batch, and writes the submission's identity once the producer holds the batch.
+   The batch is written as its canonical stream, which the producer keeps, immutable, until the
+   submission's outcome is taken or it is released; the host may release `batch` as soon as the
+   call returns, and may submit it again. A batch of another schema or with too many rows fails
+   with NX_ERROR_INVALID_ARGUMENT and sends nothing. A wait that is cancelled or expires before the
+   producer holds the batch submits nothing; one that returns an identity has submitted it. While
+   the producer is interrupted the call waits for its restoration. */
+nx_error *nx_producer_submit(const nx_producer *producer, const nx_batch *batch,
+                             const nx_cancel *cancel, uint64_t *submission);
+/* The same for one canonical Arrow IPC stream the host wrote with its own Arrow tooling. The
+   library copies `ipc` before it waits, so the host may reuse or free it as soon as the call
+   returns; the server, not the library, checks it, and refuses a stream that is not the
+   producer's canonical batch as NX_REFUSAL_INVALID_BATCH. */
+nx_error *nx_producer_submit_ipc(const nx_producer *producer, const uint8_t *ipc, size_t ipc_len,
+                                 const nx_cancel *cancel, uint64_t *submission);
+/* Waits for a submission's terminal outcome and takes it, which returns its credit. A submission
+   keeps its credit until its outcome is taken, so a host that stops taking outcomes stops being
+   able to submit. A cancelled or expired wait leaves the submission and its outcome with the
+   producer, and a later call takes it. An identity the producer does not hold, or holds no more,
+   fails with NX_ERROR_INVALID_ARGUMENT. */
+nx_error *nx_producer_rejoin(const nx_producer *producer, uint64_t submission,
+                             const nx_cancel *cancel, nx_submission_outcome **out);
+/* The submissions the producer holds, in submission order: writes `count`, the number it holds,
+   and the identity and whether it has its outcome of the first `capacity` of them. Either buffer
+   may be NULL. */
+nx_error *nx_producer_pending(const nx_producer *producer, uint64_t *submissions, bool *resolved,
+                              size_t capacity, size_t *count);
+/* Lets go of a submission. One with its outcome returns it in `out` and its credit now; one
+   without writes NULL, and returns its credit once its outcome arrives, which nobody reads. */
+nx_error *nx_producer_release(const nx_producer *producer, uint64_t submission,
+                              nx_submission_outcome **out);
+/* Stops the producer's admission and waits until the server released it; every batch it sent
+   has its outcome by then. A producer without an attachment, or closed already, returns at once.
+   A cancelled close keeps releasing the attachment. */
+nx_error *nx_producer_close(const nx_producer *producer, const nx_cancel *cancel);
+/* Releases the producer, closing it without waiting when it is still open. Outcomes it had not
+   handed out are not read by anyone. */
+void nx_producer_free(nx_producer *producer);
+
+/* ---- Submission outcomes ------------------------------------------------------------------ */
+
+/* The library sends a batch again only after a suspended or busy refusal. It never sends again a
+   batch whose outcome is a failure or unknown: replaying it is the host's decision, and it may
+   duplicate the batch's effects. A batch that was sent when its session ended is
+   NX_UNCERTAINTY_SESSION_LOST, and one that was waiting to be sent is NX_REFUSAL_PRODUCER_ENDED. */
+nx_submission_result nx_submission_outcome_result(const nx_submission_outcome *outcome);
+/* The server's bounded, non-sensitive description of the outcome; empty for a completed batch. */
+void nx_submission_outcome_message(const nx_submission_outcome *outcome, const uint8_t **message,
+                                   size_t *message_len);
+/* The typed cause of an outcome. Each fails with NX_ERROR_TYPE for an outcome that does not carry
+   it: a refusal for NOT_ADMITTED, a defect for NX_REFUSAL_INVALID_BATCH, a failure for
+   PROCESSING_FAILED and an uncertainty for OUTCOME_UNKNOWN. */
+nx_error *nx_submission_outcome_refusal(const nx_submission_outcome *outcome,
+                                        nx_submission_refusal *refusal);
+nx_error *nx_submission_outcome_defect(const nx_submission_outcome *outcome,
+                                       nx_batch_defect *defect);
+nx_error *nx_submission_outcome_failure(const nx_submission_outcome *outcome,
+                                        nx_processing_failure *failure);
+nx_error *nx_submission_outcome_uncertainty(const nx_submission_outcome *outcome,
+                                            nx_submission_uncertainty *uncertainty);
+void nx_submission_outcome_free(nx_submission_outcome *outcome);
+
+/* ---- Consumers ---------------------------------------------------------------------------- */
+
+/* Opens a competing consumer of the client emitter `emitter` of `domain`, named explicitly as for
+   a producer. `batches` and `bytes` are the credit it asks for, and `bytes` must hold one batch
+   of the emitter's maximum size. Refusals, cancellation and following the endpoint across
+   sessions are a producer's. */
+nx_error *nx_session_subscribe_emitter(const nx_session *session, const uint8_t *domain,
+                                       size_t domain_len, const uint8_t *emitter,
+                                       size_t emitter_len, const nx_fields *fields,
+                                       uint32_t batches, uint64_t bytes, const nx_cancel *cancel,
+                                       nx_consumer **out);
+
+/* What the open established, with the producer accessors' fields and units. `max_batch_rows` and
+   `max_batch_bytes` are the emitter's BATCH MAX MESSAGES and MAX SIZE. */
+nx_error *nx_consumer_schema(const nx_consumer *consumer, nx_schema **out);
+uint64_t nx_consumer_generation(const nx_consumer *consumer);
+void nx_consumer_contract(const nx_consumer *consumer, const uint8_t **digest,
+                          size_t *digest_len);
+void nx_consumer_grant(const nx_consumer *consumer, uint32_t *batches, uint64_t *bytes,
+                       uint32_t *max_batch_rows, uint64_t *max_batch_bytes);
+void nx_consumer_policy(const nx_consumer *consumer, nx_ack_window *window, uint64_t *outstanding,
+                        uint64_t *ack_timeout_nanos, uint64_t *retry_backoff_nanos,
+                        uint64_t *retry_max_backoff_nanos);
+nx_endpoint_state nx_consumer_state(const nx_consumer *consumer);
+/* As nx_producer_reopen_reason. */
+bool nx_consumer_reopen_reason(const nx_consumer *consumer, nx_reopen_reason *reason,
+                               nx_open_refusal *refusal);
+
+/* Waits for the next delivery. After the consumer's attachment ends, the next call fails once
+   with NX_ERROR_INTERRUPTED, and the one after it restores the attachment and reads on. A
+   cancelled or expired wait leaves its read with the consumer, and a later call receives what it
+   reads, so no delivery waits for its ACK TIMEOUT because a wait was abandoned. A closed consumer
+   fails with NX_ERROR_CLOSED, and one that needs a new open with NX_ERROR_REOPEN_REQUIRED. */
+nx_error *nx_consumer_next(const nx_consumer *consumer, const nx_cancel *cancel,
+                           nx_delivery **out);
+/* Closes the consumer and waits until the server released its attachment, which revokes every
+   delivery it has not settled. Its other behavior is nx_producer_close's. */
+nx_error *nx_consumer_close(const nx_consumer *consumer, const nx_cancel *cancel);
+/* Releases the consumer, closing it without waiting when it is still open. */
+void nx_consumer_free(nx_consumer *consumer);
+
+/* ---- Deliveries --------------------------------------------------------------------------- */
+
+/* One delivered attempt of a batch. Releasing a delivery settles nothing: an attempt nobody
+   settles stays with its consumer until the emitter's ACK TIMEOUT or the end of the consumer's
+   attachment, and is then delivered again. A retried, timed-out or revoked attempt comes again
+   with the same identity and a new reference, possibly to another consumer, so a host keys its
+   effects by the identity. */
+
+/* The identity every attempt of the batch shares, and this attempt's reference: 16 bytes each. */
+void nx_delivery_identity(const nx_delivery *delivery, const uint8_t **identity,
+                          size_t *identity_len);
+void nx_delivery_reference(const nx_delivery *delivery, const uint8_t **reference,
+                           size_t *reference_len);
+/* The relay the batch's rows came from. */
+void nx_delivery_source_relay(const nx_delivery *delivery, const uint8_t **name,
+                              size_t *name_len);
+/* Whether the rows came from a concrete branch, and its opaque 32-byte fingerprint when they did.
+   It carries no branch key value. */
+bool nx_delivery_branch_fingerprint(const nx_delivery *delivery, const uint8_t **fingerprint,
+                                    size_t *fingerprint_len);
+/* How many rows the batch carries. */
+uint32_t nx_delivery_members(const nx_delivery *delivery);
+/* The domain's time when the batch was prepared, in signed nanoseconds since the Unix epoch. */
+int64_t nx_delivery_execution_now(const nx_delivery *delivery);
+/* Borrows the canonical Arrow IPC stream the attempt carried, without a copy. */
+void nx_delivery_ipc(const nx_delivery *delivery, const uint8_t **ipc, size_t *ipc_len);
+/* The batch the stream holds, decoded once and held to the consumer's schema and to the rows
+   nx_delivery_members counts; a stream that differs fails with NX_ERROR_PROTOCOL. Every call
+   returns a new reference to the same batch. */
+nx_error *nx_delivery_batch(const nx_delivery *delivery, nx_batch **out);
+
+/* Acknowledges the attempt: its batch is settled, and an attached producer's submission completes
+   once every output of it is. Only this attempt's current reference settles it; the settlement
+   reads what the server did. A delivery whose attachment ended fails with NX_ERROR_REJECTED and
+   sends nothing; one whose answer the session lost fails with NX_ERROR_UNCERTAIN; a cancelled or
+   expired wait may still have settled the attempt, and settling it again reads the result the
+   server retains, or NX_SETTLEMENT_STALE_REFERENCE. */
+nx_error *nx_delivery_ack(const nx_delivery *delivery, const nx_cancel *cancel,
+                          nx_settlement *settlement);
+/* Asks the server to deliver the batch again, unchanged, after the emitter's retry backoff. */
+nx_error *nx_delivery_retry(const nx_delivery *delivery, const nx_cancel *cancel,
+                            nx_settlement *settlement);
+/* Rejects the batch for good: every row follows the emitter's ON MESSAGE ERROR policy. `reason` is
+   UTF-8, 1 to 1024 bytes, and must not hold sensitive values; another fails with
+   NX_ERROR_INVALID_ARGUMENT and sends nothing. */
+nx_error *nx_delivery_reject(const nx_delivery *delivery, const uint8_t *reason,
+                             size_t reason_len, const nx_cancel *cancel,
+                             nx_settlement *settlement);
+/* Adds a reference. Every reference, including the one nx_consumer_next returned, is released once
+   with nx_delivery_release, on any thread; the delivery, its stream and its batch's share of it
+   are freed with the last one. */
+nx_delivery *nx_delivery_retain(nx_delivery *delivery);
+void nx_delivery_release(nx_delivery *delivery);
+
+/* ---- Batches ------------------------------------------------------------------------------ */
+
+/* A batch is immutable. A column is read one level of its type at a time: level 0 holds one cell
+   per row; a LIST or FIXED_LIST level holds lists whose elements are the cells of the next level;
+   and the innermost level holds the values. Only a row can be null: list elements never are. The
+   bytes a null row holds at any level mean nothing, and its state tells it apart. Every copy
+   writes one whole level in one call, and a level's offsets start at zero. Accessors fail with
+   NX_ERROR_INVALID_ARGUMENT for a column or level past the batch's, or a buffer of another size,
+   and with NX_ERROR_TYPE for a level whose type does not hold what they read. */
+
+size_t nx_batch_row_count(const nx_batch *batch);
+/* The schema of the batch's endpoint, with every field's nullability and sensitivity. */
+nx_error *nx_batch_schema(const nx_batch *batch, nx_schema **out);
+/* Borrows the batch's canonical Arrow IPC stream: the one its delivery carried, or, for a batch a
+   host built, the one the library writes the first time it is read. */
+nx_error *nx_batch_ipc(const nx_batch *batch, const uint8_t **ipc, size_t *ipc_len);
+/* How many cells one level of a column holds. */
+nx_error *nx_batch_cells(const nx_batch *batch, size_t column, size_t level, size_t *cells);
+/* Writes one nx_cell_state byte per row of a column: NX_CELL_VALUE or NX_CELL_NULL. */
+nx_error *nx_batch_states(const nx_batch *batch, size_t column, uint8_t *states,
+                          size_t states_len);
+/* Copies the offsets of the lists of a LIST level into the next level: one per list and a final
+   end. */
+nx_error *nx_batch_offsets(const nx_batch *batch, size_t column, size_t level, uint64_t *offsets,
+                           size_t offsets_len);
+/* Copies the fixed-width values of a column's innermost level, with nx_event_column_fixed's widths
+   and native byte order. */
+nx_error *nx_batch_fixed(const nx_batch *batch, size_t column, size_t level, void *values,
+                         size_t values_len);
+/* Copies the STRING or BYTES values of a column's innermost level, as nx_event_column_varlen
+   copies a column: with `data` NULL only `data_len` is written. */
+nx_error *nx_batch_varlen(const nx_batch *batch, size_t column, size_t level, uint64_t *offsets,
+                          size_t offsets_len, uint8_t *data, size_t data_capacity,
+                          size_t *data_len);
+/* Adds a reference. Every reference, including the one nx_delivery_batch or
+   nx_batch_builder_finish returned, is released once with nx_batch_release, on any thread. */
+nx_batch *nx_batch_retain(nx_batch *batch);
+void nx_batch_release(nx_batch *batch);
+
+/* ---- Batch builders ----------------------------------------------------------------------- */
+
+/* Builds a batch of `rows` rows of a schema's row fields, such as a producer's. A builder copies
+   every buffer before the call that received it returns, so a host may reuse or free its
+   buffers at once, and it converts nothing: a value takes exactly its type's width, a BOOL is 0
+   or 1, and a STRING is UTF-8. A builder is used from one thread at a time. */
+nx_error *nx_batch_builder_new(const nx_schema *schema, size_t rows, nx_batch_builder **out);
+/* Sets whether each row of a column holds a value: one NX_CELL_VALUE or NX_CELL_NULL byte per row.
+   Unset, every row holds one. A null row of a field that is not nullable fails with
+   NX_ERROR_INVALID_ARGUMENT. */
+nx_error *nx_batch_builder_states(nx_batch_builder *builder, size_t column, const uint8_t *states,
+                                  size_t states_len);
+/* Sets the offsets of the lists of a LIST level into the next level: one per list and a final
+   end, starting at zero and never decreasing. A FIXED_LIST level needs none. */
+nx_error *nx_batch_builder_offsets(nx_batch_builder *builder, size_t column, size_t level,
+                                   const uint64_t *offsets, size_t offsets_len);
+/* Sets the fixed-width values of a column's innermost level, in native byte order. */
+nx_error *nx_batch_builder_fixed(nx_batch_builder *builder, size_t column, size_t level,
+                                 const void *values, size_t values_len);
+/* Sets the STRING or BYTES values of a column's innermost level: one offset per value and a final
+   end, starting at zero, into `data`, which the last offset ends. */
+nx_error *nx_batch_builder_varlen(nx_batch_builder *builder, size_t column, size_t level,
+                                  const uint64_t *offsets, size_t offsets_len,
+                                  const uint8_t *data, size_t data_len);
+/* Finishes the batch from every column the host set. A missing level, values that do not fill
+   their level, or text that is not UTF-8 fail with NX_ERROR_INVALID_ARGUMENT. The builder is then
+   empty, and may be filled again for another batch of the same rows. */
+nx_error *nx_batch_builder_finish(nx_batch_builder *builder, nx_batch **out);
+void nx_batch_builder_free(nx_batch_builder *builder);
 
 #ifdef __cplusplus
 }

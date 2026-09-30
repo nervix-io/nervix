@@ -15,6 +15,7 @@
 //! same data, so one expected report is the oracle for every language: a difference in any line
 //! is a difference in how that runtime read the protocol.
 
+mod c_abi_endpoints;
 mod c_abi_probe;
 
 use std::{
@@ -48,6 +49,9 @@ pub(crate) const SUBSCRIBED_LINE: &str = "SUBSCRIBED";
 /// The line a probe prints once it follows the domain's clock, before it reads the clock the
 /// attach reported.
 pub(crate) const ATTACHED_LINE: &str = "ATTACHED completed";
+
+/// The line a probe prints once its producer and consumer are open, before it submits a batch.
+pub(crate) const OPENED_LINE: &str = "OPENED";
 
 /// The directory `just test-client-conformance` builds the probe artifacts into.
 const ARTIFACTS_ENV: &str = "NERVIX_CLIENT_CONFORMANCE_DIR";
@@ -177,8 +181,8 @@ impl ProbeRuntime {
         }
     }
 
-    /// Whether the probe drives the shared Rust binding, in process or loaded, and so reads the
-    /// domain clock events the binding exposes.
+    /// Whether the probe drives the shared Rust binding, in process or loaded, and so reaches the
+    /// domain clock events and the producer and consumer handles the binding exposes.
     fn drives_binding(self) -> bool {
         match self {
             Self::CAbiInProcess | Self::C | Self::Cpp | Self::Python | Self::Java | Self::Ruby => {
@@ -216,6 +220,29 @@ pub(crate) enum ProbeExercise {
     /// first tick, then follows the generation the scenario's STOP and START begin and the
     /// attachment restored after the scenario ends the probe's session, and detaches.
     DomainClock,
+    /// Opens a producer on client ingestor `ingestor` and a consumer on client emitter `emitter`,
+    /// publishes typed batches and settles their output, holds one delivery while the scenario
+    /// ends the probe's session, and finishes on the restored attachments.
+    Endpoints { ingestor: String, emitter: String },
+}
+
+impl ProbeExercise {
+    /// The argument that selects the exercise in a probe process, when it is not the default.
+    fn argument(&self) -> Option<&'static str> {
+        match self {
+            Self::Subscription { .. } => None,
+            Self::DomainClock => Some("clock"),
+            Self::Endpoints { .. } => Some("io"),
+        }
+    }
+
+    /// Whether the exercise needs the shared Rust binding, which only the binding probes drive.
+    fn needs_binding(&self) -> bool {
+        match self {
+            Self::Subscription { .. } => false,
+            Self::DomainClock | Self::Endpoints { .. } => true,
+        }
+    }
 }
 
 impl ProbeTarget {
@@ -239,6 +266,10 @@ impl ProbeTarget {
                 environment.insert("NERVIX_PROBE_ROWS", rows.to_string());
             }
             ProbeExercise::DomainClock => {}
+            ProbeExercise::Endpoints { ingestor, emitter } => {
+                environment.insert("NERVIX_PROBE_INGESTOR", ingestor.clone());
+                environment.insert("NERVIX_PROBE_EMITTER", emitter.clone());
+            }
         }
         environment
     }
@@ -289,11 +320,11 @@ impl ClientProbe {
     }
 
     pub(crate) async fn start(runtime: ProbeRuntime, target: ProbeTarget) -> io::Result<Self> {
-        if let ProbeExercise::DomainClock = target.exercise
-            && !runtime.drives_binding()
-        {
+        if target.exercise.needs_binding() && !runtime.drives_binding() {
             return Err(io::Error::other(format!(
-                "the {runtime:?} probe implements the protocol itself and follows no domain clock"
+                "the {runtime:?} probe implements the protocol itself and does not drive the \
+                 shared binding the {:?} exercise uses",
+                target.exercise
             )));
         }
         let (sender, lines) = mpsc::unbounded_channel();
@@ -313,8 +344,8 @@ impl ClientProbe {
                 completion,
             });
         };
-        if let ProbeExercise::DomainClock = target.exercise {
-            command.arg("clock");
+        if let Some(argument) = target.exercise.argument() {
+            command.arg(argument);
         }
         command.envs(target.environment());
         if runtime.loads_binding() {

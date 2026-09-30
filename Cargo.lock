@@ -6634,6 +6634,13 @@ name = "nervix-client-ffi"
 version = "0.1.0-dev"
 dependencies = [
  "arch-into",
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-data",
+ "arrow-ipc",
+ "arrow-schema",
+ "bolero",
+ "bytes",
  "error-stack",
  "meticulous",
  "nervix-client-core",

@@ -107,6 +107,20 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/client-ffi/src/tests/__fuzz__/tests__batches__bolero_host_columns_round_trip_through_builder_and_stream/corpus"
+domain_version = 1
+features = []
+id = "client-ffi-host-columns"
+invariant = "Every column a host builds, of every scalar, text, bytes and nested list type, nullable or not, reads back level by level unchanged from the built batch and from the batch its canonical Arrow IPC stream decodes to."
+max_input_bytes = 512
+package = "nervix-client-ffi"
+random_iterations = 256
+source = "crates/client-ffi/src/tests/batches.rs"
+test = "tests::batches::bolero_host_columns_round_trip_through_builder_and_stream"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/branch-instances/src/__fuzz__/membership__tests__bolero_owned_branches_publish_exactly_the_current_owners_membership/corpus"
 domain_version = 1
 features = []
