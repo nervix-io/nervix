@@ -11,9 +11,6 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 use std::{num::NonZeroUsize, ops::Range, path::PathBuf, time::Duration};
 
 use arrow_array::{
@@ -193,7 +190,7 @@ fn is_record_server_error(state: &str, code: u16) -> bool {
 async fn maintain_minimum(pool: DriverPool, minimum: usize) {
     loop {
         nervix_primitives::task::consume_budget().await;
-        tokio::time::sleep(MAINTENANCE_INTERVAL).await;
+        nervix_primitives::time::sleep(MAINTENANCE_INTERVAL).await;
         let established = pool.metrics().connection_count.load(Ordering::Relaxed);
         let Some(shortfall) = minimum.checked_sub(established) else {
             continue;

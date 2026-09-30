@@ -119,7 +119,7 @@ impl ScheduledEmitterTask {
         flush_policy: FlushPolicy,
     ) -> EmitterReconfigureResult<()> {
         let (response, receiver) = oneshot::channel();
-        tokio::time::timeout(
+        nervix_primitives::time::timeout(
             PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE,
             commands.send(EmitterTaskCommand::Reconfigure {
                 flush_policy,
@@ -129,7 +129,7 @@ impl ScheduledEmitterTask {
         .await
         .map_err(|_| Report::new(EmitterReconfigureError::AcceptTimeout))?
         .map_err(|_| Report::new(EmitterReconfigureError::Unavailable))?;
-        tokio::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, receiver)
+        nervix_primitives::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, receiver)
             .await
             .map_err(|_| Report::new(EmitterReconfigureError::ResponseTimeout))?
             .map_err(|_| Report::new(EmitterReconfigureError::ResponseDropped))
@@ -142,7 +142,7 @@ impl ScheduledEmitterTask {
         let (response, receiver) = oneshot::channel();
         let deadline = Instant::now() + drain_timeout;
         let command = EmitterTaskCommand::Stop { deadline, response };
-        match tokio::time::timeout_at(deadline, self.commands.send(command)).await {
+        match nervix_primitives::time::timeout_at(deadline, self.commands.send(command)).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) => {
                 return Err(ScheduledEmitterStopError::recoverable(
@@ -159,7 +159,8 @@ impl ScheduledEmitterTask {
         }
         self.stop_signal.send_replace(Some(deadline));
         let response_deadline = deadline + PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE;
-        let response = match tokio::time::timeout_at(response_deadline, receiver).await {
+        let response = match nervix_primitives::time::timeout_at(response_deadline, receiver).await
+        {
             Ok(Ok(response)) => response,
             Ok(Err(_)) => {
                 clear_emitter_stop_signal(&self.stop_signal, deadline);
@@ -183,7 +184,9 @@ impl ScheduledEmitterTask {
                 self,
             ));
         }
-        match tokio::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, &mut self.task).await {
+        match nervix_primitives::time::timeout(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, &mut self.task)
+            .await
+        {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => {
                 // A successful stop response means the buffered work and transport drain already
@@ -426,8 +429,12 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use nervix_primitives::sync::{mpsc, watch};
-    use tokio::time::{Duration, Instant};
+    use std::time::Duration;
+
+    use nervix_primitives::{
+        sync::{mpsc, watch},
+        time::Instant,
+    };
 
     use super::*;
 

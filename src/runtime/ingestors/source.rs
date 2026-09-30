@@ -1991,7 +1991,7 @@ mod tests {
         ));
         started.notified().await;
         shutdown_tx.send_replace(true);
-        tokio::time::timeout(Duration::from_secs(10), running)
+        nervix_primitives::time::timeout(Duration::from_secs(10), running)
             .await
             .assured("shutdown cancels the pending resume through the source-loop select")
             .assured("the source loop exits without a task panic");
@@ -2019,11 +2019,11 @@ mod tests {
         ));
         started.notified().await;
         changed.notify_one();
-        tokio::time::timeout(Duration::from_secs(10), started.notified())
+        nervix_primitives::time::timeout(Duration::from_secs(10), started.notified())
             .await
             .assured("the quiesce notification interrupts resume so the loop retries it");
         shutdown_tx.send_replace(true);
-        tokio::time::timeout(Duration::from_secs(10), running)
+        nervix_primitives::time::timeout(Duration::from_secs(10), running)
             .await
             .assured("shutdown cancels the retried resume through the source-loop select")
             .assured("the source loop exits without a task panic");

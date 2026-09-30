@@ -90,3 +90,17 @@ random_iterations = 128
 source = "crates/client-wire/src/tests/requests.rs"
 test = "tests::requests::bolero_processor_choice_request_round_trip"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/branch-instances/src/__fuzz__/membership__tests__bolero_owned_branches_publish_exactly_the_current_owners_membership/corpus"
+domain_version = 1
+features = []
+id = "branch-membership"
+invariant = "Every owner step publishes exactly the current owner lifetime's branch membership, and a step that changes none publishes nothing."
+max_input_bytes = 256
+package = "nervix-branch-instances"
+random_iterations = 256
+source = "crates/branch-instances/src/membership_tests.rs"
+test = "membership::tests::bolero_owned_branches_publish_exactly_the_current_owners_membership"
+test_target = "lib"

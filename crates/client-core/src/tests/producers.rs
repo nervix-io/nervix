@@ -121,7 +121,7 @@ async fn open(loopback: &mut Loopback, batches: u32) -> Producer {
     loopback
         .answer(request.request_id, ReplyBody::OpenIngestor(opened))
         .await;
-    tokio::time::timeout(DEADLINE, opening)
+    nervix_primitives::time::timeout(DEADLINE, opening)
         .await
         .assured("the open is answered within the deadline")
         .assured("the open task completes")
@@ -261,7 +261,7 @@ async fn a_cancelled_wait_keeps_its_submission_and_credit_until_the_outcome_is_t
         let producer = producer.clone();
         async move { producer.submit(batch(b"next")).await }
     });
-    let pending = tokio::time::timeout(DEADLINE, async {
+    let pending = nervix_primitives::time::timeout(DEADLINE, async {
         loop {
             nervix_primitives::task::consume_budget().await;
             let pending = producer.pending_submissions();
@@ -271,7 +271,7 @@ async fn a_cancelled_wait_keeps_its_submission_and_credit_until_the_outcome_is_t
             {
                 return pending;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            nervix_primitives::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
@@ -290,7 +290,7 @@ async fn a_cancelled_wait_keeps_its_submission_and_credit_until_the_outcome_is_t
         .assured("a held submission is rejoined");
     assert_eq!(rejoined, ProducerOutcome::Completed);
     assert!(producer.pending_submissions().is_empty());
-    let next = tokio::time::timeout(DEADLINE, blocked)
+    let next = nervix_primitives::time::timeout(DEADLINE, blocked)
         .await
         .assured("taking the outcome returns the credit the next batch waits for")
         .assured("the submit task completes")

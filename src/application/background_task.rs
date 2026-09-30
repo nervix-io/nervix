@@ -8,9 +8,10 @@
 //!   shutdown deadline that bounds every wait.
 //! - **Must not know.** What any supervised task does.
 
+use std::time::Duration;
+
 use error_stack::Report;
 use nervix_primitives::{sync::CancellationToken, task::JoinHandle};
-use tokio::time::Duration;
 use tracing::warn;
 
 use super::{
@@ -105,7 +106,7 @@ pub(in crate::application) async fn await_background_task_shutdown(
     deadline: ShutdownDeadline,
 ) -> ShutdownPhaseOutcome {
     let grace_period = BACKGROUND_TASK_SHUTDOWN_GRACE_PERIOD.min(deadline.remaining());
-    let joined = tokio::time::timeout(grace_period, &mut task).await;
+    let joined = nervix_primitives::time::timeout(grace_period, &mut task).await;
     match joined {
         Ok(Ok(())) => ShutdownPhaseOutcome::Completed,
         Ok(Err(error)) => {
@@ -135,7 +136,7 @@ pub(in crate::application) async fn await_background_task_shutdown(
 
 #[cfg(test)]
 mod tests {
-    use tokio::time::Instant;
+    use nervix_primitives::time::Instant;
 
     use super::*;
 

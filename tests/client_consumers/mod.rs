@@ -112,7 +112,7 @@ async fn then_leader_describes_emitter_with(
             Instant::now() < deadline,
             "DESCRIBE EMITTER {emitter} never reported {missing:?}; last output:\n{output}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -188,7 +188,7 @@ async fn open(
                 return;
             }
             Err(EmitterOpenRefusal::EndpointUnavailable) if Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(50)).await;
             }
             Err(refusal) => panic!("emitter consumer open was refused: {refusal:?}"),
         }
@@ -324,7 +324,7 @@ async fn when_consumer_reads(world: &mut ScenarioWorld, consumer: String, batch:
         .unwrap_or_else(|| panic!("consumer '{consumer}' is not open"));
     let attempt = match attached {
         ScenarioConsumer::Native(client) => {
-            let delivery = tokio::time::timeout(OPEN_WAIT, client.next_batch())
+            let delivery = nervix_primitives::time::timeout(OPEN_WAIT, client.next_batch())
                 .await
                 .expect("consumer read deadline")
                 .expect("consumer read reply")
@@ -377,7 +377,7 @@ async fn when_consumer_starts_read(world: &mut ScenarioWorld, consumer: String, 
     };
     let client = client.clone();
     let wait = nervix_primitives::task::spawn(async move {
-        tokio::time::timeout(OPEN_WAIT, client.next_batch())
+        nervix_primitives::time::timeout(OPEN_WAIT, client.next_batch())
             .await
             .expect("consumer read deadline")
             .expect("consumer read reply")
@@ -673,7 +673,7 @@ async fn then_consumer_ends(world: &mut ScenarioWorld, consumer: String) {
     match attached {
         ScenarioConsumer::Native(client) => {
             assert!(
-                tokio::time::timeout(OPEN_WAIT, client.next_batch())
+                nervix_primitives::time::timeout(OPEN_WAIT, client.next_batch())
                     .await
                     .expect("consumer end deadline")
                     .expect("consumer end reply")

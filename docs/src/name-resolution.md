@@ -380,6 +380,14 @@ The interconnect, the native client crates and `nervix-dns` itself are not check
 depends on `nervix-dns` directly and selects no optional resolver feature. The check has no rule for
 the connectors that resolve through their drivers.
 
+Nervix-authored code cannot reach the operating system's resolver at all.
+`just validate-primitive-boundary`, also part of `just validate`, rejects `tokio::net::lookup_host`
+and the `ToSocketAddrs` traits wherever Nervix code names them, and the primitive boundary's sockets
+offer a lookup only in the Turmoil build, where it answers from the simulated DNS table, as
+[Execution-Sensitive Primitives](./data-plane-concurrency.md#execution-sensitive-primitives)
+describes. A dependency that resolves inside itself is outside that check, which is why [Residual
+Resolution](#residual-resolution) lists each one.
+
 ## Residual Resolution
 
 The paths below resolve names without the node's resolver, because the library that owns their
@@ -450,8 +458,8 @@ servers consume the whole budget before a third is asked.
 | Build | Peer names | Connector and client names |
 | --- | --- | --- |
 | Normal | The node's resolver through `PeerResolver::new` | The node's resolver, or the client's own |
-| `turmoil` | `PeerResolver::simulated`, which answers from the simulated host's DNS table through `turmoil::net::lookup_host` | Not part of the simulation |
-| `shuttle` | The production `PeerResolver`; no Shuttle check registers a peer by name | No Shuttle check opens a connector or a session by name |
+| `turmoil` | `PeerResolver::simulated`, which answers from the simulated host's DNS table through the lookup the primitive boundary offers only in this build | Not part of the simulation |
+| `shuttle` | The production `PeerResolver`, but sockets are Tokio's and outside every model, and a Shuttle execution has no Tokio reactor, so no Shuttle check opens a socket or resolves a name | The same: no Shuttle check opens a connector or a session |
 | `loom` | Not modeled | Not modeled |
 | Browser | The web console runs no interconnect | The browser resolves; `nervix-dns` and Hickory are absent from the web console's dependency graph |
 
@@ -465,9 +473,10 @@ against local DNS authorities outside it, as [Evidence](#evidence) describes.
 [Deterministic Interconnect Simulation](./interconnect-simulation.md#sockets-and-dns) owns that
 build.
 
-The resolver bounds its lookups with a Tokio semaphore and publishes no state to a data-plane
-protocol, so it has no Shuttle check or Loom model of its own; the concurrency bound and
-cancellation are checked by its own tests against real lookups. `nervix-dns` cannot be built for the
+The resolver bounds its lookups with the primitive boundary's semaphore and measures its budgets
+with the boundary's timers, and it publishes no state to a data-plane protocol, so it has no Shuttle
+check or Loom model of its own; the concurrency bound and cancellation are checked by its own tests
+against real lookups. `nervix-dns` cannot be built for the
 browser at all, because it requires the native capability of `nervix-primitives`.
 
 ## Evidence
@@ -483,6 +492,7 @@ moved it, and each test and scenario by name.
 | Public scenarios | `just test-scenarios --input <feature>` | Nodes whose resolver asks the harness's DNS authority, described in [DNS Authorities](./integration-test-lifecycle.md#dns-authorities), on one- and three-node clusters, with topology-specific cases on three: cluster formation through names and IPv6 literals, hosts-file and single-label names, a peer followed to a new address after its name stopped resolving, and a stopped leader rejoining through its advertised name; every migrated connector over plain and TLS transports through a fixture name; certificates checked against the configured host; outages answered as a missing name, no address or silence, with offsets held and delivery after recovery; changed answers followed after a restart; the CLI and a client's named seeds | Resolution through a real recursive resolver, and redirects to a named session endpoint, because every advertised client endpoint in the harness is a literal address |
 | The Turmoil simulation | `just test-turmoil` | The production transport resolving peer names through the simulated table on every connection, deterministically and under replay | Anything about Hickory, which the simulation never constructs |
 | Dependency graph checks | `just validate-dns-dependencies` | The feature selections of [Dependency Selection](#dependency-selection) in each affected crate's own graph | Runtime behavior |
+| The primitive boundary check | `just validate-primitive-boundary` | No Nervix-authored code calls the operating system's resolver through `tokio::net::lookup_host` or `ToSocketAddrs` | Resolution inside a dependency |
 | The external Chaos suite | `just chaos` | Three node containers that advertise and bootstrap by container name resolving each other through Docker's embedded DNS with the production resolver, across crashes, restarts, partitions and pauses | Changing answers, DNS failures, and the connectors' names |
 
 The scenario features are `cluster/dns_resolution.feature`, the `runtime/*_dns_resolution.feature`

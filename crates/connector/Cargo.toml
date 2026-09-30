@@ -10,11 +10,7 @@ workspace = true
 
 [features]
 default = []
-shuttle = [
-  "dep:shuttle-tokio",
-  "nervix-primitives/shuttle",
-  "shuttle-tokio/shuttle",
-]
+shuttle = ["nervix-primitives/shuttle"]
 
 [dependencies]
 arrow-array = { workspace = true }
@@ -30,15 +26,8 @@ rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
 rustls-pki-types = { workspace = true }
 serde = { workspace = true }
-shuttle-tokio = { workspace = true, features = [
-  "macros",
-  "rt",
-  "test-util",
-  "time",
-], optional = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["time"] }
 tracing = { workspace = true }
 triomphe = { workspace = true }
 upon = { workspace = true }
@@ -47,5 +36,6 @@ uuid = { workspace = true, features = ["v7"] }
 webpki-roots = { workspace = true }
 
 [dev-dependencies]
+# The physical-deadline tests advance a paused clock.
+nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }

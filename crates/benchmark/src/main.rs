@@ -1,6 +1,6 @@
 use std::{
     fs, io,
-    net::{Ipv4Addr, SocketAddrV4, TcpListener},
+    net::{Ipv4Addr, SocketAddrV4},
     num::NonZeroUsize,
     path::{Path, PathBuf},
     process::Stdio,
@@ -18,6 +18,7 @@ use nervix_benchmark::{
 };
 use nervix_client_core::{Client, ConnectOptions, DomainName, split_query_statements};
 use nervix_models::ClusterNodeName;
+use nervix_primitives::unmodeled::net::TcpListener;
 use nervix_test_environment::{
     ContainerMode, ContainerReadiness, DependencyEnvironment, KAFKA_ADDR, KAFKA_DOCKER_ADDR,
     KAFKA_DOCKER_NETWORK, ManagedContainerInfo, configure_process_lifecycle,
@@ -1090,7 +1091,7 @@ impl Subject {
         timeout: Duration,
         resolved: &ResolvedRun,
     ) -> Result<()> {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = nervix_primitives::time::Instant::now() + timeout;
         let client = loop {
             nervix_primitives::task::consume_budget().await;
             let connection = async {
@@ -1113,9 +1114,9 @@ impl Subject {
                     )?;
                     break client;
                 }
-                Ok(_) | Err(_) if tokio::time::Instant::now() < deadline => {
+                Ok(_) | Err(_) if nervix_primitives::time::Instant::now() < deadline => {
                     self.ensure_running()?;
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    nervix_primitives::time::sleep(Duration::from_millis(100)).await;
                 }
                 Ok((_, outcome)) => bail!(
                     "Nervix control plane did not report all {} benchmark nodes: {}\ndiagnostics: \
@@ -1411,7 +1412,7 @@ async fn run_load_driver(
         .spawn()
         .with_context(|| format!("failed to start load driver {}", load_driver.display()))?;
 
-    let ready_deadline = tokio::time::Instant::now() + resolved.wait_timeout;
+    let ready_deadline = nervix_primitives::time::Instant::now() + resolved.wait_timeout;
     loop {
         nervix_primitives::task::consume_budget().await;
         if ready_file.exists() {
@@ -1423,10 +1424,10 @@ async fn run_load_driver(
         }
         subject.ensure_running()?;
         ensure!(
-            tokio::time::Instant::now() < ready_deadline,
+            nervix_primitives::time::Instant::now() < ready_deadline,
             "load driver did not complete consumer stabilization and warmup before timeout"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
     fs::write(&go_file, b"go\n")?;
 
@@ -1446,7 +1447,7 @@ async fn run_load_driver(
         run.checked_add(COMPLETION_GRACE_SECONDS)
             .assured(SECONDS_FIT),
     );
-    let completion_deadline = tokio::time::Instant::now() + completion_timeout;
+    let completion_deadline = nervix_primitives::time::Instant::now() + completion_timeout;
     let status = loop {
         nervix_primitives::task::consume_budget().await;
         if let Some(status) = child.try_wait()? {
@@ -1454,10 +1455,10 @@ async fn run_load_driver(
         }
         subject.ensure_running()?;
         ensure!(
-            tokio::time::Instant::now() < completion_deadline,
+            nervix_primitives::time::Instant::now() < completion_deadline,
             "load driver exceeded its bounded completion timeout"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     };
     if !status.success() {
         let diagnostics = fs::read_to_string(&stderr_path).unwrap_or_default();
@@ -1703,7 +1704,7 @@ async fn wait_for_local_nervix(
 ) -> Result<()> {
     let url = format!("http://127.0.0.1:{observability_port}/readyz");
     let client = reqwest::Client::new();
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = nervix_primitives::time::Instant::now() + timeout;
     loop {
         nervix_primitives::task::consume_budget().await;
         if let Some(status) = child.try_wait()? {
@@ -1715,10 +1716,10 @@ async fn wait_for_local_nervix(
             return Ok(());
         }
         ensure!(
-            tokio::time::Instant::now() < deadline,
+            nervix_primitives::time::Instant::now() < deadline,
             "local nervix-server did not become ready at {url} before timeout"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 

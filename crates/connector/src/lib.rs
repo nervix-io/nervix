@@ -27,9 +27,6 @@
 //! connector reads a Model. Capabilities the registry validates live in the vocabulary, where
 //! validation reads them without naming a connector crate.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 mod client_config;
 mod http_client;
 mod ingest_metadata;

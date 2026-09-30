@@ -17,7 +17,7 @@ use http::{Response, StatusCode, Version};
 use meticulous::OptionExt as _;
 use nervix_execution::{ChargedBytes, Executor};
 use nervix_models::ClusterNodeName;
-use tokio::time::{Instant, timeout};
+use nervix_primitives::time::{Instant, timeout};
 
 use super::{
     BODY_CHUNK_BYTES, RawRequest, STREAM_PATH, StreamLease, TransportState, read_body,

@@ -26,11 +26,10 @@ use super::{
     BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingResult, BranchKey, BranchRuntime,
     CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest, DeduplicatorKeyspace,
     DomainClock, DomainExecutionSnapshot, PendingMaterializedBatch, RelayBoundaryServices,
-    RelayMessage, RelayRecordBatch, RelayRegistry, ReplicatedWasmProcessorState,
-    ReplicatedWindowProcessorState, RuntimeFlushPolicy, RuntimeInputCollectPolicy,
-    RuntimeInputCollector, WasmGuestStateResetFence, WasmLiveInstance, WindowAccumulatorPlan,
-    WindowProcessorState, branch_key_display, inferencer::OnnxInferencerSession,
-    relay_batch::RelayRecordBatchError,
+    RelayMessage, RelayRecordBatch, ReplicatedWasmProcessorState, ReplicatedWindowProcessorState,
+    RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector, WasmGuestStateResetFence,
+    WasmLiveInstance, WindowAccumulatorPlan, WindowProcessorState, branch_key_display,
+    inferencer::OnnxInferencerSession, relay_batch::RelayRecordBatchError,
 };
 use crate::{
     registry::{BranchInstanceAckBoundary, BranchedProcessorNodeSpec},
@@ -104,7 +103,6 @@ pub(super) struct IngestorRouteTemplate {
 
 #[derive(Debug, Clone)]
 pub(super) struct RelayProcessorRelayTemplate {
-    pub(super) registry: RelayRegistry,
     pub(super) services: Arc<RelayBoundaryServices>,
 }
 

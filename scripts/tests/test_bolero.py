@@ -32,9 +32,11 @@ class InventoryTests(unittest.TestCase):
             "nspl-archive-model",
             "backup-record-manifest",
             "client-processor-choice-request",
+            "branch-membership",
         })
         self.assertEqual({target.package for target in inventory.targets},
-                         {"nervix-client-wire", "nervix-nspl", "nervix-backup"})
+                         {"nervix-client-wire", "nervix-nspl", "nervix-backup",
+                          "nervix-branch-instances"})
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
             self.assertTrue(target.corpus.is_dir())

@@ -189,8 +189,9 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use nervix_models::RetryPolicy;
-    use tokio::time::Duration;
 
     use super::*;
 

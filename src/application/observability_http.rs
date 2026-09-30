@@ -18,8 +18,7 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use nervix_consensus::Observer;
-use nervix_primitives::{sync::CancellationToken, task::JoinSet};
-use tokio::net::TcpListener;
+use nervix_primitives::{net::TcpListener, sync::CancellationToken, task::JoinSet};
 use tracing::warn;
 
 use super::{AppError, http_endpoint::text_response};

@@ -23,9 +23,6 @@
 
 #![recursion_limit = "256"]
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 #[cfg(all(feature = "testing", not(debug_assertions)))]
 compile_error!(
     "the `testing` feature lowers Argon2 password hashing parameters and must not be compiled \

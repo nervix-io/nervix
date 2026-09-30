@@ -7,13 +7,7 @@
 //! - **Depends on.** The VM and the vocabulary.
 //! - **Must not know.** Relays, branches or the graph a UDF is invoked from. It answers a call.
 //!
-use std::{
-    cell::RefCell,
-    fmt,
-    panic::AssertUnwindSafe,
-    sync::Arc as StdArc,
-    time::{Duration, Instant},
-};
+use std::{cell::RefCell, fmt, panic::AssertUnwindSafe, sync::Arc as StdArc, time::Duration};
 
 use ahash::{HashMap, HashMapExt};
 use arch_into::ArchInto as _;
@@ -33,7 +27,7 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto;
 use nervix_models::{ParseAsType, Timestamp, UdfArgument, UdfLanguage, UdfName, UdfReturn};
-use nervix_primitives::sync::blocking::Mutex;
+use nervix_primitives::{sync::blocking::Mutex, time::Instant};
 use nervix_recovery::Discarded as _;
 use nervix_vm::{
     ErrorCode, FunctionExecutionPolicy, FunctionInjector, InjectedResult, RowErrorMask,

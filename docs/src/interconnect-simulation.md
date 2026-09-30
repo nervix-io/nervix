@@ -45,10 +45,11 @@ them substitutes for another.
 
 | Path | Kind | Owns |
 | --- | --- | --- |
-| `crates/interconnect/src/socket.rs` | Product seam | Selects the TCP listener, the outbound stream, and the `PeerResolver`: Tokio sockets and the node's Hickory resolver in production, `turmoil::net` sockets and DNS in the Turmoil build |
+| `crates/primitives/src/net.rs`, `time.rs` and `task.rs` | Product seam | The primitive boundary's selection for the Turmoil build: Turmoil's sockets and the simulated `lookup_host` in `net`, Tokio's timers and instants in `time`, which follow each host's clock, and `task::spawn_cpu`, which runs an admitted CPU job as a scheduler task. Production takes Tokio's sockets and runs the job on the blocking pool |
+| `crates/interconnect/src/peer_resolver.rs` | Product seam | Selects the `PeerResolver`: the node's Hickory resolver in production, the simulated host's DNS table through `nervix_primitives::net::lookup_host` in the Turmoil build |
 | `crates/interconnect/src/authentication.rs` | Product seam | `TransportClock`, the one UTC clock each TLS bundle judges certificates by. `TransportClock::system` in production, `TransportClock::from_provider` for a controlled environment |
 | `crates/interconnect/src/entropy.rs` | Product seam | `TransportEntropy`, the source of the process epoch and relay grant identifiers. `TransportEntropy::operating_system` in production, `TransportEntropy::from_source` for a controlled environment |
-| `crates/execution/src/workers.rs` | Product seam | The strategy that runs an admitted CPU job: the blocking pool, or a scheduler task in the Turmoil build |
+| `crates/execution/src/workers.rs` | Product owner | Admission, charges and cancellation of every job; it submits CPU jobs through `task::spawn_cpu`, the only caller the boundary check allows, and storage jobs through `task::spawn_blocking` |
 | `crates/primitives/src/lib.rs` | Product seam | The compile error when two execution modes are selected together |
 | `crates/interconnect/tests/simulation/runner.rs` | Harness | Run configuration, the scheduler thread and its real-time bound, host supervision, first-panic capture, the simulated UTC clock, seeded entropy, and the semantic trace. The library's own simulation tests include it as `simulation_runner` |
 | `crates/interconnect/tests/simulation/scenario.rs` | Harness | Scenario identity, committed seeds, the seed sweep, fresh-process attempts, failure records, replay, and failure injection |
@@ -59,6 +60,7 @@ them substitutes for another.
 | `crates/interconnect/src/authentication/simulation_tests.rs` | Harness | Certificate validity, expiry drain, handshake deadlines, and trace replay under the simulated clock |
 | `crates/interconnect/src/wire.rs`, module `simulation_checks` | Harness | Seeded rkyv round trips through the execution owner |
 | `crates/execution/src/workers.rs`, module `simulation_checks` | Harness | Queue slots, admission order, and charge ownership of the Turmoil CPU strategy |
+| `crates/primitives/src/tests/simulated_host.rs` | Harness | The boundary's own check that sockets, name lookup, timers, and admitted CPU jobs belong to the simulated host whose task uses them |
 | `justfile` and the `turmoil` job in `.github/workflows/check.yaml` | Tooling | The recipes, budgets, validation, and CI artifact |
 
 Every product seam has exactly one production behavior, and the production value is the default a
@@ -74,12 +76,14 @@ compilation with the production or Shuttle builds.
 
 | Build | Selected by | Sockets and DNS | CPU jobs | Synchronization primitives | Tokio configuration |
 | --- | --- | --- | --- | --- | --- |
-| Normal | Default features | Tokio's operating-system sockets and the node's Hickory resolver | Tokio's blocking pool | The ordinary primitives `nervix-primitives` re-exports: Tokio, Tokio Util, `parking_lot`, DashMap and the standard library's | Stable |
-| Shuttle | The `shuttle` feature of each owning package, forwarded to `nervix-primitives` | Not driven by the checks | `spawn_blocking` of Shuttle's modeled Tokio | The modeled primitives `nervix-primitives` selects: Shuttle's Tokio, Tokio Util, `parking_lot`, DashMap and atomics, and its own scheduler-visible `Notify` and `watch` | Stable |
-| Turmoil | The `turmoil` feature of `nervix-interconnect`, which enables `nervix-execution/turmoil` and `nervix-primitives/turmoil` | `turmoil::net` | A task on the simulated host's scheduler; storage jobs stay on the blocking pool | The ordinary primitives, on the simulated host that runs the caller | `--cfg tokio_unstable` |
+| Normal | Default features | Tokio's operating-system sockets, which `nervix_primitives::net` selects, and the node's Hickory resolver | Tokio's blocking pool, through `task::spawn_cpu` | The ordinary primitives `nervix-primitives` re-exports: Tokio, Tokio Util, `parking_lot`, DashMap and the standard library's | Stable |
+| Shuttle | The `shuttle` feature of each owning package, forwarded to `nervix-primitives` | Tokio's, outside every model and never driven by the checks: a socket created inside a check fails it | `spawn_blocking` of Shuttle's modeled Tokio | The modeled primitives `nervix-primitives` selects: Shuttle's Tokio, timers, Tokio Util, `parking_lot`, DashMap and atomics, and its own scheduler-visible `Notify` and `watch` | Stable |
+| Turmoil | The `turmoil` feature of `nervix-interconnect`, which enables `nervix-execution/turmoil` and `nervix-primitives/turmoil` | Turmoil's simulated sockets and DNS table, which `nervix_primitives::net` selects | A task on the simulated host's scheduler, through `task::spawn_cpu`; storage jobs stay on the blocking pool | The ordinary primitives, on the simulated host that runs the caller, with timers that follow its clock | `--cfg tokio_unstable` |
 | Turmoil with Shuttle or Loom | Both modes in one dependency graph, from one package or two | Fails to compile in `nervix-primitives` with a diagnostic naming both modes | | | |
 
-Only the Turmoil recipes pass `--cfg tokio_unstable`. With it, Turmoil seeds each host runtime's
+Only the Turmoil recipes pass `--cfg tokio_unstable`, and `just validate-primitive-boundary` rejects
+the flag in any other recipe, in Cargo configuration, in a workflow and in a build script. With it,
+Turmoil seeds each host runtime's
 scheduling from the simulation seed and configures an unhandled task panic to shut that host's
 runtime down, which fails the run. Without it, scheduling would not follow the seed and a panicking
 task would only print, so the runner refuses to start. The workspace declares the cfg in its
@@ -90,6 +94,11 @@ Validation keeps the modes apart:
 
 - `just validate-turmoil-dependencies` fails when the normal workspace dependency graph, with or
   without default features, contains a Turmoil package.
+- `just validate-primitive-boundary` rejects every path to Tokio's or Turmoil's sockets, Tokio's
+  timers, or the standard library's monotonic clock and sockets outside `nervix-primitives`, and a
+  `turmoil` dependency outside the boundary unless it is optional behind the package's own
+  `turmoil` feature, as the interconnect's harness takes it. The simulated path therefore cannot
+  name an operating-system socket or clock that would escape its host.
 - `just validate-shuttle-dependencies` does the same for Shuttle.
 - `just validate-execution-mode-conflicts` builds `nervix-primitives` with every pair of the
   `loom`, `shuttle` and `turmoil` modes and with all three, and `nervix-interconnect` with Shuttle
@@ -110,10 +119,11 @@ completion signals with each other and with the observing client.
 
 ### Sockets And DNS
 
-The Turmoil build aliases `TcpListener` and `TcpStream` to `turmoil::net` and builds every transport
-with `PeerResolver::simulated`, which answers from the simulated host's DNS table through
-`turmoil::net::lookup_host`. The listener, every outbound dial, and peer resolution therefore use
-simulated TCP and DNS. A peer endpoint such as `server:7443` resolves to the address Turmoil
+In the Turmoil build the primitive boundary's `nervix_primitives::net` selects Turmoil's
+`TcpListener`, `TcpStream` and `UdpSocket`, and every transport is built with
+`PeerResolver::simulated`, which answers from the simulated host's DNS table through
+`nervix_primitives::net::lookup_host`, a lookup the boundary offers in that mode alone. The listener,
+every outbound dial, and peer resolution therefore use simulated TCP and DNS. A peer endpoint such as `server:7443` resolves to the address Turmoil
 assigned to the host named `server`, in IPv4 or IPv6 by configuration, and a name the table does not
 hold fails as a name that does not exist. The scenarios register peers at their advertised
 endpoints, so, as in production, every connection attempt resolves the peer's name again inside its
@@ -128,9 +138,11 @@ describes.
 
 ### Bounded CPU Execution
 
-The transport encodes and decodes through `nervix-execution`. In the Turmoil build an admitted CPU
-job runs as a Tokio task on the host's scheduler instead of on the blocking pool, so the job body is
-one scheduling step of the simulation. Queue slots, per-class worker reservations, memory charges,
+The transport encodes and decodes through `nervix-execution`, which submits every admitted CPU job
+through the boundary's `task::spawn_cpu`. In the Turmoil build that runs the job as a Tokio task on
+the host's scheduler instead of on the blocking pool, so the job body is one scheduling step of the
+simulation. The executor is the mechanism's only caller: the boundary check rejects it anywhere
+else, so no caller runs CPU work on the scheduler without admission. Queue slots, per-class worker reservations, memory charges,
 and cooperative cancellation follow the same policy as production. A queued caller that leaves
 releases its slot and charge; a running job keeps its worker and charge until it exits, even when
 its caller leaves.
@@ -147,7 +159,7 @@ differently.
 
 | Time | Source on a simulated host | Read by |
 | --- | --- | --- |
-| Scheduler time | Tokio's paused clock, advanced by Turmoil one tick at a time | Every transport deadline: connection setup, request and progress timeouts, liveness, reconnect backoff, relay grant lifetimes, the drain deadline derived from certificate expiry |
+| Scheduler time | The timers and instants of `nervix_primitives::time`, which are Tokio's and follow the host runtime's paused clock, advanced by Turmoil one tick at a time | Every transport deadline: connection setup, request and progress timeouts, liveness, reconnect backoff, relay grant lifetimes, the drain deadline derived from certificate expiry |
 | Certificate UTC | The bundle's `TransportClock`, given a provider that reads the configured epoch plus simulated elapsed time, with an optional per-host skew | Rustls verification on both sides of a handshake, the transport's checks of its local and peer certificates, and the mapping of certificate expiry onto a monotonic drain deadline |
 | Domain time | Not simulated | Domain-clock authority and execution time, owned by [Domain Clock](./domain-clock.md) |
 
@@ -373,7 +385,7 @@ itself.
 
 | Command | What it runs | Bound and exit |
 | --- | --- | --- |
-| `just test-turmoil [budget_seconds]` | The `nervix-execution` library under the `turmoil` feature, the interconnect library's `wire::simulation_checks` and `authentication::simulation_tests`, and every case of the `simulation` target over its committed seeds | Builds first, then runs inside a real-time budget of 480 seconds by default; exits `124` naming the in-progress records when it expires |
+| `just test-turmoil [budget_seconds]` | The primitive boundary's simulated-host checks, the `nervix-execution` library under the `turmoil` feature, the interconnect library's `wire::simulation_checks` and `authentication::simulation_tests`, and every case of the `simulation` target over its committed seeds | Builds first, then runs inside a real-time budget of 480 seconds by default; exits `124` naming the in-progress records when it expires |
 | `just test-turmoil-simulation [args]` | The `simulation` target alone, with libtest arguments, such as a test name and `--exact` | The per-run bounds only |
 | `just test-turmoil-replay <record>` | Exactly the recorded package, target, test, and case, once, with the recorded inputs, in a fresh process | Exits nonzero when the replay fails, including when it reproduces the record, and when no case in the recorded test matches |
 | `just test-turmoil-replay-check` | Injects a failure at five simulated seconds into the partition-before-connect case, requires exactly one record, and requires its replay to report `turmoil replay: reproduced the recorded outcome and trace` | Fails when any of those does not hold |
@@ -482,9 +494,9 @@ Watchdog](./integration-test-lifecycle.md#the-suite-watchdog).
 
 | Bound | Value | Expiry |
 | --- | --- | --- |
-| Simulated duration per run | 1, 30, 60, 90, or 120 seconds by case | The run fails with the bound and the simulated time reached |
-| Scheduler steps per run | 200, 50,000, or 120,000 by case | The run fails with the bound and the simulated time reached |
-| Real time per run | 3, 90, or 120 seconds by case | The run fails naming its phase, steps, and simulated time |
+| Simulated duration per run | 1, 15, 30, 60, 85, 90, or 120 seconds by case | The run fails with the bound and the simulated time reached |
+| Scheduler steps per run | 200, 20,000, 50,000, 100,000, or 120,000 by case | The run fails with the bound and the simulated time reached |
+| Real time per run | 3, 60, 90, or 120 seconds by case | The run fails naming its phase, steps, and simulated time |
 | Real time per attempt process | The run's real-time bound plus 30 seconds | The driver kills the process and records an unreported outcome |
 | `just test-turmoil` tests | 480 seconds after the build | Exit `124`; in-progress records name the unfinished runs |
 | `just test-turmoil-sweep` | 1,500 seconds | Exit `124` |
@@ -511,9 +523,10 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | Case | Test | Committed seeds | Simulated / steps / real | Main assertion |
 | --- | --- | --- | --- | --- |
 | peer resolution | `peer_resolution_uses_simulated_dns` | 41 | 1 s / 200 / 3 s | A peer endpoint resolves to its simulated address through Turmoil DNS |
+| host isolation | `simulated_hosts_keep_their_own_names_sockets_and_clocks` | 43 | 15 s / 20,000 / 60 s | Two hosts listening on one port are each reached at their own address, a name no host holds fails as not existing without time passing, and a ten-second wait completes only on the simulated clock |
 | bounded CPU worker | `bounded_cpu_job_runs_on_the_simulated_scheduler` | 1–12 | 1 s / 200 / 3 s | Every CPU and memory class runs its job on the scheduler thread, and every queue and reservation returns to zero |
 | typed Arrow exchange | `transport::production_transport_exchanges_typed_arrow_batch_over_simulated_tcp` | 49 | 30 s / 50,000 / 90 s | After a listener rebind, production TLS, HTTP/2, typed envelopes, and Arrow IPC carry a typed request and a relay payload |
-| multiple authenticated peers | `transport::multiple_peers_keep_remote_failure_classes_and_reject_invalid_authentication` | 57 | 30 s / 50,000 / 90 s | One client resolves and exchanges with two peers, and a dial under a DNS identity the certificate does not name is rejected |
+| multiple authenticated peers preserve remote failure classes | `transport::multiple_peers_keep_remote_failure_classes_and_reject_invalid_authentication` | 57 | 30 s / 50,000 / 90 s | One client resolves and exchanges typed Arrow responses with two peers, each peer's rejected, unavailable, not-ready, and failed outcomes arrive as their own remote failure classes naming their subject, and a dial under a DNS identity the certificate does not name is rejected |
 | partition before connect | `transport::network_disruption_respects_deadlines_and_repairs_authenticated_service` | 61 | 85 s / 100,000 / 90 s | Setup fails and liveness times out through twelve seconds of partition; repair restores authenticated service |
 | one-way partition before connect | The same | 62 | 85 s / 100,000 / 90 s | The same, with only server-to-client messages dropped |
 | held authenticated exchange | The same | 63 | 85 s / 100,000 / 90 s | A one-second liveness probe and a two-second request expire while held; release restores service |
@@ -654,7 +667,8 @@ A new case follows the same contract as the existing ones.
    after the host and a `SimulatedUtc` clock. Share only readiness and completion signals between
    hosts, run each host body under `HostSupervisor::run`, and have the `observer` client wait for
    every host to finish.
-6. **Stay inside the simulated boundary.** Use Tokio time for every wait, and call
+6. **Stay inside the simulated boundary.** Use `nervix_primitives::time` for every wait and instant
+   and `nervix_primitives::net` for every socket, and call
    `nervix_primitives::task::consume_budget().await` at the top of every loop. Never sleep a real
    thread, read the wall clock, open an operating-system socket, touch the filesystem, or submit
    storage or unbounded CPU work.
@@ -702,9 +716,9 @@ The simulation guarantees, for the audited path:
 - Every run, attempt, suite, and sweep ends inside a real-time bound, including one whose host
   blocks the scheduler thread.
 
-The audit behind those guarantees covered the socket alias and simulated resolver, the transport
-identities and certificate clocks, request and relay deadlines, the map walks with side effects, the
-bounded CPU executor, and the runner. Its limits:
+The audit behind those guarantees covered the boundary's selection of sockets, timers, and CPU jobs
+and the simulated resolver, the transport identities and certificate clocks, request and relay
+deadlines, the map walks with side effects, the bounded CPU executor, and the runner. Its limits:
 
 - The runner's real thread and wall clock decide only when a test fails, never how a request
   proceeds.
@@ -768,3 +782,11 @@ workstation. `just test-turmoil` passed in 1m01s with a warm build cache,
 `just test-turmoil-replay-check` passed in 2 seconds, and `just test-turmoil-sweep` passed all 16
 cases over its 64 seeds in 7m05s, leaving no failure record, with a largest process of 130,764 KiB.
 The example investigation above was recorded and replayed on the same revision.
+
+Routing the simulation's sockets, timers and CPU jobs through the primitive boundary was requalified
+on 29 September 2026 on a 24-thread workstation that other builds shared. `just test-turmoil` passed,
+including the host isolation case and the boundary's own simulated-host checks, and
+`just test-turmoil-replay-check` reproduced its injected record. Every case of
+`just test-turmoil-sweep` passed its default 64 seeds twice in fresh processes with identical traces,
+leaving no failure record. Under that shared load the sweep ran past its 25-minute budget during its
+last test, the receiver restart group, which then passed its 64 seeds alone in 2m30s.

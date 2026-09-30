@@ -10,12 +10,7 @@ workspace = true
 
 [features]
 default = []
-shuttle = [
-  "dep:shuttle-tokio",
-  "nervix-connector/shuttle",
-  "nervix-primitives/shuttle",
-  "shuttle-tokio/shuttle",
-]
+shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
 testing = []
 
 [dependencies]
@@ -36,13 +31,6 @@ rdkafka = { workspace = true, features = [
   "static-linking",
   "aws-lc",
 ] }
-shuttle-tokio = { workspace = true, features = [
-  "macros",
-  "rt",
-  "sync",
-  "time",
-], optional = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing = { workspace = true }
 triomphe = { workspace = true }

@@ -8,9 +8,10 @@
 //! - **Must not know.** The harness that replaces it in a test build.
 
 #[cfg(not(feature = "testing"))]
-use nervix_models::{ClusterNodeName, DomainName, EmitterName, IngestorName};
+use std::time::Duration;
+
 #[cfg(not(feature = "testing"))]
-use tokio::time::Duration;
+use nervix_models::{ClusterNodeName, DomainName, EmitterName, IngestorName};
 
 #[cfg(not(feature = "testing"))]
 use crate::ConfiguredFaultInjection;

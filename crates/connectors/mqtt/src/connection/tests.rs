@@ -4,12 +4,10 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_primitives::net::{TcpListener, TcpSocket};
 use nervix_test_environment::dns_authority::DnsAnswer;
 use rumqttc::{AsyncClient, Event, Incoming};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::{TcpListener, TcpSocket},
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::*;
 use crate::test_fixtures::DnsFixture;

@@ -49,10 +49,16 @@ PARSER_EDGES = (
     "src/application/",
 )
 
-# The data plane executes plans. It is the server's runtime together with the connector crates the
-# runtime drives: the contract crate and every integration crate. Connector code that moves out of
-# the runtime stays inside these prefixes, so a move carries its sites along and lowers no count.
-DATA_PLANE = ("src/runtime/", "crates/connector/src/", "crates/connectors/")
+# The data plane executes plans. It is the server's runtime together with the crates the runtime
+# drives: the branch instance lifetimes its tasks own, the connector contract crate and every
+# integration crate. Code that moves out of the runtime stays inside these prefixes, so a move
+# carries its sites along and lowers no count.
+DATA_PLANE = (
+    "src/runtime/",
+    "crates/branch-instances/src/",
+    "crates/connector/src/",
+    "crates/connectors/",
+)
 
 # These decision modules are where a Model is still allowed to be read while producing those plans.
 DATA_PLANE_PLANNERS = frozenset(

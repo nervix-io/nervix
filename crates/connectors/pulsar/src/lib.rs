@@ -12,9 +12,6 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 mod source;
 
 use std::{collections::VecDeque, time::Duration};
@@ -30,6 +27,7 @@ use nervix_connector::{
     optional_bool_client_config_value, optional_client_config_value, read_tls_file,
 };
 use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
+use nervix_primitives::time::{Instant, sleep};
 use pulsar::{
     ConnectionRetryOptions, Error as PulsarError, OperationRetryOptions, Pulsar,
     TlsOptions as PulsarTlsOptions, TokioExecutor,
@@ -42,7 +40,6 @@ pub use source::{
     PulsarSourcePlan, PulsarSourcePosition, PulsarSourceSettings,
 };
 use thiserror::Error;
-use tokio::time::{Instant, sleep};
 
 const PULSAR: &str = "pulsar";
 
@@ -488,7 +485,10 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use futures_util::{SinkExt as _, StreamExt as _};
-    use nervix_primitives::sync::mpsc;
+    use nervix_primitives::{
+        net::{TcpListener, TcpStream},
+        sync::mpsc,
+    };
     use pulsar::message::{
         Codec as PulsarCodec, Message as PulsarFrame,
         proto::{
@@ -501,7 +501,6 @@ mod tests {
         },
     };
     use tempfile::tempdir;
-    use tokio::net::{TcpListener, TcpStream};
     use tokio_util::codec::Framed;
 
     use super::*;
@@ -876,7 +875,7 @@ mod tests {
         /// The next payload to reach the broker. Messages on one connection arrive in the order
         /// they were written.
         async fn next_payload(&mut self) -> Vec<u8> {
-            tokio::time::timeout(Duration::from_secs(60), self.received.recv())
+            nervix_primitives::time::timeout(Duration::from_secs(60), self.received.recv())
                 .await
                 .expect("the broker receives the next message")
                 .expect("the broker keeps listening while the test runs")

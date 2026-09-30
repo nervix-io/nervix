@@ -35,11 +35,11 @@ use nervix_models::{
     TransactionStatus,
 };
 use nervix_primitives::{
+    net::TcpListener,
     stream::wrappers::{ReceiverStream, TcpListenerStream},
     sync::mpsc,
     task::JoinHandle,
 };
-use tokio::net::TcpListener;
 use tonic::{
     Code, Request, Response, Status, Streaming,
     body::Body,
@@ -391,7 +391,7 @@ where
 }
 
 async fn next_message(replies: &mut Streaming<VerifiedFrame<ServerFrame>>) -> ServerMessage {
-    let frame = tokio::time::timeout(DEADLINE, replies.message())
+    let frame = nervix_primitives::time::timeout(DEADLINE, replies.message())
         .await
         .assured("the server answers within the deadline")
         .assured("the exchange stays open")
@@ -533,7 +533,7 @@ impl Codec for RawCodec {
 async fn status_after(session: &mut Session<RawCodec>) -> Status {
     loop {
         nervix_primitives::task::consume_budget().await;
-        let message = tokio::time::timeout(DEADLINE, session.replies.message())
+        let message = nervix_primitives::time::timeout(DEADLINE, session.replies.message())
             .await
             .assured("the server answers within the deadline");
         match message {

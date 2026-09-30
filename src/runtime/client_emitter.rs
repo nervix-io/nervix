@@ -7,7 +7,7 @@
 //!   primitive boundary, and physical time.
 //! - **Must not know.** Sessions, their wire format, NSPL text, or a client's transport.
 
-use std::{collections::VecDeque, num::NonZeroU64};
+use std::{collections::VecDeque, num::NonZeroU64, time::Duration};
 
 use ahash::HashMap;
 use bytes::Bytes;
@@ -16,14 +16,16 @@ use nervix_models::{
     AckWindow, CLIENT_CONSUMER_NODE_BYTES, CLIENT_CONSUMER_SESSION_BYTES, DomainName, EmitterName,
     ModelKind, RelayName, SchemaField, Timestamp,
 };
-use nervix_primitives::sync::{
-    Notify,
-    atomic::{AtomicBool, AtomicU64, Ordering},
-    mpsc, oneshot,
+use nervix_primitives::{
+    sync::{
+        Notify,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc, oneshot,
+    },
+    time::{Instant, sleep_until},
 };
 use nervix_recovery::NoReceiver as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use tokio::time::{Duration, Instant, sleep_until};
 use triomphe::Arc;
 use uuid::Uuid;
 
@@ -1049,10 +1051,11 @@ mod tests {
                 })
                 .await
         });
-        let attempt = tokio::time::timeout(Duration::from_secs(1), consumer.deliveries.recv())
-            .await
-            .expect("attempt arrives")
-            .expect("consumer stays open");
+        let attempt =
+            nervix_primitives::time::timeout(Duration::from_secs(1), consumer.deliveries.recv())
+                .await
+                .expect("attempt arrives")
+                .expect("consumer stays open");
         assert_eq!(
             consumer
                 .answer(
@@ -1113,10 +1116,11 @@ mod tests {
                 })
                 .await
         });
-        let attempt = tokio::time::timeout(Duration::from_secs(1), first.deliveries.recv())
-            .await
-            .expect("first attempt arrives")
-            .expect("consumer stays open");
+        let attempt =
+            nervix_primitives::time::timeout(Duration::from_secs(1), first.deliveries.recv())
+                .await
+                .expect("first attempt arrives")
+                .expect("consumer stays open");
         assert_eq!(attempt.payload.identity, identity);
         assert_eq!(
             budget.used(),
@@ -1126,10 +1130,11 @@ mod tests {
             .answer(attempt.reference, ClientEmitterAnswer::Retry)
             .await
             .expect("retry accepted");
-        let replacement = tokio::time::timeout(Duration::from_secs(1), second.deliveries.recv())
-            .await
-            .expect("replacement arrives")
-            .expect("consumer stays open");
+        let replacement =
+            nervix_primitives::time::timeout(Duration::from_secs(1), second.deliveries.recv())
+                .await
+                .expect("replacement arrives")
+                .expect("consumer stays open");
         assert_eq!(replacement.payload.identity, attempt.payload.identity);
         assert_eq!(replacement.payload.body, attempt.payload.body);
         assert_ne!(replacement.reference, attempt.reference);
@@ -1186,14 +1191,15 @@ mod tests {
             })
         };
         let first_publisher = publish("orders");
-        let first_attempt = tokio::time::timeout(Duration::from_secs(1), first.deliveries.recv())
-            .await
-            .expect("first attempt arrives")
-            .expect("first consumer stays open");
+        let first_attempt =
+            nervix_primitives::time::timeout(Duration::from_secs(1), first.deliveries.recv())
+                .await
+                .expect("first attempt arrives")
+                .expect("first consumer stays open");
         let second_publisher = publish("orders");
         let independent_publisher = publish("invoices");
         let independent_attempt =
-            tokio::time::timeout(Duration::from_secs(1), second.deliveries.recv())
+            nervix_primitives::time::timeout(Duration::from_secs(1), second.deliveries.recv())
                 .await
                 .expect("independent source arrives")
                 .expect("second consumer stays open");
@@ -1206,10 +1212,11 @@ mod tests {
             .answer(first_attempt.reference, ClientEmitterAnswer::Ack)
             .await
             .expect("first ACK");
-        let second_attempt = tokio::time::timeout(Duration::from_secs(1), first.deliveries.recv())
-            .await
-            .expect("second source attempt arrives after ACK")
-            .expect("first consumer stays open");
+        let second_attempt =
+            nervix_primitives::time::timeout(Duration::from_secs(1), first.deliveries.recv())
+                .await
+                .expect("second source attempt arrives after ACK")
+                .expect("first consumer stays open");
         assert_eq!(second_attempt.payload.source.as_str(), "orders");
         first
             .answer(second_attempt.reference, ClientEmitterAnswer::Ack)
@@ -1265,15 +1272,17 @@ mod tests {
             })
         };
         let first_publisher = publish("acme");
-        let first_attempt = tokio::time::timeout(Duration::from_secs(1), first.deliveries.recv())
-            .await
-            .expect("first branch arrives")
-            .expect("first consumer stays open");
+        let first_attempt =
+            nervix_primitives::time::timeout(Duration::from_secs(1), first.deliveries.recv())
+                .await
+                .expect("first branch arrives")
+                .expect("first consumer stays open");
         let second_publisher = publish("beta");
-        let second_attempt = tokio::time::timeout(Duration::from_secs(1), second.deliveries.recv())
-            .await
-            .expect("other branch arrives before first ACK")
-            .expect("second consumer stays open");
+        let second_attempt =
+            nervix_primitives::time::timeout(Duration::from_secs(1), second.deliveries.recv())
+                .await
+                .expect("other branch arrives before first ACK")
+                .expect("second consumer stays open");
         assert_ne!(first_attempt.payload.branch, second_attempt.payload.branch);
         first
             .answer(first_attempt.reference, ClientEmitterAnswer::Ack)
@@ -1330,15 +1339,17 @@ mod tests {
             })
         };
         let first_publisher = publish();
-        let first_attempt = tokio::time::timeout(Duration::from_secs(1), first.deliveries.recv())
-            .await
-            .expect("first attempt arrives")
-            .expect("first consumer stays open");
+        let first_attempt =
+            nervix_primitives::time::timeout(Duration::from_secs(1), first.deliveries.recv())
+                .await
+                .expect("first attempt arrives")
+                .expect("first consumer stays open");
         let second_publisher = publish();
-        let second_attempt = tokio::time::timeout(Duration::from_secs(1), second.deliveries.recv())
-            .await
-            .expect("second attempt arrives")
-            .expect("second consumer stays open");
+        let second_attempt =
+            nervix_primitives::time::timeout(Duration::from_secs(1), second.deliveries.recv())
+                .await
+                .expect("second attempt arrives")
+                .expect("second consumer stays open");
         let third_publisher = publish();
         nervix_primitives::task::yield_now().await;
         assert!(matches!(
@@ -1353,10 +1364,11 @@ mod tests {
             .answer(first_attempt.reference, ClientEmitterAnswer::Ack)
             .await
             .expect("first ACK");
-        let third_attempt = tokio::time::timeout(Duration::from_secs(1), first.deliveries.recv())
-            .await
-            .expect("third attempt starts after the first ACK")
-            .expect("first consumer stays open");
+        let third_attempt =
+            nervix_primitives::time::timeout(Duration::from_secs(1), first.deliveries.recv())
+                .await
+                .expect("third attempt starts after the first ACK")
+                .expect("first consumer stays open");
         assert_ne!(
             third_attempt.payload.identity,
             first_attempt.payload.identity
@@ -1377,14 +1389,16 @@ mod tests {
         }
 
         let retry_publisher = publish();
-        let timed_attempt = tokio::time::timeout(Duration::from_secs(1), second.deliveries.recv())
-            .await
-            .expect("timed attempt arrives")
-            .expect("second consumer stays open");
-        let replacement = tokio::time::timeout(Duration::from_secs(2), first.deliveries.recv())
-            .await
-            .expect("replacement arrives after timeout")
-            .expect("first consumer stays open");
+        let timed_attempt =
+            nervix_primitives::time::timeout(Duration::from_secs(1), second.deliveries.recv())
+                .await
+                .expect("timed attempt arrives")
+                .expect("second consumer stays open");
+        let replacement =
+            nervix_primitives::time::timeout(Duration::from_secs(2), first.deliveries.recv())
+                .await
+                .expect("replacement arrives after timeout")
+                .expect("first consumer stays open");
         assert_eq!(replacement.payload.identity, timed_attempt.payload.identity);
         assert_ne!(replacement.reference, timed_attempt.reference);
         assert_eq!(

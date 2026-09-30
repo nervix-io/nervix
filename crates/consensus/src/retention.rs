@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use tokio::time::{MissedTickBehavior, interval};
+use nervix_primitives::time::{MissedTickBehavior, interval};
 use tracing::{debug, info};
 
 use crate::{NervixRaft, storage::FjallStore};
