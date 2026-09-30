@@ -2,8 +2,8 @@ use std::{net::IpAddr, sync::Arc as StdArc};
 
 use arch_into::ArchInto as _;
 use arrow_array::{
-    BinaryArray, BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, ListArray,
-    StringArray, TimestampNanosecondArray, UInt32Array, types::Int64Type,
+    BinaryArray, BooleanArray, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
+    ListArray, StringArray, TimestampNanosecondArray, UInt32Array, types::Int64Type,
 };
 use arrow_buffer::{NullBuffer, OffsetBuffer};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
@@ -1085,6 +1085,20 @@ fn numeric_arithmetic_outputs(data_type: &DataType) -> [(&'static str, DataType)
     ]
 }
 
+/// The operators the arithmetic program computes without dividing. A division by a column is a
+/// scalar `idiv` per lane, which dominates the full program, so this program measures the sums,
+/// differences and products alone over the same batches.
+const ADD_SUB_MUL_SOURCE: &str = "SET sum = input.left + input.right, difference = input.left - \
+                                  input.right, product = input.left * input.right";
+
+fn add_sub_mul_outputs(data_type: &DataType) -> [(&'static str, DataType); 3] {
+    [
+        ("sum", data_type.clone()),
+        ("difference", data_type.clone()),
+        ("product", data_type.clone()),
+    ]
+}
+
 /// A failing row pairs the maximum value with a negative operand, which overflows the difference
 /// and the product, and divides by zero, which fails the quotient and the remainder. No pair of
 /// operands overflows both a sum and a difference, so the sum of a failing row succeeds.
@@ -1158,6 +1172,46 @@ fn i32_arithmetic_batch(program: &CompiledProgram, failures: FailureDensity) -> 
         ],
     )
     .expect("i32 arithmetic benchmark batch must build")
+}
+
+fn benchmark_row_i16(row: usize) -> i16 {
+    i16::try_from(row).assured("benchmark rows are reduced below 1,000 before the conversion")
+}
+
+/// The operands [`i32_arithmetic_batch`] holds, at 16 bits: every product of a row that does not
+/// fail stays within ±4,000.
+fn i16_arithmetic_batch(program: &CompiledProgram, failures: FailureDensity) -> TypedBatch {
+    let rows = 0..NUMERIC_KERNEL_ROWS;
+    let left = Int16Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            i16::MAX
+        } else {
+            benchmark_row_i16(row % 1_000) - 500
+        }
+    }));
+    let right = Int16Array::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            -2
+        } else {
+            benchmark_row_i16(row % 17) - 8
+        }
+    }));
+    let divisor = Int16Array::from_iter_values(rows.map(|row| {
+        if failures.fails(row) {
+            0
+        } else {
+            benchmark_row_i16(row % 13) + 1
+        }
+    }));
+    TypedBatch::try_new(
+        program.input_schema.clone(),
+        vec![
+            TypedArray::Int16(left),
+            TypedArray::Int16(right),
+            TypedArray::Int16(divisor),
+        ],
+    )
+    .expect("i16 arithmetic benchmark batch must build")
 }
 
 fn benchmark_row_f64(row: usize) -> f64 {
@@ -1558,6 +1612,26 @@ fn numeric_kernel_benches(c: &mut Criterion) {
         numeric_arithmetic_schema(&DataType::Int32),
         &numeric_arithmetic_outputs(&DataType::Int32),
     );
+    let i16_arithmetic_compiled = compile_numeric_program(
+        NUMERIC_ARITHMETIC_SOURCE,
+        numeric_arithmetic_schema(&DataType::Int16),
+        &numeric_arithmetic_outputs(&DataType::Int16),
+    );
+    let i64_add_sub_mul_compiled = compile_numeric_program(
+        ADD_SUB_MUL_SOURCE,
+        numeric_arithmetic_schema(&DataType::Int64),
+        &add_sub_mul_outputs(&DataType::Int64),
+    );
+    let i32_add_sub_mul_compiled = compile_numeric_program(
+        ADD_SUB_MUL_SOURCE,
+        numeric_arithmetic_schema(&DataType::Int32),
+        &add_sub_mul_outputs(&DataType::Int32),
+    );
+    let i16_add_sub_mul_compiled = compile_numeric_program(
+        ADD_SUB_MUL_SOURCE,
+        numeric_arithmetic_schema(&DataType::Int16),
+        &add_sub_mul_outputs(&DataType::Int16),
+    );
     let f64_arithmetic_compiled = compile_numeric_program(
         NUMERIC_ARITHMETIC_SOURCE,
         numeric_arithmetic_schema(&DataType::Float64),
@@ -1629,6 +1703,58 @@ fn numeric_kernel_benches(c: &mut Criterion) {
                 b.iter(|| {
                     runtime.block_on(execute_benchmark_program(
                         black_box(&i32_arithmetic_compiled),
+                        black_box(batch),
+                    ))
+                })
+            },
+        );
+        let batch = i16_arithmetic_batch(&i16_arithmetic_compiled, failures);
+        group.bench_with_input(
+            BenchmarkId::new("i16_arithmetic", failures.label()),
+            &batch,
+            |b, batch| {
+                b.iter(|| {
+                    runtime.block_on(execute_benchmark_program(
+                        black_box(&i16_arithmetic_compiled),
+                        black_box(batch),
+                    ))
+                })
+            },
+        );
+        let batch = i64_arithmetic_batch(&i64_add_sub_mul_compiled, failures);
+        group.bench_with_input(
+            BenchmarkId::new("i64_add_sub_mul", failures.label()),
+            &batch,
+            |b, batch| {
+                b.iter(|| {
+                    runtime.block_on(execute_benchmark_program(
+                        black_box(&i64_add_sub_mul_compiled),
+                        black_box(batch),
+                    ))
+                })
+            },
+        );
+        let batch = i32_arithmetic_batch(&i32_add_sub_mul_compiled, failures);
+        group.bench_with_input(
+            BenchmarkId::new("i32_add_sub_mul", failures.label()),
+            &batch,
+            |b, batch| {
+                b.iter(|| {
+                    runtime.block_on(execute_benchmark_program(
+                        black_box(&i32_add_sub_mul_compiled),
+                        black_box(batch),
+                    ))
+                })
+            },
+        );
+        let batch = i16_arithmetic_batch(&i16_add_sub_mul_compiled, failures);
+        group.bench_with_input(
+            BenchmarkId::new("i16_add_sub_mul", failures.label()),
+            &batch,
+            |b, batch| {
+                b.iter(|| {
+                    runtime.block_on(execute_benchmark_program(
+                        black_box(&i16_add_sub_mul_compiled),
                         black_box(batch),
                     ))
                 })

@@ -90,3 +90,17 @@ random_iterations = 128
 source = "crates/client-wire/src/tests/requests.rs"
 test = "tests::requests::bolero_processor_choice_request_round_trip"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/simd-kernels/src/__fuzz__/checked__tests__bolero_checked_lanes_match_overflowing_arithmetic_at_every_level/corpus"
+domain_version = 1
+features = []
+id = "simd-checked-lanes"
+invariant = "At every SIMD level, the checked sums, differences and products of generated integer lanes of every width, with runs or a shared operand on either side, equal the scalar overflowing reference lane for lane, and no failure bit is set past the last lane."
+max_input_bytes = 128
+package = "nervix-simd-kernels"
+random_iterations = 256
+source = "crates/simd-kernels/src/checked.rs"
+test = "checked::tests::bolero_checked_lanes_match_overflowing_arithmetic_at_every_level"
+test_target = "lib"
