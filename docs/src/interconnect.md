@@ -217,9 +217,9 @@ applies only as far as the name server the configuration names applies it, for e
 their search lists and `ndots`, are reached through the `resolv.conf` those platforms provide.
 
 The node resolver also serves HTTP polling, Prometheus, Sentry, OTEL HTTP and gRPC, Iceberg REST
-and object-store clients, RabbitMQ sources and sinks, Syslog emission, WebSocket client ingestion,
-ClickHouse emission, SQS sources and sinks, and the node's client session calls to a peer's session
-service during shutdown drain. Other connectors still resolve through their own drivers. Native
+and object-store clients, RabbitMQ sources and sinks, Redis command pools and Pub/Sub sources, MQTT
+sources and sinks, Syslog emission, WebSocket client ingestion, ClickHouse emission, SQS sources
+and sinks, and the node's client session calls to a peer's session service during shutdown drain. Other connectors still resolve through their own drivers. Native
 CLI and SDK sessions load their own Hickory resolver or reuse one supplied by their owner. The
 ledger in `tests/dns-resolution-ledger.md` records each boundary and its current owner.
 

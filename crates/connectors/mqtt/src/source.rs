@@ -6,8 +6,8 @@
 //!   session and quality-of-service settings, the shared subscription every instance joins, the
 //!   client identity each instance connects with, manual acknowledgement of publishes, and the
 //!   local replay of publishes the host rejected.
-//! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
-//!   Tokio, `rumqttc` and `url`.
+//! - **Depends on.** The connector contract, the crate's broker connection through the node DNS
+//!   resolver, typed client configuration entries, `error-stack`, Tokio, `rumqttc` and `url`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
 
 use std::{
@@ -23,6 +23,7 @@ use nervix_connector::{
     SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
     client_config_value, client_tls_paths, optional_client_config_value, read_tls_file,
 };
+use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, MqttQos, MqttSession};
 use nervix_primitives::time::{Instant, sleep_until};
 use rumqttc::{
@@ -31,6 +32,8 @@ use rumqttc::{
 };
 use thiserror::Error;
 use url::{Host, Url};
+
+use crate::connection::{MqttConnectionError, MqttDialer};
 
 const MQTT: &str = "mqtt";
 /// The template a multi-instance client identity must contain, so that every instance connects
@@ -58,6 +61,8 @@ pub enum MqttSourceError {
     MissingPort,
     #[error("instance {instance} has no MQTT client configuration")]
     MissingInstance { instance: u64 },
+    #[error("failed to connect MQTT source to its broker")]
+    Connect,
     #[error("failed to subscribe MQTT source")]
     Subscribe,
     #[error("the MQTT broker refused the subscription")]
@@ -117,9 +122,12 @@ pub struct MqttSourceSettings {
     /// Whether the source acknowledges each publish itself once the host accepted it, rather
     /// than the client acknowledging on receipt.
     pub manual_acks: bool,
+    /// The node resolver every instance resolves its broker host through when it connects.
+    pub dns: DnsResolver,
 }
 
-/// One MQTT source's subscription settings and the client entries of each of its instances.
+/// One MQTT source's subscription settings, the client entries of each of its instances, and the
+/// node resolver they connect through.
 #[derive(Clone)]
 pub struct MqttSourcePlan {
     instances: Vec<Vec<ClientConfigEntry>>,
@@ -129,6 +137,7 @@ pub struct MqttSourcePlan {
     qos: QoS,
     manual_acks: bool,
     client_id_conflict: Option<MqttClientIdError>,
+    dns: DnsResolver,
 }
 
 /// One instance's client and the event loop that carries its session.
@@ -148,6 +157,7 @@ impl MqttSourcePlan {
             session,
             qos,
             manual_acks,
+            dns,
         } = settings;
         Self {
             instances,
@@ -160,6 +170,7 @@ impl MqttSourcePlan {
             },
             manual_acks,
             client_id_conflict,
+            dns,
         }
     }
 
@@ -196,6 +207,7 @@ impl MqttSourcePlan {
             &self.default_client_id,
             self.session,
             self.manual_acks,
+            self.dns.clone(),
         )?;
         Ok(MqttConnection { client, eventloop })
     }
@@ -205,6 +217,7 @@ impl MqttSourcePlan {
         default_client_id: &str,
         session: MqttSession,
         manual_acks: bool,
+        dns: DnsResolver,
     ) -> MqttSourceResult<(AsyncClient, EventLoop)> {
         let addr = client_config_value(config, "addr", "MQTT")
             .change_context(MqttSourceError::ClientConfig)?;
@@ -256,6 +269,7 @@ impl MqttSourcePlan {
                 client_auth,
             }));
         }
+        MqttDialer::install(&mut options, dns);
         AsyncClient::builder(options)
             .capacity(1024)
             .try_build()
@@ -333,7 +347,7 @@ impl MqttSourcePlan {
                 Ok(Event::Incoming(_) | Event::Outgoing(_) | Event::Auth(_)) => {}
                 Err(error) => {
                     return Err(
-                        Report::new(MqttSourceError::Subscribe).attach_printable(error.to_string())
+                        MqttConnectionError::report(error).change_context(MqttSourceError::Connect)
                     );
                 }
             }
@@ -410,7 +424,7 @@ impl MqttSource {
                 Ok(Event::Incoming(_) | Event::Outgoing(_) | Event::Auth(_)) => {}
                 Err(error) => {
                     return Err(
-                        Report::new(MqttSourceError::Receive).attach_printable(error.to_string())
+                        MqttConnectionError::report(error).change_context(MqttSourceError::Receive)
                     );
                 }
             }
@@ -572,9 +586,12 @@ impl BrokerSourceConnector for MqttSource {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::OptionExt as _;
+    use nervix_dns::{DnsLookupError, DnsLookupFailure};
     use nonzero_ext::nonzero;
 
     use super::*;
+    use crate::test_fixtures::DnsFixture;
 
     fn entry(key: &str, value: &str) -> ClientConfigEntry {
         ClientConfigEntry {
@@ -587,29 +604,59 @@ mod tests {
         vec![entry("client_id", client_id)]
     }
 
-    fn build_client(config: &[ClientConfigEntry]) -> MqttSourceResult<(AsyncClient, EventLoop)> {
-        MqttSourcePlan::client_from_config(config, "default-client", MqttSession::Clean, false)
+    async fn build_client(
+        config: &[ClientConfigEntry],
+    ) -> MqttSourceResult<(AsyncClient, EventLoop)> {
+        let fixture = DnsFixture::start().await;
+        MqttSourcePlan::client_from_config(
+            config,
+            "default-client",
+            MqttSession::Clean,
+            false,
+            fixture.dns.clone(),
+        )
     }
 
-    fn build_client_error(
+    async fn build_client_error(
         config: &[ClientConfigEntry],
         expectation: &str,
     ) -> Report<MqttSourceError> {
-        match build_client(config) {
+        match build_client(config).await {
             Ok(_) => panic!("{expectation}"),
             Err(error) => error,
         }
     }
 
-    #[test]
-    fn persistent_sessions_allow_broker_only_resume() {
+    /// The settings of one source instance subscribing to `events` through `addr` and `dns`.
+    fn settings(addr: &str, session: MqttSession, dns: DnsResolver) -> MqttSourceSettings {
+        MqttSourceSettings {
+            instances: vec![vec![entry("addr", addr)]],
+            client_id_conflict: None,
+            default_client_id: "client".to_string(),
+            share_group: "default~ingestor".to_string(),
+            topic: "events".to_string(),
+            session,
+            qos: MqttQos::AtLeastOnce,
+            manual_acks: true,
+            dns,
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn persistent_sessions_allow_broker_only_resume() {
         let config = [
             entry("addr", "mqtt://127.0.0.1:1883"),
             entry("client_id", "persistent-client"),
         ];
-        let (_, eventloop) =
-            MqttSourcePlan::client_from_config(&config, "fallback", MqttSession::Persistent, true)
-                .expect("persistent MQTT client must be valid");
+        let fixture = DnsFixture::start().await;
+        let (_, eventloop) = MqttSourcePlan::client_from_config(
+            &config,
+            "fallback",
+            MqttSession::Persistent,
+            true,
+            fixture.dns.clone(),
+        )
+        .expect("persistent MQTT client must be valid");
 
         assert_eq!(
             eventloop.options.broker_session_resume_policy(),
@@ -648,8 +695,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_shared_client_id_names_the_conflict_as_the_resume_failure() {
+    #[nervix_primitives::test]
+    async fn a_shared_client_id_names_the_conflict_as_the_resume_failure() {
+        let fixture = DnsFixture::start().await;
         let plan = MqttSourcePlan::new(MqttSourceSettings {
             instances: vec![Vec::new(), Vec::new()],
             client_id_conflict: MqttSourcePlan::client_id_conflict(
@@ -662,6 +710,7 @@ mod tests {
             session: MqttSession::Persistent,
             qos: MqttQos::AtLeastOnce,
             manual_acks: true,
+            dns: fixture.dns.clone(),
         });
         assert_eq!(
             plan.subscribe_filter,
@@ -718,20 +767,22 @@ mod tests {
         assert!(MqttSourcePlan::parse_addr("mqtt://:1883").is_err());
     }
 
-    #[test]
-    fn client_builder_uses_configured_or_default_client_id() {
+    #[nervix_primitives::test]
+    async fn client_builder_uses_configured_or_default_client_id() {
         build_client(&[entry("addr", "mqtt://broker.example.com:1883")])
+            .await
             .expect("must build client from default id");
         build_client(&[
             entry("addr", "mqtt://broker.example.com:1883"),
             entry("client_id", "explicit-client"),
         ])
+        .await
         .expect("must build client from explicit id");
     }
 
-    #[test]
-    fn client_builder_requires_addr() {
-        let error = build_client_error(&[], "missing mqtt addr");
+    #[nervix_primitives::test]
+    async fn client_builder_requires_addr() {
+        let error = build_client_error(&[], "missing mqtt addr").await;
         assert!(matches!(
             error.current_context(),
             MqttSourceError::ClientConfig
@@ -748,12 +799,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn client_reports_typed_address_and_tls_configuration_errors() {
+    #[nervix_primitives::test]
+    async fn client_reports_typed_address_and_tls_configuration_errors() {
         let error = build_client_error(
             &[entry("addr", "not a URL")],
             "an invalid MQTT address must fail",
-        );
+        )
+        .await;
         assert!(matches!(
             error.current_context(),
             MqttSourceError::InvalidAddress
@@ -762,7 +814,8 @@ mod tests {
         let error = build_client_error(
             &[entry("addr", "mqtts://localhost:8883")],
             "MQTTS requires an explicit CA file",
-        );
+        )
+        .await;
         assert!(matches!(
             error.current_context(),
             MqttSourceError::MissingTlsCa
@@ -781,7 +834,8 @@ mod tests {
                 entry("tls_cert_file", &cert.to_string_lossy()),
             ],
             "a client certificate without a key must fail",
-        );
+        )
+        .await;
         assert!(matches!(
             error.current_context(),
             MqttSourceError::IncompleteTlsIdentity
@@ -790,16 +844,12 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn rejected_publishes_replay_in_order_before_the_broker_is_polled() {
-        let plan = MqttSourcePlan::new(MqttSourceSettings {
-            instances: vec![vec![entry("addr", "mqtt://127.0.0.1:1")]],
-            client_id_conflict: None,
-            default_client_id: "client".to_string(),
-            share_group: "default~ingestor".to_string(),
-            topic: "events".to_string(),
-            session: MqttSession::Persistent,
-            qos: MqttQos::AtLeastOnce,
-            manual_acks: true,
-        });
+        let fixture = DnsFixture::start().await;
+        let plan = MqttSourcePlan::new(settings(
+            "mqtt://127.0.0.1:1",
+            MqttSession::Persistent,
+            fixture.dns.clone(),
+        ));
         let mut source = MqttSource::open(&plan, 0)
             .await
             .expect("an MQTT source opens without connecting");
@@ -832,5 +882,52 @@ mod tests {
             vec![b"1".to_vec(), b"2".to_vec()]
         );
         assert!(source.replay.is_empty());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_broker_whose_name_does_not_resolve_fails_the_resume_with_the_lookup() {
+        let fixture = DnsFixture::start().await;
+        fixture.deny("missing.nervix.test");
+        let plan = MqttSourcePlan::new(settings(
+            "mqtt://missing.nervix.test:1883",
+            MqttSession::Clean,
+            fixture.dns.clone(),
+        ));
+        let mut source = MqttSource::open(&plan, 0)
+            .await
+            .expect("an MQTT source opens without connecting");
+
+        let resumed = source.resume().await;
+        let Err(error) = resumed else {
+            panic!("a broker whose name does not exist cannot be reached");
+        };
+
+        assert!(matches!(
+            error.current_context(),
+            SourceError::Resume { connector: MQTT }
+        ));
+        assert!(matches!(
+            error.downcast_ref::<MqttSourceError>(),
+            Some(MqttSourceError::Connect)
+        ));
+        assert!(
+            matches!(
+                error.downcast_ref::<MqttConnectionError>(),
+                Some(MqttConnectionError::Resolve {
+                    host,
+                    failure: DnsLookupFailure::NameNotFound,
+                }) if host == "missing.nervix.test"
+            ),
+            "{error:?}"
+        );
+        // DESCRIBE INGESTOR shows the deepest context, the resolver's own lookup error.
+        let lookup = error
+            .downcast_ref::<DnsLookupError>()
+            .assured("the resolver's error is the deepest context");
+        assert_eq!(
+            lookup.to_string(),
+            "resolving 'missing.nervix.test' failed: the name does not exist"
+        );
+        assert!(source.needs_resume());
     }
 }
