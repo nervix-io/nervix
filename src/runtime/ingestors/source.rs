@@ -331,6 +331,7 @@ impl Runtime {
             connector_label,
         } = source;
         let IngestorDependencies {
+            handles,
             output_routes,
             filter_where,
             branched_templates,
@@ -357,6 +358,7 @@ impl Runtime {
         }
         for (instance_index, instance) in (0_u64..).zip(instances) {
             let host = RuntimeSourceHost::new(RuntimeSourceHostSpec {
+                handles: handles.clone(),
                 runtime: self.clone(),
                 domain: domain.clone(),
                 ingestor: ingestor.name.clone(),
@@ -427,6 +429,7 @@ fn source_failure_reason(error: &Report<SourceError>) -> String {
 }
 
 pub(super) struct RuntimeSourceHostSpec {
+    pub(super) handles: IngestTaskHandles,
     pub(super) runtime: Runtime,
     pub(super) domain: DomainName,
     pub(super) ingestor: IngestorName,
@@ -445,6 +448,8 @@ pub(super) struct RuntimeSourceHostSpec {
 }
 
 pub(super) struct RuntimeSourceHost {
+    handles: IngestTaskHandles,
+    status: Arc<super::super::task_status::TaskStatus<RuntimeReconnectStatus>>,
     runtime: Runtime,
     domain: DomainName,
     ingestor: IngestorName,
@@ -466,6 +471,12 @@ pub(super) struct RuntimeSourceHost {
 
 impl RuntimeSourceHost {
     pub(super) fn new(spec: RuntimeSourceHostSpec) -> Self {
+        let status_key = DomainNodeRef::node_in(
+            spec.domain.clone(),
+            ModelKind::Ingestor,
+            spec.ingestor.clone(),
+        );
+        let status = spec.runtime.ingestor_status(&status_key);
         let ack_root_trackers = spec
             .runtime
             .ingestor_ack_root_trackers(&spec.domain, &spec.ingestor);
@@ -476,6 +487,8 @@ impl RuntimeSourceHost {
         );
         let quiesce_observation = spec.quiesce.observation();
         Self {
+            handles: spec.handles,
+            status,
             runtime: spec.runtime,
             domain: spec.domain,
             ingestor: spec.ingestor,
@@ -541,6 +554,7 @@ impl RuntimeSourceHost {
     ) -> SourceIntakeResult<()> {
         self.runtime
             .dispatch_raw_ingest_payload(RawIngestDispatch {
+                handles: &self.handles,
                 domain: &self.domain,
                 ingestor: &self.ingestor,
                 timestamp_source: self.timestamp_source.as_ref(),
@@ -563,6 +577,7 @@ impl RuntimeSourceHost {
     /// the host holds, on the request path rather than in the source loop.
     pub(super) fn request_intake(&self) -> EndpointIngestBinding {
         EndpointIngestBinding {
+            handles: self.handles.clone(),
             quiesce: self.quiesce.clone(),
             domain: self.domain.clone(),
             ingestor: self.ingestor.clone(),
@@ -576,8 +591,7 @@ impl RuntimeSourceHost {
     }
 
     fn record_poll_error(&self, reason: String) {
-        self.runtime
-            .record_ingestor_transient_error(&self.domain, &self.ingestor, reason.clone());
+        self.status.record_error(reason.clone());
         self.report_error(reason);
     }
 }
@@ -783,6 +797,7 @@ impl RuntimeSourceHost {
 
         self.runtime
             .dispatch_ingested_records(IngestGroupDispatch {
+                handles: &self.handles,
                 collector,
                 domain: &self.domain,
                 ingestor: &self.ingestor,
@@ -892,7 +907,7 @@ impl SourceHostServices for RuntimeSourceHost {
             }
             if self
                 .runtime
-                .wait_if_ingestor_faulted(&self.domain, &self.ingestor, &mut self.shutdown)
+                .wait_if_ingestor_faulted(&self.status, &self.ingestor, &mut self.shutdown)
                 .await
             {
                 return false;
@@ -917,17 +932,17 @@ impl SourceHostServices for RuntimeSourceHost {
     }
 
     fn record_transient_error(&self, reason: String, retry_after: Duration) {
-        self.runtime.record_ingestor_transient_error_with_backoff(
-            &self.domain,
-            &self.ingestor,
+        self.status.fail(
             reason,
-            retry_after,
+            Some(RuntimeReconnectStatus {
+                backoff: retry_after,
+                retry_at: Instant::now() + retry_after,
+            }),
         );
     }
 
     fn clear_transient_error(&self) {
-        self.runtime
-            .clear_ingestor_transient_error(&self.domain, &self.ingestor);
+        self.status.clear();
     }
 
     fn report_error(&self, message: String) {

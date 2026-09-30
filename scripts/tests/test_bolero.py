@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import contextlib
 import io
+import os
 import pathlib
 import subprocess
 import sys
@@ -26,6 +27,8 @@ class InventoryTests(unittest.TestCase):
     def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
+            "task-status-transitions",
+            "entity-freeze-transitions",
             "endpoint-route-table",
             "client-emitter-wire",
             "nspl-expression",
@@ -394,6 +397,31 @@ class ExecutionTests(unittest.TestCase):
                     bolero.build_instrumented(self.inventory, integration_target, again),
                     integration,
                 )
+
+    def test_build_deadline_changes_only_the_compilation_budget(self) -> None:
+        target = dataclasses.replace(self.target, package="nervix-nspl-format")
+        with tempfile.TemporaryDirectory() as directory:
+            run = pathlib.Path(directory)
+            library = run / "nervix_nspl_format-1111"
+            library.write_bytes(b"")
+            output = f"  Executable unittests src/lib.rs ({library})\n"
+            result = subprocess.CompletedProcess([], 0, output, "")
+            with mock.patch.dict(os.environ, {"BOLERO_BUILD_TIMEOUT_SECONDS": "7200"}), \
+                    mock.patch.object(bolero, "command", return_value=result) as build:
+                self.assertEqual(bolero.build_instrumented(self.inventory, target, run), library)
+                args = build.call_args.args[0]
+                self.assertEqual(build.call_args.kwargs["timeout"], 7200)
+                self.assertEqual(args[args.index("--timeout") + 1], "10s")
+                self.assertEqual(args[args.index("--runs") + 1], "0")
+
+    def test_build_deadline_refuses_invalid_bounds_before_starting_cargo(self) -> None:
+        for budget in ("0", "-1", "invalid"):
+            with self.subTest(budget=budget), tempfile.TemporaryDirectory() as directory, \
+                    mock.patch.dict(os.environ, {"BOLERO_BUILD_TIMEOUT_SECONDS": budget}), \
+                    mock.patch.object(bolero, "command") as build:
+                with self.assertRaisesRegex(bolero.BoleroError, "positive integer"):
+                    bolero.build_instrumented(self.inventory, self.target, pathlib.Path(directory))
+                build.assert_not_called()
 
     def test_feature_and_integration_test_target_arguments(self) -> None:
         target = dataclasses.replace(self.target, test_target="test:property_suite",

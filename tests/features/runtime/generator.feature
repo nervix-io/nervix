@@ -49,6 +49,7 @@ Feature: Generator node
       | 1            |
       | 3            |
 
+  @retained_task_handles
   Scenario Outline: Generator materialized state and output remain isolated per branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

@@ -5,7 +5,7 @@ Feature: HTTP emitter inspection, errors and metrics
   delivered record once, however many attempts it took, and never a rejected one; payload bytes
   count the codec body's record and never the request's method, target or headers.
 
-  @http_emitter_inspection
+  @http_emitter_inspection @retained_task_handles
   Scenario Outline: HTTP emitters with and without a body report a pending failure safely and count each delivered record once
     Given HTTP receiver "encoded_api" is running
     And HTTP receiver "encoded_api" answers with
