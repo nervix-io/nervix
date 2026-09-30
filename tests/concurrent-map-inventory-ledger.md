@@ -19,7 +19,7 @@ per-acquisition scopes in `tools/nervix-lint/scopes.json`. Its same-source calib
 `881c9097` inventories 1,117 authored sites across the declared native configuration matrix, with
 132 debt sites. `tools/nervix-lint/calibration.json` records the comparison and owning deliveries;
 [Data-Plane Concurrency](../docs/src/data-plane-concurrency.md#ratchet-and-review) states the gate's
-current contract. After the checkpoint replication repair, the complete matrix inventories 1,093
+current contract. After the checkpoint replication repair, the complete matrix inventories 1,125
 authored sites and 128 debt sites. Typed Ratchet 14 owns recurring branch catch-up lookups and
 Typed Ratchet 15 owns the remaining state-replication frame and announcer reads. Their scopes
 include helpers reached by both lifecycle and recurring callers and the primary's synchronization
@@ -266,8 +266,28 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `ProducerLinks::links`, `SubscriptionInterests::leases` | producer and subscription open and close | retain: lifecycle registry |
 | session service maps, command execution locks, retained backups and restore archives | per command, control plane; 250 ms sweeps | retain: lifecycle registry |
 | consensus `incoming_snapshots` | per snapshot chunk, consensus bulk traffic | retain: bounded protocol (one transfer per peer) |
-| client-core `previews`, `servers`, `producers`, `submissions`, exchange requests | client-side | retain: client-side |
+| client-core `previews`, `servers`, `submissions`, exchange requests | client-side | retain: client-side |
 | `src/fault_injection.rs` maps, consensus `append_stream_opens`, the test DNS authority | test-only | test-only |
+
+### Rust client attachment recovery
+
+Client I/O 03 extends the client registries below. These are client-side lifecycle maps, outside
+the server's recurring data-plane paths. Producer submission and consumer delivery retain their
+attachment directly; neither discovers it through a desired-handle map. Registry guards are
+released before notifications, handle transitions or network awaits. A reconnect takes a snapshot
+of live handles under the guard and restores that snapshot after releasing it.
+
+| Map | Frequency and key | Disposition and disposal |
+| --- | --- | --- |
+| `ProducerRegistryState::producers` (`crates/client-core/src/producer.rs`) | client-side: open reply registration, admission-change event lookup, attachment close/end and exchange loss; keyed by exchange generation and `ProducerId` | retain: client-side lifecycle registry. Each entry retains its exchange generation so reused attachment IDs cannot alias it. Close, endpoint end and loss of that exchange remove its entries. |
+| `ProducerRegistryState::current` (`crates/client-core/src/producer.rs`) | client-side: attachment binding, endpoint end, close and exchange loss; keyed by exchange generation and `ProducerId` | retain: client-side lifecycle registry. Weak application handles connect a wire attachment to its desired owner; unbinding, close, endpoint end and exchange loss remove the attachment entry. |
+| `ProducerRegistryState::desired` (`crates/client-core/src/producer.rs`) | client-side: open/bind, close/drop and reconnect snapshot; keyed by application-handle address | retain: client-side lifecycle registry. Entries are weak and scale with application-retained handles. Close/drop removes the desired entry; reconnect and exchange-loss snapshots also prune expired weak entries. |
+| `DesiredConsumers::desired` (`crates/client-core/src/consumer.rs`) | client-side: open, close/drop and reconnect or exchange-loss snapshot; keyed by application-handle address | retain: client-side lifecycle registry. Entries are weak and scale with application-retained handles. Close/drop unregisters the handle, and snapshots prune expired weak entries. Delivery and ACK use the retained original attachment. |
+
+The maps do not retain payloads, delivery attempts or server reservations. Wire attachment entries
+are limited by the server's granted attachments; desired entries have the lifetime of application
+handles. Per-handle lifecycle owners fence restoration against close and another exchange loss;
+see [Rust client attachment recovery](../docs/src/data-plane-concurrency.md#rust-client-attachment-recovery).
 
 ## Follow-up findings outside the hot paths
 

@@ -1,5 +1,7 @@
 //! The failure a host reads: `nx_error`.
 //!
+//! Layer: edges.
+//!
 //! - **Owns.** The kinds of failure the header names, how every client error and every refused
 //!   read of an attached domain clock is classified into one, and the message and execution
 //!   reference a host reads from it.
@@ -115,19 +117,22 @@ impl Failure {
             | ClientError::SubscriptionOperation(_)
             | ClientError::Transport(_)
             | ClientError::RequestInterrupted { .. }
+            | ClientError::ConsumerInterrupted
             | ClientError::UploadResource(_)
             | ClientError::Restore(_) => FailureKind::Transport,
             ClientError::RequestDeadline { .. } | ClientError::RetryDeadline => {
                 FailureKind::Deadline
             }
-            ClientError::UncertainCommand { .. } | ClientError::UncertainUpload { .. } => {
-                FailureKind::Uncertain
-            }
+            ClientError::UncertainCommand { .. }
+            | ClientError::UncertainUpload { .. }
+            | ClientError::SettlementUnknown { .. } => FailureKind::Uncertain,
             ClientError::EventOverflow { .. } => FailureKind::Overflow,
             ClientError::AttachTransaction(_)
             | ClientError::RequestRejected { .. }
             | ClientError::ProducerRefused { .. }
-            | ClientError::ConsumerRefused { .. } => FailureKind::Rejected,
+            | ClientError::ConsumerRefused { .. }
+            | ClientError::ConsumerReopenRequired(_)
+            | ClientError::DeliveryReferenceExpired { .. } => FailureKind::Rejected,
             ClientError::RequestCancelled { .. } => FailureKind::Cancelled,
             ClientError::UnexpectedReply { .. }
             | ClientError::InvalidUploadReply(_)
@@ -135,6 +140,7 @@ impl Failure {
             | ClientError::ExecutionReferenceMismatch { .. }
             | ClientError::UploadIdentityMismatch { .. } => FailureKind::Protocol,
             ClientError::SessionClosed => FailureKind::Closed,
+            ClientError::ConsumerSessionUnavailable => FailureKind::Connect,
             ClientError::BackupDownload { source, .. } => Self::classify_download(source),
         }
     }
@@ -255,4 +261,41 @@ pub unsafe extern "C" fn nx_error_execution_reference(
 pub unsafe extern "C" fn nx_error_free(error: *mut Failure) {
     // SAFETY: the header requires an unreleased error or null.
     unsafe { abi::release(error) };
+}
+
+#[cfg(test)]
+mod endpoint_recovery_tests {
+    use nervix_client_core::ConsumerReopenReason;
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[test]
+    fn client_endpoint_recovery_failures_keep_their_actionable_kind() {
+        let reference = Uuid::from_bytes([9; 16]);
+        let cases = [
+            (ClientError::ConsumerInterrupted, FailureKind::Transport),
+            (
+                ClientError::ConsumerSessionUnavailable,
+                FailureKind::Connect,
+            ),
+            (
+                ClientError::ConsumerReopenRequired(ConsumerReopenReason::GenerationChanged),
+                FailureKind::Rejected,
+            ),
+            (
+                ClientError::DeliveryReferenceExpired { reference },
+                FailureKind::Rejected,
+            ),
+            (
+                ClientError::SettlementUnknown { reference },
+                FailureKind::Uncertain,
+            ),
+        ];
+        for (error, expected) in cases {
+            let failure = Failure::from(error);
+            assert_eq!(failure.kind(), expected);
+            assert!(!failure.message().is_empty());
+        }
+    }
 }
