@@ -454,3 +454,159 @@ fn float_scalar_operands_keep_ieee_comparison_and_finite_checks() {
     assert_eq!(failed_lanes(&quotient), [0, 1, 3]);
     assert!(quotient.column.is_null(2));
 }
+
+/// Lane counts from an empty batch through three words and one lane, so every tail length of a
+/// word is reached, both alone and after whole words, and then counts on both sides of the block
+/// the kernels pack in one call.
+fn packing_lane_counts() -> impl Iterator<Item = usize> {
+    let block_boundaries = [
+        BLOCK_LANES - 1,
+        BLOCK_LANES,
+        BLOCK_LANES + 1,
+        2 * BLOCK_LANES + WORD_LANES + 1,
+    ];
+    (0..=3 * WORD_LANES + 1).chain(block_boundaries)
+}
+
+/// Whether an operand lane of the packing tests holds a valid value: the first word of every three
+/// is fully valid, the second has no valid lane, and the third mixes valid and null lanes.
+fn packing_lane_valid(lane: usize) -> bool {
+    match (lane / WORD_LANES) % 3 {
+        0 => true,
+        1 => false,
+        _ => (lane * 7 + 3) % 11 < 5,
+    }
+}
+
+/// A validity bitmap of `lanes` lanes that starts `offset` bits into its buffer, as a sliced
+/// column's does.
+fn packing_validity(lanes: usize, offset: usize, valid: impl Fn(usize) -> bool) -> NullBuffer {
+    let mut bits = arrow_buffer::BooleanBufferBuilder::new(offset + lanes);
+    bits.append_n(offset, false);
+    for lane in 0..lanes {
+        bits.append(valid(lane));
+    }
+    NullBuffer::new(bits.finish().slice(offset, lanes))
+}
+
+/// Operands that overflow `i64` when tripled on some lanes and not others.
+fn packing_operand(lane: usize) -> i64 {
+    let magnitude = i64::try_from(lane).expect("test lane counts fit i64");
+    if lane % 5 == 2 {
+        i64::MAX - magnitude
+    } else {
+        magnitude - 90
+    }
+}
+
+/// Checks computed lanes against a reference that sets each failure bit with its own shift, as
+/// the kernels did before packing: the same values, the same failed lanes, and the same buffer
+/// bytes, so no bit past the last lane is set either.
+fn assert_packed_like_shifts(lanes: &Lanes<i64>, expected: &[(i64, bool)], context: &str) {
+    let values = expected.iter().map(|(value, _)| *value).collect::<Vec<_>>();
+    let mut words = vec![0_u64; expected.len().div_ceil(WORD_LANES)];
+    for (lane, (_, failed)) in expected.iter().enumerate() {
+        words[lane / WORD_LANES] |= u64::from(*failed) << (lane % WORD_LANES);
+    }
+    let bytes = words
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect::<Vec<_>>();
+    assert_eq!(lanes.values, values, "{context}");
+    assert_eq!(lanes.failed.len(), expected.len(), "{context}");
+    assert_eq!(lanes.failed.values(), bytes.as_slice(), "{context}");
+}
+
+#[test]
+fn packed_failures_match_per_lane_shifts_for_every_lane_count_and_tail() {
+    for lanes in packing_lane_counts() {
+        let left = (0..lanes).map(packing_operand).collect::<Vec<_>>();
+        let right = (0..lanes)
+            .map(|lane| packing_operand(lanes - lane))
+            .collect::<Vec<_>>();
+
+        let tripled = Lanes::unary(&left, |value: i64| value.overflowing_mul(3));
+        let expected = left
+            .iter()
+            .map(|value| value.overflowing_mul(3))
+            .collect::<Vec<_>>();
+        assert_packed_like_shifts(&tripled, &expected, &format!("unary over {lanes} lanes"));
+
+        let sums = Lanes::binary(&left, &right, i64::overflowing_add);
+        let expected = left
+            .iter()
+            .zip(&right)
+            .map(|(left, right)| left.overflowing_add(*right))
+            .collect::<Vec<_>>();
+        assert_packed_like_shifts(&sums, &expected, &format!("binary over {lanes} lanes"));
+    }
+}
+
+#[test]
+fn valid_lane_packing_matches_per_lane_shifts_and_computes_only_valid_lanes() {
+    for lanes in packing_lane_counts() {
+        for offset in [0, 3, WORD_LANES + 5] {
+            let context = format!("{lanes} lanes at validity offset {offset}");
+            let valid = packing_validity(lanes, offset, packing_lane_valid);
+            let left = (0..lanes).map(packing_operand).collect::<Vec<_>>();
+            let right = (0..lanes)
+                .map(|lane| packing_operand(lanes - lane))
+                .collect::<Vec<_>>();
+            let valid_lanes = (0..lanes)
+                .filter(|lane| packing_lane_valid(*lane))
+                .collect::<Vec<_>>();
+
+            let mut computed = Vec::new();
+            let tripled = Lanes::unary_valid(&left, &valid, |value: i64| {
+                computed.push(value);
+                value.overflowing_mul(3)
+            });
+            let expected = (0..lanes)
+                .map(|lane| {
+                    if packing_lane_valid(lane) {
+                        left[lane].overflowing_mul(3)
+                    } else {
+                        (0, false)
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_packed_like_shifts(&tripled, &expected, &format!("unary, {context}"));
+            let valid_operands = valid_lanes
+                .iter()
+                .map(|lane| left[*lane])
+                .collect::<Vec<_>>();
+            assert_eq!(computed, valid_operands, "unary, {context}");
+
+            let mut computed = 0_usize;
+            let sums = Lanes::binary_valid(&left, &right, &valid, |left: i64, right: i64| {
+                computed += 1;
+                left.overflowing_add(right)
+            });
+            let expected = (0..lanes)
+                .map(|lane| {
+                    if packing_lane_valid(lane) {
+                        left[lane].overflowing_add(right[lane])
+                    } else {
+                        (0, false)
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_packed_like_shifts(&sums, &expected, &format!("binary, {context}"));
+            assert_eq!(computed, valid_lanes.len(), "binary, {context}");
+        }
+    }
+}
+
+#[test]
+fn a_fully_valid_bitmap_computes_every_lane_like_the_plain_kernels() {
+    for lanes in packing_lane_counts() {
+        let valid = packing_validity(lanes, 1, |_| true);
+        let operands = (0..lanes).map(packing_operand).collect::<Vec<_>>();
+
+        let plain = Lanes::unary(&operands, |value: i64| value.overflowing_neg());
+        let masked = Lanes::unary_valid(&operands, &valid, |value: i64| value.overflowing_neg());
+
+        assert_eq!(masked.values, plain.values, "{lanes} lanes");
+        assert_eq!(masked.failed, plain.failed, "{lanes} lanes");
+    }
+}

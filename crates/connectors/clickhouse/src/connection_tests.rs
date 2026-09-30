@@ -113,7 +113,7 @@ fn stand_in(listener: TcpListener) -> JoinHandle<String> {
     })
 }
 
-async fn insert(client: &ClickHouseClient) -> Result<(), ClickHouseWriteError> {
+async fn insert(client: &ClickHouseClient) -> error_stack::Result<(), ClickHouseWriteError> {
     ClickHouseSink::insert(
         client,
         "events",
@@ -204,12 +204,13 @@ async fn a_host_that_does_not_resolve_is_the_typed_cause_of_the_insert_failure()
         .expect_err("a host that does not resolve cannot be reached");
 
     let lookup = error
+        .current_context()
         .lookup_failure()
         .expect("resolving the host is what failed the insert");
     assert_eq!(lookup.name(), SERVER);
     assert_eq!(lookup.failure(), DnsLookupFailure::NameNotFound);
-    assert!(!error.is_record_error());
-    let report = error.into_report();
+    assert!(!error.current_context().is_record_error());
+    let report = ClickHouseWriteError::into_report(error);
     assert_eq!(
         report.current_context(),
         &SinkPublishError::Publish { sink: CLICKHOUSE }
@@ -248,8 +249,9 @@ async fn a_refused_connection_is_described_by_its_causes() {
         .await
         .expect_err("a closed port refuses the connection");
 
-    assert!(error.lookup_failure().is_none());
-    let report = error.into_report();
+    assert!(error.current_context().lookup_failure().is_none());
+    let report = ClickHouseWriteError::into_report(error);
+    assert!(report.contains::<ClickHouseWriteError>());
     assert!(report.downcast_ref::<DnsLookupError>().is_none());
     let message = report
         .frames()
@@ -272,7 +274,10 @@ async fn a_client_without_tls_entries_speaks_plain_http_only() {
         .expect_err("an https address needs the client's TLS entries");
 
     assert!(
-        matches!(error.0, ClickHouseError::Unsupported(_)),
+        matches!(
+            error.current_context(),
+            ClickHouseWriteError::Driver(ClickHouseError::Unsupported(_))
+        ),
         "unexpected error: {error:?}"
     );
     assert_eq!(fixture.authority.total_questions(), 0);
@@ -287,20 +292,21 @@ fn message_of(report: &Report<SinkPublishError>) -> Option<&str> {
 
 #[test]
 fn only_a_request_that_never_reached_clickhouse_is_described_by_its_causes() {
-    let rejected = ClickHouseWriteError(ClickHouseError::BadResponse(
-        "Code: 27. DB::Exception: Cannot parse input (CANNOT_PARSE_TEXT)".to_string(),
+    let rejected = ClickHouseWriteError::report(ClickHouseError::BadResponse(
+        "Code: 27. DB::Exception: secret-row-value (CANNOT_PARSE_TEXT)".to_string(),
     ));
-    assert!(rejected.lookup_failure().is_none());
-    assert!(rejected.transport_failure().is_none());
+    assert!(rejected.current_context().lookup_failure().is_none());
+    assert!(rejected.current_context().transport_failure().is_none());
+    assert!(!format!("{rejected:?}").contains("secret-row-value"));
     assert_eq!(
-        message_of(&rejected.into_report()),
+        message_of(&ClickHouseWriteError::into_report(rejected)),
         Some("ClickHouse insert request failed with CANNOT_PARSE_TEXT")
     );
 
-    let timed_out = ClickHouseWriteError(ClickHouseError::TimedOut);
-    assert!(timed_out.transport_failure().is_none());
+    let timed_out = ClickHouseWriteError::report(ClickHouseError::TimedOut);
+    assert!(timed_out.current_context().transport_failure().is_none());
     assert_eq!(
-        message_of(&timed_out.into_report()),
+        message_of(&ClickHouseWriteError::into_report(timed_out)),
         Some("ClickHouse insert request failed")
     );
 }
