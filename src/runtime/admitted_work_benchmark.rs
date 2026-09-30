@@ -2,10 +2,15 @@
 //! preparing a branched entrypoint input, and encoding an emitter's rows through a codec
 //! transformation.
 //!
+//! Layer: test harness.
+//! - **Owns.** Opaque benchmark drivers and their initialized runtime contexts.
+//! - **Depends on.** Runtime execution and its typed codec inputs.
+//! - **Must not know.** Live graph placement or control-plane transaction ownership.
+//!
 //! This module only exists with the `benchmarks` feature. Its public surface exposes benchmark
 //! operations and what they produced, never Nervix runtime carriers.
 
-use std::sync::Arc as StdArc;
+use std::sync::Arc;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
@@ -14,11 +19,12 @@ use nervix_models::{
     DomainState, DomainStatus, EmitterName, ErrorPolicies, FieldName, ModelKind, ParseAsType,
     PlacementPolicy, ResolvedCodecWireFormat, SchemaName, Timestamp,
 };
+use nervix_primitives::publication::ArcSwap;
 
 use super::{
-    ArcSwap, BranchInstanceAckBoundary, BranchKey, BranchMetricsMark, CompiledCodec,
-    DomainClockLifecycle, DomainRoutingSnapshot, EmitterPublishBatch, EmitterSinkContext, Executor,
-    RelayMessage, RelayRecordBatch, Runtime, emitter_encoding::encode_pending_broker_payloads,
+    BranchInstanceAckBoundary, BranchKey, CompiledCodec, DomainClockLifecycle, EmitterPublishBatch,
+    EmitterSinkContext, Executor, RelayMessage, RelayRecordBatch, Runtime,
+    domain_execution::DomainRoutingSnapshot, emitter_encoding::encode_pending_broker_payloads,
     prepare_branched_entrypoint_input,
 };
 use crate::{
@@ -215,17 +221,17 @@ impl TransformedEncodingBenchmark {
         let clock = lifecycle
             .bind()
             .assured("the benchmark installs its unpaced domain clock above");
+        let runtime = Runtime::new();
         let emitter = identifier::<EmitterName>("admitted_work_emitter");
-        let node = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
-        let node_runtime = Runtime::new();
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
         Self {
             runtime: benchmark_runtime(),
             context: EmitterSinkContext {
-                routing: StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
-                metrics_dirty: BranchMetricsMark::default(),
-                status: node_runtime.emitter_status(&node),
-                confirmation_waits: node_runtime.emitter_confirmation_counter(&node),
-                runtime: node_runtime,
+                routing: Arc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
+                metrics_dirty: runtime.branch_metrics_mark(&domain, ModelKind::Emitter, &emitter),
+                status: runtime.emitter_status(&key),
+                confirmation_waits: runtime.emitter_confirmation_counter(&key),
+                runtime,
                 domain,
                 emitter,
                 error_policies: ErrorPolicies::handled_by_log(),

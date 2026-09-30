@@ -401,6 +401,20 @@ test_target = "test:representations"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/simd-kernels/src/__fuzz__/division__tests__bolero_constant_division_matches_checked_operations_at_every_level/corpus"
+domain_version = 1
+features = []
+id = "simd-constant-division"
+invariant = "At every supported SIMD level and scalar fallback, constant quotients and remainders equal their checked references for every integer width and tail, and signed scalar Euclidean and truncating results preserve full-range overflow."
+max_input_bytes = 128
+package = "nervix-simd-kernels"
+random_iterations = 256
+source = "crates/simd-kernels/src/division_tests.rs"
+test = "division::tests::bolero_constant_division_matches_checked_operations_at_every_level"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/simd-kernels/src/__fuzz__/checked__tests__bolero_checked_lanes_match_overflowing_arithmetic_at_every_level/corpus"
 domain_version = 1
 features = []
