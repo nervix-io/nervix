@@ -1131,10 +1131,14 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
           switch (outcome.dispositionType()) {
             case wire.OpenEmitterDisposition.EmitterOpened: {
               const opened = member(outcome.disposition(new wire.EmitterOpened()) as wire.EmitterOpened | null);
+              const contract = member(opened.contract()).bytesArray();
+              if (contract === null || contract.length !== 32) {
+                throw new Error("an opened consumer's contract is not a 32-byte fingerprint");
+              }
               const window = opened.windowType() === wire.ConsumerWindow.ParallelConsumerWindow
                 ? `parallel:${member(opened.window(new wire.ParallelConsumerWindow()) as wire.ParallelConsumerWindow | null).max()}`
                 : 'sequential';
-              const lines = [`REPLY ${id} EMITTER_OPENED domain=${opened.domain()} emitter=${opened.emitter()} window=${window} ack_timeout=${opened.ackTimeoutNanos()} retry=${opened.retryBackoffNanos()}/${opened.retryMaxBackoffNanos()} granted=${opened.grantedBatches()}/${opened.grantedBytes()} max_batch=${opened.maxBatchBytes()}/${opened.maxBatchRows()} message=${message}`];
+              const lines = [`REPLY ${id} EMITTER_OPENED domain=${opened.domain()} emitter=${opened.emitter()} generation=${opened.generation()} contract=${hex(contract)} window=${window} ack_timeout=${opened.ackTimeoutNanos()} retry=${opened.retryBackoffNanos()}/${opened.retryMaxBackoffNanos()} granted=${opened.grantedBatches()}/${opened.grantedBytes()} max_batch=${opened.maxBatchBytes()}/${opened.maxBatchRows()} message=${message}`];
               for (let index = 0; index < opened.fieldsLength(); index += 1) {
                 lines.push(fieldLine('FIELD', readField(member(opened.fields(index)))));
               }

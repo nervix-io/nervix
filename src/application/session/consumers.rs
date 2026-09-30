@@ -15,7 +15,8 @@ use nervix_client_wire::{
     SettleEmitterBatchOutcome, SettleEmitterBatchRequest,
 };
 use nervix_models::{
-    CLIENT_CONSUMER_SESSION_BYTES, DomainStatus, EmitSink, MAX_CLIENT_CONSUMERS_PER_SESSION,
+    CLIENT_CONSUMER_SESSION_BYTES, ClientEndpointContract, CreateEmitter, DomainStatus, EmitSink,
+    FlushPolicy, MAX_CLIENT_CONSUMERS_PER_SESSION, SchemaField,
 };
 use nervix_primitives::sync::{
     Arc, Mutex as AsyncMutex, StdArc, StdWeak,
@@ -72,6 +73,35 @@ impl Drop for ConsumerCapacityReservation {
 }
 
 impl SessionConsumers {
+    fn endpoint_contract(
+        &self,
+        mut model: CreateEmitter,
+        expected_fields: &[SchemaField],
+    ) -> Result<ClientEndpointContract, (EmitterOpenRefusal, String)> {
+        // A flush-only retuning keeps the endpoint; normalize that cadence before hashing the
+        // construction, publishing and acknowledgement contract.
+        model.flush_policy = FlushPolicy::Immediate;
+        let canonical = model.to_canonical_nspl().map_err(|_| {
+            (
+                EmitterOpenRefusal::EndpointUnavailable,
+                "emitter contract could not be rendered".to_string(),
+            )
+        })?;
+        let fields = serde_json::to_vec(expected_fields).map_err(|_| {
+            (
+                EmitterOpenRefusal::EndpointUnavailable,
+                "emitter output fields could not be fingerprinted".to_string(),
+            )
+        })?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(canonical.as_bytes());
+        hasher.update(&[0xff]);
+        hasher.update(&fields);
+        Ok(ClientEndpointContract::from_digest(
+            *hasher.finalize().as_bytes(),
+        ))
+    }
+
     fn reserve(&self, bytes: u64) -> Result<ConsumerCapacityReservation, EmitterOpenRefusal> {
         let mut state = self.state.lock();
         if state.held_count >= MAX_CLIENT_CONSUMERS_PER_SESSION {
@@ -139,6 +169,12 @@ impl SessionConsumers {
             ));
         }
         let service = &shared.service;
+        if !service.inner.runtime_admission.is_admitted() {
+            return Err(refuse(
+                EmitterOpenRefusal::EndpointUnavailable,
+                "the serving node is catching up with committed domain state",
+            ));
+        }
         let Some(domain_state) = service.inner.consensus.current_domain(&open.domain).await else {
             return Err(refuse(
                 EmitterOpenRefusal::DomainNotFound,
@@ -174,6 +210,7 @@ impl SessionConsumers {
                 "emitter has no execution owner",
             ));
         };
+        let contract = self.endpoint_contract(model, &open.expected_fields)?;
         let capacity = self
             .reserve(open.limits.bytes.get())
             .map_err(|why| (why, "session consumer budget is full".to_string()))?;
@@ -224,6 +261,8 @@ impl SessionConsumers {
             domain: open.domain,
             emitter: open.emitter,
             fields: description.fields,
+            generation: domain_state.start_version,
+            contract,
             window: description.window,
             ack_timeout: description.ack_timeout,
             retry_backoff: description.retry_backoff,
@@ -329,25 +368,4 @@ impl SessionConsumers {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_interrupted_open_releases_its_session_reservation() {
-        let consumers = SessionConsumers::default();
-        let first = consumers
-            .reserve(CLIENT_CONSUMER_SESSION_BYTES)
-            .expect("first reservation fits");
-        assert!(matches!(
-            consumers.reserve(1),
-            Err(EmitterOpenRefusal::SessionCapacityExhausted)
-        ));
-        drop(first);
-        let replacement = consumers
-            .reserve(CLIENT_CONSUMER_SESSION_BYTES)
-            .expect("an interrupted open releases its reservation");
-        drop(replacement);
-        assert_eq!(consumers.state.lock().held_count, 0);
-        assert_eq!(consumers.state.lock().held_bytes, 0);
-    }
-}
+mod tests;

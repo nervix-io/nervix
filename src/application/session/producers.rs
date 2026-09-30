@@ -387,6 +387,12 @@ impl SessionProducers {
             ));
         }
         let service = &shared.service;
+        if !service.inner.runtime_admission.is_admitted() {
+            return Err(OpenRefusal::new(
+                ClientProducerRefusal::EndpointUnavailable,
+                "the serving node is catching up with committed domain state".to_string(),
+            ));
+        }
         let Some(state) = service.inner.consensus.current_domain(&domain).await else {
             return Err(OpenRefusal::new(
                 ClientProducerRefusal::DomainNotFound,

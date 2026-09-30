@@ -6638,6 +6638,7 @@ dependencies = [
  "serde_json",
  "strum 0.26.3",
  "tonic 0.13.1",
+ "uuid",
 ]
 
 [[package]]

@@ -521,6 +521,10 @@ test-connectors *args:
 test-client-wire *args:
     cargo test --package nervix-client-wire --all-features --all-targets -- {{ args }}
 
+# Run native client session unit tests without enabling the modeled Shuttle build.
+test-client-core *args:
+    cargo test --package nervix-client-core --features arrow,autocomplete --lib -- {{ args }}
+
 # Rewrite the client wire conformance corpus from the encoder's current output. Review the
 # regenerated `corpus.report` before committing it: every client implementation is held to it.
 update-client-wire-corpus:
@@ -657,10 +661,16 @@ test-scenarios-coverage: tests-deps
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
 
+# Remove collected profiles and instrumented workspace artifacts before collecting a new revision.
+# Append recipes retain artifacts, so a source move can otherwise leave stale line mappings beside
+# the current ones in a report.
+coverage-clean-workspace:
+    cargo llvm-cov clean --workspace
+
 # Rewrite lcov.info from the profiles the last coverage recipe collected, over the sources of every
 # workspace package, so crate lines the server's tests executed are measured as CI measures them.
-coverage-report-workspace:
-    cargo llvm-cov report --package 'nervix-*' --lcov --output-path lcov.info
+coverage-report-workspace *args:
+    cargo llvm-cov report --package 'nervix-*' --lcov --output-path lcov.info {{ args }}
 
 # Measure changed server and CLI lines against the server's unit tests and selected Cucumber
 # features while iterating. The scenarios run the public CLI, so it is built instrumented and handed
@@ -774,6 +784,10 @@ coverage-scenarios output *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 # Add selected scenarios to the current coverage profiles without rebuilding unchanged artifacts.
@@ -781,6 +795,10 @@ coverage-scenarios-append output *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --no-clean --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 # Measure the Redis DNS connector, its shared TLS/DNS code, and public source/sink scenarios.

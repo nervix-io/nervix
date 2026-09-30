@@ -32,6 +32,10 @@ name = "nervix-interconnect"
 
 [[package]]
 checks = [
+  "consumer::shuttle_tests::shuttle_close_fences_a_consumer_restore_interrupted_by_another_loss",
+  "consumer::shuttle_tests::shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange",
+  "producer::shuttle_tests::shuttle_close_fences_a_producer_restore_interrupted_by_another_loss",
+  "producer::shuttle_tests::shuttle_close_fences_a_producer_restore_started_on_the_same_exchange",
   "producer::slots::shuttle_tests::shuttle_a_cancelled_wait_loses_neither_the_outcome_nor_the_credit",
   "producer::slots::shuttle_tests::shuttle_a_release_racing_its_resolution_returns_the_credit_exactly_once",
   "producer::slots::shuttle_tests::shuttle_a_wait_racing_its_resolution_takes_the_outcome_once_and_returns_the_credit",
