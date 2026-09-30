@@ -73,6 +73,133 @@ Feature: Checked numeric execution
       | 1            | 0             |
       | 3            | 0             |
 
+  Scenario Outline: Narrow integer arithmetic fails only the messages whose exact results leave their width
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA narrow_operand (
+        id STRING,
+        tiny_left I8,
+        tiny_right I8,
+        byte_left U8,
+        byte_right U8,
+        short_left I16 OPTIONAL,
+        short_right I16,
+        word_left U16,
+        word_right U16,
+        int_left I32,
+        int_right I32,
+        uint_left U32,
+        uint_right U32
+      );
+      CREATE SCHEMA narrow_result (
+        id STRING,
+        tiny_sum I8,
+        tiny_difference I8,
+        tiny_product I8,
+        tiny_tripled I8,
+        byte_sum U8,
+        byte_difference U8,
+        byte_product U8,
+        byte_remaining U8,
+        short_sum I16 OPTIONAL,
+        short_difference I16 OPTIONAL,
+        short_product I16 OPTIONAL,
+        short_sum_missing BOOL,
+        word_sum U16,
+        word_difference U16,
+        word_product U16,
+        int_sum I32,
+        int_difference I32,
+        int_product I32,
+        uint_sum U32,
+        uint_difference U32,
+        uint_product U32
+      );
+      CREATE SCHEMA numeric_error (
+        input_id STRING,
+        error_message STRING
+      );
+      CREATE CODEC narrow_operand_batch_codec
+        FROM JSON
+        TO SCHEMA narrow_operand
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY narrow_operands SCHEMA narrow_operand UNBRANCHED;
+      CREATE RELAY narrow_results SCHEMA narrow_result UNBRANCHED;
+      CREATE RELAY numeric_errors SCHEMA numeric_error UNBRANCHED;
+      CREATE VHOST edge checked-narrow-{{test_id}}.example.com;
+      CREATE ENDPOINT narrow_operand_ingress ON edge PATH '/operands' TYPE HTTP;
+      CREATE INGESTOR narrow_operand_source
+        FROM ENDPOINT narrow_operand_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING narrow_operand_batch_codec
+        TO narrow_operands
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE JUNCTION compute_narrow
+        FROM narrow_operands
+        UNBRANCHED
+        TO narrow_results
+          SET id = input.id,
+              tiny_sum = input.tiny_left + input.tiny_right,
+              tiny_difference = input.tiny_left - input.tiny_right,
+              tiny_product = input.tiny_left * input.tiny_right,
+              tiny_tripled = input.tiny_left * 3 AS I8,
+              byte_sum = input.byte_left + input.byte_right,
+              byte_difference = input.byte_left - input.byte_right,
+              byte_product = input.byte_left * input.byte_right,
+              byte_remaining = 200 AS U8 - input.byte_left,
+              short_sum = input.short_left + input.short_right,
+              short_difference = input.short_left - input.short_right,
+              short_product = input.short_left * input.short_right,
+              short_sum_missing = is_null(input.short_left + input.short_right),
+              word_sum = input.word_left + input.word_right,
+              word_difference = input.word_left - input.word_right,
+              word_product = input.word_left * input.word_right,
+              int_sum = input.int_left + input.int_right,
+              int_difference = input.int_left - input.int_right,
+              int_product = input.int_left * input.int_right,
+              uint_sum = input.uint_left + input.uint_right,
+              uint_difference = input.uint_left - input.uint_right,
+              uint_product = input.uint_left * input.uint_right
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR SEND TO numeric_errors
+          SET input_id = input.id,
+              error_message = error.message;
+      CREATE SUBSCRIPTION narrow_results_subscription TO narrow_results;
+      CREATE SUBSCRIPTION numeric_errors_subscription TO numeric_errors;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "checked-narrow-{{test_id}}.example.com" path "/operands"
+      """
+      [{"id":"ordinary","tiny_left":7,"tiny_right":-3,"byte_left":9,"byte_right":4,"short_left":150,"short_right":-200,"word_left":300,"word_right":200,"int_left":70000,"int_right":-30000,"uint_left":100000,"uint_right":40000},{"id":"tiny-sum","tiny_left":1,"tiny_right":127,"byte_left":1,"byte_right":1,"short_left":1,"short_right":1,"word_left":1,"word_right":1,"int_left":1,"int_right":1,"uint_left":1,"uint_right":1},{"id":"byte-difference","tiny_left":1,"tiny_right":1,"byte_left":3,"byte_right":5,"short_left":1,"short_right":1,"word_left":1,"word_right":1,"int_left":1,"int_right":1,"uint_left":1,"uint_right":1},{"id":"short-product","tiny_left":1,"tiny_right":1,"byte_left":1,"byte_right":1,"short_left":182,"short_right":182,"word_left":1,"word_right":1,"int_left":1,"int_right":1,"uint_left":1,"uint_right":1},{"id":"word-sum","tiny_left":1,"tiny_right":1,"byte_left":1,"byte_right":1,"short_left":1,"short_right":1,"word_left":65535,"word_right":1,"int_left":1,"int_right":1,"uint_left":1,"uint_right":1},{"id":"int-difference","tiny_left":1,"tiny_right":1,"byte_left":1,"byte_right":1,"short_left":1,"short_right":1,"word_left":1,"word_right":1,"int_left":-2147483648,"int_right":1,"uint_left":1,"uint_right":1},{"id":"uint-product","tiny_left":1,"tiny_right":1,"byte_left":1,"byte_right":1,"short_left":1,"short_right":1,"word_left":1,"word_right":1,"int_left":1,"int_right":1,"uint_left":65536,"uint_right":65536},{"id":"null-short","tiny_left":1,"tiny_right":1,"byte_left":1,"byte_right":1,"short_right":32767,"word_left":1,"word_right":1,"int_left":1,"int_right":1,"uint_left":1,"uint_right":1},{"id":"tiny-tripled","tiny_left":43,"tiny_right":1,"byte_left":1,"byte_right":1,"short_left":1,"short_right":1,"word_left":1,"word_right":1,"int_left":1,"int_right":1,"uint_left":1,"uint_right":1},{"id":"byte-remaining","tiny_left":1,"tiny_right":1,"byte_left":201,"byte_right":1,"short_left":1,"short_right":1,"word_left":1,"word_right":1,"int_left":1,"int_right":1,"uint_left":1,"uint_right":1}]
+      """
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      "id":"ordinary" | "tiny_sum":4 | "tiny_difference":10 | "tiny_product":-21 | "tiny_tripled":21 | "byte_sum":13 | "byte_difference":5 | "byte_product":36 | "byte_remaining":191 | "short_sum":-50 | "short_difference":350 | "short_product":-30000 | "short_sum_missing":false | "word_sum":500 | "word_difference":100 | "word_product":60000 | "int_sum":40000 | "int_difference":100000 | "int_product":-2100000000 | "uint_sum":140000 | "uint_difference":60000 | "uint_product":4000000000
+      "id":"null-short" | "short_sum_missing":true | "tiny_sum":2 | "byte_remaining":199 | "word_product":1 | "int_difference":0 | "uint_product":1
+      "input_id":"tiny-sum" | overflow: integer addition overflowed
+      "input_id":"byte-difference" | overflow: integer subtraction overflowed
+      "input_id":"short-product" | overflow: integer multiplication overflowed
+      "input_id":"word-sum" | overflow: integer addition overflowed
+      "input_id":"int-difference" | overflow: integer subtraction overflowed
+      "input_id":"uint-product" | overflow: integer multiplication overflowed
+      "input_id":"tiny-tripled" | overflow: integer multiplication overflowed
+      "input_id":"byte-remaining" | overflow: integer subtraction overflowed
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
   Scenario Outline: Floating-point arithmetic and math functions fail only non-finite messages in a batch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

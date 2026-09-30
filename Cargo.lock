@@ -7614,6 +7614,7 @@ name = "nervix-simd-kernels"
 version = "0.1.0-dev"
 dependencies = [
  "arch-into",
+ "bolero",
  "criterion 0.5.1",
  "error-stack",
  "fastrand",
@@ -7666,6 +7667,7 @@ dependencies = [
  "criterion 0.5.1",
  "error-stack",
  "faster-hex",
+ "fastrand",
  "indexmap 2.14.2",
  "jiff",
  "jiff-tzdb",

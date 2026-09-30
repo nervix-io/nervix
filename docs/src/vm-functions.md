@@ -420,6 +420,7 @@ All paths are relative to the repository root.
 | `crates/nervix-vm/src/error.rs` | `CompileError`, `RuntimeError`, `SideError`, error codes, and sparse `RowErrors` |
 | `crates/nervix-vm/src/numeric.rs` and `numeric/` | Checked numeric lanes, comparisons, math, bit operations, and decimal rounding |
 | `crates/simd-kernels/src/flags.rs` | Packing the checked lanes' per-lane failure bytes into bitmap words at the selected SIMD level |
+| `crates/simd-kernels/src/checked.rs`, `benches/checked_lanes.rs` | Checked integer addition, subtraction and multiplication in vector registers at the selected SIMD level, returning each lane's value together with the failure words, and their measurement beside the lane loop they replaced |
 | `crates/nervix-vm/src/datetime.rs` and `datetime/` | Fixed-unit datetime kernels, calendar arithmetic, time zones, and formats |
 | `crates/nervix-vm/src/text_column.rs` | The bounded builder for `STRING` and `BYTES` values whose length an argument chooses |
 | `crates/nervix-vm/src/text_search.rs`, `regexp.rs` | Splitting, joining, `LIKE`, `contains_any`, NFC normalization, and regular expressions with their caches |
@@ -719,13 +720,14 @@ future is dropped. A UDF adds its own watchdog, described [below](#extension-bou
 
 ### Kernel Classes
 
-Every kernel falls into one of four classes. The class decides how its cost scales and which claim
+Every kernel falls into one of five classes. The class decides how its cost scales and which claim
 about vector instructions it supports.
 
 | Class | Examples | Claim |
 | --- | --- | --- |
 | Arrow compute kernel | Boolean logic, `STRING`/`BYTES`/`DATETIME` comparisons, `LIKE`/`ILIKE`, `contains`/`starts_with`/`ends_with`, casts, `CASE`/`coalesce`/`nullif` selection, filter/take/zip/interleave, UTC `date_part`, `bitwise_and`/`or`/`xor`, list `sum` per row | Whatever Arrow 58.4's kernels do; Nervix adds none of its own |
-| One pass over value buffers | Checked integer and float arithmetic, numeric comparisons, fixed-width `IN`, `abs`/`sign`/negation, `ceil`/`floor`/`round`/`trunc`, `sqrt`, shifts, classification, fixed-unit `date_trunc`/`date_bin`/`date_add`/`date_diff`, `to_unix`/`from_unix`, `length`/`octet_length`/`bit_length`, ASCII `lower`/`upper`, list `count` | Written so LLVM may auto-vectorize the loop for the target CPU; no claim that it does |
+| Explicit SIMD lanes | Checked `+` and `-` over `I8`, `U8`, `I16`, `U16`, `I32`, `U32`, `I64`, and `U64`, and checked `*` over `I8`, `U8`, `I16`, `U16`, `I32`, and `U32` | `nervix-simd-kernels` selects the vector instructions once per process, with a scalar fallback, and every level computes the same lanes; the [SIMD kernels 07 report](https://github.com/nervix-io/nervix/blob/main/benches/reports/simd-kernels-07.md) inspects the `x86-64-v3` and AVX-512 code |
+| One pass over value buffers | Checked integer `/` and `%`, checked `*` over `I64` and `U64`, checked float arithmetic, numeric comparisons, fixed-width `IN`, `abs`/`sign`/negation, `ceil`/`floor`/`round`/`trunc`, `sqrt`, shifts, classification, fixed-unit `date_trunc`/`date_bin`/`date_add`/`date_diff`, `to_unix`/`from_unix`, `length`/`octet_length`/`bit_length`, ASCII `lower`/`upper`, list `count` | Written so LLVM may auto-vectorize the loop for the target CPU; no claim that it does |
 | Library with runtime SIMD dispatch | JSON structure (simd-json), base64 (base64-simd), hexadecimal (faster-hex), `sha256` (sha2 with SHA-NI detection) | The library selects instructions at run time; `xxh3_64` selects them when the binary is built |
 | Irregular, per row | Transcendental math, `round(value, digits)`, zoned and calendar datetimes, datetime formatting and parsing, Unicode case mapping and NFC, regular expressions, Aho-Corasick, substring and padding functions, `md5`, IP and URL parsing, JSON path walk and conversion, most list functions, UUIDs | Batch API with optimized substeps; scalar work per row |
 
@@ -762,13 +764,26 @@ List `min` and `max` are the one place that intentionally keeps Arrow's total or
   `nervix-simd-kernels` packs the block's bytes into its failure words with vector compares and
   bitmask extraction at the SIMD level the process selected. No lane shifts its failure into a
   word, so packing does not decide whether the lane loop vectorizes.
+- **Explicit integer lanes.** Integer `+` and `-`, and `*` below 64 bits, run no lane loop of
+  their own. `CheckedInteger` hands the operands' value buffers, and a scalar operand as the value
+  every lane shares, to `CheckedArithmetic` in `nervix-simd-kernels`, which computes a register of
+  lanes at a time and returns each lane's value together with the failure words, so no failure
+  byte is stored or packed. A sum or a difference wraps in its operands' own lanes, and the signs
+  of its operands and result, or the carry out of unsigned lanes, give its failure bit at every
+  width. An 8-, 16-, or 32-bit product widens into two registers of lanes twice as wide, where
+  every product is exact: comparing it against the narrow type's bounds gives the failure bit, and
+  narrowing it back by truncation gives the lane's value. Every lane holds the wrapped value that
+  `overflowing_add`, `overflowing_sub`, or `overflowing_mul` returns. A 64-bit product has no wider
+  lane to be exact in, so it stays on the lane loop.
 - **Failed lanes.** A failed lane becomes null and its value is zeroed, so a wrapped result never
   escapes.
 - **Validity.** A result lane is null wherever any operand lane is null.
 - **No rerun.** The kernel never reruns a batch. The failure bitmap, restricted to lanes whose
   operands are valid, is the only record of a failure.
-- **Scalar operands.** A scalar operand is folded into the lane function.
-- **Inlining.** Each operator passes its own lane function, so the call inlines.
+- **Scalar operands.** A scalar operand is folded into the lane function, or handed to an explicit
+  kernel as the value every lane shares.
+- **Inlining.** Each operator passes its own lane function or kernel operation, so the call
+  inlines.
 
 The datetime kernels share these lanes. Their Euclidean truncation and binning, and their i128
 elapsed-time arithmetic, fail a lane rather than wrap it.
@@ -803,9 +818,19 @@ These are three different claims, and the implementation makes them separately:
   select supported instructions at run time, with a scalar fallback. Outside the VM it serves the
   schemaful JSON emission classifier and the delivery-latency fold, which reads a batch's ingestion
   watermarks once to find its latest watermark and bucket every row's latency. Inside the VM it packs
-  the failure bytes of the checked lanes into bitmap words, with the same word at every level. The
-  lane operations themselves remain compiler-vectorized: no VM kernel names an instruction set, and
-  the VM uses no `std::arch` or `target_feature` of its own.
+  the failure bytes of the checked lanes into bitmap words, with the same word at every level, and
+  computes the [explicit integer lanes](#checked-buffer-kernels).
+- **Dispatch.** The kernel crate resolves one `fearless_simd` level per process from the CPU's
+  features, never below what the build's target already guarantees. An x86-64 build selects
+  AVX-512, AVX2, SSE4.2, or SSE2, so the Docker image's `x86-64-v3` payload runs the AVX2 arm, or
+  the AVX-512 arm on a CPU that has it. An AArch64 build runs NEON, and the scalar fallback runs only
+  where no level is available. Each kernel call enters the selected level once through
+  `dispatch!`, which enables that level's target features for small `#[inline(always)]` functions
+  generic over `S: Simd`, and computes its whole run there. Every level gives every lane the same
+  value and failure bit, and the kernel tests compare every level the host offers, and the forced
+  fallback, against a scalar reference. The VM itself names no instruction set: it hands buffers to
+  the kernel crate, its other lane operations remain compiler-vectorized, and it uses no
+  `std::arch` or `target_feature` of its own.
 
 The [VM functions measurement report](https://github.com/nervix-io/nervix/blob/main/benches/reports/vm-functions-18.md)
 records what the measurements establish, and
@@ -826,7 +851,8 @@ guidance:
 
 The timings were taken on one development machine with other builds running, so they are
 diagnostic. Without hardware counters or generated-instruction inspection, they do not establish a
-SIMD speedup.
+SIMD speedup. The [SIMD kernels 07 report](https://github.com/nervix-io/nervix/blob/main/benches/reports/simd-kernels-07.md)
+records the generated instructions and interleaved Criterion rounds of the explicit integer lanes.
 
 ### Nulls, NaN, Overflow, And Unicode
 
