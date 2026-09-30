@@ -24,7 +24,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_expression_roundtrip_minimal_parentheses/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "nspl-expression"
 invariant = "A generated current expression of every form renders to text that a statement and every standalone expression reader read back as the complete structured expression."
@@ -38,7 +38,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_nspl/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "nspl-model"
 invariant = "Canonical NSPL of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
@@ -52,7 +52,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "nspl-archive-model"
 invariant = "An archived canonical document of generated Models of every family reparses to the complete ordered Model sequence."
