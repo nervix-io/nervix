@@ -26,10 +26,10 @@ use nervix_primitives::{
         atomic::{AtomicBool, Ordering},
         mpsc, oneshot,
     },
+    time::Instant,
 };
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use tokio::time::Instant;
 use triomphe::Arc;
 use uuid::Uuid;
 
@@ -237,7 +237,7 @@ impl ClientConsumerRouter {
             expected_fields,
             limits,
         };
-        let stream = tokio::time::timeout(
+        let stream = nervix_primitives::time::timeout(
             OPEN_DEADLINE,
             self.interconnect.open_duplex_stream(owner, opening),
         )
@@ -245,7 +245,7 @@ impl ClientConsumerRouter {
         .map_err(|_| EmitterOpenRefusal::EndpointUnavailable)?
         .map_err(|_| EmitterOpenRefusal::EndpointUnavailable)?;
         let (sender, mut receiver) = stream;
-        let first = tokio::time::timeout(OPEN_DEADLINE, receiver.next())
+        let first = nervix_primitives::time::timeout(OPEN_DEADLINE, receiver.next())
             .await
             .map_err(|_| EmitterOpenRefusal::EndpointUnavailable)?
             .map_err(|_| EmitterOpenRefusal::EndpointUnavailable)?
@@ -390,8 +390,8 @@ async fn serve_owner(
     let (responder, deliveries) = consumer.split();
     let mut forward =
         nervix_primitives::task::spawn(forward_deliveries(deliveries, answers.clone()));
-    let mut heartbeat = tokio::time::interval(HEARTBEAT_EACH);
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut heartbeat = nervix_primitives::time::interval(HEARTBEAT_EACH);
+    heartbeat.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
     let mut last_heard = Instant::now();
     loop {
         nervix_primitives::select! {
@@ -491,8 +491,8 @@ async fn serve_forwarded(
         ahash::HashMap::<u64, oneshot::Sender<Result<(), ClientEmitterRefusal>>>::default();
     let mut next_key = 1_u64;
     let mut assembly: Option<Assembly> = None;
-    let mut heartbeat = tokio::time::interval(HEARTBEAT_EACH);
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut heartbeat = nervix_primitives::time::interval(HEARTBEAT_EACH);
+    heartbeat.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
     let mut last_heard = Instant::now();
     loop {
         nervix_primitives::select! {

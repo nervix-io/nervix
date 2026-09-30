@@ -210,19 +210,35 @@ test-execution *args:
 
 # Run the primitive boundary's conformance checks once per execution mode. Each mode runs the same
 # contract scripts of every family against its own backend and checks that it selected that backend,
-# so an operation a backend lacks or answers differently fails here. The Shuttle build also shows
-# that its adapters let the scheduler reach a publication between a read and a waiter's
-# registration, and the Loom build that it takes the ordinary libraries for the families Loom does
-# not model. The documentation tests show that a runtime attribute refuses a crate path. Every mode
-# is its own build, because Cargo would unify the features of one.
+# so an operation a backend lacks or answers differently fails here. The ordinary build with the
+# `test-util` capability measures every timer on a paused clock. The Shuttle build also shows that
+# its adapters let the scheduler reach a publication between a read and a waiter's registration,
+# that its timers are scheduling points whose timeouts a check triggers, and that a socket fails a
+# check; the Turmoil build that sockets, name lookup, timers and admitted CPU jobs belong to the
+# simulated host that uses them; and the Loom build that it takes the ordinary libraries for the
+# families Loom does not model. The documentation tests show that a runtime attribute refuses a
+# crate path. Every mode is its own build, because Cargo would unify the features of one.
 # The portable surface is also built for the browser target.
-test-primitives:
+test-primitives: test-primitives-ordinary test-primitives-modeled test-primitives-compile
+
+# The conformance checks in ordinary native execution: the portable surface alone, then with the
+# native families, then with the `test-util` capability, which measures every timer on a paused
+# clock. `coverage-native-extras test-primitives` runs these under instrumentation.
+test-primitives-ordinary:
     cargo test --package nervix-primitives --lib
     cargo test --package nervix-primitives --features native --lib
-    cargo test --package nervix-primitives --features native --doc
+    cargo test --package nervix-primitives --features 'native test-util' --lib
+
+# The conformance checks under each model checker's backend, each mode its own build.
+test-primitives-modeled:
     cargo test --package nervix-primitives --features 'shuttle native' --lib
     cargo test --package nervix-primitives --features 'loom native' --lib
     cargo test --package nervix-primitives --features 'turmoil native' --lib
+
+# The conformance checks that compile rather than run: the documentation tests that a runtime
+# attribute refuses a crate path, and the portable surface's browser build.
+test-primitives-compile:
+    cargo test --package nervix-primitives --features native --doc
     cargo check --package nervix-primitives --lib --target wasm32-unknown-unknown
 
 # Explore the filtered execution, interconnect and server invariants under Shuttle, then replay
@@ -311,17 +327,20 @@ test-loom-replay failure:
 test-loom-qualification:
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} qualify
 
-# Run the Turmoil suite: the execution and library simulation checks, then every interconnect
-# scenario over its committed regression seeds. Tokio's unstable runtime knobs seed per-host
-# scheduling and turn unhandled task panics into runtime failures; the cfg is scoped to this test
-# mode, and ordinary and Shuttle builds keep their flags. After the build, the tests run inside a
-# real-time budget of `budget_seconds` and end with status 124 when it expires. A failed scenario
-# leaves a failure record under target/turmoil-failures for `test-turmoil-replay`.
+# Run the Turmoil suite: the primitive boundary's simulated-host checks, the execution and library
+# simulation checks, then every interconnect scenario over its committed regression seeds. Tokio's
+# unstable runtime knobs seed per-host scheduling and turn unhandled task panics into runtime
+# failures; the cfg is scoped to this test mode, and ordinary and Shuttle builds keep their flags.
+# After the build, the tests run inside a real-time budget of `budget_seconds` and end with status
+# 124 when it expires. A failed scenario leaves a failure record under target/turmoil-failures for
+# `test-turmoil-replay`.
 test-turmoil budget_seconds="480":
     #!/usr/bin/env bash
     set -euo pipefail
     turmoil_rustflags="--cfg tokio_unstable ${RUSTFLAGS:-}"
     export NERVIX_TURMOIL_FAILURES={{ quote(turmoil_failures) }}
+    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
+        --package nervix-primitives --features 'turmoil native' --lib
     RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
         --package nervix-execution --features turmoil --lib
     RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
@@ -342,6 +361,8 @@ test-turmoil budget_seconds="480":
         fi
         return "${status}"
     }
+    within_budget cargo test --package nervix-primitives --features 'turmoil native' --lib -- \
+        simulated_host turmoil_mode --test-threads=1
     within_budget cargo test --package nervix-execution --features turmoil --lib -- \
         --test-threads=1
     within_budget cargo test --package nervix-interconnect --features turmoil --lib -- \
@@ -801,6 +822,7 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
         --package nervix-connector-iceberg \
         --package nervix-connector-rabbitmq \
         --package nervix-connector-redis \
+        --package nervix-connector-mqtt \
         --package nervix-connector-syslog \
         --package nervix-connector-websockets \
         --package nervix-connector-clickhouse \
@@ -824,6 +846,7 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
     run_scenario tests/features/runtime/iceberg_emission.feature 'DNS.*fixture|Iceberg.*holds.*ACK'
     run_scenario tests/features/runtime/rabbitmq_dns_resolution.feature 'RabbitMQ|AMQPS'
     run_scenario tests/features/runtime/redis_dns_resolution.feature 'Redis'
+    run_scenario tests/features/runtime/mqtt_dns_resolution.feature 'MQTT'
     run_scenario tests/features/runtime/syslog_dns_resolution.feature 'Syslog'
     run_scenario tests/features/runtime/websocket_client_ingestion.feature 'Websocket client ingestor connects'
     run_scenario tests/features/runtime/websocket_client_tls_resource_mounts.feature 'Websocket client keeps'
@@ -848,6 +871,7 @@ coverage-dns-clients-report output="target/dns-clients.lcov":
         --package nervix-connector-iceberg \
         --package nervix-connector-rabbitmq \
         --package nervix-connector-redis \
+        --package nervix-connector-mqtt \
         --package nervix-connector-syslog \
         --package nervix-connector-websockets \
         --package nervix-connector-clickhouse \
@@ -904,6 +928,9 @@ coverage-turmoil output:
     set -euo pipefail
     export RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}"
     cargo llvm-cov --no-report \
+        --package nervix-primitives --features 'turmoil native' --lib -- \
+        simulated_host turmoil_mode --test-threads=1
+    cargo llvm-cov --no-report \
         --package nervix-execution --features turmoil --lib
     cargo llvm-cov --no-report \
         --package nervix-interconnect --features turmoil --lib -- \
@@ -913,19 +940,45 @@ coverage-turmoil output:
     cargo llvm-cov report --no-default-ignore-filename-regex \
         --lcov --output-path {{ quote(output) }}
 
+# Run the extra checks that execute Nervix code natively in ordinary mode, `bench-smoke`,
+# `test-primitives` and `nspl-completion-walk`, exactly as their recipes do but with LLVM source
+# coverage, and fail as they do. Prerequisites build outside the instrumentation, and the parts of a
+# check that compile, target the browser or run a model checker stay uninstrumented. Each producer
+# writes lcov.info, completion.json, executions.jsonl and export.log to a fresh
+# target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/, and CI runs one per step.
+# Run all three: `just coverage-native-extras`; one: `just coverage-native-extras bench-smoke`.
+coverage-native-extras *producers: llvm-tools
+    python3 scripts/native_coverage.py --target-dir {{ quote(cargo_target_dir) }} run {{ producers }}
+
+# Exercise the native coverage collector: its producer inventory, source policy, selection and
+# failure handling, then instrumented runs of a fixture crate through the real toolchain.
+test-native-coverage: llvm-tools
+    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required python3 -m unittest --quiet scripts.tests.test_native_coverage
+
+# Add the LLVM tools that read coverage profiles to the toolchain rust-toolchain.toml pins, which
+# must be the compiler's own: a toolchain installed under another name does not provide them.
+llvm-tools:
+    rustup component add llvm-tools
+
 # Run every Criterion suite with the release profile. Extra arguments are forwarded to Criterion.
 # The server benches link the console the server serves, so the console is built first rather than
 # left to whatever ran before them.
 bench *args: build-web-console
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
+    cargo bench --package nervix-branch-instances --bench owned_branches -- {{ args }}
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
     cargo bench --package nervix-server --bench wasm_checkpoint --features benchmarks -- {{ args }}
     cargo bench --package nervix-columnar-json --bench json_encode -- {{ args }}
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
 # Exercise every Criterion body once without spending CI's smoke-test budget on release codegen.
-bench-smoke: build-web-console
+bench-smoke: build-web-console bench-smoke-bodies
+
+# The Criterion bodies `bench-smoke` exercises, without the console build that precedes them there.
+# `coverage-native-extras` builds the console outside its instrumentation and then runs these in it.
+bench-smoke-bodies:
     cargo bench --profile dev --package nervix-server --bench relay_interaction --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-branch-instances --bench owned_branches -- --test
     cargo bench --profile dev --package nervix-server --bench subscription_row_encoding --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench wasm_checkpoint --features benchmarks -- --test
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
@@ -935,6 +988,11 @@ bench-smoke: build-web-console
 # one batch at 1, 64, and 1,024 rows. Extra arguments are forwarded to Criterion.
 bench-relay-interaction *args: build-web-console
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
+
+# Measure the branch owner a relay owner task holds: batches for established branches, which
+# publish nothing, and branch churn, which creates, evicts and publishes once per batch.
+bench-branch-instances *args:
+    cargo bench --package nervix-branch-instances --bench owned_branches -- {{ args }}
 
 # Build the SIMD kernel crate's optimized unit-test binary for the x86-64-v3 payload the Docker
 # image ships, in its own target directory, so the generated instructions of each dispatch level can
@@ -985,6 +1043,12 @@ bench-wasm-checkpoint *args:
 # group filter and `--save-baseline` or `--baseline` compare VM kernels without the relay suite.
 bench-vm *args:
     cargo bench --package nervix-vm --bench vm -- {{ args }}
+
+# Build the VM Criterion binary for the x86-64-v3 payload the Docker image ships, in its own target
+# directory, so the checked lanes and their failure packing can be inspected with objdump without
+# the host's native CPU tuning.
+build-vm-bench-x86-64-v3:
+    CARGO_TARGET_DIR="{{ cargo_target_dir }}/vm-x86-64-v3" RUSTFLAGS="-C target-cpu=x86-64-v3" cargo bench --package nervix-vm --bench vm --no-run
 
 # Run the same VM Criterion harness with one-shot allocation and output-size probes. The
 # instrumentation is compiled only for this recipe; use `bench-vm` for timing comparisons.
@@ -1162,6 +1226,7 @@ cargo-clippy-all:
         --package nervix-model-harness \
         --package nervix-wasm
     cargo clippy --all-targets --features native --package nervix-primitives
+    cargo clippy --all-targets --features 'native test-util' --package nervix-primitives
     cargo clippy --lib --features 'shuttle testing' \
         --package nervix-client-core \
         --package 'nervix-connector*' \
@@ -1275,9 +1340,9 @@ validate-dns-dependencies:
             exit 1
         fi
     done
-    # Syslog, WebSocket and Redis transports resolve through the node resolver, even when each
+    # Syslog, WebSocket, Redis and MQTT transports resolve through the node resolver, even when each
     # connector is built without the server's feature graph.
-    for package in nervix-connector-syslog nervix-connector-websockets nervix-connector-redis; do
+    for package in nervix-connector-syslog nervix-connector-websockets nervix-connector-redis nervix-connector-mqtt; do
         graph="$(cargo tree --package "${package}" --edges normal --format '{p} {f}' --prefix none)"
         if ! rg -q '^nervix-dns v' <<< "${graph}" || \
             ! rg -q '^hickory-resolver v0\.26\.[0-9]+ .*tokio' <<< "${graph}"; then
@@ -1289,6 +1354,14 @@ validate-dns-dependencies:
     if ! rg -q '^redis v1\.[0-9]+\.[0-9]+ .*tokio-rustls-comp' <<< "${graph}" || \
         rg -q '^rustls v[^ ]+ (.*,)?ring(,|$)' <<< "${graph}"; then
         echo "nervix-connector-redis lacks Redis's AWS-LC TLS path" >&2
+        exit 1
+    fi
+    # MQTT dials each resolved address with rumqttc's own per-address dialer from rumqttc-core,
+    # and the driver still completes TLS on the stream, on AWS-LC alone.
+    graph="$(cargo tree --package nervix-connector-mqtt --edges normal --format '{p} {f}' --prefix none)"
+    if ! rg -q '^rumqttc-v5-next v[^ ]+ (.*,)?use-rustls-aws-lc(,|$)' <<< "${graph}" || \
+        rg -q '^rustls v[^ ]+ (.*,)?ring(,|$)' <<< "${graph}"; then
+        echo "nervix-connector-mqtt lacks rumqttc's AWS-LC TLS path" >&2
         exit 1
     fi
     # ClickHouse and SQS hand the node resolver to their drivers' own DNS hooks, Hyper's connector

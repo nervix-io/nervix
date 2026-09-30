@@ -492,26 +492,27 @@ impl Client {
             expected_fields,
             limits,
         };
-        let opened = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
-            for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-                nervix_primitives::task::consume_budget().await;
-                let attempt = self.open_on_current_exchange(request.clone()).await;
-                let report = match attempt {
-                    Ok(producer) => return Ok(producer),
-                    Err(report) => report,
-                };
-                if !report.current_context().retryable_session_failure() {
-                    return Err(report);
+        let opened =
+            nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
+                for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+                    nervix_primitives::task::consume_budget().await;
+                    let attempt = self.open_on_current_exchange(request.clone()).await;
+                    let report = match attempt {
+                        Ok(producer) => return Ok(producer),
+                        Err(report) => report,
+                    };
+                    if !report.current_context().retryable_session_failure() {
+                        return Err(report);
+                    }
+                    match self.recover_session(RecoveryMode::IfClosed).await? {
+                        SessionRecovery::Ready => {}
+                        SessionRecovery::Unavailable => return Err(report),
+                    }
                 }
-                match self.recover_session(RecoveryMode::IfClosed).await? {
-                    SessionRecovery::Ready => {}
-                    SessionRecovery::Unavailable => return Err(report),
-                }
-            }
-            // Only a session that closed again on the last attempt leaves the loop.
-            Err(Report::new(ClientError::SessionClosed))
-        })
-        .await;
+                // Only a session that closed again on the last attempt leaves the loop.
+                Err(Report::new(ClientError::SessionClosed))
+            })
+            .await;
         match opened {
             Ok(result) => result,
             Err(_) => Err(Report::new(ClientError::RetryDeadline)),
@@ -604,7 +605,7 @@ async fn close_attachment(
     let request = ClientRequest::CloseIngestor(CloseIngestorRequest {
         producer: attachment.id,
     });
-    let answered = tokio::time::timeout(
+    let answered = nervix_primitives::time::timeout(
         deadline,
         request_on_exchange(&attachment.exchange, request, RequestKind::CloseIngestor),
     )
@@ -1122,7 +1123,7 @@ impl ProducerAttachment {
                 return outcome;
             }
             nervix_primitives::select! {
-                () = tokio::time::sleep(backoff) => {}
+                () = nervix_primitives::time::sleep(backoff) => {}
                 _ = end.changed() => return outcome,
             }
             backoff = next_backoff(backoff, policy.retry_max_backoff);

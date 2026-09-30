@@ -8,9 +8,10 @@
 //! - **Must not know.** The harness that replaces it in a test build.
 
 #[cfg(not(feature = "testing"))]
-use nervix_models::{ClusterNodeName, DomainName, EmitterName, IngestorName};
+use std::time::Duration;
+
 #[cfg(not(feature = "testing"))]
-use tokio::time::Duration;
+use nervix_models::{ClusterNodeName, DomainName, EmitterName, IngestorName};
 
 #[cfg(not(feature = "testing"))]
 use crate::ConfiguredFaultInjection;
@@ -87,6 +88,14 @@ impl ConfiguredFaultInjection {
         &self,
         _domain: &DomainName,
     ) {
+    }
+
+    pub(in crate::runtime) fn loses_remote_acknowledgement(
+        &self,
+        _resolver: &ClusterNodeName,
+        _registrar: &ClusterNodeName,
+    ) -> bool {
+        false
     }
 
     pub(in crate::runtime) async fn pause_owner_relay_fanout_if_armed(&self, _domain: &DomainName) {

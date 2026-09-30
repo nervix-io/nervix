@@ -112,7 +112,7 @@ async fn then_leader_describes_emitter_with(
             Instant::now() < deadline,
             "DESCRIBE EMITTER {emitter} never reported {missing:?}; last output:\n{output}"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -188,7 +188,7 @@ async fn open(
                 return;
             }
             Err(EmitterOpenRefusal::EndpointUnavailable) if Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(50)).await;
             }
             Err(refusal) => panic!("emitter consumer open was refused: {refusal:?}"),
         }
@@ -324,7 +324,7 @@ async fn when_consumer_reads(world: &mut ScenarioWorld, consumer: String, batch:
         .unwrap_or_else(|| panic!("consumer '{consumer}' is not open"));
     let attempt = match attached {
         ScenarioConsumer::Native(client) => {
-            let delivery = tokio::time::timeout(OPEN_WAIT, client.next_batch())
+            let delivery = nervix_primitives::time::timeout(OPEN_WAIT, client.next_batch())
                 .await
                 .expect("consumer read deadline")
                 .expect("consumer read reply")
@@ -375,7 +375,7 @@ async fn then_consumer_reports_interruption(world: &mut ScenarioWorld, consumer:
     else {
         panic!("session interruption requires a native consumer");
     };
-    let report = match tokio::time::timeout(OPEN_WAIT, client.next_batch())
+    let report = match nervix_primitives::time::timeout(OPEN_WAIT, client.next_batch())
         .await
         .expect("consumer interruption deadline")
     {
@@ -400,7 +400,7 @@ async fn when_consumer_starts_read(world: &mut ScenarioWorld, consumer: String, 
     };
     let client = client.clone();
     let wait = nervix_primitives::task::spawn(async move {
-        tokio::time::timeout(OPEN_WAIT, client.next_batch())
+        nervix_primitives::time::timeout(OPEN_WAIT, client.next_batch())
             .await
             .expect("consumer read deadline")
             .expect("consumer read reply")
@@ -695,7 +695,7 @@ async fn then_consumer_ends(world: &mut ScenarioWorld, consumer: String) {
         .unwrap_or_else(|| panic!("consumer '{consumer}' is not open"));
     match attached {
         ScenarioConsumer::Native(client) => {
-            let interrupted = tokio::time::timeout(OPEN_WAIT, client.next_batch())
+            let interrupted = nervix_primitives::time::timeout(OPEN_WAIT, client.next_batch())
                 .await
                 .expect("consumer end deadline")
                 .err()
@@ -704,7 +704,7 @@ async fn then_consumer_ends(world: &mut ScenarioWorld, consumer: String) {
                 interrupted.current_context(),
                 ClientError::ConsumerInterrupted
             ));
-            let terminal = tokio::time::timeout(OPEN_WAIT, client.next_batch())
+            let terminal = nervix_primitives::time::timeout(OPEN_WAIT, client.next_batch())
                 .await
                 .expect("consumer restoration deadline")
                 .err()

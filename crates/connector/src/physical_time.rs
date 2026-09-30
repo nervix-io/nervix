@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use error_stack::Report;
 use nervix_models::Timestamp;
+use nervix_primitives::time::{Instant, sleep_until};
 use thiserror::Error;
-use tokio::time::{Instant, sleep_until};
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum PhysicalDeadlineError {
@@ -86,9 +86,9 @@ mod tests {
             capability.wait_until(deadline).await;
         });
 
-        tokio::time::advance(Duration::from_secs(1)).await;
+        nervix_primitives::time::advance(Duration::from_secs(1)).await;
         assert!(!waiter.is_finished());
-        tokio::time::advance(Duration::from_secs(1)).await;
+        nervix_primitives::time::advance(Duration::from_secs(1)).await;
         waiter.await.expect("the deadline task must finish");
     }
 }

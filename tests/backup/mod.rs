@@ -103,7 +103,7 @@ async fn run_cli(world: &mut ScenarioWorld, node: &str, arguments: Vec<String>) 
         TEST_AUTH_PASSWORD,
     ]);
     command.args(arguments);
-    let output = tokio::time::timeout(CLI_BACKUP_TIMEOUT, command.output())
+    let output = nervix_primitives::time::timeout(CLI_BACKUP_TIMEOUT, command.output())
         .await
         .expect("the CLI finishes within its budget")
         .expect("the CLI process starts");
@@ -800,7 +800,7 @@ async fn when_backup_retry_validity_has_ended(world: &mut ScenarioWorld) {
         if now > retained_until {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 

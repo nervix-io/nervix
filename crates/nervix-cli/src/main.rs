@@ -1216,7 +1216,7 @@ async fn execute_upload_and_print(
     let progress_finished = Arc::clone(&finished);
     let progress_identifier = identifier.clone();
     let progress_task = nervix_primitives::task::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(120));
+        let mut interval = nervix_primitives::time::interval(std::time::Duration::from_millis(120));
         let frames = ["|", "/", "-", "\\"];
         let mut frame_index = 0_usize;
         loop {

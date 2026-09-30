@@ -19,11 +19,9 @@ nervix-client-core = { workspace = true, features = ["autocomplete"] }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 strum = { workspace = true, features = ["derive"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
 triomphe = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["net"] }
 tonic = { workspace = true }
 uuid = { workspace = true }

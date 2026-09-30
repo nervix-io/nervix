@@ -138,6 +138,20 @@ A Pub/Sub source resolves before opening its dedicated stream and retains `DnsLo
 check or failed Redis protocol setup is also a connection failure. None rejects an input message
 or changes Redis Pub/Sub's server-acceptance boundary for `PUBLISH`.
 
+An MQTT client's event loop reports a failed or lost broker connection as an
+`MqttConnectionError`, owned by the connector's connection module. The socket connector hands the
+driver the resolver's `DnsLookupError` as the failure of a lookup, and the driver keeps it as the
+cause of its connection error. The connector finds it there and reports
+`MqttConnectionError::Resolve`, with the host and the resolver's `DnsLookupFailure` as typed fields
+and the `DnsLookupError` beneath it. Any other failure keeps the driver's own description, such as
+an address that refused the connection, a failed TLS handshake, including a certificate that does
+not name the configured host, or a refused MQTT handshake. A source keeps the error beneath
+`MqttSourceError::Connect` while it connects and `MqttSourceError::Receive` while it reads, and
+those beneath `SourceError`, so `DESCRIBE INGESTOR` shows the deepest cause: the resolver's lookup
+error or the driver's description. A sink's event loop records the connection error's message as
+the emitter's transient error, which `DESCRIBE EMITTER` shows, and reconnects on the emitter's
+retry policy. None rejects a record or acknowledges input.
+
 ClickHouse and SQS reach the node resolver through their drivers' own DNS hooks, which hand the
 driver the resolver's `DnsLookupError` as the failure of the lookup. The driver carries it as a
 cause of its connection error, and the connector finds it there by type and keeps it as the context
@@ -150,6 +164,22 @@ certificate that does not name the configured host, is described by every cause 
 connection error, which describes the connection and carries neither credentials nor a record; a
 response from the service keeps its existing description. None is a record rejection, and none
 acknowledges input.
+
+The connector helper errors for OTEL, Syslog, WebSocket signaling, Postgres, MySQL and ClickHouse
+carry `error_stack::Report` from the failing operation. A caller adds context at a connector or
+host ownership transition; it does not recreate the top-level error from its formatted text.
+Syslog TLS material reports keep the file, certificate or rustls cause, and stream frame reports
+remain beneath the connection failure. WebSocket signaling compilation and execution retain jaq,
+frame encoding and transport causes. The runtime's Syslog source-plan and signaling compilation
+errors keep those reports as typed fields while preserving their startup messages.
+
+OTEL keeps a row conversion failure in the invalid-record channel and names its mapped key as the
+affected field. A lower OTEL value type or range error stays in the internal report until the
+rejection is constructed. Database sink insert reports keep transport driver or pool causes while the
+connector inspects the current typed error for definite row rejection. Postgres SQLSTATE, MySQL
+SQLSTATE and code, and ClickHouse named rejection remain the same external classifications.
+Database response text that could quote a bound value is discarded after extracting that safe
+classification; diagnostics do not quote the row payload.
 
 The native Rust session client loads its Hickory resolver before opening a server channel. An
 unreadable or invalid resolver configuration is `ClientError::LoadDnsConfiguration`, carrying the
@@ -499,7 +529,12 @@ failure carries the answering node's opaque operator description. That text is a
 boundary for an already classified failure; it is not used to recover a new class. Runtime-state
 replication and materialized-snapshot description use this envelope, and local errors retain the
 remote class alongside their target and placement. [Cluster Interconnect](./interconnect.md)
-defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries.
+defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries. A record
+acknowledgement lost between two nodes becomes an ordinary negative acknowledgement: the node that
+forwarded it fails it once the receiver has reported nothing about it for fifteen seconds, with a
+reason that names the silent receiver, and the source retries the record as it retries any failed
+acknowledgement; see
+[Record Acknowledgements The Receiver Stops Reporting](./interconnect.md#record-acknowledgements-the-receiver-stops-reporting).
 Local interconnect transport, typed request, and streaming-handler failures carry reports through
 their callers. A layer that changes the failure's meaning adds context to the existing report, so
 the caller can still inspect the transport or producer cause. The HTTP/2 and rkyv boundary sends

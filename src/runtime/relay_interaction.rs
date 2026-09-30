@@ -1087,7 +1087,7 @@ mod tests {
         event
     }
 
-    fn wake_in(timeout: tokio::time::Duration) -> RuntimeWake {
+    fn wake_in(timeout: std::time::Duration) -> RuntimeWake {
         RuntimeWake::never().with_physical(
             PhysicalDeadlineCapability::operational()
                 .after(timeout)
@@ -1096,7 +1096,7 @@ mod tests {
     }
 
     fn wake_now() -> RuntimeWake {
-        wake_in(tokio::time::Duration::ZERO)
+        wake_in(std::time::Duration::ZERO)
     }
 
     #[nervix_primitives::test]
@@ -1267,7 +1267,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn output_wake_wins_without_discarding_a_due_collection() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_millis(1),
+            interval: std::time::Duration::from_millis(1),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 1, Some(policy));
@@ -1284,7 +1284,7 @@ mod tests {
             tokio::pin!(receive);
             assert!(futures_util::poll!(&mut receive).is_pending());
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+        nervix_primitives::time::sleep(std::time::Duration::from_millis(2)).await;
 
         assert!(matches!(
             event(&mut interaction, wake_now()).await,
@@ -1358,7 +1358,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn collection_deadline_releases_every_row_for_its_branch() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_millis(50),
+            interval: std::time::Duration::from_millis(50),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 2, Some(policy));
@@ -1410,7 +1410,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn collection_size_boundary_releases_without_waiting_for_timer() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: Some(0),
         };
         let (input, broadcast) = source("events", 2, Some(policy));
@@ -1440,7 +1440,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn force_flush_latches_and_drains_every_source_before_firing() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: None,
         };
         let (left, left_broadcast) = source("left", 2, Some(policy));
@@ -1494,7 +1494,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn force_flush_preserves_source_and_branch_collection_boundaries() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 4, Some(policy));
@@ -1602,8 +1602,8 @@ mod tests {
         assert!(interaction.is_draining());
         assert!(!interaction.is_terminal_drain());
         shutdown_tx.send(true).expect("shutdown must send");
-        tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
+        nervix_primitives::time::timeout(
+            std::time::Duration::from_millis(100),
             interaction.shutdown_receiver().changed(),
         )
         .await
@@ -1620,7 +1620,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn shutdown_drains_queued_and_collected_batches_before_stopping() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 3, Some(policy));
@@ -1660,8 +1660,8 @@ mod tests {
         let mut interaction = RelayInteraction::new(vec![input], shutdown_rx, None, None)
             .expect("interaction must build");
 
-        let first = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
+        let first = nervix_primitives::time::timeout(
+            std::time::Duration::from_millis(100),
             interaction.next(RuntimeWake::never()),
         )
         .await
@@ -1932,7 +1932,7 @@ mod tests {
         assert!(matches!(
             event(
                 &mut interaction,
-                wake_in(tokio::time::Duration::from_millis(1))
+                wake_in(std::time::Duration::from_millis(1))
             )
             .await,
             RelayInteractionEvent::Wake
@@ -2050,7 +2050,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn quiesce_counts_collected_and_in_flight_work() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 1, Some(policy));
@@ -2110,7 +2110,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn dequeue_to_collection_has_overlapping_quiesce_accounting() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 1, Some(policy));
@@ -2139,7 +2139,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn dropping_interaction_releases_collected_quiesce_work() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 1, Some(policy));
@@ -2190,7 +2190,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn concatenated_batches_preserve_and_complete_every_ack_root() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 2, Some(policy));
@@ -2225,7 +2225,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn concatenation_failure_preserves_every_ack_root_for_error_handling() {
         let policy = RuntimeInputCollectPolicy {
-            interval: tokio::time::Duration::from_secs(60),
+            interval: std::time::Duration::from_secs(60),
             max_batch_size: None,
         };
         let (input, broadcast) = source("events", 2, Some(policy));
@@ -2276,7 +2276,7 @@ mod tests {
         let mut collection = RelayInputCollection::new(
             RelayInputCollectionMode::Collect {
                 policy: RuntimeInputCollectPolicy {
-                    interval: tokio::time::Duration::from_secs(60),
+                    interval: std::time::Duration::from_secs(60),
                     max_batch_size: Some(max_batch_size),
                 },
                 domain_clock: test_domain_clock(&domain("relay_interaction")),

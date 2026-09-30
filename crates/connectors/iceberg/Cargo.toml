@@ -10,12 +10,7 @@ workspace = true
 
 [features]
 default = []
-shuttle = [
-  "dep:shuttle-tokio",
-  "nervix-connector/shuttle",
-  "nervix-primitives/shuttle",
-  "shuttle-tokio/shuttle",
-]
+shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
 
 [dependencies]
 ahash = { workspace = true }
@@ -48,13 +43,6 @@ reqwest = { workspace = true }
 reqwest_iceberg = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true }
-shuttle-tokio = { workspace = true, features = [
-  "fs",
-  "macros",
-  "rt",
-  "sync",
-  "time",
-], optional = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "rt", "sync", "time"] }
 tracing = { workspace = true }

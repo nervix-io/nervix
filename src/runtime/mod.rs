@@ -19,6 +19,7 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
     sync::Arc as StdArc,
+    time::Duration,
 };
 
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
@@ -47,6 +48,10 @@ use fjall::Database;
 use futures_util::{future::BoxFuture, stream::FuturesUnordered};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
+use nervix_branch_instances::{
+    BranchInstanceRegistry, BranchInstanceSnapshotEntry, BranchPresence, GetOrCreateBranchInstance,
+    OwnedBranches,
+};
 use nervix_dns::DnsResolver;
 use nervix_execution::{ChargedBytes, Executor};
 use nervix_interconnect::{
@@ -55,7 +60,7 @@ use nervix_interconnect::{
     Transport, WasmStateResetTarget,
 };
 use nervix_models::{
-    AckMode, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClientConfigEntry, ClientName,
+    AckMode, BranchKeyFingerprint, BranchName, ClientConfigEntry, ClientName,
     ClientProducerEndReason, ClientResourceMount, ClusterNodeIdentity, ClusterNodeIncarnation,
     ClusterNodeName, CodecName, CommandExecutionReference, CoordinationIdentity,
     CorrelationTimeoutAction, CorrelatorMatchPolicy, DomainClockAuthority, DomainConfig,
@@ -92,6 +97,7 @@ use nervix_primitives::{
         broadcast, mpsc, oneshot, watch,
     },
     task::{AbortOnDropHandle, JoinHandle, TaskTracker},
+    time::{Instant, sleep, sleep_until},
 };
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use nervix_roto::{UdfExecutor, UdfProgram};
@@ -131,10 +137,7 @@ use nervix_wasm::{
 use ordered_float::OrderedFloat;
 use sorted_vec::SortedSet;
 use thiserror::Error;
-use tokio::{
-    io::AsyncBufReadExt,
-    time::{Duration, Instant, sleep, sleep_until},
-};
+use tokio::io::AsyncBufReadExt;
 use tracing::{debug, error, info, trace, warn};
 use triomphe::Arc;
 use upon::Engine as TemplateEngine;
@@ -189,7 +192,6 @@ use crate::{
 
 mod branch_aggregated_state;
 mod branch_buffering;
-mod branch_instance_registry;
 mod branch_key;
 mod branch_lru_state;
 mod branch_runtime;
@@ -291,9 +293,6 @@ use branch_buffering::{
     BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingError, BranchBufferTimingResult,
     RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector, RuntimeWake,
     wait_for_branch_buffer_deadlines,
-};
-use branch_instance_registry::{
-    BranchInstanceRegistry, BranchInstanceSnapshotEntry, GetOrCreateBranchInstance,
 };
 use branch_key::branch_key_display;
 use branch_lru_state::{
@@ -442,9 +441,9 @@ use materialized_state::{
     ReplicatedMaterializedRelayState,
 };
 use message_error::{
-    MessageErrorFailure, MessageErrorHandling, MessageErrorSourceContext,
+    InvalidOutputRows, MessageErrorFailure, MessageErrorHandling, MessageErrorSourceContext,
     SingleRecordFilterMapOutcome, captured_partial_output, finalized_partial_output,
-    invalid_output_fields, planned_structured_message_error, structured_message_error,
+    planned_structured_message_error, structured_message_error,
     vm_partial_output_row_to_runtime_batch,
 };
 use message_error_delivery::{
@@ -498,10 +497,9 @@ pub(in crate::runtime) use relay_batch::RelayDispatchResult;
 use relay_batch::build_stream_record_batch_preserving_acks;
 use relay_boundary::{
     BranchRelayDispatchGateLease, ConcreteRelayRuntime, ConcreteRelayRuntimeBuild,
-    ExpiringRelayState, RelayBoundaryBuilder, RelayBoundaryFanout, RelayBoundaryFanoutMap,
-    RelayBoundaryServices, RelayOutboundSlot, RelayOwnerTask, RelayRegistry, RelayRetention,
-    RelayRuntimeFanIn, RelayStateTask, RelayStateTaskSpec, RemoteRuntimeConsumer,
-    addressable_count,
+    RelayBoundaryBuilder, RelayBoundaryFanout, RelayBoundaryFanoutMap, RelayBoundaryServices,
+    RelayBranchPresence, RelayOutboundSlot, RelayOwnerTask, RelayRetention, RelayRuntimeFanIn,
+    RelayStateTask, RelayStateTaskSpec, RemoteRuntimeConsumer, addressable_count,
 };
 pub(in crate::runtime) use relay_channel::{
     OwnedRelayDispatchPermit, RelayDispatchGate, RelayDispatchGateLease, RelayTryRecv,

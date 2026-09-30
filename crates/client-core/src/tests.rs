@@ -343,7 +343,7 @@ impl Loopback {
 
     /// The next request the client sends, as the server decodes it.
     async fn next_request(&mut self) -> ClientMessage {
-        let frame = tokio::time::timeout(DEADLINE, self.requests.recv())
+        let frame = nervix_primitives::time::timeout(DEADLINE, self.requests.recv())
             .await
             .assured("the client sends its request within the deadline")
             .assured("the client keeps its exchange open");
@@ -810,7 +810,8 @@ async fn saturated_event_consumer_cannot_block_a_command_reply() {
             .await;
     });
 
-    let received = tokio::time::timeout(Duration::from_millis(50), command_request.reply).await;
+    let received =
+        nervix_primitives::time::timeout(Duration::from_millis(50), command_request.reply).await;
     delivery.abort();
     let Ok(Ok(ReplyBody::Command(command))) = received else {
         panic!("the command response stalled behind an undrained event consumer");
@@ -1444,7 +1445,7 @@ async fn the_client_reads_the_latest_observations_of_its_exchange() {
     }
 
     assert_eq!(client.leadership(), Some(Leadership::Unknown));
-    let domains = tokio::time::timeout(DEADLINE, client.next_domain_list())
+    let domains = nervix_primitives::time::timeout(DEADLINE, client.next_domain_list())
         .await
         .assured("an observed list is returned at once")
         .assured("the client's domain sink is alive");
@@ -1454,7 +1455,7 @@ async fn the_client_reads_the_latest_observations_of_its_exchange() {
         "a caller that reads late gets the latest list, not every list in between"
     );
     assert!(
-        tokio::time::timeout(Duration::from_millis(50), client.next_domain_list())
+        nervix_primitives::time::timeout(Duration::from_millis(50), client.next_domain_list())
             .await
             .is_err(),
         "the next call waits for the next observation"
@@ -2124,7 +2125,7 @@ async fn an_acknowledged_subscription_retries_restoration_on_the_replacement_exc
         )
         .await;
     let mut changed = loopback.client.inner.events.sinks.desired.watch();
-    tokio::time::timeout(DEADLINE, async {
+    nervix_primitives::time::timeout(DEADLINE, async {
         loop {
             nervix_primitives::task::consume_budget().await;
             if let Some(crate::SubscriptionLifecycle::Active(handle)) =
@@ -2197,7 +2198,7 @@ async fn subscription_events_follow_the_next_session_when_nothing_awaits_restora
         1,
     );
 
-    let event = tokio::time::timeout(DEADLINE, next)
+    let event = nervix_primitives::time::timeout(DEADLINE, next)
         .await
         .assured("the read completes within the deadline")
         .assured("the read task completes")

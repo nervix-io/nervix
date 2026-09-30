@@ -26,8 +26,8 @@ use nervix_primitives::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         blocking::Mutex,
     },
+    time::{Instant, timeout_at},
 };
-use tokio::time::{Instant, timeout_at};
 use tracing::debug;
 use triomphe::Arc;
 
@@ -441,7 +441,7 @@ impl Drop for OwnedRelayDispatchPermit {
 mod gate_tests {
     use std::time::Duration;
 
-    use tokio::time::Instant;
+    use nervix_primitives::time::Instant;
     use triomphe::Arc;
 
     use super::{RelayDispatchGate, RelayDispatchGateLease};
@@ -513,7 +513,7 @@ mod gate_tests {
         let mut lease = engage(&gate, deadline, "slow node swap");
         assert!(lease.wait_quiescent().await);
 
-        tokio::time::sleep_until(deadline + Duration::from_millis(10)).await;
+        nervix_primitives::time::sleep_until(deadline + Duration::from_millis(10)).await;
         assert!(gate.is_closed());
 
         let dispatch = nervix_primitives::task::spawn({
@@ -529,7 +529,7 @@ mod gate_tests {
         );
 
         drop(lease);
-        tokio::time::timeout(Duration::from_secs(1), dispatch)
+        nervix_primitives::time::timeout(Duration::from_secs(1), dispatch)
             .await
             .expect("dropping the gate lease should admit dispatch")
             .expect("dispatch task should join");

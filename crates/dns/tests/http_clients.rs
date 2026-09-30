@@ -10,7 +10,7 @@
 
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use aws_smithy_runtime_api::client::dns::ResolveDns as _;
@@ -22,6 +22,7 @@ use hyper_util::{
 };
 use meticulous::ResultExt as _;
 use nervix_dns::{DnsConfiguration, DnsLookupError, DnsLookupFailure, DnsResolver, NameServers};
+use nervix_primitives::time::Instant;
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -69,14 +70,14 @@ impl Fixture {
 }
 
 async fn serve_once(address: SocketAddr, body: &'static str) {
-    let listener = tokio::net::TcpListener::bind(address)
+    let listener = nervix_primitives::net::TcpListener::bind(address)
         .await
         .assured("the loopback HTTP endpoint is available");
     serve_on(listener, body).await;
 }
 
 /// Answer one request on `listener` with `body`, after checking it kept the fixture authority.
-async fn serve_on(listener: tokio::net::TcpListener, body: &'static str) {
+async fn serve_on(listener: nervix_primitives::net::TcpListener, body: &'static str) {
     let (mut stream, _) = listener.accept().await.assured("the test client connects");
     let mut request = [0_u8; 2048];
     let length = stream
@@ -108,7 +109,7 @@ async fn reqwest_13_uses_all_answers_and_keeps_the_url_authority() {
         vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), reachable],
         Duration::from_secs(1),
     );
-    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+    let listener = nervix_primitives::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .assured("the test endpoint can bind");
     let port = listener
@@ -157,7 +158,7 @@ async fn reqwest_12_uses_the_same_resolver_without_a_public_fallback() {
         vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
         Duration::from_secs(1),
     );
-    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+    let listener = nervix_primitives::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .assured("the test endpoint can bind");
     let port = listener
@@ -236,7 +237,7 @@ async fn ttl_expiry_reconnects_to_a_changed_answer() {
     let fixture = Fixture::start().await;
     let first_ip = Ipv4Addr::new(127, 0, 0, 1);
     let second_ip = Ipv4Addr::new(127, 0, 0, 2);
-    let first = tokio::net::TcpListener::bind((first_ip, 0))
+    let first = nervix_primitives::net::TcpListener::bind((first_ip, 0))
         .await
         .assured("the first loopback endpoint can bind");
     let port = first
@@ -281,7 +282,7 @@ async fn ttl_expiry_reconnects_to_a_changed_answer() {
         .await
         .assured("the first HTTP server task finishes");
     fixture.answer(vec![IpAddr::V4(second_ip)], Duration::from_secs(1));
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    nervix_primitives::time::sleep(Duration::from_millis(1200)).await;
     assert_eq!(
         client
             .get(&url)
@@ -316,10 +317,10 @@ async fn redirect_destination_uses_the_configured_resolver() {
             },
         );
     }
-    let source = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+    let source = nervix_primitives::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .assured("the redirect endpoint can bind");
-    let target = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+    let target = nervix_primitives::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .assured("the destination endpoint can bind");
     let source_port = source
@@ -399,7 +400,7 @@ impl Fixture {
 #[nervix_primitives::test]
 async fn hyper_connector_uses_all_answers_and_keeps_the_url_authority() {
     let fixture = Fixture::start().await;
-    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+    let listener = nervix_primitives::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .assured("the test endpoint can bind");
     let port = listener

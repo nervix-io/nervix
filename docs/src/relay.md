@@ -243,10 +243,13 @@ the logical definition and owner buffer-utilization metrics. An ordinary relay r
 `replicas: -`. Traffic metrics remain on the producing or consuming runtime-node edge.
 
 `DESCRIBE RELAY <relay> WHERE (...)` is answered only by the current relay owner and reports
-owner-authoritative concrete-branch existence and buffer metrics. Relay presence and metrics are
-not replicated. A planned owner move drains admitted work before cutover; an owner failure loses
-buffered batches, presence, and relay metrics. Materialized records survive when a current state
-replica can become owner. Prometheus exports aggregate relay metrics without branch-key labels;
+owner-authoritative concrete-branch existence and buffer metrics. A branch exists from the moment
+the owner accepts a batch for it until the owner evicts or expires it. Relay presence and metrics
+are not replicated. A planned owner move drains admitted work before cutover; an owner failure loses
+buffered batches, presence, and relay metrics. A new owner, whether on another node or after the
+relay's execution is rebuilt on the same one, reports a branch only after it accepts a batch for
+that branch itself. Materialized records survive when a current state replica can become owner.
+Prometheus exports aggregate relay metrics without branch-key labels;
 see [Metrics And Observability](metrics-and-observability.md).
 
 ## Other Replicated Runtime State

@@ -23,6 +23,7 @@ use std::{
 };
 
 use nervix_primitives::{
+    net::{TcpListener, TcpStream},
     sync::{
         CancellationToken,
         atomic::{AtomicU64, Ordering},
@@ -30,10 +31,7 @@ use nervix_primitives::{
     task::JoinHandle,
 };
 use nervix_recovery::Discarded as _;
-use tokio::{
-    io::copy_bidirectional,
-    net::{TcpListener, TcpStream},
-};
+use tokio::io::copy_bidirectional;
 
 use crate::common::port_pool::{next_port, release_test_ports};
 

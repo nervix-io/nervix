@@ -456,6 +456,17 @@ impl RowErrors {
         self.rows[row].push(error);
     }
 
+    /// The rows holding an error, as a bitmap over the batch, or `None` when no row does. A batch
+    /// without errors answers without visiting a row.
+    pub(crate) fn failed_rows(&self) -> Option<BooleanBuffer> {
+        if self.rows.is_empty() {
+            return None;
+        }
+        Some(BooleanBuffer::collect_bool(self.row_count, |row| {
+            !self.row(row).is_empty()
+        }))
+    }
+
     /// The rows holding an error recorded inside `span`, as a bitmap over the batch, or `None`
     /// when no row does. A batch without errors answers without visiting a row.
     pub(crate) fn rows_failed_within(&self, span: Span) -> Option<BooleanBuffer> {
@@ -753,6 +764,24 @@ mod tests {
         RowErrors, ShiftOperation, SideError, SideErrorReason, TextOperation,
     };
     use crate::ir::RegisterType;
+
+    #[test]
+    fn failed_rows_are_a_bitmap_only_once_a_row_fails() {
+        let mut errors = RowErrors::new(70);
+        assert!(errors.failed_rows().is_none());
+
+        let error = SideError {
+            reason: SideErrorReason::IntegerOverflow(IntegerOperation::Addition),
+            span: crate::program::Span { start: 0, end: 1 },
+        };
+        errors.push(1, error.clone());
+        errors.push(65, error.clone());
+        errors.push(65, error);
+
+        let failed = errors.failed_rows().expect("two rows failed");
+        assert_eq!(failed.len(), 70);
+        assert_eq!(failed.set_indices().collect::<Vec<_>>(), [1, 65]);
+    }
 
     #[test]
     fn error_code_strings_are_stable() {

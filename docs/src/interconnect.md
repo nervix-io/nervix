@@ -35,22 +35,26 @@ fault model, supervision, replay and failure records, the scenario matrix, the c
 budget, and the limits of what it establishes. The interconnect owns only the seams the simulation
 plugs into. Each seam has one production behavior, which is what every node uses:
 
-- **Sockets and name resolution.** The TCP listener and outbound streams use Tokio's
-  operating-system sockets, and peer names resolve through the node's own resolver, described in
-  [Peer Name Resolution](#peer-name-resolution). The dedicated `turmoil` test build selects
-  Turmoil's simulated TCP and its simulated DNS table at that one boundary and never constructs the
-  node resolver; TLS, HTTP/2, the envelope codec, and Arrow IPC above it are the same code in every
+- **Sockets and name resolution.** The TCP listener and outbound streams are the sockets of the
+  primitive boundary, `nervix_primitives::net`, which are Tokio's operating-system sockets, and
+  peer names resolve through the node's own resolver, described in
+  [Peer Name Resolution](#peer-name-resolution). In the dedicated `turmoil` test build the boundary
+  selects Turmoil's simulated TCP, and the peer resolver answers from the simulated DNS table
+  through the lookup the boundary offers in that build alone, never constructing the node
+  resolver; TLS, HTTP/2, the envelope codec, and Arrow IPC above them are the same code in every
   build.
 - **Certificate time.** Each credential bundle carries the one UTC clock its certificates are judged
   by, as described in [Peer Identity And Authentication](#peer-identity-and-authentication).
   Production bundles use the system clock.
 - **Identity entropy.** The process epoch and relay grant identifiers are drawn from the transport's
   configured entropy, which in production is the operating system's secure random source.
-- **Deadlines.** Every transport deadline is a Tokio instant, so it follows the clock of the runtime
-  it runs on: connection setup, request and progress timeouts, reconnect backoff, relay grant
+- **Deadlines.** Every transport deadline is an instant of the boundary's clock,
+  `nervix_primitives::time`, whose timers are Tokio's, so it follows the clock of the runtime it
+  runs on: connection setup, request and progress timeouts, reconnect backoff, relay grant
   lifetimes, and the drain deadline derived from certificate expiry.
-- **CPU work.** Encoding and decoding run through `nervix-execution`. Its Turmoil build runs bounded
-  CPU jobs as tasks on the simulated scheduler under the same admission, charge, and cancellation
+- **CPU work.** Encoding and decoding run through `nervix-execution`, which submits each admitted
+  CPU job through the boundary's CPU-job mechanism. In the Turmoil build that mechanism runs the
+  job as a task on the simulated scheduler, under the same admission, charge, and cancellation
   policy.
 
 The transport's concurrent maps use per-process hash seeds. Where a walk over one of them causes
@@ -213,9 +217,9 @@ applies only as far as the name server the configuration names applies it, for e
 their search lists and `ndots`, are reached through the `resolv.conf` those platforms provide.
 
 The node resolver also serves HTTP polling, Prometheus, Sentry, OTEL HTTP and gRPC, Iceberg REST
-and object-store clients, RabbitMQ sources and sinks, Syslog emission, WebSocket client ingestion,
-ClickHouse emission, SQS sources and sinks, and the node's client session calls to a peer's session
-service during shutdown drain. Other connectors still resolve through their own drivers. Native
+and object-store clients, RabbitMQ sources and sinks, Redis command pools and Pub/Sub sources, MQTT
+sources and sinks, Syslog emission, WebSocket client ingestion, ClickHouse emission, SQS sources
+and sinks, and the node's client session calls to a peer's session service during shutdown drain. Other connectors still resolve through their own drivers. Native
 CLI and SDK sessions load their own Hickory resolver or reuse one supplied by their owner. The
 ledger in `tests/dns-resolution-ledger.md` records each boundary and its current owner.
 
@@ -592,8 +596,11 @@ These steps expose three intentionally different outcomes:
 
 While admission or an attached acknowledgement is unresolved, the receiver sends coalesced progress
 events through the reserved management quota. The sender treats five seconds without progress as a
-stalled exchange and bounds the total admission wait at five minutes. Progress keeps a live attempt
-from being mistaken for a disconnected one; it does not change the delivery outcome.
+stalled exchange and bounds the total admission wait at five minutes. Once the delivery is admitted,
+the sender waits for an attached record acknowledgement only while the receiver keeps reporting it,
+and fails one the receiver reports nothing about for fifteen seconds, as
+[Acknowledgement Registrations](#acknowledgement-registrations) describes. Progress keeps a live
+attempt from being mistaken for a disconnected one; it does not change the delivery outcome.
 
 ### Acknowledgement Registrations
 
@@ -618,6 +625,41 @@ A receiver issues a grant only when the admission registration names the authent
 node. Admission bookkeeping on both ends is keyed by the peer and the whole registration, so a
 terminal outcome addressed to an earlier run neither completes nor retires the admission a later
 run registered under the same number.
+
+### Record Acknowledgements The Receiver Stops Reporting
+
+A receiver reports every record acknowledgement it holds to the node that registered it. While the
+downstream work the acknowledgement stands for continues, it sends a report 100 milliseconds after
+its previous one was delivered or given up, and when the work completes it sends the terminal
+outcome once. Each report and the outcome is one bounded event that the receiver retries for up to
+five seconds and then gives up. Once the outcome is given up, or the receiver's run ends, nothing
+reports that acknowledgement again.
+
+The registering node therefore waits for an acknowledgement only while the receiver keeps reporting
+it. From the moment the delivery that carries the acknowledgement is admitted, a sweep once a second
+counts the passes in which the receiver reported nothing about it, and fails the acknowledgement
+once fifteen seconds of such passes have gone by. The bound outlasts two consecutive reports that
+each exhaust their five-second deadline, so a receiver that is still working on the record is not
+mistaken for one that stopped. Before admission, the delivery's own admission wait decides its
+failure, and the sweep leaves its acknowledgements alone. The sweep counts its own passes rather
+than elapsed time, so a registering node whose own execution stalled, such as a paused container,
+does not fail acknowledgements whose reports it could not receive meanwhile.
+
+A failed acknowledgement resolves negatively exactly once. The sweep's removal rechecks the count
+under the entry's exclusive map lock, so a report that arrives first keeps the acknowledgement
+pending, and a terminal outcome or the delivery's own failure that resolves it first leaves the
+sweep nothing to fail. The source attempt fails with it and redelivers the record along the current
+routes, so a sink that already completed the record can receive it again. A report or outcome that
+arrives after its acknowledgement failed finds no entry and is rejected at `debug`.
+
+Every node on a record's path applies the same bound. A relay owner that routed a record to the
+node of an attached consumer reports the record alive to the source's node for as long as the
+record's acknowledgement tree is unresolved. Without the bound, a terminal outcome lost between the
+consumer's node and the relay owner would keep the source's acknowledgement alive, and its
+`ACK TIMEOUT` from ever passing, for the rest of the relay owner's run. With it, the relay owner
+fails the acknowledgement fifteen seconds after the consumer's node fell silent, stops reporting
+the record, and the source's retry takes over. Each sweep that failed acknowledgements logs, at
+`warn`, one line per receiver with the number it failed.
 
 ### Ordering, Retry, And Reconciliation
 

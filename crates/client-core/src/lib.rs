@@ -12,9 +12,6 @@
 //! - **Must not know.** The registry, the runtime, or anything else inside the server. Everything
 //!   it learns arrives over the session protocol.
 
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
-
 mod backup;
 mod client;
 mod connection;

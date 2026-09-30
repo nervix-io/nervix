@@ -132,6 +132,17 @@ reason = "Each gate and wake record must change in the same scheduling step as t
 [[permission]]
 items = [
   "sync::atomic::AtomicBool",
+  "sync::atomic::AtomicUsize",
+  "sync::atomic::Ordering",
+]
+limit = "Records observe the steps a relay's branch owners have published and never synchronize them; the presence publication under test is the modeled `ArcSwap`."
+owner = "The relay branch presence Shuttle checks."
+path = "src/runtime/relay_branch_presence_shuttle_tests.rs"
+reason = "Each step record must change in the same scheduling step as the publication it records, so recording adds no scheduling point."
+
+[[permission]]
+items = [
+  "sync::atomic::AtomicBool",
   "sync::atomic::AtomicU64",
   "sync::atomic::Ordering",
 ]
@@ -235,3 +246,31 @@ limit = "The browser console runs in no execution mode, so nothing it does is mo
 owner = "The browser console's executor installation."
 path = "crates/web-console/src/main.rs"
 reason = "The console installs its task executor once per page, and a browser build has no native capability to select a modeled primitive from."
+
+[[permission]]
+items = ["time::Instant"]
+limit = "Nothing a scenario claims: the bound decides only when a run fails, never how a simulated request proceeds."
+owner = "The Turmoil runner's real-time bound."
+path = "crates/interconnect/tests/simulation/runner.rs"
+reason = "A run's real-time bound is measured outside the scheduler thread and must expire even when a host blocks that thread and simulated time stops advancing, so it reads the operating system's clock rather than a simulated or paused one."
+
+[[permission]]
+items = ["time::Instant"]
+limit = "Nothing a scenario claims: the deadline only ends an attempt process that outlived its bound."
+owner = "The Turmoil scenario driver."
+path = "crates/interconnect/tests/simulation/scenario.rs"
+reason = "The driver waits for each fresh attempt process in real time and kills it once the run's real-time bound and its grace period have passed."
+
+[[permission]]
+items = ["net::TcpListener"]
+limit = "Nothing a check claims: the ports carry the traffic of real node processes, outside every model and simulation."
+owner = "The integration-test harness's port pool."
+path = "tests/common/port_pool.rs"
+reason = "The pool draws free ports from the operating system's ephemeral range by binding a real listener, synchronously and before anything is bound to the port."
+
+[[permission]]
+items = ["net::TcpListener"]
+limit = "Nothing a check claims: the ports carry the traffic of real containers and processes."
+owner = "The benchmark driver."
+path = "crates/benchmark/src/main.rs"
+reason = "The driver reserves free ports from the operating system for the containers and node processes it starts, synchronously and before any of them binds."

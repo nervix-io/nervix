@@ -19,6 +19,7 @@ use nervix_primitives::{
         atomic::{AtomicUsize, Ordering},
         watch,
     },
+    time::{Instant, timeout, timeout_at},
     unmodeled::sync::OnceLock,
 };
 use rcgen::{
@@ -26,7 +27,6 @@ use rcgen::{
     SanType,
 };
 use tempfile::{TempDir, tempdir};
-use tokio::time::{Instant, timeout, timeout_at};
 
 use super::*;
 
@@ -973,7 +973,8 @@ async fn stream_slot_queueing_consumes_the_request_deadline() {
     transport_b
         .register_stream_handler::<DeadlineStreamRequest, _, _>(|_context, request| async move {
             if request.response_delay_ms != 0 {
-                tokio::time::sleep(Duration::from_millis(request.response_delay_ms)).await;
+                nervix_primitives::time::sleep(Duration::from_millis(request.response_delay_ms))
+                    .await;
             }
             Ok(StreamingResponse::new(
                 1,
@@ -1012,7 +1013,7 @@ async fn stream_slot_queueing_consumes_the_request_deadline() {
             )
             .await
     });
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    nervix_primitives::time::sleep(Duration::from_millis(150)).await;
     drop(held_stream);
 
     let result = queued
@@ -2161,7 +2162,7 @@ async fn bootstrap_times_out_when_a_tcp_peer_never_completes_tls() {
     )
     .await
     .expect("test transport should bind");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let listener = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("unresponsive TCP peer should bind");
     let error = timeout(

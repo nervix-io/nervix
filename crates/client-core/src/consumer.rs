@@ -135,105 +135,108 @@ impl Client {
             expected_fields,
             limits,
         };
-        let opened = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
-            for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-                nervix_primitives::task::consume_budget().await;
-                let (exchange, generation) = {
-                    let exchange = self.inner.exchange.lock().await;
-                    (exchange.requests(), exchange.generation.clone())
-                };
-                let (answer, answered) = oneshot::channel();
-                let request = request.clone();
-                let client = self.clone();
-                nervix_primitives::task::spawn(async move {
-                    let result = async {
-                        let reply = request_on_exchange(
-                            &exchange,
-                            ClientRequest::OpenEmitter(request.clone()),
-                            RequestKind::OpenEmitter,
-                        )
-                        .await?;
-                        let ReplyBody::OpenEmitter(outcome) = reply.body else {
-                            return Err(Report::new(ClientError::unexpected_reply(
+        let opened =
+            nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
+                for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+                    nervix_primitives::task::consume_budget().await;
+                    let (exchange, generation) = {
+                        let exchange = self.inner.exchange.lock().await;
+                        (exchange.requests(), exchange.generation.clone())
+                    };
+                    let (answer, answered) = oneshot::channel();
+                    let request = request.clone();
+                    let client = self.clone();
+                    nervix_primitives::task::spawn(async move {
+                        let result = async {
+                            let reply = request_on_exchange(
+                                &exchange,
+                                ClientRequest::OpenEmitter(request.clone()),
                                 RequestKind::OpenEmitter,
-                                reply.body,
-                            )));
-                        };
-                        let description = match outcome.disposition {
-                            OpenEmitterDisposition::Opened(opened) => *opened,
-                            OpenEmitterDisposition::Refused(refusal) => {
-                                return Err(Report::new(ClientError::ConsumerRefused {
-                                    refusal,
-                                    message: outcome.message,
+                            )
+                            .await?;
+                            let ReplyBody::OpenEmitter(outcome) = reply.body else {
+                                return Err(Report::new(ClientError::unexpected_reply(
+                                    RequestKind::OpenEmitter,
+                                    reply.body,
+                                )));
+                            };
+                            let description = match outcome.disposition {
+                                OpenEmitterDisposition::Opened(opened) => *opened,
+                                OpenEmitterDisposition::Refused(refusal) => {
+                                    return Err(Report::new(ClientError::ConsumerRefused {
+                                        refusal,
+                                        message: outcome.message,
+                                    }));
+                                }
+                            };
+                            let id = ConsumerId::opened_by(reply.request_id);
+                            if description.domain != request.domain
+                                || description.emitter != request.emitter
+                                || description.fields != request.expected_fields
+                                || description.granted.batches > request.limits.batches
+                                || description.granted.bytes > request.limits.bytes
+                            {
+                                close_consumer(
+                                    exchange.clone(),
+                                    id,
+                                    client.inner.connector.request_timeout(),
+                                )
+                                .await
+                                .discarded(
+                                    "an invalid consumer open still releases its attachment",
+                                );
+                                return Err(Report::new(ClientError::UnexpectedReply {
+                                    request: RequestKind::OpenEmitter,
                                 }));
                             }
-                        };
-                        let id = ConsumerId::opened_by(reply.request_id);
-                        if description.domain != request.domain
-                            || description.emitter != request.emitter
-                            || description.fields != request.expected_fields
-                            || description.granted.batches > request.limits.batches
-                            || description.granted.bytes > request.limits.bytes
-                        {
-                            close_consumer(
-                                exchange.clone(),
+                            let attachment = Arc::new(ConsumerAttachment {
                                 id,
-                                client.inner.connector.request_timeout(),
-                            )
-                            .await
-                            .discarded("an invalid consumer open still releases its attachment");
-                            return Err(Report::new(ClientError::UnexpectedReply {
-                                request: RequestKind::OpenEmitter,
-                            }));
+                                #[cfg(feature = "arrow")]
+                                description: description.clone(),
+                                exchange,
+                                generation,
+                                closed: AtomicBool::new(false),
+                            });
+                            let registry = client.inner.events.sinks.consumers.clone();
+                            let inner = StdArc::new(ConsumerHandle {
+                                client,
+                                request,
+                                pinned: description,
+                                registry: registry.clone(),
+                                initial_id: id,
+                                lifecycle: ConsumerLifecycle::new(ConsumerPhase::Active(
+                                    attachment.clone(),
+                                )),
+                            });
+                            registry.register(&inner);
+                            if !attachment.exchange.pending.lock().is_open() {
+                                inner.exchange_ended(&attachment.generation);
+                            }
+                            Ok(EmitterConsumer { inner })
                         }
-                        let attachment = Arc::new(ConsumerAttachment {
-                            id,
-                            #[cfg(feature = "arrow")]
-                            description: description.clone(),
-                            exchange,
-                            generation,
-                            closed: AtomicBool::new(false),
-                        });
-                        let registry = client.inner.events.sinks.consumers.clone();
-                        let inner = StdArc::new(ConsumerHandle {
-                            client,
-                            request,
-                            pinned: description,
-                            registry: registry.clone(),
-                            initial_id: id,
-                            lifecycle: ConsumerLifecycle::new(ConsumerPhase::Active(
-                                attachment.clone(),
-                            )),
-                        });
-                        registry.register(&inner);
-                        if !attachment.exchange.pending.lock().is_open() {
-                            inner.exchange_ended(&attachment.generation);
+                        .await;
+                        if let Err(Ok(consumer)) = answer.send(result) {
+                            drop(consumer);
                         }
-                        Ok(EmitterConsumer { inner })
+                    });
+                    let attempt = answered
+                        .await
+                        .unwrap_or_else(|_| Err(Report::new(ClientError::SessionClosed)));
+                    let report = match attempt {
+                        Ok(consumer) => return Ok(consumer),
+                        Err(report) => report,
+                    };
+                    if !report.current_context().retryable_session_failure() {
+                        return Err(report);
                     }
-                    .await;
-                    if let Err(Ok(consumer)) = answer.send(result) {
-                        drop(consumer);
+                    match self.recover_session(RecoveryMode::IfClosed).await? {
+                        SessionRecovery::Ready => {}
+                        SessionRecovery::Unavailable => return Err(report),
                     }
-                });
-                let attempt = answered
-                    .await
-                    .unwrap_or_else(|_| Err(Report::new(ClientError::SessionClosed)));
-                let report = match attempt {
-                    Ok(consumer) => return Ok(consumer),
-                    Err(report) => report,
-                };
-                if !report.current_context().retryable_session_failure() {
-                    return Err(report);
                 }
-                match self.recover_session(RecoveryMode::IfClosed).await? {
-                    SessionRecovery::Ready => {}
-                    SessionRecovery::Unavailable => return Err(report),
-                }
-            }
-            Err(Report::new(ClientError::SessionClosed))
-        })
-        .await;
+                Err(Report::new(ClientError::SessionClosed))
+            })
+            .await;
         opened.unwrap_or_else(|_| Err(Report::new(ClientError::RetryDeadline)))
     }
 }
@@ -270,7 +273,7 @@ async fn close_consumer(
     deadline: Duration,
 ) -> error_stack::Result<EmitterCloseDisposition, ClientError> {
     let request = ClientRequest::CloseEmitter(CloseEmitterRequest { consumer: id });
-    let reply = tokio::time::timeout(
+    let reply = nervix_primitives::time::timeout(
         deadline,
         request_on_exchange(&exchange, request, RequestKind::CloseEmitter),
     )

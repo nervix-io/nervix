@@ -157,7 +157,7 @@ async fn clock_advances(
             Instant::now() < deadline,
             "logical clock did not reach {target}; observed {now}"
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        nervix_primitives::time::sleep(Duration::from_millis(10)).await;
     }
 }
 

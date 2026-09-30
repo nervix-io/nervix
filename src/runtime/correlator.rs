@@ -5,6 +5,7 @@
 //! - **Depends on.** Validated correlator plans, Arrow batches and bound domain execution time.
 //! - **Must not know.** NSPL parsing, placement decisions or connector transports.
 
+use arrow_buffer::{BooleanBuffer, BooleanBufferBuilder};
 use error_stack::{Report, ResultExt as _};
 
 use super::*;
@@ -443,7 +444,7 @@ pub(super) async fn correlate_incoming_message(
 
     let mut matching = Vec::new();
     let mut remaining = Vec::new();
-    for (pending, matched) in opposite_pending.into_iter().zip(evaluated) {
+    for (pending, matched) in opposite_pending.into_iter().zip(evaluated.iter()) {
         if matched {
             matching.push(pending);
         } else {
@@ -479,7 +480,7 @@ pub(super) async fn evaluate_correlator_where_matches(
     incoming: &CorrelatorPendingMessage,
     candidates: &[CorrelatorPendingMessage],
     execution_now: Timestamp,
-) -> Result<Vec<bool>, (String, Vec<AckSet>)> {
+) -> Result<BooleanBuffer, (String, Vec<AckSet>)> {
     let error_acks = || {
         vec![AckSet::merged(
             std::iter::once(incoming.message.acks.attached()).chain(
@@ -500,7 +501,7 @@ pub(super) async fn evaluate_correlator_where_matches(
         CorrelatorSide::Right => (&candidate_rows, &incoming_rows),
     };
     let Some(first_left) = left_rows.first() else {
-        return Ok(Vec::new());
+        return Ok(BooleanBuffer::new_unset(0));
     };
     let left =
         RuntimeRecordBatch::from_rows(first_left.batch().schema(), left_rows.iter().copied())
@@ -515,7 +516,7 @@ pub(super) async fn evaluate_correlator_where_matches(
                 )
             })?;
     let Some(first_right) = right_rows.first() else {
-        return Ok(Vec::new());
+        return Ok(BooleanBuffer::new_unset(0));
     };
     let right =
         RuntimeRecordBatch::from_rows(first_right.batch().schema(), right_rows.iter().copied())
@@ -583,9 +584,10 @@ pub(super) async fn evaluate_correlator_where_matches(
             error_acks(),
         )
     })?;
-    let mut matching = vec![false; candidates.len()];
+    let mut matching = BooleanBufferBuilder::new(candidates.len());
+    matching.append_n(candidates.len(), false);
     for row in result.selected_rows.iter() {
-        let Some(matched) = matching.get_mut(row) else {
+        if row >= candidates.len() {
             return Err((
                 format!(
                     "correlator '{}' CORRELATE WHERE selected row {} outside its {} candidate \
@@ -596,10 +598,10 @@ pub(super) async fn evaluate_correlator_where_matches(
                 ),
                 error_acks(),
             ));
-        };
-        *matched = true;
+        }
+        matching.set_bit(row, true);
     }
-    Ok(matching)
+    Ok(matching.finish())
 }
 
 pub(super) fn correlator_input_batch(
@@ -836,9 +838,10 @@ pub(super) async fn evaluate_correlator_output_batch(
             MessageErrorOperation::Finalize,
         ));
     }
-    let mut seen = vec![false; row_count];
+    let mut seen = BooleanBufferBuilder::new(row_count);
+    seen.append_n(row_count, false);
     for input_row in result.selected_rows.iter() {
-        let Some(selected) = seen.get_mut(input_row) else {
+        if input_row >= row_count {
             return Ok(correlator_output_batch_errors(
                 processor,
                 matched,
@@ -848,8 +851,8 @@ pub(super) async fn evaluate_correlator_output_batch(
                 &format!("TO output selected row {input_row} outside its {row_count} correlations"),
                 MessageErrorOperation::Finalize,
             ));
-        };
-        if *selected {
+        }
+        if seen.get_bit(input_row) {
             return Ok(correlator_output_batch_errors(
                 processor,
                 matched,
@@ -860,7 +863,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                 MessageErrorOperation::Finalize,
             ));
         }
-        *selected = true;
+        seen.set_bit(input_row, true);
     }
     let mut pending_acks = acks.into_iter().map(Some).collect::<Vec<_>>();
     let mut outcomes = (0..row_count).map(|_| None).collect::<Vec<_>>();
@@ -872,6 +875,7 @@ pub(super) async fn evaluate_correlator_output_batch(
         source: RelayMessage,
     }
 
+    let invalid_outputs = InvalidOutputRows::new(&result.batch);
     let mut successful = Vec::<SuccessfulCorrelation>::new();
     for (output_row, input_row) in result.selected_rows.iter().enumerate() {
         let acks = pending_acks[input_row]
@@ -901,7 +905,7 @@ pub(super) async fn evaluate_correlator_output_batch(
             ))));
             continue;
         }
-        let invalid_fields = invalid_output_fields(&result.batch, output_row);
+        let invalid_fields = invalid_outputs.fields(output_row);
         if !invalid_fields.is_empty() {
             outcomes[input_row] = Some(Err(Box::new(planned_structured_message_error(
                 source,
@@ -990,7 +994,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                             ),
                             MessageErrorOperation::Finalize,
                             None,
-                            invalid_output_fields(&result.batch, output_row),
+                            invalid_outputs.fields(output_row),
                         ),
                         captured_partial_output(&result.batch, output_row),
                         matched.materialized_state[input_row].snapshot(),
@@ -1430,7 +1434,7 @@ mod tests {
         .await
         .expect("left-side arrival should evaluate its right-side candidates");
 
-        assert_eq!(matching, vec![true, false, true]);
+        assert_eq!(matching.iter().collect::<Vec<_>>(), [true, false, true]);
         assert_eq!(
             CORRELATOR_WHERE_VM_EXECUTIONS.with(std::cell::Cell::get),
             1,

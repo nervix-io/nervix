@@ -5,16 +5,26 @@
 //! the top of its body, so a loop that always has work ready still lets the scheduler run other
 //! tasks.
 //!
-//! [`spawn_blocking`] is the runtime's mechanism, not a policy: variable-size and blocking work is
-//! admitted through the bounded executor, which charges and cancels it, and this path gives no
-//! caller a way around that owner.
+//! [`spawn_blocking`] is the runtime's mechanism, not a policy: variable-size and blocking work
+//! belongs to the bounded executor, which admits, charges and cancels it and runs its storage jobs
+//! here.
+//!
+//! [`spawn_cpu`] is the mechanism that runs a CPU job the bounded executor admitted. It is
+//! [`spawn_blocking`] in every mode but Turmoil's, where the job runs as one task of the simulated
+//! host's scheduler, so its synchronous body is a single scheduling step of the simulation instead
+//! of a thread outside it. `just validate-primitive-boundary` rejects it outside the executor's
+//! worker pools, so it gives no caller a way around admission either.
 
+#[cfg(feature = "shuttle")]
+pub use shuttle_tokio::task::spawn_blocking as spawn_cpu;
 #[cfg(feature = "shuttle")]
 pub use shuttle_tokio::task::{
     AbortHandle, JoinError, JoinHandle, JoinSet, consume_budget, spawn, spawn_blocking, yield_now,
 };
 #[cfg(feature = "shuttle")]
 pub use shuttle_tokio_util::task::TaskTracker;
+#[cfg(not(any(feature = "shuttle", feature = "turmoil")))]
+pub use tokio::task::spawn_blocking as spawn_cpu;
 #[cfg(not(feature = "shuttle"))]
 pub use tokio::task::{
     AbortHandle, JoinError, JoinHandle, JoinSet, block_in_place, consume_budget, spawn,
@@ -60,4 +70,18 @@ impl<T> std::future::Future for AbortOnDropHandle<T> {
     ) -> std::task::Poll<Self::Output> {
         std::pin::Pin::new(&mut self.0).poll(context)
     }
+}
+
+/// Run one CPU job the bounded executor admitted as a task of the simulated host's scheduler.
+///
+/// The job's synchronous body is one scheduling step of the simulation: Turmoil can order the tasks
+/// around it, but nothing interleaves inside it, and it never runs on a thread outside the
+/// simulation, whose completion the simulation's clock could not order.
+#[cfg(all(feature = "turmoil", not(feature = "shuttle")))]
+pub fn spawn_cpu<F, R>(job: F) -> JoinHandle<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    spawn(async move { job() })
 }

@@ -75,7 +75,7 @@ async fn open(loopback: &mut Loopback) -> EmitterConsumer {
     loopback
         .answer(request.request_id, opened(description()))
         .await;
-    tokio::time::timeout(DEADLINE, opening)
+    nervix_primitives::time::timeout(DEADLINE, opening)
         .await
         .assured("open completes within the deadline")
         .assured("open task completes")
@@ -271,7 +271,7 @@ async fn temporary_consumer_capacity_refusal_retries_the_same_desired_contract()
         gap.current_context(),
         ClientError::ConsumerInterrupted
     ));
-    tokio::time::timeout(DEADLINE, async {
+    nervix_primitives::time::timeout(DEADLINE, async {
         while consumer.connection() != ConsumerConnection::Active {
             nervix_primitives::task::consume_budget().await;
         }
@@ -317,7 +317,7 @@ async fn stopped_removed_and_changed_consumer_endpoints_require_a_new_applicatio
             gap.current_context(),
             ClientError::ConsumerInterrupted
         ));
-        let error = tokio::time::timeout(DEADLINE, consumer.next_batch())
+        let error = nervix_primitives::time::timeout(DEADLINE, consumer.next_batch())
             .await
             .assured("terminal restoration is reported promptly")
             .err()
@@ -422,7 +422,7 @@ async fn a_read_interrupted_before_its_reply_yields_no_old_batch() {
     loopback
         .answer(restore.request_id, opened(description()))
         .await;
-    tokio::time::timeout(DEADLINE, async {
+    nervix_primitives::time::timeout(DEADLINE, async {
         while consumer.connection() != ConsumerConnection::Active {
             nervix_primitives::task::consume_budget().await;
         }
@@ -449,7 +449,7 @@ async fn an_unexpected_consumer_restoration_reply_requires_a_new_open() {
         interrupted.current_context(),
         ClientError::ConsumerInterrupted
     ));
-    let terminal = tokio::time::timeout(DEADLINE, consumer.next_batch())
+    let terminal = nervix_primitives::time::timeout(DEADLINE, consumer.next_batch())
         .await
         .assured("invalid restoration is reported promptly")
         .err()

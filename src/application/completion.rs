@@ -29,8 +29,7 @@ use super::{
 };
 use crate::cluster::ClusterHandle;
 
-const APPLICATION_REVISION_PROBE_RETRY: tokio::time::Duration =
-    tokio::time::Duration::from_millis(250);
+const APPLICATION_REVISION_PROBE_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
 
 pub(in crate::application) fn register_application_revision_handler(
     cluster: Arc<ClusterHandle>,
@@ -257,7 +256,7 @@ pub(in crate::application) async fn wait_for_application_revision(
     interconnect: &Transport,
     revision: u64,
     phase: ApplicationRevisionPhase,
-    deadline: tokio::time::Instant,
+    deadline: nervix_primitives::time::Instant,
 ) -> Result<(), ApplicationRevisionTimeout> {
     let local_identity = cluster.local_node_identity().await;
     let mut directly_completed_nodes = BTreeSet::new();
@@ -271,7 +270,7 @@ pub(in crate::application) async fn wait_for_application_revision(
         let Some((tenure, expected_nodes)) =
             completion_peers(cluster, consensus, interconnect, &local_identity).await
         else {
-            if deadline_elapsed || tokio::time::Instant::now() >= deadline {
+            if deadline_elapsed || nervix_primitives::time::Instant::now() >= deadline {
                 let pending_node = match consensus.current_leader_tenure() {
                     Some(tenure) => tenure.leader_id().clone(),
                     None => local_identity.node_id().clone(),
@@ -282,9 +281,9 @@ pub(in crate::application) async fn wait_for_application_revision(
             }
             nervix_primitives::select! {
                 biased;
-                _ = tokio::time::sleep_until(deadline) => deadline_elapsed = true,
+                _ = nervix_primitives::time::sleep_until(deadline) => deadline_elapsed = true,
                 _ = &mut cluster_change => {},
-                _ = tokio::time::sleep(APPLICATION_REVISION_PROBE_RETRY) => {},
+                _ = nervix_primitives::time::sleep(APPLICATION_REVISION_PROBE_RETRY) => {},
             }
             continue;
         };
@@ -322,7 +321,7 @@ pub(in crate::application) async fn wait_for_application_revision(
         let completed_before_probe = directly_completed_nodes.len();
         nervix_primitives::select! {
             biased;
-            _ = tokio::time::sleep_until(deadline) => {
+            _ = nervix_primitives::time::sleep_until(deadline) => {
                 deadline_elapsed = true;
             }
             observed_nodes = &mut probes => {
@@ -330,11 +329,11 @@ pub(in crate::application) async fn wait_for_application_revision(
                 if directly_completed_nodes.len() == completed_before_probe {
                     nervix_primitives::select! {
                         biased;
-                        _ = tokio::time::sleep_until(deadline) => {
+                        _ = nervix_primitives::time::sleep_until(deadline) => {
                             deadline_elapsed = true;
                         }
                         _ = &mut cluster_change => {}
-                        _ = tokio::time::sleep(APPLICATION_REVISION_PROBE_RETRY) => {}
+                        _ = nervix_primitives::time::sleep(APPLICATION_REVISION_PROBE_RETRY) => {}
                     }
                 }
             }
@@ -380,8 +379,8 @@ pub(in crate::application) enum CompletionError {
          {node_unavailability_timeout:?} and propagation bound {propagation_bound:?}"
     )]
     DeadlineOverflow {
-        node_unavailability_timeout: tokio::time::Duration,
-        propagation_bound: tokio::time::Duration,
+        node_unavailability_timeout: std::time::Duration,
+        propagation_bound: std::time::Duration,
     },
     /// The reason is the failing node's own description, because the installation ran inside that
     /// node's listener.
@@ -408,7 +407,9 @@ impl SessionServiceImpl {
     /// When a completion barrier started now stops waiting: a node that cannot answer leaves the
     /// live set within the node-unavailability timeout, and a live node answers within the
     /// propagation bound.
-    fn completion_deadline(&self) -> Result<tokio::time::Instant, Report<CompletionError>> {
+    fn completion_deadline(
+        &self,
+    ) -> Result<nervix_primitives::time::Instant, Report<CompletionError>> {
         let node_unavailability_timeout = self.inner.cluster.node_unavailability_timeout();
         let overflow = CompletionError::DeadlineOverflow {
             node_unavailability_timeout,
@@ -419,7 +420,8 @@ impl SessionServiceImpl {
         else {
             return Err(Report::new(overflow));
         };
-        let Some(deadline) = tokio::time::Instant::now().checked_add(wait_budget) else {
+        let Some(deadline) = nervix_primitives::time::Instant::now().checked_add(wait_budget)
+        else {
             return Err(Report::new(overflow));
         };
         Ok(deadline)
@@ -480,7 +482,7 @@ impl SessionServiceImpl {
             )
             .await
             else {
-                if tokio::time::Instant::now() >= deadline {
+                if nervix_primitives::time::Instant::now() >= deadline {
                     let pending_node = match self.inner.consensus.current_leader_tenure() {
                         Some(tenure) => tenure.leader_id().clone(),
                         None => local_identity.node_id().clone(),
@@ -490,7 +492,7 @@ impl SessionServiceImpl {
                         pending_nodes: vec![pending_node],
                     }));
                 }
-                tokio::time::sleep(APPLICATION_REVISION_PROBE_RETRY).await;
+                nervix_primitives::time::sleep(APPLICATION_REVISION_PROBE_RETRY).await;
                 continue;
             };
             let probed = probe_https_listeners(
@@ -527,7 +529,7 @@ impl SessionServiceImpl {
                 }
                 continue;
             }
-            if tokio::time::Instant::now() >= deadline {
+            if nervix_primitives::time::Instant::now() >= deadline {
                 pending_nodes.sort();
                 return Err(Report::new(CompletionError::HttpsListenerPending {
                     revision,
@@ -536,8 +538,8 @@ impl SessionServiceImpl {
             }
             nervix_primitives::select! {
                 biased;
-                _ = tokio::time::sleep_until(deadline) => {}
-                _ = tokio::time::sleep(APPLICATION_REVISION_PROBE_RETRY) => {}
+                _ = nervix_primitives::time::sleep_until(deadline) => {}
+                _ = nervix_primitives::time::sleep(APPLICATION_REVISION_PROBE_RETRY) => {}
             }
         }
     }
@@ -557,7 +559,8 @@ impl SessionServiceImpl {
                 },
             ));
         };
-        let Some(deadline) = tokio::time::Instant::now().checked_add(wait_budget) else {
+        let Some(deadline) = nervix_primitives::time::Instant::now().checked_add(wait_budget)
+        else {
             return Err(Report::new(
                 crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
                     node_unavailability_timeout,

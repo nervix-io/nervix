@@ -50,7 +50,7 @@ fn named_clock_request(world: &ScenarioWorld, name: &str) -> RequestId {
 
 async fn clock_reply_to_named(world: &mut ScenarioWorld, name: &str) -> ReplyBody {
     let request_id = named_clock_request(world, name);
-    let reply = tokio::time::timeout(
+    let reply = nervix_primitives::time::timeout(
         CLOCK_REPLY_TIMEOUT,
         clock_session(world).reply_to(request_id),
     )
@@ -781,7 +781,7 @@ async fn then_client_receives_tick(world: &mut ScenarioWorld, duration: String, 
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
     let domain = scenario_domain(world, &world.domain);
-    let ticked = tokio::time::timeout(duration, async {
+    let ticked = nervix_primitives::time::timeout(duration, async {
         loop {
             nervix_primitives::task::consume_budget().await;
             let event = client
@@ -820,7 +820,7 @@ async fn then_client_reports_clock_interruption(
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
     let domain = scenario_domain(world, &world.domain);
-    tokio::time::timeout(duration, async {
+    nervix_primitives::time::timeout(duration, async {
         loop {
             nervix_primitives::task::consume_budget().await;
             match client
@@ -929,7 +929,7 @@ async fn then_client_observes_server_error(
     loop {
         nervix_primitives::task::consume_budget().await;
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let event = tokio::time::timeout(remaining, client.next_server_event()).await;
+        let event = nervix_primitives::time::timeout(remaining, client.next_server_event()).await;
         let event = match event {
             Ok(event) => {
                 event.unwrap_or_else(|error| panic!("client '{name}' lost its events: {error}"))

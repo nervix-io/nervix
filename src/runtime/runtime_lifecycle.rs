@@ -126,11 +126,7 @@ impl Runtime {
                 fault_injection,
                 resource_store: ArcSwapOption::empty(),
                 remote_dispatcher: ArcSwapOption::empty(),
-                remote_dispatch: Arc::new(RemoteDispatchRegistry {
-                    next_ack_id: AtomicU64::new(1),
-                    pending_acks: DashMap::default(),
-                    pending_relay_admissions: DashMap::default(),
-                }),
+                remote_dispatch: Arc::new(RemoteDispatchRegistry::new()),
                 remote_ack_watcher_shutdown: CancellationToken::new(),
                 remote_ack_watcher_tasks: TaskTracker::new(),
                 state_checkpoint_notifications: DashMap::default(),
@@ -143,7 +139,7 @@ impl Runtime {
                 activated_runtime_state_handoffs: DashMap::default(),
                 prepared_forced_runtime_state_recoveries: DashMap::default(),
                 prepared_runtime_state_snapshots: DashMap::default(),
-                expiring_stream_states: DashMap::default(),
+                relay_branch_presences: DashMap::default(),
                 replicated_deduplicator_states: DashMap::default(),
                 replicated_kafka_offset_states: DashMap::default(),
                 replicated_materialized_stream_states: DashMap::default(),
@@ -572,7 +568,7 @@ impl Runtime {
         self.inner.pending_state_checkpoint_announcements.clear();
         self.inner.state_replication_tasks.close();
         self.inner.state_replication_tasks.wait().await;
-        self.inner.expiring_stream_states.clear();
+        self.inner.relay_branch_presences.clear();
         self.inner.replicated_deduplicator_states.clear();
         self.inner.replicated_kafka_offset_states.clear();
         self.inner.replicated_materialized_stream_states.clear();
@@ -593,7 +589,7 @@ impl Runtime {
                 _ = shutdown_rx.changed() => {
                     return None;
                 }
-                progress = tokio::time::timeout(timeout_duration, completion.wait_for_progress()) => {
+                progress = nervix_primitives::time::timeout(timeout_duration, completion.wait_for_progress()) => {
                     match progress {
                         Ok(AckProgress::Alive) => {}
                         Ok(AckProgress::Complete(outcome)) => return Some(outcome),
@@ -634,7 +630,7 @@ impl Runtime {
         task_kind: &str,
         grace_period: Duration,
     ) {
-        match tokio::time::timeout(grace_period, &mut task).await {
+        match nervix_primitives::time::timeout(grace_period, &mut task).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 if error.is_cancelled() {

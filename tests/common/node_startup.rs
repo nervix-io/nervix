@@ -36,13 +36,12 @@
 //! schedules: a runner that stops running the harness's own tasks for longer than an attempt
 //! delays the check that ends it, and the measured startups include such a runner.
 
-use std::{fmt, io};
+use std::{fmt, io, time::Duration};
 
 use error_stack::Report;
 use nervix_models::ClusterNodeName;
 use nervix_server::application::AppError;
 use thiserror::Error;
-use tokio::time::Duration;
 use triomphe::Arc;
 
 use super::{

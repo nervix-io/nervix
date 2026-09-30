@@ -13,14 +13,14 @@ use std::{
 use meticulous::ResultExt as _;
 use nervix_dns::{DnsConfiguration, DnsLookupFailure, DnsResolver, NameServers};
 use nervix_models::ClientConfigEntry;
-use nervix_primitives::task::JoinHandle;
-use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
-use tempfile::TempDir;
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
+use nervix_primitives::{
     net::{TcpListener, TcpSocket, TcpStream},
+    task::JoinHandle,
     time::Instant,
 };
+use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
+use tempfile::TempDir;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::*;
 

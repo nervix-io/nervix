@@ -10,12 +10,7 @@ workspace = true
 
 [features]
 default = []
-shuttle = [
-  "dep:shuttle-tokio",
-  "nervix-connector/shuttle",
-  "nervix-primitives/shuttle",
-  "shuttle-tokio/shuttle",
-]
+shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
 
 [dependencies]
 arch-into = { workspace = true }
@@ -25,15 +20,11 @@ futures-util = { workspace = true }
 humantime = { workspace = true }
 meticulous = { workspace = true }
 nervix-connector = { workspace = true }
+nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 rumqttc = { workspace = true }
-shuttle-tokio = { workspace = true, features = [
-  "macros",
-  "rt",
-  "sync",
-  "time",
-], optional = true }
+rumqttc-core = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing = { workspace = true }
@@ -41,5 +32,7 @@ triomphe = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+nervix-test-environment = { workspace = true }
 nonzero_ext = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["io-util"] }

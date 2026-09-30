@@ -35,6 +35,7 @@ md5 = { workspace = true }
 meticulous = { workspace = true }
 nervix-approx-into = { workspace = true }
 nervix-models = { workspace = true }
+nervix-simd-kernels = { workspace = true }
 regex = { workspace = true }
 regex-automata = { workspace = true }
 sha2 = { workspace = true }

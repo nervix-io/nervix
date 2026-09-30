@@ -27,8 +27,10 @@ use nervix_models::{
     TransactionPosition, TransactionPreviewIdentity, TransactionStatus, UploadResource,
 };
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
-use nervix_primitives::sync::Mutex;
-use tokio::time::{Instant, sleep};
+use nervix_primitives::{
+    sync::Mutex,
+    time::{Instant, sleep},
+};
 use tonic::transport::Channel;
 use triomphe::Arc;
 use url::Url;
@@ -286,7 +288,7 @@ impl Client {
                 let channel = connector.connect(&candidate).await?;
                 Exchange::open(channel, &connector, events.sinks.clone()).await
             };
-            match tokio::time::timeout_at(deadline, attempt).await {
+            match nervix_primitives::time::timeout_at(deadline, attempt).await {
                 Err(_) => return Err(last_error.unwrap_or(ClientError::RetryDeadline)),
                 Ok(Err(error)) => last_error = Some(error),
                 Ok(Ok(exchange)) => {
@@ -386,9 +388,10 @@ impl Client {
             let execution = self.prepare_execution_with_route(query, route).await;
             return self.execute_prepared_after_lock(&execution, deadline).await;
         }
-        let _command_guard = tokio::time::timeout_at(deadline, self.inner.command_lock.lock())
-            .await
-            .map_err(|_| ClientError::RetryDeadline)?;
+        let _command_guard =
+            nervix_primitives::time::timeout_at(deadline, self.inner.command_lock.lock())
+                .await
+                .map_err(|_| ClientError::RetryDeadline)?;
         let execution = self.prepare_execution_with_route(query, route).await;
         self.execute_prepared_after_lock(&execution, deadline).await
     }
@@ -437,9 +440,10 @@ impl Client {
         if execution.route.is_subscription() {
             return self.execute_prepared_after_lock(execution, deadline).await;
         }
-        let _command_guard = tokio::time::timeout_at(deadline, self.inner.command_lock.lock())
-            .await
-            .map_err(|_| ClientError::RetryDeadline)?;
+        let _command_guard =
+            nervix_primitives::time::timeout_at(deadline, self.inner.command_lock.lock())
+                .await
+                .map_err(|_| ClientError::RetryDeadline)?;
         self.execute_prepared_after_lock(execution, deadline).await
     }
 
@@ -463,8 +467,11 @@ impl Client {
                 .restore_with_reference(restore, &execution.reference, |_| {})
                 .await;
         }
-        let result =
-            tokio::time::timeout_at(deadline, self.execute_prepared_within_budget(execution)).await;
+        let result = nervix_primitives::time::timeout_at(
+            deadline,
+            self.execute_prepared_within_budget(execution),
+        )
+        .await;
         let outcome = match result {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(error))
@@ -589,7 +596,7 @@ impl Client {
         id: impl Into<String>,
     ) -> Result<CommandOutcome, ClientError> {
         let id = id.into();
-        match tokio::time::timeout(self.inner.connector.retry_timeout(), async {
+        match nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
             let _command_guard = self.inner.command_lock.lock().await;
             let outcome = self.attach_with_redirects(&id).await?;
             let outcome = CommandOutcome::from(outcome);
@@ -623,55 +630,59 @@ impl Client {
         target: TransactionInspectionTarget,
         operation: Option<TransactionOperationNumber>,
     ) -> Result<InspectionOutcome, ClientError> {
-        let inspected = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
-            let _command_guard = self.inner.command_lock.lock().await;
-            for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-                nervix_primitives::task::consume_budget().await;
-                let request = ClientRequest::InspectTransaction(InspectTransactionRequest {
-                    target: target.clone(),
-                    operation,
-                });
-                let body = match self.request(request, None).await {
-                    Ok(body) => body,
-                    Err(error) if error.retryable_session_failure() => {
-                        match self.recover_session(RecoveryMode::IfClosed).await? {
-                            SessionRecovery::Ready => continue,
-                            SessionRecovery::Unavailable => return Err(error),
+        let inspected =
+            nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
+                let _command_guard = self.inner.command_lock.lock().await;
+                for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+                    nervix_primitives::task::consume_budget().await;
+                    let request = ClientRequest::InspectTransaction(InspectTransactionRequest {
+                        target: target.clone(),
+                        operation,
+                    });
+                    let body = match self.request(request, None).await {
+                        Ok(body) => body,
+                        Err(error) if error.retryable_session_failure() => {
+                            match self.recover_session(RecoveryMode::IfClosed).await? {
+                                SessionRecovery::Ready => continue,
+                                SessionRecovery::Unavailable => return Err(error),
+                            }
                         }
-                    }
-                    Err(error) => return Err(error),
-                };
-                let outcome = match body {
-                    ReplyBody::Inspection(outcome) => outcome,
-                    other => {
-                        return Err(ClientError::unexpected_reply(
-                            RequestKind::InspectTransaction,
-                            other,
-                        ));
-                    }
-                };
-                match Routing::for_inspection(&outcome) {
-                    Routing::Redirect(leader) if Self::retries_remain(attempt) => {
-                        self.follow_leader(leader).await?;
-                    }
-                    Routing::AwaitElection if Self::await_retry(attempt).await => {}
-                    _ => {
-                        if let InspectionOutcome::Inspected(inspection) = &outcome {
-                            let preview = TransactionPreviewIdentity {
-                                transaction_id: inspection.transaction.transaction_id().to_string(),
-                                position: inspection.report.position(),
-                                planning_basis: inspection.report.planning_basis(),
-                            };
-                            self.record_preview(preview).await;
+                        Err(error) => return Err(error),
+                    };
+                    let outcome = match body {
+                        ReplyBody::Inspection(outcome) => outcome,
+                        other => {
+                            return Err(ClientError::unexpected_reply(
+                                RequestKind::InspectTransaction,
+                                other,
+                            ));
                         }
-                        return Ok(outcome);
+                    };
+                    match Routing::for_inspection(&outcome) {
+                        Routing::Redirect(leader) if Self::retries_remain(attempt) => {
+                            self.follow_leader(leader).await?;
+                        }
+                        Routing::AwaitElection if Self::await_retry(attempt).await => {}
+                        _ => {
+                            if let InspectionOutcome::Inspected(inspection) = &outcome {
+                                let preview = TransactionPreviewIdentity {
+                                    transaction_id: inspection
+                                        .transaction
+                                        .transaction_id()
+                                        .to_string(),
+                                    position: inspection.report.position(),
+                                    planning_basis: inspection.report.planning_basis(),
+                                };
+                                self.record_preview(preview).await;
+                            }
+                            return Ok(outcome);
+                        }
                     }
                 }
-            }
-            // Only a session that closed again on the last attempt leaves the loop.
-            Err(ClientError::SessionClosed)
-        })
-        .await;
+                // Only a session that closed again on the last attempt leaves the loop.
+                Err(ClientError::SessionClosed)
+            })
+            .await;
         match inspected {
             Ok(result) => result,
             Err(_) => Err(ClientError::RetryDeadline),
@@ -1082,37 +1093,38 @@ impl Client {
                 Some(exchange) => exchange.clone(),
                 None => self.inner.exchange.lock().await.requests(),
             };
-            let sent = tokio::time::timeout(self.inner.connector.request_timeout(), async {
-                // Register before sending so a prompt reply always finds its waiter.
-                let Some(mut registered) = exchange.register() else {
-                    return Err(exchange.pending.lock().failure());
-                };
-                let message = ClientMessage {
-                    request_id: registered.request_id,
-                    request: request.clone(),
-                };
-                let frame = message.encode(&SESSION_LIMITS).map_err(|report| {
-                    ClientError::EncodeRequest {
-                        request: kind,
-                        source: report.current_context().clone(),
-                    }
-                })?;
-                if exchange.frames.send(frame).await.is_err() {
-                    exchange.pending.lock().close();
-                    return Err(exchange.pending.lock().failure());
-                }
-                match registered.receive().await {
-                    Some(body) => Ok(body),
-                    None => match exchange.pending.lock().failure() {
-                        ClientError::SessionClosed => {
-                            Err(ClientError::RequestInterrupted { request: kind })
+            let sent =
+                nervix_primitives::time::timeout(self.inner.connector.request_timeout(), async {
+                    // Register before sending so a prompt reply always finds its waiter.
+                    let Some(mut registered) = exchange.register() else {
+                        return Err(exchange.pending.lock().failure());
+                    };
+                    let message = ClientMessage {
+                        request_id: registered.request_id,
+                        request: request.clone(),
+                    };
+                    let frame = message.encode(&SESSION_LIMITS).map_err(|report| {
+                        ClientError::EncodeRequest {
+                            request: kind,
+                            source: report.current_context().clone(),
                         }
-                        error => Err(error),
-                    },
-                }
-            });
+                    })?;
+                    if exchange.frames.send(frame).await.is_err() {
+                        exchange.pending.lock().close();
+                        return Err(exchange.pending.lock().failure());
+                    }
+                    match registered.receive().await {
+                        Some(body) => Ok(body),
+                        None => match exchange.pending.lock().failure() {
+                            ClientError::SessionClosed => {
+                                Err(ClientError::RequestInterrupted { request: kind })
+                            }
+                            error => Err(error),
+                        },
+                    }
+                });
             let sent = if read_only {
-                tokio::time::timeout_at(deadline, sent)
+                nervix_primitives::time::timeout_at(deadline, sent)
                     .await
                     .map_err(|_| ClientError::RetryDeadline)?
             } else {
@@ -1131,7 +1143,7 @@ impl Client {
             match sent {
                 Ok(body) => return Ok(body),
                 Err(error) if error.retryable_session_failure() => {
-                    let recovered = tokio::time::timeout_at(
+                    let recovered = nervix_primitives::time::timeout_at(
                         deadline,
                         Box::pin(self.recover_session(RecoveryMode::IfClosed)),
                     )
@@ -1140,9 +1152,10 @@ impl Client {
                     if let SessionRecovery::Unavailable = recovered {
                         return Err(error);
                     }
-                    let allowed = tokio::time::timeout_at(deadline, Self::await_retry(attempt))
-                        .await
-                        .map_err(|_| ClientError::RetryDeadline)?;
+                    let allowed =
+                        nervix_primitives::time::timeout_at(deadline, Self::await_retry(attempt))
+                            .await
+                            .map_err(|_| ClientError::RetryDeadline)?;
                     if !allowed {
                         return Err(error);
                     }
@@ -1367,24 +1380,25 @@ impl Client {
         &self,
         request: ClientRequest,
     ) -> error_stack::Result<ReplyBody, ClientError> {
-        let answered = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
-            for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-                nervix_primitives::task::consume_budget().await;
-                match self.request(request.clone(), None).await {
-                    Ok(body) => return Ok(body),
-                    Err(error) if error.retryable_session_failure() => {
-                        match self.recover_session(RecoveryMode::IfClosed).await? {
-                            SessionRecovery::Ready => {}
-                            SessionRecovery::Unavailable => return Err(error),
+        let answered =
+            nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
+                for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+                    nervix_primitives::task::consume_budget().await;
+                    match self.request(request.clone(), None).await {
+                        Ok(body) => return Ok(body),
+                        Err(error) if error.retryable_session_failure() => {
+                            match self.recover_session(RecoveryMode::IfClosed).await? {
+                                SessionRecovery::Ready => {}
+                                SessionRecovery::Unavailable => return Err(error),
+                            }
                         }
+                        Err(error) => return Err(error),
                     }
-                    Err(error) => return Err(error),
                 }
-            }
-            // Only a session that closed again on the last attempt leaves the loop.
-            Err(ClientError::SessionClosed)
-        })
-        .await;
+                // Only a session that closed again on the last attempt leaves the loop.
+                Err(ClientError::SessionClosed)
+            })
+            .await;
         match answered {
             Ok(result) => result.map_err(Report::new),
             Err(_) => Err(Report::new(ClientError::RetryDeadline)),
@@ -1574,7 +1588,11 @@ impl Client {
                 }
                 for server in candidates {
                     nervix_primitives::task::consume_budget().await;
-                    match tokio::time::timeout_at(deadline, self.reconnect_unlocked(&server)).await
+                    match nervix_primitives::time::timeout_at(
+                        deadline,
+                        self.reconnect_unlocked(&server),
+                    )
+                    .await
                     {
                         Ok(Ok(())) => break 'recovery SessionRecovery::Ready,
                         Ok(Err(error)) => last_error = Some(error),

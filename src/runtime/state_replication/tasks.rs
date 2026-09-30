@@ -957,9 +957,9 @@ impl Runtime {
                 .replicated_branch_aggregated_states
                 .remove(&placement);
         }
-        let stale_expiring = self
+        let stale_presences = self
             .inner
-            .expiring_stream_states
+            .relay_branch_presences
             .iter()
             .filter_map(|entry| {
                 let placement = entry.key();
@@ -967,8 +967,8 @@ impl Runtime {
                     .then(|| placement.clone())
             })
             .collect::<Vec<_>>();
-        for placement in stale_expiring {
-            self.inner.expiring_stream_states.remove(&placement);
+        for placement in stale_presences {
+            self.inner.relay_branch_presences.remove(&placement);
         }
 
         if let Some(store) = self.inner.state_store.as_ref() {

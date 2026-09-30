@@ -515,12 +515,13 @@ class FamilyTests(CheckTestCase):
                 "crates/engine/src/lib.rs": (
                     "use std::sync::Arc;\n"
                     "use nervix_primitives::{sync::{Notify, blocking::Mutex, watch}, task};\n"
-                    "#[cfg(feature = \"shuttle\")]\nextern crate shuttle_tokio as tokio;\n"
                     "nervix_primitives::thread_local! { static SEEN: u8 = const { 0 }; }\n"
                     "#[nervix_primitives::test]\n"
                     "async fn waits() {\n"
                     "    task::consume_budget().await;\n"
-                    "    nervix_primitives::select! { () = tokio::time::sleep(DURATION) => {} }\n"
+                    "    nervix_primitives::select! {\n"
+                    "        () = nervix_primitives::time::sleep(DURATION) => {}\n"
+                    "    }\n"
                     "    tokio::pin!(future);\n"
                     "    let _pair = shuttle::future::block_on(async {});\n"
                     "}\n"
@@ -540,10 +541,10 @@ class FamilyTests(CheckTestCase):
 
     def test_a_grouped_tokio_import_fails_only_for_the_governed_items(self) -> None:
         report = self.assert_rejected(
-            "use tokio::{sync::watch, time::sleep};\n",
+            "use tokio::{io::AsyncReadExt, sync::watch};\n",
             "`tokio::sync::watch` bypasses the boundary",
         )
-        self.assertNotIn("tokio::time", report)
+        self.assertNotIn("tokio::io", report)
 
     def test_tasks_and_their_macros_fail_outside_the_boundary(self) -> None:
         self.assert_rejected(
@@ -623,15 +624,13 @@ class FamilyTests(CheckTestCase):
         self.assertNotIn("check_random", report)
         self.assertNotIn("context_switches", report)
 
-    def test_a_backend_alias_fails_and_the_timer_alias_passes(self) -> None:
-        report = self.assert_rejected(
+    def test_a_backend_alias_fails(self) -> None:
+        self.assert_rejected(
             '#[cfg(feature = "shuttle")]\nextern crate shuttle_parking_lot as parking_lot;\n'
-            '#[cfg(feature = "shuttle")]\nextern crate shuttle_tokio as tokio;\n'
             "extern crate tokio as tokio_real;\n",
             "`extern crate shuttle_parking_lot as parking_lot` selects a backend outside the boundary",
             "`extern crate tokio as tokio_real` selects a backend outside the boundary",
         )
-        self.assertNotIn("shuttle_tokio as tokio`", report)
 
     def test_a_renamed_governed_crate_fails(self) -> None:
         self.assert_rejected(
@@ -781,6 +780,254 @@ class LoomModelTests(CheckTestCase):
             }
         )
         self.assertEqual(status, 0, report)
+
+
+class TimerAndNetworkTests(CheckTestCase):
+    """Timers, the monotonic clock and sockets follow the build's execution mode, and names resolve
+    through the node's resolver."""
+
+    def test_approved_timer_and_socket_paths_pass(self) -> None:
+        status, report = self.check(
+            {
+                "crates/engine/src/lib.rs": (
+                    "use std::{net::{IpAddr, SocketAddr}, time::{self, Duration}};\n"
+                    "use nervix_primitives::{\n"
+                    "    net::{TcpListener, TcpStream},\n"
+                    "    time::{Instant, sleep, timeout},\n"
+                    "};\n"
+                    "use tokio::io::AsyncReadExt as _;\n"
+                    "fn f() -> time::Duration {\n"
+                    "    let _started = Instant::now();\n"
+                    "    let _simulation = turmoil::Builder::new().build();\n"
+                    "    let _address = turmoil::lookup(\"server\");\n"
+                    "    time::Duration::ZERO\n"
+                    "}\n"
+                )
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_tokio_timers_fail_and_name_their_replacement(self) -> None:
+        self.assert_rejected(
+            "use tokio::time::{Instant, timeout};\n"
+            "use tokio::time::Duration;\n"
+            "fn f() { tokio::time::sleep(DURATION); }\n",
+            "`tokio::time::Instant` bypasses the boundary; use `nervix_primitives::time::Instant`",
+            "`tokio::time::timeout` bypasses the boundary; use `nervix_primitives::time::timeout`",
+            "`tokio::time::Duration` bypasses the boundary; use `std::time::Duration`",
+            "`tokio::time::sleep` bypasses the boundary; use `nervix_primitives::time::sleep`",
+        )
+
+    def test_the_standard_monotonic_clock_fails(self) -> None:
+        self.assert_rejected(
+            "use std::time::Instant;\nfn f() { let _now = std::time::Instant::now(); }\n",
+            "`std::time::Instant` bypasses the boundary; use `nervix_primitives::time::Instant`",
+            "`std::time::Instant::now` bypasses the boundary",
+        )
+
+    def test_an_imported_time_module_fails_where_it_reaches_the_monotonic_clock(self) -> None:
+        report = self.assert_rejected(
+            "use std::time;\n"
+            "fn f() -> time::Duration { let _now = time::Instant::now(); time::Duration::ZERO }\n",
+            "`time::Instant::now` reaches `std::time::Instant::now` through an imported "
+            "`std::time` module; use `nervix_primitives::time::Instant::now`",
+        )
+        self.assertNotIn("Duration", report)
+
+    def test_sockets_outside_the_boundary_fail(self) -> None:
+        self.assert_rejected(
+            "use tokio::net::{TcpListener, UdpSocket};\n"
+            "use turmoil::net::TcpStream;\n"
+            "fn f() {\n"
+            "    let _socket = std::net::UdpSocket::bind(ADDRESS);\n"
+            "    let _local = std::os::unix::net::UnixStream::connect(PATH);\n"
+            "}\n",
+            "`tokio::net::TcpListener` bypasses the boundary; use `nervix_primitives::net::TcpListener`",
+            "`tokio::net::UdpSocket` bypasses the boundary; use `nervix_primitives::net::UdpSocket`",
+            "`turmoil::net::TcpStream` bypasses the boundary; use `nervix_primitives::net::TcpStream`",
+            "`std::net::UdpSocket::bind` bypasses the boundary",
+            "`std::os::unix::net::UnixStream::connect` bypasses the boundary; use "
+            "`nervix_primitives::net::UnixStream::connect`",
+        )
+
+    def test_an_imported_net_module_fails_where_it_reaches_a_socket(self) -> None:
+        report = self.assert_rejected(
+            "use std::net;\n"
+            "fn f(address: net::SocketAddr) { let _listener = net::TcpListener::bind(address); }\n",
+            "`net::TcpListener::bind` reaches `std::net::TcpListener::bind` through an imported "
+            "`std::net` module",
+        )
+        self.assertNotIn("SocketAddr", report)
+
+    def test_resolving_around_the_node_resolver_fails(self) -> None:
+        self.assert_rejected(
+            "use std::net::ToSocketAddrs;\n"
+            "use tokio::net::ToSocketAddrs as _;\n"
+            "async fn f() { let _answers = tokio::net::lookup_host(HOST).await; }\n",
+            "`std::net::ToSocketAddrs` resolves names around the node's resolver; use "
+            "`nervix_dns::DnsResolver`",
+            "`tokio::net::ToSocketAddrs` resolves names around the node's resolver",
+            "`tokio::net::lookup_host` resolves names around the node's resolver; use "
+            "`nervix_dns::DnsResolver`",
+        )
+
+    def test_the_timer_alias_fails(self) -> None:
+        self.assert_rejected(
+            "extern crate turmoil as simulator;\n",
+            "`extern crate turmoil as simulator` selects a backend outside the boundary",
+        )
+
+    def test_a_renamed_time_module_fails(self) -> None:
+        self.assert_rejected(
+            "use std::time as clock;\n",
+            "`std::time` is renamed to `clock`, which hides the governed primitives below it",
+        )
+
+    def test_timers_and_sockets_in_loom_model_code_fail(self) -> None:
+        self.assert_rejected(
+            '#[cfg(all(test, feature = "loom"))]\n'
+            "mod loom_models {\n"
+            "    use nervix_primitives::time::sleep;\n"
+            "    fn model() {\n"
+            "        let _stream = nervix_primitives::net::TcpStream::connect(ADDRESS);\n"
+            "    }\n"
+            "}\n",
+            "Loom model code names `nervix_primitives::time::sleep`",
+            "Loom model code names `nervix_primitives::net::TcpStream::connect`",
+        )
+
+
+class CpuJobTests(CheckTestCase):
+    """The boundary's CPU-job mechanism belongs to the bounded executor."""
+
+    EXECUTOR = "crates/execution/src/workers.rs"
+
+    def test_the_executor_may_run_an_admitted_cpu_job(self) -> None:
+        status, report = self.check(
+            {
+                self.EXECUTOR: (
+                    "fn start(work: Work) { let _job = nervix_primitives::task::spawn_cpu(work); }\n"
+                )
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_the_mechanism_fails_anywhere_else(self) -> None:
+        report = self.assert_rejected(
+            "use nervix_primitives::task::spawn_cpu;\n"
+            "fn f(work: Work) { nervix_primitives::task::spawn_cpu(work); }\n",
+            "`nervix_primitives::task::spawn_cpu` is the bounded executor's mechanism for an "
+            "admitted CPU job; only crates/execution/src/workers.rs may name it",
+        )
+        self.assertIn("crates/engine/src/lib.rs:1", report)
+        self.assertIn("crates/engine/src/lib.rs:2", report)
+
+    def test_the_mechanism_fails_through_an_imported_task_module_or_a_glob(self) -> None:
+        report = self.assert_rejected(
+            "use nervix_primitives::task;\n"
+            "use nervix_primitives::task::*;\n"
+            "fn f(work: Work) { task::spawn_cpu(work); task::spawn_blocking(work); }\n",
+            "`nervix_primitives::task::spawn_cpu` is the bounded executor's mechanism",
+        )
+        self.assertIn("crates/engine/src/lib.rs:2", report)
+        self.assertIn("crates/engine/src/lib.rs:3", report)
+        self.assertNotIn("spawn_blocking", report)
+
+
+class TurmoilManifestTests(CheckTestCase):
+    """Only the owner selects Turmoil's network; a harness may run Turmoil behind its own feature."""
+
+    HARNESS_USER = ENGINE.replace(
+        'shuttle = ["dep:shuttle", "nervix-primitives/shuttle", "nervix-vocabulary/shuttle"]',
+        'shuttle = ["dep:shuttle", "nervix-primitives/shuttle", "nervix-vocabulary/shuttle"]\n'
+        'turmoil = ["dep:turmoil", "nervix-primitives/turmoil"]',
+    ) + "turmoil = { workspace = true, optional = true }\n"
+
+    def test_a_harness_that_runs_turmoil_behind_its_feature_passes(self) -> None:
+        status, report = self.check(
+            {}, manifests={"crates/engine/Cargo.toml": self.HARNESS_USER}
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_turmoil_without_the_packages_feature_fails(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "crates/vocabulary/Cargo.toml": VOCABULARY
+                + "turmoil = { workspace = true, optional = true }\n"
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("crates/vocabulary/Cargo.toml", report)
+        self.assertIn("only nervix-primitives selects Turmoil's network", report)
+
+    def test_a_mandatory_or_development_turmoil_dependency_fails(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "crates/engine/Cargo.toml": self.HARNESS_USER
+                + "\n[dev-dependencies]\nturmoil = { workspace = true }\n"
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("`turmoil` must be an optional dependencies entry, not a dev-dependencies one", report)
+
+    def test_the_shuttle_tokio_wrapper_outside_the_owner_fails(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "crates/engine/Cargo.toml": ENGINE
+                + "shuttle-tokio = { workspace = true, optional = true }\n"
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("only nervix-primitives depends on `shuttle-tokio`", report)
+
+
+class TokioUnstableTests(CheckTestCase):
+    """Tokio's unstable runtime controls belong to the Turmoil recipes."""
+
+    JUSTFILE = (
+        'cargo_target_dir := "target"\n'
+        "\n"
+        "# Runs the simulation with `--cfg tokio_unstable` scoped to it.\n"
+        'test-turmoil budget_seconds="480":\n'
+        '    RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}" cargo test --features turmoil\n'
+        "\n"
+        "[parallel]\n"
+        "lint: fmt\n"
+        "    cargo clippy\n"
+    )
+
+    def test_the_turmoil_recipes_may_pass_the_cfg(self) -> None:
+        status, report = self.check({}, manifests={"justfile": self.JUSTFILE})
+        self.assertEqual(status, 0, report)
+
+    def test_another_recipe_passing_the_cfg_fails(self) -> None:
+        status, report = self.check(
+            {},
+            manifests={
+                "justfile": self.JUSTFILE
+                + 'test filter="":\n    RUSTFLAGS="--cfg=tokio_unstable" cargo test {{ filter }}\n'
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("justfile:11", report)
+        self.assertIn("only a Turmoil recipe passes it, and `test` is not one", report)
+
+    def test_cargo_configuration_workflows_and_build_scripts_fail(self) -> None:
+        status, report = self.check(
+            {"crates/engine/build.rs": 'fn main() { println!("cargo:rustc-cfg=tokio_unstable"); }\n'},
+            manifests={
+                ".cargo/config.toml": '[build]\nrustflags = ["--cfg", "tokio_unstable"]\n',
+                ".github/workflows/check.yaml": (
+                    "jobs:\n  tests:\n    env:\n      RUSTFLAGS: --cfg tokio_unstable\n"
+                ),
+            },
+        )
+        self.assertEqual(status, 1)
+        self.assertIn(".github/workflows/check.yaml:4", report)
+        self.assertIn("crates/engine/build.rs", report)
 
 
 if __name__ == "__main__":

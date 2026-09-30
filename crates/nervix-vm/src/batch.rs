@@ -5,8 +5,10 @@ use arrow_array::{
     Int32Array, Int64Array, RecordBatch, RecordBatchOptions, StringArray, TimestampNanosecondArray,
     UInt8Array, UInt16Array, UInt32Array, UInt64Array, new_null_array,
 };
+use arrow_buffer::BooleanBuffer;
 use arrow_schema::{DataType, Schema, TimeUnit};
 use error_stack::Report;
+use meticulous::OptionExt as _;
 
 use crate::{RowErrors, RuntimeError};
 
@@ -245,6 +247,38 @@ impl TypedBatch {
         self.row_count
     }
 
+    /// The rows on which some required field holds no value, because no route initialized it or
+    /// it holds a null, as a bitmap over the batch, or `None` when every required field holds a
+    /// value on every row.
+    ///
+    /// It is the OR of the inverted validity bitmaps of the required columns. A required column
+    /// without nulls is skipped on its null count, so a batch whose required columns all hold
+    /// values answers without reading a bitmap.
+    pub fn rows_missing_required_values(&self) -> Option<BooleanBuffer> {
+        let mut missing: Option<BooleanBuffer> = None;
+        for (column, field) in self.columns.iter().zip(self.schema.fields()) {
+            if field.is_nullable() || column.null_count() == 0 {
+                continue;
+            }
+            if column.is_uninitialized() {
+                return Some(BooleanBuffer::new_set(self.row_count));
+            }
+            // Arrow counts a column's nulls from its null buffer, and a row is null exactly where
+            // that buffer says so, which is also what `Array::is_null` reads.
+            let nulls = column
+                .as_array()
+                .nulls()
+                .verified("the null count checked above is read from the column's null buffer");
+            let column_missing = !nulls.inner();
+            if let Some(rows) = missing.as_mut() {
+                *rows |= &column_missing;
+            } else {
+                missing = Some(column_missing);
+            }
+        }
+        missing
+    }
+
     /// Exports the batch at a node boundary, where every required field must finally hold a value.
     ///
     /// Fields are checked in schema order and the first failing one ends the export: a required
@@ -374,6 +408,91 @@ mod tests {
         let utf8 = arrays[3].as_utf8().expect("utf8 accessor must succeed");
         assert_eq!(utf8.value(0), "a");
         assert!(arrays[3].as_int64().is_none());
+    }
+
+    #[test]
+    fn required_rows_without_values_are_the_or_of_the_required_columns_nulls() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("optional", DataType::Int64, true),
+            Field::new("first", DataType::Int64, false),
+            Field::new("second", DataType::Utf8, false),
+            Field::new("unset_optional", DataType::Float64, true),
+        ]));
+        let rows = 130;
+        let optional = Int64Array::from_iter((0..rows).map(|row| (row % 2 == 0).then_some(1)));
+        // A sliced column reads its nulls from its own offset.
+        let first = Int64Array::from_iter((0..rows + 3).map(|row| (row % 64 != 6).then_some(2)))
+            .slice(3, rows);
+        let second = StringArray::from_iter((0..rows).map(|row| (row != 129).then_some("x")));
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Int64(optional),
+                TypedArray::Int64(first),
+                TypedArray::Utf8(second),
+                TypedArray::uninitialized(DataType::Float64, rows),
+            ],
+        )
+        .expect("batch must build");
+
+        let missing = batch
+            .rows_missing_required_values()
+            .expect("two required columns hold nulls");
+
+        assert_eq!(missing.len(), rows);
+        assert_eq!(missing.set_indices().collect::<Vec<_>>(), [3, 67, 129]);
+    }
+
+    #[test]
+    fn required_columns_that_hold_every_value_need_no_bitmap() {
+        let batch =
+            TypedBatch::try_new(sample_schema(), sample_columns()).expect("batch must build");
+        assert!(batch.rows_missing_required_values().is_none());
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ints", DataType::Int64, false),
+            Field::new("names", DataType::Utf8, true),
+        ]));
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Int64(Int64Array::from(vec![1, 2])),
+                TypedArray::Utf8(StringArray::from(vec![None::<&str>, None])),
+            ],
+        )
+        .expect("batch must build");
+        assert!(batch.rows_missing_required_values().is_none());
+    }
+
+    #[test]
+    fn an_uninitialized_required_column_misses_every_row() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ints", DataType::Int64, false),
+            Field::new("unset", DataType::Utf8, false),
+        ]));
+        let batch = TypedBatch::try_new(
+            schema.clone(),
+            vec![
+                TypedArray::Int64(Int64Array::from(vec![Some(1), None, Some(3)])),
+                TypedArray::uninitialized(DataType::Utf8, 3),
+            ],
+        )
+        .expect("batch must build");
+
+        let missing = batch
+            .rows_missing_required_values()
+            .expect("an uninitialized required column holds no value");
+        assert_eq!(missing.set_indices().collect::<Vec<_>>(), [0, 1, 2]);
+
+        let empty = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Int64(Int64Array::from(Vec::<i64>::new())),
+                TypedArray::uninitialized(DataType::Utf8, 0),
+            ],
+        )
+        .expect("an empty batch must build");
+        assert!(empty.rows_missing_required_values().is_none());
     }
 
     #[test]

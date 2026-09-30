@@ -8,8 +8,10 @@
 //!   the incremental writer that fails at its budget boundary instead of growing past it. It is
 //!   the only entry point for variable-size encoding, decoding, validation, hashing, snapshot
 //!   construction, and synchronous filesystem or database work.
-//! - **Depends on.** Tokio's runtime and its blocking pool, the primitive boundary for its atomics,
-//!   the simulation scheduler when enabled, and the byte vocabulary its budgets are configured in.
+//! - **Depends on.** The primitive boundary for its atomics, semaphores and clock and for the
+//!   mechanisms that run a job: the runtime's blocking pool for storage work, and the boundary's
+//!   CPU-job mechanism, which is the same pool except in the Turmoil build. Also the byte
+//!   vocabulary its budgets are configured in.
 //! - **Must not know.** What a job computes. It admits, charges, runs and cancels; it decides
 //!   nothing about relays, branches, domains, peers, graphs or the cluster.
 //!
@@ -27,13 +29,11 @@
 //! there. Reserving threads per class would isolate them physically, at the cost of a pool per
 //! class; the node deliberately does not do that.
 //!
-//! In the Turmoil test build, admitted CPU jobs run as tasks on the simulated scheduler. Each
-//! bounded synchronous job body is one scheduling step. Storage jobs still use the blocking pool
-//! and are outside the simulated target. The same admission, cancellation and charge ownership
-//! apply in either build mode.
-
-#[cfg(feature = "shuttle")]
-extern crate shuttle_tokio as tokio;
+//! In the Turmoil test build, the boundary runs admitted CPU jobs as tasks on the simulated
+//! scheduler, so each bounded synchronous job body is one scheduling step. Storage jobs still use
+//! the blocking pool and are outside the simulated target. The same admission, cancellation and
+//! charge ownership apply in every build mode, and this executor is the only caller of the CPU-job
+//! mechanism.
 
 mod cancellation;
 mod executor;
