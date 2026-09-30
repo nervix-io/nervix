@@ -596,6 +596,14 @@ serving their streams, so a peer's request the node has not answered fails inste
 A forced ending skips this entirely, so peers observe the connections ending exactly as they do
 when a process crashes.
 
+The node's own OTLP trace exporter is a process service. After the application returns, its tracing
+guard closes resolver installation and asks the SDK to flush before the process drops its Tokio
+runtime. An installed resolver remains available to queued exports. If startup failed before DNS
+installation, closing the publication ends a pending collector connection. Export failures remain
+telemetry diagnostics with no data-plane acknowledgement consequence, and a forced process ending
+does not guarantee a final export. [Node Trace Export](./name-resolution.md#node-trace-export) owns
+the resolver lifetime and export budgets.
+
 ### Consensus Work At The Ending Boundary
 
 Consensus remains live through stop admission and drain support. A terminating node can still append
