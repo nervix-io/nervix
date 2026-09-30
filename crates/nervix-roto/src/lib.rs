@@ -4,7 +4,8 @@
 //!
 //! - **Owns.** Compiling a planned UDF program, the watchdog that bounds a call, and the
 //!   `FunctionInjector` that returns results to the VM as typed Arrow arrays.
-//! - **Depends on.** The VM and the vocabulary.
+//! - **Depends on.** The VM, the vocabulary, and the node's bounded executor, whose bulk workers
+//!   compile its programs off the caller's task.
 //! - **Must not know.** Relays, branches or the graph a UDF is invoked from. It answers a call.
 //!
 use std::{cell::RefCell, fmt, panic::AssertUnwindSafe, sync::Arc as StdArc, time::Duration};
@@ -26,6 +27,7 @@ use arrow_select::{nullif::nullif, zip::zip};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto;
+use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass};
 use nervix_models::{ParseAsType, Timestamp, UdfArgument, UdfLanguage, UdfName, UdfReturn};
 use nervix_primitives::{sync::blocking::Mutex, time::Instant};
 use nervix_recovery::Discarded as _;
@@ -95,8 +97,10 @@ pub enum UdfError {
     TestsFailed,
     #[error("Roto compile and test budget of {limit:?} was exceeded")]
     CompileBudgetExceeded { limit: Duration },
-    #[error("Roto compilation task failed: {0}")]
-    CompileTask(#[source] nervix_primitives::task::JoinError),
+    #[error("the node's bounded execution did not compile the UDFs")]
+    CompileExecution,
+    #[error("the caller stopped waiting between two UDF compilations")]
+    CompileCancelled,
     #[error("Roto entry signature is invalid: {0}")]
     Signature(String),
 }
@@ -1159,19 +1163,50 @@ pub struct UdfExecutor {
     signatures: UdfSignatures,
 }
 
+/// What compiling a domain's UDFs is charged. Roto's compiler allocates the code it generates
+/// itself and the executor keeps it for as long as the domain does, which no transient budget can
+/// stand for, so the charge only admits the compilation onto the bulk workers.
+const COMPILE_RESERVATION_BYTES: u64 = 1;
+
 impl UdfExecutor {
-    pub async fn compile(models: Vec<UdfProgram>) -> error_stack::Result<Self, UdfError> {
-        nervix_primitives::task::spawn_blocking(move || Self::compile_sync(models))
+    /// Compile `models` on the node's bulk workers, checking between two programs whether the
+    /// caller stopped waiting.
+    pub async fn compile(
+        executor: &Executor,
+        models: Vec<UdfProgram>,
+    ) -> error_stack::Result<Self, UdfError> {
+        let reservation = match executor
+            .reserve(MemoryClass::Bulk, COMPILE_RESERVATION_BYTES)
             .await
-            .map_err(|error| Report::new(UdfError::CompileTask(error)))?
+        {
+            Ok(reservation) => reservation,
+            Err(error) => return Err(error.change_context(UdfError::CompileExecution)),
+        };
+        let compiled = executor
+            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                Self::compile_sync(models, Some(cancellation))
+            })
+            .await;
+        match compiled {
+            Ok(compiled) => compiled,
+            Err(error) => Err(error.change_context(UdfError::CompileExecution)),
+        }
     }
 
+    /// Compile `models` on the calling thread. An admitted compilation passes the `cancellation`
+    /// its worker checks between programs; a test has none.
     fn compile_sync(
         models: impl IntoIterator<Item = UdfProgram>,
+        cancellation: Option<&Cancellation>,
     ) -> error_stack::Result<Self, UdfError> {
         let mut functions = HashMap::new();
         let mut signatures = UdfSignatures::default();
         for model in models {
+            if let Some(cancellation) = cancellation
+                && cancellation.is_cancelled()
+            {
+                return Err(Report::new(UdfError::CompileCancelled));
+            }
             let started = Instant::now();
             let compiled = compile_udf(model.clone(), DEFAULT_WATCHDOG)?;
             if started.elapsed() > COMPILE_TEST_BUDGET {
@@ -1200,7 +1235,7 @@ impl UdfExecutor {
 impl FunctionInjector for UdfExecutor {
     fn execution_policy(&self, function: &FunctionName) -> FunctionExecutionPolicy {
         if matches!(function, FunctionName::Udf(_)) {
-            FunctionExecutionPolicy::SpawnBlocking
+            FunctionExecutionPolicy::Extension
         } else {
             FunctionExecutionPolicy::Inline
         }
@@ -1516,11 +1551,12 @@ mod tests {
 
     #[test]
     fn compiles_and_executes_i64_column_udf() {
-        let executor = UdfExecutor::compile_sync([add_one_model()]).expect("UDF should compile");
+        let executor =
+            UdfExecutor::compile_sync([add_one_model()], None).expect("UDF should compile");
         let function = FunctionName::Udf("add_one".to_string());
         assert_eq!(
             executor.execution_policy(&function),
-            FunctionExecutionPolicy::SpawnBlocking
+            FunctionExecutionPolicy::Extension
         );
         let result = executor
             .inject_with_context(
@@ -1545,17 +1581,20 @@ mod tests {
 
     #[test]
     fn bytes_bridge_preserves_binary_columns_and_list_eligibility() {
-        let executor = UdfExecutor::compile_sync([model(
-            "copy_bytes",
-            [TestArgument {
-                name: "value",
-                ty: ParseAsType::Bytes,
-                optional: false,
-            }],
-            ParseAsType::Bytes,
-            false,
-            "fn copy_bytes(value: BytesColumn) -> BytesColumn { value }",
-        )])
+        let executor = UdfExecutor::compile_sync(
+            [model(
+                "copy_bytes",
+                [TestArgument {
+                    name: "value",
+                    ty: ParseAsType::Bytes,
+                    optional: false,
+                }],
+                ParseAsType::Bytes,
+                false,
+                "fn copy_bytes(value: BytesColumn) -> BytesColumn { value }",
+            )],
+            None,
+        )
         .assured("the BYTES bridge registers a Roto column type");
         let input = BinaryArray::from(vec![Some(&[0, 255][..]), Some(&[][..]), None]);
         let result = executor
@@ -1596,7 +1635,7 @@ mod tests {
                     let barrier = barrier.clone();
                     scope.spawn(move || {
                         barrier.wait();
-                        UdfExecutor::compile_sync([add_one_model()])
+                        UdfExecutor::compile_sync([add_one_model()], None)
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1615,14 +1654,14 @@ mod tests {
         let mut model = add_one_model();
         model.code = "fn add_one(value: I64Column) -> I64Column { value.add_s(now()) }".to_string();
         assert!(matches!(
-            UdfExecutor::compile_sync([model]),
+            UdfExecutor::compile_sync([model], None),
             Err(error) if matches!(error.current_context(), UdfError::VolatileRequired { function: "now" })
         ));
     }
 
     #[test]
     fn udf_execution_reports_invalid_argument_shapes_with_function_context() {
-        let executor = UdfExecutor::compile_sync([add_one_model()])
+        let executor = UdfExecutor::compile_sync([add_one_model()], None)
             .assured("the fixed add_one function and its wrapper compile");
         let function = FunctionName::Udf("add_one".to_string());
         let rows = RowSelection::All(2);
@@ -1682,7 +1721,7 @@ mod tests {
 
         let mut guest = add_one_model();
         guest.code.push_str("\n// __nervix_entry is reserved");
-        let report = UdfExecutor::compile_sync([guest])
+        let report = UdfExecutor::compile_sync([guest], None)
             .expect_err("guest source cannot claim the host's private namespace");
         assert!(matches!(
             report.current_context(),
@@ -1740,7 +1779,7 @@ test increments_by_one {
 "#
         .to_string();
         assert!(matches!(
-            UdfExecutor::compile_sync([model]),
+            UdfExecutor::compile_sync([model], None),
             Err(error) if matches!(error.current_context(), UdfError::TestsFailed)
         ));
     }
@@ -1750,7 +1789,7 @@ test increments_by_one {
         let mut model = add_one_model();
         model.code = "fn add_one(value: StringColumn) -> StringColumn { value.trim() }".to_string();
         assert!(matches!(
-            UdfExecutor::compile_sync([model]),
+            UdfExecutor::compile_sync([model], None),
             Err(error) if matches!(error.current_context(), UdfError::Compile { .. })
         ));
     }
@@ -1883,6 +1922,21 @@ test increments_by_one {
             ),
         ];
 
-        UdfExecutor::compile_sync(models).expect("documented UDF shapes should compile");
+        UdfExecutor::compile_sync(models, None).expect("documented UDF shapes should compile");
+    }
+
+    #[nervix_primitives::test]
+    async fn udfs_compile_on_the_bulk_workers() {
+        let executor = Executor::default();
+
+        let compiled = UdfExecutor::compile(&executor, vec![add_one_model()])
+            .await
+            .expect("the bulk workers compile the UDF");
+
+        assert!(!compiled.is_empty());
+        let snapshot = executor.snapshot();
+        assert_eq!(snapshot.bulk_cpu.admitted, 1);
+        assert_eq!(snapshot.bulk_cpu.completed, 1);
+        assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
     }
 }

@@ -11,6 +11,7 @@ use bytes::Bytes;
 use error_stack::ResultExt as _;
 use indexmap::{Equivalent, IndexMap};
 use nervix_connector::IngestMetadataRow;
+use nervix_execution::{CpuClass, ExecutionError, MemoryClass};
 
 use super::*;
 
@@ -55,13 +56,42 @@ pub(in crate::runtime) enum IngestMetadataOperation {
     Select,
 }
 
+/// The work an ingest group admits through the node's bounded executor.
 #[derive(Debug, Clone, Copy, strum::Display)]
-pub(in crate::runtime) enum IngestGroupBlockingOperation {
-    #[strum(serialize = "build a branch input batch")]
-    BuildBranchInput,
-    #[strum(serialize = "filter a branch input batch")]
-    FilterBranchInput,
+pub(in crate::runtime) enum IngestGroupAdmittedOperation {
+    #[strum(serialize = "prepare a branch input")]
+    PrepareBranchInput,
+    #[strum(serialize = "unfold an ingested payload")]
+    UnfoldPayload,
 }
+
+/// Why one ingested payload did not decode into its group's builder.
+#[derive(Debug)]
+pub(in crate::runtime) enum PayloadDecodeFailure {
+    /// The payload is not what the codec accepts. The codec's report is kept unchanged, so every
+    /// diagnostic built from it reads the codec's own chain.
+    Codec(Report<CodecError>),
+    /// The node's bounded execution did not take the payload's unfolding, so nothing judged the
+    /// payload and its sender may present it again.
+    NotAdmitted(Report<UnfoldingNotAdmitted>),
+}
+
+impl PayloadDecodeFailure {
+    /// What an unfolding job through `codec` that the executor did not complete means for its
+    /// payload. A panic is the unfolding's own defect, which presenting the payload again would
+    /// repeat, so it fails the payload's decode; every other outcome judged nothing.
+    fn from_unfolding_execution(codec: &CompiledCodec, error: Report<ExecutionError>) -> Self {
+        if let ExecutionError::JobPanicked { .. } = error.current_context() {
+            return Self::Codec(codec.unfolding_panicked(error));
+        }
+        Self::NotAdmitted(error.change_context(UnfoldingNotAdmitted))
+    }
+}
+
+/// The node's bounded execution did not take a payload's unfolding now.
+#[derive(Debug, Error)]
+#[error("the node's bounded execution did not unfold the payload")]
+pub(in crate::runtime) struct UnfoldingNotAdmitted;
 
 #[derive(Debug, Error)]
 pub(in crate::runtime) enum IngestGroupError {
@@ -144,9 +174,9 @@ pub(in crate::runtime) enum IngestGroupError {
     BranchSelectionRowOutOfBounds { row: usize, batch_rows: usize },
     #[error("failed to construct a filtered relay batch")]
     FilteredRelayBatch,
-    #[error("failed to {operation} in a blocking task")]
-    BlockingTask {
-        operation: IngestGroupBlockingOperation,
+    #[error("the node's bounded execution did not {operation}")]
+    Execution {
+        operation: IngestGroupAdmittedOperation,
     },
     #[error("failed to load routing for domain '{domain}'")]
     Routing { domain: DomainName },
@@ -403,14 +433,15 @@ impl PendingIngestGroup {
     /// not stay allocated while the group waits for a message it keeps.
     pub(super) async fn decode_payload(
         &mut self,
+        executor: &Executor,
         codec: &Arc<CompiledCodec>,
         payload: &[u8],
-    ) -> error_stack::Result<(), CodecError> {
+    ) -> Result<(), PayloadDecodeFailure> {
         let row_bound = self.row_bound;
         let records = self
             .records
             .get_or_insert_with(|| codec.schema().batch_builder(row_bound));
-        match decode_ingested_payload(codec, payload, &mut self.decoder, records).await {
+        match decode_ingested_payload(executor, codec, payload, &mut self.decoder, records).await {
             Ok(messages) => {
                 self.undispatched_payloads.push_back(messages);
                 Ok(())
@@ -702,10 +733,11 @@ impl IngestRouteCollector {
     /// leaves the group exactly as it was, and the error names that payload alone.
     pub(super) async fn decode_payload(
         &mut self,
+        executor: &Executor,
         codec: &Arc<CompiledCodec>,
         payload: &[u8],
-    ) -> error_stack::Result<(), CodecError> {
-        self.pending.decode_payload(codec, payload).await
+    ) -> Result<(), PayloadDecodeFailure> {
+        self.pending.decode_payload(executor, codec, payload).await
     }
 
     /// Drops decoded payloads a caller could not accept, so a failed dispatch leaves no stray row.
@@ -1070,59 +1102,70 @@ impl BranchedEntrypointBatch {
     }
 }
 
-pub(super) fn branched_entrypoint_inputs_acks(inputs: &[BranchedEntrypointInput]) -> Vec<AckSet> {
-    inputs
-        .iter()
-        .flat_map(|input| input.acks.iter().cloned())
-        .collect()
-}
+/// One output branch of a prepared input: its batch, or why it could not be filtered, with the
+/// acknowledgements the failure preserves.
+pub(super) type PreparedBranch = Result<RelayRecordBatch, IngestGroupFailure<Vec<AckSet>>>;
 
-pub(super) async fn branched_entrypoint_batch_from_inputs_blocking(
-    inputs: Vec<BranchedEntrypointInput>,
-) -> Result<Arc<BranchedEntrypointBatch>, IngestGroupFailure<Vec<AckSet>>> {
-    let acks = branched_entrypoint_inputs_acks(&inputs);
-    match nervix_primitives::task::spawn_blocking(move || {
-        BranchedEntrypointBatch::from_inputs(inputs)
-    })
-    .await
-    {
-        Ok(Ok(batch)) => Ok(Arc::new(batch)),
-        Ok(Err(error)) => Err(error),
+/// Builds one input's route batch, plans its output branches, and filters a batch for each, as one
+/// job on the node's data workers.
+///
+/// One job per input, not one per branch, keeps an input that fans out to many branches from
+/// taking more than one place in the data workers' finite queue. The job is charged twice the
+/// input's bytes, for the concatenated input and for the branch batches filtered from it, whose
+/// rows together are the input's rows, and never more than one relay batch may decode into. It
+/// checks for cancellation before each branch it filters. A failure that stops the whole input
+/// preserves every acknowledgement it carried; a branch that fails preserves the input's.
+pub(super) async fn prepare_branched_entrypoint_input(
+    executor: &Executor,
+    input: BranchedEntrypointInput,
+    ack_boundary: BranchInstanceAckBoundary,
+) -> Result<Vec<PreparedBranch>, IngestGroupFailure<Vec<AckSet>>> {
+    let acks = input.acks.clone();
+    let decoded_limit = executor.limits().relay_decoded_bytes.as_u64();
+    let charge = match input.batch.estimated_bytes().checked_mul(2) {
+        Some(bytes) => bytes.min(decoded_limit),
+        None => decoded_limit,
+    };
+    let reservation = match executor.reserve(MemoryClass::Relay, charge).await {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            return Err(IngestGroupFailure::new(
+                error.change_context(IngestGroupError::Execution {
+                    operation: IngestGroupAdmittedOperation::PrepareBranchInput,
+                }),
+                acks,
+            ));
+        }
+    };
+    let prepared = executor
+        .run_cpu(CpuClass::Data, reservation, move |_charge, cancellation| {
+            let batch = BranchedEntrypointBatch::from_inputs(vec![input])?;
+            let selections = match batch.branch_selections() {
+                Ok(selections) => selections,
+                Err(error) => return Err(IngestGroupFailure::new(error, batch.acks.clone())),
+            };
+            let mut branches = Vec::with_capacity(selections.len());
+            for selection in selections {
+                if let Err(cancelled) = cancellation.check() {
+                    return Err(IngestGroupFailure::new(
+                        Report::new(cancelled).change_context(IngestGroupError::Execution {
+                            operation: IngestGroupAdmittedOperation::PrepareBranchInput,
+                        }),
+                        batch.acks.clone(),
+                    ));
+                }
+                branches.push(batch.filter_branch(selection, ack_boundary));
+            }
+            Ok(branches)
+        })
+        .await;
+    match prepared {
+        Ok(prepared) => prepared,
         Err(error) => Err(IngestGroupFailure::new(
-            Report::new(error).change_context(IngestGroupError::BlockingTask {
-                operation: IngestGroupBlockingOperation::BuildBranchInput,
+            error.change_context(IngestGroupError::Execution {
+                operation: IngestGroupAdmittedOperation::PrepareBranchInput,
             }),
             acks,
-        )),
-    }
-}
-
-pub(super) async fn branched_branch_plan_blocking(
-    input: Arc<BranchedEntrypointBatch>,
-) -> error_stack::Result<Vec<BranchedBranchSelection>, IngestGroupError> {
-    input.branch_selections()
-}
-
-pub(super) async fn branched_branch_filter_blocking(
-    input: Arc<BranchedEntrypointBatch>,
-    selection: BranchedBranchSelection,
-    ack_boundary: BranchInstanceAckBoundary,
-) -> Result<(Option<BranchKey>, RelayRecordBatch), IngestGroupFailure<Vec<AckSet>>> {
-    let failure_input = input.clone();
-    let key = selection.key.clone();
-    match nervix_primitives::task::spawn_blocking(move || {
-        input
-            .filter_branch(selection, ack_boundary)
-            .map(|batch| (key, batch))
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => Err(IngestGroupFailure::new(
-            Report::new(error).change_context(IngestGroupError::BlockingTask {
-                operation: IngestGroupBlockingOperation::FilterBranchInput,
-            }),
-            failure_input.acks.clone(),
         )),
     }
 }
@@ -1130,33 +1173,67 @@ pub(super) async fn branched_branch_filter_blocking(
 /// Decodes one payload into `builder` and answers how many messages it decoded into.
 ///
 /// A schemaful codec decodes a payload into exactly one message, and a JAQ-backed codec unfolds it
-/// into zero or more. jaq and protobuf decoding is CPU-bound, so the unfolding half runs off the
-/// reactor and hands back the messages the append consumes. The append itself always runs here,
-/// which keeps the builder on the task that owns it, and it keeps all of a payload's messages or
-/// none of them.
+/// into zero or more. A JAQ program is operator-supplied code the node cannot bound, so the
+/// unfolding runs on the node's extension workers and hands back the messages the append consumes,
+/// charged twice the payload's bytes for the parsed document and the messages it unfolds into. The
+/// append itself always runs here, which keeps the builder on the task that owns it, and it keeps
+/// all of a payload's messages or none of them. A node that cannot take the unfolding now refuses
+/// it without judging the payload.
 pub(super) async fn decode_ingested_payload(
+    executor: &Executor,
     codec: &Arc<CompiledCodec>,
     payload: &[u8],
     decoder: &mut JsonDecoder,
     builder: &mut RuntimeRecordBatchBuilder,
-) -> error_stack::Result<usize, CodecError> {
-    if !codec.requires_blocking_decode() {
-        return decode_with_codec(codec, payload, decoder, builder);
+) -> Result<usize, PayloadDecodeFailure> {
+    if !codec.transforms_on_ingestion() {
+        return decode_with_codec(codec, payload, decoder, builder)
+            .map_err(PayloadDecodeFailure::Codec);
     }
 
-    // Only the unfolding leaves the reactor. The Arrow append that consumes its result stays here,
+    // Only the unfolding leaves the task. The Arrow append that consumes its result stays here,
     // with the batch builder the decoded rows join.
-    let blocking_codec = codec.clone();
-    let payload = Bytes::copy_from_slice(payload);
-    let unfolding = nervix_primitives::task::spawn_blocking(move || {
-        blocking_codec.unfold_on_ingestion(payload)
-    })
-    .await;
-    let unfolded = match unfolding {
-        Ok(unfolded) => unfolded?,
-        Err(join) => return Err(codec.decode_task_failure(join)),
+    let decoded_limit = executor.limits().relay_decoded_bytes.as_u64();
+    let payload_bytes: u64 = payload.len().arch_into();
+    let charge = match payload_bytes.checked_mul(2) {
+        Some(bytes) => bytes.min(decoded_limit),
+        None => decoded_limit,
     };
-    unfolded.append_to(codec, builder)
+    let reservation = match executor.reserve(MemoryClass::Relay, charge).await {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            return Err(PayloadDecodeFailure::NotAdmitted(
+                error.change_context(UnfoldingNotAdmitted),
+            ));
+        }
+    };
+    let unfolding_codec = codec.clone();
+    let payload = Bytes::copy_from_slice(payload);
+    let unfolded = executor
+        .run_cpu(
+            CpuClass::Extension,
+            reservation,
+            move |_charge, cancellation| {
+                if let Err(cancelled) = cancellation.check() {
+                    return Err(PayloadDecodeFailure::NotAdmitted(
+                        Report::new(cancelled).change_context(UnfoldingNotAdmitted),
+                    ));
+                }
+                unfolding_codec
+                    .unfold_on_ingestion(payload)
+                    .map_err(PayloadDecodeFailure::Codec)
+            },
+        )
+        .await;
+    let unfolded = match unfolded {
+        Ok(unfolded) => unfolded?,
+        Err(error) => {
+            return Err(PayloadDecodeFailure::from_unfolding_execution(codec, error));
+        }
+    };
+    unfolded
+        .append_to(codec, builder)
+        .map_err(PayloadDecodeFailure::Codec)
 }
 
 impl Runtime {
@@ -1177,8 +1254,8 @@ impl Runtime {
     /// branch key) and forwards each batch to its branch entrypoint.
     ///
     /// This is the counterpart to `IngestGroupDispatch::collector`. Building the batch once per
-    /// group replaces N single-row batch constructions, N channel sends, and the
-    /// `spawn_blocking` hop the route task pays per message.
+    /// group replaces N single-row batch constructions, N channel sends, and the hop onto the
+    /// node's data workers the route task would pay per message.
     ///
     /// Every failure below is handled before it is returned: the affected acknowledgements go to
     /// the ingestor's general error policy, which is what decides whether the messages are logged,
@@ -1420,6 +1497,7 @@ impl Runtime {
                 })?;
             let keys = vec![None; rows.len()];
             let outcomes = evaluate_filter_map_on_batch(
+                self.executor(),
                 ModelKind::Ingestor.as_str(),
                 ingestor,
                 filter_where,
@@ -1595,6 +1673,7 @@ impl Runtime {
                 })?;
             let keys = vec![None; rows.len()];
             let outcomes = evaluate_filter_map_on_batch(
+                self.executor(),
                 ModelKind::Ingestor.as_str(),
                 ingestor,
                 &output.program,
@@ -1657,13 +1736,16 @@ impl Runtime {
                         })?;
                     branch_state_snapshot = relay_state_snapshot_from_side_inputs(&side_inputs);
                     let evaluated = evaluate_output_branch_program(
+                        ProgramRun {
+                            executor: self.executor(),
+                            now: execution_now,
+                        },
                         ingestor,
                         branch_program,
                         &input_batch,
                         &output_batch,
                         &input_keys,
                         &side_inputs,
-                        execution_now,
                     )
                     .await
                     .change_context(IngestGroupError::BranchProgram {
@@ -1941,11 +2023,24 @@ impl Runtime {
             nervix_primitives::task::consume_budget().await;
             // A request carries all of its payloads or none of them, so a payload that fails to
             // decode takes the payloads decoded before it back out of the group.
-            if let Err(error) = collector.decode_payload(&codec, source_payload).await {
+            if let Err(failure) = collector
+                .decode_payload(self.executor(), &codec, source_payload)
+                .await
+            {
                 collector.discard_undispatched_payloads();
-                return Err(error.change_context(IngestGroupError::DecodePayload {
-                    ingestor: ingestor.clone(),
-                }));
+                let error = match failure {
+                    PayloadDecodeFailure::Codec(report) => {
+                        report.change_context(IngestGroupError::DecodePayload {
+                            ingestor: ingestor.clone(),
+                        })
+                    }
+                    PayloadDecodeFailure::NotAdmitted(report) => {
+                        report.change_context(IngestGroupError::Execution {
+                            operation: IngestGroupAdmittedOperation::UnfoldPayload,
+                        })
+                    }
+                };
+                return Err(error);
             }
         }
         let metadata = payload.metadata_rows();

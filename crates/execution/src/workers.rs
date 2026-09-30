@@ -37,6 +37,9 @@ pub struct WorkerClassSnapshot {
     pub workers: usize,
     pub running: usize,
     pub pending: usize,
+    /// How many jobs the class may hold waiting for a worker. A job submitted while `pending` is
+    /// at this capacity is refused.
+    pub queue_capacity: usize,
     /// Jobs this class has admitted since the node started. A caller that must prove it submitted
     /// one job rather than several reads the difference across its own operation.
     pub admitted: u64,
@@ -57,6 +60,7 @@ pub struct WorkerClassSnapshot {
 pub(crate) struct WorkerPool {
     class: WorkerClassName,
     workers: usize,
+    queue_capacity: usize,
     worker_permits: SemaphoreRef,
     queue_permits: SemaphoreRef,
     pending: StdArc<AtomicUsize>,
@@ -78,6 +82,7 @@ impl WorkerPool {
         Self {
             class,
             workers: workers.get(),
+            queue_capacity: pending_jobs.get(),
             worker_permits: StdArc::new(Semaphore::new(workers.get())),
             queue_permits: StdArc::new(Semaphore::new(pending_jobs.get())),
             pending: StdArc::new(AtomicUsize::new(0)),
@@ -98,6 +103,7 @@ impl WorkerPool {
                 .checked_sub(available)
                 .verified("worker permits are only taken and returned by this pool's own jobs"),
             pending: self.pending.load(Ordering::Acquire),
+            queue_capacity: self.queue_capacity,
             admitted: self.admitted.load(Ordering::Acquire),
             refused: self.refused.load(Ordering::Acquire),
             completed: self.completed.load(Ordering::Acquire),

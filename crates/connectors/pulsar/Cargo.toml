@@ -26,5 +26,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# The test hosts hand a sink the node's executor, as the server's host does.
+nervix-execution = { workspace = true }
 tempfile = { workspace = true }
 tokio-util = { workspace = true, features = ["codec"] }

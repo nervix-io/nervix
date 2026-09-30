@@ -318,6 +318,10 @@ impl Runtime {
         };
         let execution_now = scope.execution_now;
         let executed = execute_filter_map_program_on_batch(
+            ProgramRun {
+                executor: self.executor(),
+                now: execution_now,
+            },
             "reingestor",
             reingestor,
             program,
@@ -328,7 +332,6 @@ impl Runtime {
                 side_inputs: &scope.side_inputs,
                 ingest_metadata: None,
             },
-            execution_now,
             batch.acks.clone(),
             Some(&mut scope.shared),
         )
@@ -418,13 +421,16 @@ impl Runtime {
                 BoundRouteBranch::Unbranched => vec![None; output_batch.batch().num_rows()],
                 BoundRouteBranch::Preserved => input_keys,
                 BoundRouteBranch::Constructed(branch_program) => evaluate_output_branch_program(
+                    ProgramRun {
+                        executor: self.executor(),
+                        now: execution_now,
+                    },
                     reingestor,
                     branch_program,
                     &input_batch,
                     &output_batch,
                     &input_keys,
                     &scope.side_inputs,
-                    execution_now,
                 )
                 .await
                 .map_err(|error| PlannedGeneralError {
@@ -923,12 +929,15 @@ impl Runtime {
             ..
         } = context;
         let plan = match plan_filter_map_messages(
+            ProgramRun {
+                executor: self.executor(),
+                now: execution_now,
+            },
             "reingestor",
             reingestor,
             operation,
             program,
             batch,
-            execution_now,
             materialized_values,
         )
         .await

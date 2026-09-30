@@ -42,8 +42,8 @@ Five rules hold throughout:
 | --- | --- | --- |
 | Vocabulary | Expression Models in `nervix-models` | `Expression`, `RouteConstruction`, `Assignment`, `Invocation`, and `JsonPath`. A builtin name is a validated `BuiltinFunctionName` identifier, not a closed set, and a UDF name is a `UdfName`. |
 | Language | `nervix-nspl` | Parsing a call as a generic `name(args)` or `udf::name(args)` into those Models. The grammar has no function-name table; completion emits a typed builtin or UDF expectation at a call position. |
-| Engines and infrastructure | `nervix-vm` | Lowering Models into VM programs, the semantic catalog of every operator, cast, and builtin, type and sensitivity checking, compilation into instructions over typed registers, every kernel, and window aggregate lowering and route compilation. |
-| Engines and infrastructure | `nervix-roto` | Compiling a typed UDF program, and the `FunctionInjector` that answers the VM's UDF calls over Arrow arrays under a watchdog. |
+| Engines and infrastructure | `nervix-vm` | Lowering Models into VM programs, the semantic catalog of every operator, cast, and builtin, type and sensitivity checking, compilation into instructions over typed registers, every kernel, window aggregate lowering and route compilation, and where an execution runs: inline, or admitted through the node's bounded executor onto its data or extension workers. |
+| Engines and infrastructure | `nervix-roto` | Compiling a typed UDF program on the node's bulk workers, and the `FunctionInjector` that answers the VM's UDF calls over Arrow arrays under a watchdog. |
 | Decisions | Registry validation and resource planning | Compiling every expression it can check with the same compiler the runtime uses when a statement is applied, then selecting scheduled UDF programs and lowering generator and emitter routes, source filters, HTTP fields, ordering groups and sink mappings against their declared scopes. |
 | Data plane | Runtime plan binding and hosts | Binding runtime programs against installed schemas once per typed node revision, projecting carrier batches into VM input, supplying the execution context and injectors, turning row errors into structured message errors, and owning branch-local window accumulators. |
 | Control plane | Subscriptions | Compiling a session subscription's `WHERE` into a read-only predicate when the subscription is created. |
@@ -639,7 +639,7 @@ A failure that belongs to the batch is a `RuntimeError`, returned as `Err`:
 - a schema that does not match the program
 - an Arrow kernel error
 - a collection larger than Arrow can address
-- a blocking task that failed
+- an execution the bounded executor did not admit, or that panicked on its worker
 - a formatted datetime column larger than its offsets allow
 - an invalid injected result, such as the wrong type or row count
 
@@ -704,17 +704,31 @@ The VM's entry point alone decides where a program runs:
 
 | Condition | Where it runs |
 | --- | --- |
-| At most `SPAWN_BLOCKING_ROW_THRESHOLD` (1,024) rows, and no injected function asks for the blocking pool | Inline, on the caller's task |
-| More than 1,024 rows | On the runtime's blocking pool, through `nervix_primitives::task::spawn_blocking` |
-| Any `Inject` instruction whose injector's `FunctionExecutionPolicy` is `SpawnBlocking` | On the blocking pool, whatever the batch size. Every UDF call does this. |
+| At most `INLINE_ROW_LIMIT` (1,024) rows, and no injected function whose `FunctionExecutionPolicy` is `Extension` | Inline, on the caller's task |
+| More than 1,024 rows, and no such function | On the node's data workers, admitted through the bounded executor |
+| Any `Inject` instruction whose injector's `FunctionExecutionPolicy` is `Extension` | On the node's extension workers, admitted through the bounded executor, whatever the batch size. Every UDF call does this. |
 
-A caller only awaits the result, and chooses no executor.
+A caller hands the entry point the node's `Executor` and awaits the result; it chooses neither
+the class nor the charge. An admitted execution is charged to the relay memory class for the bytes
+the batch's columns hold, the usual order of what the program builds from them, and never more
+than one relay batch may decode into. A batch Arrow cannot measure is charged that bound. A UDF
+runs operator-supplied native code the node cannot bound, so its executions take the extension
+class: one that never returns holds an extension worker and leaves the data workers, which relay
+bodies are encoded and decoded on, their whole capacity.
 
-The VM never yields and has no cancellation point. A program runs every instruction over its batch
-to completion, and the batch's size and the limits above bound that work. Stopping a node or a
-processor therefore takes effect between batches. Host loops call `consume_budget` once per batch
-iteration, not the VM. A blocking task that has started runs to completion even if its awaiting
-future is dropped. A UDF adds its own watchdog, described [below](#extension-boundaries).
+Admission can refuse. A class whose wait queue is full refuses the execution with
+`RuntimeError::ExecutionNotAdmitted`, and a job that panics on its worker returns
+`RuntimeError::ExecutionPanicked`. Both are batch errors, which a processor's general error policy
+handles like any other.
+
+An inline execution never yields and has no cancellation point: it runs every instruction over
+its batch to completion, and the batch's size and the limits above bound that work. An admitted
+execution checks between its instructions whether its caller stopped waiting, and returns
+`RuntimeError::ExecutionCancelled` at the next instruction if it did, so it costs at most the
+instruction already running. It keeps its relay charge until it actually exits. Stopping a node
+or a processor otherwise takes effect between batches. Host loops call `consume_budget` once per
+batch iteration, not the VM. A UDF adds its own watchdog, described
+[below](#extension-boundaries).
 
 ## Kernels
 
@@ -842,8 +856,8 @@ guidance:
 - **Variable-length work.** Ragged lists, text search, and JSON ran at single-digit millions.
 - **Failures.** Dense failures made checked arithmetic about six times slower, because each failed
   row builds an error.
-- **The blocking-pool hop.** Crossing the 1,024-row threshold costs more than executing a small
-  batch.
+- **The executor hop.** Crossing the 1,024-row threshold admits the execution onto the data
+  workers, which costs more than executing a small batch.
 - **Conditional arms.** A regular expression in an arm that selects half the batch costs about
   twelve times one that selects none.
 - **JSON sharing.** Four extractions from one document cost less than a third of four extractions
@@ -981,7 +995,8 @@ The injectors:
 - **UDFs.** `nervix-roto`'s `UdfExecutor` answers UDF calls:
   - It receives one call per batch or selection, and masks rows whose required arguments are null
     or already failed.
-  - It runs every UDF on the blocking pool, and catches panics.
+  - Every execution that calls a UDF runs on the node's extension workers, and a panic there is a
+    batch error.
   - It reports per-row errors as side errors, and fails the batch for a trap, a wrong type or row
     count, an unexplained null, or a call that returns after its 5-second watchdog.
   - The watchdog is checked only after the call returns. It cannot reclaim a worker from native
@@ -1262,7 +1277,7 @@ Treat this as the checklist for a new builtin, or for a new family.
 **Limits:**
 
 - Column limits: 2,147,483,647 bytes of text or bytes in one column; 1,024 rows before execution
-  moves to the blocking pool.
+  moves to the node's data workers.
 - Regular expressions: 10 MiB compiled and a 2 MiB search cache per pattern, and 64 field-supplied
   patterns cached per call.
 - Pattern sets: 128 patterns and 64 KiB per constant `contains_any` list, and 64 per-row pattern

@@ -388,6 +388,7 @@ pub(super) fn lookup_generated_input_field<'a>(
 }
 
 pub(super) async fn compute_lookup_hash_map_columns(
+    executor: &Executor,
     program: &CompiledProgramWithMaterializedInterest,
     inputs: &FilterMapBatchInputs<'_>,
     execution_now: Timestamp,
@@ -445,6 +446,7 @@ pub(super) async fn compute_lookup_hash_map_columns(
             None,
         )?;
         let result = execute_program_with_selection_in_context(
+            executor,
             &call.key_program,
             &vm_batch,
             &VmExecutionContext {

@@ -162,7 +162,7 @@ impl CodecError {
 
 impl CompiledCodec {
     /// Unfolds a payload through the ON INGESTION program that
-    /// [`CompiledCodec::requires_blocking_decode`] selects, without touching a single Arrow column.
+    /// [`CompiledCodec::transforms_on_ingestion`] selects, without touching a single Arrow column.
     ///
     /// jaq and protobuf decoding is the CPU-bound half of those codecs, and it produces the JSON
     /// object of every message before any column is written. Naming that half separately is what

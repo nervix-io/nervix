@@ -99,6 +99,7 @@ pub(crate) fn compile_subscription_predicate(
 }
 
 pub(crate) async fn execute_subscription_predicate_on_record(
+    executor: &Executor,
     predicate: &CompiledSubscriptionPredicate,
     record: &RuntimeRow,
     execution_now: Timestamp,
@@ -128,12 +129,13 @@ pub(crate) async fn execute_subscription_predicate_on_record(
         error.change_context(SubscriptionPredicateExecutionError::InputProjection { reason })
     })?;
     let execution_context = VmExecutionContext::new(execution_now);
-    let result = execute_vm_predicate_in_context(&predicate.predicate, &input, &execution_context)
-        .await
-        .map_err(|error| {
-            let reason = error.current_context().to_string();
-            error.change_context(SubscriptionPredicateExecutionError::VmExecution { reason })
-        })?;
+    let result =
+        execute_vm_predicate_in_context(executor, &predicate.predicate, &input, &execution_context)
+            .await
+            .map_err(|error| {
+                let reason = error.current_context().to_string();
+                error.change_context(SubscriptionPredicateExecutionError::VmExecution { reason })
+            })?;
     if let Some(error) = result.errors().first() {
         return Err(Report::new(
             SubscriptionPredicateExecutionError::Evaluation {
@@ -195,6 +197,7 @@ mod tests {
         let record =
             crate::runtime_schema::test_runtime_row([("other".to_string(), RuntimeValue::I64(1))]);
         let report = execute_subscription_predicate_on_record(
+            &Executor::default(),
             &predicate,
             &record,
             Timestamp::from_unix_nanos(7),

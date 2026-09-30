@@ -99,21 +99,36 @@ fn count(executions: &AtomicUsize) {
 }
 """
 
+BLOCKING_PERMISSION = """
+[[permission]]
+path = "crates/engine/src/client.rs"
+owner = "The engine's client tool."
+reason = "The client is not a node and has no executor."
+bound = "One read of a file the operator named."
+"""
+
+CLIENT = """
+fn read(path: Path) { let _read = nervix_primitives::task::spawn_blocking(move || read(path)); }
+"""
+
 
 def write_repository(
     root: Path,
     sources: dict[str, str],
     manifests: dict[str, str] | None = None,
     permissions: str = PERMISSION,
+    blocking_permissions: str = BLOCKING_PERMISSION,
 ) -> None:
     files = {
         "Cargo.toml": WORKSPACE,
         "crates/primitives/Cargo.toml": PRIMITIVES,
         "crates/primitives/src/sync.rs": "pub use std::sync::atomic::AtomicBool;\n",
         "crates/primitives/unmodeled-permissions.toml": permissions,
+        "crates/primitives/blocking-permissions.toml": blocking_permissions,
         "crates/harness/Cargo.toml": HARNESS,
         "crates/engine/Cargo.toml": ENGINE,
         "crates/engine/src/runner.rs": RUNNER,
+        "crates/engine/src/client.rs": CLIENT,
         "crates/vocabulary/Cargo.toml": VOCABULARY,
         **(manifests or {}),
         **sources,
@@ -138,11 +153,12 @@ class CheckTestCase(unittest.TestCase):
         sources: dict[str, str],
         manifests: dict[str, str] | None = None,
         permissions: str = PERMISSION,
+        blocking_permissions: str = BLOCKING_PERMISSION,
     ) -> tuple[int, str]:
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
-        write_repository(root, sources, manifests, permissions)
+        write_repository(root, sources, manifests, permissions, blocking_permissions)
         return run(root)
 
     def assert_rejected(self, source: str, *fragments: str) -> str:
@@ -926,12 +942,89 @@ class CpuJobTests(CheckTestCase):
         report = self.assert_rejected(
             "use nervix_primitives::task;\n"
             "use nervix_primitives::task::*;\n"
-            "fn f(work: Work) { task::spawn_cpu(work); task::spawn_blocking(work); }\n",
+            "fn f(work: Work) { task::spawn_cpu(work); task::yield_now(); }\n",
             "`nervix_primitives::task::spawn_cpu` is the bounded executor's mechanism",
         )
         self.assertIn("crates/engine/src/lib.rs:2", report)
         self.assertIn("crates/engine/src/lib.rs:3", report)
-        self.assertNotIn("spawn_blocking", report)
+
+
+class BlockingPoolTests(CheckTestCase):
+    """The runtime's blocking pool belongs to the bounded executor and to the owners a permission
+    declares."""
+
+    EXECUTOR = "crates/execution/src/workers.rs"
+    POOL = "`nervix_primitives::task::spawn_blocking` is the runtime's blocking pool"
+
+    def test_the_executor_and_a_declared_owner_may_name_the_pool(self) -> None:
+        status, report = self.check(
+            {
+                self.EXECUTOR: (
+                    "fn start(work: Work) { let _job = nervix_primitives::task::spawn_blocking(work); }\n"
+                )
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_an_undeclared_caller_fails_however_it_names_the_pool(self) -> None:
+        report = self.assert_rejected(
+            "fn f(work: Work) { nervix_primitives::task::spawn_blocking(work); }\n",
+            self.POOL,
+            "admit this work through the bounded executor in nervix-execution, or declare its "
+            "owner, reason and bound in crates/primitives/blocking-permissions.toml",
+        )
+        self.assertIn("crates/engine/src/lib.rs:1", report)
+        for source in (
+            "use nervix_primitives::task::spawn_blocking;\n",
+            "use nervix_primitives::task::{spawn, spawn_blocking as offload};\n",
+            "use nervix_primitives::task;\nfn f(work: Work) { task::spawn_blocking(work); }\n",
+            "use nervix_primitives::task as tasks;\nfn f(work: Work) { tasks::spawn_blocking(work); }\n",
+            "use nervix_primitives::task::*;\n",
+        ):
+            with self.subTest(source=source):
+                self.assert_rejected(source, self.POOL)
+
+    def test_the_report_names_the_first_line_that_names_the_pool(self) -> None:
+        report = self.assert_rejected(
+            "fn f() {}\n"
+            "use nervix_primitives::task::spawn_blocking;\n"
+            "fn g(work: Work) { nervix_primitives::task::spawn_blocking(work); }\n",
+            "crates/engine/src/lib.rs:2",
+        )
+        self.assertNotIn("crates/engine/src/lib.rs:3", report)
+
+    def test_a_permission_for_a_file_that_no_longer_names_the_pool_is_stale(self) -> None:
+        status, report = self.check({"crates/engine/src/client.rs": "fn read() {}\n"})
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "crates/primitives/blocking-permissions.toml: stale permission: "
+            "crates/engine/src/client.rs does not name `nervix_primitives::task::spawn_blocking`",
+            report,
+        )
+
+    def test_a_permission_without_a_bound_fails(self) -> None:
+        status, report = self.check(
+            {},
+            blocking_permissions=BLOCKING_PERMISSION.replace(
+                'bound = "One read of a file the operator named."\n', ""
+            ),
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("needs a non-empty `bound`", report)
+
+    def test_a_permission_with_an_unknown_key_fails(self) -> None:
+        status, report = self.check(
+            {}, blocking_permissions=BLOCKING_PERMISSION + 'limit = "Nothing."\n'
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("has unknown keys: limit", report)
+
+    def test_a_repeated_permission_fails(self) -> None:
+        status, report = self.check(
+            {}, blocking_permissions=BLOCKING_PERMISSION + BLOCKING_PERMISSION
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("repeats crates/engine/src/client.rs", report)
 
 
 class TurmoilManifestTests(CheckTestCase):

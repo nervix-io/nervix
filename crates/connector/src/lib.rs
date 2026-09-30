@@ -9,8 +9,9 @@
 //!   entries, service URL parsing, the parsed retry policy, physical deadlines and the actual-UTC
 //!   read a source stamps arrival with, the transport-header trait a source message implements,
 //!   and the typed ingest metadata row with its Kafka, syslog and header scopes.
-//! - **Depends on.** The vocabulary, Arrow, `error-stack` and Tokio, and the TLS, HTTP client, URL
-//!   and template libraries a client configuration is built with.
+//! - **Depends on.** The vocabulary, Arrow, `error-stack` and Tokio, the node's bounded executor a
+//!   sink host hands a connector, and the TLS, HTTP client, URL and template libraries a client
+//!   configuration is built with.
 //! - **Must not know.** Relays, branches, schedules, Models, the registry or the runtime. A
 //!   connector receives a typed plan and host handles, and reaches nothing past them. It never
 //!   resolves a resource mount: the host resolves one and hands in the resolved paths.
@@ -57,9 +58,9 @@ pub use sink::{
     AckConfirmation, BrokerPublishingMode, HttpRequestSink, MappedSinkCarrier, MappedSinkMember,
     MappedSinkRows, PerRecordOutcome, PerRecordOutcomeParts, PreparedRowRequest, RecordSink,
     RejectedSinkRecord, RowRequestPreparation, RowRequestSink, RowSink,
-    SinkAcknowledgementServices, SinkAcknowledgements, SinkCommitReport, SinkDeadline,
-    SinkEventReporter, SinkGeneralErrorHandler, SinkHost, SinkHostServices, SinkHttpRequest,
-    SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId,
+    SinkAcknowledgementServices, SinkAcknowledgements, SinkBoundedExecution, SinkCommitReport,
+    SinkDeadline, SinkEventReporter, SinkGeneralErrorHandler, SinkHost, SinkHostServices,
+    SinkHttpRequest, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId,
     SinkRecordPosition, SinkRetryDelay, SinkRowRequest, SinkStagingDirectory, SinkStartError,
     SinkStartResult, SinkTransientErrorStatus,
 };
