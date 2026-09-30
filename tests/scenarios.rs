@@ -4490,6 +4490,44 @@ fn given_an_nspl_file_containing(world: &mut ScenarioWorld, name: String, #[step
     world.formatter_original_files.insert(name, contents);
 }
 
+/// Reads the `\r`, `\n`, `\t` and `\\` escapes a step spells where the characters themselves
+/// cannot be written in a feature file, such as a carriage return.
+fn unescaped_step_text(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            output.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('r') => output.push('\r'),
+            Some('n') => output.push('\n'),
+            Some('t') => output.push('\t'),
+            Some('\\') => output.push('\\'),
+            Some(other) => {
+                output.push('\\');
+                output.push(other);
+            }
+            None => output.push('\\'),
+        }
+    }
+    output
+}
+
+#[given(regex = r#"^an NSPL file "([^"]+)" containing the escaped text$"#)]
+fn given_an_nspl_file_containing_escaped_text(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let root = formatter_root(world);
+    let path = root.join(&name);
+    let contents = unescaped_step_text(docstring(step).trim());
+    std::fs::write(&path, &contents).expect("NSPL file must be written");
+    world.formatter_original_files.insert(name, contents);
+}
+
 #[when("the nervix-nspl-format help is requested")]
 fn when_nspl_format_help_is_requested(world: &mut ScenarioWorld) {
     let output = Command::new(nspl_format_binary())
@@ -4589,6 +4627,21 @@ fn then_the_nspl_file_contains(world: &mut ScenarioWorld, name: String, #[step] 
     assert!(
         actual.contains(expected),
         "expected {name} to contain:\n{expected}\ngot:\n{actual}"
+    );
+}
+
+#[then(regex = r#"^the NSPL file "([^"]+)" contains the escaped text$"#)]
+fn then_the_nspl_file_contains_escaped_text(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let root = formatter_root(world);
+    let actual = std::fs::read_to_string(root.join(&name)).expect("NSPL file must be readable");
+    let expected = unescaped_step_text(docstring(step).trim());
+    assert!(
+        actual.contains(&expected),
+        "expected {name} to contain {expected:?}, got {actual:?}"
     );
 }
 

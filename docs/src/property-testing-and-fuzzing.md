@@ -30,9 +30,27 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | ID | Package and invariant | Domain | Ordinary cases | Input limit |
 | --- | --- | --- | ---: | ---: |
 | `client-emitter-wire` | `nervix-client-wire` native emitter frame round-trip equality | all current request, reply, refusal and settlement variants with bounded exact schema, window, identity, branch and batch fields, v1 | 256 | 128 bytes |
-| `nspl-expression` | `nervix-nspl` expression render/reparse equality | current structured expressions, v1 | 256 | 128 bytes |
-| `nspl-model` | `nervix-nspl` canonical Model render/reparse equality | current generated Create Models, including client emitters, v2 | 256 | 128 bytes |
-| `nspl-archive-model` | `nervix-nspl` archive document/reparse equality | ordered generated Models, including client emitters, v2 | 64 | 128 bytes |
+| `client-processor-choice-request` | `nervix-client-wire` processor choice request round-trip equality | current targets with relay context, search, page and identity, v1 | 128 | 32 bytes |
+| `nspl-expression` | `nervix-nspl` expression render and statement-embedded reparse equality | NSPL expressions of every form, v2 | 256 | 512 bytes |
+| `nspl-model` | `nervix-nspl` canonical `CREATE` render and client and server reparse equality | NSPL Models of every family, client emitters included, v3 | 256 | 2048 bytes |
+| `nspl-archive-model` | `nervix-nspl` archive document and reparse equality | ordered NSPL Models, client emitters included, v3 | 64 | 4096 bytes |
+| `nspl-statement` | `nervix-nspl` canonical statement render and client and server reparse equality | NSPL statements of every form, session-only forms included, v1 | 256 | 2048 bytes |
+| `nspl-statement-text` | `nervix-nspl` edited statement text is rejected with located diagnostics or reads as canonical statements | edited canonical text, v1 | 256 | 2048 bytes |
+| `nspl-format-document` | `nervix-nspl-format` keeps statements and comments and is idempotent | documents with gaps, comments and either line ending, v1 | 256 | 4096 bytes |
+| `nspl-format-text` | `nervix-nspl-format` refuses unparseable text or formats it keeping its statements | edited documents, v1 | 256 | 4096 bytes |
+| `models-names` | `nervix-models` name text, conversion, JSON, archive and Model-name widening equality | every name type, v1 | 256 | 256 bytes |
+| `models-name-validation` | `nervix-models` name parsing matches the name rule; decoders accept only canonical text | arbitrary text, v1 | 256 | 256 bytes |
+| `models-timestamps` | `nervix-models` integer, RFC 3339, JSON, archive and chrono equality | every signed Unix nanosecond, v1 | 256 | 64 bytes |
+| `models-timestamp-text` | `nervix-models` RFC 3339 text reads as its reference instant or a typed error | generated RFC 3339 text, v1 | 256 | 64 bytes |
+| `models-domain-clock` | `nervix-models` period, skew and rate value and bit equality | every period, skew and positive finite rate, v1 | 256 | 64 bytes |
+| `models-domain-clock-validation` | `nervix-models` clock text and numbers read in range or fail typed; decoders refuse invalid values | arbitrary text and numbers, v1 | 256 | 64 bytes |
+| `models-json-paths` | `nervix-models` path text, JSON and archive equality | paths up to the step limit, v1 | 256 | 1024 bytes |
+| `models-json-path-validation` | `nervix-models` path text reaches a fixed point or fails typed; decoders admit the constructor's step counts | arbitrary path text, v1 | 256 | 512 bytes |
+| `models-batch-limits` | `nervix-models` message and size limit text, JSON and archive equality | every limit and unit, v1 | 256 | 64 bytes |
+| `models-batch-limit-validation` | `nervix-models` limit input reads in range or fails typed; decoders refuse out-of-range limits | arbitrary limits, v1 | 256 | 64 bytes |
+| `models-identities` | `nervix-models` execution reference, upload identity, endpoint and pool-bound equality | valid identities, v1 | 256 | 512 bytes |
+| `models-identity-validation` | `nervix-models` identity parsers and decoders accept exactly their rule | arbitrary identity text and bounds, v1 | 256 | 512 bytes |
+| `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, v1 | 256 | 4096 bytes |
 | `backup-record-manifest` | `nervix-backup` record and manifest encode/decode equality | current domain record and manifest, v1 | 256 | 128 bytes |
 
 The inventory also records exact full test names, required features, corpus paths, case timeouts
@@ -43,6 +61,63 @@ current-domain boundary seeds. Generated fuzz corpus and crash files live in ret
 under `target/bolero/runs`. Promote a verified minimized failure to the checked-in corpus
 when it remains a meaningful regression for the current domain. Breaking shape changes replace
 obsolete seeds.
+
+## Generated Domains
+
+`nervix-arbitrary` builds every generated value these properties check. It reads a property's bytes
+as a sequence of bounded choices, so the same bytes always build the same value and a saved failure
+replays exactly. It is a harness outside the layer order: it depends only on the vocabulary, and
+states what NSPL can spell as a rule over values instead of calling the parser, so the vocabulary's
+own properties use it without a language dependency. No product code names it.
+
+A generator draws from one of two domains:
+
+- **NSPL** holds the values canonical NSPL spells and reads back as themselves. The language
+  properties draw from it.
+- **Vocabulary** holds every value the vocabulary types hold, including states NSPL has no
+  spelling for: negative, signed-zero and non-finite numeric literals, empty arrays, a `CASE`
+  without a `WHEN`, casts to collection types, and the statement and Model states listed under
+  [Uncovered Boundaries](#uncovered-boundaries). Stored and archived forms carry these states, so
+  the archive properties draw from it.
+
+Both domains reach every Model family, every statement form, and every expression form: integer,
+float, boolean, string and null literals with their range ends, arrays, field references in every
+scope, every unary and binary operator nested to a bounded depth, casts and `TRY_CAST`, `IF`, `CASE`
+with and without an operand, `IN` and `BETWEEN` with their negations, the JSON value and existence
+forms, and calls to built-in functions and UDFs. Routes are generated in every shape a node family
+allows: transforming and set-only construction, `INHERIT`, ordered `SET`, `FLUSH EACH` and
+`FLUSH IMMEDIATE`, and branches declared per route or node-wide. Names reach both length limits, and
+counts reach the largest value their field holds. The language properties also sweep sixteen
+deterministic byte sequences through every Model family, every emitter sink and every statement form
+on every ordinary run, so none is left to the random cases.
+
+Rejection targets start from valid canonical text and edit up to three characters, inserting,
+deleting or replacing delimiters, quotes, comment markers, line endings, digits and non-ASCII
+characters. The result is mostly no longer NSPL and sometimes still is, so both the rejection and
+the acceptance paths are exercised.
+
+## Uncovered Boundaries
+
+The generated domains exclude states whose representation is not lossless. Each exclusion is a
+recorded boundary, not a claim:
+
+- Canonical NSPL writes a negative literal, `-0.0` included, as `-` applied to its magnitude, and
+  reads it back that way. NaN and the infinities have no spelling, and rendering them fails with a
+  typed error. The NSPL domain therefore holds only non-negative finite literals.
+- Names inside generated Models and statements are, in both domains, one lower-case ASCII
+  identifier that no keyword can match. The name rule admits more, such as `-`, `~`, `.` and a
+  leading digit; the name properties cover it on each name type directly.
+- A statement reads an embedded expression up to the first token its region stops at. A call to
+  `max`, and a field in the `output` or `right` scope, end some regions early, so the NSPL domain
+  does not write them there.
+- `DROP` has no form for branches, generators, hash maps, signaling protocols, WASM processors or
+  window processors, an HTTP emitter has no `BATCH` clause, and a correlator's filter has no
+  spelling. Only the vocabulary domain generates those states, for the archive properties.
+- The archived form of a `usize` count, such as a relay's `CAPACITY`, is 32 bits wide and
+  truncates a larger count without an error. The vocabulary domain draws those counts only from the
+  range the archive keeps.
+- A time rate's JSON form is not asserted: `serde_json` reads a float without correct rounding, so
+  it may land one unit in the last place away. Its text and archived forms keep every bit.
 
 ## Commands And Enforcement
 
@@ -65,8 +140,9 @@ just fuzz-reduce nspl-model <saved-input>
 Bolero, scans their property macros, and queries compiled targets through filtered library-test
 discovery. It rejects missing, unregistered, duplicate, ignored and zero-selected targets, plus
 corpus paths different from Bolero's actual work directory. Discovery executes only
-`bolero_` library tests under Bolero's selection mode; it cannot start the server's
-scenario harness. It reports discovered, selected, executed and completed counts.
+`bolero_` tests of the registered library and integration-test targets under Bolero's selection
+mode; it cannot start the server's scenario harness. It reports discovered, selected, executed and
+completed counts.
 `just validate` and `just validate-ci` include this gate.
 
 `just test-bolero` requires the configured randomized-case count and checked-in corpus

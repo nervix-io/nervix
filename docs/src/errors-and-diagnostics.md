@@ -665,7 +665,11 @@ owns where these outcomes occur during stop and drain.
 Broken internal guarantees take the explicit panic classes `assured` for a construction or platform
 guarantee, `verified` for a condition checked on the current path, and `todo` for a deliberately
 unimplemented path. An actually reachable failure instead becomes a typed error or a valid state
-in the type. A dropped result with no stated recovery class does not establish that it was handled.
+in the type. A dependency that panics on input a caller can supply is such a failure too: its owner
+refuses that input with a typed error before the dependency reads it, as the vocabulary's duration
+parser does with `DurationTextError::TooLong` for text whose spans would overflow `humantime`'s
+duration arithmetic. A dropped result with no stated recovery class does not establish that it was
+handled.
 
 The former `result_string_errors` debt measure is now a zero-tolerance rule:
 `just validate-typed-errors`, run by `just validate`, rejects `Result<_, String>` in product code
