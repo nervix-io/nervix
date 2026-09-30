@@ -253,7 +253,13 @@ that fails authentication ends with `UNAUTHENTICATED`. The console upgrade prese
 credentials in an `Authorization: Basic` header or, because a browser cannot set headers on a
 WebSocket, as the `auth` query parameter; a failure answers `401` with a `Basic` challenge and never
 upgrades. `GET /console/auth` checks credentials without opening a session. Passwords are verified
-against Argon2 hashes held in consensus. After a failed attempt for a user, that user's later
+against Argon2 hashes held in consensus, on the node's credentials worker under a charge of the
+working memory the stored hash's parameters make Argon2 allocate. That class serves only password
+work, so saturated data, extension or bulk work never delays a login, and concurrent attempts wait
+for it in turn. A node whose credentials class cannot take the verification now answers
+`UNAVAILABLE`, or `503` without an upgrade on the console: the
+credentials were not judged, so the attempt neither counts as a failure nor paces the user, and the
+same credentials may be presented again. After a failed attempt for a user, that user's later
 attempts are paced to ten per second until one succeeds.
 
 Authentication establishes who owns what a session does: its transaction binding, its execution
@@ -270,6 +276,7 @@ names.
 | Failure | Native gRPC | Console WebSocket |
 | --- | --- | --- |
 | Credentials missing or wrong | `UNAUTHENTICATED` | `401`, no upgrade |
+| Credentials the node could not verify now | `UNAVAILABLE` | `503`, no upgrade |
 | Message above the frame limit | `OUT_OF_RANGE`, refused before buffering | Close `1009` |
 | Message that is not a valid frame | `INTERNAL` | Close `1007` |
 | Text message | — | Close `1003` |

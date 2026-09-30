@@ -1062,12 +1062,19 @@ bench-smoke: build-web-console bench-smoke-bodies
 # `coverage-native-extras` builds the console outside its instrumentation and then runs these in it.
 bench-smoke-bodies:
     cargo bench --profile dev --package nervix-server --bench relay_interaction --features benchmarks -- --test
+    cargo bench --profile dev --package nervix-server --bench admitted_work --features benchmarks -- --test
     cargo bench --profile dev --package nervix-branch-instances --bench owned_branches -- --test
     cargo bench --profile dev --package nervix-server --bench subscription_row_encoding --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench wasm_checkpoint --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench state_replication --features benchmarks -- --test
     cargo bench --profile dev --package nervix-columnar-json --bench json_encode -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
+
+# Measure the data-plane work a node admits through its bounded executor, as the runtime submits it:
+# one branched input prepared into its branch batches, and an emitter batch encoded through a JAQ
+# transformation. Extra arguments are forwarded to Criterion.
+bench-admitted-work *args: build-web-console
+    cargo bench --package nervix-server --bench admitted_work --features benchmarks -- {{ args }}
 
 # Run only the relay-interaction Criterion suite, including the delivery a node input records for
 # one batch at 1, 64, and 1,024 rows. Extra arguments are forwarded to Criterion.

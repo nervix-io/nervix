@@ -437,8 +437,8 @@ the VM batch-size sweep (`crates/nervix-vm/benches/vm.rs`, criterion, one develo
 September 2026) relative to the 1,024-row value for each program shape: at 64 rows it is 12–60%
 of that value and climbs steeply; above 1,024 rows most shapes are flat within measurement noise,
 float arithmetic dips, and only the cheapest shape, nullable casts, keeps gaining, because batches
-above 1,024 rows execute on the blocking worker pool and its per-batch hand-off is no longer
-amortized by more work. Absolute rates are machine-specific; the shape is not.
+above 1,024 rows execute on the node's data workers and their per-batch admission and hand-off
+is no longer amortized by more work. Absolute rates are machine-specific; the shape is not.
 
 | program shape | 64 | 256 | 1,024 | 4,096 | 16,384 | 65,536 |
 |:--|--:|--:|--:|--:|--:|--:|

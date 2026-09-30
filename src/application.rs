@@ -1130,7 +1130,7 @@ impl Application {
                 .await;
         }));
         #[cfg(feature = "testing")]
-        fault_injection.register_bulk_executor(node_id.clone(), runtime.executor().clone());
+        fault_injection.register_executor(node_id.clone(), runtime.executor().clone());
         #[cfg(feature = "testing")]
         let scheduler_mode = runtime.scheduler_mode();
 
@@ -1297,7 +1297,13 @@ impl Application {
                                     .is_none() =>
                             {
                                 if let Some(password) = init_default_user_password.clone() {
-                                    match user_credentials(default_user_id.clone(), password).await {
+                                    match user_credentials(
+                                        runtime_for_reconcile.executor(),
+                                        default_user_id.clone(),
+                                        password,
+                                    )
+                                    .await
+                                    {
                                         Ok(user) => {
                                             let user_name = user.name.clone();
                                             if let Err(error) =
@@ -2934,7 +2940,8 @@ impl Application {
             .change_context(AppError::ShutdownCluster);
         interconnect.shutdown().await;
 
-        let database_owner_outcome = nervix_primitives::task::spawn_blocking(move || {
+        let executor = runtime.executor().clone();
+        let database_owner_outcome = ApplicationStartup::close_stores(&executor, move || {
             drop(service);
             drop(runtime);
             drop(consensus);
@@ -2942,11 +2949,10 @@ impl Application {
             drop(interconnect);
             drop(db);
         })
-        .await
-        .map_err(|error| {
-            error!(error = %error, "failed to join database owner shutdown task");
-            Report::new(AppError::OpenRegistry)
-        });
+        .await;
+        if let Err(error) = &database_owner_outcome {
+            error!(error = ?error, "failed to close the node's stores");
+        }
 
         if cluster_shutdown_result.is_err() || database_owner_outcome.is_err() {
             terminal_teardown_outcome =

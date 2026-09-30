@@ -734,13 +734,19 @@ impl IngestorRouteTask {
         &self,
         input: BranchedEntrypointInput,
     ) -> Vec<RelayRecordBatch> {
-        let input_batch = match branched_entrypoint_batch_from_inputs_blocking(vec![input]).await {
-            Ok(batch) => batch,
+        let branches = match prepare_branched_entrypoint_input(
+            self.runtime_handle.executor(),
+            input,
+            self.template.ack_boundary,
+        )
+        .await
+        {
+            Ok(branches) => branches,
             Err(failure) => {
                 self.handle_general_error(
                     &failure.preserved,
                     format!(
-                        "{} '{}' failed to build route input batch: {}",
+                        "{} '{}' failed to prepare route input: {}",
                         self.template.branch.source_kind.as_str(),
                         self.ingestor.as_str(),
                         failure.error
@@ -749,35 +755,11 @@ impl IngestorRouteTask {
                 return Vec::new();
             }
         };
-        let branch_plan = match branched_branch_plan_blocking(input_batch.clone()).await {
-            Ok(plan) => plan,
-            Err(error) => {
-                self.handle_general_error(
-                    &input_batch.acks,
-                    format!(
-                        "{} '{}' failed to evaluate output branch assignments: {}",
-                        self.template.branch.source_kind.as_str(),
-                        self.ingestor.as_str(),
-                        error
-                    ),
-                );
-                return Vec::new();
-            }
-        };
-        let mut batch_builds = FuturesUnordered::new();
-        for selection in branch_plan {
+        let mut prepared = Vec::with_capacity(branches.len());
+        for branch in branches {
             nervix_primitives::task::consume_budget().await;
-            batch_builds.push(branched_branch_filter_blocking(
-                input_batch.clone(),
-                selection,
-                self.template.ack_boundary,
-            ));
-        }
-        let mut prepared = Vec::new();
-        while let Some(batch_result) = futures_util::StreamExt::next(&mut batch_builds).await {
-            nervix_primitives::task::consume_budget().await;
-            match batch_result {
-                Ok((_, batch)) => prepared.push(batch),
+            match branch {
+                Ok(batch) => prepared.push(batch),
                 Err(failure) => self.handle_general_error(
                     &failure.preserved,
                     format!(

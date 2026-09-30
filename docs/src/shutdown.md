@@ -98,8 +98,10 @@ the drain timeout makes the shutdown deadline the effective bound.
 Two bounds are deliberately outside the deadline. Terminal teardown's final stops — the runtime,
 consensus, cluster membership, and the interconnect — run to completion rather than being cut short,
 because stopping them is what releases the node's tasks, connections, and storage. The interconnect
-applies its own ten-second transport drain. The deadline supervisor, not those bounds, is what
-guarantees the process ends.
+applies its own ten-second transport drain. Closing the node's databases flushes and joins their
+background work synchronously, so the services that own them are dropped last, as one job on the
+node's filesystem storage workers; a node that cannot take that job reports teardown `Abandoned`.
+The deadline supervisor, not those bounds, is what guarantees the process ends.
 
 ### Exit Status
 

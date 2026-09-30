@@ -834,7 +834,7 @@ async fn a_range_is_split_where_the_next_entry_would_exceed_its_write() -> TestR
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
         nervix_primitives::task::consume_budget().await;
         let mut harness = Harness::new().await?;
-        let reservation = StoreInner::reserve(&harness.executor, MemoryClass::Commands).await?;
+        let reservation = StoreInner::reserve(&harness.executor, StorageCharge::Commands).await?;
         let limit = DurableBatch::byte_limit(&reservation)?;
         drop(reservation);
         // Two small entries share a write, a large one does not fit beside both of them but fits
@@ -885,7 +885,7 @@ async fn a_range_is_split_where_the_next_entry_would_exceed_its_write() -> TestR
 #[nervix_primitives::test]
 async fn entries_before_one_that_cannot_be_stored_are_written_first() -> TestResult {
     let mut harness = Harness::new().await?;
-    let reservation = StoreInner::reserve(&harness.executor, MemoryClass::Commands).await?;
+    let reservation = StoreInner::reserve(&harness.executor, StorageCharge::Commands).await?;
     let limit = DurableBatch::byte_limit(&reservation)?;
     drop(reservation);
     let entries = vec![
@@ -1702,7 +1702,7 @@ impl CommitBackend for CrashDisk {
 #[nervix_primitives::test]
 async fn power_loss_discards_unsynced_records_and_keeps_whole_synced_revisions() -> TestResult {
     let harness = Harness::new().await?;
-    let reservation = StoreInner::reserve(&harness.executor, MemoryClass::Commands).await?;
+    let reservation = StoreInner::reserve(&harness.executor, StorageCharge::Commands).await?;
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
         nervix_primitives::task::consume_budget().await;
         let disk = CrashDisk::default();
@@ -1810,7 +1810,7 @@ async fn replica_update_writes_one_record_and_metadata_amid_unrelated_graphs() -
     assert_eq!(applied.response, ConsensusResponse::Applied);
     succeeding.last_applied_log_id = Some(Harness::log_id(20_000));
     succeeding.record_runtime_revision(20_000, &applied);
-    let reservation = StoreInner::reserve(&harness.executor, MemoryClass::Commands).await?;
+    let reservation = StoreInner::reserve(&harness.executor, StorageCharge::Commands).await?;
     let mut batch = DurableBatch::new(&reservation)?;
     succeeding.write_changes(&preceding, &mut batch, &harness.store.inner.sm)?;
     let disk = CrashDisk::default();

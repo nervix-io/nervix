@@ -256,13 +256,13 @@ fn test_session_service(
     registry: Arc<Registry>,
     resource_store: StdArc<ResourceStore>,
     interconnect: Transport,
+    runtime: Runtime,
 ) -> SessionServiceImpl {
     let https_certificates = HttpsListenerCertificates::new(
         &resource_store,
         &ConfiguredFaultInjection::default(),
         &cluster,
     );
-    let runtime = Runtime::new();
     let subscription_interests = SubscriptionInterests::new(cluster.clone(), runtime.metrics());
     let client_producers = super::client_producers::ClientProducerRouter::new(
         runtime.clone(),
@@ -538,14 +538,29 @@ pub(in crate::application) struct TestService {
 pub(in crate::application) async fn build_test_service(
     create_default_domain_flag: bool,
 ) -> TestService {
-    build_test_service_inner(create_default_domain_flag, None).await
+    build_test_service_inner(create_default_domain_flag, None, Runtime::new()).await
 }
 
 #[cfg(not(feature = "testing"))]
 pub(in crate::application) async fn build_test_service(
     create_default_domain_flag: bool,
 ) -> TestService {
-    build_test_service_inner(create_default_domain_flag).await
+    build_test_service_inner(create_default_domain_flag, Runtime::new()).await
+}
+
+/// A service whose runtime admits its work through `executor`, so a test can fill a class the
+/// service's own work is admitted into.
+#[cfg(feature = "testing")]
+pub(in crate::application) async fn build_test_service_with_executor(
+    create_default_domain_flag: bool,
+    executor: nervix_execution::Executor,
+) -> TestService {
+    build_test_service_inner(
+        create_default_domain_flag,
+        None,
+        Runtime::with_executor(executor),
+    )
+    .await
 }
 
 #[cfg(feature = "testing")]
@@ -553,12 +568,13 @@ pub(in crate::application) async fn build_test_service_with_probe(
     create_default_domain_flag: bool,
     probe: ConsensusTestProbe,
 ) -> TestService {
-    build_test_service_inner(create_default_domain_flag, Some(probe)).await
+    build_test_service_inner(create_default_domain_flag, Some(probe), Runtime::new()).await
 }
 
 async fn build_test_service_inner(
     create_default_domain_flag: bool,
     #[cfg(feature = "testing")] probe: Option<ConsensusTestProbe>,
+    runtime: Runtime,
 ) -> TestService {
     let path = test_db_path();
     let _ = std::fs::remove_dir_all(&path);
@@ -641,6 +657,7 @@ async fn build_test_service_inner(
                 .expect("resource store should open"),
         ),
         interconnect,
+        runtime,
     );
     TestService {
         service,
