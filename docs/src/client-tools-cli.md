@@ -44,7 +44,8 @@ nervix-cli --server https://nervix.example.com:47390 --tls required --tls-ca-cer
 
 There is no general CLI configuration file and no `--version` flag. `--server`, `--domain`, and the
 TLS options have no environment-variable equivalents. The DNS options select the resolver used by
-the native session; the system resolver and hosts files are the defaults. The password can come
+the native session; the system resolver and hosts files are the defaults, and
+[Name Resolution](name-resolution.md) describes how that resolver answers. The password can come
 from `NERVIX_PASSWORD` so it need not appear in shell history.
 
 The table above is the short version. [nervix-cli Reference](nervix-cli-reference.md) is printed by

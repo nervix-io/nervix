@@ -12,6 +12,9 @@ Use it for:
 - [HTTP emitter request preparation, delivery, lifecycle, and qualification](./http-emitter-architecture.md)
 - domain-clock mapping, authority, lifecycle, progress, and execution-time semantics
 - cluster interconnect security, traffic isolation, and delivery semantics
+- [host name resolution: the node's asynchronous DNS resolver, its configuration, cache and bounds,
+  the client-library hooks and every call site, residual driver and browser resolution, deployment
+  limits, and the evidence behind them](./name-resolution.md)
 - [client-to-node communication: the FlatBuffers session protocol, request correlation and
   dispositions, exact recovery, redirect and reconnection, Row subscriptions, uploads, and the
   shared client binding](./client-session-protocol.md)
