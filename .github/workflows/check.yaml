@@ -580,7 +580,7 @@ jobs:
         with:
           disable_search: true
           fail_ci_if_error: true
-          files: ./lcov.info
+          files: ./lcov-workspace.info
           use_oidc: true
 
       - name: Upload merged coverage
