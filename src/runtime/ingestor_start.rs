@@ -286,7 +286,6 @@ impl Runtime {
                 domain: domain.clone(),
             })?;
         let relays = RelayRuntimeHandles {
-            registries: &routing.relay_registries,
             services: &routing.relay_services,
         };
         let branched_templates = relays

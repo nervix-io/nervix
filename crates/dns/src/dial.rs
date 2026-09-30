@@ -10,7 +10,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use tokio::time::Instant;
+use nervix_primitives::time::Instant;
 
 /// One physical connection deadline shared by lookup and every address attempt.
 pub struct ConnectionBudget {

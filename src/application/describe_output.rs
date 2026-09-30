@@ -7,7 +7,7 @@
 //! - **Depends on.** The Models and the runtime reports it renders.
 //! - **Must not know.** Where the values it renders were gathered.
 
-use std::fmt::Write as _;
+use std::{fmt::Write as _, time::Duration};
 
 use ahash::{HashMap, HashSet};
 use arch_into::ArchInto;
@@ -28,7 +28,6 @@ use nervix_models::{
     ingest_quiesce_to_nspl,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
-use tokio::time::Duration;
 
 use crate::{
     registry::{

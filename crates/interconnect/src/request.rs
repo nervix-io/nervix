@@ -21,6 +21,7 @@ use nervix_models::{ClusterNodeIdentity, ClusterNodeName, CoordinationIdentity};
 use nervix_primitives::{
     publication::{ArcSwap, ArcSwapOption},
     sync::{Notify, OwnedSemaphorePermit, Semaphore},
+    time::{Instant, timeout},
 };
 use rkyv::{
     Archive, Deserialize, Serialize,
@@ -30,7 +31,6 @@ use rkyv::{
 };
 use strum::{AsRefStr, EnumCount, EnumIter, IntoEnumIterator as _};
 use thiserror::Error;
-use tokio::time::{Instant, timeout};
 use triomphe::Arc;
 
 use super::{

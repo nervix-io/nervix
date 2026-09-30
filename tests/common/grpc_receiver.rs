@@ -29,23 +29,18 @@
 //! connections the HTTP receiver's connection budget to end before it aborts and joins the ones that
 //! remain, within the same whole-stop budget.
 
-use std::{
-    collections::VecDeque,
-    fmt, io,
-    net::SocketAddr,
-    sync::Arc as StdArc,
-    time::{Duration, Instant},
-};
+use std::{collections::VecDeque, fmt, io, net::SocketAddr, sync::Arc as StdArc, time::Duration};
 
 use bytes::Bytes;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
+    net::{TcpListener, TcpStream},
     sync::{CancellationToken, blocking::Mutex, watch},
     task::{AbortOnDropHandle, JoinSet},
+    time::Instant,
 };
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
-use tokio::net::{TcpListener, TcpStream};
 use triomphe::Arc;
 
 use super::http_receiver::{
@@ -368,8 +363,11 @@ impl GrpcReceiver {
         within: Duration,
     ) -> Result<Vec<CapturedCall>, GrpcReceiverWaitError> {
         let mut captured_count = self.state.captured_count.subscribe();
-        let waited =
-            tokio::time::timeout(within, captured_count.wait_for(|count| *count >= expected)).await;
+        let waited = nervix_primitives::time::timeout(
+            within,
+            captured_count.wait_for(|count| *count >= expected),
+        )
+        .await;
         match waited {
             Ok(Ok(_)) => Ok(self.captured()),
             Ok(Err(_)) | Err(_) => Err(GrpcReceiverWaitError {
@@ -391,7 +389,7 @@ impl GrpcReceiver {
             mut accept_loop,
             ..
         } = self;
-        let joined = tokio::time::timeout(RECEIVER_STOP_BUDGET, &mut accept_loop).await;
+        let joined = nervix_primitives::time::timeout(RECEIVER_STOP_BUDGET, &mut accept_loop).await;
         let ending = match joined {
             Ok(Ok(connections)) => AcceptLoopEnding::Returned(connections),
             Ok(Err(error)) => AcceptLoopEnding::Failed(error),
@@ -505,10 +503,10 @@ impl GrpcAcceptLoop {
                 }
             }
         }
-        let deadline = tokio::time::Instant::now() + RECEIVER_CONNECTION_STOP_BUDGET;
+        let deadline = nervix_primitives::time::Instant::now() + RECEIVER_CONNECTION_STOP_BUDGET;
         loop {
             nervix_primitives::task::consume_budget().await;
-            match tokio::time::timeout_at(deadline, connections.join_next()).await {
+            match nervix_primitives::time::timeout_at(deadline, connections.join_next()).await {
                 Ok(Some(joined)) => summary.joined(joined),
                 Ok(None) => break,
                 Err(_) => {

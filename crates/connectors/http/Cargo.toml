@@ -10,12 +10,7 @@ workspace = true
 
 [features]
 default = []
-shuttle = [
-  "dep:shuttle-tokio",
-  "nervix-connector/shuttle",
-  "nervix-primitives/shuttle",
-  "shuttle-tokio/shuttle",
-]
+shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -29,7 +24,6 @@ nervix-primitives = { workspace = true, features = ["native"] }
 reqwest = { workspace = true, features = ["rustls"] }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
-shuttle-tokio = { workspace = true, features = ["rt"], optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net", "rt", "time"] }
 tokio-rustls = { workspace = true }

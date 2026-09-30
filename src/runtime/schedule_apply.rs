@@ -500,16 +500,13 @@ impl Runtime {
                     desired_node.identifier.as_str()
                 ),
             })?;
-            let relay_runtime = if entity.kind == ModelKind::Relay
+            let relay_services = if entity.kind == ModelKind::Relay
                 && let Some(execution) = self.inner.executions.get(domain)
-                && let Some(registry) = execution
-                    .relay_registries
-                    .get(&RelayName::from(&entity.identifier))
-                && let Some(service) = execution
+                && let Some(services) = execution
                     .relay_services
                     .get(&RelayName::from(&entity.identifier))
             {
-                Some((registry.clone(), service.clone()))
+                Some(services.clone())
             } else {
                 None
             };
@@ -703,8 +700,8 @@ impl Runtime {
             }
 
             if entity.kind == ModelKind::Relay && executes_locally && !was_local {
-                let (registry, services) =
-                    relay_runtime.ok_or_else(|| RuntimeError::BuildDomainExecution {
+                let services =
+                    relay_services.ok_or_else(|| RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: format!(
                             "missing runtime boundary for relocated relay '{}'",
@@ -714,7 +711,6 @@ impl Runtime {
                 let task = self.spawn_relay_owner_task(
                     domain,
                     &RelayName::from(&entity.identifier),
-                    registry,
                     services,
                     activation_plan
                         .relays
@@ -1277,7 +1273,6 @@ impl Runtime {
                             ExecutionBuildDeps::from_routing(domain, &routing),
                             &shutdown,
                             RelayRuntimeHandles {
-                                registries: &routing.relay_registries,
                                 services: &routing.relay_services,
                             },
                             inputs,
@@ -1332,7 +1327,6 @@ impl Runtime {
                         let spec = GeneratorTaskSpec::bind(
                             domain,
                             generator,
-                            &execution.relay_registries,
                             &execution.relay_services,
                             &execution.udfs,
                         )
@@ -1534,7 +1528,6 @@ impl Runtime {
                 BoundMessageErrorRoutes::bind(
                     revision.message_errors.clone(),
                     MessageErrorRouteBindingContext {
-                        relay_registries: &execution.relay_registries,
                         relay_services: &execution.relay_services,
                         materialized_stream_specs: &execution.materialized_stream_specs,
                         lookups: &execution.lookups,
@@ -1607,7 +1600,6 @@ impl Runtime {
                 BoundMessageErrorRoutes::bind(
                     revision.message_errors.clone(),
                     MessageErrorRouteBindingContext {
-                        relay_registries: &execution.relay_registries,
                         relay_services: &execution.relay_services,
                         materialized_stream_specs: &execution.materialized_stream_specs,
                         lookups: &execution.lookups,
@@ -2102,7 +2094,7 @@ mod tests {
             .expect("paused execution should remain");
         assert!(!execution.passive_only);
         assert!(Arc::ptr_eq(&revision_before_pause, &execution.revision));
-        assert!(execution.relay_registries.contains_key(&relay));
+        assert!(execution.relay_services.contains_key(&relay));
     }
 
     #[nervix_primitives::test]
@@ -2190,7 +2182,7 @@ mod tests {
             )
             .assured("the current schedule has an ownership fingerprint")
         );
-        assert!(execution.relay_registries.contains_key(&relay));
+        assert!(execution.relay_services.contains_key(&relay));
     }
 
     #[test]
@@ -2300,7 +2292,7 @@ mod tests {
             )
             .assured("the current schedule has an ownership fingerprint")
         );
-        assert!(execution.relay_registries.contains_key(&relay));
+        assert!(execution.relay_services.contains_key(&relay));
     }
 
     #[nervix_primitives::test]
@@ -2369,7 +2361,7 @@ mod tests {
             .executions
             .get(&domain)
             .expect("the reapplied execution should exist");
-        assert!(execution.relay_registries.contains_key(&relay));
+        assert!(execution.relay_services.contains_key(&relay));
     }
 
     #[nervix_primitives::test]

@@ -384,7 +384,7 @@ Transport-specific schemes and keys:
   `tls_key_file`; optional `tls_ca_file` enables required client-certificate verification.
 
 HTTP polling and Prometheus resolve endpoint names through the node's configured DNS resolver.
-The request timeout covers name resolution, connection establishment, TLS, and the response.
+A client `timeout_ms` covers name resolution, connection establishment, TLS, and the response.
 The endpoint name remains the HTTP authority and HTTPS certificate name after resolution.
 RabbitMQ resolves the host of its `addr` the same way and verifies an `amqps` broker certificate
 against that host; see [RabbitMQ](#rabbitmq).
@@ -848,12 +848,14 @@ The source resolves the host of its client's `endpoint` through the node's async
 each time it opens a connection, and tries the answers in order. Every request is still signed for
 the configured host, and over HTTPS the service certificate must name that host. Without
 `tls_ca_file` the client trusts the platform's native roots and follows the `HTTP_PROXY`,
-`HTTPS_PROXY` and `NO_PROXY` environment variables; with it, the client trusts that CA alone and
-connects directly. A missing name, a silent name server or an unreachable answer fails opening the
-queue, a poll, or a deletion. The AWS SDK's standard retry mode makes up to three attempts at each
-such request; after that the failure is a transient source failure that `DESCRIBE INGESTOR` shows
-and the source retries on its `RETRY POLICY`. A message is deleted only once it is acknowledged, so a
-lookup failure never removes one from the queue.
+`HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` environment variables; with it, the client trusts that CA
+alone and connects directly. A missing name, a silent name server or an unreachable answer fails the
+queue lookup the ingestor makes when it starts, a poll, or a deletion. The AWS SDK's standard retry
+mode makes up to three attempts at each such request. A failed queue lookup then fails the
+ingestor's start, with the lookup failure in its reason; a failed poll or deletion is a transient
+source failure that `DESCRIBE INGESTOR` shows and the source retries on its `RETRY POLICY`. A
+message is deleted only once it is acknowledged, so a lookup failure never removes one from the
+queue.
 
 ### Prometheus
 

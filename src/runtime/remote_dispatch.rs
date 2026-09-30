@@ -314,8 +314,8 @@ impl RemoteDispatchRegistry {
     /// counts once, so a node whose own execution stalled does not fail acknowledgements whose
     /// reports it could not receive meanwhile.
     pub(super) async fn sweep_silent_acks(&self) {
-        let mut sweeps = tokio::time::interval(REMOTE_ACK_SILENCE_SWEEP_INTERVAL);
-        sweeps.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut sweeps = nervix_primitives::time::interval(REMOTE_ACK_SILENCE_SWEEP_INTERVAL);
+        sweeps.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
         loop {
             nervix_primitives::task::consume_budget().await;
             sweeps.tick().await;
@@ -558,7 +558,7 @@ impl RemoteDispatcher {
             .assured("the fixed relay cancellation deadline fits the monotonic clock");
         let status = loop {
             nervix_primitives::task::consume_budget().await;
-            let cancellation = tokio::time::timeout_at(
+            let cancellation = nervix_primitives::time::timeout_at(
                 deadline,
                 self.interconnect.cancel_relay(node_id, delivery),
             )
@@ -658,7 +658,7 @@ impl RemoteDispatcher {
                 .checked_add(inactivity_timeout)
                 .assured("a bounded relay inactivity timeout fits the monotonic clock");
             let deadline = inactivity_deadline.min(total_deadline);
-            match tokio::time::timeout_at(deadline, admission.changed()).await {
+            match nervix_primitives::time::timeout_at(deadline, admission.changed()).await {
                 Ok(Ok(())) => {
                     let update = admission.borrow_and_update().clone();
                     match update {
@@ -783,7 +783,7 @@ impl RemoteDispatcher {
             .assured("the fixed remote dispatch timeout fits the monotonic clock");
         loop {
             nervix_primitives::task::consume_budget().await;
-            let result = tokio::time::timeout_at(
+            let result = nervix_primitives::time::timeout_at(
                 deadline,
                 self.interconnect.send(node_id, envelope.clone()),
             )
@@ -839,10 +839,9 @@ pub(super) fn push_remote_runtime_consumer(
     });
 }
 
-/// The instantiated relay a remote payload is delivered into: the registry that accepts it, the
-/// boundary services that own it, and the schema its Arrow batch must decode against.
+/// The instantiated relay a remote payload is delivered into: the boundary services that own it,
+/// and the schema its Arrow batch must decode against.
 pub(in crate::runtime) struct RemoteRelayTarget {
-    pub(super) registry: RelayRegistry,
     pub(super) services: Arc<RelayBoundaryServices>,
     pub(super) schema: Arc<CompiledSchema>,
 }
@@ -1022,12 +1021,6 @@ impl Runtime {
                 relay: relay.as_str().to_string(),
             });
         }
-        let Some(registry) = routing.relay_registries.get(relay).cloned() else {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: relay.as_str().to_string(),
-            });
-        };
         let Some(services) = routing.relay_services.get(relay).cloned() else {
             return Err(RuntimeError::RelayNotInstantiated {
                 domain: domain.as_str().to_string(),
@@ -1040,11 +1033,7 @@ impl Runtime {
                 relay: relay.as_str().to_string(),
             });
         };
-        Ok(RemoteRelayTarget {
-            registry,
-            services,
-            schema,
-        })
+        Ok(RemoteRelayTarget { services, schema })
     }
 
     pub(in crate::runtime) async fn wait_for_remote_stream_target(
@@ -1093,11 +1082,7 @@ impl Runtime {
         routing: &mut DomainRoutingCache,
         admission: Option<RemoteRelayAdmissionContext<'_>>,
     ) -> Result<(), RuntimeError> {
-        let RemoteRelayTarget {
-            registry,
-            services,
-            schema,
-        } = self
+        let RemoteRelayTarget { services, schema } = self
             .wait_for_remote_stream_target(routing, &remote.domain, &remote.relay)
             .await?;
         if owner_ingress && !self.owns_relay(&services) {
@@ -1173,7 +1158,6 @@ impl Runtime {
                 self.ingest_stream_boundary_message(
                     &remote.domain,
                     &remote.relay,
-                    &registry,
                     &services,
                     &batch,
                 )
@@ -1640,10 +1624,14 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use futures_util::FutureExt as _;
     use nervix_models::{AckMode, ClusterNodeName, RemoteAckOutcome};
-    use nervix_primitives::sync::{oneshot, watch};
-    use tokio::time::{Duration, Instant, sleep, timeout};
+    use nervix_primitives::{
+        sync::{oneshot, watch},
+        time::{Instant, sleep, timeout},
+    };
 
     use super::*;
     use crate::runtime_ack::{AckCompletion, AckOutcome, AckSet};
@@ -2398,7 +2386,7 @@ mod tests {
 
         // The node's execution stalls for four silence bounds, as a paused container's does, so no
         // report could have reached it.
-        tokio::time::advance(REMOTE_ACK_SILENCE_TIMEOUT * 4).await;
+        nervix_primitives::time::advance(REMOTE_ACK_SILENCE_TIMEOUT * 4).await;
         nervix_primitives::task::yield_now().await;
 
         assert!(

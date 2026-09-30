@@ -152,7 +152,7 @@ impl RuntimeAdmission {
                     nervix_primitives::select! {
                         biased;
                         _ = shutdown.cancelled() => return None,
-                        _ = tokio::time::sleep(ADMISSION_RETRY_INTERVAL) => {}
+                        _ = nervix_primitives::time::sleep(ADMISSION_RETRY_INTERVAL) => {}
                     }
                 }
             }

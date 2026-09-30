@@ -2265,7 +2265,14 @@ mod tests {
             .split_once("#[cfg(test)]")
             .assured("the module has a test boundary");
 
-        for forbidden in ["tokio::time", "Instant::", "Timestamp::now"] {
+        for forbidden in [
+            "nervix_primitives::time",
+            "time::sleep",
+            "time::timeout",
+            "time::interval",
+            "Instant::",
+            "Timestamp::now",
+        ] {
             assert!(
                 !product_source.contains(forbidden),
                 "logical clock source directly imports physical time through '{forbidden}'"

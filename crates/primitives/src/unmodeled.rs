@@ -4,7 +4,8 @@
 //! across the many model executions it starts, and a model execution cannot own them. An external
 //! library can require the exact type of the library it was written against. A thread the model
 //! does not run, such as a timer thread the operating system schedules, cannot touch a modeled
-//! primitive at all.
+//! primitive at all. A harness's real-time bound must not follow a paused or simulated clock, and
+//! the ports a harness reserves for real processes must be the operating system's.
 //!
 //! Every use of this module is a permission: `crates/primitives/unmodeled-permissions.toml` names
 //! the file, the items it uses, the owner that needs them, why a real primitive is required and
@@ -64,10 +65,23 @@ pub mod task {
 
 #[cfg(feature = "native")]
 pub mod time {
-    //! Tokio's own timer, for a task of [`task`](super::task) that runs on the runtime of an
-    //! external library.
+    //! Real time, whatever the execution mode.
 
+    /// The operating system's monotonic clock, which no runtime pauses and no simulation advances,
+    /// for a harness bound that decides only when a run fails, never how it proceeds.
+    pub use std::time::Instant;
+
+    /// Tokio's own timer, for a task of [`task`](super::task) that runs on the runtime of an
+    /// external library.
     pub use tokio::time::sleep;
+}
+
+#[cfg(feature = "native")]
+pub mod net {
+    //! The operating system's blocking sockets, for a harness that reserves real ports for real
+    //! processes. No simulation carries them.
+
+    pub use std::net::TcpListener;
 }
 
 /// Tokio's own `select!`, for a task of [`task`] that waits on real primitives.

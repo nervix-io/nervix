@@ -1806,7 +1806,7 @@ impl BranchExecutionRuntime {
             return;
         };
 
-        match tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, &mut task).await {
+        match nervix_primitives::time::timeout(SHUTDOWN_GRACE_PERIOD, &mut task).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 if error.is_cancelled() {
@@ -2110,7 +2110,7 @@ pub(super) async fn flush_branch_junction(
 mod tests {
     use nervix_interconnect::EntityGatePurpose;
     use nervix_models::{IngestorName, ModelKind, ModelName, NodeRef, ParseAsType, RelayName};
-    use tokio::time::timeout;
+    use nervix_primitives::time::timeout;
     use triomphe::Arc;
 
     use super::*;

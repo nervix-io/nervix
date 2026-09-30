@@ -5,7 +5,8 @@
 //! [`exercise_the_atomic_surface`] and the same scripts of the native families, so a backend that
 //! lacks an operation fails to compile here and a backend that answers one differently fails here,
 //! rather than in the first owner that uses it. The Shuttle checks also show that the scheduler
-//! reaches the races its adapters exist for.
+//! reaches the races its adapters exist for, and the Turmoil check that sockets, name lookup,
+//! timers and admitted CPU jobs belong to the simulated host that uses them.
 
 #[cfg(all(feature = "native", not(feature = "loom")))]
 mod families;
@@ -13,8 +14,16 @@ mod families;
 mod notification;
 #[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
 mod shuttle_races;
+#[cfg(all(feature = "native", feature = "turmoil"))]
+mod simulated_host;
 #[cfg(all(feature = "native", not(feature = "loom")))]
 mod tasks;
+#[cfg(all(
+    feature = "native",
+    any(feature = "shuttle", feature = "test-util"),
+    not(feature = "loom")
+))]
+mod timers;
 #[cfg(all(feature = "native", not(feature = "loom")))]
 mod watch_channel;
 
@@ -240,6 +249,44 @@ mod ordinary {
             crate::thread::JoinHandle<u8>,
             std::thread::JoinHandle<u8>,
         >());
+        assert!(is_same_type::<crate::time::Instant, tokio::time::Instant>());
+        assert!(is_same_type::<crate::time::Sleep, tokio::time::Sleep>());
+        assert!(is_same_type::<crate::time::Interval, tokio::time::Interval>());
+    }
+
+    /// Outside Turmoil the sockets are Tokio's, over the operating system's network.
+    #[cfg(all(feature = "native", not(feature = "turmoil")))]
+    #[test]
+    fn ordinary_execution_selects_tokios_sockets() {
+        assert!(is_same_type::<
+            crate::net::TcpListener,
+            tokio::net::TcpListener,
+        >());
+        assert!(is_same_type::<crate::net::TcpStream, tokio::net::TcpStream>());
+        assert!(is_same_type::<crate::net::UdpSocket, tokio::net::UdpSocket>());
+        assert!(is_same_type::<
+            crate::net::tcp::OwnedReadHalf,
+            tokio::net::tcp::OwnedReadHalf,
+        >());
+    }
+
+    /// An admitted CPU job runs on the blocking pool, off the thread of the task that submitted it.
+    #[cfg(all(feature = "native", not(feature = "turmoil")))]
+    #[crate::test]
+    async fn an_admitted_cpu_job_runs_on_the_blocking_pool() {
+        use meticulous::ResultExt as _;
+
+        let submitter = crate::thread::current().id();
+        let job = crate::task::spawn_cpu(|| crate::thread::current().id())
+            .await
+            .assured("the job returns its thread without panicking");
+        assert_ne!(job, submitter);
+    }
+
+    #[cfg(all(feature = "native", feature = "test-util"))]
+    #[crate::test(start_paused = true)]
+    async fn timers_measure_the_runtime_clock() {
+        super::timers::timers_measure_the_runtime_clock().await;
     }
 
     #[cfg(feature = "native")]
@@ -395,6 +442,49 @@ mod shuttle_mode {
             crate::thread::JoinHandle<u8>,
             shuttle::thread::JoinHandle<u8>,
         >());
+        assert!(is_same_type::<crate::time::Sleep, shuttle_tokio::time::Sleep>());
+        assert!(is_same_type::<
+            crate::time::Interval,
+            shuttle_tokio::time::Interval,
+        >());
+    }
+
+    /// No model checker simulates a network: a Shuttle build's sockets are Tokio's, outside every
+    /// model.
+    #[cfg(feature = "native")]
+    #[test]
+    fn shuttle_takes_tokios_sockets_outside_every_model() {
+        assert!(is_same_type::<crate::net::TcpStream, tokio::net::TcpStream>());
+        assert!(is_same_type::<crate::net::UdpSocket, tokio::net::UdpSocket>());
+    }
+
+    /// A socket created inside a Shuttle execution registers with a Tokio reactor the execution does
+    /// not have, so it fails the check instead of reaching the network unobserved.
+    #[cfg(feature = "native")]
+    #[test]
+    #[should_panic(expected = "no reactor running")]
+    fn a_socket_created_inside_a_shuttle_execution_fails_the_check() {
+        shuttle::check_random(
+            || {
+                let bound = shuttle::future::block_on(crate::net::UdpSocket::bind("127.0.0.1:0"));
+                drop(bound);
+            },
+            1,
+        );
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn timers_are_scheduling_points_and_the_check_decides_every_timeout() {
+        shuttle::check_random(
+            || {
+                shuttle::future::block_on(
+                    super::timers::timers_are_scheduling_points_and_the_check_decides_every_timeout(
+                    ),
+                );
+            },
+            1,
+        );
     }
 
     #[cfg(feature = "native")]
@@ -538,5 +628,31 @@ mod loom_mode {
             crate::publication::ArcSwap<u8>,
             arc_swap::ArcSwap<u8>,
         >());
+        assert!(is_same_type::<crate::time::Instant, tokio::time::Instant>());
+        assert!(is_same_type::<crate::time::Sleep, tokio::time::Sleep>());
+        assert!(is_same_type::<crate::net::TcpStream, tokio::net::TcpStream>());
+    }
+}
+
+#[cfg(all(feature = "turmoil", not(any(feature = "loom", feature = "shuttle"))))]
+mod turmoil_mode {
+    use super::is_same_type;
+
+    /// A Turmoil build's sockets are the simulated network's; its timers are Tokio's, which follow
+    /// the clock of the simulated host that polls them.
+    #[cfg(feature = "native")]
+    #[test]
+    fn turmoil_selects_simulated_sockets_and_tokios_timers() {
+        assert!(is_same_type::<
+            crate::net::TcpListener,
+            turmoil::net::TcpListener,
+        >());
+        assert!(is_same_type::<crate::net::TcpStream, turmoil::net::TcpStream>());
+        assert!(is_same_type::<crate::net::UdpSocket, turmoil::net::UdpSocket>());
+        assert!(is_same_type::<
+            crate::net::tcp::OwnedReadHalf,
+            turmoil::net::tcp::OwnedReadHalf,
+        >());
+        assert!(is_same_type::<crate::time::Instant, tokio::time::Instant>());
     }
 }

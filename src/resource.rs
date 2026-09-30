@@ -2404,7 +2404,7 @@ mod tests {
 
         drop(stager);
 
-        tokio::time::timeout(Duration::from_secs(5), async {
+        nervix_primitives::time::timeout(Duration::from_secs(5), async {
             while staging_root.exists() {
                 nervix_primitives::task::yield_now().await;
             }
@@ -2925,7 +2925,7 @@ mod tests {
                 )
                 .await
         });
-        tokio::time::timeout(Duration::from_secs(2), async {
+        nervix_primitives::time::timeout(Duration::from_secs(2), async {
             while !staging_root.exists() {
                 nervix_primitives::task::yield_now().await;
             }
@@ -2938,7 +2938,7 @@ mod tests {
             Err(error) if error.is_cancelled() => {}
             result => panic!("the install task should be cancelled, got {result:?}"),
         }
-        tokio::time::timeout(Duration::from_secs(5), async {
+        nervix_primitives::time::timeout(Duration::from_secs(5), async {
             while staging_root.exists() {
                 nervix_primitives::task::yield_now().await;
             }

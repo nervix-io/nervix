@@ -207,8 +207,8 @@ mod tests {
     use std::time::Duration;
 
     use meticulous::ResultExt as _;
+    use nervix_primitives::time::timeout;
     use nervix_recovery::Discarded as _;
-    use tokio::time::timeout;
 
     use super::*;
     use crate::application::test_fixtures::{TestService, build_test_service, named};

@@ -18,12 +18,7 @@ arrow = [
 ]
 autocomplete = []
 default = []
-shuttle = [
-  "dep:shuttle",
-  "dep:shuttle-tokio",
-  "nervix-primitives/shuttle",
-  "shuttle-tokio/shuttle",
-]
+shuttle = ["dep:shuttle", "nervix-primitives/shuttle"]
 
 [dependencies]
 ahash = { workspace = true }
@@ -47,13 +42,6 @@ nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
 rustls = { workspace = true }
 shuttle = { workspace = true, optional = true }
-shuttle-tokio = { workspace = true, features = [
-  "fs",
-  "io-util",
-  "rt",
-  "rt-multi-thread",
-  "sync",
-], optional = true }
 strum = { workspace = true, features = ["derive"] }
 tempfile = { workspace = true }
 thiserror = { workspace = true }

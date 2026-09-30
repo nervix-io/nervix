@@ -1389,17 +1389,17 @@ pub(super) fn relay_batch_from_wasm_output(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
+    use std::{sync::Arc as StdArc, time::Duration};
 
     use ahash::HashSet;
     use arrow_array::{Array, Int32Array, RecordBatch, StringArray};
     use arrow_schema::Schema as ArrowSchema;
     use nervix_models::ParseAsType;
+    use nervix_primitives::time::timeout;
     use nervix_wasm::{
         WasmAckSidecar, WasmAckToken, WasmAckTokenSet, WasmEnvelope, WasmOutputColumnRef,
         WasmOutputRow, WasmRoutedOutput,
     };
-    use tokio::time::{Duration, timeout};
     use triomphe::Arc;
 
     use super::*;

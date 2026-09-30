@@ -422,8 +422,7 @@ mod tests {
         RowSchema, RowsSkippedCause, ServerEvent, ServerMessage, SubscriptionHandle, VerifiedFrame,
     };
     use nervix_models::{DomainName, RelayName, SchemaField, SubscriptionName};
-    use nervix_primitives::sync::CancellationToken;
-    use tokio::time::timeout;
+    use nervix_primitives::{sync::CancellationToken, time::timeout};
 
     use super::*;
     use crate::{

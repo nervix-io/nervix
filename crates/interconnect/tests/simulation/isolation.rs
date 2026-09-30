@@ -541,7 +541,7 @@ impl PeerHost {
             .send(&self.hub, Envelope::RelayPayload(payload))
             .await
             .assured("the hub grants and receives the relay body");
-        let resolved = tokio::time::timeout(HOST_DEADLINE, async {
+        let resolved = nervix_primitives::time::timeout(HOST_DEADLINE, async {
             loop {
                 let received = self
                     .incoming
@@ -760,7 +760,7 @@ struct RelayIngress {
 
 impl RelayIngress {
     async fn next_from(&mut self, peer: &ClusterNodeName) -> ReceivedEnvelope {
-        let received = tokio::time::timeout(HOST_DEADLINE, self.incoming.recv())
+        let received = nervix_primitives::time::timeout(HOST_DEADLINE, self.incoming.recv())
             .await
             .assured("the relay reaches the hub within the simulated deadline")
             .assured("the hub's incoming queue stays open");
@@ -867,14 +867,14 @@ impl HubHost {
         what: &str,
         condition: impl Fn(&Observation) -> bool,
     ) -> Observation {
-        let waited = tokio::time::timeout(HOST_DEADLINE, async {
+        let waited = nervix_primitives::time::timeout(HOST_DEADLINE, async {
             loop {
                 nervix_primitives::task::consume_budget().await;
                 let observation = self.observe();
                 if condition(&observation) {
                     return observation;
                 }
-                tokio::time::sleep(POLL).await;
+                nervix_primitives::time::sleep(POLL).await;
             }
         })
         .await;
@@ -1761,7 +1761,7 @@ fn stalled_peer_plan(run: ScenarioRun) -> Result<(), SimulationError> {
         simulation.host(HUB, move || start_once(&hub, &finished, HubPlan::start));
         simulation.client("observer", async move {
             let mut finished = finished_rx;
-            tokio::time::timeout(Duration::from_secs(110), async {
+            nervix_primitives::time::timeout(Duration::from_secs(110), async {
                 while *finished.borrow() < 3 {
                     nervix_primitives::task::consume_budget().await;
                     finished

@@ -13,7 +13,7 @@ use error_stack::Report;
 use nervix_dns::DnsLookupError;
 use nervix_models::NodeEndpoint;
 
-use crate::socket::PeerResolver;
+use crate::peer_resolver::PeerResolver;
 
 /// One advertised address and the certificate name expected there.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]

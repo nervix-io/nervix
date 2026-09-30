@@ -1164,7 +1164,6 @@ impl Runtime {
         &self,
         domain: &DomainName,
         relay: &RelayName,
-        _registry: &RelayRegistry,
         services: &RelayBoundaryServices,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
