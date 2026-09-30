@@ -17,6 +17,7 @@ use std::{
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_model_harness::shuttle::{check_pct, check_random};
 use nervix_primitives::{
     sync::{Arc, StdArc, oneshot},
     time::Instant,
@@ -27,7 +28,6 @@ use shuttle::rand::{Rng as _, thread_rng};
 use super::{
     RelayBroadcast, RelayDispatchGate, RelayDispatchGateLease, RelayReceiver, RelayTryRecv,
 };
-use crate::shuttle_test::{check_pct, check_random};
 
 const RANDOM_ITERATIONS: usize = 1_000;
 const PCT_ITERATIONS: usize = 1_000;

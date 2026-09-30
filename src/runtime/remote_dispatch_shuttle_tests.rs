@@ -9,14 +9,12 @@
 
 use futures_util::FutureExt as _;
 use meticulous::ResultExt as _;
+use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{sync::Arc, thread};
 
 use super::{REMOTE_ACK_SILENT_SWEEPS, RemoteDispatchRegistry};
-use crate::{
-    runtime_ack::{AckCompletion, AckOutcome, AckSet},
-    shuttle_test::check_interleavings,
-};
+use crate::runtime_ack::{AckCompletion, AckOutcome, AckSet};
 
 const JOINED: &str =
     "a modeled thread's panic fails the Shuttle execution before its joiner resumes";

@@ -11,30 +11,9 @@
 [[permission]]
 items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
 limit = "Runner bookkeeping that no invariant reads."
-owner = "The execution crate's Shuttle runner."
-path = "crates/execution/src/tests.rs"
-reason = "The highest step count spans every model execution the runner starts and is read after they end, where no modeled atomic can exist."
-
-[[permission]]
-items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
-limit = "Runner bookkeeping that no invariant reads."
-owner = "The interconnect's Shuttle runner."
-path = "crates/interconnect/src/shuttle_test.rs"
-reason = "The highest step count spans every model execution the runner starts and is read after they end, where no modeled atomic can exist."
-
-[[permission]]
-items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
-limit = "Runner bookkeeping that no invariant reads."
-owner = "The server's Shuttle runner."
-path = "src/shuttle_test.rs"
-reason = "The highest step count spans every model execution the runner starts and is read after they end, where no modeled atomic can exist."
-
-[[permission]]
-items = ["sync::atomic::AtomicUsize", "sync::atomic::Ordering"]
-limit = "Runner bookkeeping that no invariant reads."
-owner = "The Rust client's Shuttle runner."
-path = "crates/client-core/src/shuttle_test.rs"
-reason = "The highest step count spans every model execution the runner starts and is read after they end, where no modeled atomic can exist."
+owner = "The Shuttle runner of nervix-model-harness."
+path = "crates/model-harness/src/shuttle.rs"
+reason = "The highest step count spans every schedule the runner starts and is read after they end, where no modeled atomic can exist."
 
 [[permission]]
 items = [

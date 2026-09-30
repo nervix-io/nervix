@@ -687,10 +687,10 @@ mod tests {
 
     #[cfg(feature = "shuttle")]
     mod shuttle_checks {
+        use nervix_model_harness::shuttle::check_interleavings;
         use nervix_primitives::{sync::blocking::mpsc, thread};
 
         use super::*;
-        use crate::shuttle_test::check_interleavings;
 
         /// The owner commits a recorded partition's offset and checks its replica quorum while
         /// another thread holds the assignment barrier, which that thread releases only after both

@@ -6,16 +6,14 @@
 //! - **Must not know.** Schedule application, processor execution or graph Models.
 
 use ahash::HashMap;
+use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{AckMode, ErrorPolicies, ModelKind, ModelName, NodeRef};
 use nervix_primitives::{sync::StdArc, thread};
 
 use super::*;
-use crate::{
-    registry::{
-        BranchedProcessorNodeSpec, BranchedProcessorOperationSpec, BranchedProcessorOutputsSpec,
-        BranchedProcessorSpec,
-    },
-    shuttle_test::check_interleavings,
+use crate::registry::{
+    BranchedProcessorNodeSpec, BranchedProcessorOperationSpec, BranchedProcessorOutputsSpec,
+    BranchedProcessorSpec,
 };
 
 const MODEL_THREAD_JOINS: &str =

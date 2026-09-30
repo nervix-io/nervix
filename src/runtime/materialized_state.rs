@@ -847,10 +847,10 @@ mod tests {
 
     #[cfg(feature = "shuttle")]
     mod shuttle_checks {
+        use nervix_model_harness::shuttle::check_interleavings;
         use nervix_primitives::{sync::blocking::mpsc, thread};
 
         use super::*;
-        use crate::shuttle_test::check_interleavings;
 
         /// An originator replaces a branch's record while another thread holds the assignment
         /// barrier, which that thread releases only after the update has returned.

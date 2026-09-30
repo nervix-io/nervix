@@ -201,92 +201,19 @@ async fn an_operation_larger_than_its_class_is_refused_rather_than_queued() {
 
 #[cfg(feature = "shuttle")]
 mod shuttle_checks {
-    use std::{future::Future, path::PathBuf, task::Poll};
+    use std::{future::Future, task::Poll};
 
     use meticulous::ResultExt as _;
+    use nervix_model_harness::shuttle::check_random_and_pct;
     use nervix_primitives::sync::StdArc;
-    // The runner's step statistic spans the model executions it starts, so it is a real atomic.
-    use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
-    use shuttle::{
-        Config, FailurePersistence, MaxSteps, Runner,
-        scheduler::{
-            PctScheduler, RandomScheduler, ReplayScheduler,
-            UncontrolledNondeterminismCheckScheduler,
-        },
-    };
 
     use super::*;
     use crate::{CpuClass, StorageClass};
-
-    const RANDOM_ITERATIONS: usize = 100;
-    const PCT_ITERATIONS: usize = 100;
-    const PCT_DEPTH: usize = 3;
-    const NONDETERMINISM_ITERATIONS: usize = 100;
-    const MAX_SCHEDULE_STEPS: usize = 10_000;
 
     struct ReservationProbe {
         started: nervix_primitives::sync::oneshot::Receiver<()>,
         release: nervix_primitives::sync::oneshot::Sender<()>,
         task: nervix_primitives::task::JoinHandle<()>,
-    }
-
-    fn measured_invariant(
-        invariant: fn(),
-        highest_steps: StdArc<AtomicUsize>,
-    ) -> impl Fn() + Send + Sync + 'static {
-        move || {
-            invariant();
-            highest_steps.fetch_max(shuttle::current::context_switches(), Ordering::Relaxed);
-            if std::env::var_os("SHUTTLE_FORCE_FAILURE").is_some() {
-                panic!("forced Shuttle schedule replay verification");
-            }
-        }
-    }
-
-    fn check_invariant(invariant: fn()) {
-        let mut config = Config::new();
-        config.max_steps = MaxSteps::FailAfter(MAX_SCHEDULE_STEPS);
-        if let Some(trace_directory) = std::env::var_os("SHUTTLE_TRACE_DIR") {
-            let trace_directory = PathBuf::from(trace_directory);
-            if let Err(error) = std::fs::create_dir_all(&trace_directory) {
-                panic!(
-                    "cannot create Shuttle failure directory {}: {error}",
-                    trace_directory.display()
-                );
-            }
-            config.failure_persistence = FailurePersistence::File(Some(trace_directory));
-        }
-
-        let highest_steps = StdArc::new(AtomicUsize::new(0));
-        if let Some(schedule) = std::env::var_os("SHUTTLE_TRACE_FILE") {
-            let scheduler = match ReplayScheduler::new_from_file(&schedule) {
-                Ok(scheduler) => scheduler,
-                Err(error) => panic!(
-                    "cannot load Shuttle schedule {}: {error}",
-                    PathBuf::from(schedule).display()
-                ),
-            };
-            Runner::new(scheduler, config)
-                .run(measured_invariant(invariant, StdArc::clone(&highest_steps)));
-        } else if std::env::var_os("SHUTTLE_CHECK_NONDETERMINISM").is_some() {
-            let scheduler = UncontrolledNondeterminismCheckScheduler::new(RandomScheduler::new(
-                NONDETERMINISM_ITERATIONS,
-            ));
-            Runner::new(scheduler, config)
-                .run(measured_invariant(invariant, StdArc::clone(&highest_steps)));
-        } else {
-            Runner::new(RandomScheduler::new(RANDOM_ITERATIONS), config.clone())
-                .run(measured_invariant(invariant, StdArc::clone(&highest_steps)));
-            Runner::new(PctScheduler::new(PCT_DEPTH, PCT_ITERATIONS), config)
-                .run(measured_invariant(invariant, StdArc::clone(&highest_steps)));
-        }
-
-        if std::env::var_os("SHUTTLE_REPORT_STEPS").is_some() {
-            eprintln!(
-                "Shuttle maximum steps: {}",
-                highest_steps.load(Ordering::Relaxed)
-            );
-        }
     }
 
     fn assert_live_reservations_fit(executor: &Executor) {
@@ -438,7 +365,7 @@ mod shuttle_checks {
 
     #[test]
     fn shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity() {
-        check_invariant(saturated_class_invariant);
+        check_random_and_pct(saturated_class_invariant);
     }
 
     fn occupied_bulk_execution_invariant() {
@@ -498,7 +425,7 @@ mod shuttle_checks {
 
     #[test]
     fn shuttle_occupied_bulk_execution_leaves_control_execution_untouched() {
-        check_invariant(occupied_bulk_execution_invariant);
+        check_random_and_pct(occupied_bulk_execution_invariant);
     }
 
     fn queued_job_drop_invariant() {
@@ -582,7 +509,7 @@ mod shuttle_checks {
 
     #[test]
     fn shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot() {
-        check_invariant(queued_job_drop_invariant);
+        check_random_and_pct(queued_job_drop_invariant);
     }
 
     fn running_job_cancellation_invariant() {
@@ -663,7 +590,7 @@ mod shuttle_checks {
 
     #[test]
     fn shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit() {
-        check_invariant(running_job_cancellation_invariant);
+        check_random_and_pct(running_job_cancellation_invariant);
     }
 
     fn full_wait_queue_invariant() {
@@ -751,7 +678,7 @@ mod shuttle_checks {
 
     #[test]
     fn shuttle_full_wait_queue_is_exact_typed_backpressure() {
-        check_invariant(full_wait_queue_invariant);
+        check_random_and_pct(full_wait_queue_invariant);
     }
 
     fn consensus_admission_order_invariant() {
@@ -826,7 +753,7 @@ mod shuttle_checks {
 
     #[test]
     fn shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit() {
-        check_invariant(consensus_admission_order_invariant);
+        check_random_and_pct(consensus_admission_order_invariant);
     }
 }
 

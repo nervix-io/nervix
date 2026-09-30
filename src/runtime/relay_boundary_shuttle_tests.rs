@@ -7,10 +7,11 @@
 
 use std::time::Duration;
 
+use nervix_model_harness::shuttle::check_random;
 use nervix_primitives::{sync::oneshot, time::Instant};
 
 use super::*;
-use crate::{runtime_ack::AckOutcome, shuttle_test::check_random};
+use crate::runtime_ack::AckOutcome;
 
 #[test]
 fn shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves() {

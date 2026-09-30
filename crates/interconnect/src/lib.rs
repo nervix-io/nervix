@@ -36,8 +36,6 @@ mod peer_target;
 mod pool;
 mod request;
 mod runtime_state;
-#[cfg(all(test, feature = "shuttle"))]
-mod shuttle_test;
 #[cfg(all(test, feature = "turmoil"))]
 #[path = "../tests/simulation/runner.rs"]
 mod simulation_runner;

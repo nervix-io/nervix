@@ -9,6 +9,7 @@ use std::{num::NonZeroU64, time::Duration};
 
 use bytes::Bytes;
 use meticulous::OptionExt as _;
+use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{
     AckWindow, CLIENT_CONSUMER_NODE_BYTES, DomainName, EmitterName, FieldName, ParseAsType,
     RelayName, SchemaField, Timestamp,
@@ -20,7 +21,7 @@ use super::{
     ClientEmitterAnswer, ClientEmitterBudget, ClientEmitterDescription, ClientEmitterEndpoint,
     ClientEmitterPayload, ClientEmitterRefusal, ClientEmitterResult,
 };
-use crate::{metrics::RuntimeMetrics, shuttle_test::check_interleavings};
+use crate::metrics::RuntimeMetrics;
 
 fn description(fields: Vec<SchemaField>) -> ClientEmitterDescription {
     ClientEmitterDescription {

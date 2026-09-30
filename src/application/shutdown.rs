@@ -561,13 +561,13 @@ mod tests {
 
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
+    use nervix_model_harness::shuttle::{check_pct, check_random};
     use nervix_primitives::thread;
     use shuttle::future::block_on;
 
     use super::*;
-    use crate::{
-        application::test_fixtures::{FAR_FUTURE_SHUTDOWN_TIMEOUT, shut_down_in_phase_order},
-        shuttle_test::{check_pct, check_random},
+    use crate::application::test_fixtures::{
+        FAR_FUTURE_SHUTDOWN_TIMEOUT, shut_down_in_phase_order,
     };
 
     const MODEL_THREAD_JOINS: &str =

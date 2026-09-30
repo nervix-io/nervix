@@ -21,6 +21,7 @@ use arch_into::ArchInto as _;
 use bytes::Bytes;
 use futures_util::{StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{
     ArchiveDigest, CommandExecutionReference, DomainName, RestoreArchive, RestoreStep, Timestamp,
     UserName,
@@ -38,9 +39,8 @@ use super::{
     },
     runner::{RestoreRunEnd, RestoreSteps, StepFailure, run_restore_steps},
 };
-use crate::{
-    application::{command_execution::CommandExecutionOwners, model_mutation::command_error},
-    shuttle_test::check_interleavings,
+use crate::application::{
+    command_execution::CommandExecutionOwners, model_mutation::command_error,
 };
 
 const MODEL_THREAD_JOINS: &str =

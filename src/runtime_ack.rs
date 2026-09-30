@@ -1007,6 +1007,7 @@ mod tests {
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
     use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_model_harness::shuttle::{check_dfs, check_pct};
     use nervix_primitives::{
         sync::{Arc, oneshot::error::TryRecvError},
         thread,
@@ -1016,7 +1017,6 @@ mod shuttle_tests {
         AckCompletion, AckHandle, AckHandoffState, AckOutcome, AckRequiredWaitGuard,
         AckRootTracker, AckSet, Ordering,
     };
-    use crate::shuttle_test::{check_dfs, check_pct};
 
     // Models with more than three tasks have too many interleavings to enumerate, so they sample
     // schedules that need up to `PCT_DEPTH` ordering constraints to fail.

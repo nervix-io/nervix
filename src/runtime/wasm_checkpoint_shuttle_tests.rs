@@ -11,6 +11,7 @@
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
 // scheduling step as the operation it records.
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{
     ClusterNodeName, DomainName, FieldName, ModelKind, ModelName, SchemaFingerprint,
     WasmCheckpointStage, WasmStateGeneration,
@@ -25,7 +26,6 @@ use crate::{
     runtime::{BranchKey, RuntimeState, wasm_state::WasmCheckpointReplicas},
     runtime_ack::AckOutcome,
     runtime_schema::RuntimeValue,
-    shuttle_test::check_interleavings,
 };
 
 const MODEL_TASK_JOINS: &str =

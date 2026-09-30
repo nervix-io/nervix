@@ -13,6 +13,7 @@ use std::{
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
 };
 
+use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{
     AckWindow, CLIENT_PRODUCER_NODE_BYTES, ClientEndpointContract, ClientProcessingFailure,
     ClientProducerEndReason, ClientProducerLimits, ClientProducerPolicy, ClientSubmissionOutcome,
@@ -26,7 +27,6 @@ use nervix_primitives::unmodeled::sync::atomic::{
 };
 
 use super::*;
-use crate::shuttle_test::check_interleavings;
 
 const CHECK_TASK_JOINS: &str =
     "a check task that panics fails the execution before its join returns";

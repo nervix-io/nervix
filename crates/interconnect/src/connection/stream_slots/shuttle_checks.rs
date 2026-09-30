@@ -9,6 +9,7 @@
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
 // step as the lease or drain operation it records.
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_model_harness::shuttle::check_random_and_pct;
 use nervix_primitives::{
     sync::{Arc, Notify},
     unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -22,7 +23,7 @@ use super::{
     MANAGEMENT_TERMINAL_STREAMS, REPLICATION_APPEND_STREAMS, REPLICATION_SHARED_STREAMS,
     StreamSlotQuotas,
 };
-use crate::{PoolClass, RequestSubquota, shuttle_test::check_random_and_pct};
+use crate::{PoolClass, RequestSubquota};
 
 /// One subquota of a partition and the stream slots it reserves.
 #[derive(Debug, Clone, Copy)]

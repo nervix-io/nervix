@@ -20,6 +20,7 @@
 use futures_util::FutureExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::SinkPublishError;
+use nervix_model_harness::shuttle::check_interleavings;
 use nervix_primitives::{
     sync::{StdArc, atomic as selected},
     unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -27,10 +28,7 @@ use nervix_primitives::{
 use nervix_recovery::NoReceiver as _;
 
 use super::*;
-use crate::{
-    runtime::test_fixtures::input_schema, runtime_ack::AckProgress,
-    shuttle_test::check_interleavings,
-};
+use crate::{runtime::test_fixtures::input_schema, runtime_ack::AckProgress};
 
 const MODEL_TASK_JOINS: &str =
     "Shuttle fails the whole execution when a model task panics, so no join observes one";

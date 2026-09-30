@@ -642,6 +642,7 @@ mod shuttle_tests {
     //! released exactly once however they finish.
 
     use nervix_client_wire::{BackupDownloadMessage, SessionLimits};
+    use nervix_model_harness::shuttle::check_interleavings;
     use nervix_primitives::{
         sync::StdArc,
         thread,
@@ -650,7 +651,6 @@ mod shuttle_tests {
     use shuttle::future::block_on;
 
     use super::{test_archives::*, *};
-    use crate::shuttle_test::check_interleavings;
 
     /// Enough bytes for several chunks, so a stream has frames to run ahead with.
     const ARCHIVE_BYTES: usize = 3 * 256 * 1024 + 1;

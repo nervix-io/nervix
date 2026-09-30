@@ -7,6 +7,7 @@
 //! - **Must not know.** Which runtime state an assignment governs, or what an operation does to it.
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{
     sync::{
@@ -21,7 +22,6 @@ use nervix_recovery::Discarded as _;
 use super::{
     StateAssignmentAuthority, StateAssignmentToken, StateCapability, StateReplicationRoles,
 };
-use crate::shuttle_test::check_interleavings;
 
 const MODEL_THREAD_JOINS: &str =
     "Shuttle fails the whole execution when a model thread panics, so no join observes one";

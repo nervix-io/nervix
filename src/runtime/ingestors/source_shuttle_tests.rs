@@ -6,13 +6,13 @@
 //! - **Must not know.** Broker drivers, model planning or external payload transports.
 
 use nervix_connector::{IngestMessageHeaders, IngestMetadataRow};
+use nervix_model_harness::shuttle::{check_pct, check_random};
 use nervix_primitives::sync::{StdArc, mpsc, oneshot, watch};
 // The dispatch count is a record: an unmodeled atomic is not a Shuttle scheduling point, so it
 // changes in the same scheduling step as the dispatch it counts.
 use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
-use crate::shuttle_test::{check_pct, check_random};
 
 const JOIN: &str = "the host loop runs until the check sends shutdown";
 

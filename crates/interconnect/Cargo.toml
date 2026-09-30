@@ -13,6 +13,7 @@ default = []
 shuttle = [
   "dep:shuttle",
   "nervix-execution/shuttle",
+  "nervix-model-harness/shuttle",
   "nervix-primitives/shuttle",
 ]
 turmoil = [
@@ -62,6 +63,7 @@ arrow-array = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
 humantime = { workspace = true }
+nervix-model-harness = { workspace = true }
 rcgen = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

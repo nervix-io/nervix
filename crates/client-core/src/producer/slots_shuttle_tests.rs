@@ -7,10 +7,10 @@
 //! - **Must not know.** Exchanges, frames, or how an outcome was decided.
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_model_harness::shuttle::check_random_and_pct;
 use nervix_primitives::sync::Arc;
 
 use super::{Credit, ProducerOutcome, SubmissionId, SubmissionSlots};
-use crate::shuttle_test::check_random_and_pct;
 
 const CHECK_TASK_JOINS: &str =
     "a check task that panics fails the execution before its join returns";

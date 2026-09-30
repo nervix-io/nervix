@@ -10,6 +10,7 @@
 // scheduling step as the operation it records.
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_model_harness::shuttle::check_interleavings;
 use nervix_primitives::{
     sync::StdArc,
     unmodeled::sync::atomic::{
@@ -19,7 +20,7 @@ use nervix_primitives::{
 use nervix_recovery::Discarded as _;
 
 use super::DurabilityBarrier;
-use crate::{runtime::state_store::RuntimePersistenceError, shuttle_test::check_interleavings};
+use crate::runtime::state_store::RuntimePersistenceError;
 
 const MODEL_TASK_JOINS: &str =
     "Shuttle fails the whole execution when a model task panics, so no join observes one";

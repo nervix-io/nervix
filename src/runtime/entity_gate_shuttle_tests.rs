@@ -14,6 +14,7 @@ use std::{collections::BTreeSet, time::Duration};
 use ahash::RandomState;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_interconnect::EntityGatePurpose;
+use nervix_model_harness::shuttle::{check_pct, check_random};
 use nervix_models::{
     ClusterNodeName, CoordinationIdentity, DomainName, DomainNodeRef, ModelKind, ModelName,
     NodeRef, RelayName,
@@ -31,7 +32,6 @@ use super::{
     OutputBufferQuiesceGauge, OwnershipHandoffFreezeWatch, RelayDispatchGate,
     RelayDispatchGateLease, Runtime,
 };
-use crate::shuttle_test::{check_pct, check_random};
 
 const RANDOM_ITERATIONS: usize = 1_000;
 const PCT_ITERATIONS: usize = 1_000;

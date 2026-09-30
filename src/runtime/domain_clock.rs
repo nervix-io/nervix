@@ -2284,6 +2284,7 @@ mod tests {
 mod shuttle_lifecycle_tests {
     use std::collections::BTreeMap;
 
+    use nervix_model_harness::shuttle::{check_pct, check_random};
     use nervix_models::DomainTimeRate;
     use nervix_primitives::{sync::blocking::Mutex, thread};
 
@@ -2291,7 +2292,6 @@ mod shuttle_lifecycle_tests {
     use crate::{
         application::{ClockDeliveryOrder, NextClockFrame},
         runtime::{domain, paced_domain_state, test_domain_clock_authority},
-        shuttle_test::{check_pct, check_random},
     };
 
     // Shuttle does not model time, so every mapping in these models anchors its physical start at

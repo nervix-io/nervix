@@ -10,6 +10,7 @@
 use std::{collections::BTreeSet, marker::PhantomData, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_model_harness::shuttle::check_random_and_pct;
 use nervix_models::ClusterNodeName;
 use nervix_primitives::sync::Arc;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -18,7 +19,7 @@ use super::{
     ErasedRequestHandler, HandlerRegistration, InterconnectRequest, RequestContext, RequestState,
     TypedRequestHandler,
 };
-use crate::{observation::TransportObservations, shuttle_test::check_random_and_pct};
+use crate::observation::TransportObservations;
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
 struct Ping;
