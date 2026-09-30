@@ -51,6 +51,7 @@ use nervix_consensus::{
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionTarget, ReplicatedTransaction,
 };
+use nervix_execution::Executor;
 use nervix_interconnect::SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, CommandExecutionReference, CreateRelay, CreateSchema,
@@ -611,14 +612,15 @@ struct SubscriptionSelection {
 
 /// Which rows of one relay batch pass a subscription's filter and sampling.
 ///
-/// The filter reads the domain's execution time once for the batch. A row the filter cannot
-/// evaluate is skipped and counted, and the first failure is reported for the batch. Sampling
-/// takes its draws from the node's `sampler`.
+/// The filter reads the domain's execution time once for the batch and runs through the node's
+/// `executor`. A row the filter cannot evaluate is skipped and counted, and the first failure is
+/// reported for the batch. Sampling takes its draws from the node's `sampler`.
 async fn select_subscription_rows(
     batch: &RelayRecordBatch,
     predicate: Option<&CompiledSubscriptionPredicate>,
     batch_sample_rate: Option<f64>,
     sampler: &SubscriptionSampler,
+    executor: &Executor,
     clock: &Result<
         crate::runtime::DomainClockLifecycle,
         Report<crate::runtime::DomainClockAccessError>,
@@ -660,14 +662,11 @@ async fn select_subscription_rows(
         nervix_primitives::task::consume_budget().await;
         if let (Some(predicate), Some(now)) = (predicate, now) {
             let passed = match batch.runtime_row(row) {
-                Ok(record) => execute_subscription_predicate_on_record(
-                    runtime.executor(),
-                    predicate,
-                    &record,
-                    now,
-                )
-                .await
-                .map_err(|error| error.to_string()),
+                Ok(record) => {
+                    execute_subscription_predicate_on_record(executor, predicate, &record, now)
+                        .await
+                        .map_err(|error| error.to_string())
+                }
                 Err(error) => Err(error.to_string()),
             };
             match passed {
