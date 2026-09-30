@@ -11,9 +11,9 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, ack_mode, branch_selection,
-        filter_where_clause, flushed_processor_outputs, from_relay_clauses, if_not_exists_clause,
-        inferencer_name, into_parse_error, kw, kw_phrase2, lex_input,
+        LexedInput, ParseError, ParseFromSourceError, ack_mode, braced_list_value_tokens,
+        branch_selection, filter_where_clause, flushed_processor_outputs, from_relay_clauses,
+        if_not_exists_clause, inferencer_name, into_parse_error, kw, kw_phrase2, lex_input,
         materialized_state_dependencies, render_expression_tokens, resource_ref,
         resource_version_clause, string_lit, suggest_from, tok,
     },
@@ -24,7 +24,7 @@ fn field_mapping<'src>()
     string_lit()
         .then(tensor_schema())
         .then_ignore(tok(Token::Eq))
-        .then(expression_tokens())
+        .then(braced_list_value_tokens())
         .try_map(|((tensor, schema), tokens), span| {
             crate::parse_expression(&render_expression_tokens(&tokens))
                 .map(|expression| InferencerTensorMapping {
@@ -36,66 +36,6 @@ fn field_mapping<'src>()
                     Rich::custom(span, error.current_context().embedded_expression_message())
                 })
         })
-}
-
-fn balanced_expression_group<'src>()
--> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
-    recursive(|element| {
-        let contents = element
-            .repeated()
-            .collect::<Vec<_>>()
-            .map(|parts| parts.into_iter().flatten().collect::<Vec<_>>());
-        let parens = contents
-            .clone()
-            .delimited_by(tok(Token::LParen), tok(Token::RParen))
-            .map(|mut tokens| {
-                tokens.insert(0, Token::LParen);
-                tokens.push(Token::RParen);
-                tokens
-            });
-        let brackets = contents
-            .clone()
-            .delimited_by(tok(Token::LBracket), tok(Token::RBracket))
-            .map(|mut tokens| {
-                tokens.insert(0, Token::LBracket);
-                tokens.push(Token::RBracket);
-                tokens
-            });
-        let braces = contents
-            .delimited_by(tok(Token::LBrace), tok(Token::RBrace))
-            .map(|mut tokens| {
-                tokens.insert(0, Token::LBrace);
-                tokens.push(Token::RBrace);
-                tokens
-            });
-        let leaf = any()
-            .filter(|token: &Token| {
-                !matches!(
-                    token,
-                    Token::LParen
-                        | Token::RParen
-                        | Token::LBracket
-                        | Token::RBracket
-                        | Token::LBrace
-                        | Token::RBrace
-                )
-            })
-            .map(|token| vec![token]);
-        // Naming the slot stops the raw delimiters leaking out as suggestions: a bare "("
-        // offered here cannot be completed into anything the expression grammar accepts.
-        choice((parens, brackets, braces, leaf)).labelled("value_expression")
-    })
-}
-
-fn expression_tokens<'src>()
--> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
-    let balanced =
-        balanced_expression_group().filter(|tokens| !matches!(tokens.as_slice(), [Token::Comma]));
-    balanced
-        .repeated()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .map(|parts| parts.into_iter().flatten().collect())
 }
 
 fn tensor_schema<'src>()

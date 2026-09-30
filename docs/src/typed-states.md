@@ -253,6 +253,19 @@ execution or recovery. Connectors and the session edge validate external represe
 they decode or publish them. A caller does not compensate for a failed lookup, absent required
 field, type mismatch, or conversion by supplying a default zero, empty value, or null.
 
+A vocabulary type that validates its value when it is parsed or constructed validates it again when
+it is decoded, from JSON and from the archive alike. Every name type, a command execution reference,
+a resource upload identity, a JSON path, connection-pool bounds, and an emitter's message and size
+limits decode through the rule that constructs them, and accept only a value that rule produces
+unchanged. Stored or received data therefore cannot hold a name with an upper-case letter, a path
+past its step limit, a minimum above its maximum, or a size that is not a whole number of its unit;
+such data fails to decode with a typed error and is never normalized into a valid value. A timestamp
+is its signed Unix nanoseconds, and every conversion into one goes through them, so two spellings of
+one instant, such as an offset and its UTC equivalent, or a leap second and the second after it, are
+one timestamp. NSPL duration literals and domain-clock periods and skews are read by a guarded
+parser in the vocabulary, which refuses text whose spans could add up to the most seconds a duration
+holds with a typed error; the grammar library it wraps would panic on such text instead of failing.
+
 One in-memory domain activation plan resolves each relay's compiled schema, branch retention and
 materialized-state presence; each codec's schema and wire definition; and each endpoint's VHOST and
 signaling reference. A missing reference is a typed planning failure before installation. The

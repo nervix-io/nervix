@@ -4,8 +4,11 @@ use std::{
 };
 
 use error_stack::Report;
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use serde::{Deserialize, Serialize};
+use rkyv::{
+    Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize,
+    rancor::{Fallible, Source},
+};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use sorted_vec::SortedVec;
 use strum::{AsRefStr, EnumString, IntoStaticStr};
 
@@ -16,21 +19,32 @@ use crate::{
 const MAX_UPLOAD_IDENTITY_BYTES: usize = 128;
 
 /// An administrative upload attempt chosen by the client and reused across redirects and retries.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
+///
+/// An identity is decoded through [`ResourceUploadIdentity::parse`], so its serde and archived
+/// forms admit exactly the text the rule allows.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Archive, RkyvSerialize)]
 pub struct ResourceUploadIdentity(String);
+
+impl<'de> Deserialize<'de> for ResourceUploadIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(|report| D::Error::custom(report.current_context()))
+    }
+}
+
+impl<D> RkyvDeserialize<ResourceUploadIdentity, D> for ArchivedResourceUploadIdentity
+where
+    D: Fallible + ?Sized,
+    D::Error: Source,
+{
+    fn deserialize(&self, _: &mut D) -> Result<ResourceUploadIdentity, D::Error> {
+        ResourceUploadIdentity::parse(self.0.as_str())
+            .map_err(|report| D::Error::new(report.current_context().clone()))
+    }
+}
 
 impl ResourceUploadIdentity {
     pub fn parse(
@@ -781,6 +795,24 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::*;
+
+    #[test]
+    fn decoders_refuse_upload_identities_parsing_rejects() {
+        for raw in ["", "has space", &"u".repeat(MAX_UPLOAD_IDENTITY_BYTES + 1)] {
+            let json = serde_json::to_string(raw)
+                .assured("a string has an infallible JSON string representation");
+            assert!(
+                serde_json::from_str::<ResourceUploadIdentity>(&json).is_err(),
+                "{raw:?}"
+            );
+            let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&raw.to_owned())
+                .assured("a string has an inline archived string representation");
+            assert!(
+                rkyv::from_bytes::<ResourceUploadIdentity, rkyv::rancor::Error>(&archived).is_err(),
+                "{raw:?}"
+            );
+        }
+    }
 
     fn domain(raw: &str) -> DomainName {
         DomainName::parse(raw).assured("test domains are identifier-shaped literals")
