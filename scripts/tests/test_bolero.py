@@ -524,6 +524,19 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(execute.call_args.kwargs["env"]["BOLERO_RANDOM_ITERATIONS"],
                              "0")
 
+    def test_replay_accepts_corpus_only_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            target = dataclasses.replace(self.target, corpus=temporary / "corpus")
+            failure = temporary / "failure"
+            failure.write_bytes(b"\x42")
+            output = subprocess.CompletedProcess(
+                [], 0, "run time: 1ms | corpus inputs: 1\n"
+                "test result: ok. 1 passed; 0 failed\n", ""
+            )
+            with mock.patch.object(bolero, "command", return_value=output):
+                self.assertEqual(bolero.replay(target, failure), 0)
+
     def test_replay_rejects_missing_large_or_unconfirmed_input(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temporary = pathlib.Path(directory)
@@ -540,6 +553,9 @@ class ExecutionTests(unittest.TestCase):
                 (subprocess.CompletedProcess([], 101, "unrelated test failed", ""),
                  "outside the selected property"),
                 (subprocess.CompletedProcess([], 0, "test result: ok. 1 passed", ""),
+                 "saved input was not replayed"),
+                (subprocess.CompletedProcess([], 0, "corpus inputs: 1 | rng inputs: 1\n"
+                                             "test result: ok. 1 passed", ""),
                  "saved input was not replayed"),
             ):
                 with self.subTest(message=message), mock.patch.object(

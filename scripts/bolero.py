@@ -761,8 +761,9 @@ def replay(target: Target, failure: pathlib.Path) -> int:
         r"test result: FAILED\. 0 passed; 1 failed", output
     ):
         raise BoleroError(f"{target.id}: replay failed outside the selected property")
+    # Bolero omits zero counters: corpus-only completion ends after the corpus count.
     if result.returncode == 0 and not re.search(
-        r"corpus inputs: [1-9]\d* \| rng inputs: 0", output
+        r"corpus inputs: [1-9]\d*(?:\r?\n|$)", output
     ):
         raise BoleroError(f"{target.id}: saved input was not replayed")
     print(output[-4000:])

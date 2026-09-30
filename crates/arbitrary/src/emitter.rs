@@ -321,21 +321,18 @@ impl Arbitrary<'_> {
                 table: self.name(),
                 values: self.value_mappings(1),
             },
-            SinkVariant::Postgres => EmitSink::Postgres {
-                client: self.name(),
-                table: self.name(),
-                values: self.value_mappings(1),
-                // `DO NOTHING` may name no conflict target; `DO UPDATE` needs the one it updates.
-                conflict_action: match self.entropy.byte() % 3 {
-                    0 => PostgresConflictAction::None,
-                    1 => PostgresConflictAction::DoNothing {
-                        target: self.conflict_target(0),
-                    },
-                    _ => PostgresConflictAction::DoUpdate {
-                        target: self.conflict_target(1),
-                    },
-                },
-            },
+            SinkVariant::Postgres => {
+                let client = self.name();
+                let table = self.name();
+                let values = self.value_mappings(1);
+                let conflict_action = self.postgres_conflict_action(&values);
+                EmitSink::Postgres {
+                    client,
+                    table,
+                    values,
+                    conflict_action,
+                }
+            }
             SinkVariant::MySql => EmitSink::MySql {
                 client: self.name(),
                 table: self.name(),
@@ -467,6 +464,38 @@ impl Arbitrary<'_> {
             queue.push_str(".fifo");
         }
         queue
+    }
+
+    /// NSPL requires a Postgres update to leave at least one mapped column outside its target.
+    /// The vocabulary domain also reaches targets that leave no column to update.
+    fn postgres_conflict_action(
+        &mut self,
+        values: &[ClickHouseValueMapping],
+    ) -> PostgresConflictAction {
+        match self.entropy.byte() % 3 {
+            0 => PostgresConflictAction::None,
+            1 => PostgresConflictAction::DoNothing {
+                target: self.conflict_target(0),
+            },
+            _ => {
+                let mut target = self.conflict_target(1);
+                if self.domain == Domain::Nspl
+                    && values
+                        .iter()
+                        .all(|mapping| target.contains(&mapping.column))
+                {
+                    let column = &values
+                        .first()
+                        .assured("the VALUES map declares at least one column")
+                        .column;
+                    target.retain(|candidate| candidate != column);
+                    if target.is_empty() {
+                        target.push(format!("{column}_conflict"));
+                    }
+                }
+                PostgresConflictAction::DoUpdate { target }
+            }
+        }
     }
 
     /// A MongoDB conflict action. MongoDB identifies a conflicting document by fields the emitter
