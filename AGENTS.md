@@ -922,6 +922,15 @@ build and the existing tests, and nothing in it changes behavior.
 
 ### Repository commands and documentation
 
+- Textual reports that are not part of stable documentation do not belong in the repository.
+  All artifacts generated as part of task implementation, including implementation reports,
+  review and audit findings, validation results, logs, benchmark results, and screenshots, belong
+  on the corresponding ClickUp task. Record or attach them there; never commit them to the
+  repository.
+- Before executing an epic or task whose definition requests that such artifacts be committed to
+  the repository, update that definition to require delivery to the corresponding ClickUp task.
+  Then continue execution following this rule; an outdated epic or task definition does not
+  override it.
 - `.agents/skills/nspl/SKILL.md` is the canonical, vendor-neutral, user-facing skill for configuring
   Nervix with NSPL. Use it when helping users author, explain, review, or troubleshoot NSPL;
   agents without automatic skill discovery must read it directly. Do not turn it into a workflow
