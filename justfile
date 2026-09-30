@@ -927,13 +927,18 @@ coverage-turmoil output:
 # writes lcov.info, completion.json, executions.jsonl and export.log to a fresh
 # target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/, and CI runs one per step.
 # Run all three: `just coverage-native-extras`; one: `just coverage-native-extras bench-smoke`.
-coverage-native-extras *producers:
+coverage-native-extras *producers: llvm-tools
     python3 scripts/native_coverage.py --target-dir {{ quote(cargo_target_dir) }} run {{ producers }}
 
 # Exercise the native coverage collector: its producer inventory, source policy, selection and
 # failure handling, then instrumented runs of a fixture crate through the real toolchain.
-test-native-coverage:
+test-native-coverage: llvm-tools
     NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required python3 -m unittest --quiet scripts.tests.test_native_coverage
+
+# Add the LLVM tools that read coverage profiles to the toolchain rust-toolchain.toml pins, which
+# must be the compiler's own: a toolchain installed under another name does not provide them.
+llvm-tools:
+    rustup component add llvm-tools
 
 # Run every Criterion suite with the release profile. Extra arguments are forwarded to Criterion.
 # The server benches link the console the server serves, so the console is built first rather than

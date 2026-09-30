@@ -751,12 +751,10 @@ jobs:
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
     steps:
-      # The LLVM tools that read the coverage profiles must be the compiler's own.
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.98
         with:
           targets: wasm32-unknown-unknown
-          components: llvm-tools-preview
 
       - name: Setup Rust nightly
         uses: dtolnay/rust-toolchain@nightly

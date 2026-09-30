@@ -334,8 +334,10 @@ Name producers to run only those, one or more of `bench-smoke`, `test-primitives
 just coverage-native-extras nspl-completion-walk
 ```
 
-A producer runs its check exactly as `just <producer>` does and fails when the check fails. What the
-check needs first, such as the web console the server benches link, is built normally. The recipe
+A producer runs its check exactly as `just <producer>` does and fails when the check fails. The
+recipe first adds the `llvm-tools` component to the toolchain `rust-toolchain.toml` pins, with
+`just llvm-tools`, because only the compiler's own LLVM tools read its profiles. What the check
+needs first, such as the web console the server benches link, is built normally. The recipe
 that executes Nervix code then runs in the environment `cargo llvm-cov show-env --sh
 --no-rustc-wrapper` describes: every crate is compiled with source coverage instrumentation into
 `target/native-coverage-build`, and the configured kache wrapper stays in place. The parts of a

@@ -103,6 +103,12 @@ class InventoryTests(unittest.TestCase):
         for producer in native_coverage.PRODUCERS:
             with self.subTest(producer=producer.name):
                 native_coverage.validate_composition(producer, recipes)
+        # The setup action installs the toolchain under its patch release, not under the channel
+        # rust-toolchain.toml pins, so the recipes add the compiler's own LLVM tools themselves.
+        for collector in ("coverage-native-extras", "test-native-coverage"):
+            with self.subTest(recipe=collector):
+                self.assertEqual(native_coverage.dependency_names(recipes[collector]), ["llvm-tools"])
+        self.assertEqual(recipes["llvm-tools"]["body"], [["rustup component add llvm-tools"]])
 
     def test_the_producers_are_the_native_extra_checks_in_ci_order(self) -> None:
         self.assertEqual(
@@ -177,7 +183,6 @@ class InventoryTests(unittest.TestCase):
     ) -> None:
         workflow = (REPOSITORY / ".github/workflows/check.yaml").read_text(encoding="utf-8")
         job = job_section(workflow, "extra-tests")
-        self.assertIn("components: llvm-tools-preview", job)
         self.assertRegex(job, r"tool: [^\n]*\bcargo-llvm-cov\b")
         self.assertIn("run: just test-native-coverage\n", job)
         for producer in native_coverage.PRODUCERS:
@@ -585,18 +590,21 @@ class SelectionTests(unittest.TestCase):
             "Instrumentation level: Front-end\nTotal functions: 3\nBinary IDs: \n"
             "d8b4dadfe3c9e772b97b1c31473f26fb\n"
         )
+        tools = Path(self.directory.name) / "tools"
+        tools.mkdir()
+        (tools / "llvm-profdata").write_text("")
         profile = Path(self.directory.name) / "1.profraw"
         commands = ProfileCommands(Captured(0, summary, ""))
         self.assertEqual(
-            native_coverage.profile_binary_ids(commands, toolchain(Path("/usr/bin")), profile),
+            native_coverage.profile_binary_ids(commands, toolchain(tools), profile),
             ("d8b4dadfe3c9e772b97b1c31473f26fb",),
         )
         unnamed = ProfileCommands(Captured(0, "Total functions: 3\n", ""))
         with self.assertRaisesRegex(RunnerError, "names no binary ID"):
-            native_coverage.profile_binary_ids(unnamed, toolchain(Path("/usr/bin")), profile)
+            native_coverage.profile_binary_ids(unnamed, toolchain(tools), profile)
         broken = ProfileCommands(Captured(1, "", "error: 1.profraw: malformed profile data\n"))
         with self.assertRaisesRegex(RunnerError, "not a readable raw profile: error"):
-            native_coverage.profile_binary_ids(broken, toolchain(Path("/usr/bin")), profile)
+            native_coverage.profile_binary_ids(broken, toolchain(tools), profile)
 
 
 class ProfileCommands(Commands):
